@@ -444,7 +444,7 @@ def _worktree_ensure(
         ):
             typer.echo(
                 f"worktree ensure: {policy_receipt}; "
-                f"reusing worktree at {wt}",
+                f"reusing worktree at {wt} created=false",
                 err=True,
             )
             typer.echo(str(wt))
@@ -482,7 +482,7 @@ def _worktree_ensure(
     ):
         typer.echo(
             f"worktree ensure: {policy_receipt}; reusing {br} at {existing} "
-            f"(policy resolves {wt}; a branch has one checkout)",
+            f"(policy resolves {wt}; a branch has one checkout) created=false",
             err=True,
         )
         typer.echo(str(existing))
@@ -527,7 +527,8 @@ def _worktree_ensure(
     # location, incl. a harness-native->external degradation - the resolver already
     # collapsed a non-native harness to `external`, so pol.policy is the true mode).
     typer.echo(
-        f"worktree ensure: {policy_receipt}; worktree at {wt}{base_note}",
+        f"worktree ensure: {policy_receipt}; worktree at {wt}{base_note} "
+        f"created=true",
         err=True,
     )
     typer.echo(str(wt))  # the ONLY stdout line -> the caller's $wt

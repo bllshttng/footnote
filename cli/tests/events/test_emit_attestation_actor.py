@@ -265,25 +265,52 @@ def test_attestation_attester_session_empty_without_marker(tmp_path: Path) -> No
 
 
 def test_attestation_attester_session_marker_precedence(tmp_path: Path) -> None:
-    """Precedence applies WITHIN one harness family: CODEX_THREAD_ID >
-    CODEX_SESSION_ID. The old cross-family reading (codex marker beating a
-    claude one) is gone - a mixed-family env is an inherited foreign marker,
-    and resolve_attester_identity refuses it rather than laundering the
-    foreign id into the attester (the same refusal resolve_harness_identity
-    makes)."""
+    """Within one codex family the durability order resolves only AGREEMENT:
+    both markers carrying the same id name one session. Two DIFFERENT ids of
+    the family are a disagreement and the attester resolves EMPTY, never a
+    position pick - the durable marker could be the stranger's, the same
+    degrade resolve_harness_identity applies. The older readings are both
+    gone: the cross-family precedence (a codex marker beating a claude one)
+    and the same-family position pick each laundered an id the resolvers
+    refuse."""
     repo = _temp_git_repo(tmp_path, "session_id: s\nharness: codex\n")
-    env = {
-        **os.environ,
-        "FNO": "fno-py",
+    base = {
+        k: v
+        for k, v in os.environ.items()
+        if k
+        not in (
+            "CODEX_THREAD_ID",
+            "CLAUDE_CODE_SESSION_ID",
+            "CODEX_SESSION_ID",
+            "GEMINI_SESSION_ID",
+            "OPENCODE_SESSION_ID",
+        )
+    }
+    base["FNO"] = "fno-py"
+
+    agreeing = {
+        **base,
+        "CODEX_THREAD_ID": "same-codex-id",
+        "CODEX_SESSION_ID": "same-codex-id",
+    }
+    r = subprocess.run(
+        ["bash", str(_SCRIPT), "code-review", "pass"],
+        cwd=repo, env=agreeing, capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert _last_event(repo)["data"]["attester_session_id"] == "same-codex-id"
+
+    disagreeing = {
+        **base,
         "CODEX_THREAD_ID": "codex-thread-wins",
         "CODEX_SESSION_ID": "codex-legacy-loses",
     }
     r = subprocess.run(
         ["bash", str(_SCRIPT), "code-review", "pass"],
-        cwd=repo, env=env, capture_output=True, text=True,
+        cwd=repo, env=disagreeing, capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stderr
-    assert _last_event(repo)["data"]["attester_session_id"] == "codex-thread-wins"
+    assert _last_event(repo)["data"]["attester_session_id"] == ""
 
 
 def test_attestation_attester_empty_on_mixed_family_env(tmp_path: Path) -> None:

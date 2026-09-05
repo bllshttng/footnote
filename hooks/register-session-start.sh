@@ -24,7 +24,13 @@ CLI_DIR="$(cd "$HOOK_DIR/.." && pwd)/cli"
 if [[ -n "${GEMINI_PROJECT_DIR:-}" ]]; then
     HARNESS="gemini"; SESSION_ID="${GEMINI_SESSION_ID:-}"
 elif [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
-    HARNESS="codex"; SESSION_ID="${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}"
+    HARNESS="codex"; SESSION_ID=""
+    # Same-family rule the resolvers enforce: two DIFFERENT codex ids are a
+    # disagreement, so no id is registered rather than the table-first guess.
+    if [[ -z "${CODEX_THREAD_ID:-}" || -z "${CODEX_SESSION_ID:-}" \
+          || "${CODEX_THREAD_ID}" == "${CODEX_SESSION_ID}" ]]; then
+        SESSION_ID="${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}"
+    fi
 elif [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
     HARNESS="claude"; SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 else

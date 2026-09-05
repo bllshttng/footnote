@@ -18,7 +18,9 @@ from fno.harness_identity import (
 def resolve_self_identity(
     env: Optional[Mapping[str, str]] = None,
     *,
-    collide: Optional[Callable[[str, str], Optional[str]]] = None,
+    collide: Optional[
+        Callable[[str, str, Optional[Tuple[str, str]]], Optional[str]]
+    ] = None,
 ):
     """Resolve the harness identity this process can prove it owns.
 
@@ -40,16 +42,55 @@ def resolve_self_identity(
     So when the walk has no answer - psutil denied, no harness ancestor, a
     container that hides the parent chain - resolution refuses rather than
     guesses, and ``fno whoami`` names the inherited family so the operator can
-    clear it. See :data:`fno.harness_identity.SELF_SET_HARNESS_MARKERS`.
+    clear it. See :data:`fno.harness_identity.SELF_SET_HARNESS_MARKERS`. The
+    one exception is the uncontended single-family case, which every branch
+    resolves by the same elimination the marker loop calls the dominant case:
+    a walk that cannot tell is "cannot tell" (``None``), never a contradiction
+    (``False``) - only a walk that found a DIFFERENT harness contradicts
+    (x-0992: returning False on a silent walk refused every spawned worker
+    whose ancestry the sandbox hides).
+
+    ``collide(harness, session_id, own_pair) -> owner | None`` reports a live
+    registry row owning an id. ``own_pair`` is this process's own
+    ``(harness, session_id)`` pair as declared by a COMPLETE canonical stamp,
+    or None when the stamp does not name an id: a row agreeing with the pair
+    on both halves is the caller's OWN row and never contention. The id half
+    must come from the STAMP, never from the ambient marker under test - a
+    name_only stamp plus a marker-built pair is circular (the pair asserts
+    exactly what the marker claims), and a leaked marker meeting its owner's
+    live row would then read as self (the round-1 P1 shape, re-measured by
+    review round 2). A name_only worker instead resolves when the attester
+    witnesses its marker from process ancestry, and fails closed otherwise.
+    The agreement check stays in the registry; this layer computes the pair
+    and hands it over.
     """
     from fno.claims.session_pid import resolve_session_harness
 
     true_harness = resolve_session_harness()
     canonical = parse_canonical_identity(env)
+
+    def collide_with(pair: Optional[Tuple[str, str]]) -> Callable[[str, str], Optional[str]]:
+        # The 3-arg collide (with own_pair) is THIS resolver's contract; the
+        # shared resolve_owned_identity takes the 2-arg shape.
+        def _collide(harness: str, session_id: str) -> Optional[str]:
+            if collide is None:
+                return None
+            return collide(harness, session_id, pair)
+
+        return _collide
+
     if canonical.disposition not in {"complete", "name_only"}:
         fallback_prove = (
             None if true_harness is None else (lambda harness, sid: harness == true_harness)
         )
+        # No collide here: a session with no stamp at all (a hand-started
+        # joined session) resolves by the uncontended single-family
+        # elimination, exactly as the registry's own SessionStart
+        # registration expects - colliding would read that session's OWN
+        # registered row as contention and refuse every crown grantor,
+        # whoami and --from-self for it. The fail-closed collide lives in
+        # the stamped branches below, where an attester can still witness
+        # self.
         return resolve_owned_identity(env, prove=fallback_prove)
 
     try:
@@ -68,16 +109,31 @@ def resolve_self_identity(
     )
 
     def prove(harness: str, session_id: str) -> Optional[bool]:
+        if true_harness is None:
+            return None
         if harness != true_harness:
             return False
         if not canonical_proven:
             return None
         return session_identity_key(session_id) == session_identity_key(canonical_session_id)
 
+    # The stamp-declared pair: a COMPLETE stamp names the id independently of
+    # the markers under test (spawn writes the stamp and the row in one act),
+    # which is the x-6d6c non-circular ground. A name_only stamp names only
+    # the family and completes NO pair - the ambient marker would be
+    # self-attesting, and own_pair stays None so the collider keeps its full
+    # ambient-leak strength there.
+    own_pair: Optional[Tuple[str, str]] = None
+    if canonical.harness and canonical.session_id:
+        own_pair = (
+            canonical.harness.strip().lower(),
+            session_identity_key(canonical.session_id),
+        )
+
     return resolve_owned_identity(
         env,
         prove=prove,
-        collide=None if canonical_proven else collide,
+        collide=None if canonical_proven else collide_with(own_pair),
     )
 
 

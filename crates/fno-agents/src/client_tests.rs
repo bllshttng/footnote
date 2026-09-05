@@ -181,14 +181,25 @@ fn maybe_run_spawn_infers_provider_defaults_claude_when_ambiguous() {
         ])),
         "claude"
     );
-    // Two markers for the SAME harness agree (Codex thread id + legacy
-    // session id) -> resolves that harness, not ambiguous. Mirrors Python.
+    // Two markers for the SAME harness carrying the SAME id (Codex thread id
+    // + legacy session id) -> resolves that harness, not ambiguous. Mirrors
+    // Python.
+    assert_eq!(
+        infer_dispatch_provider(env_of(&[
+            ("CODEX_THREAD_ID", "t"),
+            ("CODEX_SESSION_ID", "t"),
+        ])),
+        "codex"
+    );
+    // Two DIFFERENT ids of ONE family disagree -> unresolved -> builtin
+    // default, never table-first. Same degrade Python's _vendor_identity
+    // applies (without proof the id could belong to either session).
     assert_eq!(
         infer_dispatch_provider(env_of(&[
             ("CODEX_THREAD_ID", "t"),
             ("CODEX_SESSION_ID", "s"),
         ])),
-        "codex"
+        "claude"
     );
 }
 

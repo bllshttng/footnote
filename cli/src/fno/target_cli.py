@@ -1192,41 +1192,6 @@ def request_self_review_cmd(
         raise typer.Exit(code=2)
 
 
-def _registry_self_proof(
-    harness: str,
-    sid: str,
-    *,
-    true_harness: Optional[str],
-    own_binding: Optional[tuple[str, str]],
-    owning_row_harness: Callable[[str], Optional[str]],
-) -> Optional[bool]:
-    """The verb's proof policy: True proves the marker is this process's, False
-    contradicts it, None cannot tell.
-
-    Process-tree proof first (``true_harness`` - the direct walk, or the
-    launcher stamp ``FNO_SESSION_HARNESS``/``FNO_SESSION_PID`` when a sandbox
-    denies the deeper walk). A registry row alone is NEVER self-proof: a row
-    proves only that some live session owns the id, so an env marker copied
-    from another live same-harness session must keep failing closed to
-    collision-elimination (round-1 P1). Only the spawn-minted canonical
-    binding - the stamp and a same-harness live row agreeing on both halves -
-    proves self without the tree.
-    """
-    if true_harness is not None:
-        return harness == (true_harness or "").strip().lower()
-    from fno.harness_identity import session_identity_key
-
-    key = session_identity_key
-    if (
-        own_binding
-        and own_binding[0] == harness
-        and key(own_binding[1]) == key(sid)
-        and owning_row_harness(sid) == own_binding[0]
-    ):
-        return True
-    return None
-
-
 @target_app.command("resolve-owned-identity", hidden=True)
 def resolve_owned_identity_cmd() -> None:
     """Resolve the harness identity this process can PROVE it owns.
@@ -1239,26 +1204,20 @@ def resolve_owned_identity_cmd() -> None:
     without this verb (Click exit 2) as 'unavailable', falling back to today's
     precedence rather than bricking init.
 
-    The prover is process-tree truth: the harness of the nearest harness
-    ancestor is the one marker this process minted, so a foreign marker it
-    merely inherited never wins. The collider is the cause-agnostic backstop:
-    an id a live registry row already owns is provably not this session's. With
-    neither available the resolver still falls through to the sole
-    non-colliding survivor rather than guessing by precedence.
+    Resolution routes through :func:`fno.claims.self_identity.resolve_self_identity`,
+    the one owned-identity implementation every caller shares (x-0992). The
+    verb's former private proof policy and its own_binding construction - both
+    gated on a COMPLETE canonical stamp, which a pane-spawned worker never
+    carries - lived here and refused every such worker by its own registry row;
+    they are deleted, not forked behind a flag. The prover is still process-tree
+    truth and the collider is still the cause-agnostic backstop; the own-row
+    suppression now lives where the canonical pair is completed, in
+    claims.self_identity.
 
     Read-only; writes no state. Always exits 0 - it is a resolver, not a gate.
     """
-    from fno.agents.registry import (
-        live_row_holding_session_id,
-        row_owning_session_id,
-    )
-    from fno.claims.session_pid import resolve_session_harness
-    from fno.harness_identity import (
-        parse_canonical_identity,
-        resolve_owned_identity,
-    )
-
-    true_harness = resolve_session_harness()
+    from fno.agents.registry import row_owning_session_id
+    from fno.claims.self_identity import resolve_self_identity
 
     # The hook's claude session id may arrive as TARGET_TRANSCRIPT_ID (a footnote
     # hook input) when CLAUDE_CODE_SESSION_ID is not in the env; honor it as the
@@ -1270,61 +1229,15 @@ def resolve_owned_identity_cmd() -> None:
     ).strip():
         env["CLAUDE_CODE_SESSION_ID"] = env["TARGET_TRANSCRIPT_ID"]
 
-    canonical = parse_canonical_identity(env)
-    # The caller's own binding, from a COMPLETE canonical stamp: spawn writes
-    # the stamp and the registry row in one act, so a live row agreeing with
-    # it on both halves is this worker's own and the detector never reports
-    # it. Read from the stamp + registry, never FNO_AGENT_SELF: that env
-    # write cannot reach a daemon-forked worker while the row survives the
-    # fork. A session with no complete stamp proves nothing about itself and
-    # passes the explicit sentinel, which keeps the ambient-leak detector at
-    # full strength for vendor markers.
-    own_binding: Optional[tuple[str, str]] = None
-    if (
-        canonical.disposition == "complete"
-        and canonical.harness
-        and canonical.session_id
-    ):
-        own_binding = (canonical.harness.strip().lower(), canonical.session_id.strip())
+    def _collide(harness: str, sid: str, own_pair: Optional[tuple[str, str]]) -> Optional[str]:
+        # own_pair arrives from claims.self_identity (the canonical pair it
+        # completed there, None when it could not); the registry applies the
+        # agreement check, so this site never answers the own-row question
+        # itself - it had a second, COMPLETE-stamp-gated answer and that is
+        # the leg this verb deleted (x-0992).
+        return row_owning_session_id(sid, self_binding=own_pair)
 
-    def _owning_row_harness(sid: str) -> Optional[str]:
-        """Harness of the live registry row holding ``sid``, if any."""
-        entry = live_row_holding_session_id(sid)
-        if entry is None:
-            return None
-        return (getattr(entry, "harness", "") or "").strip().lower()
-
-    def _collide(harness: str, sid: str) -> Optional[str]:
-        return row_owning_session_id(sid, self_binding=own_binding)
-
-    def _prove(harness: str, _sid: str) -> Optional[bool]:
-        # Three states: True (this process mints this harness), False (the
-        # process tree resolves to a DIFFERENT harness, so this marker is
-        # foreign), None (no harness ancestor found - CI / degraded - cannot
-        # tell). Only True skips the collision check; None falls through to
-        # collision-elimination so the verb still resolves in a headless runner.
-        return _registry_self_proof(
-            (harness or "").strip().lower(),
-            _sid,
-            true_harness=true_harness,
-            own_binding=own_binding,
-            owning_row_harness=_owning_row_harness,
-        )
-
-    # The COLLIDER stays wired HERE and is deliberately not hoisted into the
-    # shared resolver every stamp site uses. A live registry row holding an id
-    # is contention only when the prover cannot claim it: the prover above now
-    # reads the spawn-minted binding when the process tree is silent, so a
-    # worker whose OWN row holds its stamped id resolves instead of being
-    # refused by its own row (that refusal cost three runs on one node in one
-    # evening). A vendor marker without a complete stamp never self-proves, so
-    # the collider remains the cause-agnostic ambient-leak backstop. On the
-    # per-call stamp path a wrong refusal would silently unstamp a fleet.
-    owned = resolve_owned_identity(
-        env,
-        prove=_prove,
-        collide=_collide,
-    )
+    owned = resolve_self_identity(env, collide=_collide)
     # AC5-CON: record any non-trivial resolution (a refused collision or a
     # non-single disposition) so a future leak is reconstructable from the event
     # log alone. A single-family resolve can still carry a refused collision, so
@@ -3458,6 +3371,17 @@ def start(
         )
         raise typer.Exit(code=1)
     wt_path = Path(wt)
+    # Whether the tree is THIS invocation's creation decides the init-failure
+    # receipt below: a tree this run created and failed to claim is named for
+    # reclaim, while a tree that predates the run is another session's subject
+    # and is not characterized as our creation. ensure stamps created=true|
+    # false on its receipt; an installed ensure that predates the token is
+    # read through its reuse wording instead.
+    _created_token = re.search(r"\bcreated=(true|false)\b", ens.stderr or "")
+    if _created_token:
+        created_this_run = _created_token.group(1) == "true"
+    else:
+        created_this_run = "reusing" not in (ens.stderr or "")
     # ensure names the branch's provenance (continued/salvaged/fresh) on its
     # stderr receipt; a re-dispatched worker must see it is continuing.
     _from = re.search(r" base=(\S+)", ens.stderr or "")
@@ -3615,11 +3539,26 @@ def start(
         init_cmd += ["--beastmode"]
     init = subprocess.run(init_cmd, cwd=str(wt_path))
     if init.returncode != 0:
-        typer.echo(
-            f"fno do target start: target init failed (step: init, exit "
-            f"{init.returncode}); worktree at {wt_path} is created but unclaimed.",
-            err=True,
-        )
+        if created_this_run and not in_place:
+            # One receipt line the run currently lacks: the refused init
+            # leaves a fresh tree holding an init-time manifest and no claim,
+            # which a later reader cannot tell from a live session. The tree
+            # is NOT deleted here - it may hold a partial checkout, and
+            # deletion is the more dangerous of the two mistakes.
+            typer.echo(
+                f"fno do target start: target init failed (step: init, exit "
+                f"{init.returncode}); worktree at {wt_path} is created but "
+                f"unclaimed; reclaim with: fno agents workspace worktree "
+                f"archive {wt_path}",
+                err=True,
+            )
+        else:
+            typer.echo(
+                f"fno do target start: target init failed (step: init, exit "
+                f"{init.returncode}); worktree at {wt_path} predates this "
+                f"run and was left untouched.",
+                err=True,
+            )
         raise typer.Exit(code=init.returncode)
 
     # 4. Receipt - one parse-friendly line a memory-less agent acts on. When a
