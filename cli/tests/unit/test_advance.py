@@ -81,7 +81,9 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _events(events_path: Path) -> list[dict]:
     """Decision events only: paired receipts (quota_rotation_declined et al.)
     share the journal since repo-root resolution landed them where
-    FNO_REPO_ROOT points, and no decision-count assertion means to count them."""
+    FNO_REPO_ROOT points, and no decision-count assertion means to count them.
+    control_plane_tick rows (the arms readout, one per advance call) are
+    bookkeeping, not decisions."""
     if not events_path.exists():
         return []
     return [
@@ -89,7 +91,8 @@ def _events(events_path: Path) -> list[dict]:
         for line in events_path.read_text().splitlines()
         if line.strip()
         and not (event := json.loads(line))["type"].startswith("claim_")
-        and event["type"] not in ("quota_rotation_declined", "dispatch_claim_observed")
+        and event["type"]
+        not in ("quota_rotation_declined", "dispatch_claim_observed", "control_plane_tick")
     ]
 
 
@@ -120,6 +123,28 @@ def test_disabled_dispatches_nothing(iso, monkeypatch):
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "advance_skipped"
     assert evs[0]["data"]["reason"] == "disabled"
+
+
+def test_advance_writes_one_control_plane_tick_row(iso, monkeypatch):
+    """x-1b88: every advance call appends exactly one auto_continue arm row,
+    carrying the skip reason the decision matrix chose."""
+    monkeypatch.setenv("FNO_AUTO_CONTINUE", "0")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: "x")
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+
+    adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    rows = [
+        json.loads(line)
+        for line in iso.read_text().splitlines()
+        if json.loads(line)["type"] == "control_plane_tick"
+    ]
+    assert len(rows) == 1
+    data = rows[0]["data"]
+    assert data["arm"] == "auto_continue"
+    assert data["skip_reason"] == "disabled"
+    assert data["interval_s"] == 1800
+    assert data["scheduler"] == "session"
 
 
 def test_no_work(iso, monkeypatch):

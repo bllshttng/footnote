@@ -60,6 +60,7 @@ fn cfg_for(tmp: &Path, fno_bin: PathBuf, mission: &str) -> DrainConfig {
         fno_bin: fno_bin.display().to_string(),
         mission: mission.to_string(),
         failure_limit: 3,
+        interval_seconds: 300,
     }
 }
 

@@ -131,6 +131,7 @@ pub mod subprocess_ask;
 pub mod subscribe;
 pub mod supervisor;
 pub mod terminal_stop;
+pub mod tick_ledger;
 pub mod usage;
 pub mod verify_evidence;
 pub mod version;
@@ -918,6 +919,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // active_backlog decision events above, this is an EventEmitter emit, so it
     // is a first-class registered kind.
     "dispatch_deferred",
+    // Control-plane arms readout (x-1b88): the supervisor-level
+    // active_backlog tick row is an EventEmitter emit (the mission-level rows
+    // ride Journal::append and are exempt like the drain decision events).
+    "control_plane_tick",
     // Meta (daemon/worker-emitted)
     "event_payload_too_large",
     // Inside-leg state push (daemon-emitted, inside-out E3.2): a per-turn hook

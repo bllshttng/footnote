@@ -414,10 +414,20 @@ emit_event_both() {
     _append_bounded_event target_stop_hook "$line" "$global_events" || true
 }
 
+# One control-plane arm row for this fire (x-1b88). interval_s 0: the stop hook
+# is event-driven, so the arms readout never reads it stale from quiet.
+emit_tick_row() {
+    local acted="$1" skip="$2" detail="$3" skip_json
+    if [[ -n "$skip" ]]; then skip_json="\"$skip\""; else skip_json="null"; fi
+    emit_event_both "control_plane_tick" \
+        "{\"arm\":\"stop_hook\",\"scheduler\":\"hook:target-stop-hook\",\"acted\":${acted},\"skip_reason\":${skip_json},\"detail\":\"$detail\",\"interval_s\":0}"
+}
+
 # Checker unavailable for an ACTIVE session: bounded-block, then loud give-up.
 # Counter keyed by session_id so two sessions sharing a symlinked .fno never
 # consume each other's retry budget (AC2-EDGE). Calls exit directly.
 unavailable_block_or_allow() {
+    emit_tick_row 0 checker_unavailable "driver=${DRIVER:-unknown} session=${SESSION_ID:-unknown}"
     local counter=".fno/.loop-check-unavail-${SESSION_ID}"
     local count=0
     [[ -f "$counter" ]] && count=$(tr -dc '0-9' < "$counter" 2>/dev/null)
@@ -497,6 +507,7 @@ fi
 # diagnostic (as before) then route through the bounded-block helper.
 if [[ -z "$BIN" ]]; then
     emit_event_both "loop_check_binary_missing" "{\"session_id\":\"${SESSION_ID}\"}"
+    emit_tick_row 0 binary_missing "driver=${DRIVER:-unknown} session=${SESSION_ID:-unknown}"
     echo "target stop-hook: WARNING: fno-agents binary not found for an active session" >&2
     echo "target stop-hook: install with: cargo install --path crates/fno-agents --bins (needs a Rust toolchain/rustup)" >&2
     unavailable_block_or_allow
@@ -590,6 +601,8 @@ rm -f ".fno/.loop-check-unavail-${SESSION_ID}" 2>/dev/null || true
 # ── 9. Translate decision to hook protocol ────────────────────────────────────
 DECISION=$(echo "$DECISION_JSON" | jq -r '.decision // "allow"')
 MESSAGE=$(echo "$DECISION_JSON" | jq -r '.message // ""')
+TERMINATION_REASON=$(echo "$DECISION_JSON" | jq -r '.termination_reason // empty')
+emit_tick_row 1 "" "driver=${DRIVER:-unknown} decision=${DECISION} reason=${TERMINATION_REASON:-live}"
 
 if [[ "$DECISION" == "block" ]]; then
     emit_block_for_harness "$MESSAGE"
@@ -604,7 +617,6 @@ fi
 # so a non-zero writer exit keeps the session alive for an idempotent retry.
 # Run synchronously (NOT backgrounded): a backgrounded child would be SIGHUP'd
 # when the session process exits, defeating the survive-compaction goal.
-TERMINATION_REASON=$(echo "$DECISION_JSON" | jq -r '.termination_reason // empty')
 # A king terminal skips this whole block. `finalize` stamps a plan, graduates a
 # node, and writes a ledger row for ONE deliverable; a king has none of those,
 # and pointing it at a king manifest would have it read fields that are not

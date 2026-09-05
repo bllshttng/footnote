@@ -1811,6 +1811,29 @@ def _session_start_bytes_line(preamble_line: Optional[str]) -> Optional[str]:
     return line if line.startswith("preamble:") else None
 
 
+def _control_plane_arms_report() -> dict[str, Any]:
+    """Stale control-plane arms via the one Rust reader (shells
+    ``fno-agents status --json``): unknown on a failed read, never green.
+    """
+    try:
+        from fno import rust_binary
+        binary = rust_binary.resolve_binary()
+        if binary is None:
+            return {"stale": [], "unknown_reason": "fno-agents binary not found"}
+        result = subprocess.run(
+            [str(binary), "status", "--json"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        payload = json.loads(result.stdout) if result.stdout.strip() else {}
+        arms = payload.get("arms")
+        if not isinstance(arms, list):
+            return {"stale": [], "unknown_reason": "status payload carries no arms"}
+        return {"stale": [a for a in arms if isinstance(a, dict) and a.get("stale")],
+                "unknown_reason": None}
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return {"stale": [], "unknown_reason": f"read failed: {exc}"}
+
+
 # ---------------------------------------------------------------------------
 # Verdict
 # ---------------------------------------------------------------------------
@@ -2336,6 +2359,17 @@ def _emit_human(
         )
     elif pw_verdict == "healthy-pending":
         out(f"fno doctor: pr-watch installed, awaiting first tick ({pw.get('detail')}).")
+
+    # Control-plane arms (x-1b88), advisory: name every stale arm; an
+    # unreadable readout never reads as green.
+    cpa = result.get("control_plane_arms") or {}
+    if cpa.get("unknown_reason"):
+        out(f"fno doctor: control-plane arms readout unknown ({cpa['unknown_reason']}); "
+            "staleness is unmeasured.")
+    for arm in cpa.get("stale") or []:
+        out(f"fno doctor: control-plane arm {arm.get('arm')} is STALE "
+            f"(last tick {arm.get('age_s')}s ago, interval {arm.get('interval_s')}s, "
+            f"skip: {arm.get('skip_reason') or 'none'})")
 
     # The durable-grant observer coupling: a standing dispatch grant
     # (auto_merge.enabled true, grant=dispatch) implies a live watcher -
@@ -4037,6 +4071,9 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     # weeks with zero signal; the verdict derives from tick recency (ground
     # truth), never from config alone. Never changes status/exit.
     result["pr_watch"] = _pr_watch_liveness()
+
+    # Advisory control-plane arms readout (x-1b88); never changes status/exit.
+    result["control_plane_arms"] = _control_plane_arms_report()
 
     # Advisory open-file limit visibility: a launchd child starves at 256 while
     # a login shell reads 1048576 and both are correct. Never changes

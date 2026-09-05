@@ -354,16 +354,24 @@ async fn run(args: Vec<String>) -> i32 {
     // `status` reports on a *running* daemon: it must NOT lazy-start one just to
     // describe it as up. A down daemon is exit 13 (AC10-ERR).
     if verb == "status" {
-        // status takes no further args; reject extras rather than silently
-        // ignoring a mistyped flag the way other verbs would not (Codex P3).
-        if args.len() > 1 {
+        // `--json`/`-J` selects the machine payload; the default renders the
+        // human arms table + daemon lines. Anything else is rejected rather
+        // than silently ignored (Codex P3).
+        let rest = &args[1..];
+        let json_out = rest.iter().any(|a| a == "--json" || a == "-J");
+        let extras: Vec<&str> = rest
+            .iter()
+            .map(String::as_str)
+            .filter(|a| *a != "--json" && *a != "-J")
+            .collect();
+        if !extras.is_empty() {
             eprintln!(
-                "fno-agents: status takes no arguments (got: {})",
-                args[1..].join(" ")
+                "fno-agents: status takes no arguments other than --json/-J (got: {})",
+                extras.join(" ")
             );
             return 2;
         }
-        return run_status().await;
+        return run_status(json_out).await;
     }
 
     // `restart` swaps a stale daemon for one built from the current binary
@@ -1746,9 +1754,13 @@ fn retired_verb_pointer(verb: &str) -> Option<&'static str> {
 }
 
 /// Dispatch `fno-agents status`: probe an already-running daemon and print its
-/// `status-v1.json`. Exit 13 when the daemon is down (no lazy-start).
-async fn run_status() -> i32 {
+/// `status-v1.json` (with `--json`), or the human arms table plus daemon lines
+/// (default). The control-plane arms readout is read straight from the event
+/// journals, so it survives a down daemon: exit 13 still signals the daemon,
+/// but the arms rows print either way.
+async fn run_status(json_out: bool) -> i32 {
     let home = AgentsHome::from_env();
+    let arms = arms_readout(&home);
     let req = Request::new(1, "agent.status", Value::Object(Map::new()));
     match call_if_running(&home, &req).await {
         Ok(resp) => match resp.payload {
@@ -1756,11 +1768,21 @@ async fn run_status() -> i32 {
                 eprintln!("fno-agents: {}", err.message);
                 exit_code_for(err.code)
             }
-            ResponsePayload::Ok(result) => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&result).unwrap_or_default()
-                );
+            ResponsePayload::Ok(mut result) => {
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert(
+                        "arms".into(),
+                        serde_json::to_value(&arms).unwrap_or(Value::Null),
+                    );
+                }
+                if json_out {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result).unwrap_or_default()
+                    );
+                } else {
+                    print_status_human(&result, &arms);
+                }
                 // Drift warning (ab-1891cdff), stderr-only so --json/automation
                 // consumers of stdout are never contaminated. We already hold the
                 // status payload, so classify from it without a second RPC.
@@ -1776,13 +1798,118 @@ async fn run_status() -> i32 {
             }
         },
         Err(ClientError::DaemonNotRunning) => {
+            // The arms table is exactly what a dead control plane needs to
+            // show; print it beside the down-daemon signal rather than nothing.
+            let payload = json!({
+                "schema_version": 1,
+                "daemon": null,
+                "arms": arms,
+            });
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_default()
+                );
+            } else {
+                print_status_human(&payload, &arms);
+            }
             eprintln!("fno-agents: daemon not running");
             13
         }
         Err(e) => {
+            // Unreachable daemon (socket error, timeout, ...): same degraded
+            // shape as DaemonNotRunning - the arms readout stands on its own.
+            let payload = json!({
+                "schema_version": 1,
+                "daemon": null,
+                "arms": arms,
+            });
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_default()
+                );
+            } else {
+                print_status_human(&payload, &arms);
+            }
             eprintln!("fno-agents: {e}");
             1
         }
+    }
+}
+
+/// The control-plane arms rows, from the journals the arms write (agents home
+/// + the global mirror) plus their `.1` rotations.
+fn arms_readout(home: &AgentsHome) -> Vec<fno_agents::tick_ledger::ArmStatus> {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // The global journal derives from the agents root we already hold (its
+    // parent dir), never a hand-built path: the root is the declared resolver
+    // surface, so an FNO_AGENTS_HOME override reaches this scan by construction.
+    let global = home
+        .root()
+        .parent()
+        .map(|p| p.join("events.jsonl"))
+        .unwrap_or_else(|| home.events_jsonl());
+    let journals = vec![home.events_jsonl(), global];
+    fno_agents::tick_ledger::read_arms(&journals, now_unix)
+}
+
+/// The human render: one line per arm (red rows first-class), then the daemon
+/// block the JSON payload carries.
+fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus]) {
+    println!("control-plane arms:");
+    for arm in arms {
+        let verdict = if arm.stale { "STALE" } else { "ok" };
+        let age = match arm.age_s {
+            Some(s) => format!("{s}s ago"),
+            None => "never".to_string(),
+        };
+        let skip = arm
+            .skip_reason
+            .as_deref()
+            .map(|r| format!(" skip={r}"))
+            .unwrap_or_default();
+        let acted = arm.acted.map(|n| format!(" acted={n}")).unwrap_or_default();
+        let scheduler = arm
+            .scheduler
+            .as_deref()
+            .map(|s| format!(" via={s}"))
+            .unwrap_or_default();
+        let detail = arm
+            .detail
+            .as_deref()
+            .map(|d| format!(" {d}"))
+            .unwrap_or_default();
+        println!(
+            "  {:<16} {:<5} {:>10}{}{}{}{}",
+            arm.arm, verdict, age, acted, skip, scheduler, detail
+        );
+    }
+    let Some(daemon) = result.get("daemon").and_then(Value::as_object) else {
+        return;
+    };
+    let state = daemon.get("state").and_then(Value::as_str).unwrap_or("?");
+    let pid = daemon.get("pid").and_then(Value::as_u64);
+    let uptime = daemon.get("uptime_secs").and_then(Value::as_u64);
+    println!(
+        "daemon: {state}{}{}",
+        pid.map(|p| format!(" pid={p}")).unwrap_or_default(),
+        uptime
+            .map(|u| format!(" uptime={}s", u))
+            .unwrap_or_default(),
+    );
+    if let Some(agents) = result.get("agents").and_then(Value::as_object) {
+        println!(
+            "agents: total={} by_status={}",
+            agents.get("total").and_then(Value::as_u64).unwrap_or(0),
+            agents
+                .get("by_status")
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "{}".into())
+        );
     }
 }
 
