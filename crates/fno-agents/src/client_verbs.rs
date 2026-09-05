@@ -388,24 +388,16 @@ const KNOWN_STATUSES: &[&str] = &[
     "exited",
     "permanent_dead",
 ];
-/// Registry schema versions this fno reads (current write version plus the older
-/// shapes it back-fills in memory). Each bump is forward-compat: a stale reader
-/// pinned to a lower set rejects a newer store instead of silently dropping a
-/// field. v10 (x-880e) removes the on-disk `provider` + per-provider session-id
-/// trio; a legacy v1..=v9 row still carries `provider`, read leniently below.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    27,
-];
+/// Registry schema versions this fno reads: `1..=REGISTRY_SCHEMA_VERSION` (the
+/// current write version plus the older shapes it back-fills in memory). Each
+/// bump is forward-compat: a stale reader pinned to a lower set rejects a newer
+/// store instead of silently dropping a field. v10 (x-880e) removes the on-disk
+/// `provider` + per-provider session-id trio; a legacy v1..=v9 row still
+/// carries `provider`, read leniently below. A range, not a list: the upper
+/// bound cannot drift from the version this binary writes.
 
-// The accepted set's upper bound MUST equal the version this binary writes, or
-// a freshly-written store would be rejected by its own reader. Compiler-enforced
-// so a future REGISTRY_SCHEMA_VERSION bump that forgets to widen the array fails
-// the build instead of drifting silently (type-design review, ab-a171ceb2).
-const _: () = assert!(
-    ACCEPTED_SCHEMA_VERSIONS[ACCEPTED_SCHEMA_VERSIONS.len() - 1] == REGISTRY_SCHEMA_VERSION as u64,
-    "ACCEPTED_SCHEMA_VERSIONS upper bound must equal REGISTRY_SCHEMA_VERSION"
-);
+/// Load the registry rows as raw JSON values, reproducing Python
+/// `registry.load_registry`:
 
 /// Load the registry rows as raw JSON values, reproducing Python
 /// `registry.load_registry`:
@@ -452,7 +444,7 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
     let on_disk_version = obj.get("schema_version").and_then(Value::as_u64);
     let mut read_forward = false;
     match on_disk_version {
-        Some(v) if ACCEPTED_SCHEMA_VERSIONS.contains(&v) => {}
+        Some(v) if (1..=REGISTRY_SCHEMA_VERSION as u64).contains(&v) => {}
         Some(v) if v > REGISTRY_SCHEMA_VERSION as u64 => {
             read_forward = true;
             eprintln!(
