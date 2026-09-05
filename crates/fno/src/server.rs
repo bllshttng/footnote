@@ -7582,15 +7582,12 @@ impl Core {
                 active_tab = trees.len();
             }
             let root = pruned.as_ref().unwrap_or(&t.root);
-            crate::pane_cwd::fill_leaf_cwds(
-                tree::leaves(root),
-                |p| {
-                    self.panes
-                        .get(&p)
-                        .map(|e| (e.pty.child_pid(), e.cwd.clone()))
-                },
-                &mut pane_cwd,
-            );
+            let cwd_of = |p| {
+                self.panes
+                    .get(&p)
+                    .map(|e| (e.pty.child_pid(), e.cwd.as_str()))
+            };
+            crate::pane_cwd::fill_leaf_cwds(tree::leaves(root), cwd_of, &mut pane_cwd);
             let mut capture = SlotCapture::new(&pane_owner, &pane_cwd);
             let tree = capture.node_to_spec(root);
             let focus = capture.slot_of(t.focus);

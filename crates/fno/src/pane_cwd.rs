@@ -74,9 +74,9 @@ impl crate::proto::LayoutSlot {
 /// Every surviving leaf's cwd, filled from `lookup` where a pane resolves and
 /// no cwd is recorded yet (a portal seat pruned out of `leaves` never calls
 /// `lookup`, so it never costs a syscall for a cwd nothing reads).
-pub fn fill_leaf_cwds(
+pub fn fill_leaf_cwds<'a>(
     leaves: impl IntoIterator<Item = u64>,
-    lookup: impl Fn(u64) -> Option<(Option<u32>, String)>,
+    lookup: impl Fn(u64) -> Option<(Option<u32>, &'a str)>,
     into: &mut std::collections::HashMap<u64, String>,
 ) {
     for pane in leaves {
@@ -84,7 +84,7 @@ pub fn fill_leaf_cwds(
             continue;
         }
         if let Some((child_pid, spawn_cwd)) = lookup(pane) {
-            into.insert(pane, live_or_spawn(child_pid, &spawn_cwd));
+            into.insert(pane, live_or_spawn(child_pid, spawn_cwd));
         }
     }
 }
