@@ -90,12 +90,52 @@ pub fn fill_leaf_cwds<'a>(
 }
 
 /// Only a genuine Shell slot's cwd steers restore; a dead worker's substitute
-/// shell still spawns at the squad root.
-pub fn shell_restore_cwd(
+/// shell still spawns at the squad root. Returns the spawn cwd plus a notice
+/// to raise when the stored cwd is gone.
+fn shell_restore_cwd(
     is_shell: bool,
     slot_cwd: Option<&str>,
     cwd0: &str,
+    tab_name: &str,
+    slot_name: &str,
 ) -> (String, Option<String>) {
     let stored = is_shell.then_some(slot_cwd).flatten();
-    crate::server::restore_member_cwd(stored, cwd0, |p| std::path::Path::new(p).is_dir())
+    let (spawn_cwd, gone) =
+        crate::server::restore_member_cwd(stored, cwd0, |p| std::path::Path::new(p).is_dir());
+    let notice = gone.map(|g| {
+        format!(
+            "restore: tab {tab_name}: {slot_name}'s directory {g} is gone; restored at {spawn_cwd} instead"
+        )
+    });
+    (spawn_cwd, notice)
+}
+
+impl crate::server::Core {
+    /// (x-5baf) A slot pane that could not be resolved: mint a shell,
+    /// steered by the slot's own captured cwd for a genuine Shell slot
+    /// whose directory still exists.
+    pub(crate) fn restore_shell_slot(
+        &mut self,
+        slot: &crate::proto::LayoutSlot,
+        rows: u16,
+        cols: u16,
+        cwd0: &str,
+        tab_name: &str,
+    ) -> Option<u64> {
+        let is_shell = matches!(slot.binding, crate::proto::LayoutBinding::Shell);
+        let (spawn_cwd, notice) =
+            shell_restore_cwd(is_shell, slot.cwd.as_deref(), cwd0, tab_name, &slot.name);
+        if let Some(notice) = notice {
+            self.notice_all(notice);
+        }
+        match self.spawn_pane(rows, cols, &spawn_cwd) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                self.notice_all(format!(
+                    "restore: tab {tab_name}: could not open shell: {e}"
+                ));
+                None
+            }
+        }
+    }
 }

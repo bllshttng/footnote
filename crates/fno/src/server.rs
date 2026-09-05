@@ -2155,7 +2155,7 @@ struct TruthReading {
     age_s: Option<u64>,
 }
 
-struct Core {
+pub(crate) struct Core {
     session: Session,
     panes: HashMap<u64, PaneEntry>,
     /// Per-pane output signal for off-loop `PaneWait` watchers. One entry per
@@ -3516,7 +3516,7 @@ impl Core {
     /// squads from MANY repos; inheriting the server process cwd would start
     /// every later squad's shell in the first client's directory). Empty /
     /// vanished dirs degrade to the server cwd inside `PtyShell::spawn`.
-    fn spawn_pane(&mut self, rows: u16, cols: u16, cwd: &str) -> Result<u64, String> {
+    pub(crate) fn spawn_pane(&mut self, rows: u16, cols: u16, cwd: &str) -> Result<u64, String> {
         let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn(
@@ -8052,7 +8052,7 @@ impl Core {
     /// received it, so a caller latching on the broadcast knows the message
     /// actually landed (x-0719): a latch set on an empty room burns a
     /// once-per-lifetime notice on nobody.
-    fn notice_all(&self, text: impl Into<String>) -> bool {
+    pub(crate) fn notice_all(&self, text: impl Into<String>) -> bool {
         let text = text.into();
         let mut delivered = false;
         for c in &self.clients {
@@ -9016,29 +9016,11 @@ impl Core {
                                 slot_pane.insert(slot.name.as_str(), p);
                             }
                             None => {
-                                let is_shell = matches!(slot.binding, LayoutBinding::Shell);
-                                let (spawn_cwd, gone) = crate::pane_cwd::shell_restore_cwd(
-                                    is_shell,
-                                    slot.cwd.as_deref(),
-                                    &cwd0,
-                                );
-                                if let Some(gone) = gone {
-                                    self.notice_all(format!(
-                                        "restore: tab {}: {}'s directory {gone} is gone; restored at {spawn_cwd} instead",
-                                        st.tab_name.as_deref().unwrap_or("?"),
-                                        slot.name
-                                    ));
-                                }
-                                match self.spawn_pane(rows, cols, &spawn_cwd) {
-                                    Ok(p) => {
-                                        slot_pane.insert(slot.name.as_str(), p);
-                                    }
-                                    Err(e) => {
-                                        self.notice_all(format!(
-                                            "restore: tab {}: could not open shell: {e}",
-                                            st.tab_name.as_deref().unwrap_or("?")
-                                        ));
-                                    }
+                                let tab_name = st.tab_name.as_deref().unwrap_or("?");
+                                if let Some(p) =
+                                    self.restore_shell_slot(slot, rows, cols, &cwd0, tab_name)
+                                {
+                                    slot_pane.insert(slot.name.as_str(), p);
                                 }
                             }
                         }
