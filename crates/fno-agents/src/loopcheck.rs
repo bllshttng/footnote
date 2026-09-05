@@ -5979,9 +5979,12 @@ impl CoverageReport {
 
     /// Whether every counted review verdict rests on the author's own
     /// (self_attested) local attestation: no GitHub App review, no second
-    /// session. Unmeasured origins (Unknown) are NOT self-attestation, so an
-    /// unmeasured row fails open - it is not proof of corroboration, but it is
-    /// not proof of its absence either.
+    /// session. A counted local verdict whose origin is anything but a
+    /// measured `OtherSession` reads as the author's own and fails closed:
+    /// Unknown authorship (including a read whose process resolved no
+    /// authoring session) cannot prove an independent reviewer, so this twin
+    /// refuses exactly what the serialized-row gate in the Python merge path
+    /// refuses - the two surfaces must never split on the same row.
     pub fn rests_on_self_attestation_alone(&self) -> bool {
         let mut counted = 0usize;
         let mut self_attested = 0usize;
@@ -5993,7 +5996,7 @@ impl CoverageReport {
             }
             counted += 1;
             if v.producer == CoverageProducer::LocalAttestation
-                && v.attestation_origin == AttestationOrigin::SelfAttested
+                && v.attestation_origin != AttestationOrigin::OtherSession
             {
                 self_attested += 1;
             }
@@ -15824,6 +15827,14 @@ mod tests {
             .find(|v| v["producer"] == "local_attestation")
             .unwrap();
         assert_eq!(v["attestation_origin"], serde_json::json!("self_attested"));
+
+        // The loop-side twin refuses the same row the serialized-row gate
+        // refuses: an unmeasured read under require_corroboration holds the
+        // PR instead of finishing green on authorship nobody measured.
+        let mut held = unmeasured;
+        assert!(held.rests_on_self_attestation_alone());
+        held.apply_corroboration_policy(true);
+        assert_eq!(held.coverage, Coverage::Covered(0));
     }
 
     #[test]
