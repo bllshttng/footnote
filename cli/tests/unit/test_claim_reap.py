@@ -550,11 +550,17 @@ class TestReapDeadClaims:
         import json
 
         events_path = tmp_path / ".fno" / "events.jsonl"
-        # events.jsonl already exists from acquire_claim's own claim_acquired
-        # emission above; what a dry run must NOT add is a claim_reap_swept
-        # entry - that write would break `fno backlog reconcile --dry-run`'s
-        # own preview contract.
-        lines = [json.loads(line) for line in events_path.read_text().splitlines()]
+        # acquire_claim's claim_acquired is ephemeral-class, so it lands in the
+        # .ephemeral sibling and the journal itself may not exist yet. Read both
+        # files: what a dry run must NOT add is a claim_reap_swept entry - that
+        # write would break `fno backlog reconcile --dry-run`'s own preview
+        # contract.
+        from fno.paths import journal_and_ephemeral_sibling
+
+        lines = []
+        for candidate in journal_and_ephemeral_sibling(events_path):
+            if candidate.exists():
+                lines.extend(json.loads(line) for line in candidate.read_text().splitlines())
         swept = [e for e in lines if e["type"] == "claim_reap_swept"]
         assert swept == []
 

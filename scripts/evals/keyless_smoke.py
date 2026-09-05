@@ -46,8 +46,9 @@ def _journal_text(path: Path) -> str:
 
 
 def _rows(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
+    # No existence gate on the journal itself: an all-ephemeral space has no
+    # events.jsonl at all, only the sibling, and gating here would hide rows
+    # _journal_text would have found.
     rows: list[dict] = []
     for line in _journal_text(path).splitlines():
         if not line.strip():

@@ -623,7 +623,9 @@ mod tests {
         // hold it back anyway.
         let reaped = orphan_sweep(&emitter, Duration::from_secs(0), None);
         assert_eq!(reaped, 0);
-        let line = std::fs::read_to_string(&path).unwrap();
+        // orphan_reap_sweep is ephemeral-class, so retention routing lands the
+        // row in the .ephemeral sibling, never in the journal proper.
+        let line = std::fs::read_to_string(crate::events::ephemeral_path(&path)).unwrap();
         assert!(line.contains("\"skipped\":true"), "{line}");
         assert!(line.contains("\"candidates\":0"), "{line}");
     }
@@ -669,7 +671,8 @@ mod tests {
         // A threshold no live process can reach, so the sweep finds nothing.
         let reaped = orphan_sweep(&emitter, Duration::from_secs(u32::MAX as u64), Some(&[]));
         assert_eq!(reaped, 0);
-        let line = std::fs::read_to_string(&path).unwrap();
+        // Same retention routing as above: the sweep row lives in the sibling.
+        let line = std::fs::read_to_string(crate::events::ephemeral_path(&path)).unwrap();
         assert!(line.contains(ORPHAN_SWEEP_EVENT), "{line}");
         assert!(line.contains("\"reaped\":0"), "{line}");
     }
