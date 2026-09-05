@@ -377,11 +377,14 @@ def resolve_session_truth(
 
 def _default_resolve(handle: str):
     from fno.agents.discover import (
+        DiscoveredSession,
+        ReachableSession,
         StoreReadError,
         resolve_or_suggest,
         resolve_reachable,
     )
 
+    session: Optional[DiscoveredSession | ReachableSession] = None
     session, suggestions = resolve_or_suggest(handle, require_alive=False)
     if session is not None:
         return session, suggestions
