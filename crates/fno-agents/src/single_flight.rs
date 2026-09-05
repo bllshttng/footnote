@@ -135,12 +135,27 @@ pub fn run_or_join<F>(key: &str, ttl: Duration, budget: Duration, work: F) -> Fl
 where
     F: FnOnce() -> Option<Vec<u8>>,
 {
+    run_or_join_at(None, key, ttl, budget, work)
+}
+
+/// [`run_or_join`] against an explicit claims root.
+///
+/// The root is resolved ONCE here and handed to the claim, rather than read
+/// from the environment twice. A test can pin it without touching process env,
+/// which this crate's threaded test binary shares with every other test in it.
+pub fn run_or_join_at<F>(
+    root: Option<&Path>,
+    key: &str,
+    ttl: Duration,
+    budget: Duration,
+    work: F,
+) -> Flight
+where
+    F: FnOnce() -> Option<Vec<u8>>,
+{
     let started = Instant::now();
-    let path = match record_path(key) {
-        Some(p) => p,
-        // No claims root means no latch. Run, and say why: a latch silent when
-        // it cannot function reports "nothing was deduped" and "the cache is
-        // broken" with the same silence.
+    let root = match root.map(Path::to_path_buf).or_else(claims::global_claims_root) {
+        Some(r) => r,
         None => {
             return finish(
                 key,
@@ -151,6 +166,7 @@ where
             )
         }
     };
+    let path = record_path(&root, key);
 
     if let Some(bytes) = read_record(&path, Some(ttl), None) {
         return finish(key, FlightKind::Cache, Some(bytes), started, None);
@@ -165,6 +181,7 @@ where
         // covers a holder that is still running.
         ttl_ms: Some((budget.as_millis() as i64).max(claims::MIN_TTL_MS)),
         reason: Some("single-flight".into()),
+        root: Some(root.clone()),
         ..Default::default()
     };
     match claims::acquire(key, &holder, opts) {
@@ -173,7 +190,7 @@ where
             if let Some(bytes) = out.as_deref() {
                 write_record(&path, bytes);
             }
-            let _ = claims::release(key, &holder, None, None);
+            let _ = claims::release(key, &holder, Some(&root), None);
             finish(key, FlightKind::Spawn, out, started, None)
         }
         claims::AcquireOutcome::HeldByOther { .. } => {
@@ -200,16 +217,25 @@ where
 
 /// `<claims root>/.fno/flight/<encoded key>.json`, beside the claims dir the
 /// latch already locks in.
-fn record_path(key: &str) -> Option<PathBuf> {
-    Some(
-        claims::global_claims_root()?
-            .join(".fno/flight")
-            .join(format!("{}.json", claims::encode_key(key))),
-    )
+fn record_path(root: &Path, key: &str) -> PathBuf {
+    root.join(".fno/flight")
+        .join(format!("{}.json", claims::encode_key(key)))
 }
 
+/// A holder string unique to ONE flight, not one process.
+///
+/// `claims::acquire` treats an identical holder as an idempotent re-acquire, so
+/// a pid-only holder let every thread in one process straight through - and the
+/// daemon runs its sweeps on `spawn_blocking` threads, which is exactly where
+/// two overlapping roster reads live. The sequence makes the second thread a
+/// joiner, the same as a second process.
 fn holder() -> String {
-    format!("single-flight:{}", std::process::id())
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "single-flight:{}:{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 /// Read the record when it satisfies the caller's freshness question.
@@ -312,22 +338,19 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    /// Point the claims root at one temp dir for the WHOLE test binary.
+    /// A private claims root per test, passed explicitly.
     ///
-    /// `FNO_CLAIMS_ROOT` is process-global and these tests run threaded, so a
-    /// per-test `set_var` races: every test would read whichever root won the
-    /// last write. One root plus a distinct key per test isolates them without
-    /// touching the env more than once.
-    fn key(name: &str) -> String {
-        static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-        ROOT.get_or_init(|| {
-            let dir =
-                std::env::temp_dir().join(format!("fno-single-flight-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).unwrap();
-            std::env::set_var("FNO_CLAIMS_ROOT", &dir);
-            dir
-        });
-        format!("flight:{name}")
+    /// Never through `FNO_CLAIMS_ROOT`: it is process-global and every test in
+    /// this binary shares it, so a `set_var` here reads whichever test wrote
+    /// last. Pinning the root as an argument is why these assertions hold under
+    /// the full threaded suite and not only when run alone.
+    fn root_for(name: &str) -> (PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "fno-single-flight-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir, format!("flight:{name}"))
     }
 
     // AC5: a comma-separated list is one flight regardless of order; distinct
@@ -351,8 +374,9 @@ mod tests {
     // AC1: no record -> spawn once, write the record, release.
     #[test]
     fn first_caller_spawns_and_writes_the_record() {
-        let key = key("ac1");
-        let flight = run_or_join(
+        let (root, key) = root_for("ac1");
+        let flight = run_or_join_at(
+            Some(&root),
             &key,
             Duration::from_secs(10),
             Duration::from_secs(5),
@@ -360,20 +384,20 @@ mod tests {
         );
         assert_eq!(flight.kind, FlightKind::Spawn);
         assert_eq!(flight.stdout.as_deref(), Some(&b"{\"ok\":1}"[..]));
-        assert!(record_path(&key).unwrap().exists());
+        assert!(record_path(&root, &key).exists());
         // Released, so the next caller is free to acquire.
-        assert_eq!(claims::status(&key, None).0, claims::ClaimState::Free);
+        assert_eq!(claims::status(&key, Some(&root)).0, claims::ClaimState::Free);
     }
 
     // AC2: a fresh record answers and nothing runs.
     #[test]
     fn second_caller_inside_the_ttl_reads_the_cache() {
-        let key = key("ac2");
+        let (root, key) = root_for("ac2");
         let runs = Arc::new(AtomicUsize::new(0));
         let ttl = Duration::from_secs(10);
         for _ in 0..2 {
             let runs = Arc::clone(&runs);
-            run_or_join(&key, ttl, Duration::from_secs(5), move || {
+            run_or_join_at(Some(&root), &key, ttl, Duration::from_secs(5), move || {
                 runs.fetch_add(1, Ordering::SeqCst);
                 Some(b"answer".to_vec())
             });
@@ -384,8 +408,8 @@ mod tests {
     // AC2, the other half: a record older than the TTL is not an answer.
     #[test]
     fn a_stale_record_does_not_answer() {
-        let key = key("ac2-stale");
-        let path = record_path(&key).unwrap();
+        let (root, key) = root_for("ac2-stale");
+        let path = record_path(&root, &key);
         write_record(&path, b"old");
         assert!(read_record(&path, Some(Duration::from_secs(10)), None).is_some());
         assert!(read_record(&path, Some(Duration::from_millis(0)), None).is_none());
@@ -395,14 +419,15 @@ mod tests {
     // holder's answer instead of starting one.
     #[test]
     fn a_joiner_waits_for_the_holders_answer() {
-        let key = key("ac3");
-        let path = record_path(&key).unwrap();
+        let (root, key) = root_for("ac3");
+        let path = record_path(&root, &key);
         // Hold the claim from a foreign holder, then answer from a thread.
         claims::acquire(
             &key,
             "foreign-holder",
             claims::AcquireOpts {
                 ttl_ms: Some(120_000),
+                root: Some(root.clone()),
                 ..Default::default()
             },
         );
@@ -411,7 +436,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(300));
             write_record(&writer_path, b"holder-answer");
         });
-        let flight = run_or_join(
+        let flight = run_or_join_at(
+            Some(&root),
             &key,
             Duration::from_secs(10),
             Duration::from_secs(5),
@@ -420,23 +446,25 @@ mod tests {
         assert_eq!(flight.kind, FlightKind::Join);
         assert_eq!(flight.stdout.as_deref(), Some(&b"holder-answer"[..]));
         assert!(flight.waited_ms > 0);
-        let _ = claims::release(&key, "foreign-holder", None, None);
+        let _ = claims::release(&key, "foreign-holder", Some(&root), None);
     }
 
     // AC4: a held flight whose record never advances costs one extra child and
     // a named outcome, never a hang.
     #[test]
     fn an_exhausted_join_budget_runs_anyway() {
-        let key = key("ac4");
+        let (root, key) = root_for("ac4");
         claims::acquire(
             &key,
             "foreign-holder",
             claims::AcquireOpts {
                 ttl_ms: Some(120_000),
+                root: Some(root.clone()),
                 ..Default::default()
             },
         );
-        let flight = run_or_join(
+        let flight = run_or_join_at(
+            Some(&root),
             &key,
             Duration::from_secs(10),
             Duration::from_millis(300),
@@ -444,15 +472,15 @@ mod tests {
         );
         assert_eq!(flight.kind, FlightKind::Timeout);
         assert_eq!(flight.stdout.as_deref(), Some(&b"own-answer"[..]));
-        let _ = claims::release(&key, "foreign-holder", None, None);
+        let _ = claims::release(&key, "foreign-holder", Some(&root), None);
     }
 
     // A record left by a PREVIOUS flight must not satisfy a joiner: it would
     // hand back an answer to a question nobody asked in this round.
     #[test]
     fn a_joiner_ignores_a_record_written_before_it_arrived() {
-        let key = key("join-floor");
-        let path = record_path(&key).unwrap();
+        let (root, key) = root_for("join-floor");
+        let path = record_path(&root, &key);
         write_record(&path, b"previous");
         let floor = claims::now_ms() + 1;
         assert!(read_record(&path, None, Some(floor)).is_none());
@@ -462,8 +490,8 @@ mod tests {
     // gets its own answer; only the sharing is skipped.
     #[test]
     fn non_utf8_stdout_is_not_cached() {
-        let key = key("binary");
-        let path = record_path(&key).unwrap();
+        let (root, key) = root_for("binary");
+        let path = record_path(&root, &key);
         write_record(&path, &[0xff, 0xfe]);
         assert!(!path.exists());
     }
