@@ -5863,13 +5863,19 @@ pub struct ReviewerVerdict {
     /// and a PR whose only attestation is self-attested is covered. Whether
     /// that should stay true is a later gate decision, not this field.
     /// Only meaningful on `local_attestation` verdicts; github_app and
-    /// human approvals carry `Unknown` (omitted on serialize) since a GitHub
-    /// login has no session to compare. Defaults to `Unknown` so every
-    /// pre-existing attestation lands there unchanged.
-    #[serde(
-        skip_serializing_if = "is_attestation_origin_unknown",
-        default = "default_attestation_origin"
-    )]
+    /// human approvals carry `Unknown` since a GitHub login has no session
+    /// to compare. Defaults to `Unknown` so every pre-existing attestation
+    /// lands there unchanged.
+    ///
+    /// `Unknown` serializes as `"unknown"`, never as an absent key: a read
+    /// that could not resolve the authoring session (a loop-check run from a
+    /// cwd whose target manifest is elsewhere) used to emit a row with no
+    /// `attestation_origin` at all, and a consumer reading absent as "not
+    /// self_attested" cleared a PR whose only review was the author's own -
+    /// a rebase laundering the review's authorship. The schema already names
+    /// `unknown` for exactly
+    /// this state.
+    #[serde(default = "default_attestation_origin")]
     pub attestation_origin: AttestationOrigin,
     /// The commit this reviewer actually read: a github_app review object's
     /// `.commit.oid`, or a local attestation's `data.head_sha`. Empty when
@@ -6035,10 +6041,6 @@ fn default_true() -> bool {
 
 fn default_attestation_origin() -> AttestationOrigin {
     AttestationOrigin::Unknown
-}
-
-fn is_attestation_origin_unknown(o: &AttestationOrigin) -> bool {
-    matches!(o, AttestationOrigin::Unknown)
 }
 
 /// Label a local attestation's authorship from its emitting session vs the
@@ -15770,6 +15772,58 @@ mod tests {
         assert!(!corr.rests_on_self_attestation_alone());
         corr.apply_corroboration_policy(true);
         assert_eq!(corr.coverage, Coverage::Covered(2));
+    }
+
+    #[test]
+    fn the_origin_key_is_never_absent_from_a_serialized_local_verdict() {
+        // A read whose process resolved no authoring session (a
+        // carried_base_sync row re-read from a cwd whose target manifest is
+        // elsewhere) classifies the local verdict Unknown, and Unknown used to
+        // be SKIPPED on serialize - the persisted row carried no
+        // attestation_origin at all, and a consumer reading absent as "not
+        // self_attested" cleared a PR whose only review was the author's own.
+        // The key must always be present: "unknown" when authorship could not
+        // be measured, "self_attested" when it could.
+        let events = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
+        let unmeasured = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        let row = serde_json::to_value(&unmeasured.verdicts).unwrap();
+        let v = row
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["producer"] == "local_attestation")
+            .unwrap();
+        assert_eq!(v["attestation_origin"], serde_json::json!("unknown"));
+
+        let measured = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        let row = serde_json::to_value(&measured.verdicts).unwrap();
+        let v = row
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["producer"] == "local_attestation")
+            .unwrap();
+        assert_eq!(v["attestation_origin"], serde_json::json!("self_attested"));
     }
 
     #[test]
