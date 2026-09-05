@@ -896,6 +896,19 @@ pub enum ControlVerb {
         #[serde(default)]
         placement: PanePlacement,
     },
+    /// Move the ONE existing viewer of a live pane-hosted worker INTO a portal
+    /// seat, keeping its PTY (re-seat, never re-attach): the pane becomes a
+    /// portal's seat, the row stops being persisted as a squad member, and the
+    /// caller (the registry-writing front door) flips the row's `mux` ref on
+    /// the receipt. The reply is a `Notice` naming pane, portal, and tab, or an
+    /// `Err` naming the refusal. Idempotent: a pane already seated is focused,
+    /// not moved twice.
+    ThreadReseat {
+        pane: u64,
+        /// Which portal to seat through; `None` takes the next free index.
+        #[serde(default)]
+        portal: Option<u8>,
+    },
     /// Join a whole source tab into the anchor pane's tab as a split, removing
     /// the now-empty source tab -> [`ServerMsg::Ok`]. Refuses join-into-self up
     /// front ([`err_code::BAD_REQUEST`]).
