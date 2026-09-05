@@ -831,6 +831,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // `agent_row_reaped` (the GC door's own event); this fires for every
     // door, including ones nobody has enumerated yet.
     "registry_row_removed",
+    // Orphan process sweep (daemon-emitted): the row GC beside it reaps
+    // registry ROWS, this reaps the `fno-py` children that init inherited and
+    // nobody was waiting on. Emitted on EVERY run including the ones that reap
+    // nothing, because a reaper that speaks only when it kills cannot be told
+    // apart from a reaper that never ran.
+    "orphan_reap_sweep",
     // Worktree report sweep (daemon-emitted, x-5a30): one line per repo per 24h
     // saying what `fno agents workspace worktree cleanup --merged` WOULD archive. Report-only by
     // construction, because a timer tick is not proof that work landed; removal
