@@ -6162,6 +6162,14 @@ mod tests {
 
     #[test]
     fn resolve_resume_cwd_picks_the_transcripts_worktree_over_the_stale_recorded_cwd() {
+        // This test resolves `git` through the process PATH, which is exactly
+        // the PATH-dependent work `PATH_TEST_MUTEX` covers: a sibling test in
+        // this same module points PATH at a stub dir holding only a fake `fno`,
+        // and a run that lands inside that window sees `git` as ENOENT.
+        // Observed in CI, never locally, because it is a scheduling race.
+        let _path_guard = crate::PATH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Registered at the canonical checkout; transcript under a worktree's
         // project dir (the EnterWorktree case). Resume must resolve to the
         // worktree, not the pre-EnterWorktree recorded cwd.
