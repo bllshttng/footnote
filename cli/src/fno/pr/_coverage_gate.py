@@ -1210,22 +1210,29 @@ def attestation_chain(
                     if scoped:
                         if data.get("repo") != slug:
                             continue
-                    # Dedup on the producer's invocation_id PLUS the head it
-                    # attested, falling back to the whole payload only when
-                    # the row predates the field. The mirror stamped `repo`
-                    # onto its copy alone, so a payload key counted every
-                    # mirrored round twice ("one review reads 2/2"); the
-                    # invocation_id lands identically on both rows. The head
-                    # must ride the key because the recovery path re-attests
-                    # under one invocation at each fixed head: keyed on the
-                    # invocation alone, the chain kept the first row (the
-                    # fail) and swallowed every later pass and its
-                    # dispositions, so a fixed finding read as never resolved.
+                    # Dedup the MIRROR, not the branch. invocation_id is
+                    # minted once per branch review-hold (emit-attestation
+                    # resolves it from the hold for the current branch), so
+                    # every round on a branch reuses it, and the mirror copies
+                    # one attestation into the global log at the SAME ts with
+                    # `repo` stamped on alone. Keyed on the invocation, the
+                    # chain collapsed every round on the branch into its first
+                    # row; keyed on invocation+head, it still swallowed a
+                    # same-head re-run (a pass and the later fail that
+                    # superseded it read as one entry). Two distinct emissions
+                    # never share a microsecond ts and the mirror pair always
+                    # does, so (ts, invocation) collapses exactly the mirror.
+                    # The payload fallback strips `repo` so pre-invocation
+                    # mirror rows still dedup.
                     invocation_id = data.get("invocation_id")
                     if isinstance(invocation_id, str) and invocation_id:
-                        key = f"invocation:{invocation_id}@{data.get('head_sha', '')}"
+                        discriminator: object = invocation_id
                     else:
-                        key = json.dumps(data, sort_keys=True)
+                        discriminator = json.dumps(
+                            {k: v for k, v in data.items() if k != "repo"},
+                            sort_keys=True,
+                        )
+                    key = f"{event.get('ts', '')}|{discriminator}"
                     if key in seen:
                         continue
                     if _in_scope(data):
