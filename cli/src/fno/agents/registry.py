@@ -266,15 +266,12 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # v26: additive served facts (liveness + its stamp, harness_title): a pre-v26
 # reader degrades (drops the keys, refuses writes) instead of TypeError at v25.
 # v27 (x-04ce): additive `launch_account_source` - WHO chose the row's
-# `launch_account`: "caller" (a flag on this spawn's argv) or "config"
-# (accounts.quota.pick_on_launch picked it). None on every other row:
-# launch_account "default" already says nobody chose, a revive inherits the
-# source row's stamp, and legacy rows predate the column. The provenance
-# vocabulary is shared with the spawn receipt (`account_source`) and defined
-# once in `fno.agents.spawn_flag_owners`. Before it, a config injection read
-# as a caller decision - the exact misread this column ends. Same
-# additive-optional writer-protection rationale as v11-v25: asdict emits the
-# key on every written row, so a pre-v27 reader must reject the store on
+# `launch_account`: "caller" or "config", vocabulary defined once in
+# `fno.agents.spawn_flag_owners`. None on every other row: "default" already
+# says nobody chose, a revive inherits the source row's stamp, legacy rows
+# predate the column. Before it, a config injection read as a caller decision.
+# Same additive-optional writer-protection rationale as v11-v25: asdict emits
+# the key on every written row, so a pre-v27 reader must reject the store on
 # version rather than TypeError on the unknown kwarg.
 SCHEMA_VERSION = 27
 
@@ -622,14 +619,10 @@ class AgentEntry:
     liveness_measured_at: Optional[str] = None
     harness_title: Optional[str] = None
 
-    # v27 (x-04ce): WHO chose `launch_account`: "caller" (a flag on this
-    # spawn's argv) or "config" (accounts.quota.pick_on_launch picked it).
-    # None when launch_account is "default" (nobody chose - the value already
-    # says so), when a revive inherits the account (the source row carries
-    # the stamp), and on rows whose writer cannot know. ABSENCE MEANS
-    # UNKNOWN, the `origin` discipline. Rust's RegistryEntry mirrors it as
-    # additive-optional passthrough so a daemon write-back preserves the
-    # stamp.
+    # v27 (x-04ce): WHO chose `launch_account`, vocabulary from
+    # spawn_flag_owners. None on "default", inherited, and unattributable
+    # rows. ABSENCE MEANS UNKNOWN, the `origin` discipline; Rust mirrors it
+    # as additive-optional passthrough.
     launch_account_source: Optional[str] = None
 
     @property
