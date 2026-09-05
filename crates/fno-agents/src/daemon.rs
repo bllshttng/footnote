@@ -1993,8 +1993,8 @@ pub(crate) fn batched_row_probes(
     truth_tail_probes: &dyn Fn(
         &[String],
     )
-        -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>,
-) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe> {
+        -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
+) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe> {
     let handles = row_truth_handles(entries);
     if handles.is_empty() {
         return std::collections::HashMap::new();
@@ -2844,6 +2844,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         let retain_days =
                             crate::agents_config::reap_receipt_retain_days(&grace_cwd);
                         let _ = gc_sweep(&home, &emitter, grace_secs, retain_days);
+                        crate::gc::unowned_sweeps(&home, &emitter, &grace_cwd);
                     });
                 }
                 // Worktree sweep: the backstop for what the merge ritual
@@ -5933,7 +5934,7 @@ fn liveness_origin(row: &Map<String, Value>) -> (Value, Option<String>) {
 /// NOT lift an unanswered age to `quiet`: the word is activity, and a process
 /// being up says nothing about when it last wrote - the same row must render
 /// the same word through the Python list lane, which has no pid census.
-fn rendered_status_from_truth(probe: Option<&crate::claude_ask::TruthProbe>) -> &'static str {
+fn rendered_status_from_truth(probe: Option<&crate::truth_probe::TruthProbe>) -> &'static str {
     if probe.and_then(|p| p.reachability.as_deref()) == Some("unreachable") {
         return "orphaned";
     }
@@ -5991,7 +5992,7 @@ fn is_refused(observed_model: &Value, harness: &str, route_settings_path: Option
 /// truth-state arms plus the measured transcript age. A written `working`
 /// state is not progress evidence when its transcript stopped advancing.
 pub(crate) fn progress_from_truth(
-    probe: Option<&crate::claude_ask::TruthProbe>,
+    probe: Option<&crate::truth_probe::TruthProbe>,
     harness: &str,
     route_settings_path: Option<&str>,
 ) -> (&'static str, &'static str) {
@@ -6043,7 +6044,7 @@ const LIST_PROJECTION_OMISSIONS: [&str; 2] = ["model", "model_basis"];
 
 fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
 where
-    F: Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>,
+    F: Fn(&[String]) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
 {
     let all = req
         .params
@@ -8260,7 +8261,7 @@ struct ReconcileSweepResult {
 ///
 /// `probe` is injected so this is testable without shelling out.
 fn predecessor_reachability(session_id: &str) -> Option<bool> {
-    crate::claude_ask::family1_truth_probe(session_id).and_then(|probe| {
+    crate::truth_probe::family1_truth_probe(session_id).and_then(|probe| {
         match probe.reachability.as_deref() {
             Some("reachable") => Some(true),
             Some("unreachable") => Some(false),
@@ -9090,7 +9091,7 @@ fn run_reconcile_sweep(
     // The session-names overlay folds into the rows on every sweep:
     // best-effort, one small file read, and the count is an event.
     crate::session_names_fold::fold_session_names(home, emitter);
-    let probes = batched_row_probes(&entries, &crate::claude_ask::family1_truth_probe_many);
+    let probes = batched_row_probes(&entries, &crate::truth_probe::family1_truth_probe_many);
     // One batch feeds both consumers: the ladder's truth rung reads states,
     // the title detector reads titles. The probes are keyed by the row's
     // claude uuid (the handle the batch asked for), which is also the map
@@ -12521,9 +12522,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     #[test]
     fn build_codex_thread_entry_stamps_the_launch_posture() {
         let worktree = tempfile::tempdir().unwrap();
-        let _guard = crate::PATH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::path_test_guard();
         let start = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -14386,8 +14385,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     /// `rendered_status_from_truth` (a `fno` too old to emit the verdict), which
     /// is what keeps these pre-existing state-mapping assertions meaningful.
     /// `probe_reachable` below covers the current wire.
-    fn probe(state: &str) -> Option<crate::claude_ask::TruthProbe> {
-        Some(crate::claude_ask::TruthProbe {
+    fn probe(state: &str) -> Option<crate::truth_probe::TruthProbe> {
+        Some(crate::truth_probe::TruthProbe {
             state: state.into(),
             reachability: None,
             basis: None,
@@ -14921,8 +14920,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     /// handler called it once or once per row, so the call SHAPE needs its own
     /// test against the raw seam.
     fn per_handle(
-        f: impl Fn(&str) -> Option<crate::claude_ask::TruthProbe>,
-    ) -> impl Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>
+        f: impl Fn(&str) -> Option<crate::truth_probe::TruthProbe>,
+    ) -> impl Fn(&[String]) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>
     {
         move |handles: &[String]| {
             handles
@@ -14936,8 +14935,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     fn probe_with_verdict(
         state: &str,
         reachability: &str,
-    ) -> Option<crate::claude_ask::TruthProbe> {
-        Some(crate::claude_ask::TruthProbe {
+    ) -> Option<crate::truth_probe::TruthProbe> {
+        Some(crate::truth_probe::TruthProbe {
             state: state.into(),
             reachability: Some(reachability.into()),
             basis: Some("transcript".into()),
@@ -14955,7 +14954,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         state: &str,
         reachability: &str,
         age_s: Option<f64>,
-    ) -> Option<crate::claude_ask::TruthProbe> {
+    ) -> Option<crate::truth_probe::TruthProbe> {
         let mut probe = probe_with_verdict(state, reachability).unwrap();
         probe.last_activity_age_s = age_s;
         Some(probe)
@@ -15005,8 +15004,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         state: &str,
         reachability: &str,
         observed_model: Value,
-    ) -> Option<crate::claude_ask::TruthProbe> {
-        Some(crate::claude_ask::TruthProbe {
+    ) -> Option<crate::truth_probe::TruthProbe> {
+        Some(crate::truth_probe::TruthProbe {
             state: state.into(),
             reachability: Some(reachability.into()),
             basis: Some("transcript".into()),
@@ -15802,7 +15801,7 @@ done
             &ctx,
             &req,
             per_handle(|_handle| {
-                Some(crate::claude_ask::TruthProbe {
+                Some(crate::truth_probe::TruthProbe {
                     state: "working".into(),
                     reachability: Some("reachable".into()),
                     basis: Some("transcript".into()),
@@ -17078,9 +17077,7 @@ done
         behavior: crate::codex_fake_daemon::Behavior,
         body: impl std::future::Future<Output = ()>,
     ) {
-        let _guard = crate::PATH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::path_test_guard();
         let _daemon = crate::codex_fake_daemon::FakeDaemon::start(behavior);
         body.await;
     }

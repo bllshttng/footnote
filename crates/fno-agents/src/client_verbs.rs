@@ -19,15 +19,14 @@
 //!   lines are already compact, so each matching line is emitted verbatim to
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
-use crate::claude_ask::{
-    family1_truth_state, family1_truth_state_for_resume, liveness_probe, locate_session, ClaudeHome,
-};
+use crate::claude_ask::{liveness_probe, locate_session, ClaudeHome};
 #[cfg(test)]
 use crate::manifest_lookup::parse_manifest_identity;
 use crate::manifest_lookup::{find_manifest_for_session, git_worktree_paths, ManifestIdentity};
 use crate::pane_relaunch::{mesh_identity_assignments, mux_pane_run_argv};
 use crate::paths::AgentsHome;
 use crate::state::REGISTRY_SCHEMA_VERSION;
+use crate::truth_probe::{family1_truth_state, family1_truth_state_for_resume};
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;
@@ -5682,7 +5681,7 @@ mod tests {
         let caller_cwd = std::env::current_dir().unwrap();
         let relative_registry = Path::new("relative/registry.json");
         let expected_registry = caller_cwd.join(relative_registry);
-        std::env::set_var("PATH", dir.path());
+        std::env::set_var("PATH", crate::path_with(dir.path()));
         std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
         std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
         let output =
@@ -5874,18 +5873,17 @@ mod tests {
         assert_eq!(code, 13);
     }
 
+    /// The shared helper snapshots git's path; hand-rolling it resolved by name.
     fn _git(repo: &Path, args: &[&str]) {
-        let st = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(st.success(), "git {:?} in {} failed", args, repo.display());
+        let out = crate::git_test_helpers::git_run(args, repo).unwrap();
+        assert!(out.status.success(), "git {args:?} failed in {repo:?}");
     }
 
     #[test]
     fn resolve_resume_cwd_picks_the_transcripts_worktree_over_the_stale_recorded_cwd() {
+        // Shells git: a sibling test blanks PATH, so this is the PATH-dependent
+        // work PATH_TEST_MUTEX covers.
+        let _p = crate::path_test_guard();
         // Registered at the canonical checkout; transcript under a worktree's
         // project dir (the EnterWorktree case). Resume must resolve to the
         // worktree, not the pre-EnterWorktree recorded cwd.

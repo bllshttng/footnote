@@ -23,6 +23,7 @@
 //! unit-testable in isolation.
 
 use crate::graph_store::WorkState;
+use std::time::Duration;
 
 /// The row verdict: retire now, or keep with a named reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,9 +276,417 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
     )
 }
 
+// --- the orphan process sweep -----------------------------------------------
+//
+// `gc_decide` above reaps registry ROWS. Nothing reaped PROCESSES, and one was
+// measured at 44.7% CPU with its parent gone: `agents stale-escalate --json`,
+// reparented to init, with nothing on the machine that would ever notice it.
+// Every other `libc::kill` in this crate is a targeted teardown of a pid the
+// caller already owns.
+
+/// The event the sweep emits on EVERY run, including the ones that reap
+/// nothing. A reaper that speaks only when it kills cannot be told apart from a
+/// reaper that never ran, and the difference is the whole question an operator
+/// is asking when they go looking.
+pub const ORPHAN_SWEEP_EVENT: &str = "orphan_reap_sweep";
+
+/// How long a SIGTERMed process is given to leave before SIGKILL. Mirrors the
+/// grace `cursor_agent::reap_detached_worker_servers` already uses.
+const REAP_GRACE: Duration = Duration::from_secs(2);
+
+/// One row of the process table, reduced to what the reap gate reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcRow {
+    pub pid: u32,
+    pub ppid: u32,
+    pub age_secs: u64,
+    pub args: String,
+}
+
+/// Whether this row is a child that init inherited and nobody is waiting on.
+///
+/// The conjunction IS the gate, and every clause is load-bearing, because the
+/// cost of a false positive is killing a process a person is using:
+///
+/// - **argv names the `fno-py` entrypoint.** Matched on the BASENAME of a
+///   whitespace-separated token, not as a substring: `--flag=fno-py-thing`
+///   contains the string and is not this.
+/// - **parent pid 1.** A live foreground `fno` has a real parent. Without this
+///   clause the gate matches every ordinary command an operator is running.
+/// - **older than the threshold.** Without it the sweep races a child whose
+///   parent is mid-exit and has simply not been reaped yet.
+/// - **no registry row names the pid live.** A worker the fleet is tracking is
+///   not an orphan even when it looks like one from out here.
+pub fn is_reapable_orphan(row: &ProcRow, older_than: Duration, live_pids: &[u32]) -> bool {
+    row.ppid == 1
+        && row.age_secs >= older_than.as_secs()
+        && !live_pids.contains(&row.pid)
+        && row.pid != std::process::id()
+        && names_fno_py(&row.args)
+}
+
+fn names_fno_py(args: &str) -> bool {
+    args.split_whitespace()
+        .any(|token| token.rsplit('/').next() == Some("fno-py"))
+}
+
+/// Parse `ps -o etime=`: `[[DD-]HH:]MM:SS`.
+///
+/// `etimes` (elapsed SECONDS, no parsing) exists on Linux and NOT on macOS, so
+/// the portable column is the formatted one. `None` on anything unparseable,
+/// which reads as "unknown age" and therefore never reaps: an age the gate
+/// cannot establish is not evidence the process is old.
+pub fn parse_etime(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    let (days, rest) = match raw.split_once('-') {
+        Some((d, rest)) => (d.parse::<u64>().ok()?, rest),
+        None => (0, raw),
+    };
+    let mut parts = rest.split(':').rev();
+    let secs = parts.next()?.parse::<u64>().ok()?;
+    let mins = parts.next()?.parse::<u64>().ok()?;
+    let hours = match parts.next() {
+        Some(h) => h.parse::<u64>().ok()?,
+        None => 0,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(days * 86_400 + hours * 3_600 + mins * 60 + secs)
+}
+
+/// Read the process table once per sweep.
+///
+/// One `ps` for the whole machine, not one probe per candidate: a sweep whose
+/// job is to reduce the process count must not be a fan-out of its own.
+fn read_proc_table() -> Vec<ProcRow> {
+    let output = match std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,etime=,args="])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return Vec::new(),
+    };
+    String::from_utf8_lossy(&output)
+        .lines()
+        .filter_map(parse_proc_line)
+        .collect()
+}
+
+fn parse_proc_line(line: &str) -> Option<ProcRow> {
+    let mut fields = line.split_whitespace();
+    let pid = fields.next()?.parse().ok()?;
+    let ppid = fields.next()?.parse().ok()?;
+    let age_secs = parse_etime(fields.next()?)?;
+    let args = fields.collect::<Vec<_>>().join(" ");
+    if args.is_empty() {
+        return None;
+    }
+    Some(ProcRow {
+        pid,
+        ppid,
+        age_secs,
+        args,
+    })
+}
+
+/// Whether this pid is STILL the process the table said it was.
+///
+/// The gap between reading the table and signalling is small, and a pid that
+/// exits inside it can be reused by something unrelated. This is a process
+/// killer, so the window gets closed rather than reasoned about: re-read the
+/// one row and require the same argv and the same inherited parent. An
+/// unreadable answer is not a match, because absence is not evidence.
+fn still_the_same(row: &ProcRow) -> bool {
+    let output = match std::process::Command::new("ps")
+        .args(["-p", &row.pid.to_string(), "-o", "ppid=,args="])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return false,
+    };
+    let text = String::from_utf8_lossy(&output);
+    let Some(line) = text.lines().next() else {
+        return false;
+    };
+    let mut fields = line.split_whitespace();
+    let ppid: u32 = match fields.next().and_then(|f| f.parse().ok()) {
+        Some(p) => p,
+        None => return false,
+    };
+    ppid == row.ppid && fields.collect::<Vec<_>>().join(" ") == row.args
+}
+
+/// SIGTERM, then SIGKILL after the grace window. Returns false when the process
+/// was already gone, changed identity, or refused the signal, so the summary
+/// counts what it actually ended rather than what it aimed at.
+fn terminate(row: &ProcRow) -> bool {
+    let pid = row.pid;
+    let alive = |p: u32| unsafe { libc::kill(p as libc::pid_t, 0) } == 0;
+    if !still_the_same(row) {
+        return false;
+    }
+    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
+        return false;
+    }
+    let deadline = std::time::Instant::now() + REAP_GRACE;
+    while alive(pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    if alive(pid) {
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    }
+    true
+}
+
+/// Reap every `fno-py` child that init inherited and nobody is waiting on.
+///
+/// `live_pids` are the pids the registry vouches for. `None` means the registry
+/// could not be read, and the sweep then reaps NOTHING: an unreadable registry
+/// is not evidence that no worker is live, and reading it that way would turn
+/// one bad file into a fleet-wide kill. It still emits, naming the refusal, so
+/// a skipped run is distinguishable from a quiet one.
+///
+/// Emits [`ORPHAN_SWEEP_EVENT`] on every run, naming the count it reaped even
+/// when that count is zero.
+pub fn orphan_sweep(
+    emitter: &EventEmitter,
+    older_than: Duration,
+    live_pids: Option<&[u32]>,
+) -> usize {
+    let table = read_proc_table();
+    let candidates: Vec<&ProcRow> = match live_pids {
+        Some(live) => table
+            .iter()
+            .filter(|row| is_reapable_orphan(row, older_than, live))
+            .collect(),
+        None => Vec::new(),
+    };
+    let reaped = candidates.iter().filter(|row| terminate(row)).count();
+    let _ = emitter.emit(
+        ORPHAN_SWEEP_EVENT,
+        &serde_json::json!({
+            "scanned": table.len(),
+            "candidates": candidates.len(),
+            "reaped": reaped,
+            "older_than_secs": older_than.as_secs(),
+            "skipped": live_pids.is_none(),
+        }),
+    );
+    reaped
+}
+
+/// The pids the registry vouches for, so the sweep never ends a tracked worker.
+///
+/// `None` on an unreadable registry. Degrading that to an empty list would say
+/// "no worker is live", which is the strongest possible licence to kill and the
+/// exact opposite of what a failed read establishes.
+pub fn registry_live_pids(home: &AgentsHome) -> Option<Vec<u32>> {
+    crate::state::load_registry(&home.registry_json())
+        .ok()
+        .map(|registry| {
+            registry
+                .entries
+                .iter()
+                .flat_map(|e| [e.pid, e.keeper_child_pid])
+                .flatten()
+                .collect()
+        })
+}
+
+/// The idle tick's two sweeps no registry row accounts for. `gc_sweep` retires
+/// ROWS; a child whose parent died is reparented to init and nothing owned it
+/// at all, and the latch's record dir is keyed by argv, so a roster whose
+/// handle set changes with every worker leaves answers to questions nobody
+/// asks any more. One `ps` for the whole machine, so a sweep meant to reduce
+/// the process count never fans out.
+pub fn unowned_sweeps(home: &AgentsHome, emitter: &EventEmitter, cwd: &std::path::Path) {
+    let _ = orphan_sweep(
+        emitter,
+        crate::agents_config::orphan_reap_after(cwd),
+        registry_live_pids(home).as_deref(),
+    );
+    let _ = crate::single_flight::prune_records(
+        None,
+        crate::agents_config::single_flight_ttl(cwd),
+        crate::agents_config::single_flight_join_budget(cwd),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- the orphan process sweep ---
+
+    fn orphan(args: &str, ppid: u32, age_secs: u64) -> ProcRow {
+        ProcRow {
+            pid: 4242,
+            ppid,
+            age_secs,
+            args: args.to_string(),
+        }
+    }
+
+    const FNO_PY: &str = "/Users/x/.local/share/uv/tools/fno/bin/python3 \
+/Users/x/.local/share/uv/tools/fno/bin/fno-py agents stale-escalate --json";
+
+    /// AC11: every clause satisfied is the only shape that reaps.
+    #[test]
+    fn an_inherited_past_threshold_fno_child_is_reapable() {
+        let row = orphan(FNO_PY, 1, 7200);
+        assert!(is_reapable_orphan(&row, Duration::from_secs(5400), &[]));
+    }
+
+    /// AC12: without the age bound the sweep races a child whose parent is
+    /// mid-exit and has simply not been reaped yet.
+    #[test]
+    fn a_young_inherited_child_is_left_alone() {
+        let row = orphan(FNO_PY, 1, 60);
+        assert!(!is_reapable_orphan(&row, Duration::from_secs(5400), &[]));
+    }
+
+    /// AC13: a live parent means somebody is waiting on it, however old it is.
+    #[test]
+    fn a_child_with_a_living_parent_is_left_alone() {
+        let row = orphan(FNO_PY, 99_000, 86_400);
+        assert!(!is_reapable_orphan(&row, Duration::from_secs(5400), &[]));
+    }
+
+    /// A worker the registry vouches for is not an orphan, whatever the process
+    /// table says: the fleet is tracking it.
+    #[test]
+    fn a_pid_the_registry_names_live_is_left_alone() {
+        let row = orphan(FNO_PY, 1, 86_400);
+        assert!(!is_reapable_orphan(
+            &row,
+            Duration::from_secs(5400),
+            &[4242]
+        ));
+    }
+
+    /// The argv clause matches a BASENAME, not a substring. A flag that merely
+    /// contains the string is not the entrypoint, and killing on it would end
+    /// somebody's foreground command.
+    #[test]
+    fn only_the_entrypoint_basename_counts_as_the_marker() {
+        assert!(!is_reapable_orphan(
+            &orphan("/usr/bin/grep --include=fno-py-notes .", 1, 86_400),
+            Duration::from_secs(5400),
+            &[]
+        ));
+        assert!(!is_reapable_orphan(
+            &orphan("/usr/bin/vim notes.txt", 1, 86_400),
+            Duration::from_secs(5400),
+            &[]
+        ));
+        assert!(is_reapable_orphan(
+            &orphan("fno-py backlog advance --json", 1, 86_400),
+            Duration::from_secs(5400),
+            &[]
+        ));
+    }
+
+    /// `etimes` does not exist on macOS, so the portable column is the
+    /// formatted one and this parser is what stands between it and the gate.
+    #[test]
+    fn etime_parses_every_shape_ps_prints() {
+        assert_eq!(parse_etime("53:30"), Some(3210));
+        assert_eq!(parse_etime("01:08:49"), Some(4129));
+        assert_eq!(
+            parse_etime("  20701-11:56:27  "),
+            Some(20701 * 86_400 + 11 * 3_600 + 56 * 60 + 27)
+        );
+        assert_eq!(parse_etime("2-00:00:00"), Some(172_800));
+    }
+
+    /// An age the parser cannot establish reads as unknown, and unknown never
+    /// reaps: a failed read is not evidence that a process is old.
+    #[test]
+    fn an_unparseable_age_never_reaps() {
+        assert_eq!(parse_etime("banana"), None);
+        assert_eq!(parse_etime(""), None);
+        assert_eq!(parse_etime("1:2:3:4"), None);
+        assert!(parse_proc_line("100 1 banana fno-py do pr wait 1").is_none());
+    }
+
+    /// An unreadable registry is not evidence that no worker is live. Reading
+    /// it that way would turn one bad file into a fleet-wide kill.
+    #[test]
+    fn an_unreadable_registry_reaps_nothing_and_says_so() {
+        let dir = std::env::temp_dir().join(format!("fno-orphan-skip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let emitter = EventEmitter::new(path.clone(), "daemon");
+        // A threshold of zero would reap every orphan on the box; None must
+        // hold it back anyway.
+        let reaped = orphan_sweep(&emitter, Duration::from_secs(0), None);
+        assert_eq!(reaped, 0);
+        let line = std::fs::read_to_string(&path).unwrap();
+        assert!(line.contains("\"skipped\":true"), "{line}");
+        assert!(line.contains("\"candidates\":0"), "{line}");
+    }
+
+    /// A pid that changed identity between the table read and the signal is
+    /// somebody else's process now.
+    #[test]
+    fn a_pid_that_changed_identity_is_not_signalled() {
+        // This process is alive and is not what the row claims, so the
+        // re-verification must refuse it.
+        let row = ProcRow {
+            pid: std::process::id(),
+            ppid: 1,
+            age_secs: 86_400,
+            args: "/tools/fno/bin/fno-py agents truth --handles a".to_string(),
+        };
+        assert!(!still_the_same(&row));
+        assert!(!terminate(&row));
+    }
+
+    /// The same pid read honestly matches itself, so the guard is not simply
+    /// refusing everything - the positive control for the check above.
+    #[test]
+    fn the_guard_matches_a_row_read_from_the_live_table() {
+        let me = std::process::id();
+        let row = read_proc_table()
+            .into_iter()
+            .find(|r| r.pid == me)
+            .expect("this process must appear in its own process table");
+        assert!(still_the_same(&row));
+    }
+
+    /// AC14: the sweep speaks on every run. A reaper that only speaks when it
+    /// kills cannot be told apart from a reaper that never ran, and the done
+    /// probe depends on the difference.
+    #[test]
+    fn a_sweep_that_reaps_nothing_still_emits() {
+        let dir = std::env::temp_dir().join(format!("fno-orphan-sweep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let emitter = EventEmitter::new(path.clone(), "daemon");
+        // A threshold no live process can reach, so the sweep finds nothing.
+        let reaped = orphan_sweep(&emitter, Duration::from_secs(u32::MAX as u64), Some(&[]));
+        assert_eq!(reaped, 0);
+        let line = std::fs::read_to_string(&path).unwrap();
+        assert!(line.contains(ORPHAN_SWEEP_EVENT), "{line}");
+        assert!(line.contains("\"reaped\":0"), "{line}");
+    }
+
+    /// The process table read is one `ps` for the whole machine: a sweep whose
+    /// job is to reduce the process count must not fan out itself.
+    #[test]
+    fn the_process_table_read_parses_a_real_ps_line() {
+        let row = parse_proc_line(
+            "60057 60045 08:34 /tools/fno/bin/python3 /tools/fno/bin/fno-py do pr wait 1483",
+        )
+        .unwrap();
+        assert_eq!(row.pid, 60057);
+        assert_eq!(row.ppid, 60045);
+        assert_eq!(row.age_secs, 514);
+        assert!(row.args.ends_with("do pr wait 1483"));
+    }
 
     const GRACE: i64 = 900;
 

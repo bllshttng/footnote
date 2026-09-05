@@ -3111,22 +3111,48 @@ fn fetch_discovered_sessions(
     // early return made `--status orphaned` drop through Rust a row that Python
     // prints -- one runtime-dependent answer to one question. The row-level
     // filter at the bottom is the single place status is applied.
-    let mut cmd = Command::new("fno");
-    cmd.args(["agents", "discovered-json"]);
-    cmd.env("FNO_AGENTS_RUNTIME", "python");
+    let mut argv = vec!["agents".to_string(), "discovered-json".to_string()];
     if let Some(c) = cwd_filter {
-        cmd.args(["--cwd", c]);
+        argv.push("--cwd".into());
+        argv.push(c.into());
     }
     // Without this the rendered surface disagrees with the Python one:
     // `--harness claude` would list every discovered codex/opencode session.
     // An empty value is "no filter" on the Python side, so forwarding it would
     // make the two runtimes disagree again in the other direction.
     if let Some(p) = provider_filter.filter(|p| !p.is_empty()) {
-        cmd.args(["--harness", p]);
+        argv.push("--harness".into());
+        argv.push(p.into());
     }
-    let output = match cmd.output() {
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return Vec::new(),
+
+    // Every `fno agents list` on the box runs this, so several terminals asking
+    // at once each paid their own Python cold start for one answer. The latch
+    // is keyed on the argv above, so a run with a different `--cwd` or
+    // `--harness` is a different flight and keeps its own answer.
+    let key = fno_agents::single_flight::flight_key(&argv);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let flight = fno_agents::single_flight::run_or_join(
+        &key,
+        fno_agents::agents_config::single_flight_ttl(&cwd),
+        fno_agents::agents_config::single_flight_join_budget(&cwd),
+        // No outer deadline to subtract from: this path has no caller-supplied
+        // budget, so the wait it may have spent changes nothing about the run.
+        |_spent| {
+            let mut cmd = Command::new("fno");
+            cmd.args(&argv);
+            cmd.env("FNO_AGENTS_RUNTIME", "python");
+            // Fail-open by contract, and the same rule the latch needs: only a
+            // clean run is worth sharing, so a failure spends no cache entry
+            // and the next caller retries for real.
+            match cmd.output() {
+                Ok(o) if o.status.success() => Some(o.stdout),
+                _ => None,
+            }
+        },
+    );
+    let output = match flight.stdout {
+        Some(bytes) => bytes,
+        None => return Vec::new(),
     };
     let parsed: Value = match serde_json::from_slice(&output) {
         Ok(v) => v,

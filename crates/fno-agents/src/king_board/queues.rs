@@ -134,7 +134,7 @@ pub(crate) struct BoardInputs {
     pub(crate) ready: SourceRead,
     pub(crate) claims: SourceRead,
     pub(crate) claimed_nodes: SourceRead,
-    pub(crate) holder_activity: HashMap<String, crate::claude_ask::TruthProbe>,
+    pub(crate) holder_activity: HashMap<String, crate::truth_probe::TruthProbe>,
     pub(crate) prs: SourceRead,
     pub(crate) pr_nodes: SourceRead,
     pub(crate) outstanding: SourceRead,

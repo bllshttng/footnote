@@ -58,6 +58,7 @@ from pydantic import (
 # idiom mypy's --no-implicit-reexport requires (these names used to be defined here).
 from fno.config import _watchdog
 from fno.config._auto_heal import AutoHealBlock
+from fno.config._sweeps import ReapReceiptsBlock, SweepKeys
 from fno.config._watchdog import WatchdogBlock
 from fno.config_io import _apply_search_ceiling as _apply_search_ceiling
 from fno.config_io import _deep_merge as _deep_merge
@@ -2363,21 +2364,7 @@ def _finite_or(value: object, default: float) -> float:
     return parsed if math.isfinite(parsed) else default
 
 
-class ReapReceiptsBlock(BaseModel):
-    """Retention for the reap-receipt store (nested under 'config.agents').
-
-    A reaped row's resume handle lives at ``~/.fno/reap-receipts/`` for this
-    many days, then the GC sweep expires it. A receipt whose ``reaped_at``
-    cannot be read is kept and named in the sweep summary - a failed read is
-    not evidence of age.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    retain_days: int = 7
-
-
-class AgentsBlock(BaseModel):
+class AgentsBlock(SweepKeys):
     """Agent-runtime settings (nested under 'config.agents').
 
     `confirm` drives the /fno:agent spawn-verb confirm gate

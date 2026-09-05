@@ -133,6 +133,7 @@ pub mod scrape;
 pub mod screen;
 pub mod session_names_fold;
 pub mod session_start_bytes;
+pub mod single_flight;
 pub mod spawn_gate;
 pub mod spawn_payload;
 pub mod state;
@@ -143,6 +144,7 @@ pub mod subscribe;
 pub mod supervisor;
 pub mod terminal_stop;
 pub mod tick_ledger;
+pub mod truth_probe;
 pub mod usage;
 pub mod verify_evidence;
 pub mod version;
@@ -403,6 +405,29 @@ fn raw_monotonic_nanos() -> u64 {
 /// mutation and the PATH-dependent work. cfg(test) in the lib only.
 #[cfg(test)]
 pub static PATH_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Hold [`PATH_TEST_MUTEX`] for the rest of the scope, poisoning ignored: a
+/// panicking test leaves the env restored by its own guard, so refusing the
+/// lock afterwards would fail every later test instead of the broken one.
+#[cfg(test)]
+pub fn path_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    PATH_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The process `PATH` with `dir` in front. PREPEND, never replace: PATH is
+/// process-global, so a test that replaces it takes the system tools away from
+/// every concurrent test in the binary, and a stub only needs to win.
+#[cfg(test)]
+pub fn path_with(dir: &std::path::Path) -> std::ffi::OsString {
+    let mut value = std::ffi::OsString::from(dir);
+    if let Some(previous) = std::env::var_os("PATH") {
+        value.push(":");
+        value.push(previous);
+    }
+    value
+}
 
 #[cfg(test)]
 mod tests {
@@ -831,6 +856,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // `agent_row_reaped` (the GC door's own event); this fires for every
     // door, including ones nobody has enumerated yet.
     "registry_row_removed",
+    // Orphan process sweep (daemon-emitted): the row GC beside it reaps
+    // registry ROWS, this reaps the `fno-py` children that init inherited and
+    // nobody was waiting on. Emitted on EVERY run including the ones that reap
+    // nothing, because a reaper that speaks only when it kills cannot be told
+    // apart from a reaper that never ran.
+    "orphan_reap_sweep",
     // Worktree report sweep (daemon-emitted, x-5a30): one line per repo per 24h
     // saying what `fno agents workspace worktree cleanup --merged` WOULD archive. Report-only by
     // construction, because a timer tick is not proof that work landed; removal

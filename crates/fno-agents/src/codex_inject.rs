@@ -1891,9 +1891,7 @@ mod tests {
     /// unhealthy against the same socket.
     #[tokio::test]
     async fn an_initialize_error_frame_reads_unhealthy_naming_the_refusal() {
-        let _guard = crate::PATH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::path_test_guard();
         let daemon = crate::codex_fake_daemon::FakeDaemon::start(
             crate::codex_fake_daemon::Behavior::quick().with_refused_initialize(),
         );

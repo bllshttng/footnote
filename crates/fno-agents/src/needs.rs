@@ -750,7 +750,7 @@ pub fn stale_claim_item(claims: &[ClaimAge], now_ms: i64) -> Option<NeedItem> {
 /// Best-effort: an unreadable registry or a probe failure degrades to no
 /// items, never a crash of `fno agents needs`.
 fn refused_worker_items(home: &AgentsHome) -> Vec<NeedItem> {
-    refused_worker_items_with(home, crate::claude_ask::family1_truth_probe_many)
+    refused_worker_items_with(home, crate::truth_probe::family1_truth_probe_many)
 }
 
 /// [`refused_worker_items`] with the batch probe injected, so a test can count
@@ -762,7 +762,7 @@ fn refused_worker_items(home: &AgentsHome) -> Vec<NeedItem> {
 /// where the question is liveness.
 fn refused_worker_items_with(
     home: &AgentsHome,
-    truth_fn: impl Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>,
+    truth_fn: impl Fn(&[String]) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
 ) -> Vec<NeedItem> {
     let registry = match crate::daemon::load_registry_asserted(&home.registry_json()) {
         Ok(r) => r,
@@ -1078,8 +1078,8 @@ mod tests {
         home
     }
 
-    fn refused_probe(model: &str) -> crate::claude_ask::TruthProbe {
-        crate::claude_ask::TruthProbe {
+    fn refused_probe(model: &str) -> crate::truth_probe::TruthProbe {
+        crate::truth_probe::TruthProbe {
             state: "working".into(),
             reachability: Some("reachable".into()),
             basis: Some("transcript".into()),
