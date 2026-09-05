@@ -13997,10 +13997,7 @@ def cmd_album(
             e
             for e in read_graph(archive_path)
             if isinstance(e, dict)
-            # The one status string every row reader agrees on. The album
-            # reads the ARCHIVE, whose pre-status-stamping rows carry only
-            # completed_at, so the status-only node_is_done ruling would
-            # evict every legacy ship (x-c672).
+            # The shared row-status read: legacy archive rows carry only completed_at (x-c672).
             and derived_status(e) == "done"
             # Superseded is derived from superseded_by (graph/types.py), so a
             # row can carry both; the album shows shipped work only.
