@@ -10,7 +10,7 @@ from typing import Any, Sequence
 import psutil
 
 from fno.rust_binary import resolve_binary
-from .io import claim_path, global_claims_root
+from .io import claim_path, claims_dir
 
 
 class ClaimVerdictUnavailable(RuntimeError):
@@ -54,8 +54,11 @@ def claim_verdicts(
         command.extend(("--prefix", prefix))
     else:
         command.append("--all")
-    if root is not None:
-        command.extend(("--root", str(root)))
+    # The door must read the SAME directory Python resolves: root as given,
+    # else the claims_dir(None) contract (env override, else the repo's space).
+    # Verbatim --claims-dir, because --root spells a repo checkout (it appends
+    # .fno/claims) and no root reaches the space layout.
+    command.extend(("--claims-dir", str(claims_dir(root))))
 
     try:
         result = run_subprocess(command, capture_output=True, text=True, check=False)
@@ -80,11 +83,10 @@ def claim_verdicts(
         if not isinstance(row, dict) or not isinstance(row.get("key"), str):
             raise ClaimVerdictError("fno-agents claim sweep returned a malformed claim row")
         verdicts[row["key"]] = row
-    roots = [global_claims_root(), root if root is not None else Path.cwd()]
     for key in requested:
         if key in verdicts:
             continue
-        if any(claim_path(key, root=candidate).exists() for candidate in roots):
+        if claim_path(key, root=root).exists():
             raise ClaimVerdictError(f"native claim sweep omitted existing claim {key!r}; refusing to assume free")
         verdicts[key] = {"key": key, "state": "free"}
     return verdicts

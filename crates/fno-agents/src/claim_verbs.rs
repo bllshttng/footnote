@@ -263,6 +263,7 @@ fn claim_status_value(rec: &crate::claims::ClaimRecord) -> Value {
 /// excluded from the payload and logged to stderr (never fatal).
 fn run_claim_sweep(args: &[String]) -> i32 {
     let mut root: Option<PathBuf> = None;
+    let mut claims_dir: Option<PathBuf> = None;
     let mut prefix: Option<String> = None;
     let mut keys: Vec<String> = Vec::new();
     let mut all = false;
@@ -273,6 +274,13 @@ fn run_claim_sweep(args: &[String]) -> i32 {
                 Some(r) => root = Some(PathBuf::from(r)),
                 None => {
                     eprintln!("fno-agents: claim sweep: --root requires a value");
+                    return 2;
+                }
+            },
+            "--claims-dir" => match it.next() {
+                Some(d) => claims_dir = Some(PathBuf::from(d)),
+                None => {
+                    eprintln!("fno-agents: claim sweep: --claims-dir requires a value");
                     return 2;
                 }
             },
@@ -298,8 +306,16 @@ fn run_claim_sweep(args: &[String]) -> i32 {
             }
         }
     }
-    let local_root = root.or_else(|| std::env::current_dir().ok());
-    let records = crate::claims::list(None, local_root.as_deref(), true);
+    if claims_dir.is_some() && root.is_some() {
+        eprintln!("fno-agents: claim sweep: --claims-dir and --root are mutually exclusive");
+        return 2;
+    }
+    let records = if let Some(dir) = claims_dir {
+        crate::claims::list_in(std::slice::from_ref(&dir), None, true)
+    } else {
+        let local_root = root.clone().or_else(|| std::env::current_dir().ok());
+        crate::claims::list(None, local_root.as_deref(), true)
+    };
     println!(
         "{}",
         claim_sweep_payload_from_records(&records, prefix.as_deref(), &keys, all)

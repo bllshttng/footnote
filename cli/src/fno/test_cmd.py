@@ -1431,10 +1431,14 @@ def _scrub_target_bins(root: Path) -> None:
             pass
 
 
-def _pin_claim_door(env: dict[str, str], directory: Path, binary: Path) -> None:
-    """Pin the claim door: the env name outranks PATH in resolve_binary."""
+def _pin_claim_door(env: dict[str, str], binary: Path) -> None:
+    """Pin the claim door: the env name outranks PATH in resolve_binary.
+
+    Never touches PATH. Hook harnesses shell bare `fno-agents` and route on
+    its absence (spaces fallback); a PATH-visible binary would flip those
+    writes onto space paths mid-shard.
+    """
     env["FNO_AGENTS_BIN"] = str(binary)
-    env["PATH"] = str(directory) + os.pathsep + env.get("PATH", "")
 
 
 def _preserve_claim_door(root: Path, env: dict[str, str]) -> None:
@@ -1452,7 +1456,7 @@ def _preserve_claim_door(root: Path, env: dict[str, str]) -> None:
     # The scrub unlinks the target/ copies this function may have been handed,
     # so a BIN inherited from the job env goes dead at exactly the moment the
     # claim consumers run. Re-point it at the preserved copy.
-    _pin_claim_door(env, preserved_dir, preserved)
+    _pin_claim_door(env, preserved)
 
 
 def _write_changed_receipt(path: str, payload: dict) -> None:
@@ -1583,8 +1587,7 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
             # The changed-smoke job has Rust but no setup build. Its selected
             # build step must run before claim tests, so keep the target path
             # present and pin the door at the fresh build.
-            debug_dir = root / "crates/fno-agents/target/debug"
-            _pin_claim_door(env, debug_dir, debug_dir / "fno-agents")
+            _pin_claim_door(env, root / "crates/fno-agents/target/debug/fno-agents")
         else:
             _preserve_claim_door(root, env)
             _scrub_target_bins(root)

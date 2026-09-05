@@ -317,7 +317,13 @@ pub fn list(prefix: Option<&str>, root: Option<&Path>, include_stale: bool) -> V
     if let Some(local) = root {
         dirs.push(local.join(CLAIMS_DIRNAME));
     }
+    list_in(&dirs, prefix, include_stale)
+}
 
+/// Scan VERBATIM directories. Spaces-era claims live directly at
+/// `<space>/claims`, a layout no explicit-root spelling of [`list`] reaches
+/// (`--root` appends `.fno/claims` for repo-checkout roots).
+pub fn list_in(dirs: &[PathBuf], prefix: Option<&str>, include_stale: bool) -> Vec<ClaimRecord> {
     let mut seen_dirs = std::collections::BTreeSet::new();
     let mut best: std::collections::BTreeMap<String, (u8, ClaimRecord)> =
         std::collections::BTreeMap::new();
