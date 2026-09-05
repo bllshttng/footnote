@@ -97,7 +97,6 @@ impl OrphanReason {
     }
 }
 
-
 fn family1_orphan_reason(handle: &str, confirmed: OrphanReason) -> OrphanReason {
     match crate::truth_probe::family1_truth_state(handle).as_deref() {
         Some("done" | "stalled") => confirmed,

@@ -13081,7 +13081,6 @@ mod tests {
         assert!(!mux_pane_is_absent("fno mux: permission denied"));
     }
 
-
     /// The real summary line, copied from this machine's output.
     const REAL_SUMMARY: &str = "would-archive      feature/x-3e17   /some/wt\n\
 Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-session, 1 processes, 0 salvage-failed, 0 needs-confirmation, 1 app-owned, 1 permanent), 0 failed  [dry-run: no changes made; pass --apply to execute]\n";
@@ -13587,7 +13586,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert!(!is_linked_worktree(""));
         assert!(!is_linked_worktree("/nonexistent/path/that/cannot/be/read"));
     }
-
 
     /// x-9de7 task 5: the "stuck and invisible" case named in the plan -
     /// past grace, a liveness surface on record, but no positive corroboration

@@ -762,10 +762,7 @@ pub fn orphan_sweep(emitter: &EventEmitter, older_than: Duration, live_pids: &[u
         .iter()
         .filter(|row| is_reapable_orphan(row, older_than, live_pids))
         .collect();
-    let reaped = candidates
-        .iter()
-        .filter(|row| terminate(row.pid))
-        .count();
+    let reaped = candidates.iter().filter(|row| terminate(row.pid)).count();
     let _ = emitter.emit(
         ORPHAN_SWEEP_EVENT,
         &serde_json::json!({
@@ -836,7 +833,11 @@ mod tests {
     #[test]
     fn a_pid_the_registry_names_live_is_left_alone() {
         let row = orphan(FNO_PY, 1, 86_400);
-        assert!(!is_reapable_orphan(&row, Duration::from_secs(5400), &[4242]));
+        assert!(!is_reapable_orphan(
+            &row,
+            Duration::from_secs(5400),
+            &[4242]
+        ));
     }
 
     /// The argv clause matches a BASENAME, not a substring. A flag that merely
@@ -867,7 +868,10 @@ mod tests {
     fn etime_parses_every_shape_ps_prints() {
         assert_eq!(parse_etime("53:30"), Some(3210));
         assert_eq!(parse_etime("01:08:49"), Some(4129));
-        assert_eq!(parse_etime("  20701-11:56:27  "), Some(20701 * 86_400 + 11 * 3_600 + 56 * 60 + 27));
+        assert_eq!(
+            parse_etime("  20701-11:56:27  "),
+            Some(20701 * 86_400 + 11 * 3_600 + 56 * 60 + 27)
+        );
         assert_eq!(parse_etime("2-00:00:00"), Some(172_800));
     }
 

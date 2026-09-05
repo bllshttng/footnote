@@ -154,7 +154,10 @@ where
     F: FnOnce() -> Option<Vec<u8>>,
 {
     let started = Instant::now();
-    let root = match root.map(Path::to_path_buf).or_else(claims::global_claims_root) {
+    let root = match root
+        .map(Path::to_path_buf)
+        .or_else(claims::global_claims_root)
+    {
         Some(r) => r,
         None => {
             return finish(
@@ -345,10 +348,8 @@ mod tests {
     /// last. Pinning the root as an argument is why these assertions hold under
     /// the full threaded suite and not only when run alone.
     fn root_for(name: &str) -> (PathBuf, String) {
-        let dir = std::env::temp_dir().join(format!(
-            "fno-single-flight-{}-{name}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fno-single-flight-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         (dir, format!("flight:{name}"))
     }
@@ -386,7 +387,10 @@ mod tests {
         assert_eq!(flight.stdout.as_deref(), Some(&b"{\"ok\":1}"[..]));
         assert!(record_path(&root, &key).exists());
         // Released, so the next caller is free to acquire.
-        assert_eq!(claims::status(&key, Some(&root)).0, claims::ClaimState::Free);
+        assert_eq!(
+            claims::status(&key, Some(&root)).0,
+            claims::ClaimState::Free
+        );
     }
 
     // AC2: a fresh record answers and nothing runs.

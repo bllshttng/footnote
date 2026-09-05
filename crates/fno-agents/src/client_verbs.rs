@@ -20,13 +20,13 @@
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
 use crate::claude_ask::{liveness_probe, locate_session, ClaudeHome};
-use crate::truth_probe::{family1_truth_state, family1_truth_state_for_resume};
 #[cfg(test)]
 use crate::manifest_lookup::parse_manifest_identity;
 use crate::manifest_lookup::{find_manifest_for_session, git_worktree_paths, ManifestIdentity};
 use crate::pane_relaunch::{mesh_identity_assignments, mux_pane_run_argv};
 use crate::paths::AgentsHome;
 use crate::state::REGISTRY_SCHEMA_VERSION;
+use crate::truth_probe::{family1_truth_state, family1_truth_state_for_resume};
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;

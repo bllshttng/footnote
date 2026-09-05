@@ -937,7 +937,8 @@ mod tests {
             },
             Duration::from_secs(5),
             "h1",
-        ).probe;
+        )
+        .probe;
         assert_eq!(attempts.get(), 2, "a crash must buy exactly one retry");
         assert_eq!(probe.expect("retry answers").state, "working");
     }
@@ -954,7 +955,8 @@ mod tests {
             },
             Duration::from_secs(5),
             "h1",
-        ).probe;
+        )
+        .probe;
         assert_eq!(attempts.get(), 2, "never more than one retry");
         assert!(probe.is_none());
     }
@@ -976,7 +978,8 @@ mod tests {
             },
             Duration::from_secs(5),
             "h1",
-        ).probe;
+        )
+        .probe;
         assert_eq!(attempts.get(), 2, "a failed spawn must buy one retry");
         assert_eq!(probe.expect("retry answers").state, "working");
     }
@@ -994,7 +997,8 @@ mod tests {
             },
             Duration::from_secs(5),
             "h1",
-        ).probe;
+        )
+        .probe;
         assert_eq!(attempts.get(), 1, "a refusal carries a body: no retry");
         assert_eq!(probe.expect("salvaged body").state, "unknown");
     }
@@ -1300,7 +1304,8 @@ mod tests {
                 )
             },
             Duration::from_secs(5),
-        ).map(|a| a.probes)
+        )
+        .map(|a| a.probes)
         .expect("the batch answered");
         assert_eq!(spawns.get(), 1, "one batch, one process");
         assert_eq!(probes.len(), 2);
@@ -1322,7 +1327,8 @@ mod tests {
             &[],
             |_| panic!("an empty batch must never spawn"),
             Duration::from_secs(5),
-        ).map(|a| a.probes)
+        )
+        .map(|a| a.probes)
         .expect("an empty batch is an answer, not a failure");
         assert!(probes.is_empty());
     }
@@ -1343,7 +1349,8 @@ mod tests {
                 }
             },
             Duration::from_secs(5),
-        ).map(|a| a.probes)
+        )
+        .map(|a| a.probes)
         .expect("the retry answered");
         assert_eq!(attempts.get(), 2, "a crash must buy exactly one retry");
         assert_eq!(probes["h1"].state, "working");
@@ -1357,7 +1364,8 @@ mod tests {
                 sh("exit 1")
             },
             Duration::from_secs(5),
-        ).map(|a| a.probes);
+        )
+        .map(|a| a.probes);
         assert_eq!(attempts.get(), 2);
         assert!(
             probes.is_none(),
@@ -1374,7 +1382,8 @@ mod tests {
             &["h1".to_string(), "gone".to_string()],
             |_| sh("printf '{\"h1\":{\"state\":\"working\"},\"gone\":{\"state\":\"nonsense\"}}'"),
             Duration::from_secs(5),
-        ).map(|a| a.probes)
+        )
+        .map(|a| a.probes)
         .expect("the batch answered");
         assert_eq!(probes.len(), 1);
         assert!(!probes.contains_key("gone"));
@@ -1442,7 +1451,8 @@ mod tests {
             &["h1".to_string()],
             |_| sh("echo 'Error: No such option: --handles' >&2; exit 2"),
             Duration::from_secs(5),
-        ).map(|a| a.probes);
+        )
+        .map(|a| a.probes);
         assert!(old_fno.is_none(), "an fno too old to batch is a failure");
 
         // A batch that RAN and resolved nothing is an answer. Reading this as a
@@ -1452,7 +1462,8 @@ mod tests {
             &["h1".to_string()],
             |_| sh("printf '{}'"),
             Duration::from_secs(5),
-        ).map(|a| a.probes);
+        )
+        .map(|a| a.probes);
         assert_eq!(
             answered_nothing
                 .expect("an empty object is an answer")
@@ -1489,5 +1500,4 @@ mod tests {
         let detail = family1_truth_failure_detail(b"not json", "  banner  ");
         assert_eq!(detail, "banner");
     }
-
 }
