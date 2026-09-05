@@ -1351,9 +1351,12 @@ def _node_settlement(reading: Optional[RosterReading] = None):
             # own end or the pid table ends it, and a closure release that
             # crashed mid-way is exactly the leak this arm heals.
             if native_verdict is not None and (
-                native_verdict.get("expired") is False
-                and native_verdict.get("bucket") == "live"
+                native_verdict.get("expired") is not True
+                and native_verdict.get("bucket") != "suspect"
             ):
+                # Not expired and not dead-pid: the holder is proven live
+                # (bucket live) or unprobeable (offhost - unknown keeps, the
+                # same asymmetry the suspect buckets teach).
                 return None
             return True
         if native_verdict is None or native_verdict.get("expired") is not True:

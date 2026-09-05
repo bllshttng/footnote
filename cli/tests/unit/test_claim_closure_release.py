@@ -279,6 +279,33 @@ class TestNodeSettlement:
         )
         assert verdict is False and bucket == "live"
 
+    def test_terminal_node_keeps_an_offhost_holder_whose_lease_is_fresh(self, tmp_path, monkeypatch):
+        """Offhost means this host cannot probe the pid at all: liveness is
+        UNKNOWN, and unknown keeps. A fresh lease on a closed node whose
+        holder lives on another machine is exactly the shape the different-
+        node arm already refuses to settle unexpired."""
+        graph = _make_graph(
+            tmp_path, [{"id": "x-gone", "status": "done", "completed_at": "2026-09-05T14:08:00Z"}]
+        )
+        monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+        claim = Claim(
+            key="node:x-gone",
+            holder="target-session:sid-remote",
+            acquired_at=now_ms(),
+            expires_at=now_ms() + 7_200_000,
+            pid=424242,
+            host="other-box",
+            machine_id="OTHER-MACHINE",
+        )
+        settlement = _node_settlement(_reading({}))
+        native = {
+            "key": claim.key,
+            "expired": False,
+            "provably_dead": False,
+            "bucket": "offhost",
+        }
+        assert settlement(claim, native_verdict=native) is None
+
     def test_terminal_node_still_settles_a_dead_pid_holder(self, tmp_path, monkeypatch):
         """The healing half survives the guard: an unexpired claim whose pid
         is gone settles on a closed node - nobody can refresh it, nobody is
