@@ -907,9 +907,8 @@ def tick() -> None:
                 crowns = int(wake_summary.get("crowns", 0) or 0)
                 woke_n = len(wake_summary.get("woke", []) or [])
                 skip = "no_crowned_target" if crowns == 0 else None if woke_n else "no_trigger"
-                detail = f"crowns={crowns}" + (f" woke={woke}" if woke else "")
-                if wake_summary.get("note"):
-                    detail += f" note={wake_summary['note']}"
+                note = wake_summary.get("note")
+                detail = f"crowns={crowns}" + (f" woke={woke}" if woke else "") + (f" note={note}" if note else "")
                 _emit_tick_row("king_wake", interval_s=kw_i, acted=woke_n,
                                skip_reason=skip, detail=detail)
             except Exception as exc:  # noqa: BLE001 - never let a wake break the tick
