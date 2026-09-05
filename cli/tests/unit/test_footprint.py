@@ -256,3 +256,41 @@ def test_the_test_count_is_whole_machine_not_fleet_attributed() -> None:
 
     assert reading.process_count == 0
     assert reading.test_process_count == 1
+
+
+def test_ac8_hp_top_consumers_name_the_process_and_the_worktree() -> None:
+    """x-aeab AC8: 23 fno-py rows and 18 fno-agents-worker rows from one
+    worktree aggregate to two consumers, the top named with its process
+    count, the worktree named with how many of its rows run from it."""
+    from fno.footprint import top_consumers
+
+    fno_py = [
+        (200.0 - float(i), f"/usr/local/bin/python3 fno-py doctor test {i}")
+        for i in range(23)
+    ]
+    workers = [
+        (90.0 - i, f"fno-agents-worker debug .fno/worktrees/x-b1ee/target/{i}")
+        for i in range(18)
+    ]
+    sustained = fno_py + workers
+
+    top = top_consumers(sustained)
+
+    assert top[0]["name"] == "python3"
+    assert top[0]["procs"] == 23
+    assert top[1]["name"] == "fno-agents-worker"
+    assert top[1]["procs"] == 18
+    assert top[1]["worktree"] == ".fno/worktrees/x-b1ee"
+    assert top[1]["worktree_procs"] == 18
+    # Bounded to five consumers.
+    assert len(top) <= 5
+
+
+def test_ac9_edge_top_consumers_carry_no_worktree_when_argv_names_none() -> None:
+    from fno.footprint import top_consumers
+
+    top = top_consumers([(10.0, "/usr/sbin/cfprefsd agent")])
+
+    assert top[0]["name"] == "cfprefsd"
+    assert top[0]["worktree"] is None
+    assert top[0]["worktree_procs"] == 0

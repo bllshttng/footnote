@@ -3330,7 +3330,6 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
-        self.court.close();
         self.search = None;
         self.rename = None;
         self.move_pick = None;
@@ -3351,7 +3350,6 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
-        self.court.close();
         self.search = None;
         self.rename = None;
         self.create = None;
@@ -3375,7 +3373,6 @@ impl View {
         self.sel_hover_armed = false;
         self.answers = None;
         self.yard = None;
-        self.court.close();
         self.search = None;
         // A half-typed workspace name is dropped too (gemini review): the
         // confirm owns the bottom row, and resuming a hidden create overlay
@@ -3407,7 +3404,6 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
-        self.court.close();
         self.search = None;
         self.move_pick = None;
         self.attach_place = None;
@@ -3847,7 +3843,6 @@ impl View {
         self.menu_usurping_open()
             || self.answers.is_some()
             || self.yard.is_some()
-            || self.court.is_open()
             || self.peek.is_some()
             || self.digest.is_some()
     }
@@ -3881,7 +3876,6 @@ impl View {
             || self.nav.is_some()
             || self.answers.is_some()
             || self.yard.is_some()
-            || self.court.is_open()
             || self.digest.is_some()
     }
 
@@ -6323,13 +6317,15 @@ impl View {
     }
 
     /// Sideline rows the cursor can occupy: the full terminal height (the
-    /// sideline owns row 0 since x-cd67 US1) minus the bottom chrome row.
-    /// `draw_bottom_row` repaints the last row over the sideline when it is
-    /// chrome, and [`sideline_row_at`] excludes it from hit-testing, so it must
-    /// not count as a scroll slot - else follow-cursor scroll would park the
-    /// last row under the status bar (invisible, unclickable).
+    /// sideline owns row 0 since x-cd67 US1) minus the bottom chrome row,
+    /// minus the court block's rows at the bottom. The block is the
+    /// subtraction point's only second customer, so `clamp_sideline_offset`
+    /// and `reveal_focus_row` inherit the shrunk window without a second
+    /// fix.
     fn sideline_visible_rows(&self) -> usize {
-        (self.term.0 as usize).saturating_sub(self.bottom_row_is_chrome() as usize)
+        (self.term.0 as usize)
+            .saturating_sub(self.bottom_row_is_chrome() as usize)
+            .saturating_sub(self.court_block_rows())
     }
 
     /// Follow-the-cursor sideline scroll (x-a621): move [`View::sideline_offset`]
@@ -6791,24 +6787,6 @@ impl View {
                 yard_overlay_lines(&crowd, sel, identity, frame as usize, self.yard_footer());
             let chrome =
                 chrome::Chrome::new("the yard", Anchor::Center).footer("n/N pick · q close");
-            draw_lines_overlay(
-                &mut cells,
-                rows,
-                cols,
-                overlay_origin,
-                overlay_dims,
-                &chrome,
-                &lines,
-                &self.theme,
-                None,
-            );
-        } else if self.court.is_open() {
-            // (x-3cb3) The court: what the machine is holding, and the cap
-            // that decides whether another lane fits. Read-only - every key
-            // closes it.
-            let lines = self.court.lines();
-            let chrome = chrome::Chrome::new("the court", Anchor::Center)
-                .footer("any key closes · prefix+C reopens");
             draw_lines_overlay(
                 &mut cells,
                 rows,
@@ -8123,12 +8101,15 @@ impl View {
         // an agent row indents by the depth computed over exactly the set that
         // paints - never a re-derivation over a different visibility set.
         let (display, row_depths) = self.display_rows_with_depths();
+        // (x-aeab) The reservation is the court block's rendered line count.
+        let (block_rows, block_lines) = self.court_block_layout(rows);
+        let list_rows = rows - block_rows;
         for (i, drow) in display.into_iter().enumerate().skip(off) {
             // (x-cd67 US1) The sideline owns the full column height including
             // row 0; the tab strip moved right of the divider. Display row `i`
             // paints at outer row `i - off` (was `TAB_BAR_ROWS + (i - off)`).
             let r = i - off;
-            if r >= rows {
+            if r >= list_rows {
                 break;
             }
             // (x-b186) The density button is pinned to the top painted row, so
@@ -8579,6 +8560,12 @@ impl View {
                 }
             }
         }
+        // (x-aeab) The court block: three glance lines minimized, the full
+        // reading expanded, pinned to the bottom rows of the column. The row
+        // list already stopped above it; the block renders DIM so it reads as
+        // chrome beside the live rows, and the painter truncates to the panel
+        // width - the same rule every sideline row follows.
+        court_block::paint_court_block(cells, block_lines, list_rows, rows, cols, text_w);
         // The divider column, now full terminal height (the sideline owns row
         // 0 too; the strip sits right of the divider) - x-cd67 US1.
         //
@@ -11102,9 +11089,10 @@ async fn attach_and_run(
     let (yard_tx, mut yard_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::yard_overlay::YardItem>>)>();
 
-    // (x-3cb3) The court fold leg, same shape as the yard's.
+    // (x-aeab) The court fold leg: single-flight + the TTL are the whole
+    // concurrency contract; no generation to supersede.
     let (court_tx, mut court_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(u64, Option<crate::court_overlay::Court>)>();
+        tokio::sync::mpsc::unbounded_channel::<Option<crate::court_overlay::Court>>();
 
     // x-84d7: the Connections modal's read fold runs off the UI loop and reports
     // back here, tagged with the generation it was kicked under, so a slow `fno`
@@ -11222,10 +11210,10 @@ async fn attach_and_run(
                 let _ = tx.send((gen, result));
             });
         }
-        if let Some(gen) = view.court.take_want() {
+        if view.court.take_want() {
             let tx = court_tx.clone();
             tokio::spawn(async move {
-                let _ = tx.send((gen, crate::court_overlay::fold_now().await));
+                let _ = tx.send(crate::court_overlay::fold_now().await);
             });
         }
         // x-84d7: kick a wanted Connections read off the UI loop, at most one in
@@ -11338,6 +11326,13 @@ async fn attach_and_run(
                     .map(|(_, _, start)| *start + PANE_DRAG_TIMEOUT),
             )
             .min();
+        // (x-b2bf) The yard's frame cycling is a flavour channel on a timer:
+        // while the overlay is open, wake at the next frame boundary so the
+        // spotlight animates on an otherwise idle terminal (nothing else
+        // redraws there). Re-armed each loop pass, so the cadence holds until
+        // the overlay closes; closed -> no deadline, no wakeups.
+        // (x-aeab) Refresh timer; the deadline is None while a fold runs.
+        let court_tick = view.court.refresh_deadline();
         // (x-b2bf) The yard's frame cycling is a flavour channel on a timer:
         // while the overlay is open, wake at the next frame boundary so the
         // spotlight animates on an otherwise idle terminal (nothing else
@@ -11669,14 +11664,11 @@ async fn attach_and_run(
                     }
                 }
             }
-            Some((gen, result)) = court_rx.recv() => {
-                // (x-3cb3) The court fold landed. `apply` owns the merge
-                // discipline (gen guard, degrade-loud, no age restamp on a
-                // failure) and answers whether anything changed on screen.
-                if view.court.apply(gen, result) {
-                    if let Err(e) = compositor.draw(&view.compose()) {
-                        break Err(format!("draw: {e}"));
-                    }
+            Some(result) = court_rx.recv() => {
+                // (x-aeab) The fold landed; `apply` owns the merge rules.
+                view.court.apply(result);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
                 }
             }
             Some((gen, outcome)) = needs_rx.recv() => {
@@ -11954,11 +11946,20 @@ async fn attach_and_run(
                     None => std::future::pending().await,
                 }
             }, if yard_tick.is_some() => {
-                // Frame advance only: compose() recomputes the frame index
-                // from elapsed, so the wake just repaints.
+                // Frame advance only: compose() uses the elapsed time, so the
+                // wake repaints (and re-arms the next deadline next pass).
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
+            }
+            _ = async {
+                match court_tick {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if court_tick.is_some() => {
+                // The wake itself is a no-op: the next loop pass runs
+                // take_want at the top and spawns the refresh if due.
             }
             _ = async {
                 match seam_drag_deadline {
@@ -12843,14 +12844,6 @@ async fn handle_stdin(
     if view.yard.is_some() {
         return yard_keys(view, &passthrough, sock_w).await;
     }
-    if view.court.is_open() {
-        // Read-only overlay: ANY key closes it, and no byte leaks into a
-        // pane (the answer-overlay invariant).
-        if !passthrough.is_empty() {
-            view.court.close();
-        }
-        return Ok(StdinFlow::Continue);
-    }
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
     }
@@ -13038,7 +13031,7 @@ async fn dispatch_event(
                 view.yard_want = true;
             }
         }
-        Event::OpenCourt => view.court.open(),
+        Event::OpenCourt => view.court.toggle(),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
             // Chrome changed size: report the new content area so rects
@@ -17098,3 +17091,10 @@ fn map_color(c: Color) -> CtColor {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "client_tests/court_block_tests.rs"]
+mod court_block_tests;
+
+#[path = "client/court_block.rs"]
+mod court_block;

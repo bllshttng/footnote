@@ -660,6 +660,8 @@ def _payload(
         "leak_verdict": leak_verdict(reading.direct_process_count, process_threshold),
         "capacity_verdict": capacity_verdict(load_snapshot),
         "load_1m": getattr(load_snapshot, "load_1m", None),
+        "load_5m": getattr(load_snapshot, "load_5m", None),
+        "load_15m": getattr(load_snapshot, "load_15m", None),
         "max_load_per_cpu": getattr(load_snapshot, "max_load_per_cpu", None),
         "load_ceiling": getattr(load_snapshot, "load_ceiling", None),
         "load_cpu_count": getattr(load_snapshot, "load_cpu_count", None),
@@ -744,10 +746,19 @@ def _emit_result(
         )
         load_status = payload["spawn_load_status"]
         if load_status in {"within", "exceeded"}:
+            load_5m = payload.get("load_5m")
+            load_15m = payload.get("load_15m")
+            trend = (
+                f"; {load_5m:.1f} 5m, {load_15m:.1f} 15m"
+                if isinstance(load_5m, (int, float))
+                and isinstance(load_15m, (int, float))
+                else ""
+            )
             typer.echo(
                 f"spawn load: {payload['load_1m']:.1f} against "
                 f"{payload['load_ceiling']:.1f} (max_load_per_cpu "
-                f"{payload['max_load_per_cpu']:g} x {payload['load_cpu_count']} cpus; "
+                f"{payload['max_load_per_cpu']:g} x {payload['load_cpu_count']} cpus"
+                f"{trend}; "
                 f"{load_status})"
             )
         else:

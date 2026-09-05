@@ -13661,11 +13661,11 @@ fn sideline_scroll_window_excludes_chrome_bottom_row() {
         v.bottom_row_is_chrome(),
         "status bar occupies the bottom row"
     );
-    // (x-cd67 US1) The sideline owns row 0, so the usable height no longer
-    // subtracts the tab-bar row - only the chrome bottom row.
+    // (x-cd67 US1) The sideline owns row 0: subtract only the chrome bottom
+    // row, then the always-visible court block's reservation (x-aeab).
     assert_eq!(
         v.sideline_visible_rows(),
-        v.term.0 as usize - 1,
+        v.term.0 as usize - 1 - v.court_block_rows(),
         "chrome bottom row is not a scroll slot"
     );
     v.status_on = false;
@@ -13675,8 +13675,8 @@ fn sideline_scroll_window_excludes_chrome_bottom_row() {
     );
     assert_eq!(
         v.sideline_visible_rows(),
-        v.term.0 as usize,
-        "with no chrome the full terminal height is usable"
+        v.term.0 as usize - v.court_block_rows(),
+        "with no chrome the full height minus the block is usable"
     );
 }
 

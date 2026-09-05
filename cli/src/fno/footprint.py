@@ -9,6 +9,7 @@ of an attributable fno process.
 
 from __future__ import annotations
 
+import re
 import shlex
 from pathlib import Path
 from typing import NamedTuple
@@ -79,6 +80,51 @@ class _Process(NamedTuple):
     cpu_percent: float
     rss_kb: int
     command: str
+
+
+#: The `worktrees/<name>` tail a cluster of commands shares - the one line
+#: that explains a spike ("that tree's test suite is running").
+_WORKTREE_RE = re.compile(r"[\w~./-]*worktrees/[\w.-]+")
+
+
+def top_consumers(sustained: list[tuple[float, str]], n: int = 5) -> list[dict]:
+    """Top programs by summed ps ``%cpu``, with the worktree a cluster calls home.
+
+    Aggregates the rows :func:`parse_footprint` already kept - no second ps
+    pass. The name is argv[0]'s basename; ``worktree`` names the tree the
+    most of that program's rows run from, with how many, so "a worker is
+    running its test suite" stays one line instead of a mystery.
+    """
+    programs: dict[str, dict] = {}
+    for cpu_percent, command in sustained:
+        argv = command.split()
+        name = Path(argv[0]).name if argv else command
+        entry = programs.setdefault(
+            name, {"name": name, "procs": 0, "cpu": 0.0, "trees": {}}
+        )
+        entry["procs"] += 1
+        entry["cpu"] += cpu_percent
+        match = _WORKTREE_RE.search(command)
+        if match:
+            entry["trees"][match.group(0)] = entry["trees"].get(match.group(0), 0) + 1
+    ranked = sorted(
+        programs.values(), key=lambda e: (-e["cpu"], -e["procs"], e["name"])
+    )[:n]
+    consumers: list[dict] = []
+    for entry in ranked:
+        tree, tree_procs = (
+            max(entry["trees"].items(), key=lambda kv: kv[1]) if entry["trees"] else (None, 0)
+        )
+        consumers.append(
+            {
+                "name": entry["name"],
+                "procs": entry["procs"],
+                "cpu_pct": round(entry["cpu"], 1),
+                "worktree": tree,
+                "worktree_procs": tree_procs,
+            }
+        )
+    return consumers
 
 
 def _elapsed_seconds(value: str) -> int:
