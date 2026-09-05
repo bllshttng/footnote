@@ -58,7 +58,6 @@ MINUTES = re.compile(r"\b(\d{1,4})\s*(?:minutes?|mins?)\b", re.IGNORECASE)
 COMPACT = re.compile(r"\b(\d{1,3})m\b")
 JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$")
 CAP = re.compile(r"^    timeout-minutes:\s*(\d+)\s*$")
-SIGNIFICANT = re.compile(r"\S")
 
 
 def scan(text: str, source: str) -> list[str]:

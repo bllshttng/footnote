@@ -229,6 +229,12 @@ jobs:
             exit 0
           fi
           elapsed=$(( $(date +%s) - $(cat "$RUNNER_TEMP/changed-start") ))
+          if [ "$elapsed" -lt 0 ]; then
+            # A clock stepped backward mid-job. The honest floor for a job
+            # that reached this step without its trap is the cap itself:
+            # reaching this step unmarked is the cap kill's signature.
+            elapsed=$(( CAP_MINUTES * 60 ))
+          fi
           bash scripts/ci/smoke-duration-report.sh changed-smoke "$elapsed" "$CAP_MINUTES" || true
 
   # The suite outgrew two runners, so the pytest full-gate lane now runs as
