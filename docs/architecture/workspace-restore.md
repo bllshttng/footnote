@@ -14,6 +14,8 @@ Every member that cannot come back is named, with the reason. The reasons includ
 
 Two preconditions are refusals, not empty results. The verb refuses before the session's first real attach. At that point startup restore has not run and the persisted squads were never read. Answering "nothing to restore" there is a lie. It also reads the registry file itself before classifying. The off-loop registry reader ticks independently, and a headless restore can otherwise refuse every member with "no such agent" while its row sits on disk.
 
+The server's member list is authoritative while the server runs. The squad store file is that list's persist target, not its source. Every pane event re-writes the file from memory. So any write to `squads.json` from outside a live server, such as `fno mux workspace prune`, must be followed by the `SquadReload` control verb to every answering session. Without the reload, the next pane event writes the old members back over the pruned file. Restore then reads memory-shaped rows, not the file a prune just shrank.
+
 ## The declared resume form
 
 The resume argv is not hardcoded. Each harness declares an `interactive_resume` form in the capability table (`cli/src/fno/agents/harness_capabilities.toml`). The server reads that declaration in process through the same reader the attach lane uses (`agents_view::resume_form`, the resume front door over `declared_form`). The bundled table is embedded at build time. An operator can override it per harness with `[harness.<name>.resume]` in `.fno/config.toml` or the global config. An operator can teach fno a new harness's resume form without a release, and correct a bundled one the same way.
