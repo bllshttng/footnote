@@ -620,6 +620,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         needs,
         lane,
         undispatched,
+        entries,
         warnings,
         autonomous_merge: autonomous_merge_enabled(&cwd),
         scope_ids,
@@ -669,6 +670,7 @@ mod tests {
             needs: ok_read(Value::Array(Vec::new())),
             lane: ok_read(Value::Array(Vec::new())),
             undispatched: ok_read(Value::Array(Vec::new())),
+            entries: None,
             warnings: Vec::new(),
             autonomous_merge: false,
             scope_ids: None,
@@ -739,6 +741,76 @@ mod tests {
         assert_eq!(ids, vec!["x-open"]);
     }
 
+    #[test]
+    fn unheld_progress_names_a_claim_free_in_progress_row() {
+        // x-add3 sat in_progress 25 minutes with a free claim and a dead
+        // worker while every queue read clean; the status stamp is never
+        // revoked, so this queue is the only one that can carry it.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.entries = Some(vec![json!({
+            "id": "x-add3",
+            "priority": "p1",
+            "status": "in_progress",
+            "title": "dead handoff",
+        })]);
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let unheld = queues
+            .iter()
+            .find(|q| q["name"] == "unheld_progress")
+            .unwrap();
+        let rows = unheld["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{unheld}");
+        assert_eq!(rows[0]["id"], "x-add3");
+        assert!(rows[0].get("claim_state").is_none(), "{:?}", rows[0]);
+    }
+
+    #[test]
+    fn unheld_progress_omits_claimed_pr_bound_and_ready_rows() {
+        let mut inputs = inputs_with(
+            json!([]),
+            json!([{"key": "node:x-held", "state": "live", "holder": "h"}]),
+            json!([]),
+        );
+        inputs.entries = Some(vec![
+            json!({"id": "x-held", "priority": "p1", "status": "in_progress"}),
+            json!({"id": "x-prbd", "priority": "p1", "status": "in_progress", "pr_number": 42}),
+            json!({"id": "x-rdy", "priority": "p1", "status": "ready"}),
+        ]);
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let unheld = queues
+            .iter()
+            .find(|q| q["name"] == "unheld_progress")
+            .unwrap();
+        assert_eq!(unheld["rows"].as_array().unwrap().len(), 0, "{unheld}");
+    }
+
+    #[test]
+    fn mergeable_pr_is_scoped_by_the_binding_node() {
+        // A scoped board returned PRs 1494 and 1490 outside the crown; the
+        // undriven_pr sibling already filtered, mergeable_pr did not.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.prs = ok_read(json!([
+            {"number": 1494, "title": "foreign"},
+            {"number": 99, "title": "unbound"},
+        ]));
+        inputs.pr_nodes = ok_read(json!([
+            {"id": "x-out", "priority": "p1", "pr_number": 1494},
+        ]));
+        inputs.scope_ids = Some(["x-in"].into_iter().map(str::to_string).collect());
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let mergeable = queues.iter().find(|q| q["name"] == "mergeable_pr").unwrap();
+        let numbers: Vec<i64> = mergeable["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["number"].as_i64())
+            .collect();
+        assert_eq!(numbers, vec![99], "{mergeable}");
+    }
+
     /// Serializes the tests that point process-global HOME at a temp dir:
     /// every other test in this binary reads HOME, so a concurrent reader can
     /// catch it mid-flip (the same ENV_LOCK shape client_tests uses).
@@ -757,7 +829,7 @@ mod tests {
             ..Default::default()
         });
         let queues = payload.get("queues").and_then(Value::as_array).unwrap();
-        assert_eq!(queues.len(), 11, "{payload}");
+        assert_eq!(queues.len(), 12, "{payload}");
         assert_eq!(payload["exit_code"], 1, "{payload}");
         assert!(payload["unreadable"].as_i64().unwrap() > 0);
         let names: Vec<&str> = queues
@@ -771,6 +843,7 @@ mod tests {
                 "undispatched",
                 "unplanned",
                 "stalled_holder",
+                "unheld_progress",
                 "undriven_pr",
                 "mergeable_pr",
                 "stale_claim",

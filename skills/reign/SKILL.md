@@ -35,7 +35,7 @@ The crown is bestowed, never inferred. Verify it before anything else:
 Six monitors, each a harness-tracked Monitor running a shell until-loop that costs no tokens while waiting and wakes the session only when its condition changes. Then two self-injected native commands.
 
 1. **Unread mail, 60s.** Everything routes through it: worker reports, peer facts, the operator's answers. Read with `fno agents mail unread -n <handle>`. The handle is `-n`, never a positional; the positional form fails loudly rather than returning empty.
-2. **Board change, 120s.** Do NOT poll `fno inbox board --json` (about two minutes at load). Watch the cheap proxy until the board port lands: tail the project events journal for `pr_opened`, `loop_terminated`, `claim_released`, plus the `fno backlog ready` count. `fno backlog ready` emits JSON on stdout; `-J` exists only for parity, so a line-prefix parser reads it as zero rows forever, which is indistinguishable from a quiet board. Assert a non-zero count as a positive control before trusting a zero.
+2. **Board change, 120s.** Do NOT poll `fno inbox board --json` (about two minutes at load). Watch the cheap proxy until the board port lands: tail the project events journal for `pr_opened`, `loop_terminated`, `claim_released`, plus the `fno backlog ready` count. `fno backlog ready` emits JSON on stdout; `-J` exists only for parity, so a line-prefix parser reads it as zero rows forever, which is indistinguishable from a quiet board. Assert a non-zero count as a positive control before trusting a zero. When you do read the board, a bare call is already scoped to this crown (the caller's own manifest is the default); pass `--state <path>` only to read outside it.
 3. **Crown liveness, 300s.** `reign_state(scope)` for this handle. Report an unreadable registry or graph as `CROWN-UNKNOWN`, never as a missing crown. Report `split` and court `conflicts` separately from the agree counts: two live rows over one scope each read `agree=true`, so a caller gating on the counts alone sees a healthy court while the fleet has two kings.
 4. **Main branch CI, 300s.** A red main blocks every merge in the fleet.
 5. **Capacity band, 300s, debounced across two consecutive samples.** The band must HOLD before it is believed: measured over, within, over, within inside fifteen minutes with no change in real work. Edge-triggering on this input is the opposite of debouncing. Print `sustained_cpu_cores` beside the verdict and flag when the two disagree.
@@ -66,7 +66,7 @@ Confirm the goal with `/hooks` and the loop with its receipt. Journal `reign_arm
 
 What the loop prompt runs every interval and what you run by hand at any time.
 
-Read `fno inbox board --json`, `fno agents court --json`, `fno agents status --json`. Print, one line each:
+Read `fno inbox board --json`, `fno agents court --json`, `fno agents status --json`. The board read defaults to this crown's manifest, so its rows are your scope; `--state <path>` reads outside it. Print, one line each:
 
 - open PR count
 - PRs with a free claim and no driver

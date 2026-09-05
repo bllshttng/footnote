@@ -84,7 +84,7 @@ help
 inbox approvals decide !--db
 inbox approvals ls !--db
 inbox approvals show !--db
-inbox board !--state
+inbox board
 inbox decide !--decision !--origin !--subject
 inbox decisions !--subject
 inbox law set
@@ -93,7 +93,7 @@ inbox outstanding ask
 inbox outstanding clear !--origin
 inbox outstanding mine do
 inbox outstanding reindex
-king board !--state
+king board
 king cancel
 king done
 king escalate
