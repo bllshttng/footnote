@@ -27,6 +27,27 @@
 //! **A latch that can wedge a caller is worse than the fan-out it prevents.** A
 //! join that exhausts its budget spawns anyway and says so. The failure mode is
 //! one extra child and a named event, never a hang.
+//!
+//! ## Callers not yet on it, and the one that needs care
+//!
+//! Three spawn sites ride this today: both `truth_probe` sites and the
+//! `discovered-json` helper in `bin/client.rs`. The other `Command::new("fno")`
+//! sites in this crate are unported because porting all of them at once is a
+//! rewrite the evidence did not support. One of them has since been measured,
+//! so it is named rather than left to be rediscovered.
+//!
+//! `loopcheck::current_law_status` shells `fno backlog decisions <subject>
+//! --lane law --state live --json`. Measured 2026-09-05 at load 137: FOUR
+//! concurrent children with byte-identical argv from one parent. Its standing
+//! subject is a constant, so every loopcheck on the machine spawns the same
+//! child, and the fleet runs loopcheck on every stop hook.
+//!
+//! It is not ported here because it is the stop gate, and the same function
+//! also reads the SCOPED per-head subject that `fno do pr coverage-waive`
+//! writes. An operator who waives and immediately re-runs expects the next read
+//! to see it, and a cached answer delays that by up to the TTL. Port the
+//! standing subject, leave the scoped one uncached, and prove the waive-then-
+//! rerun path in the same change.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
