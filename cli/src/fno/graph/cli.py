@@ -2034,6 +2034,7 @@ def cmd_decompose(
         separate_plan_path,
         validate_groups,
     )
+    from fno.graph._adopt import adopt_into, refuse_dead_owner
     from fno.graph._intake import _read_plan_frontmatter
     from fno.handoff.output import emit_error, json_mode
 
@@ -2302,99 +2303,14 @@ def cmd_decompose(
 
             # Adoption (x-b9d7 US2): re-parent each named node under this group
             # child, inside the same locked mutation. Nothing is minted for it
-            # and nothing is deleted; its plan_path, details, priority, and
-            # evidence are untouched, because membership is carried by the
-            # `parent` pointer alone. Why adopted nodes never get `group_slug`
-            # is on the NormalizedGroup field in _decompose.py.
+            # and nothing is deleted; membership rides the `parent` pointer.
             adopted: list[str] = []
-            # A DEAD delivery unit cannot own containment. Once per
-            # group, before the adopt loop, because deadness is a property of
-            # the owner rather than of each target - and it has to run BEFORE
-            # the stamp's back-fill convergence leg at :1739, which is exactly
-            # what re-applies containment that the death transition released.
-            #
-            # Unreachable by every repair path if it lands:
-            # _release_contained_children fires once, at the moment the unit
-            # dies, and nothing re-runs it (cmd_undefer deliberately does not
-            # re-contain); _strandable_contained_ids keys on the owner's
-            # completed_at, which a deferred or superseded owner does not have;
-            # and both dispatch halves then refuse the adoptee forever
-            # (selection_guards' `contained:` guard, _redirect_if_contained).
-            # The only escape is a manual `--parent null` per node.
-            #
-            # Fields, not the derived `status` string: recompute_statuses
-            # re-persists status after every locked mutation, so it is a
-            # snapshot rather than truth (selection_guards' dead-ancestor guard
-            # documents the same reasoning). The legacy `completed_at:
-            # "deferred:<ts>"` workaround (pre-feature deferral overloaded
-            # completed_at) is folded into the effective deferred_at here:
-            # recompute_statuses migrates it to deferred_at only AFTER this
-            # mutator returns, so reading completed_at raw would treat a
-            # deferred owner as done, skip this guard, and stamp exactly the
-            # permanently-contained state it exists to prevent. A genuinely-done
-            # owner (a real completed_at timestamp, not the legacy marker) is
-            # exempt because the merge cascade can heal it, reproducing the
-            # done > superseded > deferred precedence so a unit that was
-            # superseded and later closed does not trip a false refusal. Both
-            # death fields are read even though every writer sets deferred_at
-            # today, so a future supersede path that forgets it cannot slip
-            # through.
-            #
-            # Gated on a non-empty adopt list: a dead group child with nothing
-            # to adopt still updates its title, waves, and blocked_by as it does
-            # today. Refusing there would deadlock an epic doc whose group was
-            # deferred for unrelated reasons.
-            _completed = node.get("completed_at")
-            _legacy_defer = isinstance(_completed, str) and _completed.startswith(
-                _LEGACY_DEFER_PREFIX
-            )
-            if (
-                grp["adopt"]
-                and not (bool(_completed) and not _legacy_defer)
-                and (node.get("deferred_at") or node.get("superseded_by") or _legacy_defer)
-            ):
-                _superseder = node.get("superseded_by")
-                # The remedy branches on the cause: `fno backlog undefer` clears
-                # deferred_at only and never superseded_by (:6046), so offering
-                # it to a superseded owner sends the operator through a command
-                # that exits 0 and changes nothing this refusal reads.
-                if _superseder:
-                    _how = f"was superseded by {_superseder}"
-                    _containment = (
-                        "its death already released the nodes it contained "
-                        "and nothing re-runs that release"
-                    )
-                    _remedy = (
-                        f"Run `fno backlog unsupersede {node['id']}` to revive it "
-                        "(clears superseded_by; `undefer` does not), or point the "
-                        "adopt list at the superseding node, or give the group a "
-                        "new slug so it mints a live delivery unit"
-                    )
-                else:
-                    # Round-12 finding 5: `cmd_defer` no longer releases
-                    # contained children, so a deferred owner's adoptees stay
-                    # folded (test_defer_keeps_an_existing_adoptee_folded).
-                    # The superseded branch's "already released" claim is
-                    # provably false here; name the real state so the operator
-                    # undefering knows the paused unit resumes with its
-                    # children still contained, not re-run from scratch.
-                    _how = "is deferred"
-                    _containment = (
-                        "its contained nodes remain folded under it (defer "
-                        "keeps containment; nothing re-runs a release)"
-                    )
-                    _remedy = (
-                        f"Run `fno backlog undefer {node['id']}` first (its "
-                        "children resume contained, not released), or drop "
-                        "the adopt list from this group"
-                    )
-                raise DecomposeError(
-                    f"group {grp['slug']!r} resolves to {node['id']}, which "
-                    f"{_how}; {_containment}, so stamping containment "
-                    "here would leave every adoptee undispatchable with no verb "
-                    f"to free it. {_remedy}",
-                    exit_code=2,
-                )
+            # A dead delivery unit cannot own containment; the guard and its
+            # remedy text live in _adopt (shared with `fno backlog adopt`).
+            # Gated on a non-empty adopt list so a dead group child with
+            # nothing to adopt still updates its title, waves, and blocked_by.
+            if grp["adopt"]:
+                refuse_dead_owner(node, context=f"group {grp['slug']!r}")
             for adopt_id in grp["adopt"]:
                 target = _find_node(graph_entries, adopt_id)
                 if target is None:
@@ -2403,10 +2319,9 @@ def cmd_decompose(
                         exit_code=3,
                     )
                 if target["id"] == epic_resolved_id:
-                    # validate_groups makes the same check against the RAW epic
-                    # argument, so an aliasable `ab-` prefix of the epic slips
-                    # past it and would otherwise land on the generic cycle
-                    # refusal (exit 2) instead of this one (exit 1).
+                    # validate_groups checks the RAW epic argument, so an
+                    # aliasable `ab-` prefix slips past it and would land on the
+                    # generic cycle refusal instead of this specific one.
                     raise DecomposeError(
                         f"group {grp['slug']!r} adopt names the epic {epic_resolved_id} itself",
                         exit_code=1,
@@ -2430,10 +2345,6 @@ def cmd_decompose(
                     if owner:
                         whose = f"already the group child for slug {owner!r}"
                     elif target.get("parent") == epic_resolved_id:
-                        # This epic's own group child on a plan path that no
-                        # longer matches the doc (a rename). Saying "another
-                        # epic" here would be a plain lie about the operator's
-                        # own node.
                         whose = (
                             "already this epic's group child on a legacy plan "
                             f"path ({target.get('plan_path')}) that no longer "
@@ -2447,137 +2358,23 @@ def cmd_decompose(
                         "reshapes the epic",
                         exit_code=2,
                     )
-                # Refuse to adopt a node someone is actively building (codex
-                # P1). Every dispatch gate reads containment BEFORE the claim -
-                # the in-process redirect earliest of all - so adoption landing
-                # in that window produced a worker holding a claim on a node
-                # that is now contained: it writes its manifest and builds the
-                # second PR for one plan anyway.
-                #
-                # Closed from THIS side rather than by re-validating after the
-                # claim, because it is the single boundary: it covers every
-                # dispatch path at once instead of one script, it prevents the
-                # contradictory state rather than killing a worker that already
-                # started, and it reports to the person running decompose, who
-                # has the context to fix the adopt list. A live claim also means
-                # the node is a delivery unit in practice right now, which is
-                # the thing adoption asserts it is not.
-                #
-                # Reads the LIVE lockfile, not the graph's `locked_by` mirror:
-                # the manifest claim fields are an init-time snapshot and can
-                # lie after a respawn. Suspect counts as held (x-ba4b).
-                _holder = _live_worker(target["id"])
-                if _holder:
-                    raise DecomposeError(
-                        f"group {grp['slug']!r} adopts {target['id']}, which is "
-                        f"being built right now by {_holder}; adopting it would "
-                        "leave that session holding a claim on a node that no "
-                        "longer dispatches, and it would still open its own PR. "
-                        "Wait for it to land, or stop it first",
-                        exit_code=2,
-                    )
-                # Cycle + descendants BOTH run before the stamp and before the
-                # already-adopted `continue` below. Placing the descendants
-                # refusal after that short-circuit made it unreachable on the
-                # BACK-FILL path (sigma): re-running a spec against a legacy
-                # adopted node that has since gained children stamped it anyway,
-                # producing the exact half-closed subtree the refusal exists to
-                # prevent. Cycle stays first so an ancestor-of-the-epic adoptee
-                # still gets its specific message rather than the vaguer one.
-                if _would_create_cycle(graph_entries, target["id"], node["id"]):
-                    raise DecomposeError(
-                        f"adopting {target['id']} into group {grp['slug']!r} would create a cycle",
-                        exit_code=2,
-                    )
-                # An adoptee with descendants (codex P1). Containment is ONE
-                # level by design, and selection_guards does not treat a
-                # contained ANCESTOR as a guard - so the children would stay
-                # independently dispatchable while the merge cascade closed only
-                # this parent, leaving them open to build separate PRs. Refusing
-                # is right rather than propagating: a subtree is a decomposition
-                # of its own, and folding it wholesale into another unit is a
-                # reshape the operator should state explicitly.
-                _kids = [
-                    e.get("id")
-                    for e in graph_entries
-                    if isinstance(e, dict) and e.get("parent") == target["id"]
-                ]
-                if _kids:
-                    raise DecomposeError(
-                        f"group {grp['slug']!r} adopts {target['id']}, which has "
-                        f"{len(_kids)} child(ren) ({', '.join(str(k) for k in _kids[:3])}"
-                        f"{'...' if len(_kids) > 3 else ''}); containment is one "
-                        "level, so they would stay dispatchable and open their own "
-                        "PRs while their parent closed. Adopt the children "
-                        "individually, or re-parent them out first",
-                        exit_code=2,
-                    )
-                # Containment (x-e957), stamped BEFORE the already-adopted
-                # short-circuit so re-running the spec CONVERGES: a node adopted
-                # by an older fno (parent set, no contained_in) is back-filled
-                # rather than left half-adopted forever. Writing the value it
-                # already holds is a no-op, so re-running an up-to-date spec
-                # still serializes byte-identically.
-                #
-                # Same locked mutation as the re-parent below, deliberately: two
-                # writes would open a window where the node is re-parented but
-                # still armed for dispatch, which is the exact state this field
-                # exists to make impossible.
-                # Containment says "this node has no PR of its own". A node that
-                # already carries one, or that already carries cost, HAS
-                # independent delivery evidence, so the field simply does not
-                # apply to it (codex P1/P2) - and stamping it anyway would hide
-                # an open PR's node from dispatch, auto-close it under someone
-                # else's merge while its own PR is still open, and report a
-                # finished one as having "shipped inside" a unit it predates.
-                # Its cost also stays in the flat project sum regardless, because
-                # _apply_rollup reads an empty rollup as "preserve existing", so
-                # the double-count the rollup guard prevents for NEW attribution
-                # would simply persist for old.
-                #
-                # Adoption itself still proceeds: re-parenting changes rollup
-                # membership, not delivery state, which is exactly what
-                # test_adopt_a_shipped_node_is_permitted pins. Only the
-                # containment stamp is withheld, and loudly.
-                _own_pr = target.get("pr_number")
-                _own_cost = target.get("cost_usd")
-                _is_done = node_is_done(target)
-                if (_own_pr or _own_cost is not None) and not _is_done:
-                    # An UNFINISHED delivery unit cannot be adopted at all
-                    # (codex P1). Withholding the stamp keeps it dispatchable,
-                    # but re-parenting still hangs it under the group child -
-                    # and _cascade_close_parents only asks whether the EPIC's
-                    # direct children are complete, never its grandchildren. So
-                    # the group's merge would close the epic (and dispatch its
-                    # dependents) over work that is still open one level down.
-                    # Refuse: a node mid-flight with its own PR or cost is a
-                    # delivery unit, and folding one into another is a reshape
-                    # the operator has to state, not something adopt infers.
-                    _what = f"has an open PR (#{_own_pr})" if _own_pr else "has accrued cost"
-                    raise DecomposeError(
-                        f"group {grp['slug']!r} adopts {target['id']}, which "
-                        f"{_what} and has not landed; it is its own delivery "
-                        "unit mid-flight. Adopting it would hang open work under "
-                        "the group, and the epic would close over it when the "
-                        "group merges. Let it land first, or drop it from the "
-                        "adopt list",
-                        exit_code=2,
-                    )
-                if _own_pr or _own_cost is not None:
-                    _why = "carries PR #%s" % _own_pr if _own_pr else "carries cost"
+                outcome = adopt_into(
+                    graph_entries,
+                    node,
+                    target,
+                    live_worker=_live_worker,
+                    context=f"group {grp['slug']!r}",
+                )
+                if outcome.warning:
                     uncontained_box[0].append(
                         f"warning: adopted {target['id']} into group "
                         f"{grp['slug']!r} but did NOT mark it contained: it "
-                        f"{_why}, so it is its own delivery unit. It stays "
+                        f"{outcome.warning}, so it is its own delivery unit. It stays "
                         "separately dispatchable, separately costed, and is not "
                         "closed by the group's merge."
                     )
-                else:
-                    target["contained_in"] = node["id"]
-                if target.get("parent") == node["id"]:
-                    continue  # already adopted - re-running the spec is a no-op
-                target["parent"] = node["id"]
-                adopted.append(target["id"])
+                if outcome.adopted:
+                    adopted.append(target["id"])
 
             results.append(
                 {
