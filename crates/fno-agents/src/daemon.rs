@@ -5748,15 +5748,12 @@ fn reap_zombies() {
 /// because silence is absence of evidence and this registry lists REACHABLE
 /// agents rather than live processes -- a row is never condemned for being
 /// quiet, only for an affirmative falsification.
-/// `pid_confirmed_live` is a positive measurement in its OWN right (x-9de7
-/// task 3): a row whose `short_id` and `harness_session_id` are both empty
-/// resolves to its bare `name` in `registry_truth_handle`, which the truth
-/// probe can never find, so it answers `unknown` -- unrelated to whether the
-/// worker is actually running. Only the two shapes that mean "the probe could
-/// not measure" (`Some("unknown")`, and the state fallthrough) accept the
-/// override; `reachable`/`unreachable` and `working`/`done`/`stalled` stay
-/// probe-authoritative and unchanged, matching the monotone-lowering rule
-/// (never let a weaker signal raise a row the probe positively lowered).
+///
+/// STATUS is served ACTIVITY, so a confirmed-live pid is not an input here
+/// (x-c672): a process being up says nothing about when its transcript last
+/// moved, and the Python list lane has no pid census, so a pid lift here would
+/// read the same row as two different words on the two lanes. An unanswered
+/// activity age is `unknown` on both.
 fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {
     let value = value?;
     if let Some(raw) = value.as_str() {
@@ -5932,12 +5929,11 @@ fn liveness_origin(row: &Map<String, Value>) -> (Value, Option<String>) {
 /// operator's actual question, what is this session doing: `writing` (the
 /// transcript moved inside `STALE_ATTENTION_S`), `quiet` (older), `parked`
 /// (the tail closed a promise). A positively falsified row reads `orphaned`,
-/// and a probe that did not answer reads `unknown` - unless a confirmed-live
-/// pid keeps it readable as `quiet`, the process being there either way.
-fn rendered_status_from_truth(
-    probe: Option<&crate::claude_ask::TruthProbe>,
-    pid_confirmed_live: bool,
-) -> &'static str {
+/// and a probe that did not answer reads `unknown`. A confirmed-live pid does
+/// NOT lift an unanswered age to `quiet`: the word is activity, and a process
+/// being up says nothing about when it last wrote - the same row must render
+/// the same word through the Python list lane, which has no pid census.
+fn rendered_status_from_truth(probe: Option<&crate::claude_ask::TruthProbe>) -> &'static str {
     if probe.and_then(|p| p.reachability.as_deref()) == Some("unreachable") {
         return "orphaned";
     }
@@ -5948,7 +5944,6 @@ fn rendered_status_from_truth(
             Some(_) => "quiet",
             None => "unknown",
         },
-        None if pid_confirmed_live => "quiet",
         None => "unknown",
     }
 }
@@ -6190,11 +6185,7 @@ where
             // did on the per-row path: every reader below already treats an
             // unanswered row that way.
             let truth = truths.get(&registry_truth_handle(e)).cloned();
-            let pid_confirmed_live = e
-                .pid
-                .map(|p| pid_is_ours(p, e.pid_start_time))
-                .unwrap_or(false);
-            let rendered_status = rendered_status_from_truth(truth.as_ref(), pid_confirmed_live);
+            let rendered_status = rendered_status_from_truth(truth.as_ref());
             // The whole reachability triple, not just the verdict that
             // `rendered_status` above was picked from. That rendered word says
             // WHAT the row is; the triple says which question was answered and
@@ -12314,6 +12305,9 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         e.legacy_provider = "claude".into();
         e.short_id = short_id.into();
         e.claude_session_uuid = None;
+        // A row fno itself spawned: the retirement origin gate retires only
+        // these, so every retirement-path fixture starts from spawn.
+        e.origin = Some("spawn".into());
         // x-7bcd: needs a resolvable handle; short_id is the transport key
         // this row is actually tested against, not one of the three legs.
         e.log_path = Some(format!("/tmp/{name}.log"));
@@ -14974,47 +14968,33 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     #[test]
     fn the_reachability_verdict_outranks_the_transcript_state() {
         assert_eq!(
-            rendered_status_from_truth(
-                probe_with_verdict("working", "unreachable").as_ref(),
-                false
-            ),
+            rendered_status_from_truth(probe_with_verdict("working", "unreachable").as_ref()),
             "orphaned",
             "a falsified row must not render writing merely because its transcript is recent"
         );
         // A verdict that did not resolve falls through to the ACTIVITY read:
         // a 12s-old transcript is writing whatever the state word says.
         assert_eq!(
-            rendered_status_from_truth(probe_with_verdict("stalled", "unknown").as_ref(), false),
+            rendered_status_from_truth(probe_with_verdict("stalled", "unknown").as_ref()),
             "writing"
         );
         assert_eq!(
-            rendered_status_from_truth(probe("stalled").as_ref(), false),
+            rendered_status_from_truth(probe("stalled").as_ref()),
             "unknown",
             "a probe that answered nothing reads unknown, never orphaned (x-c672)"
         );
     }
 
     #[test]
-    fn a_confirmed_live_pid_overrides_an_unresolvable_truth_probe_but_never_a_falsifier() {
-        // x-9de7 task 3 (the second render path the king's live measurement
-        // found): a row with no short_id/harness_session_id resolves through
-        // its bare name, which the truth probe can never find -- "unknown" is
-        // then a statement about missing session identity, not about whether
-        // the worker is alive. A confirmed-live pid keeps the row readable.
+    fn no_probe_at_all_reads_unknown_even_for_a_live_row() {
+        // A live pid is a fact about the PROCESS, not about served activity,
+        // so it is not an input to the STATUS word (x-c672): the Python list
+        // lane has no pid census, and an unanswered activity age must read
+        // the same word on both lanes.
         assert_eq!(
-            rendered_status_from_truth(None, true),
-            "quiet",
-            "no probe at all (too-old fno / shellout failure) + a live pid reads quiet, not unknown"
-        );
-        assert_eq!(rendered_status_from_truth(None, false), "unknown");
-        // The override is scoped to the unanswered shape ONLY. A probe
-        // that positively falsified the row (unreachable) is never raised by
-        // a live pid -- that would contradict the monotone-lowering rule
-        // task 4 exists to enforce.
-        assert_eq!(
-            rendered_status_from_truth(probe_with_verdict("working", "unreachable").as_ref(), true),
-            "orphaned",
-            "a positive falsifier must never be overridden by pid liveness"
+            rendered_status_from_truth(None),
+            "unknown",
+            "no probe at all reads unknown, never quiet"
         );
     }
 
@@ -15122,7 +15102,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     fn progress_deliberately_wedged_open_turn_is_quiet_but_not_advancing() {
         let probe = probe_with_age("working", "reachable", Some(STALE_ATTENTION_S + 1.0));
         assert_eq!(
-            rendered_status_from_truth(probe.as_ref(), true),
+            rendered_status_from_truth(probe.as_ref()),
             "quiet",
             "the process and reachability axes still say present; the transcript has not moved"
         );
@@ -15850,13 +15830,13 @@ done
         std::fs::remove_dir_all(home.root()).ok();
     }
 
-    /// The end-to-end shape of the king's live measurement (x-9de7 task 3): a
-    /// codex pane row with no short_id and no harness_session_id -- the exact
-    /// specimen -- resolves through `registry_truth_handle` to its bare name,
-    /// which no truth probe can ever find. `status` must still read `quiet`
-    /// when the pid demonstrably is there, not `unknown`.
+    /// A codex pane row with no short_id and no harness_session_id resolves
+    /// through `registry_truth_handle` to its bare name, which no truth probe
+    /// can ever find. The STATUS word is activity, so even a demonstrably live
+    /// pid cannot lift an unanswered age: the row reads `unknown`, the same
+    /// word the Python list lane renders for it.
     #[test]
-    fn list_status_is_quiet_for_an_unresolvable_row_with_a_confirmed_live_pid() {
+    fn list_status_is_unknown_for_an_unresolvable_row_even_with_a_confirmed_live_pid() {
         let home = short_home("listlivepid");
         state::update_registry(&home.registry_json(), |r| {
             let mut e = seed_bare_row("cx-x-e14b");
@@ -15870,15 +15850,14 @@ done
 
         let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| None));
         let row = &response.result().unwrap()["agents"][0];
-        assert_eq!(row["status"], "quiet");
+        assert_eq!(row["status"], "unknown");
 
         std::fs::remove_dir_all(home.root()).ok();
     }
 
-    /// The pid-liveness override never fires FOR a row the probe positively
-    /// falsified, and never fires when the pid is confirmed dead -- only
-    /// "the probe could not measure" plus "the pid is confirmed live" together
-    /// produce the override.
+    /// The pid census does not reach the STATUS word at all: with no probe
+    /// answer and no live pid, the row also reads `unknown` (the reachability
+    /// fields still carry the pid verdict on their own axis).
     #[test]
     fn list_status_stays_unknown_for_an_unresolvable_row_with_no_confirmed_live_pid() {
         let home = short_home("listnolivepid");

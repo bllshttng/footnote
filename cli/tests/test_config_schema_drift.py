@@ -65,6 +65,20 @@ def test_provider_outage_config_defaults_and_minima_are_fail_closed() -> None:
     assert (legacy.watchdog.enabled, legacy.watchdog.mode) == (True, "handoff")
     assert RecoveryBlock(watchdog="off").watchdog.enabled is False
 
+    for field, value in {
+        "provider_outage_quorum": 0,
+        "provider_outage_fup_window_seconds": 299,
+        "provider_outage_529_count": 2,
+        "provider_outage_529_span_seconds": 119,
+        "provider_outage_529_cross_session_window_seconds": 599,
+        "provider_outage_pane_freshness_seconds": 119,
+        "provider_outage_evidence_freshness_seconds": 599,
+        "provider_outage_reset_grace_seconds": 119,
+        "provider_health_marker_ttl_seconds": 119,
+    }.items():
+        with pytest.raises(ValueError, match=field):
+            RecoveryBlock.model_validate({field: value})
+
 
 def test_legacy_recovery_retire_grace_lifts_onto_agents(capsys) -> None:
     """AC6-EDGE (x-c672): the retire grace moved to the agents block with the
@@ -88,20 +102,6 @@ def test_legacy_recovery_retire_grace_lifts_onto_agents(capsys) -> None:
     fresh = ConfigBlock()
     assert fresh.agents.retire_grace_s == 900
     assert capsys.readouterr().err == ""
-
-    for field, value in {
-        "provider_outage_quorum": 0,
-        "provider_outage_fup_window_seconds": 299,
-        "provider_outage_529_count": 2,
-        "provider_outage_529_span_seconds": 119,
-        "provider_outage_529_cross_session_window_seconds": 599,
-        "provider_outage_pane_freshness_seconds": 119,
-        "provider_outage_evidence_freshness_seconds": 599,
-        "provider_outage_reset_grace_seconds": 119,
-        "provider_health_marker_ttl_seconds": 119,
-    }.items():
-        with pytest.raises(ValueError, match=field):
-            RecoveryBlock.model_validate({field: value})
 
 
 def test_registry_wizard_tiers_are_valid() -> None:

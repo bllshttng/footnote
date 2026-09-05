@@ -71,6 +71,9 @@ pub enum KeepReason {
     Operator,
     /// A crowned orchestrator row.
     Crowned,
+    /// Origin is not `spawn` (adopted, or nothing recorded): only a row fno
+    /// itself spawned retires, whatever the work state says.
+    NotSpawn { origin: String },
     /// The session is named in no node's `sessions[]`: no provenance, so no
     /// work-done verdict is possible (d-5de7067a's refuse-without-provenance).
     NoProvenance,
@@ -96,6 +99,7 @@ impl KeepReason {
         match self {
             KeepReason::Operator => "operator",
             KeepReason::Crowned => "crowned",
+            KeepReason::NotSpawn { .. } => "not a spawn row",
             KeepReason::NoProvenance => "no provenance: named in no node",
             KeepReason::OpenWork { .. } => "open work",
             KeepReason::Active { .. } => "active",
@@ -132,6 +136,14 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
     }
     if row.crowned {
         return (GcAction::Keep, Some(KeepReason::Crowned));
+    }
+    // Only a row fno itself spawned retires. An `adopted` row (a session the
+    // operator took over) or a row with no origin recorded is someone else's
+    // fact about a session, and done-plus-quiet does not make it fno's to
+    // remove.
+    if row.origin.as_deref() != Some("spawn") {
+        let origin = row.origin.clone().unwrap_or_default();
+        return (GcAction::Keep, Some(KeepReason::NotSpawn { origin }));
     }
     match &row.work {
         WorkState::NoProvenance => (GcAction::Keep, Some(KeepReason::NoProvenance)),
@@ -321,6 +333,92 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_never_stops_a_retiring_row() {
+        // A rehearsal that killed the worker it rehearsed retiring would be
+        // the destructive run wearing a dry flag. The stop seam must never
+        // fire in dry-run, even for a row that classifies Retire end to end.
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!(
+            "fno-gc-dry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = AgentsHome::at(&dir);
+        home.ensure_root().unwrap();
+        // A transcript quiet past grace: written, then aged 2000s.
+        let transcript = dir.join("rollout.jsonl");
+        std::fs::write(&transcript, b"{}\n").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2000);
+        std::fs::File::options()
+            .write(true)
+            .open(&transcript)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        crate::state::update_registry(&home.registry_json(), |r| {
+            let mut e = crate::state::RegistryEntry::default();
+            e.name = "dryw".into();
+            e.short_id = "dryw".into();
+            e.origin = Some("spawn".into());
+            e.harness = Some("codex".into());
+            e.harness_session_id = Some("S-dry".into());
+            r.entries.push(e);
+        })
+        .unwrap();
+        let mut index = HashMap::new();
+        index.insert(
+            "s-dry".to_string(),
+            vec![("N1".to_string(), "done".to_string())],
+        );
+        let graph = std::cell::RefCell::new(Some(gc_sweep::GraphRead {
+            index,
+            open_do: HashMap::new(),
+        }));
+        let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
+        let stopped = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stopped);
+        let summary = gc_sweep::run(
+            &home,
+            &emitter,
+            900,
+            true,
+            7,
+            &|_h| graph.borrow_mut().take(),
+            &|_e| Some(vec![transcript.clone()]),
+            &move |_e| {
+                flag.store(true, Ordering::SeqCst);
+                true
+            },
+            &|_e| (None, None),
+            &|_e| {},
+        );
+        assert!(
+            !stopped.load(Ordering::SeqCst),
+            "the stop seam fired in dry-run"
+        );
+        assert_eq!(
+            summary.retired.len(),
+            1,
+            "the row still classifies would-retire"
+        );
+        assert!(
+            crate::state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .iter()
+                .any(|e| e.name == "dryw"),
+            "dry-run mutated the registry"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn ac3_edge_operator_crown_open_work_and_active_keep() {
         let operator = GcRow {
             origin: Some("operator".into()),
@@ -339,6 +437,29 @@ mod tests {
             gc_decide(&crowned, GRACE),
             (GcAction::Keep, Some(KeepReason::Crowned))
         );
+
+        // Only a spawn row retires: adopted (and an unrecorded origin) keep
+        // whatever the work state says - done-plus-quiet is not fno's to act
+        // on for a session it did not spawn.
+        for origin in ["adopted", "operator", ""] {
+            let not_spawn = GcRow {
+                origin: if origin.is_empty() {
+                    None
+                } else {
+                    Some(origin.into())
+                },
+                ..retiring()
+            };
+            let (action, reason) = gc_decide(&not_spawn, GRACE);
+            assert_eq!(action, GcAction::Keep, "origin {origin:?}");
+            assert!(
+                matches!(
+                    reason,
+                    Some(KeepReason::NotSpawn { .. }) | Some(KeepReason::Operator)
+                ),
+                "origin {origin:?} named its gate"
+            );
+        }
 
         let open = GcRow {
             work: WorkState::Open {
@@ -434,13 +555,20 @@ mod tests {
         };
         assert_eq!(tree_action(&bare), TreeAction::None);
 
-        // origin None is NOT the operator fact; an unstamped spawn row with
-        // done work and a quiet transcript still retires.
+        // origin None is NOT the spawn fact: with no origin recorded, done
+        // work and a quiet transcript still keep the row - only an explicit
+        // spawn origin retires, and retiring() above carries one.
         let unstamped = GcRow {
             origin: None,
             ..retiring()
         };
-        assert_eq!(gc_decide(&unstamped, GRACE), (GcAction::Retire, None));
+        assert_eq!(
+            gc_decide(&unstamped, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::NotSpawn { origin: "".into() })
+            )
+        );
     }
 
     #[test]

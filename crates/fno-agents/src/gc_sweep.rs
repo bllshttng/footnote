@@ -43,6 +43,9 @@ pub struct GcSummary {
     pub pruned: Vec<(String, String)>,
     pub kept_operator: Vec<String>,
     pub kept_crowned: Vec<String>,
+    /// `(id, origin)`: origin is not `spawn` (adopted, unknown spelling), so
+    /// a sweep never removes it - only a row fno itself spawned retires.
+    pub kept_not_spawn: Vec<(String, String)>,
     /// Named in no node's `sessions[]`: no provenance, no work-done verdict.
     pub kept_no_provenance: Vec<String>,
     /// `(id, node, status)`: a named node is not done; the first open one.
@@ -273,6 +276,7 @@ pub(crate) fn run(
             match reason {
                 Some(KeepReason::Operator) => summary.kept_operator.push(id),
                 Some(KeepReason::Crowned) => summary.kept_crowned.push(id),
+                Some(KeepReason::NotSpawn { origin }) => summary.kept_not_spawn.push((id, origin)),
                 Some(KeepReason::NoProvenance) => summary.kept_no_provenance.push(id),
                 Some(KeepReason::OpenWork { node, status }) => {
                     summary.kept_open_work.push((id, node, status))
@@ -288,8 +292,11 @@ pub(crate) fn run(
             continue;
         }
         // A retiring row first confirms its process is stopped: a refusal
-        // keeps the row this tick and names the refusal.
-        if !stop_confirmed(e) {
+        // keeps the row this tick and names the refusal. DRY-RUN never stops
+        // anything - a rehearsal that killed the worker it rehearsed
+        // retiring would be the destructive run wearing a dry flag.
+        let stopped = if dry_run { true } else { stop_confirmed(e) };
+        if !stopped {
             summary
                 .stop_refused
                 .push((id, "the stop did not confirm; row kept for retry".into()));

@@ -218,14 +218,6 @@ def test_old_passed_plus_new_live_429_waits_for_provider_quorum():
     assert "provider quorum" in v.basis
 
 
-
-
-
-
-
-
-
-
 def test_stopped_row_is_wakeable():
     rows = [Row("dddd4444-0000", "k1", "stopped", None, "/tmp/k1")]
     [v] = _run(rows, {"dddd4444-0000": _facts("stopped mid turn", age_min=130)})
@@ -244,8 +236,6 @@ def test_wake_age_ceiling_buckets_old_rows_as_stale_not_wake():
     assert v.action == "report"
     outcome, _ = apply_verdict(v, lanes="all")
     assert outcome == watchdog.SKIPPED
-
-
 
 
 def test_no_deliverable_ages_into_stale():
@@ -313,8 +303,6 @@ def test_busy_row_without_transcript_is_ghost():
     rows = [Row("ffff6666-0000", "b1", "busy", None, "/tmp/b1")]
     [v] = _run(rows, {})
     assert v.verdict == GHOST
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -457,8 +445,6 @@ def test_wake_confirmation_scans_past_the_classification_tail(monkeypatch):
     )
 
 
-
-
 def test_rows_without_a_session_id_are_skipped_loudly(monkeypatch, tmp_path):
     """A short id never resolves a transcript, so a live row keyed on it
     reads ghost. Such rows are skipped with a warning, never classified."""
@@ -480,10 +466,6 @@ def test_rows_without_a_session_id_are_skipped_loudly(monkeypatch, tmp_path):
     rows, warnings = watchdog.fleet_rows()
     assert [r.row_id for r in rows] == ["baf9409a-2af5-444a-846c-059e8fa2f758"]
     assert any("no session id" in w for w in warnings)
-
-
-
-
 
 
 def test_reroute_delegates_to_the_full_failover(monkeypatch):
@@ -586,56 +568,6 @@ def test_reroute_receipts_tell_the_truth(monkeypatch):
 RETIRE_GRACE = 900
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_every_registry_row_is_born_with_an_origin_and_a_substrate():
     """The producer half, and it has to cover EVERY birth site in BOTH languages.
 
@@ -729,24 +661,6 @@ def test_every_registry_row_is_born_with_an_origin_and_a_substrate():
     )
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Retire on EITHER the worker's own closed promise OR external proof the work
 # landed (node done AND its PR merged). Both halves of the external marker are
@@ -762,28 +676,6 @@ RECAP_TAIL = (
 )
 
 MERGED_NODE = {"status": "done", "merge_status": "merged"}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_one_rotation_per_sweep_across_reroute_rows(monkeypatch):
@@ -854,8 +746,6 @@ def test_wake_confirmation_polls_for_the_flushed_turn(monkeypatch):
         "dddd4444-0000", "/tmp/k1", "continue", NOW_1840 - 600,
         attempts=3, interval_s=0.0, sleep=lambda _s: None,
     )
-
-
 
 
 def test_persisted_registry_node_precedes_manifest_and_ledger_fallbacks(
@@ -1477,8 +1367,6 @@ def test_ac12_obs_sweep_file_never_invents_measured_provider_evidence(
         "counts": {"provider_outage_report_missing": 1},
         "refusals": [{"reason": "provider_outage_report_missing", "count": 1}],
     }
-
-
 
 
 @pytest.mark.parametrize("mode", ["off", "report", "wake"])
@@ -2694,16 +2582,6 @@ def test_the_sweep_buys_the_whole_fleet_not_the_interactive_budget(monkeypatch):
     assert spent["timeout"] > claude_mod._AGENTS_JSON_TIMEOUT_DEFAULT
 
 
-
-
-
-
-
-
-
-
-
-
 def test_ledger_join_reads_the_singular_session_key_without_spreading_it(
     monkeypatch, tmp_path
 ):
@@ -2749,10 +2627,6 @@ def test_row_state_survives_an_alias_rename_and_odd_casing():
     state, warning = watchdog._row_state({"state": "quiescing"})
     assert state == "quiescing" and "unmapped" in warning
     assert watchdog._row_state({})[1]
-
-
-
-
 
 
 def test_the_roster_warns_before_it_outgrows_its_budget(monkeypatch):
@@ -2838,10 +2712,6 @@ def test_the_second_spelling_of_blocked_reaches_the_quorum_hold():
         assert "provider quorum" in v.basis
 
 
-
-
-
-
 def test_the_roster_refusal_carries_its_cause(monkeypatch, tmp_path, capsys):
     """The refusal says the roster was unreadable; the warnings say WHY.
     Dropping them leaves the one actionable line on the floor."""
@@ -2885,19 +2755,6 @@ def test_a_watchdog_event_uses_a_source_the_schema_accepts(tmp_path, monkeypatch
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_a_hand_run_sweep_does_not_report_the_cadence_stale(tmp_path, monkeypatch):
     """One file serves both cadences, so a manual write used to erase the
     only evidence the tick had run. Status then blamed the daemon for the
@@ -2912,8 +2769,6 @@ def test_a_hand_run_sweep_does_not_report_the_cadence_stale(tmp_path, monkeypatc
     # And a cadence that really died still reads stale, hand-run or not.
     dead = watchdog.sweep_staleness(NOW_1840 + 7200, stale_after_s=3600)
     assert dead["stale"] is True, dead
-
-
 
 
 def test_reroute_refuses_a_shared_manifest_it_would_respawn_from(monkeypatch):
@@ -2934,10 +2789,6 @@ def test_reroute_refuses_a_shared_manifest_it_would_respawn_from(monkeypatch):
     assert "not a linked worktree" in detail
 
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # the unclaimed advisory (x-cd1e)
 # ---------------------------------------------------------------------------
@@ -2954,8 +2805,6 @@ def test_a_live_row_on_an_unclaimed_node_is_flagged():
     )
     assert v.verdict == UNCLAIMED
     assert "node x-76d1 carries NO claim while this row is live" in v.basis
-
-
 
 
 def test_a_claimed_node_reads_leave_exactly_as_before():
@@ -2980,8 +2829,6 @@ def test_an_unresolved_node_is_never_flagged():
         claims={"x-76d1": {"state": "free"}},
     )
     assert v.verdict == LEAVE
-
-
 
 
 @pytest.mark.parametrize("state", ["done", "completed", "exited", "killed", "stopped"])
@@ -3076,26 +2923,6 @@ def test_the_advisory_reaches_the_digest():
 
 # 30 minutes before NOW_1840, so it is INSIDE REAP_RECENT_MESSAGE_S (2h).
 RECENT_MESSAGE_STAMP = "2026-08-16T18:10:00Z"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -3666,14 +3493,10 @@ def test_ac9_census_both_callers_route_through_one_producer():
     assert "_uw.build_report" in tick and "_uw.publish_report" in tick
 
 
-
-
 def _function_body(src: str, name: str) -> str:
     start = src.index(f"def {name}(")
     nxt = src.find("\ndef ", start + 1)
     return src[start : nxt if nxt != -1 else len(src)]
-
-
 
 
 def test_ac9_budget_spent_before_scanning_reads_unknown_never_clean(tmp_path):
@@ -3964,15 +3787,5 @@ def _receipt_row(**over):
     for k, v in over.items():
         setattr(row, k, v)
     return row
-
-
-
-
-
-
-
-
-
-
 
 

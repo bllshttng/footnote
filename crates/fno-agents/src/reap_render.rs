@@ -57,6 +57,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "pruned": pruned,
                 "kept_operator": summary.kept_operator,
                 "kept_crowned": summary.kept_crowned,
+                "kept_not_spawn": pair(&summary.kept_not_spawn),
                 "kept_no_provenance": summary.kept_no_provenance,
                 "kept_open_work": open_work,
                 "kept_open_do_row": open_do,
@@ -91,6 +92,14 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     }
     for id in &summary.kept_crowned {
         out.push_str(&format!("  kept {id} (crowned)\n"));
+    }
+    for (id, origin) in &summary.kept_not_spawn {
+        let why = if origin.is_empty() {
+            "no origin recorded".to_string()
+        } else {
+            format!("origin {origin}")
+        };
+        out.push_str(&format!("  kept {id} (not a spawn row: {why})\n"));
     }
     for id in &summary.kept_no_provenance {
         out.push_str(&format!("  kept {id} (no provenance: named in no node)\n"));
@@ -174,6 +183,7 @@ mod tests {
             "pruned",
             "kept_operator",
             "kept_crowned",
+            "kept_not_spawn",
             "kept_no_provenance",
             "kept_open_work",
             "kept_open_do_row",

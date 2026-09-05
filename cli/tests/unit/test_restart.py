@@ -257,14 +257,14 @@ def test_restart_mux_revives_orphaned_claude_workers(monkeypatch) -> None:
     _revive_setup(monkeypatch, calls)
     orphan = {
         "name": "worker1",
-        "status": "live",
+        "status": "writing",
         "harness": "claude",
         "session_id": "uuid-1",
         "cwd": "/w1",
     }
     survivor = {
         "name": "bgw",
-        "status": "live",
+        "status": "writing",
         "harness": "claude",
         "session_id": "uuid-2",
         "cwd": "/w2",
@@ -316,7 +316,7 @@ def test_restart_explicit_revive_flag_wins_over_config_disabled(monkeypatch) -> 
     _revive_setup(monkeypatch, calls)
     monkeypatch.setattr(
         restart, "_agents_rows",
-        lambda: [{"name": "w", "status": "live"}],
+        lambda: [{"name": "w", "status": "writing"}],
     )
     monkeypatch.setattr(restart, "_revive_enabled", lambda: False)
 
@@ -341,7 +341,7 @@ def test_restart_revive_skips_worker_without_resumable_session(monkeypatch) -> N
     reported as skipped, never spawned blind."""
     calls: list = []
     _revive_setup(monkeypatch, calls)
-    row = {"name": "codexw", "status": "live", "harness": "codex", "session_id": None}
+    row = {"name": "codexw", "status": "writing", "harness": "codex", "session_id": None}
     _rows_seq(monkeypatch, [[row], [dict(row, status="exited")]])
 
     result = runner.invoke(app, ["agents", "restart", "--mux", "--json"])
@@ -363,7 +363,7 @@ def test_restart_revive_failure_reported_not_fatal(monkeypatch) -> None:
         return types.SimpleNamespace(returncode=rc, stdout="", stderr="")
 
     monkeypatch.setattr(restart.subprocess, "run", _run)
-    row = {"name": "worker1", "status": "live", "harness": "claude", "session_id": "uuid-1"}
+    row = {"name": "worker1", "status": "writing", "harness": "claude", "session_id": "uuid-1"}
     _rows_seq(monkeypatch, [[row], [dict(row, status="exited")]])
 
     result = runner.invoke(app, ["agents", "restart", "--mux", "--json"])
