@@ -105,7 +105,10 @@ fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
     fs::write(
         fno_dir.join("config.toml"),
         format!(
-            "[paths]\ngraph_json = \"{}\"\noperator_lane = \"{}\"\n",
+            "[paths]\ngraph_json = \"{}\"\noperator_lane = \"{}\"\n\n\
+             # The scope queue's project map reads work.workspaces; a machine \
+             # with no global config.toml must see the fixture as complete.\n\
+             [work.workspaces]\n",
             graph.display(),
             home.join("lane.md").display()
         ),
