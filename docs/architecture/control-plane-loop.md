@@ -10,9 +10,18 @@ The stop hook reads the world; it does not maintain state. The only writer is th
 
 ## The arms tick ledger (x-1b88)
 
-Every scheduled arm of the control plane appends one `control_plane_tick` row to the journal it already uses, saying what it did or why it did nothing: `data{arm, scheduler, acted, skip_reason, detail, interval_s}`. The arms: `king_wake`, `watchdog`, `pr_watch_merge` (all riding the pr-watch launchd tick), `active_backlog` (the daemon's mission drain), `auto_continue` (advance calls, plus a 1800s reconcile heartbeat from the launchd agent, gated on `FNO_CONTROL_PLANE_SCHEDULER`), and `stop_hook` (the shim below). The row shape is owned by `crates/fno-agents/src/tick_ledger.rs`; Python arms emit through `cli/src/fno/control_plane.py`, and `cli/src/fno/events/schema.yaml` pins both validators on it.
+Every scheduled arm appends one `control_plane_tick` row to the journal it already uses. The row says what the arm did, or why it did nothing: `data{arm, scheduler, acted, skip_reason, detail, interval_s}`.
 
-The readout: `fno agents status` prints one row per arm (newest tick across the journals, red when older than twice the row's own `interval_s`; an arm that never ticked reads red with `skip_reason: never`). `fno doctor` names every stale arm with its last skip reason. `stop_hook` is event-driven (`interval_s: 0`) and never reads stale from quiet. An unreadable readout reports unknown, never green.
+The arms:
+
+- `king_wake`, `watchdog`, `pr_watch_merge`: they ride the pr-watch launchd tick.
+- `active_backlog`: the daemon's mission drain, one row per tick.
+- `auto_continue`: every `advance` call, plus a 1800s reconcile heartbeat from the launchd agent. The heartbeat is gated on `FNO_CONTROL_PLANE_SCHEDULER` so a SessionStart reconcile cannot mask a dead agent.
+- `stop_hook`: the shim below, one row per fire.
+
+The row shape is owned by `crates/fno-agents/src/tick_ledger.rs`. Python arms emit through `cli/src/fno/control_plane.py`. `cli/src/fno/events/schema.yaml` pins both validators on the shape.
+
+The readout: `fno agents status` prints one row per arm. When a row's newest tick is older than twice the row's own `interval_s`, the row is red. An arm that never ticked reads red with `skip_reason: never`. `fno doctor` names every stale arm with its last skip reason. `stop_hook` is event-driven (`interval_s: 0`) and never reads stale from quiet. An unreadable readout reports unknown, never green.
 
 ## What was deleted
 
