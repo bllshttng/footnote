@@ -45,6 +45,8 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from pathlib import Path
 
+from fno.review.invocation import VERIFY_FIXES
+
 
 # Not one of ``claims.io._GLOBAL_ID_PREFIXES``, so the key routes to the
 # canonical repo root: every linked worktree of a project shares one hold, and
@@ -165,7 +167,7 @@ def acquire_review_hold(
 
 # --- The review-cap invocation gate: the cap held at the merge decision only,
 # so rounds three through five ran against a saturated counter.
-VERIFY_FIXES_FLAG = "--verify-fixes"  # matches invocation.KNOWN_REVIEW_FLAGS
+VERIFY_FIXES_FLAG = f"--{VERIFY_FIXES}"  # spelled by invocation, the flag authority
 
 
 def _code_patch_lines(cwd: str, base: str, sha: str) -> Optional[list[str]]:
