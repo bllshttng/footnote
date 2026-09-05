@@ -3447,17 +3447,27 @@ def test_rests_on_self_attestation_counts_an_absent_origin_as_self_attested():
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
 
 
-def test_rests_on_self_attestation_counts_an_unknown_origin_as_self_attested():
-    """Unknown arm: a read whose process
-    resolved no authoring session serializes attestation_origin "unknown".
-    Unknown authorship is not corroboration; the gate refuses."""
+def test_rests_on_self_attestation_clears_an_explicit_unknown_origin():
+    """Unknown arm: a read whose process resolved no authoring session
+    serializes attestation_origin "unknown" - the classifier ran and could
+    not attribute authorship. Unmeasurable is not absent: the gate neither
+    counts it as corroboration nor blocks the PR it rode in on. Refusing
+    here wedged real peer reviews on exactly the reads that can never
+    measure them."""
     cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("unknown")]}
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is False
+
+
+def test_rests_on_self_attestation_still_counts_an_unrecognized_origin():
+    """A value outside the known set refuses like an absent key: a row
+    carrying a nonsense origin cannot prove an independent reviewer."""
+    cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("garbage")]}
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
 
 
 def test_rests_on_self_attestation_still_clears_a_measured_other_session():
     """The one origin that proves the count is not the author's own stays a
-    measured other_session. Absent and unknown refuse; this clears."""
+    measured other_session. This clears; absent and unrecognized refuse."""
     cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("other_session")]}
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is False
 
@@ -3467,11 +3477,11 @@ def test_rests_on_self_attestation_reroutes_a_recorded_zero_through_verdicts():
     counted local verdicts is either a real other-session measurement or
     authorship that could not be measured, and the zero cannot tell them
     apart. The measured event carried self_attested_count 0 beside an
-    unknown-origin verdict; the verdicts rule must settle it, so the gate
-    refuses instead of clearing on 0 != 1."""
+    unknown-origin verdict; the verdicts rule settles it per row, and the
+    explicit unknown clears."""
     cov = {
         "reviewed_count": 1,
         "self_attested_count": 0,
         "verdicts": [_carried_local_row("unknown")],
     }
-    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is False

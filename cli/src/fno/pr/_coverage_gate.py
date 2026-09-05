@@ -511,11 +511,15 @@ def rests_on_self_attestation_alone(
     zero cannot tell the two apart. The verdicts rule settles it per row.
 
     That rule fails closed on authorship: a counted local_attestation
-    is treated as the author's own UNLESS its origin is a measured
-    ``other_session``. An absent key, the explicit ``unknown``, or any
-    unrecognized value means the row cannot prove an independent reviewer,
-    and a row that cannot prove one is not evidence of one - the gate refuses
-    rather than clears.
+    is treated as the author's own UNLESS its origin reads ``other_session``
+    (a measured peer). An absent key or an unrecognized value means the row
+    cannot prove an independent reviewer, and a row that cannot prove one is
+    not evidence of one - the gate refuses rather than clears. The explicit
+    ``unknown`` is the third reading, unmeasurable rather than absent: the
+    classifier ran and could not attribute authorship (a canonical read
+    resolves no target manifest). It is not corroboration, but it does not
+    block either - refusing it wedged real peer reviews on exactly the reads
+    that can never measure them.
 
     ``github_approval_satisfies`` is the resolved config flag, and it reaches
     the verdicts fallback through ``_reviews._human_approval_counts`` - the
@@ -550,7 +554,7 @@ def rests_on_self_attestation_alone(
     ]
     return bool(counted) and all(
         v.get("producer") == "local_attestation"
-        and v.get("attestation_origin") != "other_session"
+        and v.get("attestation_origin") not in ("other_session", "unknown")
         for v in counted
     )
 
@@ -568,9 +572,9 @@ def _corroboration_verdict(cov: Optional[dict], cwd: str) -> Tuple[str, str]:
     it was a third implementation of one counting rule.
 
     Empty on both when the row carries corroboration, when authorship is
-    unmeasured (not proof of corroboration, but not proof of its absence
-    either - fail open, as the Rust-side predicate does), or when the config
-    is unreadable.
+    explicitly unknown (unmeasurable, not absent - fail open here; the
+    Rust-side predicate collapses absent and unknown into one variant and
+    refuses both), or when the config is unreadable.
     """
     if not cov:
         return "", ""
