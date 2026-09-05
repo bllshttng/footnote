@@ -346,6 +346,33 @@ pub fn dead_row_grace_secs(cwd: &Path, harness: &str) -> u64 {
 /// survives a week by default before the GC sweep expires it (x-6db9).
 pub const DEFAULT_REAP_RECEIPT_RETAIN_DAYS: u64 = 7;
 
+/// Default retire grace: 15 minutes of transcript quiet past done work before
+/// a row retires (x-c672; the retired `recovery.retire_grace_s` default).
+pub const DEFAULT_RETIRE_GRACE_SECS: u64 = 900;
+
+/// Resolve `agents.retire_grace_s` for the retirement sweep. The legacy key
+/// `recovery.retire_grace_s` is read with the same precedence (coerced with a
+/// warning on the Python side; here it silently feeds the same default
+/// ladder). `$FNO_AGENTS_RETIRE_GRACE_SECS` is a global test/tuning override.
+pub fn retire_grace_secs(cwd: &Path) -> u64 {
+    if let Some(v) = non_empty_env("FNO_AGENTS_RETIRE_GRACE_SECS")
+        .and_then(|s| s.to_str().and_then(|s| s.trim().parse::<u64>().ok()))
+    {
+        return v;
+    }
+    resolve(cwd, |t| {
+        let scalar = |table: &str| -> Option<u64> {
+            t.get(table)?
+                .as_table()?
+                .get("retire_grace_s")?
+                .as_integer()
+                .and_then(|i| u64::try_from(i).ok())
+        };
+        scalar("agents").or_else(|| scalar("recovery"))
+    })
+    .unwrap_or(DEFAULT_RETIRE_GRACE_SECS)
+}
+
 /// Resolve `agents.reap_receipts.retain_days` for the GC sweep's receipt
 /// expiry, same precedence + fail-open degrade as [`dead_row_grace_secs`]:
 /// an unparseable value degrades to the default rather than deleting every
