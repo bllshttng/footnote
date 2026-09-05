@@ -6181,6 +6181,17 @@ def rpc_roundtrip(
         sock.close()
 
 
+def agents_home() -> Path:
+    """The fno-agents home, resolved as the Rust client does:
+    ``$FNO_AGENTS_HOME`` else ``$HOME/.fno/agents``."""
+    import os
+
+    env = os.environ.get("FNO_AGENTS_HOME")
+    if env:
+        return Path(env)
+    return Path(os.path.expanduser("~")) / ".fno" / "agents"
+
+
 def _daemon_rpc(
     method: str,
     params: dict,
@@ -6190,23 +6201,12 @@ def _daemon_rpc(
 ) -> Optional[dict]:
     """Send one JSON-RPC request to the daemon and return the result dict.
 
-    The daemon socket is resolved exactly as the Rust client does: read
-    ``FNO_AGENTS_HOME`` env var; if absent, use ``$HOME/.fno/agents/``;
-    the supervisor socket is ``supervisor.sock`` inside that directory.
-
+    The supervisor socket is ``supervisor.sock`` inside :func:`agents_home`.
     None on any transport error or ``error`` response (the
     :func:`rpc_roundtrip` contract, exactly one attempt); callers demote to
     durable on any falsy return.
     """
-    import os
-
-    # Resolve the supervisor socket path using the same env-var logic as Rust.
-    agents_home = os.environ.get("FNO_AGENTS_HOME")
-    if agents_home:
-        sock_path = Path(agents_home) / "supervisor.sock"
-    else:
-        home = Path(os.path.expanduser("~"))
-        sock_path = home / ".fno" / "agents" / "supervisor.sock"
+    sock_path = agents_home() / "supervisor.sock"
 
     def _note(message: str) -> None:
         print(message, file=sys.stderr)
