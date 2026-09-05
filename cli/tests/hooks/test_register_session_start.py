@@ -26,7 +26,10 @@ def test_register_session_start_shell_syntax() -> None:
     subprocess.run(["bash", "-n", str(HOOK)], check=True)
 
 
-def test_codex_thread_id_wins_with_mocked_uv(tmp_path: Path) -> None:
+def test_codex_disagreeing_ids_register_no_row(tmp_path: Path) -> None:
+    """The resolvers degrade a same-family id disagreement to unresolved; a row
+    registered under the table-first id is one this session can never resolve
+    against, so the hook registers nothing instead."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     capture = tmp_path / "uv-argv"
@@ -49,9 +52,35 @@ def test_codex_thread_id_wins_with_mocked_uv(tmp_path: Path) -> None:
     }
     subprocess.run(["bash", str(HOOK)], check=True, env=env)
 
+    assert not capture.exists(), "a disagreed id family must not register a row"
+
+
+def test_codex_same_value_dup_registers_once(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture = tmp_path / "uv-argv"
+    uv = bin_dir / "uv"
+    uv.write_text(
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$UV_CAPTURE\"\n",
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+    _mock_fno_auto_register(bin_dir)
+
+    env = {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "CLAUDE_PROJECT_DIR": str(tmp_path),
+        "CODEX_PLUGIN_ROOT": str(ROOT),
+        "CODEX_THREAD_ID": "same-id",
+        "CODEX_SESSION_ID": "same-id",
+        "UV_CAPTURE": str(capture),
+    }
+    subprocess.run(["bash", str(HOOK)], check=True, env=env)
+
     argv = capture.read_text(encoding="utf-8").splitlines()
     assert argv[argv.index("--harness") + 1] == "codex"
-    assert argv[argv.index("--session-id") + 1] == "thread-wins"
+    assert argv[argv.index("--session-id") + 1] == "same-id"
 
 
 def test_shared_codex_session_start_registers_thread_once(tmp_path: Path) -> None:

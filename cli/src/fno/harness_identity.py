@@ -813,11 +813,12 @@ def resolve_owned_identity(
             )
         if verdict is None and present:
             # A silent prover is not a refusal: fall through to the marker
-            # loop below, which collides ONCE for the id and answers by the
-            # same single-family elimination resolve_harness_identity gives
-            # the dominant case (x-0992 - the hard ambiguous here refused
-            # every pane-spawned worker). A contested id is rejected there,
-            # so a stamped id a live stranger owns still refuses, named.
+            # loop below, which collides once per distinct id and answers by
+            # the same single-family elimination resolve_harness_identity
+            # gives the dominant case (x-0992 - the hard ambiguous here
+            # refused every pane-spawned worker). A contested id is rejected
+            # there, so a stamped id a live stranger owns still refuses,
+            # named.
             pass
         else:
             owner = collide(identity.harness, identity.session_id) if collide else None
@@ -842,6 +843,17 @@ def resolve_owned_identity(
     proven: list[tuple[str, str, str]] = []
     contradicted = False
     unresolved: list[tuple[str, str, str]] = []
+    collide_memo: dict[tuple[str, str], Optional[str]] = {}
+
+    def collide_once(harness: str, value: str) -> Optional[str]:
+        # Same-value dups (codex thread id + legacy session id carrying one id)
+        # must collide ONCE per distinct id: the callback reloads the registry
+        # on every call.
+        key = (harness, session_identity_key(value))
+        if key not in collide_memo:
+            collide_memo[key] = collide(harness, value) if collide is not None else None
+        return collide_memo[key]
+
     for marker, harness, value in markers:
         verdict = prove(harness, value) if prove is not None else None
         if verdict is True:
@@ -849,7 +861,7 @@ def resolve_owned_identity(
             # not a foreign owner, so a proven marker is never decided by collision.
             proven.append((marker, harness, value))
             continue
-        owner = collide(harness, value) if collide is not None else None
+        owner = collide_once(harness, value)
         if owner:
             # Observability only: records the owner for the event. Collision never
             # stamps a fallback here - without proof it can reject the session's

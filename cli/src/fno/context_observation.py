@@ -67,6 +67,7 @@ def _identity(hook_input: bytes, explicit_entry: str | None) -> tuple[str, str, 
     # it would be guessing (x-0992).
     family_value_keys: dict[str, str] = {}
     picked_by: str = ""
+    conflicted = False
     for marker, marker_harness in HARNESS_SESSION_MARKERS:
         value = (os.environ.get(marker) or "").strip()
         if not value:
@@ -74,13 +75,17 @@ def _identity(hook_input: bytes, explicit_entry: str | None) -> tuple[str, str, 
         seen = family_value_keys.get(marker_harness)
         if seen is None:
             family_value_keys[marker_harness] = session_identity_key(value)
-            if not harness:
-                harness = marker_harness
-            if not session_id:
-                session_id = value
-                picked_by = marker_harness
+            if not conflicted:
+                # A family that already disagreed has forfeited the id slot;
+                # a later family must not refill it with its own id.
+                if not harness:
+                    harness = marker_harness
+                if not session_id:
+                    session_id = value
+                    picked_by = marker_harness
         elif seen != session_identity_key(value):
             family_value_keys[marker_harness] = "conflicted"
+            conflicted = True
             if picked_by == marker_harness:
                 session_id = ""
                 picked_by = ""

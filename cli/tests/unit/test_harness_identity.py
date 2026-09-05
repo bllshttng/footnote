@@ -1376,3 +1376,23 @@ def test_resolve_attester_identity_corroborates_the_own_id():
         # corroborated where it was readable (process) and honestly
         # env_only where it was not. Either is correct; a raise is not.
         assert witness in ("process", "env_only")
+
+
+def test_owned_collides_once_per_distinct_id_for_same_value_dups():
+    # A codex dup carrying one id on both markers must reach the collide
+    # callback once: the callback reloads the registry on every call.
+    env = {"CODEX_THREAD_ID": "same-1", "CODEX_SESSION_ID": "same-1"}
+    calls: list[tuple[str, str]] = []
+
+    def collide(harness: str, session_id: str):
+        calls.append((harness, session_id))
+        return None
+
+    owned = resolve_owned_identity(env, prove=None, collide=collide)
+
+    assert (owned.session_id, owned.harness, owned.disposition) == (
+        "same-1",
+        "codex",
+        "single",
+    )
+    assert calls == [("codex", "same-1")]
