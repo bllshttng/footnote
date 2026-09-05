@@ -61,6 +61,7 @@ use crate::vt::{self, frame_text, Modes};
 mod agent_actions;
 mod agent_rows_join;
 mod portal_reach;
+mod squad_sync;
 
 use self::agent_actions::{
     run_agent_action, run_agent_rename, run_mail_send, run_reap, run_reentry_plan,
@@ -8233,23 +8234,7 @@ impl Core {
         );
         match outcome {
             Ok(outcome) => {
-                let loaded = crate::squad_store::load();
-                let identities: HashMap<(String, String), Vec<_>> = loaded
-                    .squads
-                    .into_iter()
-                    .map(|s| ((s.name, s.key), s.members))
-                    .collect();
-                let sids: Vec<u64> = self.squad_members.keys().copied().collect();
-                for sid in sids {
-                    let Some((name, key)) = self.squad_identity(sid) else {
-                        continue;
-                    };
-                    if let Some(members) = identities.get(&(name, key)) {
-                        self.squad_members.insert(sid, members.clone());
-                    } else {
-                        self.squad_members.insert(sid, Vec::new());
-                    }
-                }
+                self.reload_members_from_store();
                 // Refused restore placeholders are positive dead markers even
                 // when their registry row is gone. Remove their visible panes
                 // after the store pass; keep a last pane so the session's
