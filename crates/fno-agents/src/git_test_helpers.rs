@@ -28,3 +28,16 @@ pub(crate) fn git_init(repo: &std::path::Path) -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+/// Run git with the snapshot binary and pinned config sources.
+pub(crate) fn git_run(
+    args: &[&str],
+    cwd: &std::path::Path,
+) -> std::io::Result<std::process::Output> {
+    std::process::Command::new(git_bin())
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+}

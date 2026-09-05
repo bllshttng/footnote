@@ -320,6 +320,7 @@ mod tests {
     fn holder_activity_reads_only_positive_evidence() {
         let active = crate::claude_ask::TruthProbe {
             state: "working".to_string(),
+            harness_title: None,
             reachability: None,
             basis: None,
             last_activity_age_s: Some(30.0),
