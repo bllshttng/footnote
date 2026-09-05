@@ -55,6 +55,7 @@ from typing import Any, Literal, NamedTuple, Optional
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
 from fno.agents.naming import agent_name
+from fno.control_plane import emit_tick, scheduler_from_env
 from fno.provenance import autobrief as _autobrief
 
 _LOG = logging.getLogger(__name__)
@@ -3177,8 +3178,6 @@ def advance(
 
     def _tick(acted: int, skip_reason: Optional[str], detail: str = "") -> None:
         """One auto-continue arm row: what this advance did, or why not."""
-        from fno.control_plane import emit_tick, scheduler_from_env
-
         emit_tick("auto_continue", scheduler=scheduler_from_env(), interval_s=1800,
                   acted=acted, skip_reason=skip_reason,
                   detail=(f"closed={closed_node_id or '-'} {detail}")[:200] or None)
