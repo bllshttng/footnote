@@ -1064,7 +1064,7 @@ def tick() -> None:
         _emit_event("pr_watch_tick_end", end_data)
         # Arms-readout row for the dispatch legs (or why they never ran): same
         # finally contract as the end record; skip is the outcome token.
-        _emit_tick_row("pr_watch_merge", interval_s=settings.pr_watch.interval_seconds,
+        _emit_tick_row("pr_watch_merge", interval_s=cfg.interval_seconds,
                        acted=int(getattr(result, "acted", 0) or 0),
                        skip_reason=outcome if outcome in
                        ("disabled", "lock_held", "quota_skip", "error", "timeout") else None,
