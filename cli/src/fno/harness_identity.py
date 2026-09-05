@@ -767,7 +767,10 @@ def resolve_owned_identity(
     consulting the collider, in both branches; collision then rejects ids a
     live row owns when proof is absent or negative (the owner is named); a
     marker the prover actively contradicts is excluded; among the rest, the
-    sole surviving family wins or the result degrades to ``None``.
+    sole surviving family wins or the result degrades to ``None``. The
+    canonical branch joins that elimination when its prover is silent and
+    nothing contends: a stamp-resolved identity nobody else owns is the
+    same answer the marker loop gives, not a refusal (x-0992).
     """
     environ = os.environ if env is None else env
     markers = present_harness_markers(environ)
@@ -803,10 +806,21 @@ def resolve_owned_identity(
                 None, None, present, "ambiguous", canonical_rejected
             )
         if verdict is not True:
-            return OwnedHarnessIdentity(None, None, present, "ambiguous")
-        return OwnedHarnessIdentity(
-            identity.session_id, identity.harness, present, "canonical"
-        )
+            if verdict is None and not owner and present:
+                # A silent prover with no contention is not a refusal: fall
+                # through to the marker loop below, whose single-family
+                # elimination answers exactly what resolve_harness_identity
+                # answers for the dominant case (x-0992 - a pane-spawned
+                # worker has no session id in its stamp and no ancestor to
+                # walk, and the hard ambiguous here refused every one of
+                # them). A contradicted marker (verdict False) still refuses.
+                pass
+            else:
+                return OwnedHarnessIdentity(None, None, present, "ambiguous")
+        else:
+            return OwnedHarnessIdentity(
+                identity.session_id, identity.harness, present, "canonical"
+            )
     if not markers:
         return OwnedHarnessIdentity(None, None, (), "empty")
     distinct = {harness for _, harness, _ in markers}

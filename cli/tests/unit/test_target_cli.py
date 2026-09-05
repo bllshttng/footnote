@@ -1568,10 +1568,12 @@ def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
 def test_resolve_owned_identity_self_row_is_not_contention(tmp_path, monkeypatch) -> None:
     """AC2-HP: a spawned worker whose own registry row holds its stamped id
     resolves that identity with no proof available. The prover is silent (a
-    codex thread worker has no harness ancestor to walk); the complete
-    canonical stamp and the worker's own row agree on (harness, id) because
-    spawn minted both in one act, so the row reads as self, not as a
-    competing holder."""
+    codex thread worker has no harness ancestor to walk); the canonical stamp
+    and the worker's own row agree on (harness, id) because spawn minted both
+    in one act, so the row reads as self, not as a competing holder. The
+    disposition is "single", not "canonical": resolution rode the same
+    uncontended elimination the marker loop calls the dominant case, so the
+    worktree-manifest anchor guard for task claims stays armed (x-0992)."""
     from fno.agents.registry import register_existing_session
     from fno.paths_testing import use_tmpdir
 
@@ -1595,7 +1597,7 @@ def test_resolve_owned_identity_self_row_is_not_contention(tmp_path, monkeypatch
     }
     assert fields["HARNESS"] == "codex"
     assert fields["SESSION_ID"] == mine
-    assert fields["DISPOSITION"] == "canonical"
+    assert fields["DISPOSITION"] == "single"
     assert fields["COLLISION"] == ""
 
 

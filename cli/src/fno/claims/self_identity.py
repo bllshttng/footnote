@@ -18,7 +18,9 @@ from fno.harness_identity import (
 def resolve_self_identity(
     env: Optional[Mapping[str, str]] = None,
     *,
-    collide: Optional[Callable[[str, str], Optional[str]]] = None,
+    collide: Optional[
+        Callable[[str, str, Optional[Tuple[str, str]]], Optional[str]]
+    ] = None,
 ):
     """Resolve the harness identity this process can prove it owns.
 
@@ -40,17 +42,42 @@ def resolve_self_identity(
     So when the walk has no answer - psutil denied, no harness ancestor, a
     container that hides the parent chain - resolution refuses rather than
     guesses, and ``fno whoami`` names the inherited family so the operator can
-    clear it. See :data:`fno.harness_identity.SELF_SET_HARNESS_MARKERS`.
+    clear it. See :data:`fno.harness_identity.SELF_SET_HARNESS_MARKERS`. The
+    one exception is the uncontended single-family case, which every branch
+    resolves by the same elimination the marker loop calls the dominant case:
+    a walk that cannot tell is "cannot tell" (``None``), never a contradiction
+    (``False``) - only a walk that found a DIFFERENT harness contradicts
+    (x-0992: returning False on a silent walk refused every spawned worker
+    whose ancestry the sandbox hides).
+
+    ``collide(harness, session_id, own_pair) -> owner | None`` reports a live
+    registry row owning an id. ``own_pair`` is this process's own
+    ``(harness, session_id)`` pair as completed from the canonical stamp plus
+    the same family's marker, or None when this resolver could not complete
+    one: a row agreeing with the pair on both halves is the caller's OWN row
+    and never contention (x-0992 - the pair used to be built only in the
+    target verb and only from a COMPLETE stamp, which a pane-spawned worker
+    never carries, so its own row refused it). The agreement check stays in
+    the registry; this layer computes the pair and hands it over.
     """
     from fno.claims.session_pid import resolve_session_harness
 
     true_harness = resolve_session_harness()
     canonical = parse_canonical_identity(env)
+
+    def collide_with_pair(harness: str, session_id: str) -> Optional[str]:
+        # The 3-arg collide (with own_pair) is THIS resolver's contract; the
+        # shared resolve_owned_identity takes the 2-arg shape. In the fallback
+        # branch there is no canonical pair, so the sentinel rides along.
+        if collide is None:
+            return None
+        return collide(harness, session_id, None)
+
     if canonical.disposition not in {"complete", "name_only"}:
         fallback_prove = (
             None if true_harness is None else (lambda harness, sid: harness == true_harness)
         )
-        return resolve_owned_identity(env, prove=fallback_prove)
+        return resolve_owned_identity(env, prove=fallback_prove, collide=collide_with_pair)
 
     try:
         attested_session_id, witness = resolve_attester_identity(env)
@@ -68,16 +95,30 @@ def resolve_self_identity(
     )
 
     def prove(harness: str, session_id: str) -> Optional[bool]:
+        if true_harness is None:
+            return None
         if harness != true_harness:
             return False
         if not canonical_proven:
             return None
         return session_identity_key(session_id) == session_identity_key(canonical_session_id)
 
+    own_pair: Optional[Tuple[str, str]] = None
+    if canonical.harness and canonical_session_id:
+        own_pair = (
+            canonical.harness.strip().lower(),
+            session_identity_key(canonical_session_id),
+        )
+
+    def collide_with_canonical_pair(harness: str, session_id: str) -> Optional[str]:
+        if collide is None:
+            return None
+        return collide(harness, session_id, own_pair)
+
     return resolve_owned_identity(
         env,
         prove=prove,
-        collide=None if canonical_proven else collide,
+        collide=None if canonical_proven else collide_with_canonical_pair,
     )
 
 
