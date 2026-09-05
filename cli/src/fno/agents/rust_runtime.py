@@ -876,9 +876,7 @@ def _pick_account_at_seam(args: Sequence[str]) -> list[str]:
     """
     out = list(args)
     # This function owns the provenance carrier: drop any previous spawn's
-    # decision before every guard, so a stale "config" can never outlive the
-    # pick that set it - not past an explicit --account, a route, a resume,
-    # or any other early exit below.
+    # decision before every guard, so a stale "config" never outlives its pick.
     os.environ.pop("FNO_LAUNCH_ACCOUNT_SOURCE", None)
     if _spawn_flag_value(out, "--account") is not None:
         return out
@@ -919,9 +917,7 @@ def _pick_account_at_seam(args: Sequence[str]) -> list[str]:
             boundary = i
             break
     # Name the injection for what it is: without this carrier the Rust mint
-    # reads the flag on argv and stamps a config pick as "caller" - the exact
-    # misread the launch_account_source column exists to end. Set in the
-    # exec-ing process so the client inherits it.
+    # stamps a config pick as "caller" - the misread this column ends.
     os.environ["FNO_LAUNCH_ACCOUNT_SOURCE"] = "config"
     return [*out[:boundary], "--account", picked, *out[boundary:]]
 
@@ -963,9 +959,8 @@ def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
         # child that pinned none. Clearing here keeps the three-valued read
         # honest: this spawn's account fact is its own, or absent.
         os.environ.pop("FNO_LAUNCH_ACCOUNT", None)
-        # Its provenance twin dies with it: a stale "config" carrier would
-        # mislabel the next spawn's provenance the same way a stale id would
-        # mislabel its account.
+        # Its provenance twin dies with it, or a stale "config" mislabels
+        # the next spawn the way a stale id would.
         os.environ.pop("FNO_LAUNCH_ACCOUNT_SOURCE", None)
         return
     if _is_route_bearing_spawn("spawn", args):
@@ -986,9 +981,7 @@ def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
     # stamp as launch_account. Set at the same seam as the overlay for the
     # same reason: this is the one edit both runtimes see. An id, never a
     # credential - the registry row carries it verbatim. The PROVENANCE
-    # carrier (FNO_LAUNCH_ACCOUNT_SOURCE) is deliberately untouched here:
-    # _pick_account_at_seam owns it and has already set it when the account
-    # on this argv is an injected pick.
+    # carrier is deliberately untouched: _pick_account_at_seam owns it.
     os.environ["FNO_LAUNCH_ACCOUNT"] = account
 
 

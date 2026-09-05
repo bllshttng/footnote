@@ -3668,8 +3668,7 @@ fn build_claude_stream_entry(
     // and no session parent is claimable from here. A daemon that somehow
     // still carries a marker attributes nothing rather than laundering it.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
-    let launch_account = crate::state::launch_account_from_env();
-    let launch_account_source = crate::state::launch_account_source_from_env();
+    let (launch_account, launch_account_source) = crate::state::launch_provenance_from_env();
     RegistryEntry {
         node: None,
         // Stream-json adoption is gated on host_mode plus mode, not on a
@@ -3697,8 +3696,7 @@ fn build_claude_stream_entry(
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         // x-d285: the daemon env is what this claude child inherits, so the
-        // three-valued env read is the honest account fact (a daemon carrying
-        // an ambient config dir stamps unknown, never "default").
+        // three-valued env read is honest (ambient config dir = unknown).
         launch_account: launch_account.clone(),
         launch_account_source,
         related_session_id: None,
@@ -3708,7 +3706,7 @@ fn build_claude_stream_entry(
         // mirrors the launch read - unknown stays unknown.
         route_provider_id: None,
         model_name: None,
-        account_record_id: launch_account.clone(),
+        account_record_id: launch_account,
         cwd: cwd_s.clone(),
         project_root: cwd_s,
         session_id: None,

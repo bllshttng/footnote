@@ -54,41 +54,12 @@ def load_workspaces() -> dict[str, str]:
     # redirect-aware, de-duped) so this map cannot drift from
     # detect_project_from_settings, and so paths route through fno.paths
     # rather than a hardcoded ~/.fno (the no-hardcoded-paths guard).
-    from fno.config_io import read_config_flat
-    from fno.graph._intake import _settings_candidate_paths
+    from fno.graph._intake import _iter_settings_projects
 
     out: dict[str, str] = {}
-    for path in _settings_candidate_paths():
-        if not path.exists():
-            continue
-        # read_config_flat parses config.toml (or a legacy settings.yaml) and
-        # returns the FLAT dict, so `work` is top-level.
-        work = read_config_flat(path).get("work")
-        if not isinstance(work, dict):
-            continue
-        workspaces = work.get("workspaces")
-        if isinstance(workspaces, dict):
-            for ws in workspaces.values():
-                if not isinstance(ws, dict):
-                    continue
-                projects = ws.get("projects")
-                if not isinstance(projects, list):
-                    continue
-                for proj in projects:
-                    if not isinstance(proj, dict):
-                        continue
-                    name = proj.get("name")
-                    raw = proj.get("path")
-                    if isinstance(name, str) and isinstance(raw, str):
-                        out[name] = os.path.normpath(os.path.expanduser(raw))
-        flat_projects = work.get("projects")
-        if isinstance(flat_projects, dict):
-            for name, cfg in flat_projects.items():
-                if not isinstance(cfg, dict):
-                    continue
-                raw = cfg.get("path")
-                if isinstance(name, str) and isinstance(raw, str):
-                    out[name] = os.path.normpath(os.path.expanduser(raw))
+    for name, raw in _iter_settings_projects():
+        if isinstance(name, str) and isinstance(raw, str):
+            out[name] = os.path.normpath(os.path.expanduser(raw))
     return out
 
 

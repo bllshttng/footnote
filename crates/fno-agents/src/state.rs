@@ -1115,6 +1115,13 @@ pub fn launch_account_source_from_env() -> Option<String> {
     }
     None
 }
+
+/// The launch-account pair a mint seam stamps (x-04ce): the row's
+/// `launch_account` fact plus WHO chose it. One read so a seam cannot take
+/// the two env reads at different moments.
+pub fn launch_provenance_from_env() -> (Option<String>, Option<String>) {
+    (launch_account_from_env(), launch_account_source_from_env())
+}
 /// `host_mode` value for an ADOPTED `claude --bg` session footnote holds live via
 /// a daemon `control.sock` attach (G1 held-attach substrate, x-26df). Distinct
 /// from `interactive` (a footnote-SPAWNED PTY worker): an `attached` row's process

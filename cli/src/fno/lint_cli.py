@@ -896,12 +896,10 @@ def menu_caps() -> None:
 def spawn_flag_owners() -> None:
     """Every ``fno agents spawn`` flag names an owner, and the count is capped.
 
-    The flag union is the surface the ``--`` passthrough exists to stop
-    growing. ``menu-caps`` ratchets VERBS; nothing ratcheted FLAGS, so a
-    fortieth flag could land with nobody deciding whether fno owns it.
-    Introspecting the live Typer command is what makes this a gate and not
-    a stale list: a flag added to ``cmd_spawn`` and not to ``FLAG_OWNERS``
-    fails here, in the PR that adds it.
+    ``menu-caps`` ratchets VERBS; nothing ratcheted FLAGS. Introspecting the
+    live Typer command is what makes this a gate and not a stale list: a flag
+    added to ``cmd_spawn`` and not to ``FLAG_OWNERS`` fails here, in the PR
+    that adds it.
     """
     from fno.agents.spawn_flag_owners import (
         CALLER,
@@ -912,9 +910,6 @@ def spawn_flag_owners() -> None:
         SPAWN_FLAG_CAP,
         TRANSLATED,
     )
-
-    _known_sources = {CALLER, CONFIG, DEFAULT, ENV}
-    failures: list[str] = []
 
     try:
         import typer.main
@@ -933,58 +928,55 @@ def spawn_flag_owners() -> None:
     # The primary long spelling of every Option on the live command. Hidden
     # flags are in: they occupy the parser and the reader's attention the
     # same as visible ones.
-    live: set[str] = set()
-    for param in spawn_cmd.params:
-        longs = [o for o in getattr(param, "opts", []) if o.startswith("--")]
-        if longs:
-            live.add(longs[0])
+    live = {
+        opts[0]
+        for param in spawn_cmd.params
+        if (opts := [o for o in getattr(param, "opts", []) if o.startswith("--")])
+    }
 
-    unclassified = sorted(live - set(FLAG_OWNERS))
-    if unclassified:
+    failures: list[str] = []
+    if unclassified := sorted(live - set(FLAG_OWNERS)):
         failures.append(
             f"{len(unclassified)} live spawn flag(s) have no owner row: "
             f"{', '.join(unclassified)}.\n"
-            "  Remedy 1: add a row to FLAG_OWNERS (cli/src/fno/agents/"
+            "  Remedy: add a FLAG_OWNERS row (cli/src/fno/agents/"
             "spawn_flag_owners.py): owner fno if fno branches on the value, "
             "translated (with its site) if fno only maps the harness's "
-            "spelling.\n"
-            "  Remedy 2: do not declare the flag; forward it after `--` "
-            "instead, when the harness owns the concept and the pane "
+            "spelling - or forward the flag after `--` when the pane "
             "passthrough carries it."
         )
-    stale = sorted(set(FLAG_OWNERS) - live)
-    if stale:
+    if stale := sorted(set(FLAG_OWNERS) - live):
         failures.append(
             f"{len(stale)} FLAG_OWNERS row(s) name flags the parser no longer "
             f"has: {', '.join(stale)}.\n"
-            "  Remedy 1: delete each stale row in the same PR that removed "
+            "  Remedy: delete each stale row in the same PR that removed "
             "the flag."
         )
     if len(live) > SPAWN_FLAG_CAP:
         failures.append(
             f"spawn carries {len(live)} flags (cap {SPAWN_FLAG_CAP}).\n"
-            "  Remedy 1: move harness-owned flags across the `--` passthrough "
+            "  Remedy: move harness-owned flags across the `--` passthrough "
             "instead of declaring them; FLAG_OWNERS marks which are safe to "
-            "move.\n"
-            "  Remedy 2: raise SPAWN_FLAG_CAP in a deliberate one-line diff."
+            "move - or raise SPAWN_FLAG_CAP in a deliberate one-line diff."
         )
-    siteless = sorted(
+    if siteless := sorted(
         f for f, row in FLAG_OWNERS.items() if row.owner == TRANSLATED and not row.site
-    )
-    if siteless:
+    ):
         failures.append(
             f"{len(siteless)} translated row(s) name no site: {', '.join(siteless)}.\n"
-            "  Remedy 1: set `site` to the file:function holding the "
+            "  Remedy: set `site` to the file:function holding the "
             "per-harness spelling map; it is the code a migration deletes."
         )
-    unknown_sources = sorted(
-        f for f, row in FLAG_OWNERS.items() if not row.sources or not set(row.sources) <= _known_sources
-    )
-    if unknown_sources:
+    known = {CALLER, CONFIG, DEFAULT, ENV}
+    if unknown_sources := sorted(
+        f
+        for f, row in FLAG_OWNERS.items()
+        if not row.sources or not set(row.sources) <= known
+    ):
         failures.append(
             f"{len(unknown_sources)} row(s) carry an unknown or empty "
             f"provenance: {', '.join(unknown_sources)}.\n"
-            "  Remedy 1: use the shared vocabulary - caller, config, env, "
+            "  Remedy: use the shared vocabulary - caller, config, env, "
             "default - and record only what the code verifiably does."
         )
 
