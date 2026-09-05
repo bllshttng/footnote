@@ -21,6 +21,7 @@
 //! loud rather than silent; see its comment for why it is not parsed here.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use toml::Value;
 
@@ -384,6 +385,16 @@ pub const DEFAULT_MAX_FLEET_CPU_SHARE: f64 = 0.5;
 /// matter whose load it is, because pure fleet-share admits onto a box already
 /// thrashing from foreign work. `<= 0` disables. Matches the Pydantic default.
 pub const DEFAULT_HARD_MAX_LOAD_PER_CPU: f64 = 40.0;
+/// Default freshness window for a single-flight answer. Matches the Pydantic
+/// default.
+pub const DEFAULT_SINGLE_FLIGHT_TTL_S: u64 = 10;
+/// Default join budget. Over the 23.2 s worst-measured roster read, so a loaded
+/// box joins instead of timing out. Matches the Pydantic default.
+pub const DEFAULT_SINGLE_FLIGHT_JOIN_BUDGET_S: u64 = 30;
+/// Default age at which a child reparented to init is reaped: three times
+/// `do pr wait --timeout 30m`, the longest detached child that is allowed to be
+/// running. Matches the Pydantic default.
+pub const DEFAULT_ORPHAN_REAP_AFTER_S: u64 = 5400;
 
 /// Resolve `agents.max_live`. Values < 1 (or unparseable) coerce to
 /// [`DEFAULT_MAX_LIVE`] — never 0, which would block all spawns.
@@ -423,6 +434,48 @@ pub fn hard_max_load_per_cpu(cwd: &Path) -> f64 {
     resolve_agents_value(cwd, "hard_max_load_per_cpu")
         .and_then(|raw| raw.parse::<f64>().ok())
         .unwrap_or(DEFAULT_HARD_MAX_LOAD_PER_CPU)
+}
+
+/// Resolve `agents.single_flight_ttl_seconds`: how long one child's written
+/// answer counts as fresh, so callers arriving inside the window cost one
+/// child. A non-positive or unparseable value coerces to the default.
+pub fn single_flight_ttl(cwd: &Path) -> Duration {
+    positive_seconds(
+        cwd,
+        "single_flight_ttl_seconds",
+        DEFAULT_SINGLE_FLIGHT_TTL_S,
+    )
+}
+
+/// Resolve `agents.single_flight_join_budget_seconds`: how long a later caller
+/// waits for the holder's answer before running its own.
+pub fn single_flight_join_budget(cwd: &Path) -> Duration {
+    positive_seconds(
+        cwd,
+        "single_flight_join_budget_seconds",
+        DEFAULT_SINGLE_FLIGHT_JOIN_BUDGET_S,
+    )
+}
+
+/// Resolve `agents.orphan_reap_after_seconds`: the age at which a child that
+/// init inherited is reaped.
+pub fn orphan_reap_after(cwd: &Path) -> Duration {
+    positive_seconds(
+        cwd,
+        "orphan_reap_after_seconds",
+        DEFAULT_ORPHAN_REAP_AFTER_S,
+    )
+}
+
+/// Seconds knobs coerce fail-safe: only a POSITIVE value is honored, because
+/// zero would mean "never fresh" for a cache and "reap everything" for the
+/// sweep, and neither is a value a typo should be able to reach.
+fn positive_seconds(cwd: &Path, key: &str, default: u64) -> Duration {
+    let secs = resolve_agents_value(cwd, key)
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default);
+    Duration::from_secs(secs)
 }
 
 /// Resolve `agents.worker_qos`: `true` = demote workers (the `utility` default),
