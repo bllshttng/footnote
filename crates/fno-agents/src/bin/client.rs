@@ -637,6 +637,12 @@ async fn run(args: Vec<String>) -> i32 {
             return 127;
         }
         if let Some(code) = maybe_run_spawn(&home, &params, &agent_name) {
+            if code == 0 {
+                if let Err(detail) = place_thread_portal_after_spawn(&params, &agent_name) {
+                    eprintln!("{detail}");
+                    return 1;
+                }
+            }
             return code;
         }
         // No client-side handler matched: fall through to the daemon RPC below.
@@ -735,6 +741,15 @@ async fn run(args: Vec<String>) -> i32 {
     // Snapshot before `params` moves into the request: the relocated gate
     // honors the same spawn-control flags the shared construction reads.
     let daemon_gate_flags = gate_flags_from_params(&params);
+    // (x-9b60) Same snapshot for the portal placement: it rides the
+    // daemon's response, after the receipt.
+    let thread_portal_params = if method == "agent.spawn"
+        && params.get("substrate").and_then(|v| v.as_str()) == Some("thread")
+    {
+        Some(params.clone())
+    } else {
+        None
+    };
     let req = Request::new(1, method, params);
 
     let daemon_spawn_gate = if daemon_bound_thread_spawn {
@@ -814,6 +829,17 @@ async fn run(args: Vec<String>) -> i32 {
                     && result.get("stopped").and_then(Value::as_bool) == Some(false)
                 {
                     return 18;
+                }
+                // (x-9b60) The daemon-bound thread lane (codex and every other
+                // attach-with-server harness): the RPC created the row, so the
+                // portal places here, after the receipt, exactly as the
+                // client-side lanes do.
+                if let Some(place_params) = &thread_portal_params {
+                    if let Err(detail) = place_thread_portal_after_spawn(place_params, &agent_name)
+                    {
+                        eprintln!("{detail}");
+                        return 1;
+                    }
                 }
                 0
             }
@@ -969,13 +995,38 @@ fn maybe_run_opencode_ask(home: &AgentsHome, params: &Value, name: &str) -> Opti
 fn validate_spawn_placement(params: &Value, substrate: &str) -> Result<(), String> {
     let squad = params.get("squad").and_then(Value::as_str);
     let split = params.get("split").and_then(Value::as_str);
+    let at = params.get("at").and_then(Value::as_str);
+    let tab = params.get("tab").and_then(Value::as_str);
+    let portal = params.get("portal").and_then(Value::as_u64);
 
     if squad.is_some_and(|name| name.trim().is_empty()) {
         return Err("--workspace/-s needs a nonblank workspace name".into());
     }
-    if (squad.is_some() || split.is_some()) && substrate != "pane" {
+    // (x-9b60) A portal is the pane a thread hosts: the placement flags are
+    // legal for a thread WHEN --portal names it, refused for a bare thread
+    // where they mean nothing. Mirrors Python's placement_refusal, the one
+    // contract both runtimes read; the portal's 0-255 range is enforced at
+    // the parse arm, so a bad index never reaches this check.
+    if portal.is_some() && substrate != "bg" {
         return Err(
-            "--workspace/-s and --split/-x apply only to --substrate pane \
+            "--portal applies only to --substrate thread; a pane hosts its \
+             own geometry and headless hosts no session at all"
+                .into(),
+        );
+    }
+    if at.is_some() && substrate == "bg" {
+        return Err("--at applies only to --substrate pane (a thread has no calling pane)".into());
+    }
+    let placement_requested = squad.is_some() || split.is_some() || at.is_some() || tab.is_some();
+    if placement_requested && substrate == "bg" && portal.is_none() {
+        return Err("--workspace/-s, --split/-x, and --tab on --substrate \
+             thread need --portal N: a thread hosts no pane until a portal \
+             opens one, so the placement has nothing to place"
+            .into());
+    }
+    if placement_requested && portal.is_none() && substrate != "pane" {
+        return Err(
+            "--workspace/-s, --split/-x, --at, and --tab apply only to --substrate pane \
              (bg/headless have no pane geometry)"
                 .into(),
         );
@@ -985,6 +1036,9 @@ fn validate_spawn_placement(params: &Value, substrate: &str) -> Result<(), Strin
             "--split/-x must be left, right, up, or down (got {:?})",
             split.unwrap_or_default()
         ));
+    }
+    if tab.is_some_and(|selector| selector.trim().is_empty()) {
+        return Err("--tab needs a nonblank selector or pane-group name".into());
     }
     Ok(())
 }
@@ -1034,6 +1088,68 @@ fn validate_effort_for_spawn(
 /// - no resolvable / unknown provider: stderr usage error + exit 2.
 ///
 /// Returns `Some(exit_code)` when handled client-side, `None` to fall through.
+/// (x-9b60) One-call portal placement on the Rust lanes, the twin of the
+/// Python `thread_portal.place_thread_portal`: a thread spawn with
+/// `--portal` ends with the portal open, through the same `fno mux thread`
+/// reach a manual second command would type. The worker is already live, so
+/// a placement failure is reported AFTER the spawn receipt and never
+/// un-spawns anyone.
+fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), String> {
+    let Some(portal) = params.get("portal").and_then(Value::as_u64) else {
+        return Ok(());
+    };
+    let mut args = vec![
+        "mux".to_string(),
+        "thread".to_string(),
+        name.to_string(),
+        "--portal".to_string(),
+        portal.to_string(),
+    ];
+    for (flag, key) in [
+        ("--workspace", "squad"),
+        ("--split", "split"),
+        ("--at", "at"),
+        ("--tab", "tab"),
+    ] {
+        if let Some(v) = params.get(key).and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                args.push(flag.to_string());
+                args.push(v.to_string());
+            }
+        }
+    }
+    let out = std::process::Command::new("fno")
+        .args(&args)
+        .output()
+        .map_err(|e| {
+            format!(
+                "portal {portal} placement failed: {e} (the worker is live; \
+                 place it with 'fno mux thread {name} --portal {portal}')"
+            )
+        })?;
+    if !out.status.success() {
+        let raw = if out.stderr.is_empty() {
+            &out.stdout
+        } else {
+            &out.stderr
+        };
+        let detail = String::from_utf8_lossy(raw).trim().to_string();
+        let detail = if detail.is_empty() {
+            "no output".to_string()
+        } else {
+            detail
+        };
+        return Err(format!(
+            "portal {portal} placement failed: {detail} (the worker is live; \
+             place it with 'fno mux thread {name} --portal {portal}')"
+        ));
+    }
+    if !out.stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(&out.stdout));
+    }
+    Ok(())
+}
+
 fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
     use fno_agents::agy_ask::dispatch_agy_once_with_effort;
     use fno_agents::claude_ask::{
@@ -1887,6 +2003,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--workspace",
         "--squad",
         "--split",
+        "--portal",
+        "--tab",
+        "--at",
         "--permission-mode",
         "--effort",
         "--add-dir",
@@ -1976,6 +2095,25 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "--split" | "-x" => {
                 params.insert("split".into(), str_arg(&mut it, "-x/--split")?);
+            }
+            // (x-9b60) The portal placement trio, same spellings the mux
+            // thread verb uses. Parsed here so the default Rust runtime
+            // accepts what the help advertises; the placement itself runs
+            // after the spawn receipt (place_thread_portal_after_spawn).
+            "--portal" => {
+                let raw = str_arg(&mut it, "--portal")?;
+                match raw.as_str().and_then(|s| s.parse::<u8>().ok()) {
+                    Some(n) => {
+                        params.insert("portal".into(), Value::from(n));
+                    }
+                    None => return Err("--portal takes an index 0-255".into()),
+                }
+            }
+            "--tab" => {
+                params.insert("tab".into(), str_arg(&mut it, "--tab")?);
+            }
+            "--at" => {
+                params.insert("at".into(), str_arg(&mut it, "--at")?);
             }
             "--from" => {
                 // `promote <name> --from <session-uuid>`: the session to resume

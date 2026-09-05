@@ -169,13 +169,12 @@ def placement_refusal(
     split: Optional[str],
     at: Optional[str],
     tab: Optional[str],
-    portal: Optional[int],
     bounded_placement: bool,
 ) -> Optional[str]:
-    """The pane/portal placement contract (x-3e38; portal lane x-9b60) as one
-    named refusal, or None when the combination is legal. A portal is the
-    pane a thread hosts: the placement flags are legal for a thread WHEN
-    --portal names it, refused for a bare thread where they mean nothing."""
+    """The pane placement contract (x-3e38) as one named refusal, or None when
+    the combination is legal. Portal placement is Rust-owned (the runtime that
+    runs the spawn validates its own flags); this seam no longer reads a
+    --portal value."""
     placement_requested = (
         bounded_placement
         or squad is not None
@@ -185,27 +184,11 @@ def placement_refusal(
     )
     if squad is not None and not squad.strip():
         return "--workspace/-s needs a nonblank workspace name"
-    if portal is not None and not 0 <= portal <= 255:
-        return "--portal takes an index 0-255"
-    if portal is not None and substrate != "bg":
-        return (
-            "--portal applies only to --substrate thread; a pane hosts its "
-            "own geometry and headless hosts no session at all"
-        )
-    if portal is not None and once:
-        return "--portal places a persistent thread worker; --once hosts no session to show"
     if bounded_placement and substrate == "bg":
         return "--bounded-placement selects its own tab for a pane; a thread cannot be bounded"
     if at is not None and substrate == "bg":
         return "--at applies only to --substrate pane (a thread has no calling pane)"
-    if placement_requested and substrate == "bg" and portal is None:
-        # AC8-EDGE: a placement with nothing to place; name the missing piece.
-        return (
-            "--workspace/-s, --split/-x, and --tab on --substrate "
-            "thread need --portal N: a thread hosts no pane until a portal "
-            "opens one, so the placement has nothing to place"
-        )
-    if placement_requested and portal is None and (substrate != "pane" or once):
+    if placement_requested and (substrate != "pane" or once):
         return (
             "--workspace/-s, --split/-x, --at, and --tab apply only to --substrate pane "
             "(bg/headless have no pane geometry)"

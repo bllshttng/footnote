@@ -923,14 +923,32 @@ fn spawn_accepts_squad_placement_aliases() {
 
 #[test]
 fn spawn_placement_is_pane_only() {
-    let params = serde_json::json!({"squad": "reviews"});
+    // The thread lane (bg on the wire) carries the placement flags only
+    // when --portal names the pane the thread hosts: without it the
+    // placement has nothing to place, and headless never hosts a session.
+    let params = serde_json::json!({"squad": "reviews", "split": "Right"});
     assert_eq!(
         validate_spawn_placement(&params, "bg"),
+        Err("--workspace/-s, --split/-x, and --tab on --substrate \
+             thread need --portal N: a thread hosts no pane until a portal \
+             opens one, so the placement has nothing to place"
+            .to_string())
+    );
+    assert_eq!(
+        validate_spawn_placement(&serde_json::json!({"portal": 1u8}), "pane"),
         Err(
-            "--workspace/-s and --split/-x apply only to --substrate pane \
-                 (bg/headless have no pane geometry)"
+            "--portal applies only to --substrate thread; a pane hosts its \
+             own geometry and headless hosts no session at all"
                 .to_string()
         )
+    );
+    assert!(
+        validate_spawn_placement(
+            &serde_json::json!({"portal": 1u8, "split": "right", "tab": "3"}),
+            "bg"
+        )
+        .is_ok(),
+        "portal + placement on the thread lane is the legal combination"
     );
 }
 
@@ -1726,6 +1744,65 @@ fn build_request_parses_fresh_and_here_flags() {
 
     let (_m, p) = build_request("ask", &["w".into(), "hi".into(), "--in-place".into()]).unwrap();
     assert_eq!(p["here"], Value::Bool(true));
+}
+
+// -----------------------------------------------------------------------
+// (x-9b60) The portal placement trio on the Rust spawn path
+// -----------------------------------------------------------------------
+
+/// AC6-HP/AC7-ERR: the runtime that runs accepts the flags the help
+/// advertises, and an out-of-range --portal refuses with the range, never
+/// the catch-all "unknown flag".
+#[test]
+fn spawn_placement_flags_are_parsed_and_bounded() {
+    let (method, p) = build_request(
+        "spawn",
+        &[
+            "w".into(),
+            "--substrate".into(),
+            "thread".into(),
+            "--portal".into(),
+            "1".into(),
+            "--tab".into(),
+            "3".into(),
+            "--at".into(),
+            "7".into(),
+            "--split".into(),
+            "Right".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(method, "agent.spawn");
+    assert_eq!(p["portal"], Value::from(1u8));
+    assert_eq!(p["tab"], Value::String("3".into()));
+    assert_eq!(p["at"], Value::String("7".into()));
+    assert_eq!(p["split"], Value::String("Right".into()));
+
+    for bad in ["999", "abc", "-1", ""] {
+        let err = build_request(
+            "spawn",
+            &["w".into(), "--portal".into(), bad.to_string().into()],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("0-255"),
+            "the refusal names the range, never the catch-all: {err}"
+        );
+        assert!(!err.contains("unknown flag"), "{err}");
+    }
+}
+
+/// The equals form parses the same way: a routed `--portal=1` must not
+/// regress to "unknown flag" (the PR 379/371 regression class).
+#[test]
+fn spawn_portal_equals_form_parses() {
+    let (_m, p) = build_request(
+        "spawn",
+        &["w".into(), "--portal=1".into(), "--tab=2".into()],
+    )
+    .unwrap();
+    assert_eq!(p["portal"], Value::from(1u8));
+    assert_eq!(p["tab"], Value::String("2".into()));
 }
 
 // (canonical_repo_root unit tests live in src/paths.rs, where the shared
