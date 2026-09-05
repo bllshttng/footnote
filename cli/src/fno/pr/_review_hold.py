@@ -44,7 +44,6 @@ from contextlib import suppress
 from typing import Any, Callable, NamedTuple, Optional
 
 from pathlib import Path
-
 from fno.review.invocation import VERIFY_FIXES
 
 
@@ -171,9 +170,8 @@ VERIFY_FIXES_FLAG = f"--{VERIFY_FIXES}"  # spelled by invocation, the flag autho
 
 
 def _code_patch_lines(cwd: str, base: str, sha: str) -> Optional[list[str]]:
-    """Content lines of the PR's code patch at ``sha``, or ``None``. Mirror
-    of ``code_patch_lines`` in review_freshness.rs; the two must measure alike
-    or the invocation and freshness gates answer one rebase differently."""
+    """Content lines of the PR's code patch at ``sha``, or ``None``. Mirror of ``code_patch_lines``
+    in review_freshness.rs; the two must measure alike or the gates answer one rebase differently."""
     import subprocess
 
     # Function-local: _merge imports this module (a cycle at module level).
@@ -245,11 +243,9 @@ def review_invocation_refusal(
             if measured is None or measured >= carry:
                 return ""
     return (
-        f"review refused: the two-round cap is spent for this head "
-        f"({rounds_used} of {max_rounds} rounds used); a new hunting round may "
-        "not start. The cap law's remedy: decline the remaining findings with "
-        "a recorded reason and merge, run a scoped fix-verification with "
-        f"{VERIFY_FIXES_FLAG}, or review a rebase delta over the interdiff budget."
+        f"review refused: the two-round cap is spent for this head ({rounds_used} of {max_rounds} rounds used); "
+        "a new hunting round may not start. The cap law's remedy: decline the remaining findings with a recorded "
+        f"reason and merge, run a scoped fix-verification with {VERIFY_FIXES_FLAG}, or review a rebase delta over the interdiff budget."
     )
 
 
