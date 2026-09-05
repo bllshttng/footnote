@@ -320,8 +320,7 @@ fn default_true() -> bool {
 /// open honors, now that the geometry refusal lives inside `reach_portal`
 /// where the slot lookup knows occupancy. Additive, so the compatibility
 /// floor does not move; a repoint keeps owning its geometry and says so.
-/// v68 (shell tab cwd): `LayoutSlot.cwd`, `#[serde(default)]`. Additive, so
-/// the floor stays at 58.
+/// v68 (x-5baf): `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
 pub const PROTO_VERSION: u32 = 68;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
@@ -1123,22 +1122,9 @@ pub enum LayoutBinding {
 pub struct LayoutSlot {
     pub name: String,
     pub binding: LayoutBinding,
-    /// (v68, x-5baf) This slot's pane's directory at capture, so a shell
-    /// slot restores there instead of the squad root. `None` pre-v68.
+    /// (v68, x-5baf) pane's cwd at capture; `None` pre-v68.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-}
-
-impl LayoutSlot {
-    /// A slot with no recorded cwd - every construction site but capture's
-    /// own `SlotCapture::name_leaf` (x-5baf).
-    pub fn new(name: String, binding: LayoutBinding) -> Self {
-        Self {
-            name,
-            binding,
-            cwd: None,
-        }
-    }
 }
 
 /// A versioned anchored layout (v44, x-6928): a typed [`LayoutTreeSpec`] plus

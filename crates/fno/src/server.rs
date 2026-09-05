@@ -48,8 +48,8 @@ use crate::pty::{shell_candidates, PtyShell};
 #[cfg(test)]
 use crate::spawn_journal::parse_spawn_receipts;
 use crate::spawn_journal::{
-    parse_never_bound_removals, receipt_for_member, scan_spawn_journal, worker_binding_key,
-    BatchReplay, DetachedPane, HeldWorker, ReentrySpawnRequest, ReentryVerdict, SpawnJournal,
+    receipt_for_member, scan_spawn_journal, worker_binding_key, BatchReplay, DetachedPane,
+    HeldWorker, ReentrySpawnRequest, ReentryVerdict, SpawnJournal,
 };
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
 use crate::squad_store::StoredTabTree;
@@ -2517,8 +2517,7 @@ fn wheel_gate(
 /// case `PaneLocation` documents) gets a `#2` suffix rather than colliding.
 struct SlotCapture<'a> {
     pane_owner: &'a HashMap<u64, &'a str>,
-    /// (x-5baf) Each pane's live cwd, read once before the tab loop. `None`
-    /// entries (a dead child pid) simply leave the slot's `cwd` unset.
+    /// (x-5baf) Each pane's live cwd, read once before the tab loop.
     pane_cwd: &'a HashMap<u64, String>,
     slots: Vec<LayoutSlot>,
     by_pane: HashMap<u64, String>,
@@ -2708,7 +2707,7 @@ fn spec_to_node(tree: &LayoutTreeSpec, resolve: &dyn Fn(&str) -> Option<u64>) ->
 /// member) and a stored path that fails `is_dir` both fall back to `cwd0` -
 /// the two-path notice (member wants -> where it actually landed) is the
 /// caller's job, since only the caller knows the member's identity to name.
-fn restore_member_cwd(
+pub(crate) fn restore_member_cwd(
     stored: Option<&str>,
     cwd0: &str,
     is_dir: impl Fn(&str) -> bool,
@@ -7533,12 +7532,8 @@ impl Core {
         // (x-8f9d) Every portal seat, collected once: the per-tab prune below
         // folds over all of them.
         let seats: Vec<u64> = self.portals.values().map(|p| p.seat).collect();
-        // (x-5baf) Each surviving pane's live cwd, filled in per tab below
-        // (below the portal-seat prune, never before it) so a portal pane -
-        // always excluded from `pruned` before a slot is ever captured - never
-        // costs a syscall for a cwd nothing reads. A dead child pid degrades
-        // to the pane's own spawn cwd, recorded at spawn (`PaneEntry::cwd`),
-        // never a capture failure.
+        // (x-5baf) Filled per tab below, after the portal prune, so a pruned
+        // portal pane never costs a cwd syscall nothing reads.
         let mut pane_cwd: HashMap<u64, String> = HashMap::new();
         let mut trees = Vec::with_capacity(sq.tabs.len());
         let mut active_tab = 0;
@@ -7587,15 +7582,15 @@ impl Core {
                 active_tab = trees.len();
             }
             let root = pruned.as_ref().unwrap_or(&t.root);
-            for pane in tree::leaves(root) {
-                if pane_cwd.contains_key(&pane) {
-                    continue;
-                }
-                if let Some(entry) = self.panes.get(&pane) {
-                    let cwd = crate::pane_cwd::live_or_spawn(entry.pty.child_pid(), &entry.cwd);
-                    pane_cwd.insert(pane, cwd);
-                }
-            }
+            crate::pane_cwd::fill_leaf_cwds(
+                tree::leaves(root),
+                |p| {
+                    self.panes
+                        .get(&p)
+                        .map(|e| (e.pty.child_pid(), e.cwd.clone()))
+                },
+                &mut pane_cwd,
+            );
             let mut capture = SlotCapture::new(&pane_owner, &pane_cwd);
             let tree = capture.node_to_spec(root);
             let focus = capture.slot_of(t.focus);
@@ -9024,25 +9019,12 @@ impl Core {
                                 slot_pane.insert(slot.name.as_str(), p);
                             }
                             None => {
-                                // (x-5baf) A genuine Shell slot's own captured
-                                // cwd, when it still exists, beats the squad
-                                // root: the whole point of remembering it. A
-                                // dead worker's substitute shell (the `Fno`
-                                // arm above) keeps spawning at the squad root
-                                // as before - its slot's cwd is the WORKER's
-                                // own directory, not a shell's, and steering
-                                // the substitute there is a different feature
-                                // than this one. A vanished directory or a
-                                // pre-v68 slot with none recorded falls back
-                                // to `cwd0`, same shape as the worker lane's
-                                // `restore_member_cwd` above.
-                                let stored_cwd = matches!(slot.binding, LayoutBinding::Shell)
-                                    .then(|| slot.cwd.as_deref())
-                                    .flatten();
-                                let (spawn_cwd, gone) =
-                                    restore_member_cwd(stored_cwd, &cwd0, |p| {
-                                        std::path::Path::new(p).is_dir()
-                                    });
+                                let is_shell = matches!(slot.binding, LayoutBinding::Shell);
+                                let (spawn_cwd, gone) = crate::pane_cwd::shell_restore_cwd(
+                                    is_shell,
+                                    slot.cwd.as_deref(),
+                                    &cwd0,
+                                );
                                 if let Some(gone) = gone {
                                     self.notice_all(format!(
                                         "restore: tab {}: {}'s directory {gone} is gone; restored at {spawn_cwd} instead",
@@ -24668,7 +24650,6 @@ mod tests {
         assert_eq!(hits, 1, "the merged agent renders exactly once");
     }
 
-    #[test]
     #[test]
     fn card_ready_gate_only_passes_ready_cards() {
         // x-a496 (codex peer review): a targeted dispatch only proceeds for a

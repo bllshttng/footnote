@@ -59,3 +59,43 @@ pub fn live_or_spawn(child_pid: Option<u32>, spawn_cwd: &str) -> String {
         .and_then(process_cwd)
         .unwrap_or_else(|| spawn_cwd.to_string())
 }
+
+impl crate::proto::LayoutSlot {
+    /// A slot with no recorded cwd (every site but capture itself, x-5baf).
+    pub fn new(name: String, binding: crate::proto::LayoutBinding) -> Self {
+        Self {
+            name,
+            binding,
+            cwd: None,
+        }
+    }
+}
+
+/// Every surviving leaf's cwd, filled from `lookup` where a pane resolves and
+/// no cwd is recorded yet (a portal seat pruned out of `leaves` never calls
+/// `lookup`, so it never costs a syscall for a cwd nothing reads).
+pub fn fill_leaf_cwds(
+    leaves: impl IntoIterator<Item = u64>,
+    lookup: impl Fn(u64) -> Option<(Option<u32>, String)>,
+    into: &mut std::collections::HashMap<u64, String>,
+) {
+    for pane in leaves {
+        if into.contains_key(&pane) {
+            continue;
+        }
+        if let Some((child_pid, spawn_cwd)) = lookup(pane) {
+            into.insert(pane, live_or_spawn(child_pid, &spawn_cwd));
+        }
+    }
+}
+
+/// Only a genuine Shell slot's cwd steers restore; a dead worker's substitute
+/// shell still spawns at the squad root.
+pub fn shell_restore_cwd(
+    is_shell: bool,
+    slot_cwd: Option<&str>,
+    cwd0: &str,
+) -> (String, Option<String>) {
+    let stored = is_shell.then_some(slot_cwd).flatten();
+    crate::server::restore_member_cwd(stored, cwd0, |p| std::path::Path::new(p).is_dir())
+}
