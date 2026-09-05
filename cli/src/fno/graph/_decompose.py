@@ -138,7 +138,10 @@ def plan_base(plan_path: Optional[str]) -> str:
     """Strip any `#fragment` from an epic plan_path to get the base doc path."""
     if not plan_path:
         raise DecomposeError(
-            "epic has no plan_path; cannot address group fragments", exit_code=1
+            "epic has no plan_path; cannot address group fragments. "
+            "To fold existing nodes into a plan-less epic run: "
+            "fno backlog adopt <epic> <id>...",
+            exit_code=1,
         )
     return plan_path.split("#", 1)[0]
 

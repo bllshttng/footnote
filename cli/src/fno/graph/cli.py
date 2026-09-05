@@ -2431,15 +2431,20 @@ def cmd_decompose(
         # refusal: refusing deadlocks, because re-parenting needs the group
         # nodes a refusal prevents creating, and a parked child is a legitimate
         # steady state.
-        unadopted_box[0] = [
-            e.get("id")
+        _unadopted = [
+            e
             for e in graph_entries
             if e.get("id") and e.get("parent") == epic_resolved_id and not is_group_child(e)
+        ]
+        unadopted_box[0] = [e["id"] for e in _unadopted]
+        contained_unadopted_box[0] = [
+            e["id"] for e in _unadopted if e.get("contained_in") == epic_resolved_id
         ]
         return graph_entries
 
     orphan_box: list[list[str]] = [[]]
     unadopted_box: list[list[str]] = [[]]
+    contained_unadopted_box: list[list[str]] = [[]]
     # Adoptees that were re-parented but deliberately NOT marked contained
     # (they carry their own PR or cost). Same box-then-emit shape as the
     # unadopted warning: collected inside the locked mutator, printed after.
@@ -2751,10 +2756,18 @@ def cmd_decompose(
     #     populated epic needs this as much as an operator does, and stderr
     #     never pollutes the JSON on stdout.
     if unadopted_ids:
+        _contained_n = len(contained_unadopted_box[0])
+        _contained_clause = (
+            f"; {_contained_n} of them are contained in the epic itself, which "
+            "has no PR, so add them to a group's adopt list or they never close"
+            if _contained_n
+            else ""
+        )
         typer.echo(
             f"warning: {len(unadopted_ids)} epic child(ren) adopted by no group, "
             f"left parented to the epic: {', '.join(unadopted_ids)}. "
-            "Add them to a group's `adopt` list to package them into that PR.",
+            "Add them to a group's `adopt` list to package them into that PR"
+            f"{_contained_clause}.",
             err=True,
         )
 
@@ -3519,7 +3532,7 @@ def cmd_update(
     parent: Optional[str] = typer.Option(
         None,
         "--parent",
-        help="Set parent node ID. Pass 'null' to clear (de-orphan to top-level). Validates target exists and rejects cycles.",
+        help="Set parent node ID. Pass 'null' to clear (de-orphan to top-level). Validates target exists and rejects cycles. Moving a contained node away from its owner un-contains it.",
     ),
     completion_note: Optional[str] = typer.Option(
         None,
@@ -8640,6 +8653,111 @@ def cmd_undefer(
             typer.echo(f"warning: {tid} was not deferred", err=True)
         typer.echo(f"Undeferred {tid}")
     _project_plans_from_graph(ids)
+
+
+@cli.command(
+    "adopt",
+    hidden=True,
+    epilog="Inverse: `fno backlog update <id> --parent null` un-contains a node.",
+)
+def cmd_adopt(
+    ctx: typer.Context,
+    owner: str = typer.Argument(..., help="The owning node: adopted nodes ship inside its PR."),
+    task_ids: List[str] = typer.Argument(
+        ...,
+        help="Node IDs to fold (ab-XXXXXXXX). Multiple via space and/or comma.",
+    ),
+) -> None:
+    """Fold existing nodes into an owner: they ship inside its PR. No plan needed.
+
+    Stamps contained_in + parent in one locked mutation. Atomic across the
+    batch: any refusal stamps nothing. A deferred target is accepted (adopt
+    first, undefer second, so the node is never armed in between). Containment
+    is released by the owner's merge cascade or by moving the node away.
+    """
+    import json as _json
+
+    from fno.graph.store import locked_mutate_graph
+    from fno.graph._intake import _find_node
+    from fno.graph._adopt import adopt_into, refuse_dead_owner
+    from fno.handoff.output import json_mode
+
+    ids = _expand_id_args(task_ids)
+    if not ids:
+        typer.echo("Error: at least one task_id is required", err=True)
+        raise typer.Exit(code=1)
+
+    adopted: list[str] = []
+    warnings: list[str] = []
+    owner_id = ""
+
+    def mutator(entries):
+        nonlocal adopted, warnings, owner_id
+        owner_node = _find_node(entries, owner)
+        if owner_node is None:
+            typer.echo(f"Error: owner not found: {owner}", err=True)
+            raise typer.Exit(code=3)
+        owner_id = owner_node["id"]
+        if owner_node.get("completed_at"):
+            typer.echo(
+                f"Error: owner {owner_id} is done; its PR already merged, so "
+                "nothing will ever close a node folded into it now",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        refuse_dead_owner(owner_node, context="adopt")
+        seen: dict[str, str] = {}
+        for tid in ids:
+            target = _find_node(entries, tid)
+            if target is None:
+                typer.echo(f"Error: feature(s) not found: {tid}", err=True)
+                raise typer.Exit(code=3)
+            prior = seen.get(target["id"])
+            if prior is not None:
+                typer.echo(
+                    f"Error: node {target['id']} is named twice ({prior} and "
+                    f"{tid}); two spellings of one id resolve to the same node",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            seen[target["id"]] = tid
+        if owner_id in seen:
+            typer.echo(
+                f"Error: adopt names the owner {owner_id} itself",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        for tid in ids:
+            target = _find_node(entries, tid)
+            outcome = adopt_into(
+                entries,
+                owner_node,
+                target,
+                live_worker=_live_worker,
+                context="adopt",
+            )
+            if outcome.warning:
+                warnings.append(
+                    f"warning: adopted {target['id']} into {owner_id} but did "
+                    f"NOT mark it contained: it {outcome.warning}, so it is "
+                    "its own delivery unit and is not closed by the owner's merge"
+                )
+            if outcome.adopted or target.get("parent") == owner_id:
+                if target["id"] not in adopted:
+                    adopted.append(target["id"])
+        return entries
+
+    locked_mutate_graph(_graph_path(), mutator)
+
+    for line in warnings:
+        typer.echo(line, err=True)
+    if json_mode(ctx):
+        typer.echo(
+            _json.dumps({"owner": owner_id, "adopted": adopted, "warnings": warnings})
+        )
+        return
+    for tid in adopted:
+        typer.echo(f"adopted {tid} into {owner_id}; it ships inside {owner_id}'s PR")
 
 
 # -- backfill-deferred-kind --
@@ -15349,6 +15467,8 @@ _TRACKER_OWNED_VERBS = frozenset(
         "reprioritize",
         "defer",
         "undefer",
+        # stamps contained_in + parent under the lock
+        "adopt",
         "queue",
         "unqueue",
         "pick",
