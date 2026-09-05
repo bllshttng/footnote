@@ -11282,8 +11282,8 @@ def cmd_reconcile(
                 f"{f' ({row.pr_url})' if row.pr_url else ''}: {', '.join(row.overlapping_paths)}"
             )
             if row.probe is not None:
-                verdict = "PASS" if row.probe.passed else "FAIL"
-                typer.echo(f"      closure_probe: {verdict} - {row.probe.detail}")
+                probe_verdict = "PASS" if row.probe.passed else "FAIL"
+                typer.echo(f"      closure_probe: {probe_verdict} - {row.probe.detail}")
         typer.echo(
             "  read-only: confirm with `fno backlog confirm-candidate <node-id> "
             "--pr-number N`, or ignore - a file overlap is evidence, not proof"
