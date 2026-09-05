@@ -2060,13 +2060,14 @@ struct LiveTab {
 /// snapshot supplies squad liveness cwds and the empty-tab candidates, so the
 /// receipt and the destructive pass cannot disagree because one probe was
 /// newer than the other. Returns `(tabs, cwds, answered, unreachable)`:
-/// `answered` counts the sessions whose `PaneLs` returned a `PaneList` and
-/// `unreachable` holds the sorted names of the rest. A dead server leaves its
-/// socket behind by design (`kill-server` owns removal, see
-/// [`session_names`]), so an unreachable session is a steady state, not an
-/// anomaly - folding the per-session fact into one boolean disabled the sweep
-/// for every healthy session and reported a clean exit 0 (x-6e79).
-fn live_tabs() -> (Vec<LiveTab>, Vec<String>, usize, Vec<String>) {
+/// `answered` names the sessions whose `PaneLs` returned a `PaneList` (the
+/// count is its length) and `unreachable` holds the sorted names of the rest.
+/// A dead server leaves its socket behind by design (`kill-server` owns
+/// removal, see [`session_names`]), so an unreachable session is a steady
+/// state, not an anomaly - folding the per-session fact into one boolean
+/// disabled the sweep for every healthy session and reported a clean exit 0
+/// (x-6e79).
+fn live_tabs() -> (Vec<LiveTab>, Vec<String>, Vec<String>, Vec<String>) {
     let Ok(names) = session_names() else {
         // The session list itself is unreadable: nothing was probed, so no
         // session answered, and the refusal below must name that hole rather
@@ -2074,14 +2075,14 @@ fn live_tabs() -> (Vec<LiveTab>, Vec<String>, usize, Vec<String>) {
         return (
             Vec::new(),
             Vec::new(),
-            0,
+            Vec::new(),
             vec!["<session list unreadable>".into()],
         );
     };
     let mut groups: std::collections::BTreeMap<(String, u64, u64), LiveTab> =
         std::collections::BTreeMap::new();
     let mut cwds = Vec::new();
-    let mut answered = 0usize;
+    let mut answered: Vec<String> = Vec::new();
     let mut unreachable = Vec::new();
     for name in names {
         let Ok(sock) = proto::socket_path(&name) else {
@@ -2090,7 +2091,7 @@ fn live_tabs() -> (Vec<LiveTab>, Vec<String>, usize, Vec<String>) {
         };
         match control_roundtrip(&sock, &name, ControlVerb::PaneLs) {
             Ok(ServerMsg::PaneList { panes }) => {
-                answered += 1;
+                answered.push(name.clone());
                 for pane in panes {
                     cwds.push(pane.cwd.clone());
                     let key = (name.clone(), pane.squad_id, pane.tab_id);
@@ -2374,7 +2375,8 @@ fn squad_prune(args: &[OsString]) -> i32 {
     }
 
     let evidence = member_evidence();
-    let (tabs, live_cwds, answered, unreachable) = live_tabs();
+    let (tabs, live_cwds, answered_names, unreachable) = live_tabs();
+    let answered = answered_names.len();
     let scope = sweep_scope(answered, &unreachable);
     let tab_outcome = if scope.fold_tabs && !dead_only {
         prune_live_tabs(&tabs, include_named, dry_run, include_used_shells)
@@ -2505,6 +2507,38 @@ fn squad_prune(args: &[OsString]) -> i32 {
         eprintln!("fno mux workspace prune: {notice}");
     }
 
+    // (v69) A store pass the live server never sees is undone by its next
+    // persist_squad: the in-memory member list is authoritative and rewrites
+    // the file on every pane event. After a real store pass, every answering
+    // session re-reads the file just written. A refused reload is a warning,
+    // not a failure: the file pass was real, and the next prune or the
+    // server's own SweepDead heals the skew.
+    let mut refreshed: Vec<(String, usize)> = Vec::new();
+    let mut reload_failed: Vec<String> = Vec::new();
+    if scope.sweep_store && !dry_run {
+        for name in &answered_names {
+            let verdict = proto::socket_path(name)
+                .map_err(|e| e.to_string())
+                .and_then(|sock| {
+                    control_roundtrip(&sock, name, ControlVerb::SquadReload)
+                        .map_err(|e| e.to_string())
+                });
+            match verdict {
+                Ok(ServerMsg::SquadReloaded { members, .. }) => {
+                    refreshed.push((name.clone(), members));
+                }
+                Ok(_) | Err(_) => reload_failed.push(name.clone()),
+            }
+        }
+    }
+    if !reload_failed.is_empty() {
+        eprintln!(
+            "fno mux workspace prune: reload refused: {}",
+            reload_failed.join(", ")
+        );
+    }
+
+    let reload_ran = scope.sweep_store && !dry_run;
     let probed = answered + unreachable.len();
     if json {
         render_prune_json(
@@ -2520,6 +2554,9 @@ fn squad_prune(args: &[OsString]) -> i32 {
             probed,
             &unreachable,
             notice.as_deref(),
+            reload_ran,
+            &refreshed,
+            &reload_failed,
         );
     } else {
         let verb = if applied { "pruned" } else { "would prune" };
@@ -2569,6 +2606,9 @@ fn squad_prune(args: &[OsString]) -> i32 {
             answered,
             probed,
             &unreachable,
+            reload_ran,
+            &refreshed,
+            &reload_failed,
         );
     }
     EXIT_OK
@@ -2602,6 +2642,9 @@ fn print_prune_summary(
     answered: usize,
     probed: usize,
     unreachable: &[String],
+    reload_ran: bool,
+    refreshed: &[(String, usize)],
+    reload_failed: &[String],
 ) {
     let mut parts = vec![format!("{verb} {n} squad(s)")];
     // The acted-on count carries its mood in the verb: an apply run says
@@ -2675,6 +2718,12 @@ fn print_prune_summary(
     if members_kept_unknown > 0 {
         parts.push(format!("kept {members_kept_unknown} unknown member(s)"));
     }
+    if reload_ran {
+        parts.push(format!("refreshed {} session(s)", refreshed.len()));
+    }
+    if !reload_failed.is_empty() {
+        parts.push(format!("reload refused: {}", reload_failed.join(", ")));
+    }
     println!("{}", parts.join("; "));
 }
 
@@ -2692,6 +2741,9 @@ fn render_prune_json(
     probed: usize,
     unreachable: &[String],
     notice: Option<&str>,
+    reload_ran: bool,
+    refreshed: &[(String, usize)],
+    reload_failed: &[String],
 ) {
     let pruned: Vec<_> = removed
         .iter()
@@ -2705,42 +2757,53 @@ fn render_prune_json(
             })
         })
         .collect();
-    println!(
-        "{}",
-        serde_json::json!({
-            "pruned": pruned,
-            "pruned_count": pruned.len(),
-            "dry_run": dry_run,
-            "kept_protected": kept_protected,
-            "kept_unknown": kept_unknown,
-            "skipped_named": skipped_named,
-            "members_reaped": members_reaped,
-            "members_kept_live": members_kept_live,
-            "members_kept_unknown": members_kept_unknown,
-            "tabs_closed": tabs.closed,
-            "tabs_would_close": tabs.would_close,
-            "tabs_skipped_named": tabs.skipped_named,
-            "tabs_kept": tabs.kept,
-            // (x-cf97) The kept split and the opt-in used-shell population:
-            // the four reasons sum to `tabs_kept` whenever the fold ran, and
-            // `kept_not_probed` covers the run where it did not.
-            "tabs_kept_last_in_squad": tabs.kept_last_in_squad,
-            "tabs_kept_not_pristine": tabs.kept_not_pristine,
-            "tabs_kept_zero_panes": tabs.kept_zero_panes,
-            "tabs_kept_unreachable": tabs.kept_unreachable,
-            "tabs_kept_not_probed": tabs.kept_not_probed,
-            "tabs_used_shells": tabs.used_shells,
-            "tabs_closed_used_shells": tabs.closed_used,
-            "tabs_would_close_used_shells": tabs.would_close_used,
-            // (review) One key covers both runs on purpose: on a dry-run these
-            // are the candidates, on an apply they are what actually closed.
-            "tabs_close_named": tabs.closed_named,
-            "server_reachable": unreachable.is_empty(),
-            "sessions_probed": probed,
-            "sessions_unreachable": unreachable,
-            "notice": notice,
-        })
-    );
+    let mut payload = serde_json::json!({
+        "pruned": pruned,
+        "pruned_count": pruned.len(),
+        "dry_run": dry_run,
+        "kept_protected": kept_protected,
+        "kept_unknown": kept_unknown,
+        "skipped_named": skipped_named,
+        "members_reaped": members_reaped,
+        "members_kept_live": members_kept_live,
+        "members_kept_unknown": members_kept_unknown,
+        "tabs_closed": tabs.closed,
+        "tabs_would_close": tabs.would_close,
+        "tabs_skipped_named": tabs.skipped_named,
+        "tabs_kept": tabs.kept,
+        // (x-cf97) The kept split and the opt-in used-shell population:
+        // the four reasons sum to `tabs_kept` whenever the fold ran, and
+        // `kept_not_probed` covers the run where it did not.
+        "tabs_kept_last_in_squad": tabs.kept_last_in_squad,
+        "tabs_kept_not_pristine": tabs.kept_not_pristine,
+        "tabs_kept_zero_panes": tabs.kept_zero_panes,
+        "tabs_kept_unreachable": tabs.kept_unreachable,
+        "tabs_kept_not_probed": tabs.kept_not_probed,
+        "tabs_used_shells": tabs.used_shells,
+        "tabs_closed_used_shells": tabs.closed_used,
+        "tabs_would_close_used_shells": tabs.would_close_used,
+        // (review) One key covers both runs on purpose: on a dry-run these
+        // are the candidates, on an apply they are what actually closed.
+        "tabs_close_named": tabs.closed_named,
+        "server_reachable": unreachable.is_empty(),
+        "sessions_probed": probed,
+        "sessions_unreachable": unreachable,
+        "notice": notice,
+    });
+    // (v69) The reload keys exist only on a run that sent SquadReload - a
+    // dry-run or tabs-only pass sends nothing, so its receipt carries no key
+    // rather than an empty list that reads as "zero sessions refreshed".
+    if reload_ran {
+        payload["refreshed"] = serde_json::json!(refreshed
+            .iter()
+            .map(|(session, members)| serde_json::json!({
+                "session": session,
+                "members": members,
+            }))
+            .collect::<Vec<_>>());
+        payload["reload_failed"] = serde_json::json!(reload_failed);
+    }
+    println!("{payload}");
 }
 
 // ---------------------------------------------------------------------------
