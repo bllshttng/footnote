@@ -126,6 +126,8 @@ is known):
    This is the reconciliation step: discovery mints at finding granularity and delivery ships at PR granularity, and `adopt` (not `/think`) is what draws the one-plan-one-node boundary between them.
    See `extraction-vs-think.md`.
 
+   Before the epic is blueprinted (no plan yet), the same fold is available directly: `fno backlog adopt <epic> <id>...` stamps containment with no group scaffolding. A later decompose that names those ids in a group converges, re-stamping the group child. A decompose that leaves one out names it in the unadopted warning.
+
    There is no epic-scoped child listing verb, so let decompose tell you. It is
    idempotent, so running it and refining the spec is safe: any child no group
    adopted is named on stderr as

@@ -107,6 +107,7 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 - **Lifecycle:** `intake -> triage -> ready/next -> done`. Side states: `blocked`, `deferred` (`defer`/`undefer`), `superseded`.
 - **Priority:** `p0`..`p3` (default `p2`); orthogonal to `--size S|M|L`.
 - **Editing:** `fno backlog update <id>` in place (`--details`, `--domain`, `--size`, `--priority`, ...). Never recreate via `idea` (dupes).
+- **Subtasks:** `fno backlog adopt <owner> <id>...` folds existing nodes into a feature with no plan. They stay on the board, never dispatch alone, and close on the owner's merge. Never defer to mean contained.
 - **Board == work order:** non-Done cards share a rank suffix (live-epic children before epics, then priority, then created_at); project lane is a board-only display prefix; `rank <id> --top` floats a card and makes it run next; `_kanban_column` is the sole column authority. [backlog-board-ordering](docs/architecture/backlog-board-ordering.md).
 - **Hygiene:** `fno backlog groom` (daily pass), `triage health [--check]`, `maintain [--apply]`, `reconcile` (auto-fires on SessionStart), `advance` (merge-triggered auto-continue, opt-in).
 - **Demand signal:** `fno backlog encounter <id> --evidence "..."`, one per node per session, evidence required. `fno backlog demand` ranks by divergence, never re-ranks. [usage](docs/backlog-usage.md#demand-signal-what-the-agents-keep-hitting).

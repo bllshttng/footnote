@@ -214,10 +214,13 @@ Four edges connect nodes, and only the first two gate anything.
 |------|----------|---------|--------|
 | `blocked_by` | `--blocked-by` / `--add-blocker` / `--remove-blocker` | this cannot start until that lands | yes: derives `_status: blocked` |
 | `parent` | `--parent` | this was decomposed into that epic | yes: rollup, epic depth |
+| `contained_in` | `fno backlog adopt <owner> <id>...` | this ships inside that node's PR | yes: skipped by both dispatch paths, closed by the owner's merge |
 | `source_node_id` | `--source-node`, or captured ambiently | this came *out of* working on that | no |
 | `related` | `--related` | affinity: two sides of the same coin, or work that co-delivers | no |
 
 `source_node_id` and `related` are deliberately different questions.
+
+`contained_in` is not defer. Containment says the node's work ships inside the owner's PR. The row stays on the board with a `ships inside: <owner>` line and never dispatches alone. When the owner's merge cascades, the row closes with it. Defer is a judgement any groom pass can make and it hides the row. If the intent is "this ships with that", adopt, never defer. Full contract: [subtask-containment](architecture/subtask-containment.md).
 Origin is where the decision to think about this was made; affinity is asserted by whoever notices it, in either direction, and neither implies the other.
 
 **Origin capture is ambient first.** Filing a node from a session that already knows its node stamps the origin with no flag, through three branches in precedence order: an explicit `--source-node`, then an owned `.fno/target-state.md`, then the `FNO_NODE` a spawn exported. Pass `--source-node <id>` only when none of those apply, or to override them.
