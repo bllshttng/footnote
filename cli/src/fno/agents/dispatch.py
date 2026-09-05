@@ -6171,9 +6171,9 @@ def rpc_roundtrip(
             emit(f"daemon RPC error: {err.get('message', err)}")
             return None
         return resp.get("result")
-    except (OSError, ValueError):
-        # ValueError covers json.JSONDecodeError / UnicodeDecodeError from a
-        # malformed daemon response; the docstring contract is NEVER raise.
+    except (OSError, ValueError) as exc:
+        # ValueError covers a malformed daemon response; print the reason.
+        emit(f"socket error: {exc}")
         return None
     finally:
         sock.close()
