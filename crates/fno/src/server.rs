@@ -16828,6 +16828,9 @@ mod tests {
     // The sideline rename test family, same treatment.
     mod rename_tests;
 
+    // The squad-store sync family (prune reload marker + negative control).
+    mod squad_sync_tests;
+
     #[test]
     fn node_from_argv_reads_the_wrapper_token() {
         // env(1) wrapper prefix: `env FNO_AGENT_SELF=... FNO_NODE=x-66e8 ... claude`.
