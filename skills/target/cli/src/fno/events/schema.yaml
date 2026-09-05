@@ -2447,7 +2447,7 @@ event_types:
           type: integer
 
   - name: agent_row_reaped
-    description: "An agent-view row was removed by the dead-row GC sweep or `fno agents reap`: a terminal/dead row past grace with corroboration (confirmed-dead pid, positively-stale transcript, or its session gone from its OWN harness's store), an absolute-age backstop removal, or a live-but-done row (idle past grace, transcript tail classifies done) which carries resumable: true so a dormant distinction can be rendered later. For a convention-named target/reconcile worker, node_id plus termination_event make a pre-claim death durable; no-termination reaps also emit node_failed for failure-streak accounting (x-5c08). Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
+    description: "An agent-view row was retired by the retirement sweep or `fno agents reap`: the session's WORK is done on every node its sessions[] names (the reverse join) and its transcript has been quiet past agents.retire_grace_s. basis names that verdict. The held process is stopped first, a resumable receipt is written before the row drops, and the node's sessions[] row and the harness transcript survive, so resumable is always true and `fno agents resume` still opens the session. For a convention-named target/reconcile worker, node_id plus termination_event make a pre-claim death durable; no-termination retirements also emit node_failed for failure-streak accounting (x-5c08). Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
     sources: [daemon]
     data:
       required: []
@@ -2464,28 +2464,16 @@ event_types:
           type: boolean
         harness:
           type: string
-          description: "The reaped row's harness identity (claude/codex/...), so the reap is attributable to the store that judged it."
+          description: "The retired row's harness identity (claude/codex/...), so the retirement is attributable to the store that judged it."
         harness_session_id:
           type: [string, "null"]
-          description: "The row's session id in its own harness's store. With harness, the resumable handle for a dormant reap; also the join key for correlating a reap with the harness's own session records."
+          description: "The row's session id in its own harness's store. With harness, the resumable handle; also the join key for correlating a retirement with the harness's own session records."
+        basis:
+          type: string
+          description: "The WORK-done verdict the retirement keyed on, e.g. 'every named node done: N1'."
         resumable:
           type: boolean
-          description: "True only for a live-but-done (dormant) reap: the session finished its turn rather than dying, and the handle above can resume it."
-        cascade_refused:
-          type: [object, "null"]
-          description: "When the post-reap cascade into the harness's own session store refused or failed: {id, reason}. Never swallowed, and never rolls back the registry reap."
-        node_session_cleared:
-          type: boolean
-          description: "True only after the exact open node do-row was positively settled by the observer cascade."
-        node_row_removed:
-          type: [boolean, "null"]
-          description: "Whether the observer cascade removed an open row; false means it was already settled."
-        node_status_before:
-          type: [string, "null"]
-        node_status_after:
-          type: [string, "null"]
-        node_remaining_open_do:
-          type: [integer, "null"]
+          description: "Always true: every retirement keeps the receipt and the harness session, so the handle above can resume it."
 
   - name: worktree_sweep
     description: "One repo's reading from the daemon's 24h worktree report sweep (x-5a30): what `fno agents workspace worktree cleanup --merged` WOULD archive. Report-only by construction, because a merged PR is external proof that work landed and a timer tick is not; removal stays on the merge-triggered path gated by post_merge.self_reap. Emitted for every repo including those reading zero, so a quiet repo is never mistaken for a sweep that did not run. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."

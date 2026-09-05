@@ -224,11 +224,16 @@ fn ac4_hp_three_row_marker_retires_prunes_and_names_every_keep() {
         &|_| Some(vec![fresh.clone()]),
         &|_| (Some(true), Some(true)),
     );
-    assert_eq!(
-        summary.kept_active,
-        vec![("rowa".to_string(), 10)],
-        "{:?}",
-        summary.kept_active
+    let [(row, age)] = summary.kept_active.as_slice() else {
+        panic!("expected one kept-active row: {:?}", summary.kept_active);
+    };
+    assert_eq!(row, "rowa");
+    // The transcript was stamped now-10s; a loaded runner measures the write
+    // a second or two later, so pin the RANGE (fresh, inside the 900s grace),
+    // never the wall-clock instant.
+    assert!(
+        *age >= 10 && *age < 900,
+        "age {age} should read fresh, got {summary:?}"
     );
     assert!(summary.retired.is_empty());
     assert!(summary.pruned.is_empty());
