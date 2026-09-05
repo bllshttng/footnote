@@ -13,7 +13,8 @@
 //! select tab · `&` close tab · `w` sideline row selector · `b` toggle sideline ·
 //! `s` toggle status row · `?` key-table overlay · `d` detach · `[`/`]` jump
 //! prev/next command block · `v` select block · `y` copy selection · `r` rerun
-//! block (x-38c4) · `,` rename tab (x-c150) · prefix-prefix = one literal
+//! block (x-38c4) · `R` ask the pane to repaint (x-a600) · `,` rename tab
+//! (x-c150) · prefix-prefix = one literal
 //! prefix byte · `<`/`>` reorder the active tab (x-0333). Prefix + anything
 //! unmapped is swallowed with BEL - a chord typo must never leak half a chord
 //! into the pane (AC2-UI's never-leak guarantee).
