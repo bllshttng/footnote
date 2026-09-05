@@ -3491,10 +3491,12 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
     # itself some other node's `parent` is an epic, and `/target` builds its
     # leaves, not the box. Mirror cmd_next's `_pick_ready` exclusion on this
     # edge-following path so a now-unblocked epic dependent is skipped here too.
-    parent_ids = {
-        e.get("parent") for e in entries
-        if isinstance(e, dict) and isinstance(e.get("parent"), str)
-    }
+    # `_container_ids` is the one implementation (an owner of only contained
+    # children is a delivery unit, not a box), so this path cannot drift from
+    # `next`.
+    from fno.graph.cli import _container_ids
+
+    parent_ids = _container_ids(entries)
     # Shared guard inputs (dead-ancestor + stale-ready quarantine): the same
     # selection_guards() the `next` picker applies, so a converge dispatch never
     # revives a leaf under a killed epic or a long-abandoned ready node.

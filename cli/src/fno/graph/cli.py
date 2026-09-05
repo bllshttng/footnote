@@ -177,6 +177,11 @@ def _container_ids(entries: list[dict]) -> set[str]:
     (cmd_ready) so the two surfaces cannot drift; advance_dependents applies the
     same rule on the merge edge-following path.
 
+    A child whose ``contained_in`` is the parent ships INSIDE the parent's PR,
+    so the parent is the delivery unit, not a box: an owner whose only children
+    are its own contained subtasks still drains. Free children make the parent
+    a box exactly as before.
+
     No "keep the all-done epic selectable" exception is needed: an epic closes
     automatically via ``_cascade_close_parents`` on the merge that finishes its
     last child (uniform across projects), so it is already ``done`` - never a
@@ -184,7 +189,13 @@ def _container_ids(entries: list[dict]) -> set[str]:
     closure. That replaces the old "walker closes the epic via next" path,
     which conflicted with never building a container.
     """
-    return {p for e in entries if isinstance(e, dict) and isinstance((p := e.get("parent")), str)}
+    return {
+        p
+        for e in entries
+        if isinstance(e, dict)
+        and isinstance((p := e.get("parent")), str)
+        and e.get("contained_in") != p
+    }
 
 
 @cli.callback()
