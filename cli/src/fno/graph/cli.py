@@ -8691,6 +8691,7 @@ def cmd_adopt(
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
     from fno.graph._adopt import adopt_into, refuse_dead_owner
+    from fno.graph._decompose import DecomposeError
     from fno.handoff.output import json_mode
 
     ids = _expand_id_args(task_ids)
@@ -8758,7 +8759,13 @@ def cmd_adopt(
                     adopted.append(target["id"])
         return entries
 
-    locked_mutate_graph(_graph_path(), mutator)
+    try:
+        locked_mutate_graph(_graph_path(), mutator)
+    except DecomposeError as e:
+        from fno.handoff.output import emit_error
+
+        emit_error(ctx, str(e))
+        raise typer.Exit(code=e.exit_code)
 
     for line in warnings:
         typer.echo(line, err=True)
