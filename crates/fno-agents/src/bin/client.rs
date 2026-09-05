@@ -55,6 +55,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "recover",
     "reentry-plan",
     "rename",
+    "reign-shape",
+    "reign-state",
     "report",
     "review-coverage",
     "review-summary",
@@ -247,6 +249,17 @@ async fn run(args: Vec<String>) -> i32 {
     // kill_criteria.rs doc). Direct dispatch; no daemon RPC.
     if verb == "kill-check" {
         return fno_agents::kill_criteria::run_kill_check(&args[1..]);
+    }
+
+    // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see
+    // loop_reign.rs doc). Direct dispatch, daemon-free reads; the Python
+    // `fno agents king shape` shell and escalate's client invoke the binary
+    // directly rather than routing through the agents verb set.
+    if matches!(verb, "reign-state") {
+        return fno_agents::loop_reign::run_reign_state(&args[1..]);
+    }
+    if matches!(verb, "reign-shape") {
+        return fno_agents::loop_reign::run_reign_shape(&args[1..]);
     }
 
     // `graph-get`/`bash-census`/`session-start-bytes` (x-997a): daemon-free reads, not routable `fno agents` verbs (same reasoning as kill-check).

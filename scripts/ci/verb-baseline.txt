@@ -99,6 +99,7 @@ king done
 king escalate
 king init
 king manifest-path
+king shape
 law set
 lint
 loops

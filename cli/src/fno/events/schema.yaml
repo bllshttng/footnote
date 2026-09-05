@@ -2371,6 +2371,43 @@ event_types:
         name:
           type: string
 
+  - name: reign_armed
+    description: "A crowned reign finished arming its beat: six monitors plus the self-injected /loop and /goal. Journaled by the reigning session through fno doctor event emit."
+    sources: [loop, daemon]
+    data:
+      required: []
+      properties:
+        scope:
+          type: string
+        shape:
+          type: string
+        monitors:
+          type: string
+
+  - name: reign_checkin
+    description: "One completed check-in body of a reign: indicators printed, levers pulled (if any)."
+    sources: [loop, daemon]
+    data:
+      required: []
+      properties:
+        scope:
+          type: string
+        change:
+          type: string
+
+  - name: reign_dispatch_exception
+    description: "A reign spawned despite the no-dispatch rule, justified by a red dispatching arm in fno agents status. Names the arm and the node."
+    sources: [loop, daemon]
+    data:
+      required: []
+      properties:
+        arm:
+          type: string
+        node:
+          type: string
+        scope:
+          type: string
+
   - name: event_payload_too_large
     description: "A Rust-emitted event payload exceeded MAX_EVENT_PAYLOAD_BYTES (500). The oversized event is replaced by this meta-event so the intended_kind is still visible to auditors."
     sources: [daemon, subagent]

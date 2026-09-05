@@ -42,6 +42,8 @@ from fno import paths
 from fno.agents.dispatch import (
     DispatchAskError,
     _capture_parent_edge,
+    _reign_typed_message,
+    _report_unlinked_parent,
     _capture_spawn_trigger,
     _touch_log_path,
     validate_spawn_name,
@@ -102,27 +104,14 @@ class MuxSpawnResult:
     # A Codex pane whose rollout has not appeared yet is created but not
     # addressable. Keep that transition explicit instead of calling it live.
     status: str = "live"
-    # Two facts that must never collapse into one field. `bound` answers "did
-    # the worker bind a session identity", true only when one was actually
-    # obtained. `pane_alive` answers "does the pane exist", probed and never
-    # assumed (None = the mux could not answer).
-    # Before these existed, a pane that would bind in 4s and one that had
-    # already died produced byte-identical receipts, so a caller could not tell
-    # a slow worker from a corpse and would re-prompt the corpse.
-    #
-    # THREE values, not two. None means this harness has no spawn-time session
-    # identity at all (see _SESSION_BINDING_HARNESSES), so the spawn asserts
-    # nothing rather than inventing an answer - claiming True there would be the
-    # same unverified "it's live" this change exists to remove. A consumer
-    # treats False as doubt and None as "no better than before".
-    #
-    # It defaults to None for the same reason: a field whose job is to carry
-    # doubt must not default to certainty.
-    #
-    # For the harnesses where short_id IS the handle, `short_id` is a PROJECTION
-    # of `bound`, never an independent claim: `bound == bool(short_id)` is an
-    # invariant with a test on it, which is what makes an empty short_id a
-    # signal rather than a formatting detail.
+    # Two facts that must never collapse into one field: `bound` (a session
+    # identity was actually obtained) vs `pane_alive` (the pane exists, probed;
+    # None = the mux could not answer). Before these, a slow worker and a corpse
+    # produced byte-identical receipts. None on `bound` means this harness has
+    # no spawn-time identity at all (see _SESSION_BINDING_HARNESSES): False is
+    # doubt, None is "no better than before", and the default is None because a
+    # field carrying doubt must not default to certainty. Where short_id IS the
+    # handle, `bound == bool(short_id)` is a tested invariant.
     bound: Optional[bool] = None
     pane_alive: Optional[bool] = None
     # Whether the computed writable set reaches the live global claim store.
@@ -1516,27 +1505,15 @@ def build_pane_argv(
         return argv
     if provider == "pi":
         # pi's WATCHING lane: the plain interactive TUI, never `--mode rpc`
-        # (the two are mutually exclusive per process, chosen at exec). The
-        # pinned `--session-id` is what makes this a JOIN onto a session the
-        # rpc lane may already be driving: measured 2026-08-28, a TUI opened on
-        # a live rpc session rendered that session's own turns and the
-        # session-file count for the id stayed at ONE.
-        #
-        # Opening it on an id that does NOT exist yet is a CREATE, and creates
-        # are the unserialised half (four simultaneous creates on one id
-        # produced four sessions, silently, every process exiting 0). The spawn
-        # lane serialises that decision with
+        # (mutually exclusive per process). The pinned `--session-id` makes this
+        # a JOIN onto a live rpc session (measured 2026-08-28: one session
+        # file). Opening a NOT-yet-existing id is a CREATE, the unserialised
+        # half - the spawn lane serialises via
         # `fno.agents.harnesses.pi.create_decision`; this builder only composes
-        # argv.
-        #
-        # `--provider` AND `--model` both, always: `--provider openai-codex`
-        # without `--model` falls through to a Bedrock model and dies naming an
-        # expired AWS SSO session, which misdirects completely.
-        #
-        # pi ships NO permission popups (its own docs/usage.md says so), so
-        # there is no never-prompt flag to add and `yolo` maps to nothing here.
-        # `--approve` trusts project-local FILES, a different axis, and stays an
-        # operator choice.
+        # argv. `--provider` AND `--model` both, always (provider alone falls
+        # through to Bedrock and dies naming an expired AWS SSO session). pi
+        # ships no permission popups, so `yolo` maps to nothing; `--approve`
+        # trusts files, a different axis, and stays an operator choice.
         from fno.agents.harnesses.pi import pi_model, pi_provider
 
         argv = [*identity, "--provider", pi_provider(), "--model", model or pi_model()]
@@ -3716,6 +3693,12 @@ def dispatch_spawn_pane(
         if grant_problem is not None:
             raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
 
+    # The pane half of the crowned-spawn typing: `pane` is the DEFAULT
+    # substrate, so typing only on the bg lane left the common case improvising.
+    message, reign_typed = _reign_typed_message(
+        message, crown_level, crown_scope, revive=False
+    )
+
     # Launch-time headroom picking (x-7d45). `pane` is the DEFAULT substrate and
     # `cmd_spawn` routes it straight here, never through `dispatch_spawn` - so a
     # picker wired only there would cover bg/headless and leave every default
@@ -4422,6 +4405,7 @@ def dispatch_spawn_pane(
                 exit_code=1,
             )
         spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
+        _report_unlinked_parent(spawned_by_session)
         # spawn_trigger was already popped before the pane-run env snapshot above.
 
         # The receipt's two independent facts (see MuxSpawnResult.bound), plus
@@ -4946,6 +4930,13 @@ def dispatch_spawn_pane(
                 print(
                     f"spawn: crown over {_declined_scope!r} recorded, but the king "
                     f"loop manifest was NOT armed{why}",
+                    file=sys.stderr,
+                )
+            if _declined_scope and not crown_declined:
+                # No NOT-typed case here: typing is unconditional when a crown
+                # is carried (no revive path on this lane).
+                print(
+                    f"spawn: crown over {_declined_scope!r} recorded; reign typed",
                     file=sys.stderr,
                 )
             # Birth (x-8cd5 Wave 6): the row is written, so the pane worker now

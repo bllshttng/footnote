@@ -294,6 +294,10 @@ def serialize_entry(
         "crown_level": entry.crown_level,
         "crown_scope": entry.crown_scope,
         "crown_grantor": entry.crown_grantor,
+        # The parent edge the orphan check keys on. Null is a real answer (an
+        # ambiguous identity resolve records no lineage rather than a wrong
+        # one): this worker is invisible to its spawner's orphan check.
+        "spawned_by_session": getattr(entry, "spawned_by_session", None),
         # How this session came to exist: "operator" for one a human started by
         # hand, "spawn" for a footnote-created worker, null for a row nothing
         # stamped. The reap lane REFUSES on "operator", so a human auditing that

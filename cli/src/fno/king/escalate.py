@@ -1,15 +1,10 @@
 """Escalate a stalled king board to the operator, exactly once per stalled set.
 
-A king that terminates ``NoProgress`` exits quietly, which is this feature's own
-failure arriving through a different door: work is pending, nothing is moving,
-and nobody is told. The escalation is the telling. It is a question in the
-operator queue rather than a log line because the queue is what survives the
-next turn.
-
-Idempotence is keyed on the stalled id SET, not on the session or the fire: a
-king respawned by the walk arm meets the same stalled board and must not record
-a second question about it. Two different stalled sets are two different
-questions, which is right - the board changed, so the ask changed.
+A king terminating ``NoProgress`` exits quietly: work pending, nothing moving,
+nobody told. The escalation is the telling, a question in the operator queue
+because the queue survives the next turn. Idempotence keys on the stalled id
+SET - a respawned king meeting the same board records no second question, while
+a different board is a different ask.
 """
 from __future__ import annotations
 
@@ -31,7 +26,14 @@ def dedupe_key(stalled_ids: "list[str]") -> str:
 MAX_LISTED_IDS = 20
 
 
-def question_text(stalled_ids: "list[str]", key: str, reason: str) -> str:
+def question_text(
+    stalled_ids: "list[str]",
+    key: str,
+    reason: str,
+    *,
+    live: "bool | None" = None,
+    unknown_reason: "str | None" = None,
+) -> str:
     """The operator-facing text, with the dedupe marker FIRST.
 
     The marker leads because ``operator_question`` truncates the recorded text
@@ -39,6 +41,10 @@ def question_text(stalled_ids: "list[str]", key: str, reason: str) -> str:
     past the cap, ``already_asked`` stopped matching, and every respawned king
     filed a fresh duplicate - the exact failure this module exists to prevent.
     Leading it also caps the id list, so neither half can crowd the other out.
+
+    ``live`` branches the closing sentence on the CALLER's measured liveness:
+    telling the operator a live king "has exited" hands it the double-crown
+    recommendation. ``None`` (unreadable) reads as dead, naming the reason.
     """
     ids = sorted(set(stalled_ids))
     if ids:
@@ -48,11 +54,25 @@ def question_text(stalled_ids: "list[str]", key: str, reason: str) -> str:
         subject = f"{len(ids)} board row(s) nothing is clearing: {shown}"
     else:
         subject = "a board the king could not read"
+    if live:
+        closing = (
+            "It is still reigning and holding these rows, so decide whether to "
+            "unblock them, defer them, or tell it to stand down."
+        )
+    else:
+        closing = (
+            "It has exited, so nothing restarts it on its own - decide whether "
+            "to unblock these rows, defer them, or crown a new king."
+        )
+        if live is None and unknown_reason:
+            # The unknown is named, never silently dropped: an operator told
+            # only "it has exited" would not know the liveness read failed and
+            # the king may in fact be live.
+            closing += f" (liveness unreadable: {unknown_reason})"
     return (
         f"[{MARKER}:{key}] The king stopped on {subject}. "
         f"Reason given: {reason}. "
-        "It has exited, so nothing restarts it on its own - decide whether to "
-        "unblock these rows, defer them, or crown a new king."
+        f"{closing}"
     )
 
 
@@ -74,12 +94,15 @@ def already_asked(root: Path, key: str) -> "str | None":
 
 
 def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str | None",
-             cwd: Path) -> "tuple[str, str]":
+             cwd: Path, *, live: "bool | None" = None,
+             unknown_reason: "str | None" = None) -> "tuple[str, str]":
     """Record one operator question for this stalled set.
 
     Returns ``(outcome, question_id)`` where outcome is ``recorded`` or
     ``duplicate``. Raises on a store failure; a quiet failure here would put the
-    king back in the silence this verb exists to break.
+    king back in the silence this verb exists to break. ``live`` and
+    ``unknown_reason`` come from :func:`fno.king.state.reign_state`; the dedupe
+    key is unchanged either way.
     """
     import secrets
 
@@ -97,7 +120,9 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
     append_question_event(
         operator_question(
             question_id=qid,
-            question=question_text(ids, key, reason),
+            question=question_text(
+                ids, key, reason, live=live, unknown_reason=unknown_reason
+            ),
             session_id=session_id,
             cwd=str(cwd),
             # The delivery address for the eventual answer. The king that asked

@@ -1,34 +1,17 @@
 """Read the eleven queues that decide whether a king still has work.
 
-Three properties are load-bearing and each has a test that fails loudly when it
-breaks.
-
-**Every row carries the shell command that produced it.** Board emptiness has to
-be reproducible by a third party who runs those commands by hand. A king that
-asserted it was finished would be the receipts-can-lie shape the pitfalls corpus
-already records; a king that hands you the commands is checkable.
-
-**A queue only a human can shrink is reported and never counted.** Counting one
-would hold the loop open until a person answered, which is idle-forever with a
-report attached. ``operator_question``, ``carveout_pending``,
-``capture_pending``, and ``unreachable_worker`` therefore report their real
-counts with ``actionable: false`` and a note naming why.
-
-**Staffed is an activity reading, never a status word.** The roster's status
-vocabulary collapses four real states into three words: a worker consuming
-tokens, a worker parked at its prompt, and a worker whose model refused all
-render the same. A board that read that word would drop every stalled node out
-of its queue and terminate NoWork while claims are held and nothing moves, which
-is worse than no loop at all. So the discriminator here is membership in
-:data:`ACTIVE_STATES` plus a fresh activity age. The set is IMPORTED, not
-copied, so the vocabulary fix that adds the missing fourth word reaches this
-board without an edit.
-
-One more asymmetry worth stating. An unreadable queue is not an empty one. No
-rows has two explanations, a clean board and a broken reader, and only a
-positive read can tell them apart. An unreadable queue is therefore counted as
-work in its own right (a blind king may not exit) and the process exits
-non-zero.
+Three load-bearing properties, each with a failing test. Every row carries the
+shell command that produced it, so board emptiness is reproducible by hand (a
+king that merely asserted it was finished would be the receipts-can-lie shape).
+A queue only a human can shrink (``operator_question``, ``carveout_pending``,
+``capture_pending``, ``unreachable_worker``) reports its real count with
+``actionable: false``, never counted - counting one is idle-forever with a
+report attached. Staffed is an ACTIVITY reading, never the roster status word,
+which collapses token-consuming, parked, and refused workers into one rendering
+and would drop stalled nodes to terminate NoWork with claims still held; the
+discriminator is :data:`ACTIVE_STATES` membership (imported, not copied) plus a
+fresh activity age. And an unreadable queue is not an empty one: it counts as
+work in its own right (a blind king may not exit) and the process exits nonzero.
 """
 from __future__ import annotations
 
@@ -694,18 +677,13 @@ def _read_prs(
     """Open PRs that are green, mergeable and unmerged, plus their nodes.
 
     The second source is every bound node's graph row, annotated with the
-    ``pr_number`` actually open; both reads are already paid for here.
+    ``pr_number`` actually open. Costs exactly ONE call (the rollup arrives
+    inside the listing), so the bound sits on the CALL via ``--limit``.
 
-    Costs exactly ONE call: the rollup arrives inside the listing, so there is
-    no per-PR status read to cap. The bound therefore sits on the CALL, via
-    ``--limit``, which is the only place it buys anything.
-
-    Two silent truncations lived here. ``gh pr list`` fetches 30 by default, so
-    an unbounded listing hid every PR past the thirtieth behind no message at
-    all. The cap then sliced rows BEFORE filtering, discarding PRs already
-    fetched and paid for. Either one drops an eligible PR from the count, and a
-    board that undercounts reaches ``NoWork`` while real work is open - the
-    same silent-truncation class as the row cap this module already fixed.
+    Two silent truncations lived here: ``gh pr list`` fetches 30 by default, so
+    an unbounded listing hid every PR past the thirtieth; the cap then sliced
+    rows BEFORE filtering, discarding fetched rows. Either drops an eligible PR
+    and a board that undercounts reaches ``NoWork`` while work is open.
     """
     listing = _run_json(
         [

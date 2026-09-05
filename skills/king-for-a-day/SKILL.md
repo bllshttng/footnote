@@ -9,6 +9,7 @@ argument-hint: "<epic-id>"
 
 You have been crowned over one scope, and the crown expires when you exit.
 That is the whole shape: real authority, no tenure.
+Tenure instead - a king that stays active over a territory for days, checking in on a schedule - is `/fno:reign <scope>`; this skill is the one-wave pass and court.
 
 One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and abdicates. The daemon's reflexes are unchanged and the tail dispatches from graph state alone, so nothing takes over the reign.
 
@@ -152,7 +153,7 @@ Reach for these by need, not by reflex; most passes touch only the first group.
 **Encode (the graph is the deliverable).**
 `fno backlog epic status <epic>` · `get` · `update --add-blocker/--blocked-by/--plan-path/--dispatch-verb/--dispatch-brief` · `rank` · `defer -R` / `undefer` · `advance --epic`
 
-**Rule.** `fno backlog decide <node|pr-N|area> "<what>" --rationale "<why>"` records a ruling that changes what a worker does. `fno backlog decisions <same>` reads it back, newest first, with superseded rows marked. A bare `fno backlog decisions` shows the recent ones across every subject. When a node exists, use its id. Otherwise use `pr-<n>` or the canonical subject returned by the standing-law query; a subject matches exactly, so never mint a near-synonym. Every ruling this verb records is machine-local project policy. A rule a stranger cloning the repository must obey does not reach them from here, so land it in the code, a doc, or a gate, in a PR. See [decision-record](../../docs/architecture/decision-record.md).
+**Rule.** A ruling that changes what a worker does is recorded with `fno backlog note <node> <text>` - the king's channel, because `fno backlog decide` refuses every agent session including a crowned one (operator authority is never inherited by an agent, and the refusal is by design). For a durable rule the OPERATOR asked for, `fno inbox law set <subject> <decision> --rationale "<why>"` records it as chat-attested and can never supersede the operator's own law; `fno backlog decisions <same>` and `fno inbox law decisions <subject>` read them back, newest first. A subject matches exactly, so never mint a near-synonym. Every ruling is machine-local project policy: a rule a stranger cloning the repository must obey does not reach them from here, so land it in the code, a doc, or a gate, in a PR. See [decision-record](../../docs/architecture/decision-record.md).
 
 **Dispatch.**
 `fno agents spawn --name <n> "<payload>" --model <m> --substrate pane|bg|headless` starts a worker.
@@ -394,7 +395,7 @@ The joiner half of this contract is the joiner posture in [/execute waves](../ex
 
 ### 5. Exit
 
-Before you abdicate, record every ruling that changes what a worker does. One `fno backlog decide <node|pr-N|area> "<what>" --rationale "<why>"` call per ruling. Your context is the only place they live, and it is about to end.
+Before you abdicate, record every ruling that changes what a worker does. One `fno backlog note <node> <text>` call per ruling; for a rule the operator asked for, `fno inbox law set <subject> <decision> --rationale "<why>"`. `fno backlog decide` refuses every agent session, crowned included, so it is not a channel a king can open. Your context is the only place these rulings live, and it is about to end.
 
 Expire your crown as the last act of the reign: `fno agents king done`. It vacates your row and clears the scope manifest, so the next king's crown arms without `--force`. A king that skips it relies on the crash path: the leftover manifest is inert (the registry row is authority), but the successor init pays a `--force`.
 

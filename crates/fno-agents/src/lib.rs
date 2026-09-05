@@ -40,6 +40,10 @@
 //!   (the per-CLI [`readiness::ReadinessDetector`] impls now live in
 //!   [`readiness`]).
 
+// daemon.rs's `agent.list` row is one json! literal with a key set pinned by
+// schemas/agents-list-row.json; the crate-level recursion_limit above covers
+// the macro expansion since `spawned_by_session` joined the contract.
+
 pub mod active_backlog;
 mod agent_lock;
 pub mod agents_config;
@@ -89,6 +93,7 @@ pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;
 pub mod loop_king;
+pub mod loop_reign;
 pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
@@ -477,6 +482,20 @@ mod tests {
     // surfaces. This test scans every production call site and fails on drift.
 
     // ── fire the registry check HERE, not only in CI ──────────────────────
+    /// The reign events (x-7b36): a king journals these from the session, and
+    /// `fno doctor event audit --type` resolves the name through this table.
+    /// A kind dropped here makes the done-probe read "unknown type", which is
+    /// the absence-lie in audit form.
+    #[test]
+    fn event_table_knows_reign() {
+        for kind in ["reign_armed", "reign_checkin", "reign_dispatch_exception"] {
+            assert!(
+                KNOWN_EVENT_KINDS.contains(&kind),
+                "{kind} missing from KNOWN_EVENT_KINDS"
+            );
+        }
+    }
+
     // `KNOWN_EVENT_KINDS` and `schema.yaml` cannot be generated from each
     // other: the YAML entry carries description/sources/data/consumers the
     // const does not have, and the two sets are a deliberate partition. So
@@ -870,6 +889,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "reconcile_deferred",
     "reconcile_done",
     "reconcile_error",
+    // Reign (king-emitted, x-7b36): the tenured-king skill journals these from
+    // the reigning session; audit resolves the names through this table.
+    "reign_armed",
+    "reign_checkin",
+    "reign_dispatch_exception",
     // Startup reconcile sweep (daemon-emitted, plan ab-70faa65b Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",

@@ -493,15 +493,11 @@ class PostMergeBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     parking_lot_path: Optional[str] = None
-    # Maintainer-only action marker (e.g. "#maintainer"): a discriminator appended to
-    # decision / sign-off / manual-setup items so they stand out in a SHARED
-    # vault parking lot that already carries thousands of unrelated checkboxes.
-    # Default empty: a dedicated maintainer file (or an unconfigured shared one)
-    # needs no discriminator, so a fresh install tags nobody's todos with someone
-    # else's initials. Opt in by setting the marker; it is honored by both the
-    # post-merge ritual (skills/pr/references/merged.md) and the capture parser
-    # (cli/src/fno/backlog/capture.py) - the producer and consumer of
-    # maintainer-only items share one key, mirroring parking_lot_path above.
+    # Maintainer-only action marker (e.g. "#maintainer"): a discriminator
+    # appended to decision / sign-off items so they stand out in a SHARED vault
+    # parking lot. Default empty so a fresh install tags nobody's todos with
+    # someone else's initials. Honored by both the post-merge ritual and the
+    # capture parser - producer and consumer share one key, like parking_lot_path.
     maintainer_marker: Optional[str] = None
     enabled: bool = True
     self_reap: bool = False
@@ -738,17 +734,14 @@ class ReviewerDescriptor:
 
 
 # Reviewer names that have a `review_attestation` emit path (x-e703 Change 4).
-# config.review.reviewers entries must resolve to one of these keys; a leading
-# '/' is stripped first (so `/code-review` == `code-review`). Kept in sync with
-# the emit surfaces in skills/review, the loop-check attestation read, and the
-# Rust-side invocation table - the last of those by
+# config.review.reviewers must resolve to one of these keys ('/' stripped).
+# Kept in sync with the emit surfaces and the Rust-side invocation table by
 # scripts/ci/check-reviewer-descriptor-parity.sh, not by remembering.
 #
-# This table is exactly the reviewers footnote AUTHORS. A project registers its
-# own via `config.review.reviewer_registry`, which is unioned in at lookup time
-# by `resolvable_reviewers()` and is never written back here: the parity script
-# AST-parses this literal, so a config-dependent table would turn a build-time
-# CI check into one whose verdict varies per machine.
+# Exactly the reviewers footnote AUTHORS: project-owned reviewers live in
+# `reviewer_registry`, unioned at lookup by `resolvable_reviewers()` and never
+# written back here (the parity script AST-parses this literal, so a
+# config-dependent table would make the CI verdict vary per machine).
 _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
     # RETIRED. The six-agent panel is gone; the fno review lane (bare
     # /fno:review) is the default reviewer on every harness. A config still
@@ -761,18 +754,13 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
         invocation="/fno:review",
         asserts="review-evidence",
     ),
-    # `/code-review` is a self-serve local-attestation reviewer: the session
-    # that wrote the diff runs the fno review lane (the skill behind this
-    # invocation) and the lane's emit step records the classified attestation.
-    # `requires="none"` rather than "operator" is load-bearing - the operator
-    # variant made `blocks_autonomy` true and refused every unattended run at
-    # init, which is the opposite of a gate whose point is that the session
-    # serves itself. No per-harness map: the owned lane is the invocation on
-    # every harness, which is the portability the recharter bought. The native
-    # verbs (/code-review on claude, /review on codex) remain the operator's
-    # explicit choice, documented in docs/architecture/review-lanes.md; the
-    # machinery never recommends them, because a recommendation that depends
-    # on a harness transport is the fragile part this table no longer encodes.
+    # `/code-review` is self-serve: the session that wrote the diff runs the fno
+    # review lane and its emit step records the classified attestation.
+    # `requires="none"` is load-bearing ("operator" made `blocks_autonomy` true
+    # and refused every unattended run at init). No per-harness map: the lane is
+    # the invocation on every harness. The native verbs (/code-review on claude,
+    # /review on codex) stay the operator's explicit choice; the machinery never
+    # recommends them (docs/architecture/review-lanes.md).
     "code-review": ReviewerDescriptor(
         kind="local-attestation",
         requires="none",
@@ -903,18 +891,14 @@ def resolvable_reviewers(
 
 # ── review.posture ──────────────────────────────────────────────────
 #
-# One leaf that names how much review a code PR must have before it may merge.
-# Two settings that must be coupled (`may the fleet merge` and `what review
-# must exist first`) previously sat in separate tables with nothing refusing
-# the dangerous combination: `auto_merge.enabled=true` with no review gate was
-# one flag away and taught no one. The posture names the rung; the merge grant
-# refuses below the floor. Rank is the ladder position (1 worst, 9 best), and
-# every field of a descriptor is exactly what the merge receipt prints, so a
-# user picking a posture sees what they bought and what it costs.
+# One leaf naming how much review a code PR must have before it may merge. The
+# posture names the rung; the merge grant refuses below the floor (the old
+# separate tables let `auto_merge.enabled=true` with no review gate pass
+# silently). Rank is the ladder position (1 worst, 9 best); every descriptor
+# field is exactly what the merge receipt prints.
 #
-# This literal is a PARITY SOURCE: the Rust coverage reader mirrors the ranks
-# and component vocabulary, and scripts/ci/check-reviewer-descriptor-parity.sh
-# AST-parses it the way it does `_RESOLVABLE_REVIEWERS`. Keep it a literal.
+# PARITY SOURCE: the Rust coverage reader mirrors the ranks and component
+# vocabulary, and check-reviewer-descriptor-parity.sh AST-parses this literal.
 @dataclass(frozen=True)
 class ReviewPostureDescriptor:
     """One rung of the review-posture ladder, immutable.
@@ -1608,24 +1592,14 @@ class ReviewBlock(BaseModel):
             self.github_apps = self.required_bots
         # Keep the alias readable and consistent with the canonical field.
         self.required_bots = self.github_apps
-        # Identity-free peers deliberately use the local head-pinned attestation
-        # carrier. A per-entry or shared identity remains an explicit opt-in to
-        # the legacy GitHub-posting carrier.
-        # A `claude` peer is only a real cross-model reviewer when it names a
-        # model route (e.g. {provider: claude, model: "zai,glm-5.3"}): the claude
-        # CLI is only transport, and the routed model (GLM) is genuinely distinct
-        # from the Claude author. A bare `claude` peer (no route) IS the author's
-        # own model, which defeats the "distinct model" trust invariant - reject
-        # it at load, fail-closed, rather than let it masquerade as a peer.
-        # This is a universal but Claude-CENTRIC static restriction: it rejects a
-        # bare claude peer for EVERY author (it has no authorship input), which is
-        # correct only for the dominant claude author. For a codex/gemini author,
-        # claude IS cross-model, so this over-rejects a legitimate claude peer -
-        # the known inverse limitation (see the peers Open Question). The config is
-        # harness-agnostic, so load time cannot know the author; the SYMMETRIC,
-        # author-aware coverage lives at gate time: loop-check resolves the
-        # invoking harness and holds the gate for any same-model peer
-        # (crates/fno-agents/src/loopcheck.rs, the same-model guard, x-c2e7).
+        # Identity-free peers use the local head-pinned attestation carrier; a
+        # per-entry or shared identity is the legacy GitHub-posting opt-in.
+        # A `claude` peer is cross-model only when it names a model route: the
+        # claude CLI is transport, so a bare `claude` peer IS the author's own
+        # model - reject it at load, fail-closed. This static check is
+        # Claude-centric (it over-rejects a claude peer for a codex/gemini
+        # author); the symmetric author-aware coverage lives at gate time in
+        # loopcheck's same-model guard (x-c2e7).
         for e in self.peers:
             prov: object
             model: object
@@ -2487,46 +2461,30 @@ class AgentsBlock(BaseModel):
     reap_receipts: ReapReceiptsBlock = Field(default_factory=ReapReceiptsBlock)
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
-    # Spawn-gate knobs (x-c5cc). Scalar guards retain their fail-open defaults;
-    # provider_limits keeps its safe default on invalid input because dropping
-    # zai's cap would fail open exactly when the fleet is busiest.
-    #   max_live    — cap on concurrent live worker processes (union of the fno
-    #                 registry and claude's daemon roster). Spawn queues at cap.
-    #   provider_limits — the per-provider budget record
-    #                 (:class:`ProviderBudget`): `lanes` is the
-    #                 immediate-refusal spawn cap, `subagents` is the
-    #                 in-session fan-out width route resolution reads.
-    #                 Unlisted providers are uncapped in both dimensions; the
-    #                 built-in zai budget is lanes 5, subagents 1. A bare
-    #                 integer is still legal and coerces to `lanes`. Renamed
-    #                 from `max_lanes` (x-3f84 W5) so no two config leaves
-    #                 share that name with `parallel.max_lanes`; the legacy
-    #                 spelling still parses, with one deprecation line.
+    # Spawn-gate knobs (x-c5cc). Scalar guards keep fail-open defaults;
+    # provider_limits keeps its safe default on invalid input (dropping zai's
+    # cap would fail open exactly when the fleet is busiest).
+    #   max_live    — cap on concurrent live worker processes (fno registry +
+    #                 claude roster union). Spawn queues at cap.
+    #   provider_limits — per-provider budget (:class:`ProviderBudget`):
+    #                 `lanes` = immediate-refusal spawn cap, `subagents` =
+    #                 in-session fan-out width. Unlisted providers uncapped;
+    #                 built-in zai budget lanes 5, subagents 1; a bare integer
+    #                 coerces to `lanes`. Renamed from `max_lanes` (x-3f84 W5).
     #   min_free_gb — available-RAM floor for spawn preflight; <= 0 disables.
-    #   max_load_per_cpu — the load at which the gate STOPS TRUSTING LOAD and
-    #                 consults fleet attribution: `factor x cpu count` on the
-    #                 1-min loadavg (x-3f84 W3). This is a TRIGGER, not a
-    #                 refusal. It was a refusal until x-7c0f, and it refused
-    #                 twice on load the fleet did not cause. Load average
-    #                 counts blocked processes, so it measures neither CPU nor
-    #                 anyone's share of it. Measured 2026-08-22: load 309 on 12
-    #                 CPUs while the RAM floor held ten times its margin - the
-    #                 one machine guard read the one resource that was never
-    #                 scarce. <= 0 disables the whole check.
-    #   max_fleet_cpu_share — the GOVERNOR: above the trigger, refuse when
-    #                 footprint attributes more than this share of CPU capacity
-    #                 to the fleet (0.5 = half the box). This is the number the
-    #                 refusal always printed and never decided on. When
-    #                 attribution is unreadable the gate refuses, because an
-    #                 unknown share is not evidence of headroom (x-e040).
-    #   hard_max_load_per_cpu — the absolute machine backstop: refuse above
-    #                 `factor x cpu count` no matter whose load it is. Pure
-    #                 fleet-share would admit onto a box already thrashing from
-    #                 foreign work. Must stay well above max_load_per_cpu or it
-    #                 silently restores the defect x-7c0f removed.
-    #                 All three are machine dimensions, so scalars on agents.*
-    #                 and never fields on ProviderBudget (a machine is not an
-    #                 account).
+    #   max_load_per_cpu — the load (factor x cpu count on 1-min loadavg) at
+    #                 which the gate stops trusting load and consults fleet
+    #                 attribution. A TRIGGER, not a refusal (until x-7c0f it
+    #                 refused twice on load the fleet did not cause - loadavg
+    #                 counts blocked processes and measures nobody's share).
+    #                 <= 0 disables the whole check.
+    #   max_fleet_cpu_share — the GOVERNOR: above the trigger, refuse when the
+    #                 fleet holds more than this share of CPU capacity.
+    #                 Unreadable attribution refuses (an unknown share is not
+    #                 evidence of headroom, x-e040).
+    #   hard_max_load_per_cpu — absolute backstop: refuse above factor x cpu
+    #                 count no matter whose load. Machine dimensions, so
+    #                 scalars on agents.*, never ProviderBudget fields.
     #   worker_qos  — utility (demote workers to background QoS) | off.
     max_live: int = 3
     provider_limits: dict[str, ProviderBudget] = Field(
@@ -4489,6 +4447,21 @@ class AccountsBlock(BaseModel):
         return None
 
 
+#: The texts a reign self-injects as native commands (x-7b36), module-level so
+#: the fail-safe validators return the same default the field was born with.
+KING_CHECKIN_TEXT = (
+    "reign check-in: run the check-in body of the reign skill "
+    "(skills/reign/SKILL.md); journal reign_checkin; if nothing changed "
+    "since the last check-in, print 'no change' and stop"
+)
+KING_GOAL_TEXT = (
+    "reign goal: fno inbox board --json reports no actionable rows for the "
+    "crown scope, fno agents court --json shows no split, and the operator "
+    "has not ordered a stand-down; until then keep reigning and never "
+    "/goal clear on NoProgress"
+)
+
+
 class KingBlock(BaseModel):
     """The king loop (nested under 'config.king').
 
@@ -4520,6 +4493,31 @@ class KingBlock(BaseModel):
     wake_ceiling: int = 32
     wake_debounce_seconds: int = 900
     wake_backstop_seconds: int = 1800
+    # The reign skill carries these defaults verbatim; the keys are the one
+    # place an operator edits them.
+    checkin_interval: str = "30m"
+    checkin_text: str = KING_CHECKIN_TEXT
+    goal_text: str = KING_GOAL_TEXT
+
+    @field_validator("checkin_interval", mode="before")
+    @classmethod
+    def _coerce_checkin_interval(cls, v: object) -> str:
+        """Fail-safe to 30m on anything but ``<digits>[smhd]``.
+
+        A bad value degrades, never raises: the interval arms a self-injected
+        /loop, and a typo there must not kill a reign at config load.
+        """
+        if isinstance(v, str) and re.fullmatch(r"\d+[smhd]?", v.strip()):
+            return v.strip()
+        return "30m"
+
+    @field_validator("checkin_text", "goal_text", mode="before")
+    @classmethod
+    def _coerce_reign_text(cls, v: object, info: ValidationInfo) -> str:
+        """Fail-safe to the block default on a non-string or blank value."""
+        if isinstance(v, str) and v.strip():
+            return v
+        return KING_CHECKIN_TEXT if info.field_name == "checkin_text" else KING_GOAL_TEXT
 
 
 class PreflightBlock(BaseModel):

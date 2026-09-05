@@ -15,6 +15,13 @@ from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
+# Import the claims CLI module BEFORE any test patches fno.claims.core. Its
+# module-level `from .core import acquire_claim` binds whatever core carries at
+# first import, so a patch that lands first (as xdist worker ordering can do)
+# bakes the stub into the CLI module for the rest of the process, and a later
+# handover test in the same worker calls the stub instead of the real acquire.
+import fno.claims.cli  # noqa: F401
+
 from fno.agents.cli import _spawn_guard_decision, agents_app
 from fno.agents.harness_map import resolve_dispatch
 

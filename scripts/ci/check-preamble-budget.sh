@@ -163,7 +163,12 @@ set -euo pipefail
 # version this branch already had was 89 bytes longer, and the rebase kept
 # it (no conflict was flagged - the two hunks merged cleanly). Measured from
 # the actual committed AGENTS.md, zero spare.
-CEILING_BYTES=39640
+# +55 (39640 -> 39695), measured 2026-09-04: the `/fno:reign` row in
+# skills/using-fno/SKILL.md. Reign is a new first-class verb and that table is
+# its only session-start mention, the same shape as the workspace-restore and
+# demand-signal raises. The row was compressed to neighbor idiom first
+# ("Reign as the crowned king", -22 B). 55 is the measured residue, zero spare.
+CEILING_BYTES=39695
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.

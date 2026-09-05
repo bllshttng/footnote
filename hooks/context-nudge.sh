@@ -398,10 +398,28 @@ fi
 
 # ── 7. Check (b): orphaned live children (CROWN-ONLY; latches INDEPENDENTLY). ─
 if [[ "$IS_KING" -eq 1 && "$ORPHAN_COUNT" -gt 0 && ! -f "$ORPHAN_LATCH" ]]; then
+    # Resolution 1: the crown holder DECLARED this reign a court. Choosing
+    # court had no machine-visible act before `fno agents king shape` existed,
+    # so this hook offered three options and could detect two - and the
+    # cheapest way to silence it (the carveout, option 3) downgrades a live
+    # teammate to advisory self-review. The shape field is the structured
+    # answer to option 1: a court with live workers is the ANSWERED case, and
+    # the nudge stays loud only for the unshaped reign walking away from them.
+    # Read failure leaves RESOLVED=0 (nag), matching the carveout posture
+    # below: a broken reader never silently clears a guard.
+    RESOLVED=0
+    if command -v fno >/dev/null 2>&1 && [[ -n "$SESSION_ID" ]]; then
+        KING_MANIFEST=$(cd "$REPO_ROOT" 2>/dev/null && with_timeout 5 fno agents king \
+            manifest-path --harness-session-id "$SESSION_ID" \
+            --state-root "$REPO_ROOT/.fno" 2>/dev/null || true)
+        if [[ -n "$KING_MANIFEST" && -f "$KING_MANIFEST" ]]; then
+            KING_SHAPE=$(sed -n 's/^shape:[[:space:]]*//p' "$KING_MANIFEST" | head -1 | tr -d '[:space:]')
+            [[ "$KING_SHAPE" == "court" ]] && RESOLVED=1
+        fi
+    fi
     # Resolution 3: a carveout carrying THIS scope (structured field, not free
     # text) means the king stated the orphaning and fell back to advisory
     # self-review. Scope match is the discriminator, or any carveout silences it.
-    RESOLVED=0
     if command -v fno >/dev/null 2>&1; then
         # --all is load-bearing: `carveout list` now scopes to the current
         # session by default, and this check must see a carveout filed by ANY
@@ -427,7 +445,7 @@ if [[ "$IS_KING" -eq 1 && "$ORPHAN_COUNT" -gt 0 && ! -f "$ORPHAN_LATCH" ]]; then
         touch "$ORPHAN_LATCH" 2>/dev/null || true
         emit_event "king_orphan_block" \
             "{\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"workers\":\"${ORPHANS}\",\"count\":${ORPHAN_COUNT},\"session_id\":\"${SESSION_ID}\"}"
-        ORPHAN_REASON="You hold the crown over ${CROWN_SCOPE} and ${ORPHAN_COUNT} worker(s) you spawned are still live (${ORPHANS}). A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave; (2) hand the crown to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno backlog carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review."
+        ORPHAN_REASON="You hold the crown over ${CROWN_SCOPE} and ${ORPHAN_COUNT} worker(s) you spawned are still live (${ORPHANS}). A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave with 'fno agents king shape court'; (2) hand the crown to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno backlog carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review. This list is built from each row's spawned_by link: a worker spawned while your identity resolved ambiguously carries no link and will NOT appear here - check 'fno agents registry-json' for spawned_by_session null before trusting the count."
         if [[ -n "$REASON" ]]; then
             REASON="${REASON}  ||  ${ORPHAN_REASON}"
         else

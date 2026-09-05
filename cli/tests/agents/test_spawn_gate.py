@@ -1309,3 +1309,91 @@ class TestQos:
         monkeypatch.setattr(spawn_gate, "_qos_enabled", lambda: True)
         spawn_gate.qos_demote_bg_worker("deadbeef", poll_s=0.05)
         assert "QoS demotion skipped" in capsys.readouterr().err
+
+
+# --- parent-edge visibility (x-7b36 change 12) --------------------------------
+# A null spawned_by_session is sometimes correct (an ambiguous identity resolve
+# records no lineage rather than a wrong one); the defect was its SILENCE. The
+# receipt line names it at spawn time, and the list row carries the field so
+# lineage questions debugged through `agents list -J` measure something.
+
+
+class TestParentEdgeNotice:
+    def test_parent_edge_notice_names_reason_and_orphan_check(
+        self, monkeypatch, capsys
+    ):
+        from fno.agents.dispatch import _report_unlinked_parent
+        from fno.harness_identity import OwnedHarnessIdentity
+
+        monkeypatch.setattr(
+            "fno.claims.self_identity.resolve_self_identity",
+            lambda: OwnedHarnessIdentity(
+                session_id=None,
+                harness=None,
+                markers_present=(
+                    ("CLAUDE_CODE_SESSION_ID", "claude", "x"),
+                    ("CODEX_THREAD_ID", "codex", "y"),
+                ),
+                disposition="ambiguous",
+            ),
+        )
+        _report_unlinked_parent(None)
+        err = capsys.readouterr().err
+        assert "parent edge NOT recorded" in err
+        assert "disposition=ambiguous" in err
+        assert "CLAUDE_CODE_SESSION_ID" in err
+        # The consequence, not just the cause: the spawner learns the child is
+        # invisible to its orphan check.
+        assert "will not appear in its spawner's orphan check" in err
+
+    def test_parent_edge_notice_silent_when_parent_recorded(
+        self, monkeypatch, capsys
+    ):
+        from fno.agents.dispatch import _report_unlinked_parent
+
+        _report_unlinked_parent("d88ad3a3-b820-440e-9654-70fad39cd7d8")
+        assert capsys.readouterr().err == ""
+
+    def test_spawned_by_session_rides_list_row(self):
+        from fno.agents.format import serialize_entry
+
+        entry = AgentEntry(
+            name="linked-worker",
+            cwd="/w",
+            log_path="/l",
+            harness="claude",
+            spawned_by_session="d88ad3a3-b820-440e-9654-70fad39cd7d8",
+        )
+        row = serialize_entry(entry, live_status=None)
+        # Same value registry-json reports for that row (AC30), and the key is
+        # present even when null so declared-but-unwritten and dropped stay
+        # distinguishable.
+        assert (
+            row["spawned_by_session"] == "d88ad3a3-b820-440e-9654-70fad39cd7d8"
+        )
+        null_row = serialize_entry(
+            AgentEntry(name="bare", cwd="/w", log_path="/l", harness="claude"),
+            live_status=None,
+        )
+        assert "spawned_by_session" in null_row
+        assert null_row["spawned_by_session"] is None
+
+
+# --- the crown types the verb (x-7b36 change 11) ------------------------------
+
+
+class TestReignTyped:
+    def test_crowned_spawn_payload_opens_with_the_verb(self):
+        from fno.agents.dispatch import _reign_typed_message
+
+        message, typed = _reign_typed_message("run the territory", 2, "epic-x", False)
+        assert typed is True
+        assert message.splitlines()[0] == "/fno:reign epic-x"
+        # The operator's brief follows the verb as the payload body.
+        assert message.splitlines()[1] == "run the territory"
+
+    def test_uncrowned_and_revived_spawns_keep_their_payload(self):
+        from fno.agents.dispatch import _reign_typed_message
+
+        assert _reign_typed_message("brief", None, None, False) == ("brief", False)
+        assert _reign_typed_message("brief", 2, "epic-x", True) == ("brief", False)
