@@ -407,16 +407,8 @@ def acquire_claim(
         pid_provenance = _resolve_pid_provenance(pid, ttl_ms, harness)
 
     new_claim = _make_claim(
-        key,
-        holder,
-        ttl_ms,
-        reason,
-        metadata,
-        pid,
-        host,
-        harness,
-        pid_provenance,
-        pid_unavailable,
+        key, holder, ttl_ms, reason, metadata, pid, host, harness,
+        pid_provenance, pid_unavailable,
     )
     payload = serialize_claim(new_claim)
 
@@ -482,16 +474,8 @@ def acquire_claim(
                 return _release_and_retry()
 
             refreshed = _make_claim(
-                key,
-                holder,
-                ttl_ms,
-                reason,
-                metadata,
-                pid,
-                host,
-                harness,
-                pid_provenance,
-                pid_unavailable,
+                key, holder, ttl_ms, reason, metadata, pid, host, harness,
+                pid_provenance, pid_unavailable,
             )
             _atomic_replace(path, serialize_claim(refreshed))
             emit_claim_idempotent_reacquired(refreshed, previous=fresh_existing)
@@ -548,16 +532,8 @@ def acquire_claim(
             if existing.holder == holder:
                 # Raced into the idempotent path while we were grabbing the lock.
                 refreshed = _make_claim(
-                    key,
-                    holder,
-                    ttl_ms,
-                    reason,
-                    metadata,
-                    pid,
-                    host,
-                    harness,
-                    pid_provenance,
-                    pid_unavailable,
+                    key, holder, ttl_ms, reason, metadata, pid, host, harness,
+                    pid_provenance, pid_unavailable,
                 )
                 _atomic_replace(path, serialize_claim(refreshed))
                 emit_claim_idempotent_reacquired(refreshed, previous=existing)
@@ -871,12 +847,8 @@ def compare_and_rebind(
             # free-read this whole change exists to close, reintroduced on the
             # one substrate that blocks.
             rebound = _rebound_claim(
-                existing,
-                npid,
-                ttl_ms,
-                new_holder=effective_new_holder,
-                new_reason=effective_new_reason,
-                new_harness=effective_new_harness,
+                existing, npid, ttl_ms, new_holder=effective_new_holder,
+                new_reason=effective_new_reason, new_harness=effective_new_harness,
                 new_metadata=effective_new_metadata,
                 new_pid_provenance=resolved_provenance,
                 new_pid_unavailable=npid_unavailable,
@@ -897,12 +869,8 @@ def compare_and_rebind(
             if existing.pid == npid:
                 # Idempotent: already bound to this process; refresh lease only.
                 rebound = _rebound_claim(
-                    existing,
-                    npid,
-                    ttl_ms,
-                    new_holder=effective_new_holder,
-                    new_reason=effective_new_reason,
-                    new_harness=effective_new_harness,
+                    existing, npid, ttl_ms, new_holder=effective_new_holder,
+                    new_reason=effective_new_reason, new_harness=effective_new_harness,
                     new_metadata=effective_new_metadata,
                     new_pid_unavailable=npid_unavailable,
                     new_pid_provenance=resolved_provenance,
@@ -941,12 +909,8 @@ def compare_and_rebind(
 
         # Local same-holder, prior PID dead: the resume rebind.
         rebound = _rebound_claim(
-            existing,
-            npid,
-            ttl_ms,
-            new_holder=effective_new_holder,
-            new_reason=effective_new_reason,
-            new_harness=effective_new_harness,
+            existing, npid, ttl_ms, new_holder=effective_new_holder,
+            new_reason=effective_new_reason, new_harness=effective_new_harness,
             new_metadata=effective_new_metadata,
             new_pid_provenance=resolved_provenance,
             new_pid_unavailable=npid_unavailable,
@@ -1549,10 +1513,7 @@ def force_release_claim(
 
         if not path.exists():
             emit_claim_force_overridden(
-                key=key,
-                reason=reason,
-                previous_holder=None,
-                previous_pid=None,
+                key=key, reason=reason, previous_holder=None, previous_pid=None,
             )
             return
 
@@ -1763,11 +1724,8 @@ def reap_dead_claims(
     reaped = 0
     would_reap = 0
     kept: dict[str, int] = {
-        "offhost": 0,
-        "suspect": 0,
-        "live": 0,
-        "suspect_alive": 0,
-        "suspect_unprobed": 0,
+        "offhost": 0, "suspect": 0, "live": 0,
+        "suspect_alive": 0, "suspect_unprobed": 0,
     }
 
     def _sweep_verdict(
