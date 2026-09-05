@@ -976,9 +976,7 @@ def _claim_verdict(claim: Claim, *, root: Optional[Path] = None) -> dict[str, An
         path = claim_path(claim.key, root=root)
         if not path.exists():
             raise ClaimGoneAway(str(path))
-        raise ClaimVerdictError(
-            f"native claim verdict omitted readable claim {claim.key!r}; refusing to assume free"
-        )
+        raise ClaimVerdictError(f"native verdict omitted readable claim {claim.key!r}")
     return verdict
 
 

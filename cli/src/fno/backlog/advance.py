@@ -3098,10 +3098,9 @@ def _claim_is_live(
     if verdicts is not None and key not in verdicts:
         return True
     if key.startswith("node:"):
+        info = verdicts.get(key) if verdicts is not None else None
         return _observe_node_claim(
-            key.removeprefix("node:"),
-            node_cwd,
-            native_info=(verdicts[key] if verdicts is not None else None),
+            key.removeprefix("node:"), node_cwd, native_info=info
         ).blocks_dispatch
 
     from fno.claims.verdict import claim_verdicts
