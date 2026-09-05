@@ -3627,13 +3627,20 @@ pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
 /// Take the path from a holder that is dead or has been terminated. Session
 /// files, not just the socket, so a dead holder's .pid cannot outlive the
 /// rebind and name an unrelated pid. Losing the rebind means a peer won it;
-/// that peer is the server.
+/// that peer is the server. Not Bound means the marker we claimed must not
+/// outlive the claim: a starter after us would wait out its dead pid.
 fn rebind_after_release(path: &Path) -> std::io::Result<BindOutcome> {
     remove_session_files(path)?;
     match UnixListener::bind(path) {
         Ok(l) => Ok(BindOutcome::Bound(l)),
-        Err(e) if socket_in_use(&e) => Ok(BindOutcome::AlreadyRunning),
-        Err(e) => Err(e),
+        Err(e) if socket_in_use(&e) => {
+            remove_startup_guard(path);
+            Ok(BindOutcome::AlreadyRunning)
+        }
+        Err(e) => {
+            remove_startup_guard(path);
+            Err(e)
+        }
     }
 }
 
