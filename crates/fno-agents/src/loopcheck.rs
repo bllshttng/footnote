@@ -1751,15 +1751,17 @@ pub use crate::review_freshness::{
 };
 
 // Child modules named by their question (the file budget's remedy): the
-// coverage row's state deriver, the receipt line, and attestation authorship
-// live there, not here.
+// coverage row's state deriver, the receipt line, attestation authorship, and
+// the verdict vocabulary live there, not here.
 mod authorship;
 mod coverage_receipt;
 mod review_state;
+mod verdict;
 use authorship::carry_author_session_forward;
 pub use authorship::AttestationOrigin;
 use authorship::{classify_attestation_origin, default_attestation_origin};
 pub use coverage_receipt::coverage_receipt_line;
+pub use verdict::{AttestationScope, CoverageProducer, CoverageVerdict};
 
 /// Whether a `review_attestation` line is about the PR under evaluation.
 ///
@@ -2949,6 +2951,7 @@ fn read_pr_info(
                 Some(tiling),
                 pr_author.as_deref(),
                 github_approval_satisfies,
+                require_corroboration,
             );
             // Same capture-then-apply order as the external-read arm below: the
             // predicate reads the pre-downgrade report, and the `reviewed` verdict
@@ -3299,6 +3302,7 @@ fn read_pr_info(
             Some(&tiling),
             pr_author.as_deref(),
             github_approval_satisfies,
+            require_corroboration,
         );
         // The predicate reads the pre-downgrade report (the policy below only
         // flips the covered state, preserving verdicts), so capture it first.
@@ -5731,65 +5735,8 @@ fn compute_review_info(
 
 // ── review coverage (x-0eaf) ──────────────────────────────────────────────────
 //
-// The old gate's `reviewed` boolean (loopcheck.rs `let reviewed =
-// all_required_passed() && unaddressed.is_empty() && reviewers_ok`) was a claim
-// about reviews computed entirely from what did NOT happen: nobody is still
-// owed, no finding is outstanding, no reviewer is unattested. A quota refusal is
-// dropped from `missing_bots` (PR #214) and reads as a pass; on a config with no
-// required bots, nothing can object, so `reviewed` is true on zero reviews.
-//
-// Coverage is the missing predicate: did anyone actually review? It is a
-// first-class value reported everywhere, never folded back into the objection
-// boolean (collapsing it back undoes this node).
-//
-// Producer axis, not producer string. Two review producers share the display
-// name "codex": the `chatgpt-codex-connector` GitHub App (posts review objects,
-// can refuse on quota) and the local `codex` CLI (posts none, never rate-limited
-// by the App's quota). They are told apart by `CoverageProducer`, never by the
-// reviewer string (x-9ae8's one-word-two-entities disease). A third local lane,
-// claude `/code-review`, shares the `LocalAttestation` axis.
-
-/// The channel a review verdict came from. Two producers that share a name (the
-/// `chatgpt-codex-connector` App vs the local `codex` CLI) are distinguished by
-/// this axis, never by the reviewer string alone (x-9ae8, x-0eaf).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CoverageProducer {
-    /// A GitHub App bot that posts review objects via the reviews API. Can
-    /// refuse on quota (the `usage_markers` / `body_is_usage_limit` path).
-    GithubApp,
-    /// A local reviewer that leaves NO GitHub object and instead emits a
-    /// head-pinned `review_attestation` event (`emit-attestation.sh`). Never
-    /// rate-limited by any App's quota: `/code-review`, the codex CLI, sigma.
-    LocalAttestation,
-}
-
-/// One verdict for one reviewer over one producer axis (x-0eaf). `reviewed` here
-/// is derived from observed evidence, unlike the old boolean of the same name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CoverageVerdict {
-    /// Posted a review object, or a `pass` attestation, against a commit whose
-    /// code still matches HEAD (`Freshness::counts()`). The only verdict that
-    /// counts toward coverage.
-    Reviewed,
-    /// Responded, but against a commit whose code no longer matches HEAD
-    /// (x-5b99). Positive evidence that a reviewer READ AN OLDER COMMIT, which
-    /// is a different fact from `Absent` (never responded) and needs a
-    /// different response: nudge for a re-read, do not wait for a first read.
-    /// Recorded rather than dropped so the trail shows what happened; excluded
-    /// from the count, because inheriting a verdict across a commit its author
-    /// never saw is the defect this variant exists to make visible.
-    Stale,
-    /// Responded and declined to review. Quota exhaustion is the first known
-    /// shape (detected by `body_is_usage_limit`). Positive evidence a reviewer
-    /// exists and will not help - exactly what a nudge or lane failover needs.
-    Refused,
-    /// Responded with a failure / unparseable payload.
-    Errored,
-    /// A configured reviewer that produced no response.
-    Absent,
-}
+// The verdict vocabulary (producer axis, verdict, scope) lives in the
+// `verdict` child module; attestation authorship lives in `authorship`.
 
 /// A first-class coverage value, separate from the objection predicate. Never
 /// 0-on-error: a failed read is `Unknown`, which behaves as 0 for the autonomous
@@ -5823,22 +5770,8 @@ impl Coverage {
     }
 }
 
-/// Authorship of a local attestation lives in [`authorship`]: the enum, its
-/// classifier, and the manifest fallback all answer one question.
-///
-/// How a local attestation was scoped to this PR: it is scopeable while
-/// scope lasts (`attested_branch`: it named this PR's head branch, or it pins
-/// this PR's exact head sha), or it predates the `branch` field and was
-/// admitted on exact head equality alone (`legacy_head_match`). The second is
-/// the one a refusal must NAME rather than silently drop: a pre-branch-field
-/// attestation on a moved head is unscopeable, and a reader told only "0
-/// reviewed" cannot tell it from nobody-ever-reviewed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttestationScope {
-    AttestedBranch,
-    LegacyHeadMatch,
-}
+/// Attestation scoping and the rest of the verdict vocabulary live in
+/// [`verdict`]; authorship lives in [`authorship`].
 
 /// One reviewer's classification, for the `review_coverage` event and receipts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5861,17 +5794,13 @@ pub struct ReviewerVerdict {
     #[serde(skip_serializing_if = "is_false", default)]
     pub author_approval: bool,
     /// Whether a local attestation was emitted by the authoring session
-    /// (`SelfAttested`), a different one (`OtherSession`), or that is
-    /// unknowable (`Unknown`). `coverage_count` never reads it: a
-    /// `SelfAttested` verdict counts toward coverage exactly like any other,
-    /// and a PR whose only attestation is self-attested is covered. Whether
-    /// that should stay true is a later gate decision, not this field.
-    /// Only meaningful on `local_attestation` verdicts; github_app and
-    /// human approvals carry `Unknown` since a GitHub login has no session
-    /// to compare. Defaults to `Unknown` so every pre-existing attestation
-    /// lands there unchanged. `Unknown` serializes as `"unknown"`, never
-    /// as an absent key: a consumer reading absent as "not self_attested"
-    /// once cleared a PR whose only review was the author's own.
+    /// (`SelfAttested`), a different one (`OtherSession`), by a session that
+    /// could not be compared (`Unmeasured`), or by an unobservable attester
+    /// (`Unknown`). The gate rule over these lives in
+    /// [`counts_as_self_attestation_basis`]. `Unknown` serializes as
+    /// `"unknown"`, never as an absent key: a consumer reading absent as
+    /// "not self_attested" once cleared a PR whose only review was the
+    /// author's own.
     #[serde(default = "default_attestation_origin")]
     pub attestation_origin: AttestationOrigin,
     /// The commit this reviewer actually read: a github_app review object's
@@ -5949,12 +5878,33 @@ pub enum ReviewState {
     Unreviewed,
 }
 
+/// Whether one verdict feeds the self-attestation-alone basis: a counted
+/// local verdict is the author's own unless its origin is a measured
+/// `OtherSession` or an attester-absent `Unknown` (env_only, recorded as a
+/// real review). ONE rule for the rests-alone term; the recorded
+/// `self_attested_count` deliberately keeps its stricter
+/// `== SelfAttested` definition below, because the count is telemetry about
+/// MEASURED authorship while this is a gate rule, and no gate reads the
+/// count any more - the Python predicate walks verdicts.
+fn counts_as_self_attestation_basis(v: &ReviewerVerdict, github_approval_satisfies: bool) -> bool {
+    v.verdict == CoverageVerdict::Reviewed
+        && human_approval_counts(v, github_approval_satisfies)
+        && v.producer == CoverageProducer::LocalAttestation
+        && !matches!(
+            v.attestation_origin,
+            AttestationOrigin::OtherSession | AttestationOrigin::Unknown
+        )
+}
+
 impl CoverageReport {
     /// Count of `reviewed` verdicts, excluding human approvals. This is the one
     /// place that decides whether a human GitHub approval counts; flip the
     /// `!v.human_approval` guard to include them (the operator's deferred call).
     /// How many of the counted verdicts are the author attesting its own diff.
-    /// Recorded, never gating - see `coverage_event_data` for why.
+    /// Recorded, never gating - see `coverage_event_data` for why. Deliberately
+    /// stricter than [`counts_as_self_attestation_basis`]: the count is
+    /// telemetry about MEASURED self-attestation, the basis is a gate rule,
+    /// and no gate reads the count.
     pub fn self_attested_count(&self) -> usize {
         self.verdicts
             .iter()
@@ -5983,7 +5933,7 @@ impl CoverageReport {
     /// serialized-row gate in the Python merge path refuses.
     pub fn rests_on_self_attestation_alone(&self) -> bool {
         let mut counted = 0usize;
-        let mut self_attested = 0usize;
+        let mut basis = 0usize;
         for v in &self.verdicts {
             if v.verdict != CoverageVerdict::Reviewed
                 || !human_approval_counts(v, self.github_approval_satisfies)
@@ -5991,16 +5941,11 @@ impl CoverageReport {
                 continue;
             }
             counted += 1;
-            if v.producer == CoverageProducer::LocalAttestation
-                && !matches!(
-                    v.attestation_origin,
-                    AttestationOrigin::OtherSession | AttestationOrigin::Unknown
-                )
-            {
-                self_attested += 1;
+            if counts_as_self_attestation_basis(v, self.github_approval_satisfies) {
+                basis += 1;
             }
         }
-        counted > 0 && counted == self_attested
+        counted > 0 && counted == basis
     }
 
     /// Apply `config.review.require_corroboration`: a covered report whose
@@ -6141,7 +6086,7 @@ pub struct RangeTiling {
 /// only. ONE parse serves every consumer (disposition blockers, tiling
 /// ranges, the answered-fail predicates); a second hand-copy of this loop is
 /// how the gates drift (x-aecc review, finding 4).
-fn in_scope_chain(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<Value> {
+pub fn in_scope_chain(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<Value> {
     let mut chain: Vec<Value> = Vec::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -6893,6 +6838,7 @@ pub fn classify_coverage(
         None,
         None,
         false,
+        true,
     )
 }
 
@@ -6917,6 +6863,7 @@ pub fn classify_coverage_tiled(
     tiling: Option<&RangeTiling>,
     pr_author: Option<&str>,
     github_approval_satisfies: bool,
+    require_corroboration: bool,
 ) -> CoverageReport {
     let (local_passes, pairs_raising_findings) =
         local_latest_attestations(events_text, head_branch, head_sha);
@@ -7162,8 +7109,10 @@ pub fn classify_coverage_tiled(
             verdicts: verdicts.clone(),
             github_approval_satisfies,
         };
-        let blockers =
-            disposition_blockers_on_chain(&chain, basis.rests_on_self_attestation_alone());
+        let blockers = disposition_blockers_on_chain(
+            &chain,
+            require_corroboration && basis.rests_on_self_attestation_alone(),
+        );
         if !blockers_withhold(&blockers, rounds_exhausted) {
             for lp in local_passes.iter().filter(|lp| answered_fail(lp)) {
                 verdicts.push(local_attestation_verdict(
