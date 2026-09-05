@@ -41,4 +41,17 @@ impl Core {
         }
         receipt
     }
+
+    /// The `CoreMsg::SquadReload` arm body: reload, repaint the sideline, and
+    /// answer with the counts the server now holds. Running on the core loop
+    /// is what makes the reload atomic against `persist_squad`.
+    pub(super) fn handle_squad_reload(&mut self, reply: ControlReply) {
+        let receipt = self.reload_members_from_store();
+        self.push_layout(true);
+        let _ = reply.send(ServerMsg::SquadReloaded {
+            squads: receipt.squads,
+            members: receipt.members,
+            emptied: receipt.emptied,
+        });
+    }
 }

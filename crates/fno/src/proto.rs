@@ -321,7 +321,9 @@ fn default_true() -> bool {
 /// where the slot lookup knows occupancy. Additive, so the compatibility
 /// floor does not move; a repoint keeps owning its geometry and says so.
 /// v68 (x-5baf): `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
-pub const PROTO_VERSION: u32 = 68;
+/// v69 (prune sync): `ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`;
+/// a v68 peer cannot decode them, so the handshake stops the skew.
+pub const PROTO_VERSION: u32 = 69;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -990,6 +992,11 @@ pub enum ControlVerb {
         #[serde(default)]
         harness: Option<String>,
     },
+    /// (v69) Re-project `squads.json` into the server's member list ->
+    /// [`ServerMsg::SquadReloaded`]. The prune CLI sends this after an applied
+    /// store pass, so the next `persist_squad` cannot write the reaped
+    /// members back from memory.
+    SquadReload,
 }
 
 /// What a [`ControlVerb::LayoutGet`] dumps (v41, layout-api).
@@ -2244,6 +2251,13 @@ pub enum ServerMsg {
     /// (v60, x-7b5e) Answer to [`ControlVerb::WorkspaceRestore`]: one row per
     /// member, including every refusal with its reason.
     WorkspaceRestored { rows: Vec<RestoreRow> },
+    /// (v69) Answer to [`ControlVerb::SquadReload`]: the member counts the
+    /// server now holds after re-reading the store.
+    SquadReloaded {
+        squads: usize,
+        members: usize,
+        emptied: usize,
+    },
     /// Answer to [`ControlVerb::PaneWait`].
     WaitDone { outcome: WaitOutcome },
     /// A control verb failed (dead pane, spawn failure, version skew, ...).
@@ -4196,8 +4210,10 @@ mod tests {
         // edit; they now assert only their own wire shapes.
         // The registry-keyed identity pair (StopAgent/RemoveAgent carry
         // `harness_session_id`; AgentRow carries `liveness_age_s`) bumps it
-        // 66 -> 67. `LayoutSlot.cwd` (x-5baf) bumps it 67 -> 68.
-        assert_eq!(PROTO_VERSION, 68);
+        // 66 -> 67. `LayoutSlot.cwd` (x-5baf) bumps it 67 -> 68. The prune
+        // reload pair (`ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`)
+        // bumps it 68 -> 69.
+        assert_eq!(PROTO_VERSION, 69);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

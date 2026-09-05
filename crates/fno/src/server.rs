@@ -683,6 +683,12 @@ enum CoreMsg {
         plans: HashMap<String, Result<ReentryVerdict, String>>,
         reply: ControlReply,
     },
+    /// (v69) `ControlVerb::SquadReload`: re-read `squads.json` into
+    /// `squad_members` on the core loop, so an external prune survives the
+    /// next `persist_squad`.
+    SquadReload {
+        reply: ControlReply,
+    },
     Gone(u64),
     /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
     Query(tokio::sync::oneshot::Sender<ServerMsg>),
@@ -14145,6 +14151,10 @@ impl Core {
                 self.workspace_restore_apply(dry_run, harness, plans, reply);
                 Flow::Continue
             }
+            CoreMsg::SquadReload { reply } => {
+                self.handle_squad_reload(reply);
+                Flow::Continue
+            }
             CoreMsg::Gone(id) => {
                 // Gone is a geometry event (Locked 5, AC1-ERR): a vanished
                 // constraining client releases its clamp, so the tab regrows
@@ -16162,6 +16172,7 @@ async fn handle_control(
                 })
                 .await
         }
+        ControlVerb::SquadReload => core_tx.send(CoreMsg::SquadReload { reply: reply_tx }).await,
         ControlVerb::PaneFocus { pane } => {
             core_tx
                 .send(CoreMsg::PaneFocus {
