@@ -131,6 +131,14 @@ cap_secs=$(( $(as_int "$cap_min") * 60 ))
 pct=$((secs * 100 / cap_secs))
 threshold=$((cap_secs * WARN_PCT / 100))
 
+# The margin is a band below the cap, so it is bounded against the cap it is
+# subtracted from, not just by its own sanity range: a margin at or above the
+# cap puts even a healthy run inside the timeout band.
+if [ "$TIMEOUT_MARGIN_SECS" -ge "$cap_secs" ]; then
+    TIMEOUT_MARGIN_SECS=$(( cap_secs / 2 ))
+    say "SMOKE_TIMEOUT_MARGIN_SECS=$TIMEOUT_MARGIN_RAW meets or exceeds the ${cap_min}m cap; using ${TIMEOUT_MARGIN_SECS}s."
+fi
+
 verdict=ok
 [ "$secs" -ge "$threshold" ] && verdict=approaching
 [ "$secs" -ge "$((cap_secs - TIMEOUT_MARGIN_SECS))" ] && verdict=timeout

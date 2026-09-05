@@ -1435,7 +1435,7 @@ def _changed_packet_counts(selections: Sequence[dict]) -> tuple[int, int]:
     return pytest_files, shell
 
 
-def _estimate_changed_minutes(selections: Sequence[dict]) -> int:
+def _estimate_changed_minutes(root: Path, selections: Sequence[dict]) -> int:
     """Minutes the changed packet plausibly needs, from its selection alone.
 
     The packet scales with the diff, so its CI cap must too; this estimate is
@@ -1445,13 +1445,18 @@ def _estimate_changed_minutes(selections: Sequence[dict]) -> int:
     roughly 7x headroom; a shell harness is at most about a minute (the stress
     contract is 35.9s a trial, one trial in changed mode); provisioning
     includes runner setup plus a cold cargo build, so it gets a flat 5 with
-    the build step adding 2 more. It is deliberately generous: the cost of
+    the build step adding 3 more. It is deliberately generous: the cost of
     over-estimating is a wider ceiling on one job, the cost of
     under-estimating is a run killed by its own cap with no receipt.
     """
     pytest_files, shell = _changed_packet_counts(selections)
     structural = {s["target"] for s in selections if s["kind"] == "step"}
-    build = 1 if _RUST_BUILD_STEP in structural else 0
+    # The build is priced whether it arrives as an explicit rust-family
+    # selection or is injected by _changed_steps for a harness whose content
+    # needs the binary - one spelling of does-the-packet-build.
+    shell_rels = sorted({s["target"] for s in selections if s["kind"] == "shell"})
+    build = 1 if (_RUST_BUILD_STEP in structural
+                  or any(_needs_rust_binary(root, rel) for rel in shell_rels)) else 0
     # Tenths of a minute, so the arithmetic stays in integers. The build is
     # priced at 3 on its own; the other structural steps at 1 each.
     tenths = 50 + (pytest_files * 3) // 2 + shell * 10 \
@@ -1482,7 +1487,7 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     steps = _changed_steps(root, selections)
     select_s = time.monotonic() - t0
 
-    estimate = _estimate_changed_minutes(selections)
+    estimate = _estimate_changed_minutes(root, selections)
     print(f"smoke: base={opts['base'] or resolved_base} "
           f"head={opts['head'] or candidate[:12]} changed={len(paths)} "
           f"selected={len(steps)} unmapped={len(unmapped)}", flush=True)

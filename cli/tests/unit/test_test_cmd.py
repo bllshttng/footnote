@@ -428,39 +428,60 @@ def _selections(kind_counts: dict[str, int], *, with_build: bool = False) -> lis
     return sels
 
 
-def test_estimate_floors_a_tiny_packet_at_fifteen() -> None:
+def test_estimate_floors_a_tiny_packet_at_fifteen(tmp_path: Path) -> None:
     """A three-file packet must keep today's ceiling, not shrink below it."""
     from fno.test_cmd import _estimate_changed_minutes
     assert _estimate_changed_minutes(
-        _selections({"pytest": 3, "shell": 1})) == 15
+        tmp_path, _selections({"pytest": 3, "shell": 1})) == 15
 
 
-def test_estimate_is_monotone_in_packet_size() -> None:
+def test_estimate_is_monotone_in_packet_size(tmp_path: Path) -> None:
     """A superset packet never estimates below its subset."""
     from fno.test_cmd import _estimate_changed_minutes
     small = _selections({"pytest": 5, "shell": 2})
     big = _selections({"pytest": 40, "shell": 8, "step": 2}, with_build=True)
-    assert _estimate_changed_minutes(big) >= _estimate_changed_minutes(small)
+    a = _estimate_changed_minutes(tmp_path, small)
+    b = _estimate_changed_minutes(tmp_path, big)
+    assert b >= a, (a, b)
 
 
-def test_estimate_prices_the_rust_build_above_other_structural_steps() -> None:
+def test_estimate_prices_the_rust_build_above_other_structural_steps(tmp_path: Path) -> None:
     """A cold cargo build is minutes; a registry step is seconds."""
-    from fno.test_cmd import _RUST_BUILD_STEP, _estimate_changed_minutes
+    from fno.test_cmd import _estimate_changed_minutes
     plain = _selections({"pytest": 20, "shell": 4, "step": 3})
     with_build = _selections({"pytest": 20, "shell": 4, "step": 3}, with_build=True)
-    a = _estimate_changed_minutes(plain)
-    b = _estimate_changed_minutes(with_build)
+    a = _estimate_changed_minutes(tmp_path, plain)
+    b = _estimate_changed_minutes(tmp_path, with_build)
     assert b > a, (a, b)
 
 
-def test_estimate_puts_tonights_failing_packet_well_above_the_old_cap() -> None:
+def test_estimate_prices_an_injected_build_from_harness_content(tmp_path: Path) -> None:
+    """A journey harness needing the binary gets the build injected by
+    _changed_steps; the estimate must price the same packet the same way,
+    even with no explicit rust-family selection."""
+    from fno.test_cmd import _estimate_changed_minutes
+    _write(tmp_path / "tests/journey/test_needs_bin.sh",
+           '#!/usr/bin/env bash\n'
+           'CRATE=target/debug/fno-agents\n:\n', executable=True)
+    with_harness = _selections({"pytest": 20, "shell": 4, "step": 3})
+    with_harness.append({"rule": "shell-harness-self",
+                         "path": "tests/journey/test_needs_bin.sh",
+                         "kind": "shell",
+                         "target": "tests/journey/test_needs_bin.sh"})
+    without = _selections({"pytest": 20, "shell": 4, "step": 3})
+    a = _estimate_changed_minutes(tmp_path, without)
+    b = _estimate_changed_minutes(tmp_path, with_harness)
+    assert b > a, (a, b)
+
+
+def test_estimate_puts_tonights_failing_packet_well_above_the_old_cap(tmp_path: Path) -> None:
     """The measured packet (93 pytest files, 14 shell harnesses, the build and
     two registry steps) could not finish inside a fixed 15-minute cap. The
     estimate must land far above that cap and inside the 45 ceiling CI clamps
     to, or the sizing would repeat the starvation it exists to remove."""
     from fno.test_cmd import _estimate_changed_minutes
     sels = _selections({"pytest": 93, "shell": 14, "step": 2}, with_build=True)
-    est = _estimate_changed_minutes(sels)
+    est = _estimate_changed_minutes(tmp_path, sels)
     assert est > 15, est
     assert est <= 45, est
 

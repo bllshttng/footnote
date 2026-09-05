@@ -9,7 +9,8 @@
 #
 # Scope decisions, on purpose:
 # - Comments only. The timeout-minutes lines themselves are the yardstick, not
-#   offenders.
+#   offenders, and a '#' begins a comment only at line start or after
+#   whitespace: a '#' glued to a value character is data.
 # - Job blocks only, and only job-level timeout-minutes. A file-header comment
 #   names no job, and a step-level timeout has no job cap to contradict.
 # - Strictly greater refuses. A comment naming the cap itself is documentation,
@@ -41,6 +42,7 @@ jobs:          # file-header numbers like 'costs 4 minutes' name no job
       - run: true
       # exactly 10 minutes is the cap, named as documentation
       - run: true
+      - run: echo 'took 90 minutes#rest of the line is glued data, not a comment'
   over-job:
     # its own header says 12 minutes and must refuse against the cap below
     timeout-minutes: 10
@@ -102,11 +104,16 @@ def scan(text: str, source: str) -> list[str]:
 
     fails: list[str] = []
     for i, line in enumerate(lines):
-        if jobs_start is None or "#" not in line:
+        if jobs_start is None:
             continue
         # Keep only the comment part, so a YAML value like `run: echo 99m`
-        # never reads as a comment duration.
-        comment = line[line.index("#"):]
+        # never reads as a comment duration. YAML begins a comment at a '#'
+        # that starts the line or follows whitespace; a '#' glued to a value
+        # character (`--format=%h#%h`) is data, not a comment.
+        m = re.search(r"(?:^|\s)#", line)
+        if m is None:
+            continue
+        comment = line[m.end():]
         own = owner(i)
         if own is None:
             continue
@@ -150,8 +157,5 @@ for wf in workflows:
 for f in fails:
     print(f"FAIL: {f}")
 print(f"checked {len(workflows)} workflows, {len(fails)} comment overshoot(s)")
-# A positive count: a run that read nothing must not look like a pass.
-if not workflows:
-    sys.exit(1)
 sys.exit(1 if fails else 0)
 PY

@@ -222,17 +222,26 @@ jobs:
         # `cancelled` and no actor.
         if: always()
         run: |
+          # job.status is `cancelled` only when the cap killed the job: a run
+          # cancelled by a superseding push never reaches this job, and a red
+          # step makes the job `failure`, which the trap already receipted.
+          if [ "${{ job.status }}" != "cancelled" ]; then
+            exit 0
+          fi
           if [ -f "$RUNNER_TEMP/smoke-duration-reported" ]; then
             exit 0
           fi
-          if [ ! -f "$RUNNER_TEMP/changed-start" ]; then
-            exit 0
-          fi
-          elapsed=$(( $(date +%s) - $(cat "$RUNNER_TEMP/changed-start") ))
-          if [ "$elapsed" -lt 0 ]; then
-            # A clock stepped backward mid-job. The honest floor for a job
-            # that reached this step without its trap is the cap itself:
-            # reaching this step unmarked is the cap kill's signature.
+          if [ -f "$RUNNER_TEMP/changed-start" ]; then
+            elapsed=$(( $(date +%s) - $(cat "$RUNNER_TEMP/changed-start") ))
+            if [ "$elapsed" -lt 0 ]; then
+              # A clock stepped backward mid-job. The honest floor for a job
+              # that reached this step without its trap is the cap itself:
+              # reaching this step unmarked is the cap kill's signature.
+              elapsed=$(( CAP_MINUTES * 60 ))
+            fi
+          else
+            # The cap can also kill during provisioning, before the run step
+            # wrote a start time. Same signature, same receipt at the floor.
             elapsed=$(( CAP_MINUTES * 60 ))
           fi
           bash scripts/ci/smoke-duration-report.sh changed-smoke "$elapsed" "$CAP_MINUTES" || true
