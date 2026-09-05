@@ -61,6 +61,7 @@ use crate::vt::{self, frame_text, Modes};
 mod agent_actions;
 mod agent_rows_join;
 mod portal_reach;
+mod squad_sync;
 
 use self::agent_actions::{
     run_agent_action, run_agent_rename, run_mail_send, run_reap, run_reentry_plan,
@@ -680,6 +681,12 @@ enum CoreMsg {
         dry_run: bool,
         harness: Option<String>,
         plans: HashMap<String, Result<ReentryVerdict, String>>,
+        reply: ControlReply,
+    },
+    /// (v71) `ControlVerb::SquadReload`: re-read `squads.json` into
+    /// `squad_members` on the core loop, so an external prune survives the
+    /// next `persist_squad`.
+    SquadReload {
         reply: ControlReply,
     },
     Gone(u64),
@@ -8269,23 +8276,7 @@ impl Core {
         );
         match outcome {
             Ok(outcome) => {
-                let loaded = crate::squad_store::load();
-                let identities: HashMap<(String, String), Vec<_>> = loaded
-                    .squads
-                    .into_iter()
-                    .map(|s| ((s.name, s.key), s.members))
-                    .collect();
-                let sids: Vec<u64> = self.squad_members.keys().copied().collect();
-                for sid in sids {
-                    let Some((name, key)) = self.squad_identity(sid) else {
-                        continue;
-                    };
-                    if let Some(members) = identities.get(&(name, key)) {
-                        self.squad_members.insert(sid, members.clone());
-                    } else {
-                        self.squad_members.insert(sid, Vec::new());
-                    }
-                }
+                self.reload_members_from_store();
                 // Refused restore placeholders are positive dead markers even
                 // when their registry row is gone. Remove their visible panes
                 // after the store pass; keep a last pane so the session's
@@ -14245,6 +14236,10 @@ impl Core {
                 self.workspace_restore_apply(dry_run, harness, plans, reply);
                 Flow::Continue
             }
+            CoreMsg::SquadReload { reply } => {
+                self.handle_squad_reload(reply);
+                Flow::Continue
+            }
             CoreMsg::Gone(id) => {
                 // Gone is a geometry event (Locked 5, AC1-ERR): a vanished
                 // constraining client releases its clamp, so the tab regrows
@@ -16264,6 +16259,7 @@ async fn handle_control(
                 })
                 .await
         }
+        ControlVerb::SquadReload => core_tx.send(CoreMsg::SquadReload { reply: reply_tx }).await,
         ControlVerb::PaneFocus { pane } => {
             core_tx
                 .send(CoreMsg::PaneFocus {

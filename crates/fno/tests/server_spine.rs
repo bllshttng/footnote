@@ -214,7 +214,9 @@ fn wait_for_raw_frame(
             | Ok(ServerMsg::TabClosed { .. })
             // (v60, x-7b5e) Bulk restore answers a one-shot control
             // connection, never the spine's attached client.
-            | Ok(ServerMsg::WorkspaceRestored { .. }) => {}
+            | Ok(ServerMsg::WorkspaceRestored { .. })
+            // (v69) Prune reload: same one-shot control connection shape.
+            | Ok(ServerMsg::SquadReloaded { .. }) => {}
             Ok(ServerMsg::Bye { reason }) => panic!("unexpected Bye: {reason}"),
             Err(fno::proto::ProtoError::Io(e))
                 if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
