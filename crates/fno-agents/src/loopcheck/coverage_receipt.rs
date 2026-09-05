@@ -80,13 +80,14 @@ pub fn coverage_receipt_line(
                 .collect();
             if *n > 0 {
                 // Origin breakdown over EVERY reviewed (non-human) verdict, folded
-                // by its attestation_origin, so the three buckets sum to `n`. The
+                // by its attestation_origin, so the four buckets sum to `n`. The
                 // self-attestation hazard lives on the local lane; a GitHub App
                 // review has no session to compare and reads `unknown` here (it is
                 // named above, so a reader sees it reviewed - "unknown" is its
-                // origin, not its verdict). All three buckets are always shown so
-                // a reader learns the vocabulary even when two are zero; `other`
-                // is a different session, NOT "independent".
+                // origin, not its verdict). All four buckets are always shown so
+                // a reader learns the vocabulary even when three are zero; `other`
+                // is a different session, NOT "independent", and `unmeasured` is a
+                // comparison that failed, not a third party.
                 //
                 // "all origins counted" is load-bearing: readers took the bare
                 // tally for a subtraction and refused to merge green PRs over
@@ -94,24 +95,26 @@ pub fn coverage_receipt_line(
                 // gate") answers the question by raising it. Scoped to ORIGINS
                 // because `n` does drop human approvals, so a bare "all
                 // counted" would be false on a human-approved PR.
-                let (self_n, other_n, unknown_n) = rep
+                let (self_n, other_n, unmeasured_n, unknown_n) = rep
                     .verdicts
                     .iter()
                     .filter(|v| {
                         v.verdict == CoverageVerdict::Reviewed
                             && human_approval_counts(v, rep.github_approval_satisfies)
                     })
-                    .fold((0, 0, 0), |(s, o, u), v| match v.attestation_origin {
-                        AttestationOrigin::SelfAttested => (s + 1, o, u),
-                        AttestationOrigin::OtherSession => (s, o + 1, u),
-                        AttestationOrigin::Unknown => (s, o, u + 1),
+                    .fold((0, 0, 0, 0), |(s, o, m, u), v| match v.attestation_origin {
+                        AttestationOrigin::SelfAttested => (s + 1, o, m, u),
+                        AttestationOrigin::OtherSession => (s, o + 1, m, u),
+                        AttestationOrigin::Unmeasured => (s, o, m + 1, u),
+                        AttestationOrigin::Unknown => (s, o, m, u + 1),
                     });
                 return format!(
-                    "review coverage: {} reviewed ({}) - all origins counted; self {}, other {}, unknown {}",
+                    "review coverage: {} reviewed ({}) - all origins counted; self {}, other {}, unmeasured {}, unknown {}",
                     n,
                     reviewed_names.join(", "),
                     self_n,
                     other_n,
+                    unmeasured_n,
                     unknown_n
                 );
             }
@@ -295,15 +298,13 @@ mod tests {
     fn the_origin_key_is_never_absent_from_a_serialized_local_verdict() {
         // A read whose process resolved no authoring session (a
         // carried_base_sync row re-read from a cwd whose target manifest is
-        // elsewhere) classifies the local verdict Unknown, and Unknown used to
-        // be SKIPPED on serialize - the persisted row carried no
-        // attestation_origin at all, and a consumer reading absent as "not
-        // self_attested" cleared a PR whose only review was the author's own.
-        // The key must always be present: "unknown" when authorship could not
-        // be measured, "self_attested" when it could. The loop-side twin
-        // refuses the same row: an unmeasured read under require_corroboration
-        // holds the PR instead of finishing green on authorship nobody
-        // measured.
+        // elsewhere) classifies the local verdict Unmeasured: a concrete
+        // attester id is on the row, only the comparison failed - and that is
+        // the shape of the author's own re-read. An attester-absent env_only
+        // row reads unknown instead. The key is
+        // always present either way; Unknown used to be SKIPPED on serialize,
+        // and a consumer reading absent as "not self_attested" cleared a PR
+        // whose only review was the author's own.
         let events = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
         let unmeasured = classify_coverage(
             &[],
@@ -323,7 +324,7 @@ mod tests {
             .iter()
             .find(|v| v["producer"] == "local_attestation")
             .unwrap();
-        assert_eq!(v["attestation_origin"], serde_json::json!("unknown"));
+        assert_eq!(v["attestation_origin"], serde_json::json!("unmeasured"));
 
         let measured = classify_coverage(
             &[],
