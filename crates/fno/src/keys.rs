@@ -1078,6 +1078,13 @@ fn default_bindings() -> Vec<KeyBinding> {
             Navigation,
             "copy selection",
         ),
+        b(
+            b'R',
+            "redraw-pane",
+            Cmd(C::RedrawPane { pane: None }),
+            Navigation,
+            "ask the pane to repaint",
+        ),
         b(b'r', "rerun-block", BlockRerun, Navigation, "rerun block"),
         b(b'/', "search", SearchOpen, Navigation, "search scrollback"),
         // The label names every row class `nav_rows()` actually emits. The old

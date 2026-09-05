@@ -13802,6 +13802,48 @@ impl Core {
                 }
                 Flow::Continue
             }
+            Command::RedrawPane { pane } => {
+                // (x-a600) The repaint gesture for a garbled pane: nudge the
+                // child's winsize so a SIGWINCH-respecting renderer repaints at
+                // the settled size, then re-seed the pane's frame to every
+                // viewer - the same flush-then-re-emit the push_layout reemit
+                // pass does, scoped to one pane. `None` is the sender's viewed
+                // tab's focus; a named pane is resolved session-wide and a
+                // stale id is refused fail-closed, like FocusPane.
+                let pid = match pane {
+                    Some(p) => p,
+                    None => match self.viewed_tab(view) {
+                        Some(tab) => tab.focus,
+                        None => return Flow::Continue,
+                    },
+                };
+                let Some(entry) = self.panes.get(&pid) else {
+                    self.notice(client_id, format!("{pid}: no such pane"));
+                    return Flow::Continue;
+                };
+                let (rows, cols) = entry.vt.size();
+                let frame = entry.vt.frame();
+                entry
+                    .stats
+                    .frames_composited
+                    .fetch_add(1, Ordering::Relaxed);
+                entry.pty.nudge_winch(rows, cols);
+                let mut seeded = 0usize;
+                for c in &mut self.clients {
+                    if c.visible.contains(&pid) {
+                        let mut d = c.dirty.lock().unwrap();
+                        d.insert(pid, frame.clone());
+                        drop(d);
+                        c.notify.notify_one();
+                        seeded += 1;
+                    }
+                }
+                e2e_log(format_args!(
+                    "redraw pane {pid}: nudged {rows}x{cols}, re-seeded to {seeded} viewer(s)"
+                ));
+                self.notice(client_id, format!("pane {pid} repaint requested"));
+                Flow::Continue
+            }
         }
     }
 

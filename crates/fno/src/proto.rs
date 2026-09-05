@@ -321,7 +321,8 @@ fn default_true() -> bool {
 /// where the slot lookup knows occupancy. Additive, so the compatibility
 /// floor does not move; a repoint keeps owning its geometry and says so.
 /// v68 (x-5baf): `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
-pub const PROTO_VERSION: u32 = 68;
+/// v69 (x-a600): `Command::RedrawPane`, `#[serde(default)]`; floor stays 58.
+pub const PROTO_VERSION: u32 = 69;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1669,6 +1670,17 @@ pub enum Command {
     ToggleDiffPane {
         #[serde(default)]
         agent: Option<String>,
+        #[serde(default)]
+        pane: Option<u64>,
+    },
+    /// (v69, x-a600) The operator's repaint gesture for a garbled pane: the
+    /// server nudges the child's winsize (two SIGWINCHes over the existing
+    /// resize path) and re-seeds the pane's frame to every viewer, the same
+    /// flush-then-re-emit `push_layout(reemit)` does, scoped to one pane.
+    /// `None` resolves to the sender's viewed tab's focused pane (the
+    /// keybind path); `Some` names a catalog pane, refused fail-closed with
+    /// a notice when stale, like `FocusPane`.
+    RedrawPane {
         #[serde(default)]
         pane: Option<u64>,
     },
