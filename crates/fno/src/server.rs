@@ -2509,6 +2509,55 @@ fn wheel_gate(
     }
 }
 
+/// The CURRENT directory of `pid`, read from the kernel (x-5baf). A shell's
+/// own cwd, not the pane's spawn cwd: every tab is born at the squad root
+/// (`create_tab_in`), so the spawn cwd tells two tabs apart in no case.
+/// `None` on any failure, which the caller degrades to the spawn cwd.
+#[cfg(target_os = "macos")]
+fn process_cwd(pid: u32) -> Option<String> {
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    // `vip_path` is `[[c_char; 32]; 32]`, a libc workaround for
+    // `[c_char; MAXPATHLEN]` (1024) that flattens identically since a 2D
+    // fixed array has no inter-row padding.
+    let bytes: &[libc::c_char] = unsafe {
+        std::slice::from_raw_parts(
+            info.pvi_cdir.vip_path.as_ptr().cast::<libc::c_char>(),
+            32 * 32,
+        )
+    };
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    if end == 0 {
+        return None;
+    }
+    let path_bytes: Vec<u8> = bytes[..end].iter().map(|&b| b as u8).collect();
+    String::from_utf8(path_bytes).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn process_cwd(pid: u32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_cwd(_pid: u32) -> Option<String> {
+    None
+}
+
 /// Capture-side pane -> slot naming (x-caef). Slot names are decided at
 /// CAPTURE, never at restore, so two snapshots of one session agree on which
 /// pane is which: a pane with an fno id names its slot that id and binds
@@ -2517,15 +2566,19 @@ fn wheel_gate(
 /// case `PaneLocation` documents) gets a `#2` suffix rather than colliding.
 struct SlotCapture<'a> {
     pane_owner: &'a HashMap<u64, &'a str>,
+    /// (x-5baf) Each pane's live cwd, read once before the tab loop. `None`
+    /// entries (a dead child pid) simply leave the slot's `cwd` unset.
+    pane_cwd: &'a HashMap<u64, String>,
     slots: Vec<LayoutSlot>,
     by_pane: HashMap<u64, String>,
     ordinal: usize,
 }
 
 impl<'a> SlotCapture<'a> {
-    fn new(pane_owner: &'a HashMap<u64, &str>) -> Self {
+    fn new(pane_owner: &'a HashMap<u64, &str>, pane_cwd: &'a HashMap<u64, String>) -> Self {
         SlotCapture {
             pane_owner,
+            pane_cwd,
             slots: Vec::new(),
             by_pane: HashMap::new(),
             ordinal: 0,
@@ -2580,6 +2633,7 @@ impl<'a> SlotCapture<'a> {
         self.slots.push(LayoutSlot {
             name: name.clone(),
             binding,
+            cwd: self.pane_cwd.get(&pane).cloned(),
         });
         self.by_pane.insert(pane, name.clone());
         name
@@ -7528,6 +7582,22 @@ impl Core {
         // (x-8f9d) Every portal seat, collected once: the per-tab prune below
         // folds over all of them.
         let seats: Vec<u64> = self.portals.values().map(|p| p.seat).collect();
+        // (x-5baf) Each of this squad's panes' live cwd, read once up front
+        // (one syscall per leaf per flush) rather than per-slot: a pane can
+        // appear as a leaf in only one tab, so there is no repeat work to
+        // dedupe. A dead child pid degrades to the pane's own spawn cwd,
+        // recorded at spawn (`PaneEntry::cwd`), never a capture failure.
+        let mut pane_cwd: HashMap<u64, String> = HashMap::new();
+        for pane in sq.tabs.iter().flat_map(|t| tree::leaves(&t.root)) {
+            if let Some(entry) = self.panes.get(&pane) {
+                let cwd = entry
+                    .pty
+                    .child_pid()
+                    .and_then(process_cwd)
+                    .unwrap_or_else(|| entry.cwd.clone());
+                pane_cwd.insert(pane, cwd);
+            }
+        }
         let mut trees = Vec::with_capacity(sq.tabs.len());
         let mut active_tab = 0;
         // If pruning hollows out the active tab itself, `active_tab` has no
@@ -7575,7 +7645,7 @@ impl Core {
                 active_tab = trees.len();
             }
             let root = pruned.as_ref().unwrap_or(&t.root);
-            let mut capture = SlotCapture::new(&pane_owner);
+            let mut capture = SlotCapture::new(&pane_owner, &pane_cwd);
             let tree = capture.node_to_spec(root);
             let focus = capture.slot_of(t.focus);
             trees.push(StoredTabTree {
@@ -9002,17 +9072,36 @@ impl Core {
                             Some(p) => {
                                 slot_pane.insert(slot.name.as_str(), p);
                             }
-                            None => match self.spawn_pane(rows, cols, &cwd0) {
-                                Ok(p) => {
-                                    slot_pane.insert(slot.name.as_str(), p);
-                                }
-                                Err(e) => {
+                            None => {
+                                // (x-5baf) A slot's own captured cwd, when it
+                                // still exists, beats the squad root: the
+                                // whole point of remembering it. A vanished
+                                // directory or a pre-v68 slot with none
+                                // recorded falls back to `cwd0`, same shape as
+                                // the worker lane's `restore_member_cwd` above.
+                                let (spawn_cwd, gone) =
+                                    restore_member_cwd(slot.cwd.as_deref(), &cwd0, |p| {
+                                        std::path::Path::new(p).is_dir()
+                                    });
+                                if let Some(gone) = gone {
                                     self.notice_all(format!(
-                                        "restore: tab {}: could not open shell: {e}",
-                                        st.tab_name.as_deref().unwrap_or("?")
+                                        "restore: tab {}: {}'s directory {gone} is gone; restored at {spawn_cwd} instead",
+                                        st.tab_name.as_deref().unwrap_or("?"),
+                                        slot.name
                                     ));
                                 }
-                            },
+                                match self.spawn_pane(rows, cols, &spawn_cwd) {
+                                    Ok(p) => {
+                                        slot_pane.insert(slot.name.as_str(), p);
+                                    }
+                                    Err(e) => {
+                                        self.notice_all(format!(
+                                            "restore: tab {}: could not open shell: {e}",
+                                            st.tab_name.as_deref().unwrap_or("?")
+                                        ));
+                                    }
+                                }
+                            }
                         }
                     }
                     let lookup = |name: &str| slot_pane.get(name).copied();
@@ -19989,10 +20078,12 @@ mod tests {
                 LayoutSlot {
                     name: "a".into(),
                     binding: LayoutBinding::Anchor,
+                    cwd: None,
                 },
                 LayoutSlot {
                     name: "b".into(),
                     binding: LayoutBinding::Shell,
+                    cwd: None,
                 },
             ],
         };
@@ -20068,10 +20159,12 @@ mod tests {
                 LayoutSlot {
                     name: "a".into(),
                     binding: LayoutBinding::Anchor,
+                    cwd: None,
                 },
                 LayoutSlot {
                     name: "b".into(),
                     binding: LayoutBinding::Fno("S1".into()),
+                    cwd: None,
                 },
             ],
         };
@@ -21861,6 +21954,7 @@ mod tests {
         let slot_for = |session: &str| crate::proto::LayoutSlot {
             name: "s0".into(),
             binding: LayoutBinding::Fno(format!("worker:codex:{session}")),
+            cwd: None,
         };
         let tree_for = |session: &str| crate::proto::LayoutTreeSpec::Slot("s0".into());
         crate::squad_store::set_tab_trees(

@@ -4308,6 +4308,7 @@ fn layout_graft_cli(
                 .map(|(n, b)| LayoutSlot {
                     name: n.clone(),
                     binding: b,
+                    cwd: None,
                 })
                 .collect();
             AnchoredLayoutSpec {
