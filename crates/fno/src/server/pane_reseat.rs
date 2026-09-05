@@ -223,7 +223,6 @@ impl Core {
         // Idempotence: a pane that already seats a portal is answered, not moved.
         if let Some((idx, _)) = self.portals.iter().find(|(_, p)| p.seat == pane) {
             let idx = *idx;
-            self.push_layout(true);
             return ServerMsg::Notice {
                 text: format!("already seated: portal {idx} (pane {pane})"),
             };
@@ -352,19 +351,14 @@ impl Core {
         }
         // The graft: a fresh tab in the owner-routed squad (the
         // reattach_detached_pane shape), so the pane keeps rendering while
-        // owning no squad membership.
+        // owning no squad membership. `find_by_cwd` answers a live squad id by
+        // construction; the fallback is the squad the pane came from, live
+        // since `find_pane` and untouched in between (no await points).
         let dest = self.session.find_by_cwd(&cwd).unwrap_or(squad);
-        if self.session.squad(dest).is_none() {
-            self.reap_pane(pane);
-            return ServerMsg::Err {
-                code: err_code::BAD_REQUEST,
-                msg: "reseat failed: the target workspace vanished".to_string(),
-            };
-        }
         let tid = self.session.mint_tab_id();
         self.session
             .squad_mut(dest)
-            .expect("target squad checked")
+            .expect("target squad live")
             .tabs
             .push(Tab {
                 name: clean_tab_name(Some(row.name.clone())),
