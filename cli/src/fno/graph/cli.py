@@ -23,6 +23,7 @@ from typing import Any, List, Literal, Optional, Union
 
 import typer
 
+from fno.control_plane import emit_tick, scheduler_from_env
 from fno.tombstones import tombstone_group_cls
 
 cli = typer.Typer(
@@ -11741,15 +11742,13 @@ def cmd_reconcile(
         # after the lock - else an epic-level dependent stalls.
         cascade_closed_acc: list = []
         # Nodes closed because they shipped inside a closed node's PR (x-e957).
-        # Kept SEPARATE from cascade_closed_acc, which drives auto-continue
-        # dispatch - contained nodes deliberately get none. This list is for
-        # reporting only: a sweep that closes three nodes while saying it closed
-        # one reads as "already in sync" to the next operator.
+        # Reporting only, and kept SEPARATE from cascade_closed_acc (which
+        # drives auto-continue): a sweep that closes three nodes while saying
+        # it closed one reads as "already in sync" to the next operator.
         contained_closed_acc: list = []
-        # Cascade/sweep failures, carried into the --json payload. stderr alone
+        # Cascade/sweep failures, carried into the --json payload: stderr alone
         # is invisible to the SessionStart hook, which runs `reconcile --json`
-        # and discards stderr - so a repeatedly-failing cascade left contained
-        # nodes open forever with no signal reaching any automated reader.
+        # and discards stderr.
         contained_errors_acc: list = []
         supersession_unverified_acc: list[dict] = []
         blocked_by_settlement_acc: list[dict] = []
@@ -11798,13 +11797,11 @@ def cmd_reconcile(
                         try:
                             from fno.done.cli import _apply_rollup
 
-                            # Cost is fill-only, matching cmd_done. _apply_rollup
-                            # merges cost_sessions and recomputes the total, but
-                            # a prior stamp (fno backlog cost / a loop writer)
-                            # timestamps its rows at recording time while the
-                            # ledger row carries the completion time, so the same
-                            # run reads as distinct and gets double-counted.
-                            # Preserve any existing cost; the rollup's job here is
+                            # Cost is fill-only, matching cmd_done: a prior stamp
+                            # (fno backlog cost / a loop writer) timestamps its
+                            # rows at recording time while the ledger row carries
+                            # the completion time, so re-applying double-counts
+                            # the same run. The rollup's job here is
                             # session_id / points.
                             prior_cost = node_obj.get("cost_usd")
                             prior_sessions = list(node_obj.get("cost_sessions") or [])
@@ -11833,18 +11830,11 @@ def cmd_reconcile(
                         node_obj["pr_number"] = record.pr_number
                         node_obj["pr_url"] = record.pr_url
                     # Close every node that shipped inside this PR (x-e957),
-                    # BEFORE the parent cascade: a contained node is a child of
-                    # the delivery unit, so the epic above is only all-done once
-                    # these are closed too. Running it after would leave the
-                    # ancestor open for a sweep it should have closed now.
-                    #
-                    # A loud warning, never an abort. The merge already
-                    # happened and the delivery unit's own close is the
-                    # load-bearing write; a cascade that raised here would leave
-                    # that unit open against a merged PR - strictly worse than
-                    # the bug this fixes. Contained ids are NOT added to
-                    # cascade_closed_acc: that accumulator drives auto-continue
-                    # dispatch, which contained nodes deliberately do not get.
+                    # BEFORE the parent cascade: the epic is only all-done once
+                    # its contained children are closed too. A loud warning,
+                    # never an abort - the unit's own close is the load-bearing
+                    # write. Contained ids are NOT added to cascade_closed_acc:
+                    # contained nodes deliberately get no auto-continue.
                     try:
                         contained_closed_acc.extend(
                             _cascade_close_contained(entries, record.node_id)
@@ -11868,24 +11858,16 @@ def cmd_reconcile(
                     # across projects (follows the parent edge, not a filter).
                     cascade_closed_acc.extend(_cascade_close_parents(entries, record.node_id))
                     actually_closed.append(record)
-            # Self-heal pre-existing stranded all-done epics (codex P2): close any
-            # open epic whose children are already all done, even with no drift
-            # this sweep. Full reconcile only - a node-scoped run must not touch
-            # unrelated epics. Going forward the cascade prevents new ones, so
-            # this is a no-op once migrated. Their dependents auto-continue via
-            # the same cascade_closed_acc dispatch loop.
-            # Self-heal contained nodes whose unit shipped before the
-            # containment record existed (codex P1): the merge-time cascade
-            # above only fires while closing an owner, and an already-closed
-            # owner never appears in `closeable`. Runs BEFORE the epic sweep so
-            # an epic waiting on one of these sees it done in the same pass.
-            # Full reconcile only, matching _sweep_close_done_epics.
+            # Self-heal pre-existing stranded all-done epics (codex P2) and
+            # contained nodes whose unit shipped before the containment record
+            # existed (codex P1): the merge-time cascades above only fire while
+            # closing an owner. Full reconcile only; going forward the cascade
+            # prevents new stranded ones. Dependents auto-continue via the same
+            # cascade_closed_acc dispatch loop.
             if _full_sweep:
-                # Guarded for the same reason the merge-time cascade is: this
-                # leg is a self-heal for a state that predates the invariant,
-                # and letting it raise would abort the whole sweep - taking
-                # every genuine PR-drift close with it. Strictly worse than the
-                # stale rows it exists to clean up.
+                # Guarded: a self-heal that raised would abort the whole sweep,
+                # taking every genuine PR-drift close with it - strictly worse
+                # than the stale rows it exists to clean up.
                 try:
                     contained_closed_acc.extend(_sweep_close_stranded_contained(entries))
                 except Exception as _sw_exc:  # noqa: BLE001 - never abort the sweep
@@ -11990,13 +11972,11 @@ def cmd_reconcile(
             # closes a node once (AC4-EDGE).
             emit_human_touch_for_record(record)
 
-            # Ledger backstop (x-88df US3): the merge event is the one moment
-            # the system is guaranteed to know (node, pr, project, merged_at),
-            # yet the ledger's only writer is the origin's own finalize - a
-            # killed/reaped origin leaks its row. Stamp a null-pr row or create a
-            # minimal backstop for the transcript-gone tail; the direct-finalize
-            # rung's full row supersedes it via the collapse rule. Best-effort
-            # and non-fatal: a ledger failure must never abort the close (AC1-ERR).
+            # Ledger backstop (x-88df US3): the ledger's only writer is the
+            # origin's own finalize, so a killed/reaped origin leaks its row.
+            # Stamp a minimal row for the transcript-gone tail; the
+            # direct-finalize rung's full row supersedes it via the collapse
+            # rule. Best-effort: never aborts the close (AC1-ERR).
             try:
                 from fno.cost._register import upsert_ledger_pr
 
@@ -12027,9 +12007,8 @@ def cmd_reconcile(
 
             # Tier-1 gate_escape (x-f894): a STRICTER subset of the touch above -
             # only when a required review bot never reviewed the oob-merged PR
-            # (the #222 boundary). Resolve the repo's required bots (empty on
-            # most repos -> no-op) and let the helper apply the boundary + emit.
-            # Fully fail-open: never abort the close.
+            # (the #222 boundary). Resolve the repo's required bots and let the
+            # helper apply the boundary + emit; fail-open, never aborts.
             _required_bots: list = []
             if record.cwd:
                 try:
@@ -12037,14 +12016,11 @@ def cmd_reconcile(
 
                     _settings = load_settings_for_repo(Path(record.cwd))
                     # The review block lives under `config:` (SettingsModel ->
-                    # config.review), NOT at the top level - reading
-                    # `_settings.review` always missed and returned [], so the
-                    # emit short-circuited and this telemetry never fired in the
-                    # real CLI path (codex P2 on PR #232). github_apps is the bot
-                    # half of the required gate; a local peer reviewer that never
-                    # reviewed is NOT counted here. That under-reports (fail-safe
-                    # direction) and is acceptable for a Tier-1 metric - dead-bot
-                    # is the recurring escape this catches.
+                    # config.review), NOT at the top level: reading
+                    # `_settings.review` always missed and returned [] (codex P2
+                    # on PR #232). github_apps is the bot half of the gate; a
+                    # local peer reviewer is NOT counted (under-reports, the
+                    # fail-safe direction) - dead-bot is the recurring escape.
                     _required_bots = list(_settings.review.github_apps or [])
                 except Exception:
                     _required_bots = []  # fail open: unresolvable config -> no emit
@@ -12060,14 +12036,12 @@ def cmd_reconcile(
                 }
             )
 
-            # Merge-triggered auto-continue (ab-3cd195b6 / task 2.1): now that
-            # this node's close has committed (AC1-RACE ordering: advance runs
-            # only AFTER the locked_mutate_graph above), dispatch a fresh
-            # /target --no-merge worker for the next now-unblocked node IF
-            # auto-continue is armed for the project. advance gates on
-            # enablement internally (a no-op advance_skipped{disabled} when
-            # off) and is strictly non-fatal: a failed advance never fails the
-            # reconcile sweep. Project-scoped per the closed node's project.
+            # Merge-triggered auto-continue (ab-3cd195b6): with the close
+            # committed above (AC1-RACE ordering), dispatch a fresh /target
+            # worker for the next now-unblocked node. advance gates on
+            # enablement internally and is strictly non-fatal: a failed advance
+            # never fails the reconcile sweep. Project-scoped per the closed
+            # node's project.
             try:
                 _adv_node = _find_node(post_entries, record.node_id)
                 _adv_project = _adv_node.get("project") if _adv_node else None
@@ -12099,11 +12073,10 @@ def cmd_reconcile(
         # only touches directly-closed records; the epic parents need this.
         _project_plans_from_graph([r.node_id for r in actually_closed] + list(cascade_closed_acc))
 
-        # x-33b2: a cascade-closed parent epic unblocks its OWN dependents (a node
-        # blocked_by the epic). The per-record loop above only dispatched the
-        # directly-closed children, so run the same auto-continue for each
-        # cascade-closed ancestor too - else an epic-level dependent stalls.
-        # Deduped; project/cwd read from the (close-stable) graph.
+        # x-33b2: a cascade-closed parent epic unblocks its OWN dependents (a
+        # node blocked_by the epic), which the per-record loop above never
+        # dispatched - run the same auto-continue for each cascade-closed
+        # ancestor too. Deduped; read-only from the close-stable graph.
         _seen_parents: set = set()
         for _pid in cascade_closed_acc:
             if _pid in _seen_parents:
@@ -12140,14 +12113,11 @@ def cmd_reconcile(
             _sn = _find_node(_sim, record.node_id)
             if _sn and not _sn.get("completed_at"):
                 _apply_completion_fields(_sn)
-                # Same order as the real mutator: contained children close
-                # first, so the simulated parent cascade sees the same
-                # all-children-done world a real run would.
-                # Guarded like the real mutator. Unguarded, a raise crashed the
-                # PREVIEW with a traceback where a real run degrades to a
-                # warning - the preview failing harder than the thing it
-                # previews - and `contained_errors` stayed [] in the --json
-                # payload, asserting no errors for a leg that never completed.
+                # Same order as the real mutator (contained children first), and
+                # guarded like it: an unguarded raise crashed the PREVIEW where
+                # a real run degrades to a warning, and left `contained_errors`
+                # [] in the --json payload - asserting no errors for a leg that
+                # never completed.
                 try:
                     _sim_contained.extend(_cascade_close_contained(_sim, record.node_id))
                 except Exception as _sc_exc:  # noqa: BLE001 - preview never crashes
@@ -12219,12 +12189,11 @@ def cmd_reconcile(
         except Exception as exc:  # noqa: BLE001 - never abort the sweep
             typer.echo(f"warning: revert detection skipped: {exc}", err=True)
 
-    # Canonical-sync catch-up. reconcile auto-fires on SessionStart, so
-    # this is the leg that breaks the circularity: when the pr-watch daemon is
-    # dead AGAIN, the next interactive session catches the canonical up instead
-    # of the outage waiting for a human to notice. Same self-heal posture as
-    # hooks/groom-self-heal-session-start.sh. Skipped under --dry-run (a preview
-    # must mutate nothing) and strictly non-fatal to the sweep.
+    # Canonical-sync catch-up: reconcile auto-fires on SessionStart, so when
+    # the pr-watch daemon is dead the next interactive session catches the
+    # canonical up instead of the outage waiting for a human. Same self-heal
+    # posture as hooks/groom-self-heal-session-start.sh; --dry-run skips (a
+    # preview mutates nothing) and a failure never fails the sweep.
     sync_catchup: dict = {"outcome": "not-run"}
     if not dry_run:
         try:
@@ -12244,28 +12213,20 @@ def cmd_reconcile(
             if not json_out:
                 typer.echo(f"warning: sync catch-up skipped: {_cu_exc}", err=True)
 
-    # Claim GC. This call site reaches every path that fires reconcile - the
-    # SessionStart reconcile hook (scripts/lib/reconcile-throttle.sh) and a
-    # manual invocation - so a reaper hook on any one caller instead would be
-    # a guard on one of N reachable paths. The eval-sweep SessionStart hook
-    # sources reconcile-throttle.sh too, but only to reuse its
-    # _reconcile_resolve_fno helper; it never calls reconcile_maybe_fire, so
-    # it does not reach this reaper. --dry-run
-    # propagates to the reaper (one mode contract); best-effort, same posture
-    # as sync_catchup above: a reap error is reported and never fails the
-    # sweep.
+    # Claim GC. This call site reaches every path that fires reconcile (the
+    # SessionStart hook and a manual invocation), so a reaper on any one caller
+    # would be a guard on one of N reachable paths. The eval-sweep hook sources
+    # reconcile-throttle.sh only for its fno resolver, so it never reaches
+    # this. --dry-run propagates (one mode contract); best-effort like
+    # sync_catchup: a reap error never fails the sweep.
     claim_reap: dict = {"outcome": "not-run"}
     try:
         from fno.claims.cli import _abandonment_probe, _node_settlement
         from fno.claims.core import reap_dead_claims
 
-        # The probe travels with the sweep, not only with the hand-typed verb.
-        # This is the UNATTENDED reaper: without it the positive-finding
-        # abandonment reap existed on exactly one path an operator has to type,
-        # and the SessionStart sweep that actually runs kept every abandoned
-        # claim until its TTL. A producer on one of N paths is the same defect
-        # as a guard on one of N, from the other side. Same for the
-        # node_settlement (x-94f8).
+        # The probe travels with the sweep: this is the UNATTENDED reaper, and
+        # a producer on one of N paths is the same defect as a guard on one of
+        # N. Same for the node_settlement (x-94f8).
         _optout_sink: list = []
         _reap = reap_dead_claims(
             apply=not dry_run,
@@ -12303,13 +12264,11 @@ def cmd_reconcile(
         if not json_out:
             typer.echo(f"warning: claim reap skipped: {_reap_exc}", err=True)
 
-    # x-59a6: for a multi-node feature where this run's --pr-number closure
-    # claims land under a still-open parent epic, name exactly which sibling
-    # ship(s) keep it open - not just that the epic did not close. Without
-    # this, a PR that ships one of two required nodes reads as silent
-    # (`closed=[thisone]`) rather than naming the outstanding one, and an
-    # operator cannot tell "genuinely unfinished" from "closure never fired"
-    # for the epic itself. Read-only: never mutates.
+    # x-59a6: when this run's --pr-number closure claims land under a
+    # still-open parent epic, name exactly which sibling ship(s) keep it open -
+    # else a PR that ships one of two required nodes reads as silent
+    # (`closed=[thisone]`) and an operator cannot tell "genuinely unfinished"
+    # from "closure never fired". Read-only: never mutates.
     epics_waiting: list[dict] = []
     if closure_claims:
         # On a dry run, `_sim` (when built) already carries the SIMULATED
@@ -12406,16 +12365,12 @@ def cmd_reconcile(
             # (x-e957). Reported separately from `closed`, whose entries all
             # carry their own pr_number - a contained node has none.
             "contained_closed": contained_closed,
-            # Cascade/sweep failures. In the payload because the SessionStart
-            # hook reads --json and discards stderr: a leg whose failure is
-            # unobservable is indistinguishable from one that never ran.
+            # Cascade/sweep and canonical-sync legs. In the payload because the
+            # SessionStart hook reads --json and discards stderr: a leg whose
+            # failure is unobservable is indistinguishable from one that never ran.
             "contained_errors": contained_errors,
             # Nodes whose ship a merged revert PR names (stamped unless --dry-run).
             "reverted": reverted_stamped,
-            # Canonical-sync catch-up outcome. In the JSON payload rather than
-            # only on stderr because the SessionStart hook invokes reconcile with
-            # --json and discards stderr - a leg whose result is unobservable is
-            # the exact failure mode this feature exists to end.
             "sync_catchup": sync_catchup,
             "claim_reap": claim_reap,
             "ledger_harvest": _harvest,
@@ -12430,34 +12385,20 @@ def cmd_reconcile(
                 for r in failures
             ],
             # Closeable records held open by the promise gate (x-5d34): a merged
-            # PR whose plan promised work that has not all shipped. In the JSON
-            # payload because the SessionStart hook reads --json and discards
-            # stderr - a held-open node that prints only to stderr is invisible.
+            # PR whose plan promised work that has not all shipped.
             "promise_unmet": [{"node_id": nid, "reason": reason} for nid, reason in promise_unmet],
             "promise_warnings": promise_warnings,
             "supersession_evidence_failures": owed_evidence_failures,
         }
         typer.echo(json.dumps(payload, indent=2))
-        # Auto-continue arm row, ONLY from a scheduled context (the launchd
-        # script exports FNO_CONTROL_PLANE_SCHEDULER): this reconcile call is
-        # the arm's 1800s heartbeat, and a SessionStart reconcile must not
-        # mask an unloaded agent with its own fresh row.
+        # Auto-continue heartbeat, only from a scheduled context: a SessionStart
+        # reconcile must not mask an unloaded agent with a fresh row.
         if os.environ.get("FNO_CONTROL_PLANE_SCHEDULER"):
-            from fno.control_plane import emit_tick, scheduler_from_env
-
-            emit_tick(
-                "auto_continue",
-                scheduler=scheduler_from_env(),
-                interval_s=1800,
-                acted=len(closed),
-                skip_reason=None if closed else "no-web-merges",
-                detail=(
-                    f"closed={len(closed)} healed={len(healed_epics)} "
-                    f"failures={len(failures)}"
-                ),
-            )
-        # Unresolved PR queries are a partial failure: signal it so unattended
-        # callers can detect it from the exit code, not just the JSON body.
+            emit_tick("auto_continue", scheduler=scheduler_from_env(), interval_s=1800,
+                      acted=len(closed), skip_reason=None if closed else "no-web-merges",
+                      detail=f"closed={len(closed)} healed={len(healed_epics)} "
+                             f"failures={len(failures)}")
+        # Unresolved PR queries are a partial failure, signalled via the exit code.
         if failures or owed_evidence_failures:
             raise typer.Exit(code=4)
         return

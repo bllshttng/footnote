@@ -1727,13 +1727,14 @@ fn arms_readout(home: &AgentsHome) -> Vec<fno_agents::tick_ledger::ArmStatus> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let global = std::env::var_os("HOME")
-        .map(|h| {
-            std::path::PathBuf::from(h)
-                .join(".fno")
-                .join("events.jsonl")
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from(".fno/events.jsonl"));
+    // The global journal derives from the agents root we already hold (its
+    // parent dir), never a hand-built path: the root is the declared resolver
+    // surface, so an FNO_AGENTS_HOME override reaches this scan by construction.
+    let global = home
+        .root()
+        .parent()
+        .map(|p| p.join("events.jsonl"))
+        .unwrap_or_else(|| home.events_jsonl());
     let journals = vec![home.events_jsonl(), global];
     fno_agents::tick_ledger::read_arms(&journals, now_unix)
 }

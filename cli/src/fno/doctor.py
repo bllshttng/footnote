@@ -1812,20 +1812,15 @@ def _session_start_bytes_line(preamble_line: Optional[str]) -> Optional[str]:
 
 
 def _control_plane_arms_report() -> dict[str, Any]:
-    """The control-plane arms readout (x-1b88), via the ONE Rust reader.
-
-    Shells ``fno-agents status --json`` (the same reader ``fno agents status``
-    prints) rather than reimplementing the journal fold in Python. Stale arms
-    are the finding; an unreadable readout is reported as unknown, never as
-    green. Advisory: never changes doctor's status/exit.
+    """Stale control-plane arms via the one Rust reader (shells
+    ``fno-agents status --json``): unknown on a failed read, never green.
+    Advisory: never changes doctor's status/exit.
     """
-    report: dict[str, Any] = {"arms": [], "stale": [], "unknown_reason": None}
     try:
         from fno import rust_binary
         binary = rust_binary.resolve_binary()
         if binary is None:
-            report["unknown_reason"] = "fno-agents binary not found"
-            return report
+            return {"stale": [], "unknown_reason": "fno-agents binary not found"}
         result = subprocess.run(
             [str(binary), "status", "--json"],
             capture_output=True, text=True, timeout=10, check=False,
@@ -1833,23 +1828,11 @@ def _control_plane_arms_report() -> dict[str, Any]:
         payload = json.loads(result.stdout) if result.stdout.strip() else {}
         arms = payload.get("arms")
         if not isinstance(arms, list):
-            report["unknown_reason"] = "status payload carries no arms (binary predates x-1b88?)"
-            return report
-        report["arms"] = arms
-        report["stale"] = [
-            {
-                "arm": a.get("arm"),
-                "age_s": a.get("age_s"),
-                "interval_s": a.get("interval_s"),
-                "skip_reason": a.get("skip_reason"),
-                "detail": a.get("detail"),
-            }
-            for a in arms
-            if isinstance(a, dict) and a.get("stale")
-        ]
+            return {"stale": [], "unknown_reason": "status payload carries no arms"}
+        return {"stale": [a for a in arms if isinstance(a, dict) and a.get("stale")],
+                "unknown_reason": None}
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        report["unknown_reason"] = f"read failed: {exc}"
-    return report
+        return {"stale": [], "unknown_reason": f"read failed: {exc}"}
 
 
 # ---------------------------------------------------------------------------
@@ -2378,25 +2361,16 @@ def _emit_human(
     elif pw_verdict == "healthy-pending":
         out(f"fno doctor: pr-watch installed, awaiting first tick ({pw.get('detail')}).")
 
-    # Control-plane arms (x-1b88). Advisory: name every stale arm with its
-    # last skip reason, and stay loud-but-honest when the readout itself could
-    # not run (unknown never reads as green).
+    # Control-plane arms (x-1b88), advisory: name every stale arm; an
+    # unreadable readout never reads as green.
     cpa = result.get("control_plane_arms") or {}
     if cpa.get("unknown_reason"):
-        out(
-            "fno doctor: control-plane arms readout unknown "
-            f"({cpa['unknown_reason']}); staleness is unmeasured."
-        )
+        out(f"fno doctor: control-plane arms readout unknown ({cpa['unknown_reason']}); "
+            "staleness is unmeasured.")
     for arm in cpa.get("stale") or []:
-        age = arm.get("age_s")
-        interval = arm.get("interval_s")
-        skip = arm.get("skip_reason") or "no-skip-reason"
-        detail = arm.get("detail") or ""
-        out(
-            f"fno doctor: control-plane arm {arm.get('arm')} is STALE "
-            f"(last tick {age}s ago, interval {interval}s, last skip reason: "
-            f"{skip}){'; ' + str(detail) if detail else ''}"
-        )
+        out(f"fno doctor: control-plane arm {arm.get('arm')} is STALE "
+            f"(last tick {arm.get('age_s')}s ago, interval {arm.get('interval_s')}s, "
+            f"skip: {arm.get('skip_reason') or 'none'})")
 
     # The durable-grant observer coupling: a standing dispatch grant
     # (auto_merge.enabled true, grant=dispatch) implies a live watcher -
@@ -4099,9 +4073,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     # truth), never from config alone. Never changes status/exit.
     result["pr_watch"] = _pr_watch_liveness()
 
-    # Advisory control-plane arms readout (x-1b88): one row per scheduled arm,
-    # red when its last tick is older than twice its interval. Never changes
-    # status/exit.
+    # Advisory control-plane arms readout (x-1b88); never changes status/exit.
     result["control_plane_arms"] = _control_plane_arms_report()
 
     # Advisory open-file limit visibility: a launchd child starves at 256 while

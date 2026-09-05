@@ -3179,14 +3179,9 @@ def advance(
         """One auto-continue arm row: what this advance did, or why not."""
         from fno.control_plane import emit_tick, scheduler_from_env
 
-        emit_tick(
-            "auto_continue",
-            scheduler=scheduler_from_env(),
-            interval_s=1800,
-            acted=acted,
-            skip_reason=skip_reason,
-            detail=(f"closed={closed_node_id or '-'} " + detail)[:200] or None,
-        )
+        emit_tick("auto_continue", scheduler=scheduler_from_env(), interval_s=1800,
+                  acted=acted, skip_reason=skip_reason,
+                  detail=(f"closed={closed_node_id or '-'} {detail}")[:200] or None)
 
     def skip(
         reason: str,
