@@ -25,7 +25,7 @@
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1297,6 +1297,84 @@ fn is_open_do_row(row: &Value) -> bool {
     is_open_phase_row(row, "do")
 }
 
+/// The WORK-done verdict for one session, read through the reverse join over
+/// `sessions[]`. This is the one WORK-done reader on the Rust side
+/// (x-c672): retirement asks it, never `row.node`, and no second predicate
+/// folds WORK, SHIP, WRITING or HOLDING into one boolean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkState {
+    /// Named on n nodes, every one `done`.
+    AllDone { nodes: Vec<String> },
+    /// At least one named node is not done; the first is reported.
+    Open { node: String, status: String },
+    /// Named on no node's `sessions[]`.
+    NoProvenance,
+}
+
+/// Normalize one session id for identity comparison, `session_identity_key`'s
+/// rule: uuid-family ids are case-insensitive, opencode's `ses_` ids are not.
+fn work_state_key(session_id: &str) -> String {
+    if session_id.starts_with("ses_") {
+        session_id.to_string()
+    } else {
+        session_id.to_ascii_lowercase()
+    }
+}
+
+/// The reverse-join index: normalised `session_id` -> `[(node_id, status)]`
+/// over every entry's `sessions[]` rows. Build once per sweep over the
+/// working graph plus the archive; `status` is the entry's stored `status`
+/// field only, never a derived overlay.
+pub fn sessions_index(entries: &[Value]) -> HashMap<String, Vec<(String, String)>> {
+    let mut index: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for entry in entries {
+        let Some(node_id) = entry_id(entry) else {
+            continue;
+        };
+        let status = entry
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let Some(rows) = entry.get("sessions").and_then(Value::as_array) else {
+            continue;
+        };
+        for row in rows {
+            let Some(sid) = row.get("session_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let sid = sid.trim();
+            if sid.is_empty() {
+                continue;
+            }
+            index
+                .entry(work_state_key(sid))
+                .or_default()
+                .push((node_id.to_string(), status.clone()));
+        }
+    }
+    index
+}
+
+/// The WORK-done question for one session against a [`sessions_index`].
+pub fn work_state(index: &HashMap<String, Vec<(String, String)>>, session_id: &str) -> WorkState {
+    let Some(named) = index.get(&work_state_key(session_id)) else {
+        return WorkState::NoProvenance;
+    };
+    if named.is_empty() {
+        return WorkState::NoProvenance;
+    }
+    if let Some((node, status)) = named.iter().find(|(_, status)| status != "done") {
+        return WorkState::Open {
+            node: node.clone(),
+            status: status.clone(),
+        };
+    }
+    WorkState::AllDone {
+        nodes: named.iter().map(|(node, _)| node.clone()).collect(),
+    }
+}
+
 /// Recompute status for all entries based on graph state
 /// (statuses.recompute_statuses). The write path's derivation: blocked_by is
 /// deliberately NOT derived here - dependency satisfaction is answered fresh
@@ -2345,6 +2423,72 @@ mod tests {
             FieldUpdate::from_cli("details", None),
             Ok(FieldUpdate::Keep)
         ));
+    }
+
+    #[test]
+    fn work_state_folds_every_named_node() {
+        // AC2-HP: named on two done nodes -> AllDone carrying both.
+        let entries = vec![
+            json!({
+                "id": "N1", "status": "done",
+                "sessions": [{"session_id": "S", "phase": "do", "harness": "claude"}],
+            }),
+            json!({
+                "id": "N2", "status": "done",
+                "sessions": [{"session_id": "S", "phase": "review", "harness": "claude"}],
+            }),
+        ];
+        let index = sessions_index(&entries);
+        assert_eq!(
+            work_state(&index, "S"),
+            WorkState::AllDone {
+                nodes: vec!["N1".into(), "N2".into()]
+            }
+        );
+        // Keyed on the normalised id: an upper-case spelling resolves too.
+        assert_eq!(
+            work_state(&index, "s"),
+            WorkState::AllDone {
+                nodes: vec!["N1".into(), "N2".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn work_state_reports_the_first_open_node_and_no_provenance() {
+        // AC2-EDGE: one open node among the named -> Open naming it.
+        let entries = vec![
+            json!({
+                "id": "N2", "status": "done",
+                "sessions": [{"session_id": "S", "phase": "do", "harness": "claude"}],
+            }),
+            json!({
+                "id": "N3", "status": "in_review",
+                "sessions": [{"session_id": "S", "phase": "review", "harness": "claude"}],
+            }),
+        ];
+        let index = sessions_index(&entries);
+        assert_eq!(
+            work_state(&index, "S"),
+            WorkState::Open {
+                node: "N3".into(),
+                status: "in_review".into()
+            }
+        );
+        // Named nowhere -> NoProvenance, and a ses_ id keeps its case.
+        assert_eq!(work_state(&index, "unknown-id"), WorkState::NoProvenance);
+        let opencode = vec![json!({
+            "id": "N4", "status": "done",
+            "sessions": [{"session_id": "ses_CaseKept", "phase": "do", "harness": "opencode"}],
+        })];
+        let index = sessions_index(&opencode);
+        assert_eq!(
+            work_state(&index, "ses_CaseKept"),
+            WorkState::AllDone {
+                nodes: vec!["N4".into()]
+            }
+        );
+        assert_eq!(work_state(&index, "ses_casekept"), WorkState::NoProvenance);
     }
 
     #[test]
