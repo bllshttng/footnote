@@ -202,22 +202,11 @@ def _update_registry_if_recipient_unchanged(
     return applied
 
 
-# ---------------------------------------------------------------------------
-# Dispatch-scoped context propagation (Task 2.1)
-# ---------------------------------------------------------------------------
-#
-# The dispatch paths build an ``EventContext`` once they know the recipient
-# provider (after ``select_provider``) and stash it on this ContextVar
-# so the helpers they call can emit context-enriched events without
-# threading ``ctx`` through every keyword-arg list. ContextVar is the
-# right substrate because:
-#
-# - It is automatically isolated per-task / per-thread (no module-global
-#   races between concurrent dispatch calls in different threads).
-# - The ``set(...)`` + ``reset(token)`` cycle ensures no leakage across
-#   dispatches even when an exception unwinds the stack.
-# - Test code can read it cheaply for assertion (or ignore it; helpers
-#   that don't observe the contextvar fall back to legacy ``emit``).
+# Dispatch-scoped context propagation (Task 2.1): the dispatch paths build an
+# ``EventContext`` once the provider is known and stash it here so helpers emit
+# context-enriched events without threading ``ctx`` everywhere. ContextVar is
+# per-task/thread isolated and the set/reset token cycle never leaks across
+# dispatches; helpers that don't observe it fall back to legacy ``emit``.
 _DISPATCH_CTX: contextvars.ContextVar[Optional[EventContext]] = contextvars.ContextVar(
     "fno_dispatch_ctx", default=None
 )
@@ -888,10 +877,8 @@ def _reign_typed_message(
 ) -> tuple[str, bool]:
     """A crowned spawn's payload opens with the plugin-qualified reign verb.
 
-    The claude lane is the measured case: the crown stamp said nothing and the
-    king improvised the ritual by hand for a hundred turns. A revival keeps its
-    own payload - the session already knows what it is - and the receipt names
-    the not-typed case with the remedy instead of silence.
+    A revival keeps its own payload (the session already knows what it is);
+    the receipt names the not-typed case with the remedy.
     """
     if crown_level is not None and crown_scope and not revive:
         return f"/fno:reign {crown_scope}\n{message}", True
@@ -901,14 +888,9 @@ def _reign_typed_message(
 def _report_unlinked_parent(session_id: Optional[str]) -> None:
     """Name an unrecorded parent edge in the spawn output.
 
-    A null ``spawned_by_session`` is sometimes CORRECT: markers from two
-    harness families attribute nothing, because an inherited foreign marker
-    would record a stranger as the parent for the life of that row. The defect
-    was that the null was silent at both ends - the spawning king never learned
-    its child is invisible to the orphan check meant to protect it. This line
-    is the whole fix for that side: say it when it happens, with the identity
-    resolution's own reason (its disposition and the markers it saw), so the
-    spawner reads WHY, not just that.
+    A null can be CORRECT (an inherited foreign marker would record a stranger
+    as parent); the defect was its silence. Say it with the identity
+    resolution's own reason, so the spawner reads WHY.
     """
     if session_id:
         return
@@ -1097,14 +1079,11 @@ def _codex_thread_spawn(
     for overlay in (route_env, account_env):
         if overlay:
             env.update(overlay)
-    # This client IS a footnote process, and a non-claude oauth_dir overlay is a
-    # HOME override, so without the seal the client's own registry read and the
-    # daemon child's claim would resolve under the account's home and go
-    # unfindable (x-c33e). Unlike the spawn front door there is no argv carrier
-    # here: the env is the only channel to the app-server child, so the override
-    # stays and the two roots that HAVE an env carrier are pinned around it.
-    # locks_dir and state_dir have none and still follow HOME - see
-    # seal_state_root's docstring for what that leaves open.
+    # This client IS a footnote process and a non-claude oauth_dir overlay is a
+    # HOME override, so seal it or the client's own reads resolve under the
+    # account's home and go unfindable (x-c33e). Env is the only channel to the
+    # app-server child, so the override stays; seal_state_root's docstring says
+    # what that leaves open.
     env = seal_state_root(env)
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180, env=env)
@@ -1723,19 +1702,12 @@ def _claude_create_path(
     from fno.agents.harnesses import claude as claude_mod
     from fno.harness_identity import claude_transport_short_id
 
-    # x-9844 Lane 2 / x-7fef: every resume takes the session single-writer claim
-    # here, so a concurrent resume of the same uuid (the residual window the
-    # per-agent flock's name-scoped serialization leaves open, plus the
-    # cross-name case) can't spawn a second supervisor onto one transcript.
-    #
-    # x-7fef: the claim is PINNED to the spawned supervisor's pid below and then
-    # deliberately outlives this process. Releasing after the spawn (the old
-    # lifetime) left the transcript guarded only by `session_is_live(uuid[:8])`,
-    # which a revived supervisor defeats by registering under a NEW short id. A
-    # supervisor-pinned claim needs no such lookup: a dead supervisor makes it
-    # dead-pid and the next acquire reclaims it via stale recovery, while a live
-    # one truthfully refuses a second writer. That also answers the old
-    # "holding past spawn hoards the writer and blocks native attach" objection.
+    # x-9844 Lane 2 / x-7fef: every resume takes the session single-writer
+    # claim here, PINNED to the spawned supervisor's pid, and it deliberately
+    # outlives this process: a dead supervisor makes it dead-pid (the next
+    # acquire reclaims it) and a live one refuses a second writer - unlike a
+    # short-id liveness lookup, which a revived supervisor defeats by
+    # registering under a NEW short id.
     writer_claim_holder: Optional[str] = None
     if resume_session_id:
         writer_claim_holder = f"revive:{os.getpid()}"
@@ -1830,16 +1802,11 @@ def _claude_create_path(
                 time.sleep(_PIN_LOOKUP_BACKOFF_S)
         return False
 
-    # x-ae2d: materialize the route file BEFORE the supervisor exists. It does
-    # mkdir + open + replace under the state dir, and doing it at row-write time
-    # would put that I/O after the launch, where an OSError escapes uncaught and
-    # strands a live supervisor with no registry row. Content-addressed, so this
-    # is the same path bg_create resolves for itself moments later - including
-    # the account overlay, else a composed spawn's row names a different file
-    # than the worker launched with and a restore silently drops the account's
-    # pinned env. Route-bearing rows only: an account-only file restores as "no
-    # route" (or an incomplete unit the composition guard refuses), so stamping
-    # it broke every --account worker's revive.
+    # x-ae2d: materialize the route file BEFORE the supervisor exists; at
+    # row-write time its I/O would sit after the launch and an OSError strands
+    # a live supervisor with no row. Content-addressed, so this is the path
+    # bg_create resolves (including the account overlay). Route-bearing rows
+    # only: an account-only file restored as "no route" broke --account revives.
     from fno.agents.model_routing import route_settings_path_for
 
     route_settings_path = (
@@ -1855,11 +1822,8 @@ def _claude_create_path(
     # _capture_spawn_trigger's own docstring for what that mislabels).
     spawn_trigger = _capture_spawn_trigger()
 
-    # x-7b36 change 11: a crowned spawn TYPES the reign verb as the payload's
-    # first line, so the king's first turn is the skill itself rather than a
-    # hand-improvised ritual. Measured on the first crowned king: the stamp
-    # said nothing, the king improvised for a hundred turns, and nothing
-    # warned. The operator's brief follows the verb as the payload's body.
+    # A crowned spawn TYPES the reign verb as the payload's first line, so the
+    # king's first turn is the skill itself, not a hand-improvised ritual.
     message, reign_typed = _reign_typed_message(message, crown_level, crown_scope, revive)
 
     try:
@@ -1922,26 +1886,18 @@ def _claude_create_path(
     # supervisor, so the claim lives and dies with the writer it guards.
     pinned_to_supervisor = _pin_claim_to_supervisor(short_id)
 
-    # Best-effort full session-UUID capture (ab-f1b0ccd1, AC1-HP): persist the
-    # stream-json `--resume` target alongside the 8-hex short-id so the worker
-    # is adoptable by the live stream-json switchboard lane. Runs after the receipt is
-    # captured; a miss leaves the field None and never gates the launch.
-    # On a revival this records the SOURCE conversation's id, not the live
-    # session's: `claude --bg --resume` always forks, claude mints a fresh
-    # uuid, and no shell flag can learn it. The row keeps the lineage id for
-    # provenance; the fork is announced loudly below.
+    # Best-effort full session-UUID capture (ab-f1b0ccd1, AC1-HP): persisted for
+    # the stream-json adopt lane; a miss leaves None and never gates the launch.
+    # A revival records the SOURCE conversation's id - `--bg --resume` forks and
+    # claude mints a fresh uuid no flag can learn; the fork is announced below.
     session_uuid = (
         resume_session_id if revive else claude_mod.resolve_session_uuid_at_spawn(short_id)
     )
 
-    # v23 (x-2019): reconcile the REQUEST with the session's observed model,
-    # so a silent substitution is named here instead of living in the
-    # operator's memory. One best-effort transcript read; a session with no
-    # model sample yet (a fresh spawn whose first turn has not landed) probes
-    # as `no-model-yet` and the verdict is `unknown` - an unanswered probe is
-    # not a verdict, so the spawn says nothing and the list-row marker picks
-    # the comparison up once a sample exists. A REVIVE reads history, so its
-    # answer is deterministic at this line.
+    # v23 (x-2019): reconcile the REQUEST with the session's observed model so a
+    # silent substitution is named, not remembered. A fresh spawn with no sample
+    # yet probes `no-model-yet` and stays silent (an unanswered probe is not a
+    # verdict); a REVIVE reads history, so its answer is deterministic here.
     requested_token = model or route_model
     substitution: Optional[dict] = None
     verified_model: Optional[str] = None
@@ -2197,21 +2153,14 @@ def _claude_create_path(
                 file=sys.stderr,
             )
         if crown_scope and not crown_declined:
-            # The typed/not-typed fact rides the receipt either way: an
-            # untyped ritual is visible in the receipt, never inferred from
-            # silence.
-            if reign_typed:
-                print(
-                    f"spawn: crown over {crown_scope!r} recorded; reign typed",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"spawn: crown over {crown_scope!r} recorded; NOT typed "
-                    "(revived session keeps its own payload; send "
-                    f"'/fno:reign {crown_scope}' by raw mail if it should reign)",
-                    file=sys.stderr,
-                )
+            # Typed or not rides the receipt either way, never inferred from silence.
+            tail = (
+                "reign typed"
+                if reign_typed
+                else "NOT typed (revived session keeps its own payload; send "
+                f"'/fno:reign {crown_scope}' by raw mail if it should reign)"
+            )
+            print(f"spawn: crown over {crown_scope!r} recorded; {tail}", file=sys.stderr)
     except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
         # Birth's failure counterpart (x-8cd5 Wave 6): the supervisor launched
         # but no registry row names it, so without this the orphan's later
@@ -2732,23 +2681,12 @@ def dispatch_spawn(
     Raises:
         :class:`DispatchAskError`: every documented failure mode.
     """
-    # 0. Launch-time headroom picking (x-7d45). An explicit --account always
-    # wins and is never second-guessed; this only fills the gap when none was
-    # given. It runs before the tier-remap check below so that check sees the
-    # overlay the worker will actually launch with.
-    #
-    # This is ONE of the two Python spawn seams: `cmd_spawn` routes the default
-    # `pane` substrate to `dispatch_spawn_bounded_pane` and never reaches here,
-    # so the pane path calls the same helper itself. Two seams, one
-    # implementation - putting it in cli.py instead would miss every in-process
-    # caller that bypasses argument parsing.
-    # A --resume spawn is never picked for, the same seam rule `_pick_account_at_seam`
-    # applies to the CLI argv: the transcript being resumed lives under the config
-    # dir it was created in, so a picked CLAUDE_CONFIG_DIR points at a directory
-    # where that uuid does not exist. It also keeps the revive restore below
-    # honest - any --account reaching it is one the operator actually typed.
-    # x-d285: a picked overlay names its account id so the minted row records
-    # WHICH account it rides; an explicit launch_account from the caller wins.
+    # 0. Launch-time headroom picking (x-7d45): fills the gap only when no
+    # --account was given, before the tier-remap check so that check sees the
+    # real overlay. One of the two spawn seams - the default `pane` substrate
+    # never reaches here and calls the same helper itself. A --resume spawn is
+    # never picked for (the transcript lives under its birth config dir).
+    # x-d285: a picked overlay names its account id; launch_account wins.
     effective_launch_account = launch_account
     if account_env is None and harness == "claude" and not resume_session_id:
         picked_overlay = _pick_account_overlay(role=role, route_env=route_env)
@@ -3036,24 +2974,14 @@ def dispatch_spawn(
                     exit_code=2,
                 )
 
-            # x-ae2d: a revive relaunches the supervisor, so it must come back on
-            # the route the row was born with unless this invocation resolved one
-            # of its own. Raises (exit 2) when the recorded route is unrestorable.
-            #
-            # Keyed on the RESOLVED route, never on whether --role was mentioned.
-            # `resolve_route` is fail-SAFE: a protected role, a disabled block, an
-            # unconfigured provider, or a missing key all return None and leave
-            # route_env unset. Skipping the restore because a role was NAMED would
-            # therefore relaunch unrouted in exactly the case where the role
-            # produced nothing - the silent default-account fallback this exists
-            # to prevent. A role that DID resolve leaves route_env truthy, so it
-            # still wins over the recorded route.
-            # The source row is resolved by the TRANSCRIPT being resumed, not by
-            # this spawn's name. A revive reuses the old name, but nothing stops
-            # `spawn other-name --resume <uuid>` from relaunching the same
-            # transcript under a fresh row - and that row is the one carrying the
-            # route. Keying on `existing` alone would leave every renamed relaunch
-            # silently unrouted, a guard on one of the two ways in.
+            # x-ae2d: a revive must come back on the route the row was born with
+            # unless this invocation resolved one of its own; raises exit 2 when
+            # the recorded route is unrestorable. Keyed on the RESOLVED route,
+            # never on --role being mentioned: resolve_route is fail-SAFE, so
+            # skipping on a named-but-unresolved role would relaunch unrouted -
+            # the fallback this prevents. The source row is resolved by the
+            # resumed TRANSCRIPT, not the name: a renamed relaunch's fresh row is
+            # the one carrying the route.
             source_row = existing if revive else None
             if resume_session_id and source_row is None:
                 source_row = next(
@@ -3065,14 +2993,11 @@ def dispatch_spawn(
                     ),
                     None,
                 )
-            # x-d285: the value the minted row carries on its account axis.
-            # A fresh spawn positively knows: explicit id, picked id, or
-            # "default". A revive does not - the transcript lives under the
-            # config dir it was created in, so its account is a fact about the
-            # SOURCE row, resolved by uuid alone (a row can carry an account
-            # with no route). No source evidence means unknown (None), never
-            # "default": stamping default on a revive is the silent
-            # wrong-account re-entry this node exists to end.
+            # x-d285: the minted row's account axis. A fresh spawn positively
+            # knows (explicit id, picked id, "default"); a revive's account is
+            # a fact about the SOURCE row, resolved by uuid alone. No source
+            # evidence means unknown (None), never "default": stamping default
+            # on a revive is the silent wrong-account re-entry.
             row_launch_account = effective_launch_account
             if resume_session_id and row_launch_account is None:
                 account_source = existing if revive else next(

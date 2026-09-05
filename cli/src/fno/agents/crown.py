@@ -1,41 +1,24 @@
 """The crown vocabulary: what a scope is, what rung it implies, and what a
-grantor may hand down.
+grantor may hand down. ``registry`` owns the three row fields; this module owns
+their meaning and touches no file.
 
-Everything about orchestrator authority that is not storage lives here.
-``registry`` owns the three fields on the row (``crown_level`` /
-``crown_scope`` / ``crown_grantor``) and nothing about their meaning; this
-module owns the meaning and touches no file.
-
-THE LADDER IS THREE RUNGS, AND EACH IS A FACT ABOUT THE SCOPE:
+THE LADDER IS THREE RUNGS, EACH A FACT ABOUT THE SCOPE:
 
     0   several projects   scope names 2+ config projects (a portfolio)
     1   one project        scope names one config project
     2   one epic           scope is a backlog node with type == "epic"
 
-There is deliberately no rung for an implementer. A node that is not an epic is
-work, not a territory, and nobody reigns for a day over a single task - so a
-crown aimed at one is REFUSED rather than stamped at some bottom rung. That
-refusal is the whole reason no caller passes a level: ``derive_crown_level``
-reads the rung off the scope, and a scope that names no territory has no rung to
-read, which is exactly the case that should fail.
+No rung for an implementer: a non-epic node is work, not territory, so a crown
+aimed at one is REFUSED - which is why no caller passes a level;
+``derive_crown_level`` reads the rung off the scope, and a scope naming no
+territory has none to read. Callers hand-type no altitude (the old surface let a
+backwards ladder - 0 is the TOP - silently mint wrong authority).
 
-The practical payoff is that the counter-intuitive part of the old surface is
-gone. Callers used to hand-type an altitude on a ladder whose direction reads
-backwards (0 is the TOP), and typing the wrong one silently minted authority at
-the wrong altitude. Now the only input is the territory, which the operator
-already knows by name.
-
-CANONICALIZATION CONTRACT: the one-live-crown guard (in ``dispatch`` and
-``mux_spawn``) compares a stored ``crown_scope`` to the requested one by exact
-equality, so it only stays correct while every stored scope IS canonical.
-``resolve_crown`` guarantees that for every crown it stamps (aliases resolved via
-``_canonical_project``, members sorted and deduped), so new-vs-new is safe. The
-gap is migration-only: a crown stamped by the OLD ``--crown level=,scope=`` path
-(before this redesign) could store a raw alias spelling that the equality guard
-would not match against the canonical form. That old path is deleted here, and
-the feature was unreleased, so no such row should exist outside development
-registries - if one does, re-crown it rather than relying on the guard to merge
-the spellings.
+CANONICALIZATION CONTRACT: the one-live-crown guard compares stored scopes by
+exact equality, so ``resolve_crown`` guarantees every stamp is canonical
+(aliases resolved, members sorted and deduped). The only gap is a pre-redesign
+``--crown level=,scope=`` row storing a raw alias spelling - that path is
+deleted and was unreleased; re-crown such a row rather than merging spellings.
 """
 from __future__ import annotations
 
@@ -68,40 +51,29 @@ class CrownScopeError(ValueError):
 #: must refuse rather than assume the most privileged answer.
 REGISTRY_UNREADABLE: Any = object()
 
-#: Sentinel for "the caller carries an agent identity but no registry row matches
-#: it." Distinct from ``None`` (an attended human with no identity at all) and
-#: from :data:`REGISTRY_UNREADABLE` (the registry could not be read): the registry
-#: WAS read, the caller claims to be an agent, but it is not joined - a
-#: just-spawned worker before its row lands, or a session that has not run
-#: ``/fno-me``. Such a caller holds no verified authority, so :func:`grant_error`
-#: refuses with the heal rather than authorize like a human. This is the third
-#: fail-open path: the first review's sentinel covered the registry EXCEPTION, and
-#: ``_find_by_session`` returns ``None`` on a clean miss WITHOUT raising, so the
-#: miss never reached that except branch.
+#: Sentinel for "the caller carries an agent identity but no registry row
+#: matches it": distinct from ``None`` (attended human) and
+#: :data:`REGISTRY_UNREADABLE` (read failed). The registry WAS read, the caller
+#: claims to be an agent, but is not joined - it holds no verified authority,
+#: so :func:`grant_error` refuses with the heal rather than authorize. Covers
+#: the clean-miss path ``_find_by_session`` answers with ``None``, not raising.
 AGENT_UNREGISTERED: Any = object()
 
 
 def calling_agent_row():
-    """The calling session's registry row.
+    """The calling session's registry row; :func:`grant_error` treats each
+    outcome differently:
 
-    Four outcomes, and :func:`grant_error` treats each differently:
-
-    - ``None`` - an attended human: no ``FNO_AGENT_SELF``, so no agent identity
-      to check against. A human may grant any scope.
+    - ``None`` - an attended human. A human may grant any scope.
     - an ``AgentEntry`` - a joined agent; :func:`grant_error` checks its crown.
-    - :data:`REGISTRY_UNREADABLE` - the caller HAS an agent identity, but the
-      registry could not be read to resolve it. This is NOT an attended human,
-      and flattening it to ``None`` would let a registry read failure promote
-      any spawned worker to human authority and mint crowns it has no right to
-      bestow - fail-open on the rule "you cannot hand down authority you do not
-      hold." Surfaced as a sentinel so the caller refuses instead.
-    - :data:`AGENT_UNREGISTERED` - the caller HAS an agent identity and the
-      registry was read, but no row matches it (a just-spawned worker before its
-      row lands, or a session that has not run ``/fno-me``). ``_find_by_session``
-      returns ``None`` on this clean miss WITHOUT raising, so without this
-      sentinel the miss would flow out as the attended-human ``None`` and
-      authorize any grant - the same fail-open as the exception path, one branch
-      over. Surfaced so :func:`grant_error` refuses with the heal instead.
+    - :data:`REGISTRY_UNREADABLE` - the caller HAS an agent identity but the
+      registry could not be read. Flattening this to ``None`` would let a read
+      failure promote any worker to human authority - fail-open on "you cannot
+      hand down authority you do not hold" - so it surfaces as a sentinel.
+    - :data:`AGENT_UNREGISTERED` - identity present, registry read, but no row
+      matches (a just-spawned worker, a session without ``/fno-me``). The clean
+      miss flows out as ``None`` without this sentinel, the same fail-open one
+      branch over; surfaces so :func:`grant_error` refuses with the heal.
 
     Resolved the same way ``fno whoami`` does, so "who am I" has one answer.
     """
@@ -502,23 +474,13 @@ def crown_scope_matches(held: Optional[str], requested: Optional[str]) -> bool:
     """Will the row-keyed king readers accept a crown over ``held`` for
     ``requested``? Territory equality, aliases normalized.
 
-    NOT a containment check, and the difference is the whole point. Grant
-    asks "may this crown bestow that scope", and answers yes for a strict
-    container. The readers ask something narrower and answer it with a
-    string: ``king_manifest_path`` builds ``kings/{crown_scope}.md`` from
-    the stored scope verbatim, and ``king done`` refuses on ``own != scope``.
-    Neither walks the ladder. So a project-level crown does NOT satisfy an
-    epic manifest, however cleanly it contains it.
-
-    A first cut of this helper accepted ``scope_contains`` on the reasoning
-    that grant already applies that rule. That silenced precisely the state
-    the warning exists to make loud: a king crowned over a project arms an
-    epic manifest, hears nothing, and then finds ``manifest-path`` exiting 1
-    and ``done`` refusing. Reuse the rule that matches the QUESTION, not the
-    rule that happens to live nearby.
-
-    A blank scope on either side answers False: a crown naming no territory
-    matches nothing, and neither does a manifest armed for nothing.
+    NOT a containment check: grant answers "may this crown bestow that scope"
+    with the ladder, while the readers answer a string question
+    (``kings/{crown_scope}.md`` built verbatim; ``done`` refuses on
+    ``own != scope``), so a project crown does NOT satisfy an epic manifest.
+    A first cut reused ``scope_contains`` and silenced exactly the state the
+    warning exists to make loud. Reuse the rule that matches the QUESTION.
+    A blank scope on either side answers False.
     """
     if not held or not requested:
         return False
@@ -736,13 +698,11 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     if denial is not None:
         raise CrownPromotionError(denial)
     grantor = "human" if caller is None else caller.name
-    # `grant_error` blesses an equal scope because SPAWN succession is legal
-    # there: that path vacates the caller and stamps the heir in one write.
-    # This path only stamps the target, so letting it through would leave two
-    # live crowns over one scope - which the holder scan below then refuses,
-    # naming the caller's OWN row as the blocker and offering three remedies
-    # that all contradict the refusal (re-scope yourself, reconcile yourself,
-    # stop yourself). Refuse here instead, where the remedy is reachable.
+    # `grant_error` blesses an equal scope because SPAWN succession vacates the
+    # caller and stamps the heir in one write; this path only stamps the target,
+    # so letting it through would leave two live crowns and the holder scan
+    # below would refuse naming the caller's OWN row. Refuse here, where the
+    # remedy is reachable.
     if caller is not None and _same_territory(
         getattr(caller, "crown_scope", None), scope
     ):
@@ -754,14 +714,11 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             "registry write, so the scope is never doubly ruled and never "
             "briefly unruled."
         )
-    # The authority check above ran OUTSIDE the lock, so the grantor's own
-    # crown can move between it and the stamp - a window that did not exist
-    # while every agent caller was refused outright. Re-running grant_error
-    # under the lock is not the fix: it calls scope_contains, which reads the
-    # GRAPH, and this file keeps graph I/O off the lock on purpose. So carry
-    # the scope authority was granted on and re-assert it under the lock as a
-    # plain attribute compare. Fails closed: an agent grantor whose crown moved
-    # mid-call is refused rather than allowed to bestow what it no longer holds.
+    # The authority check ran OUTSIDE the lock, so the grantor's crown can move
+    # before the stamp. Re-running grant_error under the lock would put graph
+    # I/O on the lock, so carry the granted scope and re-assert it under the
+    # lock as a plain compare. Fails closed: a grantor whose crown moved
+    # mid-call cannot bestow what it no longer holds.
     granting_scope = None if caller is None else getattr(caller, "crown_scope", None)
 
     from fno.agents.registry import (
@@ -778,13 +735,10 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             f"{exc}. `fno agents list` shows every handle you can crown."
         ) from exc
 
-    # A crown is stamped BY a grantor, never self-declared. That held for free
-    # while every agent caller was refused outright; once a king may grant, the
-    # invariant needs its own check, because the grantor recorded on the row
-    # would otherwise be the row itself. The succession refusal above does not
-    # cover this: it fires only on an EQUAL scope, so a king narrowing its own
-    # crown to a strict SUBSET sails past it and re-stamps itself, vacating the
-    # wider scope on the way. Identity, not territory, is the thing to test.
+    # Never self-declared: once a king may grant, the grantor recorded on the
+    # row could be the row itself. The succession refusal above fires only on
+    # an EQUAL scope, so narrowing to a strict SUBSET would sail past it -
+    # identity, not territory, is the test.
     if caller is not None and target_name == grantor:
         raise CrownPromotionError(
             f"refusing to crown {target_name!r}: that is this session, and a "
@@ -825,13 +779,10 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 "grant committed. `fno agents list` shows the handles you can crown."
             )
         if target.status in TERMINAL_STATUSES:
-            # Name the field, not just the value, and name a remedy that cannot
-            # contradict the refusal. This test reads the STORED status; `fno
-            # agents list` renders that column beside a freshly-computed
-            # `live_status`, and the two disagree exactly when a live row was
-            # stamped terminal by an earlier sweep. Pointing a caller at that
-            # reader (as this refusal used to) sends it to a column saying the
-            # row is live, with no way forward from there.
+            # Name the field and a remedy that cannot contradict the refusal:
+            # `fno agents list` renders this STORED status beside a
+            # freshly-computed `live_status`, and pointing the caller there (as
+            # this used to) shows a column saying the row is live.
             raise CrownPromotionError(
                 f"refusing to crown {target.name!r}: its STORED status is "
                 f"{target.status!r}, which is terminal. That is a recorded "
@@ -946,11 +897,9 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     except Exception:
         # Advisory receipt data must never crash a crown that committed.
         receipt["stranded_subordinates"] = None
-    # x-7b36 change 11: the crown TYPES the verb. The holder learns it reigns
-    # through the one channel it reads anyway - raw mail typed as the operator
-    # would - instead of discovering the crown on its next `fno whoami`.
-    # Plugin-qualified per harness: `/fno:` on claude and opencode, `$fno:` on
-    # codex because `/` is reserved there.
+    # The crown TYPES the verb: the holder learns it reigns through raw mail
+    # typed as the operator would. Plugin-qualified per harness (`$fno:` on
+    # codex, `/fno:` elsewhere).
     target_row = next((r for r in rows_after if r.name == target_name), None)
     target_harness = getattr(target_row, "harness", None) if target_row else None
     address = target_name
@@ -969,27 +918,17 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
 def _send_reign_verb(address: str, verb: str) -> str:
     """Mail the reign verb to a freshly crowned holder; never raises.
 
-    Advisory receipt data: a delivery failure is named on the receipt, because
-    a crowned session that never receives the verb improvises the ritual by
-    hand - the exact silence this typing exists to end. `--raw` types the
-    payload as the operator would, so a leading slash arrives as a command.
+    Advisory receipt data: a failure is named on the receipt, because a crowned
+    session that never receives the verb improvises the ritual. `--raw` types
+    the payload as the operator would, so a slash arrives as a command.
     """
     import subprocess
     import sys
 
     try:
         proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            [
-                sys.executable,
-                "-m",
-                "fno.cli",
-                "agents",
-                "mail",
-                "send",
-                address,
-                verb,
-                "--raw",
-            ],
+            [sys.executable, "-m", "fno.cli", "agents", "mail",
+             "send", address, verb, "--raw"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -1035,13 +974,11 @@ def _stranded_subordinates(
         if row.name == target_name or row.status in TERMINAL_STATUSES:
             continue
         members = split_scope(row.crown_scope)
-        # A single-member scope that names no project is an epic id, whose
-        # containment lives in the graph. If the graph does not hold it,
-        # containment is UNKNOWABLE for this row. It is listed anyway rather
-        # than nulling the report: one stale crowned row must not silence
-        # the determinate answers for every other row, and naming a row
-        # that turns out fine costs an operator a glance, while a missing
-        # name costs the move's audit trail.
+        # A single-member scope naming no project is an epic id whose
+        # containment lives in the graph; without the graph it is UNKNOWABLE.
+        # List it anyway: one stale row must not silence every determinate
+        # answer, and a false name costs a glance while a missing one costs
+        # the audit trail.
         unresolvable = (
             len(members) == 1
             and members[0] not in by_id

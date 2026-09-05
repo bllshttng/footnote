@@ -235,9 +235,8 @@ fn is_codex_thread_entry(entry: &RegistryEntry) -> bool {
 /// enforced by [`crate::state::PtyState::take_active_drive`], which this calls.
 ///
 /// Since x-4c87 an unreadable registry is a startup failure, not an empty
-/// roster: recovery ran on `unwrap_or_default()` reads, so a store the typed
-/// reader could not decode made the daemon come up believing zero agents and
-/// answer every later caller from that false zero.
+/// roster: `unwrap_or_default()` reads once made the daemon come up believing
+/// zero agents and answer every caller from that false zero.
 pub fn recover(
     home: &AgentsHome,
     emitter: &EventEmitter,
@@ -389,11 +388,10 @@ fn recover_with_policy(
     }
 
     // Step 6: orphan-PID sweep. An entry whose pid is set but is no longer OUR
-    // worker is reaped (status -> exited). A live worker socket means the worker
-    // (Outcome B) is still up; leave it. "No longer ours" = dead (ESRCH) OR a
-    // recycled pid whose start time no longer matches what we recorded
-    // (ab-d19e6458) — without the start-time check a reused pid belonging to an
-    // unrelated process would keep a dead worker looking alive.
+    // worker is reaped; a live worker socket means the worker (Outcome B) is
+    // still up. "No longer ours" = dead (ESRCH) OR a recycled pid whose start
+    // time no longer matches (ab-d19e6458), else a reused pid keeps a dead
+    // worker looking alive.
     let live_workers = home.scan_worker_sockets();
     let mut to_reap: Vec<(String, u32)> = Vec::new();
     for entry in &registry.entries {
@@ -411,11 +409,10 @@ fn recover_with_policy(
     }
     if !to_reap.is_empty() {
         // Keyed on (short_id, pid), not short_id alone (x-9de7 task 1). Every
-        // codex/gemini shellout row shares the same empty short_id, so a
-        // short_id-only set condemns every row wearing that empty id the
-        // moment ONE of them fails pid_is_ours -- including live pane-hosted
-        // siblings that were never checked. pid is what pid_is_ours actually
-        // verified, so it is what must gate the write.
+        // A codex/gemini shellout row shares the same empty short_id, so a
+        // short_id-only set condemns every row wearing that empty id the moment
+        // ONE fails pid_is_ours. pid is what pid_is_ours verified, so it gates
+        // the write.
         let reaped: std::collections::BTreeSet<(String, u32)> = to_reap.iter().cloned().collect();
         let is_reaped = |e: &RegistryEntry| {
             e.pid
@@ -7772,9 +7769,7 @@ where
                     "crown_scope": e.crown_scope,
                     "crown_grantor": e.crown_grantor,
                     // The parent edge the orphan check keys on (same key as
-                    // Python's serialize_entry; registry-json has always had
-                    // it). Null is a real answer: this worker will not appear
-                    // in its spawner's orphan check.
+                    // Python's serialize_entry); null is a real answer.
                     "spawned_by_session": e.spawned_by_session,
                     // How this session came to exist: "operator" for one a human
                     // started by hand, "spawn" for a footnote-created worker, null

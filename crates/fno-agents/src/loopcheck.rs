@@ -42,17 +42,13 @@ pub enum TerminationReason {
     /// path closes it, and DonePRGreen always wins when observable.
     DoneAwaitingMerge,
     /// A PR is green, mergeable, and nothing objected - but nothing reviewed it
-    /// either (coverage 0 or Unknown). The old gate named this state
-    /// `DonePRGreen` because its three conjuncts all ask "did anyone object"
-    /// and none asks "did anyone review" (x-0eaf). Terminal on the first
-    /// evaluation (no loop iteration spent waiting - that is what keeps the
-    /// PR #214 wedge from returning), and deliberately NOT a ship reason (out
-    /// of finalize.SHIP_REASONS -> no plan stamp/graduate), shaped exactly like
-    /// `DoneAwaitingMerge`: never merges, never marks the node done. The
-    /// autonomous merge is refused structurally because `should_arm_auto_merge`
-    /// arms only on `DonePRGreen`; a human (or out-of-band) merge then the
-    /// reconcile path closes it. The discriminator is coverage, NOT the
-    /// `attended` manifest field (x-be78: that field lies for spawned workers).
+    /// either (coverage 0 or Unknown; the old conjuncts all asked "did anyone
+    /// object", never "did anyone review", x-0eaf). Terminal on the first
+    /// evaluation (no iteration spent waiting) and NOT a ship reason, shaped
+    /// like `DoneAwaitingMerge`: `should_arm_auto_merge` arms only on
+    /// `DonePRGreen`, so a human merge plus reconcile closes it. The
+    /// discriminator is coverage, NOT the `attended` manifest field (x-be78:
+    /// that field lies for spawned workers).
     DoneUnreviewed,
     /// Work complete (PR open, green, HEAD shipped) but `done()` fails because a
     /// required review bot is rate-limited: it posted a usage-limit (quota)
@@ -339,12 +335,10 @@ pub(crate) struct Settings {
     nudge_overrides: Vec<NudgeOverride>,
     /// Top-level `done_probes` (x-a534): the repo-wide probe list, evaluated
     /// alongside the plan's own. The file is FLAT, so this reads off the TOML
-    /// root, not out of a `config` table.
-    ///
-    /// None = key absent (no project gate). Some(Ok(list)) = the declaration.
-    /// Some(Err(why)) = present but not an array of strings, which maps to the
-    /// plan side's `Unparseable` and BLOCKS - a config key that degrades to
-    /// no-gate is a guardrail that disappears when you typo it.
+    /// root, not out of a `config` table. None = key absent (no project gate);
+    /// Some(Err(why)) = present but not an array of strings, which BLOCKS - a
+    /// config key that degrades to no-gate is a guardrail that disappears when
+    /// you typo it.
     done_probes: Option<Result<Vec<String>, String>>,
 }
 
@@ -1089,15 +1083,13 @@ const BLOCKED_DATA_STR_CAP: usize = 500;
 
 /// Emit the `blocked` x-dbaf event natively (x-77a0) and push it to the
 /// parent handle. The push leg and the emit-CLI auto-push shipped with zero
-/// emitters: the advisory `--emit-boundary blocked` instruction predates this
-/// and demonstrably never fires in real runs, so a king swept on a timeout
-/// instead of being told. The stop hook is the one surface that mechanically
-/// reads every session's message, which makes it the emitter that cannot be
-/// skipped. Envelope mirrors finalize's run_summary (the schema's blocked row
-/// is the same x-dbaf family); the push shells the same Python resolver
-/// finalize shells, so lineage resolution lives in one place. Best-effort
-/// throughout: a write or push failure logs one stderr note and never changes
-/// the stop verdict.
+/// emitters (the advisory `--emit-boundary blocked` instruction demonstrably
+/// never fires, so a king got swept on a timeout instead of being told). The
+/// stop hook is the one surface that mechanically reads every session's
+/// message, which makes it the emitter that cannot be skipped. Envelope mirrors
+/// finalize's run_summary; the push shells the same Python resolver finalize
+/// shells, so lineage resolution lives in one place. Best-effort throughout: a
+/// write or push failure logs one stderr note and never changes the verdict.
 fn emit_help_distress_blocked(
     project_events: &Path,
     global_events: &Path,
@@ -12797,8 +12789,7 @@ pub(crate) struct KingManifest {
     /// The crowned session the manifest names; `loop_reign`'s split read keys
     /// on it. Empty on manifests written before identity fields existed.
     pub(crate) harness_session_id: Option<String>,
-    /// `pass` | `court`. Absent reads as `pass`, the value its writer's
-    /// default would have recorded, never as a third unknown shape.
+    /// `pass` | `court`; absent reads as `pass`, never a third shape.
     pub(crate) shape: String,
     pub(crate) max_iterations: u64,
     pub(crate) respawn_count: u64,

@@ -41,9 +41,8 @@
 //!   [`readiness`]).
 
 // daemon.rs's `agent.list` row is one json! literal with a key set pinned by
-// schemas/agents-list-row.json; it outgrew the default macro recursion limit
-// the day `spawned_by_session` joined the contract (x-7b36).
-#![recursion_limit = "256"]
+// schemas/agents-list-row.json; the crate-level recursion_limit above covers
+// the macro expansion since `spawned_by_session` joined the contract.
 
 pub mod active_backlog;
 mod agent_lock;

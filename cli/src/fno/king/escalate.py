@@ -1,15 +1,10 @@
 """Escalate a stalled king board to the operator, exactly once per stalled set.
 
-A king that terminates ``NoProgress`` exits quietly, which is this feature's own
-failure arriving through a different door: work is pending, nothing is moving,
-and nobody is told. The escalation is the telling. It is a question in the
-operator queue rather than a log line because the queue is what survives the
-next turn.
-
-Idempotence is keyed on the stalled id SET, not on the session or the fire: a
-king respawned by the walk arm meets the same stalled board and must not record
-a second question about it. Two different stalled sets are two different
-questions, which is right - the board changed, so the ask changed.
+A king terminating ``NoProgress`` exits quietly: work pending, nothing moving,
+nobody told. The escalation is the telling, a question in the operator queue
+because the queue survives the next turn. Idempotence keys on the stalled id
+SET - a respawned king meeting the same board records no second question, while
+a different board is a different ask.
 """
 from __future__ import annotations
 
@@ -47,12 +42,9 @@ def question_text(
     filed a fresh duplicate - the exact failure this module exists to prevent.
     Leading it also caps the id list, so neither half can crowd the other out.
 
-    ``live`` branches the closing sentence on the CALLER's measured liveness
-    (:func:`fno.king.state.reign_state`). A live king has not exited, and
-    telling the operator it has - with "crown a new king" as a remedy - is the
-    double-crown recommendation ``fno agents court`` exists to end. ``None``
-    (liveness unreadable) reads as dead: a question that under-claims is safe,
-    one that over-claims crowns a second king over a live scope.
+    ``live`` branches the closing sentence on the CALLER's measured liveness:
+    telling the operator a live king "has exited" hands it the double-crown
+    recommendation. ``None`` (unreadable) reads as dead, naming the reason.
     """
     ids = sorted(set(stalled_ids))
     if ids:
@@ -109,9 +101,8 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
     Returns ``(outcome, question_id)`` where outcome is ``recorded`` or
     ``duplicate``. Raises on a store failure; a quiet failure here would put the
     king back in the silence this verb exists to break. ``live`` and
-    ``unknown_reason`` come from :func:`fno.king.state.reign_state` resolved by
-    the caller; the dedupe key is unchanged either way, so a live king and a
-    dead one over the same stalled set still collapse to one question.
+    ``unknown_reason`` come from :func:`fno.king.state.reign_state`; the dedupe
+    key is unchanged either way.
     """
     import secrets
 
