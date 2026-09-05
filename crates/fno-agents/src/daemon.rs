@@ -28,6 +28,9 @@ use crate::state::{self, RegistryEntry};
 use crate::AgentStatus;
 use serde_json::{json, Map, Value};
 use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership check
+
+mod list_rows;
+use self::list_rows::{attention_sort_key, handle_list};
 use std::os::unix::process::CommandExt; // process_group on std::process::Command
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7347,10 +7350,6 @@ pub(crate) fn registry_truth_handle(entry: &RegistryEntry) -> String {
     }
 }
 
-fn handle_list(ctx: &Ctx, req: &Request) -> Response {
-    handle_list_with_truth(ctx, req, crate::claude_ask::family1_truth_probe_many)
-}
-
 /// The attention window this surface orders by. Session-truth's stall window
 /// is 7200s and correct FOR REAPING; for display it is exactly the gap a
 /// dead-under-two-hours worker hides in, so the ordering window is ten
@@ -7359,48 +7358,11 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
 /// shared fixture in schemas/ is what pins them together.
 const STALE_ATTENTION_S: f64 = 600.0;
 
-/// One row's list-lane attention key: evidence tier, then longest-silent
-/// first, then name so consecutive lists never shuffle equal rows. Only
-/// fields that carry their evidence with them (`basis`,
-/// `last_activity_age_s`) - never `status`, never a bare verdict. A row with
-/// no probe answer (all three null) lands in the neutral tier with age 0:
-/// absence of a reading is not urgency.
-/// `to_bits` is order-preserving for non-negative f64 (and an age is a
-/// duration, always non-negative), which is what lets a float age ride an
-/// `Ord` tuple key.
-fn attention_sort_key(row: &Value) -> (u8, std::cmp::Reverse<u64>, String) {
-    let basis = row.get("basis").and_then(|v| v.as_str());
-    let age = row
-        .get("last_activity_age_s")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let tier = if matches!(basis, Some("process-gone") | Some("pane-gone"))
-        || row.get("reachability").and_then(|v| v.as_str()) == Some("unreachable")
-    {
-        5
-    } else if basis == Some("transcript") && age >= STALE_ATTENTION_S {
-        0
-    } else if basis == Some("silent") {
-        1
-    } else if basis == Some("no-evidence") {
-        2
-    } else {
-        4
-    };
-    (
-        tier,
-        std::cmp::Reverse(age.to_bits()),
-        row.get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-    )
-}
+const LIST_PROJECTION_OMISSIONS: [&str; 2] = ["model", "model_basis"];
 
 /// `agent.list`, with the truth probe injected as a BATCH seam: one call for
 /// the whole filtered page, keyed by handle. The per-row seam it replaced spent
 /// one Python interpreter cold start per row per list.
-const LIST_PROJECTION_OMISSIONS: [&str; 2] = ["model", "model_basis"];
 
 fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
 where
@@ -7797,6 +7759,12 @@ where
                     // key that says where such a worker actually lives; without it a
                     // caller reads a bound pane worker as unhosted.
                     "mux": e.mux,
+                    // (x-7955) The lane the row was spawned on, read from the
+                    // registry record. Never inferred from `mux` or
+                    // `thread_id`: a paneless pane row and a thread row would
+                    // then read identically, which is the confusion a reader
+                    // cannot recover from.
+                    "substrate": e.substrate,
                     // Crown (US9): the compact descriptor plus the raw fields, so a
                     // minion can resolve who to escalate to.
                     "crown": crown,
@@ -17172,6 +17140,9 @@ done
             e.provider = Some("zai".into());
             e.effort = Some("xhigh".into());
             e.node = Some("x-cafe".into());
+            // (x-7955) AC9-HP: the recorded lane rides verbatim, so a reader
+            // can tell a paneless pane row from a thread row.
+            e.substrate = Some("thread".into());
         })
         .unwrap();
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
@@ -17187,6 +17158,12 @@ done
         assert_eq!(
             result["fields_omitted"], contract["projection_omissions"],
             "list envelope omissions drifted from contract"
+        );
+        // (x-7955) The recorded lane, by VALUE: the projection reads the
+        // registry's record, never an inference from mux or thread_id.
+        assert_eq!(
+            row["substrate"], "thread",
+            "the list row carries the recorded substrate"
         );
 
         // v23 (x-2019), by VALUE and not merely by presence: a substituted

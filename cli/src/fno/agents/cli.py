@@ -1505,16 +1505,6 @@ def cmd_spawn(
             "with room, or create the next. --substrate pane only."
         ),
     ),
-    portal: int | None = typer.Option(
-        None,
-        "--portal",
-        help=(
-            "Portal placement (x-9b60): open portal N (0-255) showing the new "
-            "worker, in one call. --substrate thread only. Makes the placement "
-            "flags meaningful for a thread: a fresh portal open honors them; "
-            "a portal that already has a live viewer keeps its geometry."
-        ),
-    ),
     bounded_placement: bool = typer.Option(
         False,
         "--bounded-placement",
@@ -1860,7 +1850,7 @@ def cmd_spawn(
 
     refusal = placement_refusal(
         substrate=substrate, once=once, squad=squad, split=split, at=at,
-        tab=tab, portal=portal, bounded_placement=bounded_placement,
+        tab=tab, bounded_placement=bounded_placement,
     )
     if refusal is not None:
         print(refusal, file=sys.stderr)
@@ -2853,22 +2843,6 @@ def cmd_spawn(
             from fno.agents.spawn_gate import qos_demote_bg_worker
 
             qos_demote_bg_worker(result.short_id)
-        # x-9b60: one call places a portal. The bg lane owns no pane geometry,
-        # so the portal is opened through the one door that creates one (the
-        # `fno mux thread` reach), carrying the placement flags. After the
-        # receipt flush so line-parsing consumers never wait on it.
-        if substrate == "bg" and portal is not None:
-            from fno.agents.thread_portal import place_thread_portal
-
-            try:
-                landing = place_thread_portal(
-                    name, portal, workspace=squad, split=split, at=at, tab=tab
-                )
-            except DispatchAskError as exc:
-                print(str(exc), file=sys.stderr)
-                raise typer.Exit(code=exc.exit_code) from exc
-            if landing:
-                print(landing, flush=True)
     else:
         # once path: reply verbatim on stdout (no added newline per ask contract).
         sys.stdout.write(result.reply or "")

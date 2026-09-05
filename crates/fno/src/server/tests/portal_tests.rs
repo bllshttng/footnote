@@ -919,7 +919,10 @@ fn thread_pane_refuses_an_unresolvable_or_ambiguous_key() {
     core.command(client_id, thread_reach_cmd("dupe"));
     assert_eq!(core.panes.len(), panes_before, "nothing spawned");
     let notices = drain_notices(&mut rx);
-    assert!(notices.iter().any(|t| t.contains("no such agent")));
+    assert!(
+        notices.iter().any(|t| t.contains("no live row answers")),
+        "the reach's miss names the door and the key: {notices:?}"
+    );
     assert!(notices.iter().any(|t| t.contains("more than one row")));
     assert!(core.portals.is_empty(), "no slot recorded on a refusal");
 }
@@ -965,9 +968,10 @@ fn thread_pane_ctl_refuses_an_unknown_name() {
     core.portal_ctl("nosuchrow", 0, PanePlacement::default(), None, tx);
 
     match rx.blocking_recv().expect("a reply") {
-        ServerMsg::Err { msg, .. } => {
-            assert!(msg.contains("no such agent"), "names the refusal: {msg}")
-        }
+        ServerMsg::Err { msg, .. } => assert!(
+            msg.contains("no live row answers"),
+            "names the door and the key it could not find: {msg}"
+        ),
         other => panic!("expected an Err refusal, got {other:?}"),
     }
     assert!(core.portals.is_empty());
@@ -1490,6 +1494,175 @@ fn close_pane_plain_lone_pane_still_removes_its_tab() {
             .any(|t| t.id == 901),
         "a plain pane's tab is removed exactly as today"
     );
+}
+
+/// A live paneless claude row (the Drive tier): harness claude plus an
+/// attach id is exactly the shape the re-entry resolver owns.
+fn claude_row(name: &str, attach: &str) -> RegistryAgent {
+    let mut row = bg_row(name, "/tmp/seen", Some(attach));
+    row.harness = Some("claude".into());
+    row
+}
+
+#[tokio::test]
+async fn portal_ctl_claude_row_replies_the_landing_not_the_fallback() {
+    // AC1-HP marker: the control door on a LIVE paneless claude row. The
+    // join behind the reply has two refusal arms: (false, Some) means
+    // reach_portal ran and reported; (false, None) means it produced
+    // nothing and the fallback invented "no such agent: NAME" - the reply
+    // that sent a reader hunting a resolver that is not in this chain.
+    // The reply must be the reach's own verdict, and it must name the
+    // portal index it opened.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let row = claude_row("claude-row", "deadbee1");
+    let new_pid = core.next_pane_id;
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+
+    core.portal_ctl(
+        "claude-row",
+        1,
+        PanePlacement::default(),
+        Some(vec![row]),
+        tx,
+    );
+    // The reach parked: no pane, and no reply yet - it waits for the verdict
+    // instead of answering the old fallback.
+    assert!(core.portals.get(&1).is_none(), "the park opens nothing");
+    assert!(
+        rx.try_recv().is_err(),
+        "the held reply waits for the verdict"
+    );
+    // Pump the continuation by hand: the real verdict arrives on the core
+    // channel (the fixture does not run the loop); the handler is what
+    // finishes the park.
+    core.handle(CoreMsg::ReentryPlanReady {
+        id: u64::MAX, // the control door's observer client
+        request: Box::new(ReentrySpawnRequest::Attach {
+            attach_id: "deadbee1".into(),
+            placement: PanePlacement {
+                portal: Some(1),
+                ..Default::default()
+            },
+        }),
+        verdict: Ok(ReentryVerdict {
+            argv: vec!["/bin/cat".into()],
+            env: vec![],
+            config_dir: None,
+        }),
+    });
+
+    match rx.await.expect("a reply") {
+        ServerMsg::Err { msg, .. } => {
+            panic!("the (false, None) fallback arm fired - reach_portal never reported: {msg}")
+        }
+        ServerMsg::Notice { text } => assert!(
+            text.contains("portal 1"),
+            "the landing must name the portal index the caller asked for: {text}"
+        ),
+        other => panic!("expected a Notice landing, got {other:?}"),
+    }
+    assert!(
+        core.portals
+            .get(&1)
+            .is_some_and(|e| e.row_key == "deadbee1" && e.seat == new_pid),
+        "portal 1 holds the row's viewer"
+    );
+    assert_eq!(
+        core.panes[&new_pid].cmd.as_deref(),
+        Some("cat"),
+        "the pane runs the verdict's argv, not a guess"
+    );
+    core.reap_pane(new_pid); // don't leak the stand-in child
+}
+
+#[tokio::test]
+async fn portal_ctl_claude_row_with_a_refused_plan_names_the_reason() {
+    // The resolver's refusal must reach the operator verbatim, never
+    // collapse into the reach-never-ran fallback: (false, Some) is the
+    // honest arm - the reach ran and was refused by name.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let row = claude_row("claude-row", "deadbee1");
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+
+    core.portal_ctl(
+        "claude-row",
+        1,
+        PanePlacement::default(),
+        Some(vec![row]),
+        tx,
+    );
+    core.handle(CoreMsg::ReentryPlanReady {
+        id: u64::MAX, // the control door's observer client
+        request: Box::new(ReentrySpawnRequest::Attach {
+            attach_id: "deadbee1".into(),
+            placement: PanePlacement {
+                portal: Some(1),
+                ..Default::default()
+            },
+        }),
+        verdict: Err("row claude-row is on the account axis and records no launch account".into()),
+    });
+
+    match rx.await.expect("a reply") {
+        ServerMsg::Err { msg, .. } => assert!(
+            msg.contains("account axis"),
+            "the resolver's refusal reaches the operator verbatim, never as the fallback: {msg}"
+        ),
+        other => panic!("expected an Err refusal, got {other:?}"),
+    }
+    assert!(core.portals.is_empty(), "no portal on a refused plan");
+}
+
+#[tokio::test]
+async fn portal_ctl_reaches_a_paneless_row_whose_key_also_matches_a_hosted_row() {
+    // Door parity: the duplicate refusal counts live paneless rows, the rows
+    // a reach could serve - the same filter reach_portal applies. A hosted
+    // namesake answers the location only when no reachable row exists.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let mut hosted = claude_row("hosted-name", "deadbee1");
+    hosted.mux = Some(("some-session".into(), 7));
+    let live = claude_row("live-name", "deadbee1");
+    let new_pid = core.next_pane_id;
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+
+    core.portal_ctl(
+        "deadbee1",
+        1,
+        PanePlacement::default(),
+        Some(vec![hosted, live]),
+        tx,
+    );
+    core.handle(CoreMsg::ReentryPlanReady {
+        id: u64::MAX, // the control door's observer client
+        request: Box::new(ReentrySpawnRequest::Attach {
+            attach_id: "deadbee1".into(),
+            placement: PanePlacement {
+                portal: Some(1),
+                ..Default::default()
+            },
+        }),
+        verdict: Ok(ReentryVerdict {
+            argv: vec!["/bin/cat".into()],
+            env: vec![],
+            config_dir: None,
+        }),
+    });
+
+    match rx.await.expect("a reply") {
+        ServerMsg::Err { msg, .. } => {
+            panic!("the hosted namesake turned a reachable row into a refusal: {msg}")
+        }
+        ServerMsg::Notice { text } => assert!(
+            text.contains("portal 1"),
+            "the reach served the live paneless row: {text}"
+        ),
+        other => panic!("expected a Notice landing, got {other:?}"),
+    }
+    assert!(core.portals.get(&1).is_some_and(|e| e.seat == new_pid));
+    core.reap_pane(new_pid); // don't leak the stand-in child
 }
 
 #[test]
