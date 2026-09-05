@@ -75,6 +75,26 @@ requires_rust = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _provider_clis_on_path(tmp_path, monkeypatch):
+    """Presence-check parity needs codex/gemini/opencode resolvable.
+
+    The full smoke packet stubs these on PATH before running this file; the
+    changed packet selects the same file with no such stub, so a PR touching it
+    failed on `codex CLI not on PATH` instead of any parity claim. Stub them
+    here so both packets exercise the same PATH, and keep them `exit 0` no-ops:
+    nothing under test executes a provider. A per-test fake that prepends its
+    own dir still wins.
+    """
+    fake_bin = tmp_path / "fake-provider-bin"
+    fake_bin.mkdir()
+    for name in ("codex", "gemini", "opencode"):
+        stub = fake_bin / name
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ.get("PATH", ""))
+
+
 def _run_rust(args: list[str], home: Path) -> subprocess.CompletedProcess:
     """Run the Rust client with FNO_AGENTS_HOME pointed at ``home`` (the agents dir).
 

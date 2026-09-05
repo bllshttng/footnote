@@ -139,6 +139,7 @@ def test_installed_resolve_excludes_cargo_dev(monkeypatch, tmp_path) -> None:
 def test_resolve_prefers_bundled(monkeypatch, tmp_path) -> None:
     bundled = _make_exe(tmp_path / "bundled" / rust_binary.BINARY_NAME)
     on_path = _make_exe(tmp_path / "path" / rust_binary.BINARY_NAME)
+    monkeypatch.setattr(rust_binary, "_env_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: bundled)
     monkeypatch.setattr(rust_binary, "_path_binary", lambda: on_path)
     assert rust_binary.resolve_binary() == bundled
@@ -146,6 +147,7 @@ def test_resolve_prefers_bundled(monkeypatch, tmp_path) -> None:
 
 def test_resolve_falls_back_to_sibling(monkeypatch, tmp_path) -> None:
     sibling = _make_exe(tmp_path / "venvbin" / rust_binary.BINARY_NAME)
+    monkeypatch.setattr(rust_binary, "_env_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: sibling)
     monkeypatch.setattr(rust_binary, "_path_binary", lambda: None)
@@ -155,6 +157,7 @@ def test_resolve_falls_back_to_sibling(monkeypatch, tmp_path) -> None:
 
 def test_resolve_falls_back_to_path(monkeypatch, tmp_path) -> None:
     on_path = _make_exe(tmp_path / "path" / rust_binary.BINARY_NAME)
+    monkeypatch.setattr(rust_binary, "_env_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_path_binary", lambda: on_path)
