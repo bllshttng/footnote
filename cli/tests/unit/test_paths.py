@@ -492,12 +492,11 @@ def test_plans_dir_honors_project_root(
     from fno.paths import plans_dir
 
     result = plans_dir(project_root=project_bar)
-    # Must be anchored under project_bar, NOT under tmp_path/foo
-    assert str(result).startswith(str(project_bar)), (
-        f"plans_dir should be under project_bar={project_bar}, got {result}"
-    )
-    assert result == project_bar / ".fno" / "plans", (
-        f"Expected {project_bar / '.fno' / 'plans'}, got {result}"
+    # Anchored to project_bar's space, NOT under tmp_path/foo (the CWD fallback)
+    from fno.paths import space_dir
+
+    assert result == space_dir(project_bar) / "plans", (
+        f"Expected {space_dir(project_bar) / 'plans'}, got {result}"
     )
 
 

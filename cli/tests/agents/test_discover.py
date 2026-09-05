@@ -1456,11 +1456,11 @@ def test_resolver_only_provisional_registry_id_cannot_hide_canonical_owner(
 
 @pytest.mark.parametrize(
     "truth_state,expected",
-    # `done` is UNKNOWN, not orphaned: a worker that declared its mission complete
-    # says nothing about whether it is still up, and this row carries no falsifier
-    # (pid 0 is the "not recorded" placeholder). Only an affirmative falsifier
-    # condemns a row, in this lane exactly as in the registry lane.
-    [("working", "live"), ("done", "unknown"), ("unknown", "unknown")],
+    # Served activity (x-c672, AC7): `done` renders PARKED - the tail closed a
+    # promise - and a state with no measured age renders unknown, exactly as
+    # the registry lane does. This row carries no falsifier (pid 0 is the
+    # "not recorded" placeholder), so nothing reads orphaned.
+    [("working", "unknown"), ("done", "parked"), ("unknown", "unknown")],
 )
 def test_discovered_row_status_projects_family1_truth(truth_state, expected):
     session = discover.DiscoveredSession(

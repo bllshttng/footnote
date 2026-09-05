@@ -17,6 +17,11 @@ struct Decision {
     message: String,
 }
 
+#[path = "space_paths.rs"]
+mod space_paths;
+
+use space_paths::project_events;
+
 fn fire(args: &[&str]) -> (i32, Decision) {
     let mut args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     args_owned.push("--global-settings".to_string());
@@ -135,7 +140,7 @@ fn base_args(cwd: &Path, transcript: &Path) -> Vec<String> {
 #[test]
 fn answered_close_without_record_blocks() {
     let (_tmp, cwd, transcript) = setup();
-    let events = cwd.join(".fno/events.jsonl");
+    let events = project_events(&cwd);
     fs::write(
         &events,
         asked("q-11112222", "sess-d1") + "\n" + &closed_answered("q-11112222") + "\n",
@@ -164,7 +169,7 @@ fn answered_close_without_record_blocks() {
 #[test]
 fn recorded_decision_clears_the_gate() {
     let (_tmp, cwd, transcript) = setup();
-    let events = cwd.join(".fno/events.jsonl");
+    let events = project_events(&cwd);
     fs::write(
         &events,
         asked("q-11112222", "sess-d1")
@@ -191,7 +196,7 @@ fn recorded_decision_clears_the_gate() {
 #[test]
 fn another_sessions_question_does_not_block() {
     let (_tmp, cwd, transcript) = setup();
-    let events = cwd.join(".fno/events.jsonl");
+    let events = project_events(&cwd);
     fs::write(
         &events,
         asked("q-33334444", "sess-other") + "\n" + &closed_answered("q-33334444") + "\n",
@@ -212,7 +217,7 @@ fn another_sessions_question_does_not_block() {
 #[test]
 fn withdrawn_close_does_not_block() {
     let (_tmp, cwd, transcript) = setup();
-    let events = cwd.join(".fno/events.jsonl");
+    let events = project_events(&cwd);
     fs::write(
         &events,
         asked("q-55556666", "sess-d1") + "\n" + &closed_withdrawn("q-55556666") + "\n",
@@ -236,7 +241,7 @@ fn withdrawn_close_does_not_block() {
 #[test]
 fn record_in_a_sibling_journal_clears_the_gate() {
     let (_tmp, cwd, transcript) = setup();
-    let events = cwd.join(".fno/events.jsonl");
+    let events = project_events(&cwd);
     fs::write(
         &events,
         asked("q-77778888", "sess-d1") + "\n" + &closed_answered("q-77778888") + "\n",

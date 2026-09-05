@@ -329,6 +329,130 @@ pub fn worktree_repo_root(cwd: &Path) -> PathBuf {
         .unwrap_or_else(|| cwd.to_path_buf())
 }
 
+// ---------------------------------------------------------------------------
+// Project spaces: the per-repository state root OUTSIDE any checkout
+// ---------------------------------------------------------------------------
+
+/// The spaces ROOT (the directory holding `<slug>` space dirs): `FNO_SPACES_DIR`
+/// verbatim -- it names the root itself, like Python `spaces_root` -- else
+/// `<FNO_AGENTS_HOME parent>/spaces`, else `$HOME/.fno/spaces`.
+/// `config.paths.spaces_dir` is Python-only for now: relocation through the
+/// env pins covers tests and isolation, and the default answers
+/// byte-identically to `fno.paths` (the slug contract below is a
+/// cross-language wire format).
+fn spaces_root_dir() -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_SPACES_DIR").filter(|v| !v.is_empty()) {
+        return PathBuf::from(v);
+    }
+    let state_root = if let Some(v) = std::env::var_os(HOME_ENV).filter(|v| !v.is_empty()) {
+        let home = PathBuf::from(&v);
+        home.parent().map(|p| p.to_path_buf()).unwrap_or(home)
+    } else {
+        std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(|h| PathBuf::from(h).join(".fno"))
+            .unwrap_or_else(|| PathBuf::from(".fno"))
+    };
+    state_root.join("spaces")
+}
+
+/// The per-repo space key: the full canonical path with `/` swapped for `-`
+/// (Claude's project-dir shape, operator ruling 2026-09-04: self-describing in
+/// both directions -- read the dir, see the path; no hash to reverse). The
+/// input is the CANONICAL root, so every worktree of a repo mints one slug.
+/// Byte-parity with Python `paths.space_slug` -- the two languages must mint
+/// the SAME directory, so change one and check the other.
+pub fn space_slug(canonical_root: &Path) -> String {
+    canonical_root.to_string_lossy().replace('/', "-")
+}
+
+/// The space for the repository containing `cwd`, keyed on its CANONICAL root
+/// so every worktree of one repo answers the same path. Cross-worktree state
+/// (claims, events, kings) resolves here; mirrors Python `paths.space_dir`.
+pub fn space_dir(cwd: &Path) -> PathBuf {
+    let root = canonical_repo_root(cwd).unwrap_or_else(|| worktree_repo_root(cwd));
+    spaces_root_dir().join(space_slug(&root))
+}
+
+/// The per-worktree slice: `<space>/worktrees/<name>/` from a linked
+/// worktree, the space root itself from canonical. Session-keyed state
+/// (target-state.md, run-log.jsonl) resolves here; mirrors Python
+/// `paths.worktree_space_dir`.
+pub fn worktree_space_dir(cwd: &Path) -> PathBuf {
+    let root = worktree_repo_root(cwd);
+    match canonical_repo_root(cwd) {
+        Some(canonical) if canonical != root => space_dir(cwd).join("worktrees").join(
+            root.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ),
+        _ => space_dir(cwd),
+    }
+}
+
+/// The project event journal on the space. Migrates the legacy
+/// `<checkout>/.fno/events.jsonl` once on first resolve so appenders never
+/// split the file across the two locations; one contract for every reader
+/// and `fno-agents state path events`.
+pub fn events_path(cwd: &Path) -> PathBuf {
+    let path = space_dir(cwd).join("events.jsonl");
+    migrate_from_checkout(
+        &worktree_repo_root(cwd).join(".fno").join("events.jsonl"),
+        &path,
+    );
+    path
+}
+
+/// The per-checkout cost ledger on the space, with the same legacy migration
+/// as [`events_path`]: a pre-space `<checkout>/.fno/ledger.json` moves on
+/// first read so budget caps stay enforceable across the move.
+pub fn ledger_path(cwd: &Path) -> PathBuf {
+    let path = worktree_space_dir(cwd).join("ledger.json");
+    migrate_from_checkout(
+        &worktree_repo_root(cwd).join(".fno").join("ledger.json"),
+        &path,
+    );
+    path
+}
+
+/// One-shot lazy migration of a legacy `<repo>/.fno/<rel>` file onto the
+/// space, mirroring Python `paths.migrate_from_checkout`. Moves `old` to
+/// `new` when `old` exists, is not a symlink, and `new` does not; leaves a
+/// `MOVED-TO` pointer naming the space so a stale reader fails loud. Best
+/// effort: any failure leaves the old file in place.
+pub fn migrate_from_checkout(old: &Path, new: &Path) -> bool {
+    if old == new || new.exists() || !old.exists() || old.is_symlink() {
+        return false;
+    }
+    if let Some(parent) = new.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return false;
+        }
+    }
+    if std::fs::rename(old, new).is_err() {
+        if std::fs::copy(old, new).is_err() {
+            return false;
+        }
+        let _ = std::fs::remove_file(old);
+    }
+    let marker = old.parent().map(|p| p.join("MOVED-TO"));
+    if let Some(marker) = marker {
+        if !marker.exists() {
+            let _ = std::fs::write(
+                &marker,
+                format!(
+                    "{}\n",
+                    new.parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_default()
+                        .display()
+                ),
+            );
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,6 +679,90 @@ mod tests {
             canonical_repo_root(&bare).is_none(),
             "a bare repo must resolve to None (safe-side fallback), not a wrong parent"
         );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn space_slug_is_the_path_with_slashes_swapped() {
+        let p = Path::new("/tmp/whatever");
+        let slug = space_slug(p);
+        assert_eq!(slug, "-tmp-whatever");
+        assert_eq!(slug, space_slug(p), "same root mints the same slug");
+        let other = Path::new("/tmp/other/whatever");
+        assert_ne!(slug, space_slug(other), "a different root must not collide");
+        // Golden value pinning the cross-language wire format: Python
+        // `space_slug` swaps the same separators, and the two languages must
+        // mint the SAME directory. Change one and check the other.
+        assert_eq!(space_slug(Path::new("/repos/web")), "-repos-web");
+    }
+
+    #[test]
+    fn space_dir_matches_from_canonical_and_linked_worktree() {
+        if !git_available() {
+            return;
+        }
+        let agents_home = tmp("spaces-home");
+        // Redirect the whole state root so the assertion never reads real $HOME.
+        std::env::set_var(HOME_ENV, &agents_home);
+        let base = tmp("space");
+        let main = base.join("foo");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q"]);
+        git(&main, &["config", "user.email", "t@t"]);
+        git(&main, &["config", "user.name", "t"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let linked = base.join("bar");
+        std::fs::create_dir_all(linked.parent().unwrap()).unwrap();
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                linked.to_str().unwrap(),
+                "-b",
+                "feat",
+            ],
+        );
+
+        let canonical = std::fs::canonicalize(&main).unwrap();
+        let linked = std::fs::canonicalize(&linked).unwrap();
+        let slug = space_slug(&canonical);
+        // AC1-HP: both checkouts answer ONE space...
+        assert_eq!(space_dir(&main), space_dir(&linked));
+        assert_eq!(
+            space_dir(&main),
+            agents_home.parent().unwrap().join("spaces").join(&slug)
+        );
+        // ...and the worktree slice only from the worktree.
+        assert_eq!(worktree_space_dir(&main), space_dir(&main));
+        assert_eq!(
+            worktree_space_dir(&linked),
+            space_dir(&linked).join("worktrees").join("bar")
+        );
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&agents_home).ok();
+    }
+
+    #[test]
+    fn migrate_from_checkout_moves_once_and_writes_marker() {
+        let base = tmp("migrate");
+        let old = base.join("old").join("events.jsonl");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "rows").unwrap();
+        let new = base.join("space").join("events.jsonl");
+        assert!(migrate_from_checkout(&old, &new));
+        assert!(!old.exists());
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "rows");
+        let marker = base.join("old").join("MOVED-TO");
+        assert!(marker.exists(), "MOVED-TO must name the space");
+        // Idempotent: gone is gone, no second move, no error.
+        assert!(!migrate_from_checkout(&old, &new));
+        // A symlink never moves (a worktree link dies with the canonical move).
+        let link = base.join("old").join("link.jsonl");
+        std::os::unix::fs::symlink(&new, &link).unwrap();
+        let new2 = base.join("space").join("link.jsonl");
+        assert!(!migrate_from_checkout(&link, &new2));
         std::fs::remove_dir_all(&base).ok();
     }
 }

@@ -559,9 +559,9 @@ fn expand_eq(rest: &[String]) -> Vec<String> {
     out
 }
 
-/// Default event/ledger sources: project `.fno/events.jsonl` + global
+/// Default event/ledger sources: the repo's space journal + global
 /// `~/.fno/events.jsonl` + `~/.fno/questions.jsonl` + `~/.fno/ledger.json`.
-fn default_sources(home: &AgentsHome) -> (Vec<PathBuf>, PathBuf) {
+fn default_sources(home: &AgentsHome, cwd: &Path) -> (Vec<PathBuf>, PathBuf) {
     let fno_dir = home
         .root()
         .parent()
@@ -569,7 +569,7 @@ fn default_sources(home: &AgentsHome) -> (Vec<PathBuf>, PathBuf) {
         .unwrap_or_else(|| PathBuf::from(".fno"));
     let global_events = fno_dir.join("events.jsonl");
     let questions = fno_dir.join("questions.jsonl");
-    let project_events = PathBuf::from(".fno").join("events.jsonl");
+    let project_events = crate::paths::space_dir(cwd).join("events.jsonl");
     let ledger = fno_dir.join("ledger.json");
     (vec![project_events, global_events, questions], ledger)
 }
@@ -928,23 +928,21 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
         }
     };
 
-    let (default_events, default_ledger) = default_sources(home);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let (default_events, default_ledger) = default_sources(home, &cwd);
     let explicit_events = !args.events_override.is_empty();
     let mut event_paths = if explicit_events {
         args.events_override
     } else {
         default_events
     };
-    // `fno inbox outstanding ask` appends to the CANONICAL checkout's
-    // `.fno/events.jsonl` (never a linked worktree's), while the default
-    // project journal above is cwd-relative and this verb inherits the
-    // caller's cwd. Without the canonical journal in the set, a question
-    // asked from a worktree is invisible to the fold.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // One journal per space: the cwd journal and the canonical journal are the
+    // same file now (the worktree fork is what the spaces move retired), so
+    // this push collapses to a no-op and stays only as the shape's record.
     let canonical = crate::paths::canonical_repo_root(&cwd);
     if let Some(root) = &canonical {
-        let canonical_events = root.join(".fno").join("events.jsonl");
-        let cwd_events = cwd.join(".fno").join("events.jsonl");
+        let canonical_events = crate::paths::space_dir(root).join("events.jsonl");
+        let cwd_events = crate::paths::space_dir(&cwd).join("events.jsonl");
         if !explicit_events
             && canonical_events != cwd_events
             && !event_paths.contains(&canonical_events)
@@ -1696,7 +1694,7 @@ mod tests {
         )
         .unwrap();
 
-        let (sources, _) = default_sources(&home);
+        let (sources, _) = default_sources(&home, tmp.path());
         let events = sources
             .iter()
             .filter_map(|path| std::fs::read_to_string(path).ok())

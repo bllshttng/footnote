@@ -1350,7 +1350,12 @@ def test_scoreboard_cli_inventories_live_and_archived_delivery_roots(
         json.dumps(duplicate_snapshot) + "\n" + json.dumps(duplicate_review) + "\n",
         encoding="utf-8",
     )
-    (roots[0] / ".fno" / "events.jsonl").write_text(
+    from fno.paths import project_log
+
+    spaces_root = tmp_path / "spaces"  # pinned into the CLI subprocess below
+    root_a_journal = project_log("events.jsonl", project_root=roots[0])
+    root_a_journal.parent.mkdir(parents=True, exist_ok=True)
+    root_a_journal.write_text(
         json.dumps(duplicate_snapshot)
         + "\n"
         + json.dumps(_snapshot_event("run-1", 90, "2026-07-03T10:00:00Z"))
@@ -1398,6 +1403,7 @@ def test_scoreboard_cli_inventories_live_and_archived_delivery_roots(
             **os.environ,
             "FNO_CONFIG": str(settings),
             "FNO_REPO_ROOT": str(roots[0]),
+            "FNO_SPACES_DIR": str(spaces_root),
             "FNO_TEST_MODE": "1",
         },
         text=True,
@@ -1423,7 +1429,7 @@ def test_scoreboard_cli_inventories_live_and_archived_delivery_roots(
     }
     expected_paths = {
         str((state_dir / "events.jsonl").resolve()),
-        str((roots[0] / ".fno" / "events.jsonl").resolve()),
+        str(root_a_journal.resolve()),
         str(second_event_path.resolve()),
     }
     if archived_first_path is not None:

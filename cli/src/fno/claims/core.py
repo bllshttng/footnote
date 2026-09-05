@@ -15,6 +15,7 @@ Every state-changing verb appends an audit event to ``.fno/events.jsonl``
 through the typed builders in :mod:`fno.claims.events`. Audit-trail
 writes are best-effort: the YAML lock file write is authoritative.
 """
+
 from __future__ import annotations
 
 import os
@@ -50,16 +51,9 @@ from .io import (
     read_claim_file,
     serialize_claim,
 )
-from .staleness import (
-    classify,
-    classify_for_sweep,
-    classify_with_basis,
-    is_expired,
-    is_live,
-    now_ms,
-)
 from .self_identity import resolve_self_identity
 from ..mutex import acquire_dir_mutex, release_dir_mutex
+from .verdict import ClaimVerdictError, ClaimVerdictUnavailable, claim_verdicts
 from .types import (
     MAX_ENCODED_FILENAME_BYTES,
     MAX_KEY_LENGTH,
@@ -69,6 +63,7 @@ from .types import (
     SCHEMA_VERSION,
     Claim,
     ClaimState,
+    now_ms,
 )
 
 
@@ -122,7 +117,12 @@ class ClaimContended(Exception):
 # restated comment at each site. A caller that needs to read `.holder`/`.pid`/
 # `.host` (ClaimHeldByOther-only attributes) still needs its own separate
 # `except ClaimHeldByOther as exc:` block ahead of this one.
-CLAIM_UNAVAILABLE = (ClaimHeldByOther, ClaimContended)
+CLAIM_UNAVAILABLE = (
+    ClaimHeldByOther,
+    ClaimContended,
+    ClaimVerdictError,
+    ClaimVerdictUnavailable,
+)
 
 
 class RebindRefused(Exception):
@@ -158,6 +158,8 @@ __all__ = [
     "ClaimGoneAway",
     "ClaimHeldByOther",
     "ClaimValidationError",
+    "ClaimVerdictError",
+    "ClaimVerdictUnavailable",
     "HolderMismatch",
     "RebindRefused",
     "acquire_claim",
@@ -184,9 +186,7 @@ def _validate_inputs(
     if not key:
         raise ClaimValidationError("key must be non-empty")
     if len(key) > MAX_KEY_LENGTH:
-        raise ClaimValidationError(
-            f"key length {len(key)} exceeds MAX_KEY_LENGTH={MAX_KEY_LENGTH}"
-        )
+        raise ClaimValidationError(f"key length {len(key)} exceeds MAX_KEY_LENGTH={MAX_KEY_LENGTH}")
     # Raw length passing MAX_KEY_LENGTH does not guarantee the encoded
     # filename fits the filesystem's 255-byte name limit. Check the
     # URL-encoded form explicitly: keys with many reserved characters
@@ -206,9 +206,7 @@ def _validate_inputs(
     if pid is not None and pid <= 0:
         raise ClaimValidationError("pid must be positive")
     if ttl_ms is not None and not (MIN_TTL_MS <= ttl_ms <= MAX_TTL_MS):
-        raise ClaimValidationError(
-            f"ttl_ms={ttl_ms} out of range [{MIN_TTL_MS}, {MAX_TTL_MS}]"
-        )
+        raise ClaimValidationError(f"ttl_ms={ttl_ms} out of range [{MIN_TTL_MS}, {MAX_TTL_MS}]")
 
 
 def _resolve_pid_provenance(
@@ -216,7 +214,7 @@ def _resolve_pid_provenance(
 ) -> str:
     """Classify how a claim's pid was resolved: "session-prover" or "ambient".
 
-    The corroborated hybrid arm in ``staleness.classify`` reads this field to
+    The corroborated hybrid arm in the native classifier reads this field to
     decide whether a live pid may keep an expired TTL claim LIVE, so the stamp
     must be EARNED, never asserted. The one earning path is the process-tree
     prover: the pid must be exactly ``resolve_session_pid``'s answer for THIS
@@ -274,9 +272,7 @@ def _make_claim(
 ) -> Claim:
     acquired = now_ms()
     return Claim(
-        schema_version=(
-            PID_UNAVAILABLE_SCHEMA_VERSION if pid_unavailable else SCHEMA_VERSION
-        ),
+        schema_version=(PID_UNAVAILABLE_SCHEMA_VERSION if pid_unavailable else SCHEMA_VERSION),
         key=key,
         holder=holder,
         acquired_at=acquired,
@@ -345,9 +341,7 @@ def acquire_claim(
     rather than recursing unbounded, mirroring Rust's bounded
     ``ACQUIRE_MAX_ATTEMPTS`` for-loop (crates/fno-agents/src/claims.rs).
     """
-    _validate_inputs(
-        key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable
-    )
+    _validate_inputs(key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable)
     path = claim_path(key, root=root)
     # Unconditional initial value (each branch below reassigns its own):
     # gives _release_and_retry's `nonlocal` an unambiguous prior binding
@@ -360,8 +354,7 @@ def acquire_claim(
         # 9-line call restated at each of the seven sites that need it.
         if _attempt + 1 >= ACQUIRE_MAX_ATTEMPTS:
             raise ClaimContended(
-                f"acquire_claim gave up after {ACQUIRE_MAX_ATTEMPTS} "
-                f"contention retries on {key!r}"
+                f"acquire_claim gave up after {ACQUIRE_MAX_ATTEMPTS} contention retries on {key!r}"
             )
         return acquire_claim(
             key,
@@ -495,7 +488,11 @@ def acquire_claim(
     # mutex, two workers can both observe a stale file, both archive (one
     # actually moves, one no-ops), and both successfully create the new lock
     # in the gap between archive-and-create.
-    if not _existing_is_live(existing):
+    try:
+        existing_is_live = _existing_is_live(existing, root=root)
+    except ClaimGoneAway:
+        return _retry()
+    if not existing_is_live:
         recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
         acquired_lock = False
         recovery_token = ""
@@ -541,7 +538,11 @@ def acquire_claim(
                 emit_claim_idempotent_reacquired(refreshed, previous=existing)
                 return refreshed
 
-            if _existing_is_live(existing):
+            try:
+                existing_is_live = _existing_is_live(existing, root=root)
+            except ClaimGoneAway:
+                return _release_and_retry()
+            if existing_is_live:
                 # Raced - now it's live. Fall through to ClaimHeldByOther.
                 raise ClaimHeldByOther(
                     holder=existing.holder,
@@ -645,11 +646,7 @@ def _rebound_claim(
     if not pid_dies_with_session(written_harness):
         new_pid_provenance = "ambient"
     return Claim(
-        schema_version=(
-            PID_UNAVAILABLE_SCHEMA_VERSION
-            if new_pid_unavailable
-            else SCHEMA_VERSION
-        ),
+        schema_version=(PID_UNAVAILABLE_SCHEMA_VERSION if new_pid_unavailable else SCHEMA_VERSION),
         key=existing.key,
         holder=new_holder or existing.holder,
         acquired_at=acquired,
@@ -738,9 +735,7 @@ def compare_and_rebind(
     # Resolved BEFORE the recovery mutex below, for the same reason as
     # `acquire_claim`: the owned path walks the process tree, and everything
     # after the lock runs while other callers poll on it (x-20f1).
-    resolved_harness = (
-        new_harness if new_harness is not None else resolve_self_identity().harness
-    )
+    resolved_harness = new_harness if new_harness is not None else resolve_self_identity().harness
     # Same placement, same reason: the rebind rewrites the pid, so its
     # provenance is earned here against the prover or it resets to ambient.
     resolved_provenance = _resolve_pid_provenance(new_pid, ttl_ms, resolved_harness)
@@ -787,12 +782,12 @@ def compare_and_rebind(
             raise RebindRefused(
                 f"holder mismatch: expected {expected_holder!r}, claim held by "
                 f"{existing.holder!r} (pid={existing.pid})",
-                state=classify(existing).value,
+                state=_claim_state(existing, root=root).value,
                 holder=existing.holder,
                 pid=existing.pid,
             )
 
-        state = classify(existing)
+        state = _claim_state(existing, root=root)
         # ONLY a launch-window holder may be replaced. Naming the prior holder
         # is the proof, and for `spawn-handover:<worker>` that proof is real: it
         # is minted per worker and travels only in that worker's environment.
@@ -819,7 +814,7 @@ def compare_and_rebind(
             raise RebindRefused(
                 f"holder {existing.holder!r} is not a launch-window holder; "
                 "only a spawn-side handover claim can be taken over",
-                state=classify(existing).value,
+                state=state.value,
                 holder=existing.holder,
                 pid=existing.pid,
             )
@@ -913,12 +908,12 @@ def compare_and_rebind(
 
         # Local same-holder, prior PID dead: the resume rebind.
         rebound = _rebound_claim(
-                existing, npid, ttl_ms, new_holder=effective_new_holder,
-                new_reason=effective_new_reason, new_harness=effective_new_harness,
-                new_metadata=effective_new_metadata,
-                new_pid_provenance=resolved_provenance,
-                new_pid_unavailable=npid_unavailable,
-            )
+            existing, npid, ttl_ms, new_holder=effective_new_holder,
+            new_reason=effective_new_reason, new_harness=effective_new_harness,
+            new_metadata=effective_new_metadata,
+            new_pid_provenance=resolved_provenance,
+            new_pid_unavailable=npid_unavailable,
+        )
         _atomic_replace(path, serialize_claim(rebound))
         if emit:
             emit_claim_rebound(
@@ -974,7 +969,26 @@ _RECOVERY_LOCK_MAX_WAIT_S = 5.0
 ACQUIRE_MAX_ATTEMPTS = 5
 
 
-def _existing_is_live(existing: Claim) -> bool:
+def _claim_verdict(claim: Claim, *, root: Optional[Path] = None) -> dict[str, Any]:
+    """Read one claim verdict from the native batch door."""
+    verdict = claim_verdicts([claim.key], root=root).get(claim.key)
+    if verdict is None:
+        path = claim_path(claim.key, root=root)
+        if not path.exists():
+            raise ClaimGoneAway(str(path))
+        raise ClaimVerdictError(f"native verdict omitted readable claim {claim.key!r}")
+    return verdict
+
+
+def _claim_state(claim: Claim, *, root: Optional[Path] = None) -> ClaimState:
+    """Project a native row into the Python enum used by control flow."""
+    try:
+        return ClaimState(_claim_verdict(claim, root=root).get("state", "corrupted"))
+    except ValueError:
+        return ClaimState.CORRUPTED
+
+
+def _existing_is_live(existing: Claim, *, root: Optional[Path] = None) -> bool:
     """Authoritative acquire/recovery liveness predicate.
 
     Delegates to ``classify`` so the mutex honors the SAME hybrid TTL-or-pid
@@ -987,7 +1001,7 @@ def _existing_is_live(existing: Claim) -> bool:
     is a respawned worker's protected slot, so acquire must refuse it exactly
     like LIVE (never steal). Only TTL expiry (-> STALE) makes it reclaimable.
     """
-    return classify(existing) in (ClaimState.LIVE, ClaimState.SUSPECT)
+    return _claim_state(existing, root=root) in (ClaimState.LIVE, ClaimState.SUSPECT)
 
 
 def _atomic_replace(path: Path, content: str) -> None:
@@ -1096,7 +1110,9 @@ def release_claim(
         release_dir_mutex(recovery_lock, token)
 
 
-def _reanchor_pid_for(existing: Claim) -> Optional[int]:
+def _reanchor_pid_for(
+    existing: Claim, *, root: Optional[Path] = None, verdict: Optional[dict[str, Any]] = None
+) -> Optional[int]:
     """The durable pid a renewal should re-anchor EXISTING to, or None.
 
     Mirrors ``renew`` in ``crates/fno-agents/src/claims.rs``. Renewal used to
@@ -1142,11 +1158,12 @@ def _reanchor_pid_for(existing: Claim) -> Optional[int]:
     # was mid-flight. `renew_locked` in `crates/fno-agents/src/claims.rs`, which
     # this mirrors, has always refused there; without the same refusal here the
     # two implementations of one operation answered differently.
-    if existing.pid_unavailable:
+    verdict = verdict or _claim_verdict(existing, root=root)
+    if existing.pid_unavailable or verdict.get("expired") is True:
         return None
-    if is_expired(existing):
+    if verdict.get("bucket") == "offhost":
         return None
-    if is_live(existing) or not is_same_machine(existing.host, existing.machine_id):
+    if verdict.get("state") not in (ClaimState.STALE.value, ClaimState.SUSPECT.value):
         return None
     from .session_pid import resolve_session_pid
 
@@ -1160,9 +1177,9 @@ def _reanchor_pid_for(existing: Claim) -> Optional[int]:
     # overwriting the original holder's pid for nothing. Leave the anchor alone
     # there and let the TTL decide, which is what a claim with no better anchor
     # has always done.
-    from .staleness import _process_create_time_ms
+    from .verdict import process_create_time_ms
 
-    created = _process_create_time_ms(anchor)
+    created = process_create_time_ms(anchor)
     if created is None or created > existing.acquired_at:
         return None
     return anchor
@@ -1198,9 +1215,7 @@ def refresh_claim(
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
     if ttl_ms is not None and not (MIN_TTL_MS <= ttl_ms <= MAX_TTL_MS):
-        raise ClaimValidationError(
-            f"ttl_ms={ttl_ms} out of range [{MIN_TTL_MS}, {MAX_TTL_MS}]"
-        )
+        raise ClaimValidationError(f"ttl_ms={ttl_ms} out of range [{MIN_TTL_MS}, {MAX_TTL_MS}]")
 
     path = claim_path(key, root=root)
     if not path.exists():
@@ -1236,13 +1251,14 @@ def refresh_claim(
             raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
         if existing.expires_at is None:
             return None
-        if is_expired(existing):
+        verdict = _claim_verdict(existing, root=root)
+        if verdict.get("expired") is True:
             raise ClaimValidationError(
                 f"claim {key!r} expired before refresh; refusing to resurrect it"
             )
 
         window = ttl_ms if ttl_ms is not None else MIN_TTL_MS
-        anchor_pid = _reanchor_pid_for(existing)
+        anchor_pid = _reanchor_pid_for(existing, root=root, verdict=verdict)
         if anchor_pid is not None:
             refreshed = _rebound_claim(
                 existing,
@@ -1305,29 +1321,25 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
             "path": str(path),
         }
 
-    state, basis = classify_with_basis(claim)
-    out: dict[str, Any] = {
-        "key": key,
-        "state": state.value,
-        "basis": basis,
-        "holder": claim.holder,
-        "pid": claim.pid,
-        "pid_unavailable": claim.pid_unavailable,
-        "schema_version": claim.schema_version,
-        "host": claim.host,
-        # Callers classify ownership from this dict, so it has to carry what
-        # liveness actually compares; host alone sends them down the fallback.
-        "machine_id": claim.machine_id,
-        "acquired_at": claim.acquired_at,
-        "expires_at": claim.expires_at,
-    }
-    if claim.reason is not None:
-        out["reason"] = claim.reason
-    if claim.harness is not None:
-        out["harness"] = claim.harness
-    if claim.metadata:
-        out["metadata"] = claim.metadata
-    return out
+    try:
+        return _claim_verdict(claim, root=root)
+    except ClaimGoneAway:
+        return {"key": key, "state": ClaimState.FREE.value}
+    except (ClaimVerdictError, ClaimVerdictUnavailable) as exc:
+        # The file itself read fine, so its identity fields are usable even
+        # though the native liveness verdict is unreachable. Dropping holder
+        # here made a visibility re-check read an instrument outage as a lost
+        # race: the dispatch gate saw a holderless row and refused with
+        # duplicate-claim / prior_holder=unknown.
+        return {
+            "key": key,
+            "state": ClaimState.CORRUPTED.value,
+            "error": str(exc),
+            "path": str(path),
+            "holder": claim.holder,
+            "pid": claim.pid,
+            "host": claim.host,
+        }
 
 
 def _list_claims_impl(
@@ -1347,7 +1359,7 @@ def _list_claims_impl(
     ``counts`` blind to a key existing in more than one root.
     """
     cdir = claims_dir(root)
-    # "free" covers a claim released between iterdir() and claim_status()
+    # "free" covers a claim released between iterdir() and the native batch
     # below (ClaimGoneAway / a vanished path) - without a bucket for it, that
     # entry silently drops out of `total` too, instead of being an accounted
     # non-event.
@@ -1355,6 +1367,7 @@ def _list_claims_impl(
     if not cdir.is_dir():
         return [], {**counts, "total": 0}, {}
 
+    verdicts = claim_verdicts(prefix=prefix, root=root)
     out: list[dict[str, Any]] = []
     states_by_key: dict[str, str] = {}
     for entry in sorted(cdir.iterdir()):
@@ -1368,7 +1381,20 @@ def _list_claims_impl(
         if prefix is not None and not key.startswith(prefix):
             continue
 
-        status = claim_status(key, root=root)
+        status = verdicts.get(key)
+        if status is None:
+            try:
+                read_claim_file(entry)
+            except ClaimCorrupted:
+                counts[ClaimState.CORRUPTED.value] += 1
+                states_by_key[key] = ClaimState.CORRUPTED.value
+            except ClaimGoneAway:
+                counts[ClaimState.FREE.value] += 1
+                states_by_key[key] = ClaimState.FREE.value
+            else:
+                counts[ClaimState.CORRUPTED.value] += 1
+                states_by_key[key] = ClaimState.CORRUPTED.value
+            continue
         state = status.get("state")
         if state in counts:
             counts[state] += 1
@@ -1509,114 +1535,14 @@ def force_release_claim(
             release_dir_mutex(recovery_lock, recovery_token)
 
 
-def _pid_holder_map(dirs: list[Path]) -> dict[tuple[str, int], dict[str, Path]]:
-    """Sweep-time PID-exclusivity evidence: which distinct holders each
-    ``(machine, pid)`` pair names across the swept roots, with one claim
-    file per holder so the mutex re-verify can re-read just the siblings
-    (see :func:`_pid_exclusive_rechecked`).
-
-    The property a single claim cannot carry: a pid identifies a session only
-    when it is the ONLY holder it answers for. A daemon-hosted substrate
-    honestly resolves every session it hosts to the daemon's pid, so
-    provenance-true claims from distinct holders can share one live pid
-    (ab-6d5afbde: seven claims on one app-server pid, every one reading LIVE
-    forever, none reapable, all consuming max_live permanently). Counting
-    DISTINCT holders - never claim files, which one session legitimately
-    writes several of - is what keeps the legitimate same-holder shape
-    exclusive.
-
-    Keyed by ``(machine_id or host, pid)`` because a pid is host-local: the
-    same number on two machines names two processes. Claims whose machine
-    identity spelling differs (a legacy no-machine_id row beside a modern
-    one) simply do not group, which reads exclusive - the safe direction.
-
-    A claim that cannot be read contributes no holder; the sweep's own
-    corrupted/vanished bucketing already reports those files.
-    """
-    holders: dict[tuple[str, int], dict[str, Path]] = {}
-    for cdir in dirs:
-        if not cdir.is_dir():
-            continue
-        for entry in sorted(cdir.iterdir()):
-            if entry.is_dir() or not entry.name.endswith(".lock"):
-                continue
-            try:
-                claim = read_claim_file(entry)
-            except Exception:  # noqa: BLE001 - an unreadable claim is no sibling evidence
-                continue
-            if claim.pid is None:
-                continue
-            holders.setdefault(
-                (claim.machine_id or claim.host, claim.pid), {}
-            )[claim.holder] = entry
-    return holders
-
-
-def _pid_exclusive(
-    claim: Claim, holder_map: dict[tuple[str, int], dict[str, Path]]
-) -> Optional[bool]:
-    """Does the claim's pid name exactly one distinct holder?
-
-    ``None`` (unknown) when the claim has no pid or the map predates the
-    claim's write - absent sibling evidence must never read as
-    exclusive-by-absence; ``classify`` keeps the claim's own evidence
-    deciding.
-    """
-    if claim.pid is None:
-        return None
-    named = holder_map.get((claim.machine_id or claim.host, claim.pid))
-    if named is None:
-        return None
-    return len(named) <= 1
-
-
-def _pid_exclusive_rechecked(
-    claim: Claim,
-    holder_map: dict[tuple[str, int], dict[str, Path]],
-    archived_this_run: set[Path],
-) -> Optional[bool]:
-    """Mutex-time exclusivity for one claim: re-read ONLY this pid's sibling
-    files the scan map named, never the whole store.
-
-    The one direction that can flip a verdict under the recovery mutex is a
-    sibling going away (shared -> exclusive -> possibly LIVE, must not
-    archive) or being replaced by a different holder, and both are answered
-    by those few files. A sibling APPEARING cannot matter here: a claim the
-    scan read as exclusive corroborated to LIVE and never became a reap
-    candidate in this sweep.
-
-    Two going-away shapes differ. A sibling ARCHIVED BY THIS SWEEP was
-    sharing evidence when the set was judged non-exclusive, and the survivor
-    must keep reading it that way - otherwise apply drains one member per
-    sweep while the dry run promised N, and each survivor becomes the sole
-    record for the pid and lives forever (ab-6d5afbde). Any OTHER absent
-    sibling (its holder's own release, a concurrent recovery) genuinely
-    stops naming a holder.
-    """
-    if claim.pid is None:
-        return None
-    named = holder_map.get((claim.machine_id or claim.host, claim.pid))
-    if named is None:
-        return None
-    holders: set[str] = set()
-    for holder, path in named.items():
-        if path in archived_this_run:
-            holders.add(holder)
-            continue
-        try:
-            holders.add(read_claim_file(path).holder)
-        except Exception:  # noqa: BLE001 - a vanished/unreadable sibling stops naming a holder
-            continue
-    return len(holders) <= 1
 
 
 def sweep_verdict(
     claim: Claim,
     *,
-    now: Optional[int] = None,
-    pid_exclusive: Optional[bool] = None,
-    abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
+    abandonment_probe: Optional[Callable[..., Optional[bool]]] = None,
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
+    native_verdict: Optional[dict[str, Any]] = None,
 ) -> tuple[bool, str]:
     """Can this claim be archived, and if not, which bucket says why?
 
@@ -1630,10 +1556,6 @@ def sweep_verdict(
     ``True`` settles (reapable); anything else falls through to liveness,
     which stays the authority for every unsettled shape.
 
-    :func:`fno.claims.staleness.classify_for_sweep` plus the roster probe on the
-    one case a pid cannot settle: a ``node:`` claim reading SUSPECT, whose
-    holder is a session and so genuinely might come back under a new pid.
-
     THE single reap decision. The sweep's lock-free triage, its under-mutex
     re-verify, and the spawn guard's targeted recovery all call this, so no two
     of them can drift into different answers about the same claim - the shape
@@ -1643,34 +1565,31 @@ def sweep_verdict(
     probe was supplied), ``"suspect_alive"`` (a worker is on the node) and
     ``"suspect_unprobed"`` (the probe could not run). The last two are kept
     apart deliberately: one is a measurement and the other is its absence.
-
-    ``pid_exclusive`` is the sweep's sibling evidence (ab-6d5afbde): a
-    prover-proven pid shared across DISTINCT holders cannot corroborate an
-    expired lease, so the claim reads SUSPECT and the instruments below -
-    not the shared daemon pid - settle it. ``None`` keeps today's behavior
-    for every caller without sibling context (the spawn guard's single-key
-    recovery).
     """
+    verdict = native_verdict or _claim_verdict(claim)
     if node_settlement is not None and claim.key.startswith("node:"):
         # A settlement instrument that raises answers nothing; a broken probe
         # must never become a verdict. The CLI-built settlement never raises
         # by contract - this is the belt under it.
         try:
-            if node_settlement(claim, now=now) is True:
+            if node_settlement(claim, native_verdict=verdict) is True:
                 return True, ""
         except Exception:  # noqa: BLE001 - unknown keeps
             pass
-    provably_dead, bucket = classify_for_sweep(claim, now, pid_exclusive=pid_exclusive)
+    if "provably_dead" not in verdict or "bucket" not in verdict:
+        raise RuntimeError("native claim verdict omitted sweep fields")
+    provably_dead = bool(verdict["provably_dead"])
+    bucket = str(verdict["bucket"] or "")
     if provably_dead or bucket != "suspect":
         return provably_dead, bucket
     if abandonment_probe is None or not claim.key.startswith("node:"):
         return False, "suspect"
-    verdict = abandonment_probe(claim)
-    if verdict is True:
+    probe_verdict = abandonment_probe(claim, native_verdict=verdict)
+    if probe_verdict is True:
         return True, ""
     # False: a live worker holds this node. None: the probe could not run,
     # which is unknown, and unknown keeps.
-    return False, "suspect_alive" if verdict is False else "suspect_unprobed"
+    return False, "suspect_alive" if probe_verdict is False else "suspect_unprobed"
 
 
 def _default_reap_roots() -> list[Path]:
@@ -1689,7 +1608,7 @@ def reap_dead_claims(
     *,
     roots: Optional[list[Optional[Path]]] = None,
     apply: bool = False,
-    abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
+    abandonment_probe: Optional[Callable[..., Optional[bool]]] = None,
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
     optout_sink: Optional[list[Claim]] = None,
 ) -> dict[str, Any]:
@@ -1699,9 +1618,8 @@ def reap_dead_claims(
     release, refresh, and force-release all exist; nothing prunes a claim
     whose holder died without releasing, so a dead session leaks its
     lockfile forever. This walks every ``.lock`` file in the swept roots,
-    classifies it with :func:`fno.claims.staleness.classify_for_sweep` (the
-    single liveness authority; :func:`~fno.claims.staleness.is_provably_dead`
-    is its bool-only view), and archives the provably-dead ones to
+    classifies it with the native ``classify_for_sweep`` decision (the
+    single liveness authority), and archives the provably-dead ones to
     ``.expired/``.
 
     ``roots``, when given, is a list of repo-root arguments passed through
@@ -1776,6 +1694,9 @@ def reap_dead_claims(
     which read-time revocation still covers.
     """
     use_dirs = _default_reap_roots() if roots is None else _dedup_roots(roots)
+    native_verdicts: dict[str, dict[str, Any]] = {}
+    for cdir in use_dirs:
+        native_verdicts.update(claim_verdicts(root=cdir.parent.parent))
 
     ts = now_ms()
     scanned = 0
@@ -1787,14 +1708,16 @@ def reap_dead_claims(
     }
 
     def _sweep_verdict(
-        claim: Claim, pid_exclusive: Optional[bool] = None
+        claim: Claim, native_verdict: Optional[dict[str, Any]] = None
     ) -> tuple[bool, str]:
+        native = native_verdict or native_verdicts.get(claim.key)
+        if native is None:
+            return False, "suspect_unprobed"
         return sweep_verdict(
             claim,
-            now=ts,
-            pid_exclusive=pid_exclusive,
             abandonment_probe=abandonment_probe,
             node_settlement=node_settlement,
+            native_verdict=native,
         )
 
     corrupted = 0
@@ -1807,11 +1730,12 @@ def reap_dead_claims(
     contended = 0
     reap_failed: list[tuple[str, str]] = []
     # Node ids whose claims this run archived (confirmed re-reads only), for
-    # the lock-mirror clear after the loop; and the archived files
-    # themselves, which stay sharing evidence for their pid's surviving
-    # claims for the rest of THIS sweep (see _pid_exclusive_rechecked).
+    # the lock-mirror clear after the loop.
     settled_nodes: list[str] = []
-    archived_paths: set[Path] = set()
+    # A shared PID remains shared for this sweep after one member is archived;
+    # otherwise the survivor's fresh native read would become exclusive and
+    # the apply pass would drain only the first member.
+    archived_shared_pids: set[tuple[str, int]] = set()
 
     def _read_or_bucket(entry: Path) -> Optional[Claim]:
         """Read one claim file for the sweep, or bucket why it can't be read.
@@ -1837,8 +1761,6 @@ def reap_dead_claims(
     # more than one distinct holder (ab-6d5afbde). A prover-proven pid shared
     # across distinct holders cannot corroborate an expired lease, so those
     # claims read SUSPECT here and the secondary instruments settle them.
-    holder_map = _pid_holder_map(use_dirs)
-
     for cdir in use_dirs:
         if not cdir.is_dir():
             continue
@@ -1858,17 +1780,10 @@ def reap_dead_claims(
             # Cheap, lock-free triage: decide whether this claim is even a
             # reap candidate before paying for a mutex acquire. The mutex
             # re-verify below does NOT reuse this result - it re-reads the
-            # file and calls classify_for_sweep again on that fresh read,
-            # because the claim may have been archived-and-recreated between
-            # this scan and the lock. Do not "de-duplicate" that second call;
-            # it is the TOCTOU check, not redundant work.
-            #
-            # The holder map feeding pid exclusivity is built once per sweep,
-            # before the scan: a claim acquired after it is absent from the
-            # map, which reads UNKNOWN and keeps - never exclusive-by-absence.
-            provably_dead, bucket = _sweep_verdict(
-                claim, _pid_exclusive(claim, holder_map)
-            )
+            # file and asks the native door again for that fresh claim, because
+            # the claim may have been archived-and-recreated between this scan
+            # and the lock.
+            provably_dead, bucket = _sweep_verdict(claim)
 
             if provably_dead:
                 if not apply:
@@ -1902,17 +1817,31 @@ def reap_dead_claims(
                     if fresh is None:
                         continue
 
-                    # Re-verify exclusivity here too, for the same TOCTOU
-                    # reason as the fresh read: a sibling released since the
-                    # scan flips this pid back to exclusive, and a recreated
-                    # one flips it shared, and the archive decision must ride
-                    # the property as it stands UNDER the lock. The recheck
-                    # re-reads only this pid's sibling files, not the store,
-                    # and counts siblings archived by THIS run as still
-                    # sharing (a drained set stays drained in one sweep).
+                    # The native key read deliberately has unknown PID
+                    # exclusivity: this is a TOCTOU re-read, not a reused batch
+                    # scan. The first batch read carried the full sibling set.
+                    fresh_native = claim_verdicts(prefix="", root=cdir.parent.parent).get(fresh.key)
+                    if fresh_native is None:
+                        kept["suspect_unprobed"] += 1
+                        continue
+                    identity = fresh.machine_id or fresh.host
+                    pid_key = (identity, fresh.pid) if fresh.pid is not None else None
+                    if (
+                        pid_key is not None
+                        and pid_key in archived_shared_pids
+                        and native_verdicts.get(fresh.key, {}).get("basis") == "pid-shared"
+                        and fresh_native.get("basis") == "live"
+                    ):
+                        fresh_native = {
+                            **fresh_native,
+                            "state": "suspect",
+                            "basis": "pid-shared",
+                            "bucket": "suspect",
+                            "provably_dead": False,
+                        }
                     fresh_dead, fresh_bucket = _sweep_verdict(
                         fresh,
-                        _pid_exclusive_rechecked(fresh, holder_map, archived_paths),
+                        native_verdict=fresh_native,
                     )
                     if not fresh_dead:
                         kept[fresh_bucket] += 1
@@ -1944,7 +1873,9 @@ def reap_dead_claims(
                         # would make entry.exists() true again with no
                         # bearing on whether the archive itself worked.
                         reaped += 1
-                        archived_paths.add(entry)
+                        initial = native_verdicts.get(fresh.key, {})
+                        if fresh.pid is not None and initial.get("basis") == "pid-shared":
+                            archived_shared_pids.add((fresh.machine_id or fresh.host, fresh.pid))
                         if fresh.key.startswith("config-optout:") and optout_sink is not None:
                             # The caller owns the opt-out restore: importing the
                             # config layer here would tie claims (infra) to
@@ -1974,9 +1905,7 @@ def reap_dead_claims(
                         # is not evidence. The source is still there and no
                         # archive was created, so the move did not happen
                         # (AC5).
-                        reap_failed.append(
-                            (str(entry), "archive_claim did not move the file")
-                        )
+                        reap_failed.append((str(entry), "archive_claim did not move the file"))
                 finally:
                     release_dir_mutex(recovery_lock, recovery_token)
                 continue

@@ -162,8 +162,10 @@ def _registry_handles() -> dict[str, str]:
         return {}
 
 
-def _progress_map(workers: list[LiveWorker]) -> dict[str, Optional[str]]:
-    """name -> progress verdict, for the fno-registry-sourced rows only.
+def _progress_map(
+    workers: list[LiveWorker],
+) -> dict[str, tuple[Optional[str], Optional[str], Optional[float]]]:
+    """name -> (progress verdict, activity word, activity age), fno rows only.
 
     This is the surface that showed 8513 MB across 31 live pids with no way
     to see which of them were parked (specimen 1), so it must show progress
@@ -171,12 +173,17 @@ def _progress_map(workers: list[LiveWorker]) -> dict[str, Optional[str]]:
     no fno registry entry) are out of scope: there is no ``harness`` /
     ``route_settings_path`` context here to judge a refusal against.
 
-    One transcript read per row (``resolve_session_truth``), reused for both
-    the reachability verdict and the progress verdict -- the same shape
-    ``fno.agents.read`` uses so this view does not pay a second read for the
-    same evidence.
+    One transcript read per row (``resolve_session_truth``), reused for the
+    reachability verdict, the progress verdict and the activity word -- the
+    same shape ``fno.agents.read`` uses so this view does not pay a second
+    read for the same evidence.
     """
-    from fno.agents.reachability import classify_progress, classify_reachability, registry_falsifier
+    from fno.agents.reachability import (
+        classify_progress,
+        classify_reachability,
+        registry_falsifier,
+        rendered_activity,
+    )
     from fno.agents.registry import load_registry
     from fno.agents.session_truth import resolve_session_truth
 
@@ -185,7 +192,7 @@ def _progress_map(workers: list[LiveWorker]) -> dict[str, Optional[str]]:
     except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
         return {}
 
-    out: dict[str, Optional[str]] = {}
+    out: dict[str, tuple[Optional[str], Optional[str], Optional[float]]] = {}
     for w in workers:
         if w.source != "fno":
             continue
@@ -207,7 +214,15 @@ def _progress_map(workers: list[LiveWorker]) -> dict[str, Optional[str]]:
             route_settings_path=entry.route_settings_path,
             last_activity_age_s=truth.get("last_activity_age_s"),
         )
-        out[w.name] = prog.verdict
+        out[w.name] = (
+            prog.verdict,
+            rendered_activity(
+                truth_state=truth_state,
+                age_s=reach.age_s,
+                reachability=reach.verdict,
+            ),
+            reach.age_s,
+        )
     return out
 
 
@@ -216,6 +231,12 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     progress = _progress_map(workers)
     rows = []
     for w in workers:
+        # The activity triple for fno rows; a foreign claude row has no
+        # registry entry to read, so it keeps the roster token it arrived
+        # with and no age.
+        progress_triple = progress.get(w.name)
+        activity = progress_triple[1] if progress_triple else w.status
+        age = progress_triple[2] if progress_triple else None
         # Null when this session has no registry row (a foreign claude session
         # that fno never adopted), which is a real answer, not a lookup miss.
         handle = handles.get(w.session_id or "")
@@ -245,14 +266,18 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 # in the one view built to show it.
                 "pid": w.session_pid or w.pid,
                 "rss_mb": tree_rss_mb(w.session_pid or w.pid),
-                "status": w.status,
-                # (x-d401) Why `status` is not the stored token, when it is
-                # not: the contradiction the emitter resolved. Null = the
-                # stored token passed through.
+                # (x-c672, AC7) Served activity from the same single
+                # truth read the progress axis uses, with the measured age in
+                # its own key; the stored token rides `stored_status`.
+                "status": activity,
+                "status_age_s": age,
+                "stored_status": w.status,
+                # (x-d401) Why `stored_status` is not the registry's token,
+                # when it is not: the contradiction the emitter resolved.
                 "status_basis": w.status_basis,
                 # The orthogonal axis beside `status`: null for a foreign
                 # claude row this view has no harness/route context to judge.
-                "progress": progress.get(w.name),
+                "progress": progress_triple[0] if progress_triple else None,
                 "crown": crowns.get(reg_name),  # US9: null when uncrowned
             }
         )
@@ -550,11 +575,13 @@ def render_top(
         name_cell = r["name"] + (f" [{r['crown']}]" if r["crown"] else "")
         if r.get("handle"):
             name_cell += f" ={r['handle']}"
+        age_s = r.get("status_age_s")
+        activity = r["status"] + (f" {_fmt_age(age_s)}" if age_s is not None else "")
         out.append(
             f"{r['source']:<7} {name_cell:<24} {r['harness']:<9} "
             f"{r['substrate']:<10} {r['king'] or '-':<9} {r['pid'] or '-':>7} "
             f"{r['rss_mb'] if r['rss_mb'] is not None else '-':>7} "
-            f"{r['progress'] or '-':<17} {r['status']}"
+            f"{r['progress'] or '-':<17} {activity}"
             + (f" ({r['status_basis']})" if r.get("status_basis") else "")
         )
     if c.slot_claims:

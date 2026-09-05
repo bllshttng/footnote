@@ -25,8 +25,7 @@ import pytest
 from fno import mutex
 from fno.claims.core import acquire_claim
 from fno.claims.io import claim_path, claims_dir, serialize_claim
-from fno.claims.staleness import now_ms
-from fno.claims.types import Claim
+from fno.claims.types import Claim, now_ms
 from fno.events import append_event, mission_started
 from fno.mutex import (
     STALE_MUTEX_STEAL_S,
@@ -336,11 +335,13 @@ class TestEventsMutex:
         # Its own coverage lives in test_events_journal_containment.py.
         monkeypatch.delenv("FNO_EVENTS_PATH", raising=False)
         monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: repo)
+        from fno.paths import space_dir
+
         monkeypatch.chdir(subdir)
 
         append_event(_event())
 
-        assert (repo / ".fno/events.jsonl").exists()
+        assert (space_dir(repo) / "events.jsonl").exists()
         assert not (subdir / ".fno/events.jsonl").exists()
 
     def test_AC1_HP_corpse_stolen_and_event_lands(self, tmp_path):

@@ -332,6 +332,9 @@ rm -rf "$TMP_DIR"
 log "S5: observer rejection preserves legacy block"
 {
     TMP_DIR="$(mktemp -d)"
+    # The run-log seed and loop-check must hash one slug: /var and
+    # /private/var are the same dir, so pin the physical path once.
+    TMP_DIR="$(cd "$TMP_DIR" && pwd -P)"
     HOME_DIR="${TMP_DIR}/home"
     STUB_BIN="${TMP_DIR}/stubs"
     mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "$STUB_BIN"
@@ -348,7 +351,12 @@ attended: true
 ---
 MANIFEST
 
-    cat > "${TMP_DIR}/.fno/run-log.jsonl" <<'RUNLOG'
+    # The run log lives in the worktree slice of the repo's space now; ask the
+    # binary under test where that is (same HOME + cwd it will resolve with).
+    RUN_LOG="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH "$REAL_BIN" state path run-log 2>/dev/null)" \
+        || RUN_LOG="${TMP_DIR}/.fno/run-log.jsonl"
+    mkdir -p "$(dirname "$RUN_LOG")"
+    cat > "$RUN_LOG" <<'RUNLOG'
 {"run_id":"20260823T060900Z-cx73523-e04109","from":"open","event":"dispatch_classified","to":"working"}
 {"run_id":"20260823T060900Z-cx73523-e04109","from":"working","event":"prepare_handoff","to":"delegating"}
 {"run_id":"20260823T060900Z-cx73523-e04109","from":"delegating","event":"successor_proven","to":"closed"}

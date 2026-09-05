@@ -68,7 +68,7 @@ def _seat(name: str, session: str, *, scope: str | None = SCOPE, status: str = "
 
 
 def _manifest(court, scope: str = SCOPE, session: str = CALLER_SESSION):
-    path = king_manifest_path(scope, state_root=court / ".fno")
+    path = king_manifest_path(scope)  # default root: the repo space the verb resolves
     write_manifest(path, scope=scope, harness_session_id=session)
     return path
 

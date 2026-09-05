@@ -148,29 +148,25 @@ def claims_root_for(key: str) -> Path | None:
 
 
 def claims_dir(root: Path | None = None) -> Path:
-    """Return the claims directory under the given repo root.
+    """Return the claims directory under the given root.
 
-    Claims are cross-worktree coordination state. Resolution order for the
-    base dir:
+    Cross-worktree coordination state. Resolution order for the base dir:
 
       1. explicit ``root`` argument (per-root claims, e.g. walker singleton),
-      2. ``$FNO_CLAIMS_ROOT`` env var (global node claims; see
-         ``CLAIMS_ROOT_ENV``),
-      3. the canonical repo root (main worktree via
-         :func:`fno.paths.resolve_canonical_repo_root`), so that claims
-         from linked worktrees and the canonical checkout land in the same
-         directory.
+      2. ``$FNO_CLAIMS_ROOT`` env var (global node claims),
+      3. the repo's space (keyed on the canonical root), so claims from every
+         worktree land in one directory and no claims dir lives in a checkout.
     """
     if root is not None:
         base: Path = root
     else:
         override = os.environ.get(CLAIMS_ROOT_ENV)
         if override:
-            base = Path(override)
-        else:
-            from fno.paths import resolve_canonical_repo_root
+            return Path(override) / CLAIMS_DIRNAME
+        from fno.paths import space_dir
 
-            base = resolve_canonical_repo_root()
+        # fno-owned state: <space>/claims directly, no nested .fno segment.
+        return space_dir() / "claims"
     return base / CLAIMS_DIRNAME
 
 
@@ -301,6 +297,10 @@ def _breadcrumb_path() -> Path:
     in a linked worktree and is granted THAT directory; the main worktree is
     outside its sandbox, so a breadcrumb aimed there is silently dropped by the
     very failure it is reporting.
+
+    Deliberately NOT moved into the repo's space: it exists for the worker
+    whose access to the fno state root was just DENIED, so it stays in the
+    one root that worker demonstrably still has.
     """
     from fno.paths import resolve_repo_root
 

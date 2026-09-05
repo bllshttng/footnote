@@ -87,14 +87,16 @@ Resolve the save path with `fno do plan path --slug "<slug>" [--node "<node-id>"
 
 ### Session State Initialization
 
-Initialize session state for cost tracking (replaces the PreToolUse hook for portability):
+Initialize session state for cost tracking (replaces the PreToolUse hook for portability). State lives in the repo's space, not the checkout; resolve the dir through the verb:
 ```bash
-mkdir -p .fno
+STATE_DIR=$(dirname "$(fno-agents state path target-state 2>/dev/null)" 2>/dev/null)
+[[ -z "$STATE_DIR" || "$STATE_DIR" == "." ]] && STATE_DIR=".fno"
+mkdir -p "$STATE_DIR"
 # Don't overwrite if target is running (it has its own state)
-if [[ ! -f .fno/target-state.md ]]; then
-  rm -f .fno/.session-registered
+if [[ ! -f "$STATE_DIR/target-state.md" ]]; then
+  rm -f "$STATE_DIR/.session-registered"
   TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  cat > .fno/session-state.md << STEOF
+  cat > "$STATE_DIR/session-state.md" << STEOF
 ---
 type: plan
 status: IN_PROGRESS
@@ -113,7 +115,7 @@ fi
 2. **Structural context** — Generate a fresh codemap:
    ```bash
    REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-   # `fno doctor codemap` writes to .fno/codemap.md by default and
+   # `fno doctor codemap` writes codemap.md into the repo's space by default and
    # auto-appends the DB-schema companion when --db-schema is set.
    # The `.env` clause widens detection to repos whose connection lives only
    # in a dev .env file (the case `db-schema.py` now discovers).
@@ -127,9 +129,11 @@ fi
    # section AND the codemap is fresh (<24h), schema was grounded at design
    # time - skip the --db-schema regeneration (mirrors the `## Discovery` skip
    # below). $DESIGN_DOC_PATH is the resolved design-doc argument, if any.
+   CODEMAP_PATH=$(fno-agents state path codemap 2>/dev/null || true)
+   [ -z "$CODEMAP_PATH" ] && CODEMAP_PATH="$REPO_ROOT/.fno/codemap.md"
    schema_reused=""
    if [ -n "${DESIGN_DOC_PATH:-}" ] && grep -q '^## Schema Reconciliation$' "$DESIGN_DOC_PATH" 2>/dev/null \
-      && [ -f "$REPO_ROOT/.fno/codemap.md" ] && [ -z "$(find "$REPO_ROOT/.fno/codemap.md" -mmin +1440 2>/dev/null)" ]; then
+      && [ -f "$CODEMAP_PATH" ] && [ -z "$(find "$CODEMAP_PATH" -mmin +1440 2>/dev/null)" ]; then
      schema_reused=1
    fi
    if [ -z "$schema_reused" ] && { [ -d "$REPO_ROOT/supabase" ] || [ -f "$REPO_ROOT/prisma/schema.prisma" ] || [ -f "$REPO_ROOT/drizzle/schema.ts" ] || [ -n "$DATABASE_URL" ] || [ -n "$db_env_found" ]; }; then

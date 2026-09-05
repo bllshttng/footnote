@@ -67,6 +67,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "rm",
     "session-start-bytes",
     "spawn",
+    "state",
     "status",
     "stop",
     "subscribe",
@@ -174,7 +175,7 @@ async fn run(args: Vec<String>) -> i32 {
     // and it stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS — `fno agents claim`
     // remains the only operator CLI for claims.
     if matches!(verb, "claim") {
-        return fno_agents::client_verbs::run_claim(&args[1..]);
+        return fno_agents::claim_verbs::run_claim(&args[1..]);
     }
 
     // `detect` is the HIDDEN debug front over the screen-manifest fallback
@@ -221,6 +222,16 @@ async fn run(args: Vec<String>) -> i32 {
     // Direct dispatch; no daemon RPC.
     if verb == "loop-check" {
         return fno_agents::loopcheck::run_loop_check(&args[1..]);
+    }
+
+    // `state path` is the shell-hook surface for project-space path resolution
+    // (matched with `matches!` like `version`/`mail-inject`: a binary-direct
+    // verb that stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and so out
+    // of the client<->router parity guard; the verb-surface ratchet's binary
+    // probe reads the unknown-verb refusal, so the verb IS registered in
+    // ALL_CLIENT_ACTIONS like every direct dispatch). No daemon, from cwd.
+    if matches!(verb, "state") {
+        return fno_agents::state_path::run(&args[1..]);
     }
 
     // `probe-run`: see its own doc in loopcheck.rs. Direct dispatch.
@@ -1937,15 +1948,14 @@ fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus
     }
 }
 
-/// `fno agents reap`: manual dead-row garbage collection (x-b1aa). Runs the same
+/// `fno agents reap`: manual row retirement (x-c672). Runs the same
 /// `gc_sweep` the daemon runs on its idle tick, operating on the registry
-/// directly under the shared flock (no daemon required), and reports what it did:
-/// the count removed and, for each row KEPT, the specific gate that kept it
-/// (dirty/unprobed worktree, no positive corroboration yet - x-9de7 task 5 -
-/// or the liveness re-check itself, x-98ab) so a stuck row is never silent
-/// and invisible, and a zero-reap pass over a live fleet is never silent
-/// about the rows it kept. The grace window is resolved
-/// from `config.agents.dead_row_grace` exactly as the daemon does.
+/// directly under the shared flock (no daemon required), and reports what it
+/// did: every row retired with its basis, and for each row KEPT, the named
+/// gate holding it, so a stuck row is never silent and invisible, and a
+/// zero-reap pass over a live fleet is never silent about the rows it kept.
+/// The grace window is resolved from `config.agents.retire_grace_s` exactly
+/// as the daemon does.
 ///
 /// `--dry-run` runs the identical classification with no registry write and no
 /// `agent_row_reaped` event - a reaper an operator cannot rehearse is one they
@@ -1967,13 +1977,9 @@ fn run_reap(rest: &[String]) -> i32 {
     }
     let home = AgentsHome::from_env();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let grace_for_harness = |harness: &str| {
-        std::time::Duration::from_secs(fno_agents::agents_config::dead_row_grace_secs(
-            &cwd, harness,
-        ))
-    };
+    let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
     let summary = if dry_run {
-        fno_agents::daemon::gc_sweep_dry_run(&home, &grace_for_harness)
+        fno_agents::daemon::gc_sweep_dry_run(&home, grace_secs)
     } else {
         // Source "daemon" matches the event schema's declared source for
         // agent_row_reaped; the manual verb is the same operation as the tick.
@@ -1981,7 +1987,7 @@ fn run_reap(rest: &[String]) -> i32 {
         fno_agents::daemon::gc_sweep(
             &home,
             &emitter,
-            &grace_for_harness,
+            grace_secs,
             fno_agents::agents_config::reap_receipt_retain_days(&cwd),
         )
     };

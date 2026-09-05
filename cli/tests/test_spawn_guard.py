@@ -25,6 +25,8 @@ from typer.testing import CliRunner
 
 from fno.agents.cli import agents_app
 from fno.claims.core import acquire_claim, claim_status
+from fno.claims.io import claim_path, read_claim_file, serialize_claim
+from fno.claims.types import now_ms
 
 runner = CliRunner()
 
@@ -377,7 +379,7 @@ def test_spawn_guard_hidden_but_reachable(claims_tmp):
 # --- x-4652: orphaned dispatch reservation reaps (already-correct path) -------
 
 
-def test_expired_dead_dispatch_reservation_reaped(claims_tmp, monkeypatch):
+def test_expired_dead_dispatch_reservation_reaped(claims_tmp):
     """Regression (x-4652): a dispatch:<id> reservation whose TTL has expired AND
     whose recorded pid is dead is STALE, so spawn-guard reaps it and dispatches,
     taking a fresh reservation. This locks the already-correct reap path (the
@@ -389,8 +391,6 @@ def test_expired_dead_dispatch_reservation_reaped(claims_tmp, monkeypatch):
     SUSPECT-arm behavior is asserted by
     test_suspect_claim_already_running_no_reservation above."""
     import psutil
-    from fno.claims import staleness
-
     dead_pid = 999_999
     while psutil.pid_exists(dead_pid):
         dead_pid += 1
@@ -400,8 +400,9 @@ def test_expired_dead_dispatch_reservation_reaped(claims_tmp, monkeypatch):
     acquire_claim(
         "dispatch:x-7777", "dispatch-node:orphan", pid=dead_pid, ttl_ms=60_000
     )
-    future = staleness.now_ms() + 120_000
-    monkeypatch.setattr(staleness, "now_ms", lambda: future)
+    path = claim_path("dispatch:x-7777")
+    claim = read_claim_file(path)
+    path.write_text(serialize_claim(claim.model_copy(update={"expires_at": now_ms() - 1})))
     assert claim_status("dispatch:x-7777")["state"] == "stale"
 
     res = _invoke("x-7777", "--holder", "dispatch-node:fresh", "--json")

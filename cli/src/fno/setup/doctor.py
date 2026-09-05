@@ -514,8 +514,9 @@ def run_doctor() -> int:
 
     try:
         print(f"[doctor] state_dir: {paths.state_dir()}")
+        print(f"[doctor] space_dir: {paths.space_dir()}  worktree: {paths.worktree_space_dir()}")
     except Exception as exc:
-        print(f"[doctor] state_dir: ERROR ({exc})")
+        print(f"[doctor] state_dir/space_dir: ERROR ({exc})")
 
     issues: list[tuple[str, str, str]] = []
     errors: list[tuple[str, str]] = []

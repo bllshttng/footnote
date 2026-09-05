@@ -28,6 +28,9 @@ chmod +x "$STUB_SCRIPT"
 export FNO_INBOX_ROOT="$INBOX_ROOT"
 export FNO_INBOX_KNOWN_PROJECTS="proj-a,somesender"
 export FNO_LLM_STUB="$STUB_SCRIPT"
+# The triage journal resolves through the repo's space; pin the root inside
+# the sandbox and assert through the same resolver the writer used.
+export FNO_SPACES_DIR="$TMP/spaces"
 
 # Seed proj-a with a heads-up thread, capture msg-id.
 SEND_OUT=$(uv run fno-py agents mail send --to-project proj-a --kind heads-up \
@@ -48,7 +51,10 @@ print('plan ok')
 "
 
 # triage-log.jsonl gets a line keyed on thread_id.
-TRIAGE_LOG="$REPO_ROOT/.fno/triage-log.jsonl"
+TRIAGE_LOG="$(cd "$CLI_DIR" && uv run python -c "
+from fno.paths import project_log
+print(project_log('triage-log.jsonl'))
+")"
 if [[ ! -f "$TRIAGE_LOG" ]]; then
   echo "FAIL: triage-log.jsonl not found at $TRIAGE_LOG" >&2
   exit 1

@@ -1522,26 +1522,30 @@ def test_check_contained_says_so_when_the_store_is_unavailable(tmp_path,
     assert "no store for you" in result.output
 
 
-def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
+def test_resolve_owned_identity_verb_proven_claude_wins_foreign_codex_refused(
     tmp_path, monkeypatch
 ) -> None:
-    """AC1-HP + AC3-ERR at the verb: a CODEX_THREAD_ID a live row already owns
-    is refused and the proven claude marker wins.
+    """AC1-HP + AC3-ERR at the verb: the proven claude marker wins and the
+    foreign codex marker is refused by the walk (it contradicts the prover),
+    with no registry collision consulted - a session with no stamp resolves by
+    elimination and contradiction only, because colliding there read a
+    hand-started joined session's OWN registered row as contention and refused
+    every crown grantor. Collision reporting lives on the stamped branches.
 
     Proven in Python so it does not depend on the PATH-resolved `fno` carrying
     the verb - the bash hook test's CI limitation, since the PR's own CI runs a
     `fno` that predates the verb. The prover is pinned to claude (a real claude
-    process's view) so the claude marker is proven and wins; the foreign codex
-    marker is refused as another live row's. CI-robust: no real process tree.
+    process's view) so the claude marker is proven and wins. CI-robust: no real
+    process tree.
     """
     from fno.agents.registry import register_existing_session
     from fno.paths_testing import use_tmpdir
 
     use_tmpdir(monkeypatch, tmp_path)
     foreign = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
-    owner = register_existing_session(
+    register_existing_session(
         provider="codex", session_id=foreign, cwd="/x"
-    ).name
+    )
     # Pin the prover to claude (what a real claude session's process tree sees),
     # so the test does not depend on the runner's actual harness.
     monkeypatch.setattr(
@@ -1561,17 +1565,19 @@ def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
     assert fields["HARNESS"] == "claude"
     assert fields["SESSION_ID"] == "aaaa1111-mine"
     assert fields["DISPOSITION"] == "proven"
-    assert fields["COLLISION"] == owner
-    assert fields["COLLISION_ID"] == foreign
+    assert fields["COLLISION"] == ""
+    assert fields["COLLISION_ID"] == ""
 
 
 def test_resolve_owned_identity_self_row_is_not_contention(tmp_path, monkeypatch) -> None:
     """AC2-HP: a spawned worker whose own registry row holds its stamped id
     resolves that identity with no proof available. The prover is silent (a
-    codex thread worker has no harness ancestor to walk); the complete
-    canonical stamp and the worker's own row agree on (harness, id) because
-    spawn minted both in one act, so the row reads as self, not as a
-    competing holder."""
+    codex thread worker has no harness ancestor to walk); the canonical stamp
+    and the worker's own row agree on (harness, id) because spawn minted both
+    in one act, so the row reads as self, not as a competing holder. The
+    disposition is "single", not "canonical": resolution rode the same
+    uncontended elimination the marker loop calls the dominant case, so the
+    worktree-manifest anchor guard for task claims stays armed (x-0992)."""
     from fno.agents.registry import register_existing_session
     from fno.paths_testing import use_tmpdir
 
@@ -1595,7 +1601,7 @@ def test_resolve_owned_identity_self_row_is_not_contention(tmp_path, monkeypatch
     }
     assert fields["HARNESS"] == "codex"
     assert fields["SESSION_ID"] == mine
-    assert fields["DISPOSITION"] == "canonical"
+    assert fields["DISPOSITION"] == "single"
     assert fields["COLLISION"] == ""
 
 
@@ -1704,11 +1710,11 @@ def test_worktree_occupancy_defers_to_finished_with_the_tree(monkeypatch, tmp_pa
         return calls.get("done", False)
 
     monkeypatch.setattr("fno.agents.watchdog.finished_with_the_tree", fake_finished)
-    from fno.agents.watchdog import REAP_QUIET_AFTER_S
+    from fno.agents.watchdog import QUIET_AFTER_S
 
     verdict, info = target_cli._classify_worktree_occupancy(wt)
     assert verdict == "occupied_worktree"
     assert info["session_id"] == "s-1"
-    assert calls["quiet"] == REAP_QUIET_AFTER_S
+    assert calls["quiet"] == QUIET_AFTER_S
     calls["done"] = True
     assert target_cli._classify_worktree_occupancy(wt)[0] == "available"

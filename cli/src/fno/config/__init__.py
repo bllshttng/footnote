@@ -1,9 +1,8 @@
 """Pydantic settings schema for the fno CLI.
 
-Settings are DEEP-MERGED across every candidate file that exists, with
-higher-priority files overriding lower-priority ones key-by-key (nested
-dicts merge recursively; scalars and lists replace wholesale). Candidate
-priority, highest first:
+Settings are DEEP-MERGED across every candidate file that exists, higher
+priority overriding lower key-by-key (nested dicts merge recursively,
+scalars and lists replace wholesale). Candidate priority, highest first:
   1. $FNO_CONFIG env var (explicit path; when set, the ONLY candidate)
   2. <worktree_root>/.fno/settings.yaml  (project-local to this checkout)
   3. <canonical_root>/.fno/settings.yaml  (the main checkout's config,
@@ -12,16 +11,13 @@ priority, highest first:
      deduped when 2 == 3)
   4. ~/.fno/settings.yaml  (per-user global; shared defaults)
 
-A key absent from a higher-priority file falls through to the next file
-down, so the per-user global can hold shared defaults (e.g.
-config.obsidian.vault) while each project sets only its deltas (e.g.
-config.post_merge.parking_lot_path). When no file exists, built-in defaults apply.
-This mirrors the shell reader (scripts/lib/config.sh, per-key local->global
-fallback) and the provider loader, both of which already merge project-local
-over global.
+A key absent from a higher-priority file falls through to the next file down,
+so the per-user global holds shared defaults while each project sets only its
+deltas. With no file, built-in defaults apply. This mirrors the shell reader
+(scripts/lib/config.sh, per-key local->global fallback) and the provider loader.
 
-Cache: load_settings() is cached per-process via functools.lru_cache.
-Mid-process edits to settings.yaml do not take effect; the next
+Cache: load_settings() is cached per-process via functools.lru_cache;
+mid-process edits to settings.yaml do not take effect; the next
 subprocess sees the new value.
 
 Design decisions (locked in 2026-05-14-path-config.md):
@@ -140,6 +136,7 @@ class PathsBlock(BaseModel):
     loops_paused_json: Optional[str] = None
     observer_reports_dir: Optional[str] = None
     operator_lane: Optional[str] = None
+    spaces_dir: Optional[str] = None
 
     @field_validator(
         "graph_json",
@@ -160,6 +157,7 @@ class PathsBlock(BaseModel):
         "loops_paused_json",
         "observer_reports_dir",
         "operator_lane",
+        "spaces_dir",
         mode="before",
     )
     @classmethod
@@ -2441,19 +2439,13 @@ class AgentsBlock(BaseModel):
     # Opt in per machine after happy is installed and paired. Only routed claude
     # panes use it; primary claude, every other harness, and bg stay unchanged.
     happy_routed_panes: bool = False
-    # Dead-row GC grace window in SECONDS (x-b1aa). A finished agent-view row
-    # stays visible this long after the daemon GC first observes its process gone,
-    # before it is reaped. Default 3600 (1h). The Rust daemon + `fno agents reap`
-    # read the same `config.agents.dead_row_grace` key (agents_config.rs), so a
-    # non-default here changes both the automatic sweep and the manual verb.
-    #
-    # Also accepts a per-harness table, `agents.dead_row_grace.<harness> =
-    # <seconds>` (x-9de7 task 6): a codex worker's working session runs 6-8h,
-    # so the single global default reads its normal silence as staleness.
-    # A harness absent from the table falls back to this default, not to a
-    # sibling harness's number -- see `agents_config::dead_row_grace_secs`,
-    # the resolver this type mirrors.
-    dead_row_grace: int | dict[str, int] = 3600
+    # Row-retirement grace in SECONDS (x-c672): a worker's registry row
+    # retires when every node its session is named on is done AND its
+    # transcript has been quiet this long. The Rust daemon's sweep reads the
+    # same `config.agents.retire_grace_s` key (agents_config.rs), so a
+    # non-default here changes both the idle tick and `fno agents reap`.
+    # A legacy `recovery.retire_grace_s` still parses (lifted with a warning).
+    retire_grace_s: int = Field(default=900, ge=0)
     # Reap-receipt retention (x-6db9). The Rust daemon expires receipts past
     # this window in the same GC sweep that writes new ones; the Pydantic
     # mirror keeps `fno config get` honest. A receipt whose reaped_at cannot
@@ -2511,19 +2503,6 @@ class AgentsBlock(BaseModel):
     # (prompting, expressed positively). Interactive `fno agents spawn` does NOT
     # read this. Claude-native value, fail-closed at the spawn seam, never here.
     spawn_permission_mode: str = "bypassPermissions"
-
-    @field_validator("dead_row_grace")
-    @classmethod
-    def dead_row_grace_nonneg(cls, v: int | dict[str, int]) -> int | dict[str, int]:
-        """Grace is a duration; a negative value is a config error (would reap
-        instantly, defeating the visibility window). Checks every value when
-        `v` is a per-harness table (x-9de7 task 6), not just the shape."""
-        for secs in v.values() if isinstance(v, dict) else (v,):
-            if secs < 0:
-                raise ValueError(
-                    f"config.agents.dead_row_grace must be >= 0 seconds; got {secs}"
-                )
-        return v
 
     @field_validator("profiles", mode="before")
     @classmethod
@@ -3325,25 +3304,14 @@ class RecoveryBlock(BaseModel):
     idle_threshold_seconds:
         How old family-1 transcript activity may be before recovery acts on a
         session (default 900 = 15 min). Keep it above the longest expected
-        single-tool runtime because a long build can legitimately produce no
-        transcript turn while it runs.
+        single-tool runtime: a long build legitimately produces no turn.
     max_nudges:
-        Per-session cap on held-by-design surfaces before the sweep gives up and
-        emits ``recovery_capped`` (default 3) so a genuinely wedged session
-        surfaces instead of looping forever. Close notifications are once-only,
-        tracked separately.
+        Per-session cap on held-by-design surfaces before the sweep gives up
+        and emits ``recovery_capped`` (default 3). Close notifications are
+        once-only, tracked separately.
     watchdog:
         The fleet watchdog lane, as a nested block. See
         :mod:`fno.config._watchdog`.
-    retire_grace_s:
-        How long a finished worker stays parked before ``--apply-all`` stops
-        it (default 900). A worker that declares itself done and never exits
-        holds a live slot against ``config.agents.max_live`` forever; this is
-        the follow-up window before the retire lane takes the slot back, so a
-        worker that just delivered can still be asked one more thing. ``0``
-        turns the lane off entirely. Unlike reap this ships ARMED, because
-        retire only runs ``stop``: the worktree, the transcript and the
-        registry row all survive and ``fno agents resume`` undoes it.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -3359,7 +3327,6 @@ class RecoveryBlock(BaseModel):
     def _coerce_legacy_watchdog(cls, data: object) -> object:
         return _watchdog.coerce_legacy(data)
 
-    retire_grace_s: int = Field(default=900, ge=0)
     provider_outage_quorum: int = Field(default=2, ge=1)
     provider_outage_fup_window_seconds: int = Field(default=300, ge=300)
     provider_outage_529_count: int = Field(default=3, ge=3)
@@ -4126,8 +4093,8 @@ class MuxBlock(BaseModel):
 
     ``notify_on_blocked`` / ``notify_on_done`` (x-dd84) fire an OS notification
     when a badge enters blocked / done. The Rust daemon reads these straight from
-    settings.yaml (``agents_config.rs``, the same split-brain as
-    ``config.agents.dead_row_grace``); modeling them here keeps every mux key
+    config.toml (``agents_config.rs``, the same split-brain as
+    ``config.agents.retire_grace_s``); modeling them here keeps every mux key
     discoverable via ``fno config get/set``, the wizard, and the generated docs.
 
     Fields
@@ -4607,6 +4574,11 @@ class ConfigBlock(BaseModel):
     status_fanout: StatusFanoutConfig = Field(default_factory=StatusFanoutConfig)
     king: KingBlock = Field(default_factory=KingBlock)
     accounts: AccountsBlock = Field(default_factory=AccountsBlock)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_legacy_retire_grace(cls, data: object) -> object:
+        return _watchdog.lift_retire_grace(data)
 
     @field_validator("status_sinks", mode="before")
     @classmethod

@@ -981,8 +981,9 @@ def test_rm_crowned_agent_cleans_its_scope_manifest_best_effort(
     from fno.agents import dispatch
     from fno.agents.harnesses import claude as claude_mod
     from fno.king.state import king_manifest_path, write_manifest
+    from fno.paths import space_dir
 
-    manifest = king_manifest_path("alpha", state_root=tmp_path / ".fno")
+    manifest = king_manifest_path("alpha", state_root=space_dir(tmp_path))
     write_manifest(manifest, scope="alpha", harness_session_id="session-worker")
     monkeypatch.setattr(claude_mod, "claude_rm", lambda short_id, *, timeout=30.0: (0, ""))
 

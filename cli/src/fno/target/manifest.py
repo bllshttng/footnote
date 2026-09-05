@@ -37,6 +37,7 @@ def read_target_manifest(project_root: Path) -> Optional[dict[str, Any]]:
     which can differ under ``FNO_REPO_ROOT`` or a subdirectory).
     """
     raw: Optional[dict[str, Any]] = None
+    ctx = None
     try:
         from fno.agent.state import load_agent_context
 
@@ -45,7 +46,10 @@ def read_target_manifest(project_root: Path) -> Optional[dict[str, Any]]:
             raw = dict(ctx.session.raw)
     except Exception:  # noqa: BLE001 - no/unreadable manifest is fine
         pass
-    manifest = project_root / ".fno" / "target-state.md"
+    manifest = getattr(getattr(ctx, "session", None), "path", None)
+    if manifest is None:
+        from fno import paths as _paths
+        manifest = _paths.target_state_path_or_legacy(project_root)
     try:
         text = manifest.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):

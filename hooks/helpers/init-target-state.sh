@@ -23,17 +23,39 @@
 set -euo pipefail
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-STATE_FILE="$REPO_ROOT/.fno/target-state.md"
+
+# Project state files resolve through the owning verb (the repo's space under
+# ~/.fno/spaces/, keyed on the canonical root). Degraded fallback for an fno
+# predating the verb: the legacy checkout path, spelled with its real filename.
+_space_state_path() {
+  local p
+  p=$(fno-agents state path "$1" 2>/dev/null || true)
+  if [[ -z "$p" ]]; then
+    case "$1" in
+      target-state) p="$REPO_ROOT/.fno/target-state.md" ;;
+      events)       p="$REPO_ROOT/.fno/events.jsonl" ;;
+      scratchpad)   p="$REPO_ROOT/.fno/scratchpad" ;;
+      *)            p="$REPO_ROOT/.fno/$1" ;;
+    esac
+  fi
+  printf '%s\n' "$p"
+}
+
+STATE_FILE=$(_space_state_path target-state)
 STATE_DIR="$(dirname "$STATE_FILE")"
 
-# Guard: only run when the target skill explicitly asked for init.
-if [[ "${TARGET_START:-}" != "1" ]] && [[ ! -f "$STATE_DIR/.target-starting" ]]; then
+# Guard: only run when the target skill explicitly asked for init. The legacy
+# sentinel sat beside the old checkout path; check both during the fallback
+# window so an old skill body still triggers.
+if [[ "${TARGET_START:-}" != "1" ]] \
+   && [[ ! -f "$STATE_DIR/.target-starting" ]] \
+   && [[ ! -f "$REPO_ROOT/.fno/.target-starting" ]]; then
   exit 0
 fi
 
 # Consume both triggers so a single trigger fires at most once.
 unset TARGET_START
-rm -f "$STATE_DIR/.target-starting"
+rm -f "$STATE_DIR/.target-starting" "$REPO_ROOT/.fno/.target-starting" 2>/dev/null || true
 
 # ── Review-capability gate on the unwrapped path (x-4a60) ────────────
 # `fno do target init` runs both review refusals in-process and says so with
@@ -312,8 +334,9 @@ fi
 # script's project-local STATE_DIR. Re-derive ours or every sentinel/manifest
 # path below silently retargets the global dir (caught by
 # tests/hooks/test_pending_plan_wipe.sh, ab-d0337fbc).
-STATE_FILE="$REPO_ROOT/.fno/target-state.md"
+STATE_FILE=$(_space_state_path target-state)
 STATE_DIR="$(dirname "$STATE_FILE")"
+SPACE_DIR="$(dirname "$(_space_state_path events)")"
 
 _attended="true"
 if [[ "${TARGET_UNATTENDED:-}" == "1" ]]; then
@@ -564,13 +587,18 @@ _worktree_has_fresh_activity() {
     mt="$(_stat_mtime "$root/$f")"
     if (( mt > newest )); then newest="$mt"; _ACTIVITY_EVIDENCE="modified $f"; fi
   done < <(git -C "$root" diff --name-only HEAD 2>/dev/null || true)
-  # scratchpad tree - a live /target session writes here continuously.
-  if [[ -d "$root/.fno/scratchpad" ]]; then
+  # scratchpad tree - a live /target session writes here continuously. It
+  # lives in the worktree slice of the repo's space; fall back to the legacy
+  # checkout path for an fno predating the verb.
+  local spad
+  spad="$(cd "$root" 2>/dev/null && fno-agents state path scratchpad 2>/dev/null || true)"
+  [[ -z "$spad" ]] && spad="$root/.fno/scratchpad"
+  if [[ -d "$spad" ]]; then
     while IFS= read -r f; do
       [[ -z "$f" ]] && continue
       mt="$(_stat_mtime "$f")"
       if (( mt > newest )); then newest="$mt"; _ACTIVITY_EVIDENCE="scratchpad ${f##*/}"; fi
-    done < <(find "$root/.fno/scratchpad" -type f 2>/dev/null || true)
+    done < <(find "$spad" -type f 2>/dev/null || true)
   fi
   # AC1-EDGE: borderline mtimes err toward "fresh" (skip is cheap, steal is not)
   # via strict `<` against the window, and clock skew that makes a file appear in
@@ -618,9 +646,9 @@ if [[ -f "$STATE_FILE" ]]; then
   # manifest session with a completed reason. Budget/stuck finalizations remain
   # resumable, and malformed or unreadable logs preserve the manifest.
   if [[ -z "$_STALE_REASON" && -z "$_STALE_CLAIM_KEY" \
-        && -n "$_STALE_SESSION_ID" && -f "$STATE_DIR/events.jsonl" \
+        && -n "$_STALE_SESSION_ID" && -f "$SPACE_DIR/events.jsonl" \
         && -x "$(command -v python3 2>/dev/null || true)" ]]; then
-    if python3 - "$STATE_DIR/events.jsonl" "$_STALE_SESSION_ID" "$STATE_DIR/.target-cancelled" <<'PYEOF'
+    if python3 - "$SPACE_DIR/events.jsonl" "$_STALE_SESSION_ID" "$REPO_ROOT/.fno/.target-cancelled" <<'PYEOF'
 import json
 import sys
 from pathlib import Path
@@ -1140,7 +1168,7 @@ owner_started_at: $local_owner_started_at
 owner_cwd: "$local_owner_cwd"
 claude_session_id: $claude_transcript_id
 codex_thread_id: $codex_thread_id
-scratchpad_path: $REPO_ROOT/.fno/scratchpad
+scratchpad_path: $STATE_DIR/scratchpad
 target_size: ${TARGET_SIZE:-}
 # Dispatch pins - a model/provider chosen at \`fno do target start\`/\`init\`, carried
 # to this session's dispatched workers. Empty = unpinned (spawn-time defaults).

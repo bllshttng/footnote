@@ -1,157 +1,442 @@
-//! The gc ladder, reap-receipt gate and plan_reconcile test families,
-//! moved verbatim out of daemon.rs (file budget shrink). Shared helpers
-//! (`tmp_home`, `ask_row`, `rentry`, `no_tails`, `probe`, `civil`, ...)
+//! The retirement sweep, reap-receipt gate and plan_reconcile test
+//! families. Shared helpers (`tmp_home`, `ask_row`, `rentry`, `civil`, ...)
 //! stay in the parent tests module and resolve through the glob.
 use super::*;
 
-// ── x-91f3: is_live from the ladder, and every keep is named ────────────
+use crate::gc_sweep::{self, GcSummary, GraphRead};
 
-/// The acceptance, against a fixture registry shaped like the real one:
-/// most rows carry neither `short_id` nor `pid` (structural for codex,
-/// whose sessions a shared app-server hosts), their stored status is
-/// live-ish, and two rows only the ladder can vouch for - an unstamped
-/// claude row whose transcript truth state reads `working` (named LIVE),
-/// and a stamped codex row whose heartbeat advanced past its own exit
-/// stamp (resolved as live: the false stamp is cleared and the clear is
-/// reported). Before x-91f3 every row here read not-live and landed in
-/// the silent `_ => {}` arm: `fno agents reap --dry-run` named zero of
-/// the rows it kept. This test cannot pass with `is_live` wrong: the
-/// truth-alive row must be named LIVE, the surface-less rows NOT
-/// TERMINAL, the named set must cover every row, and the sweep must
-/// still reap NOTHING - the fix is a classification-and-reporting
-/// change, never a removal.
-#[test]
-fn gc_sweep_names_every_kept_row_on_a_real_shaped_registry() {
-    let home = tmp_home("gc-names-kept");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+// ── x-c672: the retirement sweep, keyed by the reverse join ─────────────
+
+/// A transcript file untouched for `age_secs`, so the activity read answers
+/// a positive quiet past the grace.
+fn quiet_transcript(dir: &std::path::Path, name: &str, age_secs: i64) -> std::path::PathBuf {
+    use std::io::Write;
+    let path = dir.join(name);
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(f, "{{}}").unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs();
-    let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-    let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-    let (y2, mo2, d2, h2, mi2, s2) = civil(now - 3600);
-    let beat_at = format!("{y2:04}-{mo2:02}-{d2:02}T{h2:02}:{mi2:02}:{s2:02}Z");
+        .as_secs() as i64;
+    let mtime = std::time::SystemTime::UNIX_EPOCH
+        + std::time::Duration::from_secs((now - age_secs).max(0) as u64);
+    f.set_modified(mtime).unwrap();
+    path
+}
+
+/// Build the injected graph seam from `(session, node, status)` triples and
+/// `(session, node)` open-do pairs.
+fn graph_read(named: &[(&str, &str, &str)], open_do: &[(&str, &str)]) -> Option<GraphRead> {
+    let mut index: std::collections::HashMap<String, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    for (sid, node, status) in named {
+        index
+            .entry(sid.to_ascii_lowercase())
+            .or_default()
+            .push((node.to_string(), status.to_string()));
+    }
+    let mut open: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for (sid, node) in open_do {
+        open.entry(sid.to_ascii_lowercase())
+            .or_default()
+            .push(node.to_string());
+    }
+    Some(GraphRead {
+        index,
+        open_do: open,
+    })
+}
+
+/// A retirement-shaped sweep for the dispatch-accounting tests: every row
+/// named on a done node, its staged transcript quiet (grace 0), stop
+/// confirmed, no tree.
+fn retire_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    named: &[(&str, &str, &str)],
+    transcripts: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
+) -> GcSummary {
+    let graph = graph_read(named, &[]);
+    gc_sweep::run(
+        home,
+        emitter,
+        0,
+        false,
+        7,
+        &move |_| graph.clone(),
+        transcripts,
+        &|_| true,
+        &|_| (None, None),
+        &|_| {},
+    )
+}
+
+/// The sweep against staged seams: graph as staged, transcripts as staged,
+/// stop always confirmed, tree probes staged per name, prune recorded.
+fn staged_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace_secs: i64,
+    graph: Option<GraphRead>,
+    transcripts: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
+    trees: &dyn Fn(&str) -> (Option<bool>, Option<bool>),
+) -> GcSummary {
+    let pruned = std::cell::RefCell::new(Vec::new());
+    let summary = gc_sweep::run(
+        home,
+        emitter,
+        grace_secs,
+        false,
+        7,
+        &move |_| graph.clone(),
+        transcripts,
+        &|_| true,
+        &|e| trees(&e.name),
+        &|e| pruned.borrow_mut().push(e.name.clone()),
+    );
+    let _ = pruned;
+    summary
+}
+
+/// AC4-HP, the epic's VERIFICATION three-row marker. Row A is named on a
+/// done node and owns a clean linked worktree: it retires with its basis,
+/// its tree is pruned, and the branch-shaped protections (transcript on
+/// disk, no graph mutation) hold. Row B is named on one done and one
+/// open node: kept, naming the open node. Row C is named nowhere: kept,
+/// no provenance.
+#[test]
+fn ac4_hp_three_row_marker_retires_prunes_and_names_every_keep() {
+    let home = tmp_home("gc-ac4");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let a_path = quiet_transcript(transcripts.path(), "a.jsonl", 2 * 3600);
+    let b_path = quiet_transcript(transcripts.path(), "b.jsonl", 2 * 3600);
+    let c_path = quiet_transcript(transcripts.path(), "c.jsonl", 2 * 3600);
     state::update_registry(&home.registry_json(), |r| {
-        // The majority shape on the measured registry: live-ish status,
-        // no short_id, no pid, nothing for a process surface to vouch
-        // with.
-        for name in ["idle-a", "idle-b", "idle-c"] {
-            let mut e = ask_row(name, None);
-            e.status = AgentStatus::Idle;
-            r.entries.push(e);
-        }
-        // Unstamped, surface-less, alive only through the truth rung: a
-        // claude row whose transcript says the session is working. The
-        // persisted session id is harness_session_id; the ladder reads
-        // the claude uuid backfilled from it on load. The old derivation
-        // called this row not-live; the ladder calls it live.
-        let mut truth_live = ask_row("truth-live", None);
-        truth_live.status = AgentStatus::Idle;
-        truth_live.harness = Some("claude".into());
-        r.entries.push(truth_live);
-        // Stamped, surface-less, alive only through the heartbeat rung:
-        // received strictly later than the row's own exit stamp.
-        let mut heartbeat_live = codex_thread_row("cx-live", Some(exited_at.as_str()));
-        heartbeat_live.status = AgentStatus::Idle;
-        heartbeat_live.inside_leg = Some(state::InsideLegReport {
-            state: state::InsideLegState::Working,
-            seq: 1,
-            reason: None,
-            received_at: beat_at,
-            ttl_ms: None,
-        });
-        r.entries.push(heartbeat_live);
+        let mut a = ask_row("row-a", None);
+        a.short_id = "rowa".into();
+        a.harness = Some("claude".into());
+        a.harness_session_id = Some("sess-a".into());
+        a.origin = Some("spawn".into());
+        // A hosted worker, not a one-shot ask: the row owns its worktree.
+        a.host_mode = Some(state::HOST_MODE_INTERACTIVE.into());
+        // A linked worktree: `.git` is a file.
+        let wt = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(wt.path()).unwrap();
+        std::fs::write(wt.path().join(".git"), "gitdir: /x/worktrees/a\n").unwrap();
+        a.cwd = wt.keep().to_string_lossy().into_owned();
+        r.entries.push(a);
+        let mut b = ask_row("row-b", None);
+        b.short_id = "rowb".into();
+        b.harness_session_id = Some("sess-b".into());
+        b.origin = Some("spawn".into());
+        r.entries.push(b);
+        let mut c = ask_row("row-c", None);
+        c.short_id = "rowc".into();
+        c.harness_session_id = Some("sess-c".into());
+        c.origin = Some("spawn".into());
+        r.entries.push(c);
     })
     .unwrap();
 
-    // The ladder as production folds it: the truth batch over the
-    // fixture rows with the tail read staged (one uuid answers
-    // `working`), then the production prober over that map - the truth
-    // rung reaches the ladder through the SAME seam the daemon tick
-    // uses, batch included. The socket rung reads the real sessions
-    // index but every fixture row carries an empty short_id, so the
-    // rung is skipped for all of them; the only markers that can fire
-    // are the truth rung and the heartbeat rung, the markers pid-less
-    // rows are judged by.
-    let entries = state::load_registry(&home.registry_json()).unwrap().entries;
-    let truth = batched_row_states(&entries, &|handles: &[String]| {
-        handles
-            .iter()
-            .filter(|h| h.as_str() == "truth-live-sess")
-            .map(|h| (h.clone(), "working".to_string()))
-            .collect()
-    });
-    let summary = gc_sweep_impl(
+    let summary = staged_sweep(
         &home,
         &emitter,
-        &|_| Duration::from_secs(3600),
-        false,
-        7,
-        &no_tails,
-        &|_| None,
-        &live_liveness_prober(truth),
-        &|_| None,
+        900,
+        graph_read(
+            &[
+                ("sess-a", "N1", "done"),
+                ("sess-b", "N2", "done"),
+                ("sess-b", "N3", "in_review"),
+            ],
+            &[],
+        ),
+        &|e| match e.harness_session_id.as_deref() {
+            Some("sess-a") => Some(vec![a_path.clone()]),
+            Some("sess-b") => Some(vec![b_path.clone()]),
+            Some("sess-c") => Some(vec![c_path.clone()]),
+            _ => None,
+        },
+        &|name| {
+            // A's tree: clean and merged; B and C own nothing removable.
+            let _ = name;
+            (Some(true), Some(true))
+        },
     );
 
-    assert!(summary.reaped.is_empty(), "{:?}", summary.reaped);
-    assert!(summary.reaped_backstop.is_empty());
-    assert!(summary.reaped_dormant.is_empty());
-    // NON-ZERO, per gate: the truth-alive row reads live through the
-    // ladder, the surface-less rows keep as not-terminal - each named.
-    assert_eq!(summary.kept_live, vec!["truth-live".to_string()]);
+    assert_eq!(
+        summary.retired,
+        vec![("rowa".to_string(), "every named node done: N1".to_string())],
+        "{:?}",
+        summary.retired
+    );
+    assert_eq!(summary.pruned.len(), 1, "{:?}", summary.pruned);
+    assert_eq!(
+        summary.kept_open_work,
+        vec![(
+            "rowb".to_string(),
+            "N3".to_string(),
+            "in_review".to_string()
+        )]
+    );
+    assert_eq!(summary.kept_no_provenance, vec!["rowc".to_string()]);
+    // The retired vocabulary: none of the exit-stamp words appears.
+    let rendered = format!("{summary:?}");
+    for word in [
+        "exited_at",
+        "not-terminal",
+        "contradicted",
+        "within-grace",
+        "uncorroborated",
+        "backstop",
+    ] {
+        assert!(!rendered.contains(word), "{word} leaked: {rendered}");
+    }
+    // The receipt survived (the resumable handle), and the other rows stayed.
+    let reg = state::load_registry(&home.registry_json()).unwrap();
+    assert!(reg.entries.iter().all(|e| e.name != "row-a"));
+    assert!(reg.entries.iter().any(|e| e.name == "row-b"));
+    assert!(reg.entries.iter().any(|e| e.name == "row-c"));
+    let receipts = home.root().join("reap-receipts");
+    assert!(
+        receipts.join("claude-sess-a.json").exists(),
+        "the resume handle must be durable before the row leaves"
+    );
+
+    // AC4-EDGE: touch A's transcript and rerun as a fresh home - the same
+    // row shape with a fresh transcript is ACTIVE, nothing retires.
+    let home2 = tmp_home("gc-ac4-active");
+    let emitter2 = EventEmitter::new(home2.events_jsonl(), "daemon");
+    let fresh = quiet_transcript(transcripts.path(), "a-fresh.jsonl", 10);
+    state::update_registry(&home2.registry_json(), |r| {
+        let mut a = ask_row("row-a", None);
+        a.short_id = "rowa".into();
+        a.harness_session_id = Some("sess-a".into());
+        a.origin = Some("spawn".into());
+        r.entries.push(a);
+    })
+    .unwrap();
+    let summary = staged_sweep(
+        &home2,
+        &emitter2,
+        900,
+        graph_read(&[("sess-a", "N1", "done")], &[]),
+        &|_| Some(vec![fresh.clone()]),
+        &|_| (Some(true), Some(true)),
+    );
+    let [(row, age)] = summary.kept_active.as_slice() else {
+        panic!("expected one kept-active row: {:?}", summary.kept_active);
+    };
+    assert_eq!(row, "rowa");
+    // The transcript was stamped now-10s; a loaded runner measures the write
+    // a second or two later, so pin the RANGE (fresh, inside the 900s grace),
+    // never the wall-clock instant.
+    assert!(
+        *age >= 10 && *age < 900,
+        "age {age} should read fresh, got {summary:?}"
+    );
+    assert!(summary.retired.is_empty());
+    assert!(summary.pruned.is_empty());
+    let reg = state::load_registry(&home2.registry_json()).unwrap();
+    assert!(reg.entries.iter().any(|e| e.name == "row-a"));
+}
+
+/// AC4-ERR, both arms: an unreadable graph keeps every row (never a
+/// retirement on a failed read), and a stop that does not confirm keeps
+/// the row under `stop_refused`.
+#[test]
+fn ac4_err_graph_unreadable_and_stop_refusal_keep_every_row() {
+    let home = tmp_home("gc-ac4-err");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    state::update_registry(&home.registry_json(), |r| {
+        for name in ["row-a", "row-b"] {
+            let mut e = ask_row(name, None);
+            e.harness_session_id = Some(format!("sess-{name}"));
+            e.origin = Some("spawn".into());
+            r.entries.push(e);
+        }
+    })
+    .unwrap();
+
+    // Graph unreadable: every row keeps under that one reason.
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &|_| None,
+        &|_| None,
+        &|_| true,
+        &|_| (Some(true), Some(true)),
+        &|_| {},
+    );
+    assert!(summary.retired.is_empty());
+    assert_eq!(
+        summary.kept_graph_unreadable,
+        vec!["row-a".to_string(), "row-b".to_string()]
+    );
+    let reg = state::load_registry(&home.registry_json()).unwrap();
+    assert_eq!(reg.entries.len(), 2);
+
+    // Stop refused: the row earned its retirement but the process could
+    // not be confirmed stopped, so it stays for the next tick.
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "q.jsonl", 2 * 3600);
+    let graph = graph_read(&[("sess-row-a", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![quiet.clone()]),
+        &|e| e.name != "row-a",
+        &|_| (Some(true), Some(true)),
+        &|_| {},
+    );
+    assert!(summary.retired.is_empty());
     assert_eq!(
         summary
-            .kept_not_terminal
+            .stop_refused
             .iter()
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>(),
-        vec![
-            "idle-a".to_string(),
-            "idle-b".to_string(),
-            "idle-c".to_string()
-        ]
+        vec!["row-a".to_string()]
     );
-    // The heartbeat row's stale stamp is CLEARED on the ladder's positive
-    // answer (the x-5d96 resolution, reported - never a reap): a kept
-    // stamp would hand gc an old clock that skips grace at the row's
-    // real death.
-    assert_eq!(summary.cleared_contradiction, vec!["cx-live".to_string()]);
-    // And the named set covers EVERY row: no silent keep survives.
-    let named: std::collections::BTreeSet<String> = summary
-        .kept_live
-        .iter()
-        .chain(summary.kept_not_terminal.iter().map(|(id, _)| id))
-        .chain(summary.kept_contradicted.iter())
-        .chain(summary.cleared_contradiction.iter())
-        .chain(summary.kept_uncorroborated.iter())
-        .chain(summary.kept_dirty.iter().map(|(id, _)| id))
-        .chain(summary.kept_no_receipt.iter().map(|(id, _)| id))
-        .cloned()
-        .collect();
     let reg = state::load_registry(&home.registry_json()).unwrap();
-    let live_row = reg.entries.iter().find(|e| e.name == "cx-live").unwrap();
-    assert!(
-        live_row.exited_at.is_none(),
-        "the false stamp is gone from the proven-alive row"
+    assert!(reg.entries.iter().any(|e| e.name == "row-a"));
+}
+
+/// Locked Decision 1: every named node done but one carries an OPEN do row
+/// for this session -> the row keeps, the node is named, and the sweep never
+/// settles graph rows on a retirement.
+#[test]
+fn an_open_do_row_on_a_done_node_holds_the_retirement() {
+    let home = tmp_home("gc-open-do");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "d.jsonl", 2 * 3600);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut e = ask_row("row-d", None);
+        e.short_id = "rowd".into();
+        e.harness_session_id = Some("sess-d".into());
+        e.origin = Some("spawn".into());
+        r.entries.push(e);
+    })
+    .unwrap();
+    let graph = graph_read(&[("sess-d", "N1", "done")], &[("sess-d", "N1")]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![quiet.clone()]),
+        &|_| true,
+        &|_| (Some(true), Some(true)),
+        &|_| {},
     );
+    assert!(summary.retired.is_empty());
     assert_eq!(
-        named.len(),
-        reg.entries.len(),
-        "a kept row the report does not name: named={named:?}"
+        summary.kept_open_do_row,
+        vec![("rowd".to_string(), "N1".to_string())]
     );
-    assert!(
-        reg.entries.iter().all(|e| named.contains(e.name.as_str())),
-        "every row still on disk, each one named"
+    let reg = state::load_registry(&home.registry_json()).unwrap();
+    assert!(reg.entries.iter().any(|e| e.name == "row-d"));
+}
+
+/// The origin and crown protections, and the tree buckets on a retired row.
+#[test]
+fn operator_and_crowned_rows_never_retire_and_tree_buckets_only_keep_trees() {
+    let home = tmp_home("gc-protect");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let q1 = quiet_transcript(transcripts.path(), "o.jsonl", 2 * 3600);
+    let q2 = quiet_transcript(transcripts.path(), "k.jsonl", 2 * 3600);
+    let q3 = quiet_transcript(transcripts.path(), "t.jsonl", 2 * 3600);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut o = ask_row("row-o", None);
+        o.short_id = "rowo".into();
+        o.harness_session_id = Some("sess-o".into());
+        o.origin = Some("operator".into());
+        r.entries.push(o);
+        let mut k = ask_row("row-k", None);
+        k.short_id = "rowk".into();
+        k.harness_session_id = Some("sess-k".into());
+        k.origin = Some("spawn".into());
+        k.crown_level = Some(1);
+        r.entries.push(k);
+        let mut t = ask_row("row-t", None);
+        t.short_id = "rowt".into();
+        t.harness_session_id = Some("sess-t".into());
+        t.origin = Some("spawn".into());
+        t.host_mode = Some(state::HOST_MODE_INTERACTIVE.into());
+        let wt = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(wt.path()).unwrap();
+        std::fs::write(wt.path().join(".git"), "gitdir: /x/worktrees/t\n").unwrap();
+        t.cwd = wt.keep().to_string_lossy().into_owned();
+        r.entries.push(t);
+    })
+    .unwrap();
+    let graph = graph_read(
+        &[
+            ("sess-o", "N1", "done"),
+            ("sess-k", "N1", "done"),
+            ("sess-t", "N1", "done"),
+        ],
+        &[],
     );
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |e| match e.harness_session_id.as_deref() {
+            Some("sess-o") => Some(vec![q1.clone()]),
+            Some("sess-k") => Some(vec![q2.clone()]),
+            _ => Some(vec![q3.clone()]),
+        },
+        &|_| true,
+        // row-t's tree: dirty. The row retires; the tree stays and is named.
+        &|e| {
+            if e.name == "row-t" {
+                (Some(false), None)
+            } else {
+                (Some(true), Some(true))
+            }
+        },
+        &|_| {},
+    );
+    assert_eq!(summary.kept_operator, vec!["rowo".to_string()]);
+    assert_eq!(summary.kept_crowned, vec!["rowk".to_string()]);
+    assert_eq!(
+        summary
+            .retired
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>(),
+        vec!["rowt".to_string()],
+        "a dirty tree never pins the row"
+    );
+    assert_eq!(summary.kept_dirty.len(), 1, "{:?}", summary.kept_dirty);
+    assert!(summary.pruned.is_empty());
+    let reg = state::load_registry(&home.registry_json()).unwrap();
+    assert!(reg.entries.iter().all(|e| e.name != "row-t"));
+    assert!(reg.entries.iter().any(|e| e.name == "row-o"));
+    assert!(reg.entries.iter().any(|e| e.name == "row-k"));
 }
 
 #[test]
 fn the_truth_batch_includes_unstamped_rows() {
-    // The ladder's is_live vote reads the truth rung for EVERY row, so a
-    // stamped-only batch leaves the transcript - the one positive marker
-    // an unstamped, pid-less claude row can carry - permanently silent
-    // for that vote.
+    // The truth verb's ONE batch reaches every claude-uuid row, stamped or
+    // not: a stamped-only batch leaves the transcript - the one positive
+    // marker an unstamped, pid-less claude row can carry - permanently
+    // silent for the ladder's vote.
     let stamped = {
         let mut e = ask_row("stamped", Some("2020-01-01T00:00:00Z"));
         e.claude_session_uuid = Some("stamped-uuid".into());
@@ -163,27 +448,14 @@ fn the_truth_batch_includes_unstamped_rows() {
         e
     };
     let bare = ask_row("bare", None); // no uuid: must not reach the probe
-    let seen: std::cell::RefCell<Vec<Vec<String>>> = std::cell::RefCell::new(Vec::new());
-    let capture = |handles: &[String]| {
-        seen.borrow_mut().push(handles.to_vec());
-        std::collections::HashMap::new()
-    };
-    batched_row_states(&[stamped, unstamped], &capture);
-    assert_eq!(
-        seen.borrow().len(),
-        1,
-        "one batched call, however many rows"
-    );
-    let mut handles = seen.borrow_mut().pop().unwrap();
+    let mut handles = crate::daemon::row_truth_handles(&[stamped, unstamped]);
     handles.sort();
     assert_eq!(
         handles,
         vec!["stamped-uuid".to_string(), "unstamped-uuid".to_string()]
     );
-    seen.borrow_mut().clear();
-    batched_row_states(&[bare], &capture);
     assert!(
-        seen.borrow().is_empty(),
+        crate::daemon::row_truth_handles(&[bare]).is_empty(),
         "an empty candidate set spends nothing"
     );
 }
@@ -199,34 +471,39 @@ fn the_truth_batch_includes_unstamped_rows() {
 fn reap_receipt_built_from_the_row_when_the_ledger_has_no_entry() {
     let home = tmp_home("gc-receipt-row");
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-    let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "king.jsonl", 2 * 3600);
     state::update_registry(&home.registry_json(), |r| {
-        let mut e = ask_row("king-mux", Some(exited_at.as_str()));
+        let mut e = ask_row("king-mux", None);
         e.short_id = "kingmux".into();
         e.log_path = Some("/tmp/king-mux.log".into());
-        e.pid = Some(999_999_999); // no such process: confirmed dead
+        e.origin = Some("spawn".into());
         r.entries.push(e);
     })
     .unwrap();
 
-    let summary = gc_sweep_impl(
+    let graph = graph_read(&[("king-mux-sess", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
         &home,
         &emitter,
-        &|_| Duration::from_secs(3600),
+        900,
         false,
         7,
-        &no_tails,
-        &|_| None,
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        &|_| None,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![quiet.clone()]),
+        &|_| true,
+        &|_| (Some(true), Some(true)),
+        &|_| {},
     );
 
-    assert_eq!(summary.reaped, vec!["kingmux".to_string()]);
+    assert_eq!(
+        summary
+            .retired
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>(),
+        vec!["kingmux".to_string()]
+    );
     assert!(summary.kept_no_receipt.is_empty());
     // The row is gone AND the record of how to come back is on disk.
     let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -258,14 +535,10 @@ fn reap_receipt_built_from_the_row_when_the_ledger_has_no_entry() {
 fn a_row_whose_receipt_cannot_be_built_is_never_reaped() {
     let home = tmp_home("gc-receipt-unknown");
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-    let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "nocap.jsonl", 2 * 3600);
     state::update_registry(&home.registry_json(), |r| {
-        let mut e = ask_row("no-cap-row", Some(exited_at.as_str()));
+        let mut e = ask_row("no-cap-row", None);
         e.short_id = "nocap".into();
         // A harness with no capability row at all (hermes hosts real
         // sessions per docs/SETUP-*.md and ships no row) carries a
@@ -273,24 +546,26 @@ fn a_row_whose_receipt_cannot_be_built_is_never_reaped() {
         // case, by name. grok carried this fixture until x-fd31 landed
         // its row; hermes has no row to land.
         e.harness = Some("hermes".into());
-        e.pid = Some(999_999_999); // confirmed dead: nothing else holds it
+        e.origin = Some("spawn".into());
         r.entries.push(e);
     })
     .unwrap();
 
-    let summary = gc_sweep_impl(
+    let graph = graph_read(&[("no-cap-row-sess", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
         &home,
         &emitter,
-        &|_| Duration::from_secs(3600),
+        900,
         false,
         7,
-        &no_tails,
-        &|_| None,
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        &|_| None,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![quiet.clone()]),
+        &|_| true,
+        &|_| (Some(true), Some(true)),
+        &|_| {},
     );
 
-    assert!(summary.reaped.is_empty());
+    assert!(summary.retired.is_empty());
     assert_eq!(summary.kept_no_receipt.len(), 1);
     let (id, reason) = &summary.kept_no_receipt[0];
     assert_eq!(id, "nocap");
@@ -336,7 +611,7 @@ fn a_receipt_past_the_window_expires_in_the_same_sweep() {
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     let old = write_receipt_at(&home, "claude-old-sess.json", &rfc3339_days_ago(8));
 
-    let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
+    let summary = gc_sweep(&home, &emitter, 900, 7);
 
     assert!(!old.exists(), "the receipt past the window must be gone");
     assert_eq!(
@@ -351,13 +626,13 @@ fn a_receipt_inside_the_window_survives_and_the_window_flows() {
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     let recent = write_receipt_at(&home, "claude-recent-sess.json", &rfc3339_days_ago(6));
 
-    let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
+    let summary = gc_sweep(&home, &emitter, 900, 7);
     assert!(recent.exists());
     assert!(summary.expired_receipts.is_empty());
 
     // The same 6-day-old receipt under a 5-day window expires: the
     // configured value reaches the sweep, the default is not hardcoded.
-    let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 5);
+    let summary = gc_sweep(&home, &emitter, 900, 5);
     assert!(!recent.exists());
     assert_eq!(
         summary.expired_receipts,
@@ -372,7 +647,7 @@ fn a_receipt_whose_reaped_at_will_not_parse_is_kept_and_named() {
     let broken = write_receipt_at(&home, "claude-broken-sess.json", "");
     let missing = write_receipt_at(&home, "claude-missing-sess.json", "not-a-date");
 
-    let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
+    let summary = gc_sweep(&home, &emitter, 900, 7);
 
     // A failed read is not evidence of age: both survive, and the sweep
     // names what it kept so a silent pile-up is never mistaken for health.
@@ -395,7 +670,7 @@ fn dry_run_never_expires_receipts() {
     let home = tmp_home("gc-receipt-dryrun");
     let old = write_receipt_at(&home, "claude-old-sess.json", &rfc3339_days_ago(30));
 
-    let summary = gc_sweep_dry_run(&home, &|_| Duration::from_secs(3600));
+    let summary = gc_sweep_dry_run(&home, 900);
 
     assert!(old.exists());
     assert!(summary.expired_receipts.is_empty());
@@ -461,12 +736,15 @@ fn the_ledger_entry_enriches_the_receipt_when_one_exists() {
     )
     .unwrap();
 
-    let rows = ledger_rows(&path).expect("ledger parses");
-    let row = ledger_entry_in(&rows, "s-ledger").expect("the session resolves");
+    let rows = crate::gc_sweep::ledger_rows(&path).expect("ledger parses");
+    let row = crate::gc_sweep::ledger_entry_in(&rows, "s-ledger").expect("the session resolves");
     assert_eq!(row["graph_node_id"], "x-abc1");
-    assert!(ledger_entry_in(&rows, "s-never-recorded").is_none());
+    assert!(crate::gc_sweep::ledger_entry_in(&rows, "s-never-recorded").is_none());
     // The impostor row carries `sessions` as a string: never matched.
-    assert_eq!(ledger_entry_in(&rows, "s-ledger-impostor"), None);
+    assert_eq!(
+        crate::gc_sweep::ledger_entry_in(&rows, "s-ledger-impostor"),
+        None
+    );
 
     let mut e = ask_row("shipped", None);
     e.harness_session_id = Some("s-ledger".into());
@@ -482,34 +760,32 @@ fn the_ledger_entry_enriches_the_receipt_when_one_exists() {
 fn a_row_reaps_only_after_its_receipt_is_durable() {
     let home = tmp_home("gc-receipt-durability");
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-    let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
     std::fs::write(home.root().join("reap-receipts"), b"not a directory").unwrap();
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "undeliv.jsonl", 2 * 3600);
     state::update_registry(&home.registry_json(), |r| {
-        let mut e = ask_row("undeliverable", Some(exited_at.as_str()));
+        let mut e = ask_row("undeliverable", None);
         e.short_id = "undeliv".into();
-        e.pid = Some(999_999_999); // confirmed dead: the policy would reap
+        e.origin = Some("spawn".into());
         r.entries.push(e);
     })
     .unwrap();
 
-    let summary = gc_sweep_impl(
+    let graph = graph_read(&[("undeliverable-sess", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
         &home,
         &emitter,
-        &|_| Duration::from_secs(3600),
+        900,
         false,
         7,
-        &no_tails,
-        &|_| None,
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        &|_| None,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![quiet.clone()]),
+        &|_| true,
+        &|_| (Some(true), Some(true)),
+        &|_| {},
     );
 
-    assert!(summary.reaped.is_empty());
+    assert!(summary.retired.is_empty());
     assert!(
         summary
             .kept_no_receipt
@@ -520,679 +796,6 @@ fn a_row_reaps_only_after_its_receipt_is_durable() {
     );
     let reg = state::load_registry(&home.registry_json()).unwrap();
     assert!(reg.entries.iter().any(|e| e.name == "undeliverable"));
-}
-
-// A codex THREAD row (the x-6678 shape): harness codex, interactive host,
-// no claude short id, no pane of its own - the row that owns no pid by
-// design, because the shared daemon's pid is not the worker's to hold.
-fn codex_thread_row(name: &str, exited_at: Option<&str>) -> RegistryEntry {
-    let mut row = ask_row(name, exited_at);
-    row.harness = Some("codex".into());
-    row.host_mode = Some(state::HOST_MODE_INTERACTIVE.into());
-    row
-}
-
-/// A stopped codex thread row whose rollout still exists must NOT be
-/// corroborated-removable. PR 1255 correctly stopped recording a pid on
-/// this row shape, which silently emptied `liveness_surface` for every
-/// thread row and left `removal_is_corroborated` true on the
-/// `!liveness_surface` arm alone: reapable with no probe, no transcript
-/// read and no session check, while the thread is alive and resumable on
-/// the daemon and the row is the only pointer back to it. The store probe
-/// here answers the way codex's own rollout store does for a LIVE thread
-/// (the session exists, the transcript is fresh), so the ONLY thing that
-/// could reap this row is the missing-liveness arm.
-#[test]
-fn gc_sweep_keeps_a_stopped_codex_thread_row_whose_rollout_still_exists() {
-    let home = tmp_home("gc-codex-thread");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-    let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-    // Fresh mtime: inside the 1h grace, so transcript_fresh reads true.
-    let rollout = home.root().join("rollout-cx-thread.jsonl");
-    std::fs::write(&rollout, "{}\n").unwrap();
-    state::update_registry(&home.registry_json(), |r| {
-        r.entries
-            .push(codex_thread_row("cx-thread", Some(exited_at.as_str())));
-    })
-    .unwrap();
-
-    let summary = gc_sweep_impl(
-        &home,
-        &emitter,
-        &|_| Duration::from_secs(3600),
-        false,
-        7,
-        &no_tails,
-        &|e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
-            Some("cx-thread-sess") => Some(vec![rollout.clone()]),
-            _ => None,
-        },
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        &|_| None,
-    );
-
-    assert!(
-        !summary.reaped.contains(&"cx-thread".to_string()),
-        "a live codex thread's row is the only pointer back to the resumable session; {:?}",
-        summary.reaped
-    );
-    assert_eq!(
-        summary.kept_uncorroborated,
-        vec!["cx-thread".to_string()],
-        "kept, and the diagnostic names why"
-    );
-    let reg = state::load_registry(&home.registry_json()).unwrap();
-    assert!(
-        reg.entries.iter().any(|e| e.name == "cx-thread"),
-        "the row itself stays on disk"
-    );
-}
-
-/// The liveness term keys on ROW SHAPE, never on "has a session id". A
-/// codex ONE-SHOT ask (host_mode exec) records a `harness_session_id`
-/// naming a FINISHED exchange; widening the term there hands it a surface
-/// nothing probes, which strands it instead of reaping it.
-#[test]
-fn gc_sweep_still_reaps_a_codex_one_shot_ask_row_despite_a_session_id() {
-    let home = tmp_home("gc-codex-ask");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-    let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-    state::update_registry(&home.registry_json(), |r| {
-        let mut e = ask_row("cx-ask-done", Some(exited_at.as_str()));
-        e.harness = Some("codex".into());
-        e.host_mode = Some(state::HOST_MODE_EXEC.into());
-        r.entries.push(e);
-    })
-    .unwrap();
-
-    // Past grace, short of the backstop horizon, and the ONLY corroboration
-    // is the row's own store answering that the session is gone from it.
-    let summary = gc_sweep_impl(
-        &home,
-        &emitter,
-        &|_| Duration::from_secs(3600),
-        false,
-        7,
-        &no_tails,
-        &|_| Some(Vec::new()),
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        &|_| None,
-    );
-
-    assert_eq!(
-        summary.reaped,
-        vec!["cx-ask-done".to_string()],
-        "a finished one-shot ask with a session id must stay reapable"
-    );
-}
-
-// -- The harness-store corroboration seam (AC1 / AC3 / AC5) -------------
-
-#[test]
-fn harness_store_keying_never_judges_one_harness_by_anothers_store() {
-    // THE AC3 SPECIMEN: a codex worker has no claude transcript by
-    // construction. Judged by claude's store it reads "session gone" and
-    // reaps; judged by its own (empty) codex store it also reads gone -
-    // but the keying is what makes each answer belong to the right row,
-    // and an unknown harness must answer None (unjudgeable), never borrow
-    // either store.
-    let dir = tempfile::tempdir().expect("tmpdir");
-    let claude_root = dir.path().join("claude-projects");
-    let codex_root = dir.path().join("codex-sessions");
-    let project = claude_root.join("-proj");
-    std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(project.join("sid-1234.jsonl"), "{}\n").unwrap();
-    std::fs::create_dir_all(&codex_root).unwrap();
-
-    let row_for = |harness: Option<&str>, sid: Option<&str>| RegistryEntry {
-        node: None,
-        harness: harness.map(str::to_string),
-        harness_session_id: sid.map(str::to_string),
-        ..ask_row("keying", None)
-    };
-    let mut idx = HarnessStoreIndex::with_roots(claude_root.clone(), codex_root.clone());
-
-    let claude = idx
-        .matches(&row_for(Some("claude"), Some("sid-1234")))
-        .expect("claude store is readable, so it answers");
-    assert_eq!(claude.len(), 1, "the session exists in claude's own store");
-
-    let codex = idx
-        .matches(&row_for(Some("codex"), Some("sid-1234")))
-        .expect("codex store is readable, so it answers");
-    assert!(
-        codex.is_empty(),
-        "the codex store holds no such session: its own answer, independent of claude's"
-    );
-
-    for unknown in ["gemini", "opencode", "agy"] {
-        assert!(
-            idx.matches(&row_for(Some(unknown), Some("sid-1234")))
-                .is_none(),
-            "an unknown harness ({unknown}) is unjudgeable, never judged by another store"
-        );
-    }
-    // A row with no resolvable identity at all -- harness AND the legacy
-    // provider fallback both blank -- is unjudgeable too. Distinct from
-    // `harness: Some("")` alone: harness_name() treats a blank `harness`
-    // the same as `None` and falls back to legacy_provider (tested below,
-    // where the fixture's legacy_provider is "claude"), so this case must
-    // blank the fallback too or it silently resolves to a known store.
-    let blank = RegistryEntry {
-        node: None,
-        harness: Some(String::new()),
-        harness_session_id: Some("sid-1234".to_string()),
-        legacy_provider: String::new(),
-        provider: None,
-        model: None,
-        model_basis: None,
-        effort: None,
-        ..ask_row("keying", None)
-    };
-    assert!(
-        idx.matches(&blank).is_none(),
-        "no resolvable harness identity at all is unjudgeable"
-    );
-    // No session id on the row: unjudgeable even for a known harness.
-    assert!(idx.matches(&row_for(Some("claude"), None)).is_none());
-    // A row whose harness falls back to the legacy provider field keys the
-    // same way (harness_name resolves the alias).
-    let mut legacy = HarnessStoreIndex::with_roots(claude_root, codex_root);
-    let hits = legacy
-        .matches(&row_for(None, Some("sid-1234")))
-        .expect("claude (via legacy provider) store is readable, so it answers");
-    assert_eq!(hits.len(), 1);
-}
-
-/// AC1 end-to-end: an exited row past grace whose harness session is gone
-/// from its own store reaps, with the event carrying harness + session id
-/// (the resumable/diagnostic handle), and the registry reap is never
-/// blocked by a cascade that finds nothing to remove.
-#[test]
-fn gc_sweep_reaps_on_a_gone_harness_session_and_records_the_handle() {
-    let home = tmp_home("gc-harness-gone");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-    let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-    state::update_registry(&home.registry_json(), |r| {
-        let mut e = ask_row("gone-session", Some(exited_at.as_str()));
-        e.short_id = "gonesess".into(); // liveness surface, no live socket
-        e.log_path = None; // the dead-evidence file that no longer exists
-        e.harness = Some("claude".into());
-        e.harness_session_id = Some("80e70ab4-1111".into());
-        r.entries.push(e);
-    })
-    .unwrap();
-
-    let summary = gc_sweep_impl(
-        &home,
-        &emitter,
-        &|_| Duration::from_secs(3600),
-        false,
-        7,
-        &no_tails, // truth tail: no live rows to probe
-        // Session gone from its own store: the empty hit vector.
-        &|e| (e.name == "gone-session").then(Vec::new),
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        &|_| None,          // cascade: store holds nothing to remove
-    );
-
-    assert_eq!(summary.reaped, vec!["gonesess".to_string()]);
-    assert!(summary.cascade_refused.is_empty());
-    // POSITIVE MARKER: the row is absent from the registry after the call,
-    // not merely absent from the error output.
-    let reg = state::load_registry(&home.registry_json()).unwrap();
-    assert!(
-        reg.entries.iter().all(|e| e.name != "gone-session"),
-        "the reap must be observable in the registry itself"
-    );
-    // The event carries the resumable handle fields.
-    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
-    assert!(
-        events.contains("\"harness_session_id\"") && events.contains("80e70ab4-1111"),
-        "agent_row_reaped must record the harness session handle"
-    );
-}
-
-#[test]
-fn gc_sweep_node_session_clears_before_emitting_reap() {
-    let home = tmp_home("gc-node-session-success");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-    let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-    state::update_registry(&home.registry_json(), |r| {
-        let mut e = ask_row("target-x-292e-worker", Some(exited_at.as_str()));
-        e.short_id = "node-success".into();
-        e.harness = Some("codex".into());
-        e.harness_session_id = Some("codex-session-292e".into());
-        r.entries.push(e);
-    })
-    .unwrap();
-
-    let summary = gc_sweep_impl_with_node_cascade(
-        &home,
-        &emitter,
-        &|_| Duration::from_secs(3600),
-        false,
-        7,
-        &no_tails,
-        &|_| Some(Vec::new()),
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        Some(&|entry, node_id, harness, session_id| {
-            assert_eq!(entry.name, "target-x-292e-worker");
-            assert_eq!(
-                (node_id, harness, session_id),
-                ("x-292e", "codex", "codex-session-292e")
-            );
-            Ok(NodeSessionCascadeReceipt {
-                row_removed: true,
-                status_before: Some("in_progress".into()),
-                status_after: Some("ready".into()),
-                remaining_open_do: 0,
-            })
-        }),
-        &|_| None,
-    );
-
-    assert_eq!(summary.reaped, vec!["node-success".to_string()]);
-    assert!(summary.node_session_refused.is_empty());
-    let events = read_events(&home);
-    let reap = events
-        .iter()
-        .find(|event| event.get("type").and_then(Value::as_str) == Some("agent_row_reaped"))
-        .expect("positive reap event");
-    assert_eq!(reap["data"]["node_session_cleared"], true);
-    assert_eq!(reap["data"]["node_row_removed"], true);
-    assert_eq!(reap["data"]["node_status_after"], "ready");
-    assert_eq!(reap["data"]["node_remaining_open_do"], 0);
-}
-
-#[test]
-fn gc_sweep_node_session_refusal_restores_registry() {
-    let home = tmp_home("gc-node-session-refused");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-    let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-    state::update_registry(&home.registry_json(), |r| {
-        let mut e = ask_row("target-x-292e-refuse", Some(exited_at.as_str()));
-        e.short_id = "node-refused".into();
-        e.harness = Some("codex".into());
-        e.harness_session_id = Some("codex-session-refused".into());
-        r.entries.push(e);
-    })
-    .unwrap();
-
-    let summary = gc_sweep_impl_with_node_cascade(
-        &home,
-        &emitter,
-        &|_| Duration::from_secs(3600),
-        false,
-        7,
-        &no_tails,
-        &|_| Some(Vec::new()),
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        Some(&|_, _, _, _| Err("node read-back failed".into())),
-        &|_| panic!("harness cascade must be skipped after node refusal"),
-    );
-
-    assert!(summary.reaped.is_empty());
-    assert_eq!(
-        summary.node_session_refused,
-        vec![("node-refused".into(), "node read-back failed".into())]
-    );
-    let reg = state::load_registry(&home.registry_json()).unwrap();
-    assert!(reg.entries.iter().any(|e| e.name == "target-x-292e-refuse"));
-    let events = read_events(&home);
-    assert!(events
-        .iter()
-        .all(|event| { event.get("type").and_then(Value::as_str) != Some("agent_row_reaped") }));
-    assert!(events.iter().any(|event| {
-        event.get("type").and_then(Value::as_str) == Some("daemon_recovery_error")
-            && event["data"]["op"] == "node_session_refused"
-    }));
-}
-
-/// AC4 end-to-end: an Orphaned row earns an exit stamp on first sight and
-/// reaps once past grace with corroboration - the immortal-row mechanism.
-#[test]
-fn gc_sweep_orphaned_row_stamps_then_reaps() {
-    let home = tmp_home("gc-orphaned");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-    let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-
-    // First pass: unstamped Orphaned -> StampExit, nothing removed.
-    state::update_registry(&home.registry_json(), |r| {
-        let mut e = ask_row("orph", None);
-        e.status = AgentStatus::Orphaned;
-        e.short_id = "orph".into();
-        e.log_path = None;
-        r.entries.push(e);
-    })
-    .unwrap();
-    let first = gc_sweep_impl(
-        &home,
-        &emitter,
-        &|_| Duration::from_secs(3600),
-        false,
-        7,
-        &no_tails,
-        &|_| None,
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        &|_| None,
-    );
-    assert!(first.reaped.is_empty(), "first sight stamps, never reaps");
-    let reg = state::load_registry(&home.registry_json()).unwrap();
-    let stamped = reg
-        .entries
-        .iter()
-        .find(|e| e.name == "orph")
-        .expect("row survives the stamping pass")
-        .exited_at
-        .clone();
-    assert!(
-        stamped.is_some(),
-        "an unreachable probe is an observation: the clock starts"
-    );
-
-    // Backdate past grace, corroborate, sweep again: reaped.
-    state::update_registry(&home.registry_json(), |r| {
-        for e in r.entries.iter_mut() {
-            if e.name == "orph" {
-                e.exited_at = Some(exited_at.clone());
-            }
-        }
-    })
-    .unwrap();
-    let second = gc_sweep_impl(
-        &home,
-        &emitter,
-        &|_| Duration::from_secs(3600),
-        false,
-        7,
-        &no_tails,
-        &|e| (e.name == "orph").then(Vec::new),
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        &|_| None,
-    );
-    assert_eq!(second.reaped, vec!["orph".to_string()]);
-    let reg = state::load_registry(&home.registry_json()).unwrap();
-    assert!(reg.entries.iter().all(|e| e.name != "orph"));
-}
-mod gc_dormant_tests;
-
-/// AC6: a reaped row whose harness session refuses removal keeps the
-/// refusal in the report (surfaced, never swallowed), and the registry reap
-/// is NOT rolled back. Cascade injected so the staged refusal is
-/// deterministic - no PATH/HOME games against a parallel test run.
-#[test]
-fn gc_sweep_cascade_refusal_is_surfaced_and_never_undoes_the_reap() {
-    let home = tmp_home("gc-cascade");
-    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-    let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-    state::update_registry(&home.registry_json(), |r| {
-        let mut e = ask_row("pid-dead", Some(exited_at.as_str()));
-        e.short_id = "piddead".into();
-        e.log_path = None;
-        e.harness = Some("codex".into());
-        e.harness_session_id = Some("sid-cascade".into());
-        e.pid = Some(999_999_999); // no such process: confirmed dead
-        r.entries.push(e);
-    })
-    .unwrap();
-
-    let summary = gc_sweep_impl(
-        &home,
-        &emitter,
-        &|_| Duration::from_secs(3600),
-        false,
-        7,
-        &no_tails,
-        &|_| None,
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        // The cascade refuses for this row: the harness store would not
-        // give the session up.
-        &|e| {
-            (e.name == "pid-dead").then(|| {
-                (
-                    "piddead".to_string(),
-                    "cascade refused (staged)".to_string(),
-                )
-            })
-        },
-    );
-
-    assert_eq!(summary.reaped, vec!["piddead".to_string()]);
-    assert_eq!(
-        summary.cascade_refused,
-        vec![(
-            "piddead".to_string(),
-            "cascade refused (staged)".to_string()
-        )],
-        "the refusal is surfaced with its reason"
-    );
-    // POSITIVE MARKER: the registry itself no longer holds the row - the
-    // refusal never rolled back the reap.
-    let reg = state::load_registry(&home.registry_json()).unwrap();
-    assert!(reg.entries.iter().all(|e| e.name != "pid-dead"));
-}
-
-/// The codex cascade core: index surgery drops only the matching session's
-/// entry, keeps unparsable lines, and reports nothing to remove as a no-op.
-#[test]
-fn codex_index_cascade_drops_only_the_matching_entry() {
-    let dir = tempfile::tempdir().expect("tmpdir");
-    let index = dir.path().join("session_index.jsonl");
-    std::fs::write(
-        &index,
-        concat!(
-            "{\"session_id\":\"aaa\"}\n",
-            "not-json-at-all\n",
-            "{\"session_id\":\"bbb\"}\n",
-        ),
-    )
-    .unwrap();
-    assert_eq!(cascade_codex_index(&index, "missing", "row"), Ok(false));
-    let after_noop = std::fs::read_to_string(&index).unwrap();
-    assert_eq!(
-        after_noop.lines().count(),
-        3,
-        "no match: byte-for-byte no-op"
-    );
-
-    assert_eq!(cascade_codex_index(&index, "aaa", "row"), Ok(true));
-    let after = std::fs::read_to_string(&index).unwrap();
-    assert!(!after.contains("\"aaa\""), "the matching entry is gone");
-    assert!(after.contains("\"bbb\""), "other entries stay");
-    assert!(
-        after.contains("not-json-at-all"),
-        "an unparsable line is never destroyed"
-    );
-
-    // A missing index is a no-op, not a refusal.
-    assert_eq!(
-        cascade_codex_index(&dir.path().join("nope.jsonl"), "aaa", "row"),
-        Ok(false)
-    );
-}
-
-/// `--dry-run` (x-9de7 task 5): the same classification as a real sweep,
-/// including the kept-reason diagnostics, but the registry is provably
-/// untouched and no `agent_row_reaped` event lands.
-#[test]
-fn gc_sweep_dry_run_reports_without_mutating() {
-    let home = tmp_home("gc-dry-run");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-    let recent_exit = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-    state::update_registry(&home.registry_json(), |r| {
-        // Would reap (no liveness surface -> auto-corroborated regardless
-        // of age, so an old stamp is fine here).
-        r.entries
-            .push(ask_row("ask-old", Some("2020-01-01T00:00:00Z")));
-        // Would keep uncorroborated: past grace, short of the 7-day
-        // backstop horizon.
-        let mut stuck = ask_row("stuck", Some(recent_exit.as_str()));
-        stuck.short_id = "stuck".into();
-        stuck.log_path = None;
-        r.entries.push(stuck);
-    })
-    .unwrap();
-    let before = state::load_registry(&home.registry_json()).unwrap();
-
-    // gc_sweep_impl directly, not the gc_sweep_dry_run wrapper: see the
-    // comment on gc_sweep_reports_kept_uncorroborated_for_the_stuck_and_invisible_row
-    // for why the wrapper's real-$HOME HarnessStoreIndex is not hermetic.
-    let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
-    let summary = gc_sweep_impl(
-        &home,
-        &emitter,
-        &|_| Duration::from_secs(3600),
-        true,
-        7,
-        &no_tails,
-        &|_| None,
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        &|_| None,
-    );
-
-    assert_eq!(summary.reaped, vec!["ask-old".to_string()]);
-    assert_eq!(summary.kept_uncorroborated, vec!["stuck".to_string()]);
-
-    let after = state::load_registry(&home.registry_json()).unwrap();
-    assert_eq!(
-        before.entries.len(),
-        after.entries.len(),
-        "dry-run must not remove a row"
-    );
-    assert!(
-        after.entries.iter().any(|e| e.name == "ask-old"),
-        "dry-run must not remove ask-old from disk"
-    );
-    assert!(
-        !std::path::Path::new(&home.events_jsonl()).exists(),
-        "dry-run must never emit agent_row_reaped"
-    );
-}
-
-/// The long-silence repro (x-9de7 verification #7, the one task 6 exists
-/// for). A codex row whose transcript went untouched for 90 minutes while
-/// the pane was alive: under the OLD one-hour-for-every-harness window
-/// that silence corroborates a reap; under an 8h codex grace it does not.
-/// Both sweeps run against the SAME fixture (same exited_at, same
-/// transcript mtime) so the only variable is the grace the resolver hands
-/// back for "codex".
-#[test]
-fn gc_sweep_a_90_minute_codex_silence_reaps_under_1h_grace_not_under_8h() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let exited_at_secs = now - 9 * 3600; // well past either grace
-    let (y, mo, d, h, mi, s) = civil(exited_at_secs);
-    let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-
-    let seed = |tag: &str| -> (AgentsHome, std::path::PathBuf) {
-        let home = tmp_home(tag);
-        let log_path = home.root().join("transcript.jsonl");
-        std::fs::write(&log_path, "{}\n").unwrap();
-        let mtime =
-            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(now - 90 * 60);
-        std::fs::File::options()
-            .write(true)
-            .open(&log_path)
-            .unwrap()
-            .set_modified(mtime)
-            .unwrap();
-        state::update_registry(&home.registry_json(), |r| {
-            let mut e = ask_row("codex-silent", Some(exited_at.as_str()));
-            e.short_id = "codex-silent".into(); // liveness_surface, no live socket
-            e.harness = Some("codex".into());
-            e.log_path = Some(log_path.to_string_lossy().into_owned());
-            r.entries.push(e);
-        })
-        .unwrap();
-        (home, log_path)
-    };
-
-    // gc_sweep_impl directly, not the gc_sweep wrapper: see the comment
-    // on gc_sweep_reports_kept_uncorroborated_for_the_stuck_and_invisible_row
-    // for why the wrapper's real-$HOME HarnessStoreIndex is not hermetic
-    // - here it would auto-corroborate via harness_session_gone
-    // regardless of the transcript-mtime freshness this test is about.
-
-    // OLD behaviour: one number for every harness.
-    let (home_old, _) = seed("gc-silence-old");
-    let emitter_old = EventEmitter::new(home_old.events_jsonl(), "daemon");
-    let summary_old = gc_sweep_impl(
-        &home_old,
-        &emitter_old,
-        &|_| Duration::from_secs(3600),
-        false,
-        7,
-        &no_tails,
-        &|_| None,
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        &|_| None,
-    );
-    assert_eq!(
-        summary_old.reaped,
-        vec!["codex-silent".to_string()],
-        "control: a 1h window reads 90 minutes of silence as corroborated staleness"
-    );
-
-    // FIXED behaviour: codex gets its own 8h grace/freshness window.
-    let (home_new, _) = seed("gc-silence-new");
-    let emitter_new = EventEmitter::new(home_new.events_jsonl(), "daemon");
-    let summary_new = gc_sweep_impl(
-        &home_new,
-        &emitter_new,
-        &|harness| Duration::from_secs(if harness == "codex" { 8 * 3600 } else { 3600 }),
-        false,
-        7,
-        &no_tails,
-        &|_| None,
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        &|_| None,
-    );
-    assert!(
-        summary_new.reaped.is_empty(),
-        "an 8h codex grace must not corroborate a worker that was silent for only 90 minutes"
-    );
 }
 
 #[test]
@@ -1248,18 +851,20 @@ fn gc_sweep_turns_unterminated_node_reap_into_durable_failure() {
         )
         .unwrap();
 
-    let summary = gc_sweep_impl(
+    let summary = retire_sweep(
         &home,
         &emitter,
-        &|_| Duration::from_secs(0),
-        false,
-        7,
-        &live_truth_tail_states,
-        &|_| None,
-        &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-        &|_| None,
+        &[
+            ("dead-harness-uuid", "x-a35a", "done"),
+            ("done-harness-uuid", "x-b44e", "done"),
+        ],
+        &|e| {
+            e.log_path
+                .as_deref()
+                .map(|p| vec![std::path::PathBuf::from(p)])
+        },
     );
-    assert_eq!(summary.reaped.len(), 2);
+    assert_eq!(summary.retired.len(), 2, "{:?}", summary.retired);
 
     let reaps = read_events(&home);
     // The reap event, by type: the removal accounting (x-a879) also emits
@@ -1321,9 +926,18 @@ fn gc_sweep_restores_row_when_termination_evidence_is_unknown() {
     })
     .unwrap();
 
-    let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(0), 7);
+    let summary = retire_sweep(
+        &home,
+        &emitter,
+        &[("019cdead-0000-7000-8000-000000000001", "x-other", "done")],
+        &|e| {
+            e.log_path
+                .as_deref()
+                .map(|p| vec![std::path::PathBuf::from(p)])
+        },
+    );
 
-    assert!(summary.reaped.is_empty());
+    assert!(summary.retired.is_empty());
     let registry = state::load_registry(&home.registry_json()).unwrap();
     assert!(registry
         .entries
@@ -1359,9 +973,18 @@ fn gc_sweep_restores_row_when_dead_dispatch_receipt_cannot_persist() {
     .unwrap();
     std::fs::create_dir_all(global_events_path(&home)).unwrap();
 
-    let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(0), 7);
+    let summary = retire_sweep(
+        &home,
+        &emitter,
+        &[("019cdead-0000-7000-8000-000000000001", "x-a35a", "done")],
+        &|e| {
+            e.log_path
+                .as_deref()
+                .map(|p| vec![std::path::PathBuf::from(p)])
+        },
+    );
 
-    assert!(summary.reaped.is_empty());
+    assert!(summary.retired.is_empty());
     let registry = state::load_registry(&home.registry_json()).unwrap();
     assert!(registry
         .entries

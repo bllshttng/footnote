@@ -40,8 +40,9 @@ def test_question_drops_wake_signal_leaves_unread(inbox_root, repo_root):
     assert results[0].action == "wake_signal_dropped"
     assert results[0].kind == "question"
 
-    # Wake signal landed under .fno/wake-signals
-    sigs = list((repo_root / ".fno" / "wake-signals").glob("wake-*.json"))
+    # Wake signal landed in the repo's space wake-signals dir
+    from fno.wake.signal import signals_dir
+    sigs = list(signals_dir(repo_root).glob("wake-*.json"))
     assert len(sigs) == 1
 
     # Thread stays unread

@@ -578,7 +578,6 @@ def test_the_unattributed_row_warning_fires_once_per_process(monkeypatch):
 
     assert len([m for m in seen if "without a provider stamp" in m]) == 1
 
-
 def test_census_caption_points_at_the_transcript_verdict(runner):
     """The table's footer names itself a census and defers liveness to truth.
 
@@ -593,3 +592,53 @@ def test_census_caption_points_at_the_transcript_verdict(runner):
     assert result.exit_code == 0, out
     assert "census: rows are processes present at scan time" in out, out
     assert "for a liveness verdict use fno agents truth" in out, out
+
+
+def test_status_column_renders_served_activity_with_age(tmp_path, monkeypatch, runner):
+    """AC7-HP (x-c672): the STATUS column answers what the session is doing -
+    `writing 30s` for a transcript touched half a minute ago, `quiet 3h` for
+    one three hours stale - and the word `live` appears in neither row."""
+    roster = {"proto": 1, "workers": {}}
+    (tmp_path / "daemon" / "roster.json").write_text(json.dumps(roster))
+    rows = [
+        AgentEntry(
+            name="fresh-worker",
+            harness="claude",
+            cwd="/tmp",
+            log_path="/tmp/l",
+            status="busy",
+            pid=ALIVE,
+            short_id="aaaa0000",
+        ),
+        AgentEntry(
+            name="stale-worker",
+            harness="claude",
+            cwd="/tmp",
+            log_path="/tmp/m",
+            status="busy",
+            pid=ALIVE,
+            short_id="bbbb1111",
+        ),
+    ]
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+
+    from fno.agents import session_truth
+
+    def fake_truth(handle, **_kwargs):
+        fresh = handle == "fresh-worker"
+        return {
+            "state": "working",
+            "last_activity_age_s": 30 if fresh else 3 * 3600,
+        }
+
+    monkeypatch.setattr(session_truth, "resolve_session_truth", fake_truth)
+
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["top"])
+    assert result.exit_code == 0, result.output
+    assert "writing 30s" in result.output, result.output
+    assert "quiet 3h" in result.output, result.output
+    for line in result.output.splitlines():
+        if "fresh-worker" in line or "stale-worker" in line:
+            assert " live" not in f" {line}", line

@@ -1588,6 +1588,14 @@ def test_ac2_ui_non_cargo_binary_never_reports_stale(
         rust_source_rev="bbb",
         cargo_bin_present=False,  # no cargo bin -> rust_stale is False in verdict
     )
+    # Same reasoning as the tripwire test below: the control-plane arms readout
+    # (`fno-agents status --json`) is a legit advisory subprocess, and the claim
+    # door may legitimately put a binary in this test's PATH. Stub it so the
+    # readout's environmental arm state cannot masquerade as the rust-staleness
+    # contradiction this test pins.
+    monkeypatch.setattr(
+        doctor, "_control_plane_arms_report", lambda: {"arms": [], "stale": [], "unknown_reason": None}
+    )
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, f"exit code {result.exit_code}, output: {result.stdout}{result.stderr}"
     combined = result.stdout + result.stderr

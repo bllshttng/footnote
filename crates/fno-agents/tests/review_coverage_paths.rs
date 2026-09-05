@@ -30,6 +30,11 @@ enum ProducerReach {
     SafeDirection(&'static str),
 }
 
+#[path = "space_paths.rs"]
+mod space_paths;
+
+use space_paths::project_events;
+
 fn path_table() -> Vec<(&'static str, &'static str, ProducerReach)> {
     vec![
         (
@@ -190,7 +195,7 @@ exit 1"#
 esac"#
         ),
     );
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = parent.join(format!("{name}-global-events.jsonl"));
     (cwd, project, global, gh, git)
 }

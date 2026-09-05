@@ -1156,7 +1156,9 @@ def _validate_session_identity(phase: str, harness: str, session_id: str) -> "tu
     """Validate a session row's identity triple, returning the stripped pair.
 
     The keeper re-validates under the lock; this pass keeps the ValueError
-    contract at the call boundary.
+    contract at the call boundary. An id whose shape names one of the
+    shape-known harnesses refuses a stamp naming another: the wrong-harness
+    stamp is how phantom twin rows get minted.
     """
     if phase not in _SESSION_PHASES:
         raise ValueError(
@@ -1169,6 +1171,17 @@ def _validate_session_identity(phase: str, harness: str, session_id: str) -> "tu
             raise ValueError(f"{label} must be a non-empty string")
         if len(value) > _SESSION_STR_MAX:
             raise ValueError(f"{label} exceeds {_SESSION_STR_MAX} chars")
+    from fno.harness_identity import SHAPE_KNOWN_HARNESSES, harness_of_session_id
+
+    shape_harness = harness_of_session_id(session_id)
+    if (
+        shape_harness is not None
+        and harness != shape_harness
+        and harness in SHAPE_KNOWN_HARNESSES
+    ):
+        raise ValueError(
+            f"session_id {session_id} is a {shape_harness} id; refusing harness {harness}"
+        )
     return harness, session_id
 
 

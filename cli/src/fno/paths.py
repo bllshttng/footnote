@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Iterable
@@ -219,6 +220,95 @@ def resolve_canonical_repo_root() -> Path:
     if canonical is not None:
         return canonical.resolve()
     return resolve_repo_root()
+
+
+# Project spaces: state OUTSIDE any checkout. Cross-worktree state at the
+# space root, session-keyed state under ``worktrees/<name>/``.
+
+
+def space_slug(canonical_root: Path) -> str:
+    """The full canonical path with ``/`` swapped for ``-`` (Claude's project-dir
+    shape: read the dir, see the path). Mirrored byte for byte in ``fno-agents::paths``."""
+    return str(canonical_root).replace("/", "-")
+
+
+def _canonical_for(root: Path) -> Path:
+    root = root.resolve()
+    gitdir = root / ".git"
+    # A `.git` dir is a main checkout; an absent one is no repo. Only the
+    # linked-worktree gitfile needs the probe.
+    if not gitdir.exists() or gitdir.is_dir():
+        return root
+    canonical = resolve_canonical_worktree(root)
+    if canonical is not None:
+        return canonical.resolve()
+    return root
+
+
+def spaces_root() -> Path:
+    """``FNO_SPACES_DIR`` > ``config.paths.spaces_dir`` > ``<state_dir>/spaces``."""
+    explicit = os.environ.get("FNO_SPACES_DIR")
+    if explicit:
+        return _guard_state_path(Path(os.path.expanduser(explicit)).resolve())
+    settings = _settings()
+    override = settings.paths.spaces_dir
+    if override is not None:
+        return _guard_state_path(_resolve(override))
+    return _guard_state_path(state_dir() / "spaces")
+
+
+def space_dir(project_root: Optional[Path] = None) -> Path:
+    """The space for ``project_root``'s repo (default: cwd's), keyed on its
+    CANONICAL root so every worktree answers the same path."""
+    root = resolve_canonical_repo_root() if project_root is None else _canonical_for(project_root)
+    return _guard_state_path(spaces_root() / space_slug(root))
+
+
+def worktree_space_dir(project_root: Optional[Path] = None) -> Path:
+    """The session-keyed slice: ``<space>/worktrees/<name>/``, or the space root from canonical."""
+    root = project_root or resolve_repo_root()
+    if root.resolve() != _canonical_for(root):
+        return _guard_state_path(space_dir(root) / "worktrees" / root.name)
+    return space_dir(root)
+
+
+def target_state_path(project_root: Optional[Path] = None) -> Path:
+    """The write-once session manifest, per worktree slice of the space."""
+    return _guard_state_path(worktree_space_dir(project_root) / "target-state.md")
+
+
+def target_state_path_or_legacy(project_root: Optional[Path] = None) -> Path:
+    """``target_state_path``, falling back to the pre-space checkout manifest."""
+    try:
+        space = target_state_path(project_root)
+        if space.exists():
+            return space
+    except Exception:  # noqa: BLE001 - a read degrades, never refuses
+        pass
+    root = project_root or resolve_repo_root()
+    return root / ".fno" / "target-state.md"
+
+
+def migrate_from_checkout(old: Path, new: Path) -> bool:
+    """One-shot lazy migration onto the space: move a legacy checkout file to
+    ``new`` unless either exists or old is a symlink, then leave a MOVED-TO
+    pointer. Best effort: any failure leaves ``old`` in place and returns
+    False, degrading to the legacy path.
+    """
+    if old == new or new.exists() or not old.exists() or old.is_symlink():
+        return False
+    try:
+        new.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.replace(old, new)
+        except OSError:
+            shutil.move(str(old), str(new))
+        marker = old.parent / "MOVED-TO"
+        if not marker.exists():
+            marker.write_text(f"{new.parent}\n")
+        return True
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -534,18 +624,15 @@ STATE_FILES: tuple[StateFile, ...] = (
         filename="events.jsonl",
         resolver="fno.paths.project_events_json",
         root_class="PROJECT",
-        selector="FNO_EVENTS_PATH, else git --git-common-dir",
+        selector="FNO_EVENTS_PATH, else config.paths.spaces_dir, else state_dir",
         owning_modules=("cli/src/fno/paths.py", "crates/fno-agents/src/paths.rs"),
     ),
     StateFile(
         filename="target-state.md",
-        # No owner today. `fno.phase.cli`, `fno.update` and `fno.recovery` each
-        # build it, which is why the lint's refusal for this row names the gap
-        # instead of a symbol that does not exist.
-        resolver=None,
+        resolver="fno.paths.target_state_path",
         root_class="PROJECT",
-        selector="git --git-common-dir",
-        owning_modules=(),
+        selector="worktree slice of the space",
+        owning_modules=("cli/src/fno/paths.py", "cli/src/fno/agent/state.py"),
     ),
 )
 
@@ -684,7 +771,7 @@ def questions_jsonl() -> Path:
 
 
 def project_events_json() -> Path:
-    """The per-checkout event journal, or the scratch journal a harness pins.
+    """The per-repository event journal in the space, or the pin a harness sets.
 
     ``FNO_EVENTS_PATH`` exists because repo-root resolution cannot be
     sandboxed. ``fno.hermetic.neutralise`` deliberately leaves ``FNO_REPO_ROOT``
@@ -712,7 +799,9 @@ def project_events_json() -> Path:
     override = os.environ.get("FNO_EVENTS_PATH")
     if override:
         return _guard_state_path(Path(override))
-    return _guard_state_path(resolve_repo_root() / ".fno" / "events.jsonl")
+    space = space_dir() / "events.jsonl"
+    migrate_from_checkout(resolve_repo_root() / ".fno" / "events.jsonl", space)
+    return _guard_state_path(space)
 
 
 def event_journals() -> list[Path]:
@@ -984,13 +1073,14 @@ def bus_dir() -> Path:
 
 
 def plans_dir(project_root: Optional[Path] = None) -> Path:
-    """Return the plans directory.
-
-    Default is project-relative: <project_root>/.fno/plans/.
-    When project_root is None, falls back to resolve_repo_root().
-    """
+    """Return the plans directory: ``<space>/plans/`` by default. An explicit
+    config value (usually a vault template) resolves as before."""
     settings = _settings()
     raw = settings.plans_dir
+    if raw == ".fno/plans/":
+        space = space_dir(project_root) / "plans"
+        migrate_from_checkout((project_root or resolve_repo_root()) / ".fno" / "plans", space)
+        return space
     root = project_root or resolve_repo_root()
 
     # Detect whether the raw value is a "plain relative" path:
@@ -1235,36 +1325,36 @@ def agents_home_dir() -> Path:
 def inbox_dir(project_root: Optional[Path] = None) -> Path:
     """Return the inbox directory.
 
-    Default is project-relative: <project_root>/.fno/inbox/.
+    Default is the space: <space>/inbox/.
     """
     settings = _settings()
     override = settings.paths.inbox_dir
     if override is not None:
         return _resolve(override, project_root=project_root)
     root = project_root or resolve_repo_root()
-    return (root / ".fno" / "inbox").resolve()
+    space = space_dir(root) / "inbox"
+    migrate_from_checkout(root / ".fno" / "inbox", space)
+    return space.resolve()
 
 
 def project_log(name: str, project_root: Optional[Path] = None) -> Path:
-    """Return ``<repo>/.fno/<name>`` for a project-local log/state file.
+    """Return ``<space>/<name>`` for a project log/state file.
 
-    Anchored to :func:`resolve_repo_root` (never CWD) so a hook or CLI
-    subcommand invoked from any subdirectory of the repo lands on the same
-    file. This is the single accessor ad-hoc writers (events.jsonl,
-    finalize.stderr.log, worktree-log.jsonl, inbox-errors.jsonl, ...) route
-    through instead of hand-building ``".fno/" + name`` strings, per the
-    placement rule (state lives only under ``~/.fno/``, ``<project>/.fno/``,
-    or ``internal/<project>/``). Callers needing a nested path (e.g.
-    ``"claims/foo.lock"``) pass the sub-path as part of ``name``.
+    Anchored to the space (one per repository, keyed on the canonical root)
+    so any subdirectory or worktree lands on the same file. The single
+    accessor ad-hoc writers (events.jsonl, finalize.stderr.log,
+    worktree-log.jsonl, inbox-errors.jsonl, ...) route through instead of
+    hand-building ``".fno/" + name`` strings, per the placement rule.
+    Nested paths pass the sub-path as part of ``name``.
     """
     root = project_root or resolve_repo_root()
-    return (root / ".fno" / name).resolve()
+    space = space_dir(root) / name
+    migrate_from_checkout(root / ".fno" / name, space)
+    return space.resolve()
 
 
 def status_sinks_dir(project_root: Optional[Path] = None) -> Path:
-    """Directory holding per-sink cursor + error-log files for the status
-    fanout (``<repo>/.fno/status-sinks/``, x-2057). Routes through
-    :func:`project_log` so callers never hand-assemble a ``.fno/`` path."""
+    """Per-sink cursors + error logs for the status fanout (x-2057)."""
     return project_log("status-sinks", project_root=project_root)
 
 

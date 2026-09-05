@@ -272,6 +272,10 @@ def test_codex_tui_canonical_start_does_not_request_desktop_handoff(
     assert f"worktree={wt}" in result.output
 
 
+# The init-failure receipt tests live in cli/tests/unit/test_target_start_receipt.py
+# (file-budget allowance; the stubs mirror this file's ordinary-path set).
+
+
 def test_desktop_canonical_start_refuses_without_project_assignment(
     monkeypatch, tmp_path
 ):

@@ -28,12 +28,27 @@ from .test_pr_merge import FakeRun, _last_json, enabled  # noqa: F401
 HEAD = "aaaa1111bbbb2222"
 
 
+def _journal(tmp_path):
+    """The journal the gate reads: the repo's space via the accessor that owns
+    it. A legacy checkout path goes quiet once a reader migrates it, so a
+    re-seed that writes .fno/events.jsonl directly lands where nobody looks."""
+    from fno.paths import project_log
+
+    journal = project_log("events.jsonl", project_root=tmp_path)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    return journal
+
+
 def _seed_row(
     tmp_path, *, coverage, count, head, verdicts=None, pr=42, self_attested=None,
     review_state=None,
 ):
     """One review_coverage event in the project log the gate reads."""
     (tmp_path / ".fno").mkdir(exist_ok=True)
+    from fno.paths import project_log as _pl
+
+    journal = _pl("events.jsonl", project_root=tmp_path)
+    journal.parent.mkdir(parents=True, exist_ok=True)
     data = {"pr": pr, "coverage": coverage, "head_sha": head}
     if review_state is not None:
         data["review_state"] = review_state
@@ -54,7 +69,7 @@ def _seed_row(
         data["self_attested_count"] = self_attested
     if verdicts is not None:
         data["verdicts"] = verdicts
-    (tmp_path / ".fno" / "events.jsonl").write_text(
+    journal.write_text(
         json.dumps({"ts": "2026-08-16T03:00:00Z", "type": "review_coverage", "data": data})
         + "\n",
         encoding="utf-8",
@@ -701,7 +716,7 @@ def _seed_specimen(tmp_path, *, extra_lines=()):
     text = DISPOSITIONS_FIXTURE.read_text(encoding="utf-8")
     for line in extra_lines:
         text += json.dumps(line) + "\n"
-    (tmp_path / ".fno" / "events.jsonl").write_text(text, encoding="utf-8")
+    _journal(tmp_path).write_text(text, encoding="utf-8")
 
 
 def _specimen_gates(monkeypatch):
@@ -840,7 +855,7 @@ def test_ac5_hp_fixed_confirmed_plus_untouched_nits_covered(monkeypatch, tmp_pat
         },
     }
     (tmp_path / ".fno").mkdir(exist_ok=True)
-    (tmp_path / ".fno" / "events.jsonl").write_text(
+    _journal(tmp_path).write_text(
         "\n".join(json.dumps(e) for e in (r1, r2, row)) + "\n", encoding="utf-8"
     )
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
@@ -895,7 +910,7 @@ def test_ac5_err_self_attested_decline_refuses_with_both_remedies(monkeypatch, t
         },
     }
     (tmp_path / ".fno").mkdir(exist_ok=True)
-    (tmp_path / ".fno" / "events.jsonl").write_text(
+    _journal(tmp_path).write_text(
         "\n".join(json.dumps(e) for e in (r1, row)) + "\n", encoding="utf-8"
     )
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
@@ -947,7 +962,7 @@ def test_ac5_edge_producer_blocking_count_is_never_the_answer(monkeypatch, tmp_p
         },
     }
     (tmp_path / ".fno").mkdir(exist_ok=True)
-    (tmp_path / ".fno" / "events.jsonl").write_text(
+    _journal(tmp_path).write_text(
         "\n".join(json.dumps(e) for e in (r1, row)) + "\n", encoding="utf-8"
     )
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
@@ -1026,7 +1041,7 @@ def test_ac5_decline_with_corroboration_is_terminal(monkeypatch, tmp_path):
         },
     }
     (tmp_path / ".fno").mkdir(exist_ok=True)
-    (tmp_path / ".fno" / "events.jsonl").write_text(
+    _journal(tmp_path).write_text(
         "\n".join(json.dumps(e) for e in (r1, r2, row)) + "\n", encoding="utf-8"
     )
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
@@ -1103,7 +1118,7 @@ def _ac7_seed(tmp_path, rounds):
         dispositions = _AC7_DECLINE if i == 1 else None
         lines.append(_ac7_round(stamps[i], "fail", heads[i], dispositions))
     (tmp_path / ".fno").mkdir(exist_ok=True)
-    with open(tmp_path / ".fno" / "events.jsonl", "w", encoding="utf-8") as fh:
+    with open(_journal(tmp_path), "w", encoding="utf-8") as fh:
         for line in lines:
             fh.write(json.dumps(line) + "\n")
         fh.write(
@@ -1307,7 +1322,7 @@ def test_ac7_exhausted_rounds_with_no_blocking_findings_stay_covered(
         ],
     }
     (tmp_path / ".fno").mkdir(exist_ok=True)
-    with open(tmp_path / ".fno" / "events.jsonl", "w", encoding="utf-8") as fh:
+    with open(_journal(tmp_path), "w", encoding="utf-8") as fh:
         for i in range(3):
             data = dict(nit_round, head_sha=heads[i], reviewed_head_sha=heads[i])
             fh.write(
@@ -1394,7 +1409,7 @@ def _seed_soft_cap(tmp_path, rounds=3):
     stamps = [f"2026-08-25T{21 + (i // 2):02d}:{(i % 2) * 30:02d}:00Z" for i in range(rounds)]
     heads = [f"{i + 1}" * 40 for i in range(rounds - 1)] + [FIXTURE_HEAD]
     (tmp_path / ".fno").mkdir(exist_ok=True)
-    with open(tmp_path / ".fno" / "events.jsonl", "w", encoding="utf-8") as fh:
+    with open(_journal(tmp_path), "w", encoding="utf-8") as fh:
         for i in range(rounds):
             fh.write(json.dumps(_soft_round(stamps[i], heads[i])) + "\n")
         fh.write(
@@ -1761,7 +1776,7 @@ def _xaecc_seed(tmp_path, attestations, row):
     if not isinstance(attestations, list):
         attestations = [attestations]
     (tmp_path / ".fno").mkdir(exist_ok=True)
-    (tmp_path / ".fno" / "events.jsonl").write_text(
+    _journal(tmp_path).write_text(
         "\n".join(json.dumps(e) for e in (*attestations, row)) + "\n",
         encoding="utf-8",
     )
@@ -2396,7 +2411,7 @@ def test_past_the_cap_the_spent_budget_discharges_the_obligation(monkeypatch, tm
             }
         )
     )
-    (tmp_path / ".fno" / "events.jsonl").write_text("\n".join(rows) + "\n")
+    _journal(tmp_path).write_text("\n".join(rows) + "\n")
     monkeypatch.setattr(_coverage_gate, "_pr_reviews", lambda *a, **k: (None, ""))
     monkeypatch.setattr(
         _coverage_gate, "file_findings_at_cap", lambda *a, **k: ["x-filed1"]
@@ -2450,7 +2465,7 @@ def test_rounds_spent_with_zero_attestations_has_a_permitted_merge_path(
     _specimen_gates(monkeypatch)
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     # No review_attestation events at all: chain is empty by construction.
-    (tmp_path / ".fno" / "events.jsonl").write_text(
+    _journal(tmp_path).write_text(
         json.dumps(
             {
                 "ts": "2026-08-28T05:00:00Z",
@@ -2514,7 +2529,7 @@ def test_a_failed_reviews_read_is_not_rendered_as_a_measured_zero(
     """
     _specimen_gates(monkeypatch)
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
-    (tmp_path / ".fno" / "events.jsonl").write_text(
+    _journal(tmp_path).write_text(
         json.dumps(_soft_round("2026-08-28T05:00:00Z", FIXTURE_HEAD)) + "\n",
         encoding="utf-8",
     )
@@ -2596,7 +2611,7 @@ def _waive_env(monkeypatch, tmp_path):
     import fno.paths as paths_mod
 
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(_journal(tmp_path)))
     paths_mod.resolve_repo_root.cache_clear()
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     from types import SimpleNamespace
@@ -3228,11 +3243,17 @@ def _cap_chain(rounds, *, first_verdict="fail", dispositions_at=None, category="
 
 
 def _seed_cap_chain(tmp_path, lines, *, extra_rows=()):
+    """Seed the journal the gate reads (the repo's space; a re-seed must land
+    where the reader resolves, which a legacy checkout path no longer is)."""
     (tmp_path / ".fno").mkdir(exist_ok=True)
+    from fno.paths import project_log as _pl
+
+    journal = _pl("events.jsonl", project_root=tmp_path)
+    journal.parent.mkdir(parents=True, exist_ok=True)
     text = "\n".join(json.dumps(e) for e in lines) + "\n"
     for row in extra_rows:
         text += json.dumps(row) + "\n"
-    (tmp_path / ".fno" / "events.jsonl").write_text(text, encoding="utf-8")
+    journal.write_text(text, encoding="utf-8")
 
 
 _CAP_HARD_KEY = "cli/src/fake.py:779:correctness"
@@ -3298,7 +3319,7 @@ def test_cap_verdict_reads_the_events_axis_alone_for_impossible(tmp_path):
 def test_cap_verdict_on_an_empty_chain_answers_zero_not_impossible(tmp_path):
     """No chain at all: rounds 0, impossible False, nothing omitted."""
     (tmp_path / ".fno").mkdir(exist_ok=True)
-    (tmp_path / ".fno" / "events.jsonl").write_text("", encoding="utf-8")
+    _journal(tmp_path).write_text("", encoding="utf-8")
     cap = _coverage_gate.cap_verdict(
         str(tmp_path), f"{5:040x}", "feature/x-cap", _cap_cov_row()
     )
@@ -3401,3 +3422,56 @@ def test_a_pr_without_a_head_branch_appends_no_impossible_blocker(tmp_path):
     )
     assert "review_coverage_impossible" not in blockers
     assert blockers == []
+
+
+def _carried_local_row(origin):
+    """One counted local_attestation verdict shaped like a carried read."""
+    row = {
+        "name": "code-review",
+        "producer": "local_attestation",
+        "verdict": "reviewed",
+        "reviewed_sha": HEAD,
+        "freshness": "carried_base_sync",
+    }
+    if origin is not None:
+        row["attestation_origin"] = origin
+    return row
+
+
+def test_rests_on_self_attestation_counts_an_absent_origin_as_self_attested():
+    """Absence arm: a carried row whose attestation_origin key
+    is absent (pre-fix producer, or any producer that never wrote the field)
+    cannot prove an independent reviewer, so the predicate reads it as the
+    author's own and the gate refuses rather than clears."""
+    cov = {"reviewed_count": 1, "verdicts": [_carried_local_row(None)]}
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
+
+
+def test_rests_on_self_attestation_counts_an_unknown_origin_as_self_attested():
+    """Unknown arm: a read whose process
+    resolved no authoring session serializes attestation_origin "unknown".
+    Unknown authorship is not corroboration; the gate refuses."""
+    cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("unknown")]}
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
+
+
+def test_rests_on_self_attestation_still_clears_a_measured_other_session():
+    """The one origin that proves the count is not the author's own stays a
+    measured other_session. Absent and unknown refuse; this clears."""
+    cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("other_session")]}
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is False
+
+
+def test_rests_on_self_attestation_reroutes_a_recorded_zero_through_verdicts():
+    """The counts path cannot answer a recorded zero: 0 self_attested next to
+    counted local verdicts is either a real other-session measurement or
+    authorship that could not be measured, and the zero cannot tell them
+    apart. The measured event carried self_attested_count 0 beside an
+    unknown-origin verdict; the verdicts rule must settle it, so the gate
+    refuses instead of clearing on 0 != 1."""
+    cov = {
+        "reviewed_count": 1,
+        "self_attested_count": 0,
+        "verdicts": [_carried_local_row("unknown")],
+    }
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True

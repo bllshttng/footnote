@@ -13,6 +13,9 @@ CLI_DIR="$(git rev-parse --show-toplevel)/cli"
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
+# The signals live in the repo's space; pin the root so the whole roundtrip
+# stays inside this sandbox.
+export FNO_SPACES_DIR="$TMPDIR/spaces"
 cd "$TMPDIR"
 
 # Drop a signal via the live writer.
@@ -30,9 +33,15 @@ drop_signal(Path('.'), WakeSignal(
 ))
 " > /dev/null
 
-# Verify exactly one signal file was created
-[[ -d .fno/wake-signals ]] || { echo "FAIL: wake-signals dir missing"; exit 1; }
-COUNT=$(find .fno/wake-signals -name 'wake-*.json' 2>/dev/null | wc -l | tr -d ' ')
+# Verify exactly one signal file was created (resolve the dir the way the
+# writer did)
+SIGNALS_DIR=$(uv run --project "$CLI_DIR" python3 -c "
+from pathlib import Path
+from fno.wake.signal import signals_dir
+print(signals_dir(Path('.')))
+")
+[[ -d "$SIGNALS_DIR" ]] || { echo "FAIL: wake-signals dir missing"; exit 1; }
+COUNT=$(find "$SIGNALS_DIR" -name 'wake-*.json' 2>/dev/null | wc -l | tr -d ' ')
 [[ "$COUNT" == "1" ]] || { echo "FAIL: expected 1 signal file after drop, got $COUNT"; exit 1; }
 
 # Drain via the Python helper (mirrors what the hook will do)
@@ -53,7 +62,7 @@ assert data[0]['msg_id'] == 'msg-deadbeef', f'wrong msg_id: {data[0][\"msg_id\"]
 "
 
 # Confirm the file is gone (use find to avoid glob-fail when dir is empty)
-COUNT_AFTER=$(find .fno/wake-signals -name 'wake-*.json' 2>/dev/null | wc -l | tr -d ' ')
+COUNT_AFTER=$(find "$SIGNALS_DIR" -name 'wake-*.json' 2>/dev/null | wc -l | tr -d ' ')
 [[ "$COUNT_AFTER" == "0" ]] || { echo "FAIL: drain did not delete: $COUNT_AFTER files left"; exit 1; }
 
 # The removed verb must still refuse BY NAME rather than as a typo.

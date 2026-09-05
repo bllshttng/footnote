@@ -339,6 +339,19 @@ def test_journey_harness_carries_its_build_prerequisite(tmp_path: Path) -> None:
     assert "tests/hooks/test_journey.sh" in names
 
 
+def test_native_claim_door_build_precedes_changed_pytest(tmp_path: Path) -> None:
+    from fno.test_cmd import _RUST_BUILD_STEP, _changed_steps
+
+    selections = [
+        {"kind": "pytest", "target": "cli/tests/unit/test_claim_verdict.py"},
+        {"kind": "step", "target": _RUST_BUILD_STEP},
+    ]
+
+    names = [name for name, _, _ in _changed_steps(tmp_path, selections)]
+
+    assert names[:2] == [_RUST_BUILD_STEP, "Pytest (changed subset, 1 file(s))"]
+
+
 def test_plain_harness_does_not_drag_in_the_rust_build(tmp_path: Path) -> None:
     """The prerequisite is conditional; a plain harness pays nothing for it."""
     from fno.test_cmd import _RUST_BUILD_STEP, _changed_steps
@@ -408,7 +421,107 @@ def test_changed_pytest_step_is_preceded_by_the_binary_scrub() -> None:
 
     import fno.test_cmd as tc
     src = inspect.getsource(tc._run_changed)
-    assert "Pytest (changed subset" in src and "target/debug/fno-agents" in src
+    assert "Pytest (changed subset" in src
+    assert "_scrub_target_bins(root)" in src
+    assert any("target/debug/fno-agents" in rel for rel in tc._TARGET_BIN_RELS)
+
+
+# --- the changed-packet estimate (what CI sizes the job ceiling from) ---------
+
+
+def _selections(kind_counts: dict[str, int], *, with_build: bool = False) -> list[dict]:
+    """Synthetic selections shaped like select_changed() output."""
+    sels: list[dict] = []
+    for kind, n in kind_counts.items():
+        for i in range(n):
+            sels.append({"rule": kind, "path": f"{kind}-{i}",
+                         "kind": kind, "target": f"{kind}-{i}-target"})
+    if with_build:
+        from fno.test_cmd import _RUST_BUILD_STEP
+        sels.append({"rule": "rust-family", "path": "crates/x.rs",
+                     "kind": "step", "target": _RUST_BUILD_STEP})
+    return sels
+
+
+def test_estimate_floors_a_tiny_packet_at_fifteen(tmp_path: Path) -> None:
+    """A three-file packet must keep today's ceiling, not shrink below it."""
+    from fno.test_cmd import _estimate_changed_minutes
+    assert _estimate_changed_minutes(
+        tmp_path, _selections({"pytest": 3, "shell": 1})) == 15
+
+
+def test_estimate_is_monotone_in_packet_size(tmp_path: Path) -> None:
+    """A superset packet never estimates below its subset."""
+    from fno.test_cmd import _estimate_changed_minutes
+    small = _selections({"pytest": 5, "shell": 2})
+    big = _selections({"pytest": 40, "shell": 8, "step": 2}, with_build=True)
+    a = _estimate_changed_minutes(tmp_path, small)
+    b = _estimate_changed_minutes(tmp_path, big)
+    assert b >= a, (a, b)
+
+
+def test_estimate_prices_the_rust_build_above_other_structural_steps(tmp_path: Path) -> None:
+    """A cold cargo build is minutes; a registry step is seconds."""
+    from fno.test_cmd import _estimate_changed_minutes
+    plain = _selections({"pytest": 20, "shell": 4, "step": 3})
+    with_build = _selections({"pytest": 20, "shell": 4, "step": 3}, with_build=True)
+    a = _estimate_changed_minutes(tmp_path, plain)
+    b = _estimate_changed_minutes(tmp_path, with_build)
+    assert b > a, (a, b)
+
+
+def test_estimate_prices_an_injected_build_from_harness_content(tmp_path: Path) -> None:
+    """A journey harness needing the binary gets the build injected by
+    _changed_steps; the estimate must price the same packet the same way,
+    even with no explicit rust-family selection."""
+    from fno.test_cmd import _estimate_changed_minutes
+    _write(tmp_path / "tests/journey/test_needs_bin.sh",
+           '#!/usr/bin/env bash\n'
+           'CRATE=target/debug/fno-agents\n:\n', executable=True)
+    with_harness = _selections({"pytest": 20, "shell": 4, "step": 3})
+    with_harness.append({"rule": "shell-harness-self",
+                         "path": "tests/journey/test_needs_bin.sh",
+                         "kind": "shell",
+                         "target": "tests/journey/test_needs_bin.sh"})
+    without = _selections({"pytest": 20, "shell": 4, "step": 3})
+    a = _estimate_changed_minutes(tmp_path, without)
+    b = _estimate_changed_minutes(tmp_path, with_harness)
+    assert b > a, (a, b)
+
+
+def test_estimate_puts_tonights_failing_packet_well_above_the_old_cap(tmp_path: Path) -> None:
+    """The measured packet (93 pytest files, 14 shell harnesses, the build and
+    two registry steps) could not finish inside a fixed 15-minute cap. The
+    estimate must land far above that cap and inside the 45 ceiling CI clamps
+    to, or the sizing would repeat the starvation it exists to remove."""
+    from fno.test_cmd import _estimate_changed_minutes
+    sels = _selections({"pytest": 93, "shell": 14, "step": 2}, with_build=True)
+    est = _estimate_changed_minutes(tmp_path, sels)
+    assert est > 15, est
+    assert est <= 45, est
+
+
+def test_changed_estimate_line_is_printed_for_the_sizer_to_read(tmp_path: Path) -> None:
+    """CI's sizer parses one stdout line; its absence would read as a zero."""
+    import contextlib
+    import io
+
+    import fno.test_cmd as tc
+    _git_repo(tmp_path)
+    _repo(tmp_path)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+    base = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    _write(tmp_path / "cli/src/fno/widget.py", "x = 2\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "head"], check=True)
+    opts = {"changed": True, "base": base, "head": "HEAD", "list": True}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = tc._run_changed(tmp_path, opts, {})
+    assert rc == 0
+    assert "changed-estimate minutes=" in buf.getvalue()
 
 
 def test_prereq_codes_are_per_mode(tmp_path: Path) -> None:

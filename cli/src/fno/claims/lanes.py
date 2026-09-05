@@ -180,7 +180,7 @@ def reconcile_lane_slot(
 
     The re-acquire is PURE pid-liveness (``ttl_ms=None``): a pid-liveness claim
     is ``LIVE`` exactly while the process is alive and flips ``STALE`` the instant
-    it dies (``staleness.classify``), so the slot frees promptly on lane exit and
+    it dies (the native claim verdict), so the slot frees promptly on lane exit and
     never expires under a still-running lane. A non-expiring TTL cannot do this -
     a non-expired TTL claim classifies ``LIVE`` regardless of pid, so death
     cleanup would lag to the TTL.

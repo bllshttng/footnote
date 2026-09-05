@@ -989,7 +989,11 @@ def test_a_held_node_never_pays_for_the_crosscheck(cwd_tmp, monkeypatch):
         raise AssertionError("roster consulted for a held node")
 
     monkeypatch.setattr("fno.agents.watchdog.fleet_rows", _boom)
-    acquire_claim(key="node:x-held", holder="target-session:s", ttl_ms=60_000)
+    # status routes a node: key to the GLOBAL root; acquire with the same
+    # explicit root so both legs read one dir (cwd_tmp collapses them).
+    acquire_claim(
+        key="node:x-held", holder="target-session:s", ttl_ms=60_000, root=cwd_tmp
+    )
     r = runner.invoke(cli, ["status", "node:x-held", "--json"])
     info = json.loads(r.output)
     assert info["state"] == "live"

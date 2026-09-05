@@ -77,7 +77,9 @@ fn manifest_path(root: &Path, scope: &str) -> Result<PathBuf, String> {
     {
         return Err(format!("unsafe king scope for manifest path: {scope:?}"));
     }
-    Ok(root.join(".fno").join("kings").join(format!("{scope}.md")))
+    // `root` is the state root itself (the repo's space), matching Python's
+    // king_manifest_path: kings sit at <root>/kings, NOT <root>/.fno/kings.
+    Ok(root.join("kings").join(format!("{scope}.md")))
 }
 
 /// The row's canonical session id, tolerating legacy rows without one

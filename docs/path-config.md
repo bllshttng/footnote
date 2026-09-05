@@ -2,6 +2,10 @@
 
 footnote stores all user-data files under `~/.fno/` by default. Every path is configurable via `~/.fno/config.toml`. This page documents the full schema, environment variables, template variables, and the migration flow.
 
+## The project space
+
+Project state lives OUTSIDE the checkout, in one space per repository: `~/.fno/spaces/<slug>/`. The slug is the canonical repo root's path with `/` swapped for `-` (Claude's project-dir shape: read the directory name, see the path), keyed on the canonical checkout (the git common dir's). Every worktree of one repo resolves to the SAME space, so no state is ever committed by accident. Cross-worktree state (the events journal, repo-local claims, kings, plans, inbox, status sinks) sits at the space root. Per-worktree state (the target manifest, the run log, the codemap, the scratchpad) sits at `<space>/worktrees/<worktree basename>/`. The only fno file left inside a checkout is `.fno/config.toml` (committed project config) plus the sandbox-denied breadcrumb. `FNO_SPACES_DIR` overrides the spaces root outright (tests pin it). `config.paths.spaces_dir` is the config form, and unset the root is `<state_dir>/spaces`. The first resolve of a moved file migrates the legacy `<repo>/.fno/<file>` into the space and leaves a `<repo>/.fno/MOVED-TO` pointer naming it.
+
 ## Quick start
 
 Run `fno config doctor` to see your current resolved paths and detect common problems:
@@ -48,7 +52,7 @@ config:
 
   # Per-project plans directory. Relative paths are anchored to the
   # git repo root (or cwd if not in a git repo).
-  plans_dir: .fno/plans/
+  plans_dir: .fno/plans/     # the legacy default; unset it resolves to <space>/plans/
 
   # Per-resource overrides. Omit a key to derive from state_dir.
   paths:
@@ -60,9 +64,10 @@ config:
     worktrees_base: null     # default: <state_dir>/worktrees/
     memory_dir: null         # default: <state_dir>/memory/
     hook_logs_dir: null      # default: <state_dir>/hook-logs/
-    inbox_dir: null          # default: <project_root>/.fno/inbox/
+    inbox_dir: null          # default: <space>/inbox/
     handoffs_dir: null       # default: <vault>/internal/{project}/handoffs/ when obsidian.enabled,
                              # else <state_dir>/handoffs/<project>/
+    spaces_dir: null         # default: <state_dir>/spaces/
 
   obsidian:
     enabled: false  # set true to use {vault} template variable

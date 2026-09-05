@@ -5863,13 +5863,12 @@ pub struct ReviewerVerdict {
     /// and a PR whose only attestation is self-attested is covered. Whether
     /// that should stay true is a later gate decision, not this field.
     /// Only meaningful on `local_attestation` verdicts; github_app and
-    /// human approvals carry `Unknown` (omitted on serialize) since a GitHub
-    /// login has no session to compare. Defaults to `Unknown` so every
-    /// pre-existing attestation lands there unchanged.
-    #[serde(
-        skip_serializing_if = "is_attestation_origin_unknown",
-        default = "default_attestation_origin"
-    )]
+    /// human approvals carry `Unknown` since a GitHub login has no session
+    /// to compare. Defaults to `Unknown` so every pre-existing attestation
+    /// lands there unchanged. `Unknown` serializes as `"unknown"`, never
+    /// as an absent key: a consumer reading absent as "not self_attested"
+    /// once cleared a PR whose only review was the author's own.
+    #[serde(default = "default_attestation_origin")]
     pub attestation_origin: AttestationOrigin,
     /// The commit this reviewer actually read: a github_app review object's
     /// `.commit.oid`, or a local attestation's `data.head_sha`. Empty when
@@ -5973,9 +5972,10 @@ impl CoverageReport {
 
     /// Whether every counted review verdict rests on the author's own
     /// (self_attested) local attestation: no GitHub App review, no second
-    /// session. Unmeasured origins (Unknown) are NOT self-attestation, so an
-    /// unmeasured row fails open - it is not proof of corroboration, but it is
-    /// not proof of its absence either.
+    /// session. A counted local verdict is the author's own unless its
+    /// origin is a measured `OtherSession` - unknown authorship cannot prove
+    /// an independent reviewer - so this twin refuses exactly what the
+    /// serialized-row gate in the Python merge path refuses.
     pub fn rests_on_self_attestation_alone(&self) -> bool {
         let mut counted = 0usize;
         let mut self_attested = 0usize;
@@ -5987,7 +5987,7 @@ impl CoverageReport {
             }
             counted += 1;
             if v.producer == CoverageProducer::LocalAttestation
-                && v.attestation_origin == AttestationOrigin::SelfAttested
+                && v.attestation_origin != AttestationOrigin::OtherSession
             {
                 self_attested += 1;
             }
@@ -6035,10 +6035,6 @@ fn default_true() -> bool {
 
 fn default_attestation_origin() -> AttestationOrigin {
     AttestationOrigin::Unknown
-}
-
-fn is_attestation_origin_unknown(o: &AttestationOrigin) -> bool {
-    matches!(o, AttestationOrigin::Unknown)
 }
 
 /// Label a local attestation's authorship from its emitting session vs the
@@ -8568,7 +8564,7 @@ pub(crate) fn resolve_review_inputs(
 ) -> ReviewInputs {
     let project_events = events_path
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| cwd.join(".fno/events.jsonl"));
+        .unwrap_or_else(|| crate::paths::events_path(cwd));
 
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let global_events = global_events_path
@@ -8898,7 +8894,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     let ledger_path = parsed
         .ledger_path
         .clone()
-        .unwrap_or_else(|| cwd.join(".fno/ledger.json"));
+        .unwrap_or_else(|| crate::paths::ledger_path(&cwd));
 
     // Now timestamp
     let now: DateTime<Utc> = if let Some(ref s) = parsed.now_override {
@@ -9030,9 +9026,15 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // canonical root's journal while a worktree stop gate reads its own cwd's
     // - a record on any of the three paths clears the gate.
     let unrecorded = if session_id != "unknown" {
+        // One journal per space: the cwd's journal IS the canonical journal for
+        // this repo (the old worktree-vs-canonical fork is what the spaces move
+        // retired), so the union collapses to the two live journals.
         let mut journals = vec![project_events.clone(), global_events.clone()];
         if let Some(canon) = crate::paths::canonical_repo_root(&cwd) {
-            journals.push(canon.join(".fno/events.jsonl"));
+            let canonical_journal = crate::paths::events_path(&canon);
+            if !journals.contains(&canonical_journal) {
+                journals.push(canonical_journal);
+            }
         }
         scan_unrecorded_decisions(&journals, &session_id)
     } else {
@@ -13116,7 +13118,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let project_events = parsed
         .events_path
         .clone()
-        .unwrap_or_else(|| parsed.cwd.join(".fno/events.jsonl"));
+        .unwrap_or_else(|| crate::paths::events_path(&parsed.cwd));
     let global_events = parsed
         .global_events_path
         .clone()
@@ -13348,14 +13350,14 @@ fn observe_decision(args: &[String], output: &str) {
     };
     let project_events = parsed
         .events_path
-        .unwrap_or_else(|| parsed.cwd.join(".fno/events.jsonl"));
+        .unwrap_or_else(|| crate::paths::events_path(&parsed.cwd));
     let global_events = parsed.global_events_path.unwrap_or_else(|| {
         std::env::var("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/tmp"))
             .join(".fno/events.jsonl")
     });
-    let run_log = parsed.cwd.join(".fno/run-log.jsonl");
+    let run_log = crate::paths::worktree_space_dir(&parsed.cwd).join("run-log.jsonl");
     if transition == crate::run_state::RunEvent::TerminalDecided
         && matches!(
             crate::run_state::fold_run_state(&run_log, &session_id),
@@ -13598,7 +13600,10 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     // exists, else None. Resolve it before the PR-head read so even an unknown
     // row from that read failure keeps the established event shape.
     let author_session = session_id.or_else(|| {
-        std::fs::read_to_string(cwd.join(".fno/target-state.md"))
+        // The manifest moved into the worktree slice of the space; the legacy
+        // checkout path is the read fallback for one release.
+        std::fs::read_to_string(crate::paths::worktree_space_dir(&cwd).join("target-state.md"))
+            .or_else(|_| std::fs::read_to_string(cwd.join(".fno/target-state.md")))
             .ok()
             .and_then(|content| scan_manifest_field(&content, "harness_session_id"))
             .filter(|s| s != "null")
@@ -16098,136 +16103,9 @@ mod tests {
         assert!(telemetry.contains("invalid transition Closed + DispatchClassified"));
     }
 
-    #[test]
-    fn decision_chokepoint_observes_block_then_terminal() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = dir.path().join("target-state.md");
-        let events = dir.path().join("events.jsonl");
-        let run_id = "20260823T060900Z-cx73523-e04109";
-        std::fs::write(&state, format!("---\nsession_id: {run_id}\n---\n")).unwrap();
-        let args = vec![
-            "loop-check".to_string(),
-            "--state".to_string(),
-            state.display().to_string(),
-            "--transcript".to_string(),
-            dir.path().join("transcript.jsonl").display().to_string(),
-            "--cwd".to_string(),
-            dir.path().display().to_string(),
-            "--events".to_string(),
-            events.display().to_string(),
-            "--global-events".to_string(),
-            events.display().to_string(),
-        ];
-
-        let blocked = allow_output("block", None, "keep working", 1, None);
-        observe_decision(&args, &blocked);
-        assert_eq!(
-            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), run_id)
-                .unwrap(),
-            crate::run_state::RunState::Working
-        );
-
-        let terminal = allow_output(
-            "allow",
-            Some(TerminationReason::DonePRGreen),
-            "done",
-            2,
-            None,
-        );
-        observe_decision(&args, &terminal);
-        assert_eq!(
-            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), run_id)
-                .unwrap(),
-            crate::run_state::RunState::Sealing
-        );
-        assert!(!events.exists());
-    }
-
-    #[test]
-    fn immediate_terminal_seeds_dispatch_before_terminal() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = dir.path().join("target-state.md");
-        let events = dir.path().join("events.jsonl");
-        let run_id = "20260823T060900Z-cx73523-e04109";
-        std::fs::write(&state, format!("---\nfno_id: {run_id}\n---\n")).unwrap();
-        let args = vec![
-            "loop-check".to_string(),
-            "--state".to_string(),
-            state.display().to_string(),
-            "--transcript".to_string(),
-            dir.path().join("transcript.jsonl").display().to_string(),
-            "--cwd".to_string(),
-            dir.path().display().to_string(),
-            "--events".to_string(),
-            events.display().to_string(),
-            "--global-events".to_string(),
-            events.display().to_string(),
-        ];
-
-        observe_decision(
-            &args,
-            &allow_output(
-                "allow",
-                Some(TerminationReason::DonePRGreen),
-                "done",
-                1,
-                None,
-            ),
-        );
-
-        let run_log = dir.path().join(".fno/run-log.jsonl");
-        assert_eq!(
-            crate::run_state::fold_run_state(&run_log, run_id).unwrap(),
-            crate::run_state::RunState::Sealing
-        );
-        let log = std::fs::read_to_string(run_log).unwrap();
-        assert!(log.contains("dispatch_classified"));
-        assert!(log.contains("terminal_decided"));
-        assert!(
-            !events.exists(),
-            "accepted shadow transitions emit no rejection"
-        );
-    }
-
-    #[test]
-    fn decision_chokepoint_prefers_canonical_fno_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = dir.path().join("target-state.md");
-        let events = dir.path().join("events.jsonl");
-        let canonical = "20260823T060900Z-cx73523-e04109";
-        std::fs::write(
-            &state,
-            format!("---\nfno_id: {canonical}\nsession_id: legacy-run\n---\n"),
-        )
-        .unwrap();
-        let args = vec![
-            "loop-check".to_string(),
-            "--state".to_string(),
-            state.display().to_string(),
-            "--transcript".to_string(),
-            dir.path().join("transcript.jsonl").display().to_string(),
-            "--cwd".to_string(),
-            dir.path().display().to_string(),
-            "--events".to_string(),
-            events.display().to_string(),
-            "--global-events".to_string(),
-            events.display().to_string(),
-        ];
-
-        observe_decision(&args, &allow_output("block", None, "keep working", 1, None));
-
-        assert_eq!(
-            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), canonical)
-                .unwrap(),
-            crate::run_state::RunState::Working
-        );
-        assert_eq!(
-            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), "legacy-run")
-                .unwrap(),
-            crate::run_state::RunState::Open
-        );
-    }
-
+    // The spaces-move chokepoint tests live in their own file: this module
+    // is shrink-only, and the tests were the code this change touched.
+    mod space_chokepoint_tests;
     #[test]
     fn shadow_observer_rejects_short_run_ids() {
         let dir = tempfile::tempdir().unwrap();

@@ -1192,41 +1192,6 @@ def request_self_review_cmd(
         raise typer.Exit(code=2)
 
 
-def _registry_self_proof(
-    harness: str,
-    sid: str,
-    *,
-    true_harness: Optional[str],
-    own_binding: Optional[tuple[str, str]],
-    owning_row_harness: Callable[[str], Optional[str]],
-) -> Optional[bool]:
-    """The verb's proof policy: True proves the marker is this process's, False
-    contradicts it, None cannot tell.
-
-    Process-tree proof first (``true_harness`` - the direct walk, or the
-    launcher stamp ``FNO_SESSION_HARNESS``/``FNO_SESSION_PID`` when a sandbox
-    denies the deeper walk). A registry row alone is NEVER self-proof: a row
-    proves only that some live session owns the id, so an env marker copied
-    from another live same-harness session must keep failing closed to
-    collision-elimination (round-1 P1). Only the spawn-minted canonical
-    binding - the stamp and a same-harness live row agreeing on both halves -
-    proves self without the tree.
-    """
-    if true_harness is not None:
-        return harness == (true_harness or "").strip().lower()
-    from fno.harness_identity import session_identity_key
-
-    key = session_identity_key
-    if (
-        own_binding
-        and own_binding[0] == harness
-        and key(own_binding[1]) == key(sid)
-        and owning_row_harness(sid) == own_binding[0]
-    ):
-        return True
-    return None
-
-
 @target_app.command("resolve-owned-identity", hidden=True)
 def resolve_owned_identity_cmd() -> None:
     """Resolve the harness identity this process can PROVE it owns.
@@ -1239,26 +1204,20 @@ def resolve_owned_identity_cmd() -> None:
     without this verb (Click exit 2) as 'unavailable', falling back to today's
     precedence rather than bricking init.
 
-    The prover is process-tree truth: the harness of the nearest harness
-    ancestor is the one marker this process minted, so a foreign marker it
-    merely inherited never wins. The collider is the cause-agnostic backstop:
-    an id a live registry row already owns is provably not this session's. With
-    neither available the resolver still falls through to the sole
-    non-colliding survivor rather than guessing by precedence.
+    Resolution routes through :func:`fno.claims.self_identity.resolve_self_identity`,
+    the one owned-identity implementation every caller shares (x-0992). The
+    verb's former private proof policy and its own_binding construction - both
+    gated on a COMPLETE canonical stamp, which a pane-spawned worker never
+    carries - lived here and refused every such worker by its own registry row;
+    they are deleted, not forked behind a flag. The prover is still process-tree
+    truth and the collider is still the cause-agnostic backstop; the own-row
+    suppression now lives where the canonical pair is completed, in
+    claims.self_identity.
 
     Read-only; writes no state. Always exits 0 - it is a resolver, not a gate.
     """
-    from fno.agents.registry import (
-        live_row_holding_session_id,
-        row_owning_session_id,
-    )
-    from fno.claims.session_pid import resolve_session_harness
-    from fno.harness_identity import (
-        parse_canonical_identity,
-        resolve_owned_identity,
-    )
-
-    true_harness = resolve_session_harness()
+    from fno.agents.registry import row_owning_session_id
+    from fno.claims.self_identity import resolve_self_identity
 
     # The hook's claude session id may arrive as TARGET_TRANSCRIPT_ID (a footnote
     # hook input) when CLAUDE_CODE_SESSION_ID is not in the env; honor it as the
@@ -1270,61 +1229,15 @@ def resolve_owned_identity_cmd() -> None:
     ).strip():
         env["CLAUDE_CODE_SESSION_ID"] = env["TARGET_TRANSCRIPT_ID"]
 
-    canonical = parse_canonical_identity(env)
-    # The caller's own binding, from a COMPLETE canonical stamp: spawn writes
-    # the stamp and the registry row in one act, so a live row agreeing with
-    # it on both halves is this worker's own and the detector never reports
-    # it. Read from the stamp + registry, never FNO_AGENT_SELF: that env
-    # write cannot reach a daemon-forked worker while the row survives the
-    # fork. A session with no complete stamp proves nothing about itself and
-    # passes the explicit sentinel, which keeps the ambient-leak detector at
-    # full strength for vendor markers.
-    own_binding: Optional[tuple[str, str]] = None
-    if (
-        canonical.disposition == "complete"
-        and canonical.harness
-        and canonical.session_id
-    ):
-        own_binding = (canonical.harness.strip().lower(), canonical.session_id.strip())
+    def _collide(harness: str, sid: str, own_pair: Optional[tuple[str, str]]) -> Optional[str]:
+        # own_pair arrives from claims.self_identity (the canonical pair it
+        # completed there, None when it could not); the registry applies the
+        # agreement check, so this site never answers the own-row question
+        # itself - it had a second, COMPLETE-stamp-gated answer and that is
+        # the leg this verb deleted (x-0992).
+        return row_owning_session_id(sid, self_binding=own_pair)
 
-    def _owning_row_harness(sid: str) -> Optional[str]:
-        """Harness of the live registry row holding ``sid``, if any."""
-        entry = live_row_holding_session_id(sid)
-        if entry is None:
-            return None
-        return (getattr(entry, "harness", "") or "").strip().lower()
-
-    def _collide(harness: str, sid: str) -> Optional[str]:
-        return row_owning_session_id(sid, self_binding=own_binding)
-
-    def _prove(harness: str, _sid: str) -> Optional[bool]:
-        # Three states: True (this process mints this harness), False (the
-        # process tree resolves to a DIFFERENT harness, so this marker is
-        # foreign), None (no harness ancestor found - CI / degraded - cannot
-        # tell). Only True skips the collision check; None falls through to
-        # collision-elimination so the verb still resolves in a headless runner.
-        return _registry_self_proof(
-            (harness or "").strip().lower(),
-            _sid,
-            true_harness=true_harness,
-            own_binding=own_binding,
-            owning_row_harness=_owning_row_harness,
-        )
-
-    # The COLLIDER stays wired HERE and is deliberately not hoisted into the
-    # shared resolver every stamp site uses. A live registry row holding an id
-    # is contention only when the prover cannot claim it: the prover above now
-    # reads the spawn-minted binding when the process tree is silent, so a
-    # worker whose OWN row holds its stamped id resolves instead of being
-    # refused by its own row (that refusal cost three runs on one node in one
-    # evening). A vendor marker without a complete stamp never self-proves, so
-    # the collider remains the cause-agnostic ambient-leak backstop. On the
-    # per-call stamp path a wrong refusal would silently unstamp a fleet.
-    owned = resolve_owned_identity(
-        env,
-        prove=_prove,
-        collide=_collide,
-    )
+    owned = resolve_self_identity(env, collide=_collide)
     # AC5-CON: record any non-trivial resolution (a refused collision or a
     # non-single disposition) so a future leak is reconstructable from the event
     # log alone. A single-family resolve can still carry a refused collision, so
@@ -1942,7 +1855,7 @@ def _warn_no_merge_dropped() -> None:
         "WARNING: --no-merge did NOT take - this session wrote no manifest, and "
         "the manifest is write-once. Merge posture is whatever the existing "
         "manifest says. Verify with:\n"
-        "  sed -n 's/^auto_merge_approved:[[:space:]]*//p' .fno/target-state.md\n"
+        "  sed -n 's/^auto_merge_approved:[[:space:]]*//p' \"$(fno-agents state path target-state)\"\n"
         "and if it is not `false`, do not rely on this flag.",
         err=True,
     )
@@ -3050,7 +2963,7 @@ def _read_node_claim(node_id: str) -> Optional[dict]:
         return None
 
 
-def _classify_node_claim(node_id: str) -> tuple[str, Optional[dict]]:
+def _classify_node_claim(node_id: str, *, info: Optional[dict] = None) -> tuple[str, Optional[dict]]:
     """``(verdict, info)`` for ``node:<id>`` from THIS session's view.
 
     verdict in ``{ours, foreign_live, dead_predecessor, free}``. Liveness is
@@ -3058,9 +2971,11 @@ def _classify_node_claim(node_id: str) -> tuple[str, Optional[dict]]:
     the surface that lets a caller park a second session instead of being told
     the owner went idle. Read-only, never raises; a probe failure reads as
     ``free`` (a re-acquire candidate) so an unreadable claims dir never wedges
-    start.
+    start. ``info`` overrides the claim read (a batch verdict row), so every
+    caller maps state through this one function.
     """
-    info = _read_node_claim(node_id)
+    if info is None:
+        info = _read_node_claim(node_id)
     if not info:
         return ("free", None)
     state = info.get("state")
@@ -3150,7 +3065,7 @@ def _classify_worktree_occupancy(wt_path: Path) -> tuple[str, Optional[dict]]:
     if not session_id:
         return "unknown", {"reason": "session-id-unavailable"}
     try:
-        from fno.agents.watchdog import REAP_QUIET_AFTER_S, finished_with_the_tree, tail_facts
+        from fno.agents.watchdog import QUIET_AFTER_S, finished_with_the_tree, tail_facts
 
         facts = tail_facts(
             session_id,
@@ -3171,7 +3086,7 @@ def _classify_worktree_occupancy(wt_path: Path) -> tuple[str, Optional[dict]]:
     # disagree about the same session - a silent-but-ENGAGED tail read
     # available to a successor while reap refused to touch it, and a dead
     # worker occupied its tree an hour past the fleet's quiet window.
-    if not finished_with_the_tree(facts, time.time(), REAP_QUIET_AFTER_S):
+    if not finished_with_the_tree(facts, time.time(), QUIET_AFTER_S):
         return "occupied_worktree", {
             "session_id": session_id,
             "age_s": int(max(0.0, time.time() - last_epoch)),
@@ -3322,9 +3237,9 @@ def start(
     idempotent verb with a printed receipt, so a memory-less agent succeeds.
 
     Composes: ``fno agents workspace worktree ensure`` (create/reuse off origin/main, never local
-    HEAD) -> heal ``.fno`` + link shared state -> ``fno do target init`` (writes the
-    manifest, claims the node exactly once) -> receipt. Run from INSIDE a valid
-    worktree it is a no-op.
+    HEAD) -> link shared non-fno state -> ``fno do target init`` (writes the
+    manifest into the worktree's space slice, claims the node exactly once) -> receipt.
+    Run from INSIDE a valid worktree it is a no-op.
     """
     from fno._flag_aliases import refuse_retired_provider
 
@@ -3458,26 +3373,31 @@ def start(
         )
         raise typer.Exit(code=1)
     wt_path = Path(wt)
+    # Whether the tree is THIS invocation's creation decides the init-failure
+    # receipt below: a tree this run created and failed to claim is named for
+    # reclaim, while a tree that predates the run is another session's subject
+    # and is not characterized as our creation. ensure stamps created=true|
+    # false on its receipt; an installed ensure that predates the token is
+    # read through its reuse wording instead.
+    _created_token = re.search(r"\bcreated=(true|false)\b", ens.stderr or "")
+    if _created_token:
+        created_this_run = _created_token.group(1) == "true"
+    else:
+        created_this_run = "reusing" not in (ens.stderr or "")
     # ensure names the branch's provenance (continued/salvaged/fresh) on its
     # stderr receipt; a re-dispatched worker must see it is continuing.
     _from = re.search(r" base=(\S+)", ens.stderr or "")
     from_note = f"  from={_from.group(1)}" if _from else ""
 
     # policy=never: ensure returned the repo main checkout itself (launch in place,
-    # no worktree). Skip the worktree-only heal + setup-worktree.sh - both mutate
-    # the CANONICAL .fno (unlink a real symlink, re-link shared state), the exact
-    # corruption Locked Decision 4 forbids. Init still runs, in place.
+    # no worktree). Skip setup-worktree.sh - it links worktree-local state the
+    # space regime replaced. Init still runs, in place.
     in_place = wt_path.resolve() == repo_root.resolve()
 
-    # 2. Heal .fno when it arrived as a whole-dir symlink (the memory-only fix,
-    #    now in code), then link shared state via the canonical setup hook.
-    healed = False
+    # 2. Link the remaining shared non-fno state (.claude/, vault) via the
+    #    canonical setup hook. Project state needs no link: it lives in the
+    #    repo's space, which every worktree resolves identically.
     if not in_place:
-        fno_dir = wt_path / ".fno"
-        if fno_dir.is_symlink():
-            fno_dir.unlink()
-            fno_dir.mkdir()
-            healed = True
         from fno.worktree import _run_setup_worktree_hook
 
         rc, tail = _run_setup_worktree_hook(repo_root, wt_path)
@@ -3497,10 +3417,12 @@ def start(
         # codex-native branch above); resolve the same verified ref locally.
         base_label = _remote_base_ref(repo_root)
 
-    # Idempotent re-run from canonical: a manifest already in the worktree means
-    # init has run (write-once) - skip it, never double-claim or error.
-    manifest = wt_path / ".fno" / "target-state.md"
-    fno_state = "in-place" if in_place else ("healed" if healed else "ok")
+    # Idempotent re-run from canonical: a manifest in this worktree's space
+    # slice (or still at the legacy checkout path) means init has run - skip
+    # it, never double-claim or error.
+    from fno.paths import target_state_path_or_legacy
+
+    manifest = target_state_path_or_legacy(wt_path)
     if manifest.exists() and not manifest.is_symlink():
         # A manifest means init ran. Classify the live node claim from this
         # session's view: foreign-live -> park; ours -> idempotent already-claimed;
@@ -3542,7 +3464,7 @@ def start(
             raise typer.Exit(code=1)
         if verdict == "ours":
             typer.echo(
-                f"worktree={wt_path}  .fno={fno_state}  "
+                f"worktree={wt_path}  "
                 f"base={_truthful_base(cwd, base_label, measure=False)}  "
                 f"node=already-claimed holder={(claim_info or {}).get('holder') or '?'} "
                 f"state={(claim_info or {}).get('state') or '?'}"
@@ -3580,7 +3502,7 @@ def start(
             else "no prior claim"
         )
         typer.echo(
-            f"worktree={wt_path}  .fno={fno_state}  "
+            f"worktree={wt_path}  "
             f"base={_truthful_base(cwd, base_label, measure=False)}  "
             f"node=reacquired (successor took over from {prior})"
         )
@@ -3619,11 +3541,26 @@ def start(
         init_cmd += ["--beastmode"]
     init = subprocess.run(init_cmd, cwd=str(wt_path))
     if init.returncode != 0:
-        typer.echo(
-            f"fno do target start: target init failed (step: init, exit "
-            f"{init.returncode}); worktree at {wt_path} is created but unclaimed.",
-            err=True,
-        )
+        if created_this_run and not in_place:
+            # One receipt line the run currently lacks: the refused init
+            # leaves a fresh tree holding an init-time manifest and no claim,
+            # which a later reader cannot tell from a live session. The tree
+            # is NOT deleted here - it may hold a partial checkout, and
+            # deletion is the more dangerous of the two mistakes.
+            typer.echo(
+                f"fno do target start: target init failed (step: init, exit "
+                f"{init.returncode}); worktree at {wt_path} is created but "
+                f"unclaimed; reclaim with: fno agents workspace worktree "
+                f"archive {wt_path}",
+                err=True,
+            )
+        else:
+            typer.echo(
+                f"fno do target start: target init failed (step: init, exit "
+                f"{init.returncode}); worktree at {wt_path} predates this "
+                f"run and was left untouched.",
+                err=True,
+            )
         raise typer.Exit(code=init.returncode)
 
     # 4. Receipt - one parse-friendly line a memory-less agent acts on. When a
@@ -3631,7 +3568,7 @@ def start(
     #    auditable (x-d7a7); absent -> today's line, byte-identical.
     model_note = f"  model={model} ({decision_source})" if model else ""
     typer.echo(
-        f"worktree={wt_path}  .fno={fno_state}  "
+        f"worktree={wt_path}  "
         f"base={_truthful_base(wt_path, base_label)}  node=claimed{from_note}{model_note}"
     )
     typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)

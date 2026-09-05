@@ -741,7 +741,11 @@ def update_readiness(
     # a restart, so an exited or already-dead row never counts toward
     # `--revive` even when `is_revivable` alone would accept it (P2, codex on
     # PR #881).
-    revivable = sum(1 for r in agent_rows if r.get("status") == "live" and is_revivable(r))
+    revivable = sum(
+        1
+        for r in agent_rows
+        if r.get("status") in ("writing", "quiet", "parked") and is_revivable(r)
+    )
 
     changelog: list[str] = []
     if resolved_source is not None and installed_rev and source_rev:

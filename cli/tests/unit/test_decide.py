@@ -19,6 +19,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.decide.cli import decide_app
+from fno.paths import project_events_json, project_log
 
 runner = CliRunner()
 
@@ -482,7 +483,7 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _events(root: Path) -> list[dict]:
     return [
         json.loads(line)
-        for line in (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in project_log("events.jsonl", project_root=root).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
 
@@ -689,7 +690,7 @@ def test_reindex_preserves_distinct_retractions_for_one_target(
         )
         assert result.exit_code == 0, result.output
     index.unlink()
-    assert reindex(sources=[root / ".fno" / "events.jsonl"])["added"] == 3
+    assert reindex(sources=[project_log("events.jsonl", project_root=root)])["added"] == 3
     listed = runner.invoke(decide_app, ["list", "--state", "retracted", "--json"])
     row = json.loads(listed.stdout)["decisions"][0]
     assert row["lifecycle_reason"] == "second reason"
@@ -740,7 +741,7 @@ def test_retraction_survives_reindex(root: Path, tmp_graph: Path, index: Path):
     )
     assert retracted.exit_code == 0, retracted.output
     index.unlink()
-    assert reindex(sources=[root / ".fno" / "events.jsonl"])["added"] == 2
+    assert reindex(sources=[project_log("events.jsonl", project_root=root)])["added"] == 2
     listed = runner.invoke(decide_app, ["list", "--state", "retracted", "--json"])
     assert json.loads(listed.stdout)["decisions"][0]["decision_id"] == decision_id
 
@@ -762,7 +763,7 @@ def test_reindex_counts_decision_and_retraction_keys_once(
     )
     assert retracted.exit_code == 0, retracted.output
 
-    counts = reindex(sources=[root / ".fno" / "events.jsonl"])
+    counts = reindex(sources=[project_log("events.jsonl", project_root=root)])
     assert counts["added"] == 0
     assert counts["already"] == 2
 
@@ -844,7 +845,9 @@ def test_missing_supersession_target_refuses_before_recording(
     )
     assert result.exit_code != 0, result.output
     assert not index.exists()
-    assert not (root / ".fno" / "events.jsonl").exists()
+    from fno.paths import project_log
+
+    assert not project_log("events.jsonl", project_root=root).exists()
 
 
 def test_retraction_origin_is_floored_before_event_persistence(
@@ -1773,7 +1776,9 @@ def test_reindex_recovers_journal_records_and_is_idempotent(
     already exists."""
     from fno.decide import reindex
 
-    journal = root / ".fno" / "events.jsonl"
+    from fno.paths import project_log
+
+    journal = project_log("events.jsonl", project_root=root)
     for subject in ("pr-923", "pr-921", "x-6352-worktree"):
         runner.invoke(decide_app, ["--subject", subject, "--decision", f"on {subject}"])
     index.unlink()  # the state before the index existed: journal only
@@ -1801,7 +1806,9 @@ def test_reindex_reads_one_journal_once_through_a_symlink(
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
     index.unlink()
 
-    journal = root / ".fno" / "events.jsonl"
+    from fno.paths import project_log
+
+    journal = project_log("events.jsonl", project_root=root)
     link = tmp_path / "linked-events.jsonl"
     link.symlink_to(journal)
 
@@ -1860,7 +1867,11 @@ def test_reindex_folds_every_project_root_the_graph_names(
     )["decision_id"]
     index.unlink()
 
-    assert any(sibling in p.parents for p in _default_journals()), _default_journals()
+    from fno.paths import project_log
+
+    sibling_journal = project_log("events.jsonl", project_root=sibling)
+    journals = _default_journals()
+    assert any(p == sibling_journal or sibling_journal in p.parents for p in journals), journals
     assert reindex()["added"] >= 1
     payload = json.loads(
         runner.invoke(decide_app, ["list", "--subject", "pr-777", "--json"]).stdout
@@ -1908,7 +1919,7 @@ def test_reindex_drops_the_damaged_row_so_the_warning_can_clear(
     with index.open("a", encoding="utf-8") as fh:
         fh.write('{"type":"operator_decision","data":{"decision_id":"d-tru\n')
 
-    counts = reindex(sources=[root / ".fno" / "events.jsonl"])
+    counts = reindex(sources=[project_log("events.jsonl", project_root=root)])
     assert counts["repaired"] == 1, counts
 
     capsys.readouterr()
@@ -1927,12 +1938,12 @@ def test_reindex_counts_a_journal_row_and_its_own_projection_once(
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
     index.unlink()
 
-    counts = reindex(sources=[root / ".fno" / "events.jsonl"])
+    counts = reindex(sources=[project_log("events.jsonl", project_root=root)])
     assert (counts["added"], counts["already"]) == (1, 0), counts
 
     # And on the SECOND run it is one already-indexed decision, not two
     # sightings of one.
-    again = reindex(sources=[root / ".fno" / "events.jsonl"])
+    again = reindex(sources=[project_log("events.jsonl", project_root=root)])
     assert (again["added"], again["already"]) == (0, 1), again
 
 
@@ -2011,7 +2022,7 @@ def test_a_torn_multibyte_append_stays_readable_and_recoverable(
     assert listed.exit_code == 0, listed.output
     assert [d["decision"] for d in json.loads(listed.stdout)["decisions"]] == ["merged"]
 
-    assert reindex(sources=[root / ".fno" / "events.jsonl"])["repaired"] == 1
+    assert reindex(sources=[project_log("events.jsonl", project_root=root)])["repaired"] == 1
     assert index.with_suffix(".jsonl.corrupt").exists(), "the drop is reversible"
 
 
@@ -2031,7 +2042,7 @@ def test_one_unusable_projection_row_does_not_abort_the_backfill(
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
 
-    counts = reindex(sources=[root / ".fno" / "events.jsonl"])
+    counts = reindex(sources=[project_log("events.jsonl", project_root=root)])
     assert counts["added"] == 2, counts
     for subject, decision in (("pr-923", "from the journal"), ("x-7d94", "usable")):
         payload = json.loads(
@@ -2109,7 +2120,9 @@ def test_a_torn_journal_does_not_make_reindex_impossible(
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
     index.unlink()
-    journal = root / ".fno" / "events.jsonl"
+    from fno.paths import project_log
+
+    journal = project_log("events.jsonl", project_root=root)
     with journal.open("ab") as fh:
         fh.write(b'{"type":"other","data":{"x":"caf\xc3\n')
 

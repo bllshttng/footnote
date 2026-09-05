@@ -1,11 +1,12 @@
 # Dual-implementation inventory and the port protocol
 
-The operator ruling. When either trigger fires, port a Python behavior to Rust.
+The operator ruling. When any trigger fires, port a Python behavior to Rust.
 
 1. DUPLICATION. One behavior is hand-written twice, in two languages. This is the original rule, and the dual-logic kind below.
 2. PREVENTION. The port removes a class of defect that a type system makes unrepresentable rather than merely detectable. The qualifying classes are in the second-trigger section below.
+3. PARITY GUARD. Writing a guard whose purpose is to force Python and Rust implementations to agree is itself the strongest trigger for a port. The guard is legitimate as scaffolding during the port, never as its end state.
 
-Neither trigger reaches a shared-vocabulary or a generated-artifact guard. Those stay excluded regardless of benefit, because porting them retires nothing and a generated-artifact tripwire is correct as built.
+The first two triggers do not reach a shared-vocabulary or a generated-artifact guard. Those stay excluded regardless of benefit, because porting them retires nothing and a generated-artifact tripwire is correct as built. The parity-guard trigger applies only when the guard pins two implementations of one decision, not when it checks shared vocabulary or generated data.
 
 This page answers four questions. Which cross-tree guards mark a real second implementation. What the procedure is for retiring one. Why most of these guards are not port candidates at all. When a port is justified without duplication.
 
@@ -35,7 +36,7 @@ The rename-safety case. The substrate vocabulary moved from `bg` to `thread`, an
 
 Each case earns the port through the type system. Provenance moves into a type instead of a docstring. A closed vocabulary forces every entry to carry its reason. An enum turns a rename into a compile error at every surviving site instead of a false comparison at one.
 
-The scope guard. Prevention is a second trigger for porting, never a third kind of guard. The discriminator above still decides what a dual implementation is, and its exclusions survive this trigger unchanged. A prevention port follows the same four-step protocol as a duplication port. The sequence section orders duplication ports only. A prevention port is scheduled on its own measured case, never by that sequence.
+The scope guard. Prevention is a trigger for porting, not a third kind of implementation. The parity-guard trigger is stronger still: once a guard is needed to force two decision legs to agree, the port has already earned priority. The discriminator above still decides what a dual implementation is, and its exclusions survive these triggers unchanged. Every port follows the same four-step protocol. The sequence section orders confirmed duals by dependency, while a prevention-only case is scheduled on its own measured evidence.
 
 ## The parity tests
 
@@ -48,24 +49,29 @@ Measured by reading each file's header, then testing whether its oracle still ex
 | `crates/fno-agents/tests/graph_store_parity.rs` | `fno.graph.store._acquire_flock` | absent (symbol) | characterization, port complete |
 | `crates/fno-agents/tests/kill_criteria_parity.rs` | `scripts/lib/kill-criteria.sh` | absent | characterization, port complete |
 | `crates/fno-agents/tests/verify_evidence_parity.rs` | `scripts/lib/verify-event-evidence.sh` | absent | characterization, port complete |
+| `crates/fno-agents/tests/claim_classifier_parity.rs` | `fno.claims.staleness` | absent (module) | characterization, port complete |
 
-All five are finished ports. Their oracle legs are gone. Each converted case now asserts against a golden captured before that deletion, and each file sits at step 4 of the protocol below. None awaits anything. The ask files and the graph store file carry the SYMBOL oracles, and their Python modules survive the port. The spawn surface keeps `parse_short_id`, the session registry keeps the reply readers, and `codex.create` keeps the one-shot lane. The graph store module survives as the keeper's socket client. Only a symbol says which leg is gone.
+All six are finished ports. Their oracle legs are gone. Each converted case now asserts against a golden captured before that deletion, and each file sits at step 4 of the protocol below. None awaits anything. The ask files and the graph store file carry the SYMBOL oracles, and their Python modules survive the port. The claim classifier's module oracle is absent because its Python module was deleted. The spawn surface keeps `parse_short_id`, the session registry keeps the reply readers, and `codex.create` keeps the one-shot lane. Only a symbol or module resolution says which leg is gone.
 
 `kill_criteria` is not a dual implementation. State the reason, because the mistake is easy to repeat. The Python files under `cli/src/fno/plan/` validate the kill-criteria DECLARATION against a schema. The Rust `kill-check` verb EVALUATES the predicates at a wave boundary. Two functions share a vocabulary. The parity test never pointed at that Python. It points at a bash oracle that is gone.
 
 ## The real dual set
 
-There are four, in retirement order. The ask adapters and the graph store are retired (2026-09-02). The claim classifier and the native graph reader are still live duals.
+Four live duals below, plus one retirement recorded where it landed (the watchdog reap and retire lanes, 2026-09-04). The ask adapters, the claim classifier and the graph store are retired (2026-09-02), and the review-freshness mirror followed (2026-09-03). The native graph reader remains the confirmed dual closest to a port, with three port-owed duals named below.
 
 **The review-freshness mirror.** `_pr_code_diff_identity` and `_reviewed_sha_still_describes_head` in `cli/src/fno/pr/_reviews.py` mirrored `review_freshness` in loopcheck.rs decision for decision. When the Rust instrument was absent, they were the fallback answer. Retired 2026-09-03. The fallback guessed where every other missing-instrument gate refuses. It also disagreed with the gate it mirrored: a locally recomputed floor read 3 where the gate's row said 1 on one PR. The one predicate now lives in `crates/fno-agents/src/review_freshness.rs`. With the binary absent, `fno do pr status` answers `unmeasurable` and names the remedy.
 
-**The claim classifier.** Dual. It goes first. When it was sequenced, no parity guard pinned it. Silent drift was possible, and that is why it leads. `claim_classifier_parity.rs` pins it now while its port runs.
+**The claim classifier.** Port complete (2026-09-02). The Python liveness module was deleted, every verdict consumer moved to the Rust decision door, and `claim_classifier_parity.rs` now characterizes the captured state+basis golden. Its parity guard is the third trigger's specimen: writing the guard proved that the duplicated decision had to be retired.
 
 **The ask adapters.** `fno.agents.harnesses.claude` and `fno.agents.harnesses.codex`, pinned by the two differential harnesses until their port completed (2026-09-02). The Rust runtime already owned production `ask` end to end. The port deleted the Python ask functions and moved the last Python-only caller duty, `--to-project` anycast resolution, into `cmd_ask` ahead of the binary exec. The surviving Python surface is spawn substrate, not ask: `parse_short_id` for bg receipts, the registry reply readers, and `codex.create` for one-shot spawns.
 
 **The graph store.** `cli/src/fno/graph/store.py`, pinned by the differential harness until its port completed (2026-09-02). The store core lives in `crates/fno-agents/src/graph_store.rs` behind a keeper process. The core owns the byte-compatible JSON I/O, defaults, status recompute, canonicalization, slugs, the bounded lock, and the publish with its backup and sidecar. The keeper model is one process per graph, with the socket beside the file. The Python file survives as the socket client with unchanged signatures. The verb surface above it never moved. The port also removed two defect classes. Typed presence makes an empty overwrite of `details` unrepresentable at the store boundary. The bounded lock answers inside its deadline and never blocks forever.
 
 **The native graph reader.** `crates/fno/src/backlog_view.rs`, 2140 lines of Rust parsing `graph.json` with no subprocess. Its docstrings name the Python oracles it mirrors. Two mirrors still hold on both sides: `KANBAN_COLUMNS` (`cli/src/fno/graph/render.py:26`, mirrored at `backlog_view.rs:380`) and `_kanban_column` (`render.py:71`, mirrored near `backlog_view.rs:390`). The readiness mirror lost its Python counterpart. The store port moved the overlay into `graph_store.rs`, and the Python statuses module now answers through the keeper. This file is not a duplicate that waits for deletion. It is the read-only reader of the mux, and the store client borrows its `kanban_column` for peer lanes. A port here deletes a reader, not a second implementation of the store. Dual and UNGUARDED. The parity is a comment asking a human to remember, and the tests beside it run one side only. The earlier guard enumeration did not find this file. That is the limit the duplicate-discovery sweep exists to close. A mirror that declares itself in a docstring is invisible to a guard census keyed on parity-test files. It holds exactly one seam crossing, so a crossing count alone scores writing more of it as an improvement. The two-axis budget in [the seam doc](rust-python-seam.md) exists for exactly this shape.
+
+**The watchdog reap and retire lanes.** Dual, disposition dual-logic, RETIRED (2026-09-04). The Python lanes (`reap_decision`, `retire_decision` and their apply halves in `cli/src/fno/agents/watchdog.py`) and the Rust sweep answered the same question, which row may be removed, with different keys: the Python lane read a node's `status` plus claim occupancy; the Rust sweep read exit stamps. Both were wrong keys. The retirement question now has one leg, the daemon sweep in `crates/fno-agents/src/gc.rs` + `gc_sweep.rs`, keyed by the reverse join through `node.sessions[]` plus transcript quiet. The characterization is the AC7 test family in `crates/fno-agents/src/daemon/tests/gc_receipts.rs`. The watchdog keeps wake, reroute, ghost and report.
+
+**`classify_progress` vs the daemon's list projection.** Dual, disposition dual-logic, port owed, not in this PR. Python leg `classify_progress` in `cli/src/fno/agents/reachability.py:217`, Rust leg the progress fold in `crates/fno-agents/src/daemon.rs` (the list projection, `rendered_status_from_truth` around line 5954). Both classify a session's tail into the progress axis the roster renders, and both are correct today. A port deletes the Python leg when the roster's progress axis answers through the daemon.
 
 **`pending_supersession_reason`.** Dual, disposition dual-logic, port owed, not in this PR. Python leg `cli/src/fno/graph/statuses.py:220`, Rust leg `crates/fno-agents/src/graph_store.rs:770`. Both answer whether a supersession lacks merged-PR proof, and both are correct today. The blocked_by edge settlement landed beside them and recorded this row. A port deletes the Python leg and converts the guard to characterization. The readiness predicate it sits beside is already Rust-only.
 
@@ -135,7 +141,7 @@ The header carries no node id and no PR number. `scripts/ci/check-no-internal-re
 
 ## Sequence
 
-The claim classifier goes first. When it was sequenced it was the only dual implementation with no parity guard pinning it. `claim_classifier_parity.rs` pins it now. A guarded leg cannot drift silently. An unguarded one can.
+The claim classifier went first and is complete. It was the only dual implementation with no parity guard when this sequence was filed; its golden characterization now proves the Rust decision is the sole surviving leg.
 
 Retirement order is subordinate to the crossing dependency order in [the seam doc](rust-python-seam.md). A leg with no guard still waits for the legs it feeds. Risk argues for a port. Dependency decides the safe order.
 

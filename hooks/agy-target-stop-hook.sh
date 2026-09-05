@@ -83,7 +83,8 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${GEMINI_PLUGIN_ROOT:-$(
 EVENTS_LIB="${PLUGIN_ROOT}/scripts/lib/events.sh"
 # shellcheck source=../scripts/lib/events.sh
 [[ -r "$EVENTS_LIB" ]] && source "$EVENTS_LIB" 2>/dev/null || true
-LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
+LIVE_STATE_FILE=$(fno-agents state path target-state 2>/dev/null || true)
+[[ -z "$LIVE_STATE_FILE" ]] && LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
 TARGET_CWD="$ROOT"
 REPO_ROOT=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")
@@ -92,6 +93,8 @@ WORKTREE_COUNT=$(git -C "$ROOT" worktree list --porcelain 2>/dev/null \
 [[ "$WORKTREE_COUNT" =~ ^[0-9]+$ ]] || WORKTREE_COUNT=0
 OTHER_WORKTREE_PRESENT=0
 (( WORKTREE_COUNT > 1 )) && OTHER_WORKTREE_PRESENT=1
+SPACE_DIR=$(dirname "$(fno-agents state path events 2>/dev/null || true)")
+[[ -z "$SPACE_DIR" || "$SPACE_DIR" == "." ]] && SPACE_DIR="${REPO_ROOT}/.fno"
 
 resolve_agents_bin() {
     if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
@@ -212,7 +215,7 @@ emit_event() {
         echo "agy stop-hook: event helper unavailable; skipping ${kind}" >&2
         return
     fi
-    _append_bounded_event agy_stop_hook "$line" "$ROOT/.fno/events.jsonl" || true
+    _append_bounded_event agy_stop_hook "$line" "${SPACE_DIR}/events.jsonl" || true
     # Honors an overridden config.state_dir when the shell stub was sourced;
     # falls back to the default so the helper-missing give-up path still logs.
     global_events="${GLOBAL_EVENTS_PATH:-${STATE_DIR:-$HOME/.fno}/events.jsonl}"
@@ -226,7 +229,7 @@ counter_path() {
     [[ -z "$key" ]] && key=$(grep '^session_id:' "$STATE_FILE" 2>/dev/null | head -1 \
         | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
     [[ -z "$key" ]] && key="session"
-    printf '%s' "$ROOT/.fno/.loop-check-unavail-${key}"
+    printf '%s' "${SPACE_DIR}/.loop-check-unavail-${key}"
 }
 
 # Checker unavailable for an ACTIVE session: bounded-continue, then loud give-up
@@ -279,7 +282,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
     if [[ -n "$CONVERSATION_ID" ]] && command -v fno >/dev/null 2>&1; then
         KING_STATE_FILE=$(cd "$ROOT" && fno agents king manifest-path \
             --harness-session-id "$CONVERSATION_ID" --harness agy \
-            --state-root "$ROOT/.fno" 2>/dev/null || true)
+            --state-root "$SPACE_DIR" 2>/dev/null || true)
     fi
     if [[ -n "$KING_STATE_FILE" && -f "$KING_STATE_FILE" ]]; then
         # BOUNDED, mirroring unavailable_continue_or_allow rather than inventing
@@ -351,7 +354,7 @@ synthesize_transcript() {
 }
 
 SYNTH="${STATE_FILE%/*}/.agy-loopcheck-${CONVERSATION_ID:-session}.jsonl"
-mkdir -p "$ROOT/.fno" 2>/dev/null || true
+mkdir -p "$SPACE_DIR" 2>/dev/null || true
 if [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
     synthesize_transcript "$TRANSCRIPT_PATH" > "$SYNTH" 2>/dev/null || : > "$SYNTH"
 else
@@ -393,7 +396,7 @@ else
         --state "$STATE_FILE" \
         --transcript "$SYNTH" \
         --cwd "$TARGET_CWD" \
-        2>>"$ROOT/.fno/agy-loop-check.stderr.log") || verb_rc=$?
+        2>>"${SPACE_DIR}/agy-loop-check.stderr.log") || verb_rc=$?
 
     # Same invariant as the claude adapter: a non-zero exit means a BROKEN
     # checker only when the reply carries no verdict. A driver may return a
@@ -408,7 +411,7 @@ else
     if ! printf '%s' "$DECISION_JSON" | jq -e '.decision' >/dev/null 2>&1; then
         emit_event "loop_check_gh_error"
         echo "agy stop-hook: WARNING: loop-check unavailable (rc=$verb_rc / no decision)" >&2
-        tail -n 5 "$ROOT/.fno/agy-loop-check.stderr.log" >&2 2>/dev/null || true
+        tail -n 5 "${SPACE_DIR}/agy-loop-check.stderr.log" >&2 2>/dev/null || true
         unavailable_continue_or_allow
     fi
 fi
@@ -448,7 +451,7 @@ if [[ -n "$TERMINATION_REASON" ]]; then
         --transcript "$SYNTH" \
         --cwd "$TARGET_CWD" \
         --reason "$TERMINATION_REASON" 2>&1)" || FINALIZE_RC=$?
-    [[ -n "$FINALIZE_OUT" ]] && printf '%s\n' "$FINALIZE_OUT" >> "$ROOT/.fno/finalize.stderr.log" 2>/dev/null || true
+    [[ -n "$FINALIZE_OUT" ]] && printf '%s\n' "$FINALIZE_OUT" >> "${SPACE_DIR}/finalize.stderr.log" 2>/dev/null || true
     if [[ "$TERMINATION_REASON" == "DoneDelivery" && $FINALIZE_RC -ne 0 ]]; then
         emit '{"decision":"continue","reason":"generic delivery finalization failed; will retry"}'
     fi

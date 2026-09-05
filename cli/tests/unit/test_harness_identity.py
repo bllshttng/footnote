@@ -17,12 +17,29 @@ from fno.harness_identity import (
     claude_transport_short_id,
     current_session_id,
     current_session_ids,
+    harness_of_session_id,
     legacy_suffix_handle,
     present_harness_markers,
     resolve_harness_identity,
     resolve_owned_identity,
     session_identity_key,
 )
+
+
+@pytest.mark.parametrize(
+    ("session_id", "expected"),
+    [
+        ("b936b571-e0aa-40ed-a07d-97acb9a87db1", "claude"),
+        ("01a06886-9405-74a1-8afd-5b67baf89604", "codex"),
+        ("01A06886-9405-74A1-8AFD-5B67BAFB9604", "codex"),
+        ("ses_7f3a9b2cAbCd1234", "opencode"),
+        ("20260823T083106Z-cx87209-9d434e", None),
+        ("8ad8e13c", None),
+        ("", None),
+    ],
+)
+def test_harness_of_session_id_reads_the_shapes_own_harness(session_id, expected):
+    assert harness_of_session_id(session_id) == expected
 
 
 @pytest.mark.parametrize(
@@ -42,15 +59,24 @@ def test_resolves_each_supported_marker(marker, session_id, harness):
     )
 
 
-def test_precedence_favors_codex_thread_id():
-    """Within ONE family, higher-precedence markers still win (thread id over
-    the legacy codex session id). Cross-family never gets here - see the
-    refusal test below."""
-    env = {
+def test_same_family_dup_resolves_and_disagreement_degrades():
+    """Within ONE family: the same id under two names (codex sets both the
+    thread id and the legacy session id) resolves normally; two DIFFERENT ids
+    of one family are a disagreement and degrade rather than pick the
+    durable-looking one by position (x-0992). Cross-family never gets here -
+    see the refusal test below."""
+    same = {
+        "CODEX_THREAD_ID": "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4",
+        "CODEX_SESSION_ID": "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4",
+    }
+    assert resolve_harness_identity(same) == HarnessIdentity(
+        "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4", "codex"
+    )
+    disagree = {
         "CODEX_THREAD_ID": "thread",
         "CODEX_SESSION_ID": "codex-session",
     }
-    assert resolve_harness_identity(env) == HarnessIdentity("thread", "codex")
+    assert resolve_harness_identity(disagree) == HarnessIdentity(None, None)
 
 
 def test_cross_family_markers_refuse_instead_of_precedence():
@@ -340,13 +366,25 @@ def test_owned_single_marker_matches_precedence(marker, session_id, harness):
 
 
 def test_owned_two_same_family_is_single_not_ambiguous():
-    """Two markers of ONE harness (both codex) agree; that is not the bug
-    shape. Precedence-first wins, byte-identical to today."""
-    env = {"CODEX_THREAD_ID": "thread", "CODEX_SESSION_ID": "session"}
+    """Two markers of ONE harness carrying the SAME id agree; that is not the
+    bug shape. The family resolves, byte-identical to today."""
+    env = {"CODEX_THREAD_ID": "thread", "CODEX_SESSION_ID": "thread"}
     owned = resolve_owned_identity(env)
     assert owned.disposition == "single"
     assert owned.harness == "codex"
     assert owned.session_id == "thread"
+
+
+def test_owned_same_family_disagreement_degrades_not_table_first():
+    """Two ids of ONE family, no proof, no collision: unresolved rather than
+    the table-first value - either marker could be the stranger's (x-0992)."""
+    env = {"CODEX_THREAD_ID": "thread", "CODEX_SESSION_ID": "session"}
+    owned = resolve_owned_identity(env)
+    assert owned.disposition == "ambiguous"
+    assert owned.session_id is None
+    assert owned.harness is None
+    assert ("CODEX_THREAD_ID", "codex", "thread") in owned.markers_present
+    assert ("CODEX_SESSION_ID", "codex", "session") in owned.markers_present
 
 
 def test_owned_disagreement_degrades_without_proof():
@@ -741,12 +779,16 @@ def test_ac7_con_no_resolver_guesses_codex_for_a_disagreement():
 
 
 def test_current_session_helpers_refuse_mixed_and_fall_back_to_legacy():
-    """One family: precedence winner. Mixed canonical families: the id helper
+    """One family agreeing on one id: the id resolves. Two ids of one family
+    disagree: unresolved (x-0992). Mixed canonical families: the id helper
     refuses like the resolver instead of laundering the claude-legacy marker
     (x-b57a); the ids helper still enumerates every marker, its own job."""
-    one_family = {"CODEX_THREAD_ID": " thread ", "CODEX_SESSION_ID": "session"}
+    one_family = {"CODEX_THREAD_ID": " thread ", "CODEX_SESSION_ID": " thread "}
     assert current_session_id(one_family) == "thread"
-    assert current_session_ids(one_family) == {"thread", "session"}
+    assert current_session_ids(one_family) == {"thread"}
+    disagree = {"CODEX_THREAD_ID": " thread ", "CODEX_SESSION_ID": "session"}
+    assert current_session_id(disagree) is None
+    assert current_session_ids(disagree) == {"thread", "session"}
     mixed = {
         "CODEX_THREAD_ID": " thread ",
         "CLAUDE_CODE_SESSION_ID": "claude",
@@ -1351,3 +1393,23 @@ def test_resolve_attester_identity_corroborates_the_own_id():
         # corroborated where it was readable (process) and honestly
         # env_only where it was not. Either is correct; a raise is not.
         assert witness in ("process", "env_only")
+
+
+def test_owned_collides_once_per_distinct_id_for_same_value_dups():
+    # A codex dup carrying one id on both markers must reach the collide
+    # callback once: the callback reloads the registry on every call.
+    env = {"CODEX_THREAD_ID": "same-1", "CODEX_SESSION_ID": "same-1"}
+    calls: list[tuple[str, str]] = []
+
+    def collide(harness: str, session_id: str):
+        calls.append((harness, session_id))
+        return None
+
+    owned = resolve_owned_identity(env, prove=None, collide=collide)
+
+    assert (owned.session_id, owned.harness, owned.disposition) == (
+        "same-1",
+        "codex",
+        "single",
+    )
+    assert calls == [("codex", "same-1")]

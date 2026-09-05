@@ -108,7 +108,7 @@ PREFLIGHT_RUN_TESTS=1 bash run-checks.sh
 
 **Purpose:** Check if the structural codebase map is current.
 
-**Pass:** `.fno/codemap.md` exists and was modified within the last 24 hours.
+**Pass:** the codemap in the repo's space (resolved by `fno-agents state path codemap`) exists and was modified within the last 24 hours.
 
 **Warn:** File missing, or older than 24 hours. Includes age in the message.
 

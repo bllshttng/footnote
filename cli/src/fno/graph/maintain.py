@@ -446,6 +446,343 @@ def detect_shared_plan_cost_violations(entries: list[dict]) -> list[SharedPlanCo
 
 
 # ---------------------------------------------------------------------------
+# Leg 2c: mis-harnessed session twins (deterministic repair)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class MisharnessedTwin:
+    """A sessions[] row whose harness its own session id contradicts, while a
+    shape-correct twin with the same (session_id, phase) exists on the node."""
+
+    node_id: str
+    session_id: str
+    phase: str
+    bad_harness: str
+    keep_harness: str
+
+
+def detect_misharnessed_twins(entries: list[dict]) -> list[MisharnessedTwin]:
+    """Rows stamped under a harness their id's shape contradicts, where the
+    node also carries the shape-correct twin for the same (session_id, phase).
+
+    These are phantom rows minted before the store refused wrong-shape
+    harnesses: a codex UUIDv7 id under ``harness: claude`` reads as a second,
+    distinct session to every keyed resolver. Dropped only when the correct
+    twin exists, so the provenance itself never leaves the graph.
+    """
+    from fno.harness_identity import harness_of_session_id
+
+    out: list[MisharnessedTwin] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        nid = e.get("id")
+        rows = e.get("sessions")
+        if not isinstance(nid, str) or not isinstance(rows, list):
+            continue
+        groups: dict[tuple[str, str], list[dict]] = {}
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            sid = r.get("session_id")
+            phase = r.get("phase")
+            harness = r.get("harness")
+            if not (
+                isinstance(sid, str) and sid
+                and isinstance(phase, str) and phase
+                and isinstance(harness, str) and harness
+            ):
+                continue
+            groups.setdefault((sid, phase), []).append(r)
+        for (sid, phase), group in groups.items():
+            shape = harness_of_session_id(sid)
+            if shape is None or len(group) < 2:
+                continue
+            if not any(r.get("harness") == shape for r in group):
+                continue
+            for r in group:
+                if r.get("harness") != shape:
+                    out.append(
+                        MisharnessedTwin(
+                            node_id=nid,
+                            session_id=sid,
+                            phase=phase,
+                            bad_harness=r.get("harness", "?"),
+                            keep_harness=shape,
+                        )
+                    )
+    out.sort(key=lambda t: (t.node_id, t.session_id, t.phase, t.bad_harness))
+    return out
+
+
+def apply_twin_drops(
+    ents: list[dict],
+    drops: list[MisharnessedTwin],
+    current_claimed: set[str],
+) -> tuple[list[dict], list[str], list[str]]:
+    """Drop each detected twin inside the caller's locked mutation.
+
+    Re-checked under the lock so a row settled since the scan (the wrong twin
+    gained the shape-correct harness, or the correct twin left) never drops
+    provenance. Returns ``(applied records, claimed node ids, warnings)``.
+    """
+    applied: list[dict] = []
+    skipped: list[str] = []
+    warnings: list[str] = []
+    for drop in drops:
+        if drop.node_id in current_claimed:
+            skipped.append(drop.node_id)
+            continue
+        try:
+            n = next(
+                (
+                    e
+                    for e in ents
+                    if isinstance(e, dict) and e.get("id") == drop.node_id
+                ),
+                None,
+            )
+            if not isinstance(n, dict):
+                continue
+            rows = n.get("sessions")
+            if not isinstance(rows, list):
+                continue
+            keep = [
+                r
+                for r in rows
+                if not (
+                    isinstance(r, dict)
+                    and r.get("session_id") == drop.session_id
+                    and r.get("phase") == drop.phase
+                    and r.get("harness") == drop.bad_harness
+                    and any(
+                        isinstance(o, dict)
+                        and o.get("session_id") == drop.session_id
+                        and o.get("phase") == drop.phase
+                        and o.get("harness") == drop.keep_harness
+                        for o in rows
+                    )
+                )
+            ]
+            if len(keep) != len(rows):
+                n["sessions"] = keep
+                applied.append(
+                    {
+                        "node_id": drop.node_id,
+                        "session_id": drop.session_id,
+                        "phase": drop.phase,
+                        "dropped_harness": drop.bad_harness,
+                        "kept_harness": drop.keep_harness,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 - one bad row must not abort
+            warnings.append(f"twin drop on {drop.node_id} failed: {exc}")
+    return applied, skipped, warnings
+
+
+def twin_payload(
+    drops: list[MisharnessedTwin], applied: list[dict], apply: bool
+) -> dict:
+    """The ``session_twins`` block of the maintain ``--json`` payload."""
+    return {
+        "applied": applied if apply else [],
+        "candidates": [
+            {
+                "node_id": t.node_id,
+                "session_id": t.session_id,
+                "phase": t.phase,
+                "dropped_harness": t.bad_harness,
+                "kept_harness": t.keep_harness,
+            }
+            for t in drops
+        ],
+    }
+
+
+def twin_lines(
+    drops: list[MisharnessedTwin], applied: list[dict], apply: bool
+) -> list[str]:
+    """Human-report lines, one per drop (or per candidate under dry-run)."""
+    if apply:
+        return [
+            f"  dropped twin {d['node_id']} ({d['session_id']}, phase "
+            f"{d['phase']}): harness {d['dropped_harness']} contradicts the "
+            f"id shape, {d['kept_harness']} twin kept"
+            for d in applied
+        ]
+    return [
+        f"  would drop twin {t.node_id} ({t.session_id}, phase {t.phase}): "
+        f"harness {t.bad_harness} contradicts the id shape, "
+        f"{t.keep_harness} twin kept"
+        for t in drops
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Leg 2d: mis-harnessed stamps with no twin (deterministic repair)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class HarnessShapeFix:
+    """A sessions[] row whose harness its own session id contradicts, with no
+    shape-correct twin to drop it against. The row is the node's only record of
+    the session, so the harness field is corrected, never the row deleted."""
+
+    node_id: str
+    session_id: str
+    phase: str
+    wrong_harness: str
+    right_harness: str
+
+
+def detect_harness_shape_fixes(entries: list[dict]) -> list[HarnessShapeFix]:
+    """Rows stamped under a harness their id's shape contradicts, where the node
+    carries NO shape-correct twin for the same (session_id, phase).
+
+    The twin lever drops a wrong row beside its correct twin; this lever
+    repairs the only row, because deleting it would erase the node's record
+    that the session ran here at all. Correcting the harness re-keys the row
+    onto the identity every resolver already uses, so the phantom second
+    session disappears.
+    """
+    from fno.harness_identity import harness_of_session_id
+
+    out: list[HarnessShapeFix] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        nid = e.get("id")
+        rows = e.get("sessions")
+        if not isinstance(nid, str) or not isinstance(rows, list):
+            continue
+        groups: dict[tuple[str, str], list[dict]] = {}
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            sid = r.get("session_id")
+            phase = r.get("phase")
+            harness = r.get("harness")
+            if not (
+                isinstance(sid, str) and sid
+                and isinstance(phase, str) and phase
+                and isinstance(harness, str) and harness
+            ):
+                continue
+            groups.setdefault((sid, phase), []).append(r)
+        for (sid, phase), group in groups.items():
+            shape = harness_of_session_id(sid)
+            if shape is None:
+                continue
+            if any(r.get("harness") == shape for r in group):
+                continue  # the twin lever owns the wrong rows beside a correct one
+            for r in group:
+                if r.get("harness") != shape:
+                    out.append(
+                        HarnessShapeFix(
+                            node_id=nid,
+                            session_id=sid,
+                            phase=phase,
+                            wrong_harness=r.get("harness", "?"),
+                            right_harness=shape,
+                        )
+                    )
+    out.sort(key=lambda f: (f.node_id, f.session_id, f.phase, f.wrong_harness))
+    return out
+
+
+def apply_harness_shape_fixes(
+    ents: list[dict],
+    fixes: list[HarnessShapeFix],
+    current_claimed: set[str],
+) -> tuple[list[dict], list[str], list[str]]:
+    """Correct each detected harness inside the caller's locked mutation.
+
+    Re-checked under the lock so a row settled since the scan (dropped as a
+    twin, gone, or already correct) is never rewritten. Returns ``(applied
+    records, claimed node ids, warnings)``.
+    """
+    applied: list[dict] = []
+    skipped: list[str] = []
+    warnings: list[str] = []
+    for fix in fixes:
+        if fix.node_id in current_claimed:
+            skipped.append(fix.node_id)
+            continue
+        try:
+            n = next(
+                (
+                    e
+                    for e in ents
+                    if isinstance(e, dict) and e.get("id") == fix.node_id
+                ),
+                None,
+            )
+            rows = n.get("sessions") if isinstance(n, dict) else None
+            if not isinstance(rows, list):
+                continue
+            touched = False
+            for r in rows:
+                if (
+                    isinstance(r, dict)
+                    and r.get("session_id") == fix.session_id
+                    and r.get("phase") == fix.phase
+                    and r.get("harness") == fix.wrong_harness
+                ):
+                    r["harness"] = fix.right_harness
+                    touched = True
+            if touched:
+                applied.append(
+                    {
+                        "node_id": fix.node_id,
+                        "session_id": fix.session_id,
+                        "phase": fix.phase,
+                        "was_harness": fix.wrong_harness,
+                        "now_harness": fix.right_harness,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 - one bad row must not abort
+            warnings.append(f"harness fix on {fix.node_id} failed: {exc}")
+    return applied, skipped, warnings
+
+
+def shape_fix_payload(
+    fixes: list[HarnessShapeFix], applied: list[dict], apply: bool
+) -> dict:
+    """The ``session_harness_fixes`` block of the maintain ``--json`` payload."""
+    return {
+        "applied": applied if apply else [],
+        "candidates": [
+            {
+                "node_id": f.node_id,
+                "session_id": f.session_id,
+                "phase": f.phase,
+                "was_harness": f.wrong_harness,
+                "now_harness": f.right_harness,
+            }
+            for f in fixes
+        ],
+    }
+
+
+def shape_fix_lines(
+    fixes: list[HarnessShapeFix], applied: list[dict], apply: bool
+) -> list[str]:
+    """Human-report lines, one per fix (or per candidate under dry-run)."""
+    if apply:
+        return [
+            f"  fixed harness {d['node_id']} ({d['session_id']}, phase "
+            f"{d['phase']}): {d['was_harness']} -> {d['now_harness']} "
+            "(the id's own shape)"
+            for d in applied
+        ]
+    return [
+        f"  would fix harness {f.node_id} ({f.session_id}, phase {f.phase}): "
+        f"{f.wrong_harness} -> {f.right_harness} (the id's own shape)"
+        for f in fixes
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Leg 4: drain stale ideas (propose-only)
 # ---------------------------------------------------------------------------
 
