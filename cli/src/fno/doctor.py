@@ -1814,7 +1814,6 @@ def _session_start_bytes_line(preamble_line: Optional[str]) -> Optional[str]:
 def _control_plane_arms_report() -> dict[str, Any]:
     """Stale control-plane arms via the one Rust reader (shells
     ``fno-agents status --json``): unknown on a failed read, never green.
-    Advisory: never changes doctor's status/exit.
     """
     try:
         from fno import rust_binary

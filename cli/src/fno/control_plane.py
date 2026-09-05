@@ -26,8 +26,8 @@ def scheduler_from_env(default: str = "session") -> str:
 def emit_tick(arm: str, *, scheduler: str, interval_s: int, acted: int = 0,
               skip_reason: Optional[str] = None, detail: Optional[str] = None,
               events_path: Optional[Path] = None) -> bool:
-    """Append one tick row. Returns False, never raises, on a failed write: a
-    readout row must never break the arm it observes."""
+    """Append one tick row. False, never raises, on a failed write: a readout
+    row must never break the arm it observes."""
     try:
         if events_path is None:
             pin = os.environ.get("FNO_EVENTS_PATH")  # test pin
