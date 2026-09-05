@@ -2,7 +2,7 @@
 """Re-seat a live pane worker into a portal: the registry half of the v70 move.
 =======
 """Re-seat a live pane worker into a portal: the registry half of the v69 move.
->>>>>>> 629e92fd9 (feat(mux): re-seat a live pane worker into a portal seat (server + registry half))
+>>>>>>> 7c0c95700 (feat(mux): re-seat a live pane worker into a portal seat (server + registry half))
 
 Drives ``fno mux thread reseat <pane>`` (the server moves the topology keeping
 the PTY), then clears the row's ``mux`` ref on the receipt - the server reads
