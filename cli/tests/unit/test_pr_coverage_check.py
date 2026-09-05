@@ -3426,31 +3426,62 @@ def test_rests_on_self_attestation_counts_an_absent_origin_as_self_attested():
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
 
 
-def test_rests_on_self_attestation_counts_an_unknown_origin_as_self_attested():
-    """Unknown arm: a read whose process
-    resolved no authoring session serializes attestation_origin "unknown".
-    Unknown authorship is not corroboration; the gate refuses."""
-    cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("unknown")]}
+def test_rests_on_self_attestation_refuses_an_unmeasured_origin():
+    """Unmeasured arm: a concrete attester session id with no author session
+    to compare against - the shape of an author's own re-read from a cwd
+    whose target manifest is absent. The comparison failed; the gate
+    refuses."""
+    cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("unmeasured")]}
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
 
 
+def test_rests_on_self_attestation_unknown_origin_corroborates():
+    """An attester-absent unknown is an env_only lane's real review, which
+    the recorded contract counts as corroboration. Refusing it would wedge
+    exactly those lanes, so the gate clears."""
+    cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("unknown")]}
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is False
+
+
 def test_rests_on_self_attestation_still_clears_a_measured_other_session():
-    """The one origin that proves the count is not the author's own stays a
-    measured other_session. Absent and unknown refuse; this clears."""
+    """The one measured origin that proves the count is not the author's own
+    stays a measured other_session. This clears."""
     cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("other_session")]}
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is False
 
 
-def test_rests_on_self_attestation_reroutes_a_recorded_zero_through_verdicts():
-    """The counts path cannot answer a recorded zero: 0 self_attested next to
-    counted local verdicts is either a real other-session measurement or
-    authorship that could not be measured, and the zero cannot tell them
-    apart. The measured event carried self_attested_count 0 beside an
-    unknown-origin verdict; the verdicts rule must settle it, so the gate
-    refuses instead of clearing on 0 != 1."""
+def test_rests_on_self_attestation_walks_verdicts_not_counts():
+    """One rule on both surfaces: the recorded self_attested_count is
+    telemetry, never the answer. The split row the peer review named
+    (1 measured self + 1 unknown peer beside self_attested_count 1) must
+    clear here exactly as it clears on the Rust twin, instead of the counts
+    path answering 1 != 2."""
     cov = {
-        "reviewed_count": 1,
-        "self_attested_count": 0,
-        "verdicts": [_carried_local_row("unknown")],
+        "reviewed_count": 2,
+        "self_attested_count": 1,
+        "verdicts": [
+            _carried_local_row("self_attested"),
+            _carried_local_row("unknown"),
+        ],
+    }
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is False
+
+
+def test_rests_on_self_attestation_held_row_reads_preserved_verdicts():
+    """A row the corroboration policy held is rewritten to reviewed_count 0
+    and omits the count exactly when authorship was unmeasured, so the
+    preserved verdicts must answer - otherwise the operator gets a bare
+    uncovered blocker instead of the corroboration refusal naming both
+    remedies."""
+    cov = {
+        "reviewed_count": 0,
+        "verdicts": [_carried_local_row("unmeasured")],
     }
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
+
+
+def test_rests_on_self_attestation_uncovered_row_without_evidence_stays_clear():
+    """A merely-uncovered row with no self-attestation record and no verdicts
+    is not self-attested-only; it reads as what it is."""
+    cov = {"reviewed_count": 0}
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is False
