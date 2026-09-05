@@ -9,6 +9,44 @@ pub(super) fn row_matches_portal_key(row: &RegistryAgent, key: &str, portal_key:
     portal_key == key || row.attach_id.as_deref() == Some(portal_key) || portal_key == row.name
 }
 
+/// One control-door reach parked while the row's re-entry plan resolves
+/// off-loop: the observer stays registered, the harvest receiver and the
+/// held reply wait here, and the ReentryPlanReady replay finishes the reach
+/// through `finish_pending_thread_reply`.
+pub(super) struct PendingThreadReply {
+    pub(super) client: u64,
+    name: String,
+    portal: u8,
+    rx: mpsc::Receiver<ServerMsg>,
+    reply: ControlReply,
+}
+
+/// The join behind the control door's reply. Row-aware, not key-aware, and
+/// index-aware: a focus on a portal keyed by the attach id (the TUI door)
+/// reached through the registry name (this door) is a landing, not a
+/// refusal, and landing in a DIFFERENT index would be a refusal reported as
+/// success.
+fn portal_reply(landed: bool, landing: Option<String>, name: &str, portal: u8) -> ServerMsg {
+    match (landed, landing) {
+        (true, Some(text)) => ServerMsg::Notice { text },
+        (true, None) => ServerMsg::Notice {
+            text: format!("thread pane -> {name} (portal {portal})"),
+        },
+        (false, Some(text)) => ServerMsg::Err {
+            code: err_code::BAD_REQUEST,
+            msg: text,
+        },
+        // (x-7955) The fallback arm: the reach itself never reported. The
+        // old "no such agent: NAME" here read as a resolver-style refusal
+        // and cost a measurement pass; this text can only mean the harvest
+        // came back empty.
+        (false, None) => ServerMsg::Err {
+            code: err_code::BAD_REQUEST,
+            msg: format!("portal reach produced no verdict for {name}"),
+        },
+    }
+}
+
 impl Core {
     /// (x-07c2) Reach `key` (an attach id for a claude row, a registry name
     /// for every other harness) through portal `portal`. The tier is
@@ -71,7 +109,13 @@ impl Core {
                 return Flow::Continue;
             }
             _ => {
-                self.notice(client_id, "no such agent");
+                // (x-7955) The bare "no such agent" this arm used to emit
+                // sent a reader hunting a lifecycle resolver that is not in
+                // this chain. Name the door and the row it looked for.
+                self.notice(
+                    client_id,
+                    format!("portal reach: no live row answers {key}"),
+                );
                 return Flow::Continue;
             }
         };
@@ -326,7 +370,10 @@ impl Core {
                     if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
                         tab.focus = new_pid;
                     }
-                    self.notice(client_id, format!("thread pane -> {}", row.name));
+                    self.notice(
+                        client_id,
+                        format!("thread pane -> {} (portal {})", row.name, portal_idx),
+                    );
                     self.push_layout(true);
                     return Flow::Continue;
                 } else {
@@ -440,7 +487,10 @@ impl Core {
         if fell_back {
             self.notice(client_id, "tab full - opened as tab");
         }
-        self.notice(client_id, format!("thread pane -> {}", row.name));
+        self.notice(
+            client_id,
+            format!("thread pane -> {} (portal {})", row.name, portal_idx),
+        );
         self.push_layout(true);
         Flow::Continue
     }
@@ -503,7 +553,7 @@ impl Core {
         }
         // A row already pane-hosted has its viewport: answer with the location
         // instead of opening a second one. Another session's row is that
-        // server's to view - saying so beats the reach's "no such agent",
+        // server's to view - saying so beats the reach's no-row refusal,
         // which would lie about a row the registry knows (the inline attach
         // this verb replaced attached it regardless of hosting session).
         let hosted = self
@@ -519,6 +569,41 @@ impl Core {
             };
             let _ = reply.send(ServerMsg::Notice {
                 text: format!("{} hosts pane {pane} in {where_at}", a.name),
+            });
+            return;
+        }
+        // The row the reach would land on decides this door's shape: the
+        // sync path drives the reach inline, a claude Drive row parks below.
+        let live_row = self
+            .agents
+            .iter()
+            .find(|a| {
+                (a.name == name || a.attach_id.as_deref() == Some(name))
+                    && a.mux.is_none()
+                    && !a.exited
+            })
+            .cloned();
+        // (x-7955) A claude Drive row's argv is the canonical re-entry plan,
+        // resolved OFF this loop. The TUI gesture hands that wait to a live
+        // client whose replay re-enters in place; this door's observer is
+        // disposable and its reply is one-shot, so parking is the only honest
+        // shape: the observer stays registered, the reply waits in
+        // `pending_thread_reply`, and the ReentryPlanReady replay runs the
+        // reach with the verdict staged and answers through
+        // `finish_pending_thread_reply`. Driving the reach inline would hit
+        // the plan-pending return that emits nothing, and the harvest would
+        // invent "no such agent: NAME" for a row the registry knows.
+        let needs_plan = matches!(&live_row, Some(r)
+            if r.attach_id.is_some()
+                && r.harness.as_deref() == Some("claude")
+                && self.reentry_verdict.is_none());
+        if needs_plan && self.pending_thread_reply.is_some() {
+            // One park at a time: the observer client id is the constant
+            // CONTROL_CLIENT, so a second park would trample the first. The
+            // parked reach finishes within the resolver's own bound.
+            let _ = reply.send(ServerMsg::Err {
+                code: err_code::BAD_REQUEST,
+                msg: "a portal reach is still resolving; try again in a moment".to_string(),
             });
             return;
         }
@@ -552,6 +637,27 @@ impl Core {
         placement.portal = Some(portal);
         placement.portal_new = false;
         placement.thread_pane = false;
+        if needs_plan {
+            let row = live_row.expect("needs_plan implies a live row");
+            let attach_id = row.attach_id.expect("needs_plan implies an attach id");
+            self.resolve_reentry(
+                CONTROL_CLIENT,
+                &row.name,
+                "attach",
+                ReentrySpawnRequest::Attach {
+                    attach_id,
+                    placement,
+                },
+            );
+            self.pending_thread_reply = Some(PendingThreadReply {
+                client: CONTROL_CLIENT,
+                name: name.to_string(),
+                portal,
+                rx,
+                reply,
+            });
+            return;
+        }
         self.command(
             CONTROL_CLIENT,
             Command::AttachAgent {
@@ -563,6 +669,15 @@ impl Core {
         // through Gone. Every path ends in at least one; a reach that refuses
         // caller geometry AND lands (x-9b60) ends in two, joined here so the
         // reply still carries the landing.
+        let landing = Self::harvest_portal_landing(&mut rx);
+        let _ = self.self_tx.try_send(CoreMsg::Gone(CONTROL_CLIENT));
+        let landed = self.portal_landed(name, portal);
+        let _ = reply.send(portal_reply(landed, landing, name, portal));
+    }
+
+    /// Drain an observer channel into the joined landing text: notices in
+    /// arrival order, every other frame skipped.
+    fn harvest_portal_landing(rx: &mut mpsc::Receiver<ServerMsg>) -> Option<String> {
         let mut landing: Option<String> = None;
         loop {
             match rx.try_recv() {
@@ -576,34 +691,40 @@ impl Core {
                 Err(_) => break,
             }
         }
-        let _ = self.self_tx.try_send(CoreMsg::Gone(CONTROL_CLIENT));
-        // Row-aware, not key-aware: a focus on a portal keyed by the attach id
-        // (the TUI door) reached through the registry name (this door) leaves
-        // it keyed by the attach id - that is a landing, not a refusal.
-        // (x-8f9d) Read the portal the caller named, not any portal: landing
-        // in a DIFFERENT index would be a refusal reported as success.
-        let landed = self.portals.get(&portal).is_some_and(|p| {
+        landing
+    }
+
+    /// Row-aware landed check for the portal the caller NAMED: a slot keyed
+    /// by the name or by the row's attach id, never a landing reported from
+    /// some other index.
+    fn portal_landed(&self, name: &str, portal: u8) -> bool {
+        self.portals.get(&portal).is_some_and(|p| {
             let k = p.row_key.as_str();
             k == name
                 || self.agents.iter().any(|a| {
                     (a.attach_id.as_deref() == Some(k) && a.name == name)
                         || (a.name == k && a.attach_id.as_deref() == Some(name))
                 })
-        });
-        let msg = match (landed, landing) {
-            (true, Some(text)) => ServerMsg::Notice { text },
-            (true, None) => ServerMsg::Notice {
-                text: format!("thread pane -> {name}"),
-            },
-            (false, Some(text)) => ServerMsg::Err {
-                code: err_code::BAD_REQUEST,
-                msg: text,
-            },
-            (false, None) => ServerMsg::Err {
-                code: err_code::BAD_REQUEST,
-                msg: format!("no such agent: {name}"),
-            },
-        };
-        let _ = reply.send(msg);
+        })
+    }
+
+    /// Finish a parked control-door reach: harvest what the replayed reach
+    /// emitted, tear the observer out through Gone, and answer the held
+    /// reply with the reach's own verdict. The parked observer is the only
+    /// thing the resolver's verdict can still land on, so this runs in BOTH
+    /// ReentryPlanReady arms - a refused plan is a notice here, and the join
+    /// reads it as the (false, Some) refusal it is.
+    pub(super) fn finish_pending_thread_reply(&mut self, pending: PendingThreadReply) {
+        let PendingThreadReply {
+            client,
+            name,
+            portal,
+            mut rx,
+            reply,
+        } = pending;
+        let landing = Self::harvest_portal_landing(&mut rx);
+        let _ = self.self_tx.try_send(CoreMsg::Gone(client));
+        let landed = self.portal_landed(&name, portal);
+        let _ = reply.send(portal_reply(landed, landing, &name, portal));
     }
 }

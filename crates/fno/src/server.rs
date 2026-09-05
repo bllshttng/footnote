@@ -2417,6 +2417,12 @@ struct Core {
     /// (and in every legacy-path test: no entry means the reconstructed
     /// argv stands).
     batch_plans: HashMap<String, Result<ReentryVerdict, String>>,
+    /// (x-7955) One parked control-door portal reach: a claude Drive row
+    /// whose re-entry plan is resolving off-loop. The observer client stays
+    /// registered and the CLI's reply is held until the ReentryPlanReady
+    /// replay lands (or refuses) the reach; `finish_pending_thread_reply`
+    /// then answers it. `None` in steady state and on every TUI gesture.
+    pending_thread_reply: Option<portal_reach::PendingThreadReply>,
     /// Keeper-hosted panes adopted at startup, awaiting their stored-member
     /// binding at restore. Empty once every adoptee is placed.
     keeper_adopted: Vec<AdoptedKeeper>,
@@ -13973,13 +13979,27 @@ impl Core {
                 request,
                 verdict,
             } => {
+                // (x-7955) A parked control-door reach finishes with its own
+                // verdict: take it first, let the replay run on the observer
+                // that stayed registered, then answer the held reply. Taken
+                // with a restore, not a drop: a verdict for a DIFFERENT
+                // client (a TUI gesture resolving while a reach is parked)
+                // puts the park back.
+                let parked = self.pending_thread_reply.take().and_then(|p| {
+                    if p.client == id {
+                        Some(p)
+                    } else {
+                        self.pending_thread_reply = Some(p);
+                        None
+                    }
+                });
                 match verdict {
                     Err(reason) => self.notice(id, reason),
                     Ok(verdict) => {
                         // Stage exactly one verdict; the receiving arm takes
                         // it at its argv construction. A vanished client
                         // (detached mid-resolution) drops the replay - the
-                        // re-dispatch's client_view read refuses it.
+                        // re-dispatch's command read refuses it.
                         self.reentry_verdict = Some(verdict);
                         match *request {
                             ReentrySpawnRequest::Attach {
@@ -14003,6 +14023,9 @@ impl Core {
                         }
                         self.reentry_verdict = None;
                     }
+                }
+                if let Some(pending) = parked {
+                    self.finish_pending_thread_reply(pending);
                 }
                 Flow::Continue
             }
@@ -14993,6 +15016,7 @@ async fn serve(
         last_topology_flush: None,
         reentry_verdict: None,
         batch_plans: HashMap::new(),
+        pending_thread_reply: None,
         keeper_adopted: Vec::new(),
     };
 
@@ -26848,6 +26872,7 @@ mod tests {
             last_topology_flush: None,
             reentry_verdict: None,
             batch_plans: HashMap::new(),
+            pending_thread_reply: None,
             keeper_adopted: Vec::new(),
         }
     }

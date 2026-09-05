@@ -919,7 +919,10 @@ fn thread_pane_refuses_an_unresolvable_or_ambiguous_key() {
     core.command(client_id, thread_reach_cmd("dupe"));
     assert_eq!(core.panes.len(), panes_before, "nothing spawned");
     let notices = drain_notices(&mut rx);
-    assert!(notices.iter().any(|t| t.contains("no such agent")));
+    assert!(
+        notices.iter().any(|t| t.contains("no live row answers")),
+        "the reach's miss names the door and the key: {notices:?}"
+    );
     assert!(notices.iter().any(|t| t.contains("more than one row")));
     assert!(core.portals.is_empty(), "no slot recorded on a refusal");
 }
@@ -965,9 +968,10 @@ fn thread_pane_ctl_refuses_an_unknown_name() {
     core.portal_ctl("nosuchrow", 0, PanePlacement::default(), None, tx);
 
     match rx.blocking_recv().expect("a reply") {
-        ServerMsg::Err { msg, .. } => {
-            assert!(msg.contains("no such agent"), "names the refusal: {msg}")
-        }
+        ServerMsg::Err { msg, .. } => assert!(
+            msg.contains("no live row answers"),
+            "names the door and the key it could not find: {msg}"
+        ),
         other => panic!("expected an Err refusal, got {other:?}"),
     }
     assert!(core.portals.is_empty());
@@ -1512,7 +1516,8 @@ async fn portal_ctl_claude_row_replies_the_landing_not_the_fallback() {
     set_attach_program(&["/bin/cat"]);
     let (mut core, _client_id, _p1, _rx) = thread_core();
     let row = claude_row("claude-row", "deadbee1");
-    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    let new_pid = core.next_pane_id;
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<ServerMsg>();
 
     core.portal_ctl(
         "claude-row",
@@ -1521,6 +1526,31 @@ async fn portal_ctl_claude_row_replies_the_landing_not_the_fallback() {
         Some(vec![row]),
         tx,
     );
+    // The reach parked: no pane, and no reply yet - it waits for the verdict
+    // instead of answering the old fallback.
+    assert!(core.portals.get(&1).is_none(), "the park opens nothing");
+    assert!(
+        rx.try_recv().is_err(),
+        "the held reply waits for the verdict"
+    );
+    // Pump the continuation by hand: the real verdict arrives on the core
+    // channel (the fixture does not run the loop); the handler is what
+    // finishes the park.
+    core.handle(CoreMsg::ReentryPlanReady {
+        id: u64::MAX, // the control door's observer client
+        request: Box::new(ReentrySpawnRequest::Attach {
+            attach_id: "deadbee1".into(),
+            placement: PanePlacement {
+                portal: Some(1),
+                ..Default::default()
+            },
+        }),
+        verdict: Ok(ReentryVerdict {
+            argv: vec!["/bin/cat".into()],
+            env: vec![],
+            config_dir: None,
+        }),
+    });
 
     match rx.await.expect("a reply") {
         ServerMsg::Err { msg, .. } => {
@@ -1533,13 +1563,17 @@ async fn portal_ctl_claude_row_replies_the_landing_not_the_fallback() {
         other => panic!("expected a Notice landing, got {other:?}"),
     }
     assert!(
-        core.portals.get(&1).is_some(),
+        core.portals
+            .get(&1)
+            .is_some_and(|e| e.row_key == "deadbee1" && e.seat == new_pid),
         "portal 1 holds the row's viewer"
     );
-    if let Some(portal) = core.portals.get(&1) {
-        let pid = portal.seat;
-        core.reap_pane(pid); // don't leak the stand-in child
-    }
+    assert_eq!(
+        core.panes[&new_pid].cmd.as_deref(),
+        Some("cat"),
+        "the pane runs the verdict's argv, not a guess"
+    );
+    core.reap_pane(new_pid); // don't leak the stand-in child
 }
 
 #[tokio::test]
@@ -1559,6 +1593,17 @@ async fn portal_ctl_claude_row_with_a_refused_plan_names_the_reason() {
         Some(vec![row]),
         tx,
     );
+    core.handle(CoreMsg::ReentryPlanReady {
+        id: u64::MAX, // the control door's observer client
+        request: Box::new(ReentrySpawnRequest::Attach {
+            attach_id: "deadbee1".into(),
+            placement: PanePlacement {
+                portal: Some(1),
+                ..Default::default()
+            },
+        }),
+        verdict: Err("row claude-row is on the account axis and records no launch account".into()),
+    });
 
     match rx.await.expect("a reply") {
         ServerMsg::Err { msg, .. } => assert!(

@@ -7,6 +7,22 @@ use std::time::Duration;
 use super::{first_line_or, fno_bin};
 use crate::spawn_journal::ReentryVerdict;
 
+#[cfg(test)]
+thread_local! {
+    /// Hermetic seam over the off-loop re-entry plan: a staged verdict or
+    /// refusal comes back without shelling out. Safe across the tokio::spawn
+    /// boundary because `#[tokio::test]` defaults to the current-thread
+    /// runtime, where the spawned task runs on the test's own thread.
+    static REENTRY_PLAN_STUB: std::cell::RefCell<Option<Result<ReentryVerdict, String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Stage (or clear, with `None`) the test verdict `run_reentry_plan` returns.
+#[cfg(test)]
+pub(crate) fn stage_reentry_plan(plan: Option<Result<ReentryVerdict, String>>) {
+    REENTRY_PLAN_STUB.with(|stub| *stub.borrow_mut() = plan);
+}
+
 /// Shell `fno-agents <verb> <name>` for a sideline lifecycle gesture (x-76ea),
 /// bounded + fail-open (the `run_dispatch_one` idiom): a short outcome notice,
 /// never a wedge. The registry poll owns the row's truth, so a lost/failed
@@ -294,6 +310,10 @@ pub(super) async fn run_reentry_plan(
     name: &str,
     transition: &str,
 ) -> Result<ReentryVerdict, String> {
+    #[cfg(test)]
+    if let Some(staged) = REENTRY_PLAN_STUB.with(|stub| stub.borrow().clone()) {
+        return staged;
+    }
     const PLAN_TIMEOUT: Duration = Duration::from_secs(20);
     let mut command =
         crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
