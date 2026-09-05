@@ -387,7 +387,7 @@ def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
 
 def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], list[str]]:
     """Return event journals plus discovery errors that make coverage uncertain."""
-    from fno.paths import global_events_json, ledger_json
+    from fno.paths import global_events_json, ledger_json, project_log
 
     repo = Path(cwd or os.getcwd()).resolve()
     errors: list[str] = []
@@ -397,7 +397,10 @@ def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], 
     except (OSError, ValueError) as exc:
         root = repo
         errors.append(f"repository root discovery failed: {exc}")
-    paths = [global_events_json(), root / ".fno" / "events.jsonl"]
+    # project_log, not a hand-built checkout path: the coverage reader resolves
+    # the space journal, so a hand-built path scans a dead file and reports
+    # every PR unreviewed (x-d2e9).
+    paths = [global_events_json(), project_log("events.jsonl", project_root=root)]
     try:
         raw = json.loads(ledger_json().read_text(encoding="utf-8"))
         if isinstance(raw, list):
