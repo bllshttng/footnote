@@ -2844,25 +2844,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         let retain_days =
                             crate::agents_config::reap_receipt_retain_days(&grace_cwd);
                         let _ = gc_sweep(&home, &emitter, grace_secs, retain_days);
-                        // Reap what init inherited, on the same tick and behind
-                        // the same gate. gc_sweep reaps registry ROWS; a child
-                        // whose parent died is reparented to init and nothing
-                        // owned it at all. One `ps` for the whole machine, so a
-                        // sweep meant to reduce the process count never fans out.
-                        let _ = crate::gc::orphan_sweep(
-                            &emitter,
-                            crate::agents_config::orphan_reap_after(&grace_cwd),
-                            crate::gc::registry_live_pids(&home).as_deref(),
-                        );
-                        // The latch's own leftovers. Its record dir is keyed by
-                        // argv and the roster's handle set changes with every
-                        // worker, so unpruned it fills the state root with
-                        // answers to questions nobody asks any more.
-                        let _ = crate::single_flight::prune_records(
-                            None,
-                            crate::agents_config::single_flight_ttl(&grace_cwd),
-                            crate::agents_config::single_flight_join_budget(&grace_cwd),
-                        );
+                        crate::gc::unowned_sweeps(&home, &emitter, &grace_cwd);
                     });
                 }
                 // Worktree sweep: the backstop for what the merge ritual

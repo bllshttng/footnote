@@ -5681,20 +5681,7 @@ mod tests {
         let caller_cwd = std::env::current_dir().unwrap();
         let relative_registry = Path::new("relative/registry.json");
         let expected_registry = caller_cwd.join(relative_registry);
-        // PREPEND, never replace. PATH is process-global, so replacing it took
-        // the system tools away from every concurrent test in this binary and
-        // made their fixtures fail at random. The stub still wins for `fno`,
-        // which is all this test needs.
-        let stubbed = match &old_path {
-            Some(prev) => {
-                let mut v = std::ffi::OsString::from(dir.path());
-                v.push(":");
-                v.push(prev);
-                v
-            }
-            None => std::ffi::OsString::from(dir.path()),
-        };
-        std::env::set_var("PATH", stubbed);
+        std::env::set_var("PATH", crate::path_with(dir.path()));
         std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
         std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
         let output =

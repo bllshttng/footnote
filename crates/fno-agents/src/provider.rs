@@ -1878,21 +1878,7 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&fake_fno, perms).unwrap();
         let old_path = std::env::var_os("PATH");
-        // PREPEND, never replace. PATH is process-global and this test holds it
-        // for the whole argv build, so replacing it took `git` away from every
-        // concurrent test in the binary. That is what made the paths and
-        // roster_progress git fixtures fail at random. The stub still wins for
-        // `fno`, which is all this test needs.
-        let stubbed = match &old_path {
-            Some(prev) => {
-                let mut v = std::ffi::OsString::from(&bin);
-                v.push(":");
-                v.push(prev);
-                v
-            }
-            None => std::ffi::OsString::from(&bin),
-        };
-        unsafe { std::env::set_var("PATH", stubbed) };
+        unsafe { std::env::set_var("PATH", crate::path_with(std::path::Path::new(&bin))) };
 
         let mut create_ctx = create_ctx();
         create_ctx.cwd = dir.path().to_path_buf();

@@ -494,6 +494,25 @@ pub fn registry_live_pids(home: &AgentsHome) -> Option<Vec<u32>> {
         })
 }
 
+/// The idle tick's two sweeps no registry row accounts for. `gc_sweep` retires
+/// ROWS; a child whose parent died is reparented to init and nothing owned it
+/// at all, and the latch's record dir is keyed by argv, so a roster whose
+/// handle set changes with every worker leaves answers to questions nobody
+/// asks any more. One `ps` for the whole machine, so a sweep meant to reduce
+/// the process count never fans out.
+pub fn unowned_sweeps(home: &AgentsHome, emitter: &EventEmitter, cwd: &std::path::Path) {
+    let _ = orphan_sweep(
+        emitter,
+        crate::agents_config::orphan_reap_after(cwd),
+        registry_live_pids(home).as_deref(),
+    );
+    let _ = crate::single_flight::prune_records(
+        None,
+        crate::agents_config::single_flight_ttl(cwd),
+        crate::agents_config::single_flight_join_budget(cwd),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

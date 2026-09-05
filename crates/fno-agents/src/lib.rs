@@ -416,6 +416,19 @@ pub fn path_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The process `PATH` with `dir` in front. PREPEND, never replace: PATH is
+/// process-global, so a test that replaces it takes the system tools away from
+/// every concurrent test in the binary, and a stub only needs to win.
+#[cfg(test)]
+pub fn path_with(dir: &std::path::Path) -> std::ffi::OsString {
+    let mut value = std::ffi::OsString::from(dir);
+    if let Some(previous) = std::env::var_os("PATH") {
+        value.push(":");
+        value.push(previous);
+    }
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
