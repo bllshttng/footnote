@@ -20,6 +20,7 @@
     "last_message_at_basis",
     "last_reconciled_at",
     "status",
+    "substrate",
     "reachability",
     "basis",
     "progress",
@@ -120,8 +121,7 @@
       "spawn_trigger",
       "spawned_by_cwd",
       "spawned_by_harness",
-      "spawned_by_session",
-      "substrate"
+      "spawned_by_session"
     ]
   },
   "known_gaps": {}

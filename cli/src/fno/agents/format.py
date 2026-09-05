@@ -211,6 +211,10 @@ def serialize_entry(
         # `session_id` (the resume-target id, which is the 8-hex jobId for
         # claude) and from `short_id` (the transport key).
         "harness_session_id": entry.harness_session_id,
+        # The lane the row was spawned on ("pane"|"thread"|"headless"), read
+        # from the registry record and never inferred from mux or thread_id:
+        # a paneless pane row and a thread row would then read identically.
+        "substrate": getattr(entry, "substrate", None),
         # The two identity axes, stated explicitly (x-dfe7): `thread_id` is
         # the stable fno identity one worker keeps across succession, and
         # `current_session_id` is the address delivery follows NOW. They are
