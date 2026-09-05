@@ -6175,7 +6175,7 @@ def rpc_roundtrip(
         return resp.get("result")
     except (OSError, ValueError):
         # ValueError covers json.JSONDecodeError / UnicodeDecodeError from a
-        # malformed response; the contract is NEVER raise.
+        # malformed daemon response; the docstring contract is NEVER raise.
         return None
     finally:
         sock.close()
