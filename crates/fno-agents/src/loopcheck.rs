@@ -2952,7 +2952,6 @@ fn read_pr_info(
                 Some(tiling),
                 pr_author.as_deref(),
                 github_approval_satisfies,
-                require_corroboration,
             );
             // Same capture-then-apply order as the external-read arm below: the
             // predicate reads the pre-downgrade report, and the `reviewed` verdict
@@ -3303,7 +3302,6 @@ fn read_pr_info(
             Some(&tiling),
             pr_author.as_deref(),
             github_approval_satisfies,
-            require_corroboration,
         );
         // The predicate reads the pre-downgrade report (the policy below only
         // flips the covered state, preserving verdicts), so capture it first.
@@ -5886,10 +5884,9 @@ pub enum ReviewState {
 /// (attester absent or empty) is no evidence of who attested at all: an
 /// author running the review from a shell with no harness marker lands
 /// there, so treating it as a peer would clear a self-review. ONE rule for
-/// the rests-alone term; the recorded `self_attested_count` deliberately
-/// keeps its stricter `== SelfAttested` definition below, because the count
-/// is telemetry about MEASURED authorship while this is a gate rule, and no
-/// gate reads the count any more - the Python predicate walks verdicts.
+/// BOTH readers: the rests-alone term and the recorded `self_attested_count`
+/// (the split definitions once serialized a count of 0 beside a gate that
+/// held the same row as the author's own).
 fn counts_as_self_attestation_basis(v: &ReviewerVerdict, github_approval_satisfies: bool) -> bool {
     v.verdict == CoverageVerdict::Reviewed
         && human_approval_counts(v, github_approval_satisfies)
@@ -5901,19 +5898,16 @@ impl CoverageReport {
     /// Count of `reviewed` verdicts, excluding human approvals. This is the one
     /// place that decides whether a human GitHub approval counts; flip the
     /// `!v.human_approval` guard to include them (the operator's deferred call).
-    /// How many of the counted verdicts are the author attesting its own diff.
-    /// Recorded, never gating - see `coverage_event_data` for why. Deliberately
-    /// stricter than [`counts_as_self_attestation_basis`]: the count is
-    /// telemetry about MEASURED self-attestation, the basis is a gate rule,
-    /// and no gate reads the count.
+    /// How many of the counted verdicts the self-attestation rule reads as the
+    /// author's own - the SAME predicate `rests_on_self_attestation_alone`
+    /// applies, so the recorded number can never contradict the gate holding
+    /// on it. Recorded, never gating on the Rust side - see
+    /// `coverage_event_data` for why; the Python held-row reader treats a
+    /// recorded positive count as the answer.
     pub fn self_attested_count(&self) -> usize {
         self.verdicts
             .iter()
-            .filter(|v| {
-                v.verdict == CoverageVerdict::Reviewed
-                    && human_approval_counts(v, self.github_approval_satisfies)
-                    && v.attestation_origin == AttestationOrigin::SelfAttested
-            })
+            .filter(|v| counts_as_self_attestation_basis(v, self.github_approval_satisfies))
             .count()
     }
 
@@ -6811,9 +6805,9 @@ fn local_attestation_verdict(
 /// `author_session` is the manifest's `harness_session_id` (the session that ran
 /// `fno do target init` in this worktree). Each local attestation's
 /// `attester_session_id` is compared against it to label `attestation_origin`;
-/// `None` (no manifest / unparseable) leaves every local verdict `Unknown`,
-/// failing open on unknown authorship so the coverage verdict is byte-identical
-/// to the pre-change behavior. `coverage_count` never reads the origin: every
+/// `None` (no manifest / unparseable) leaves the comparison unresolved
+/// (`Unmeasured` / `Unknown`), which REFUSES at the disposition and
+/// corroboration gates. `coverage_count` never reads the origin: every
 /// `Reviewed` verdict counts regardless of it, `SelfAttested` included.
 pub fn classify_coverage(
     reviews: &[Value],
@@ -6839,7 +6833,6 @@ pub fn classify_coverage(
         None,
         None,
         false,
-        true,
     )
 }
 
@@ -6864,7 +6857,6 @@ pub fn classify_coverage_tiled(
     tiling: Option<&RangeTiling>,
     pr_author: Option<&str>,
     github_approval_satisfies: bool,
-    require_corroboration: bool,
 ) -> CoverageReport {
     let (local_passes, pairs_raising_findings) =
         local_latest_attestations(events_text, head_branch, head_sha);
@@ -7110,10 +7102,13 @@ pub fn classify_coverage_tiled(
             verdicts: verdicts.clone(),
             github_approval_satisfies,
         };
-        let blockers = disposition_blockers_on_chain(
-            &chain,
-            require_corroboration && basis.rests_on_self_attestation_alone(),
-        );
+        // Locked Decision 2: a disposition pass carries its OWN corroboration
+        // requirement, independent of config.review.require_corroboration - a
+        // disposition pass can be gamed by declining, a clean review cannot.
+        // Key-gating here let a reasoned decline read terminal at default
+        // config while both gates refused the same row.
+        let blockers =
+            disposition_blockers_on_chain(&chain, basis.rests_on_self_attestation_alone());
         if !blockers_withhold(&blockers, rounds_exhausted) {
             for lp in local_passes.iter().filter(|lp| answered_fail(lp)) {
                 verdicts.push(local_attestation_verdict(

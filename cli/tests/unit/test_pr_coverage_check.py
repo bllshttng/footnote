@@ -3748,6 +3748,19 @@ def test_rests_on_self_attestation_walks_verdicts_not_counts():
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
 
 
+def test_rests_on_self_attestation_counts_only_row_reads_all_self_attested():
+    """A pre-verdicts producer recorded only the counts. A reviewed_count of
+    3 beside self_attested_count 3 and no verdicts key proves no independent
+    reviewer, so the predicate refuses - the answer the old counts path gave
+    and the fail-closed direction when no verdict row exists at all."""
+    cov = {"reviewed_count": 3, "self_attested_count": 3}
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
+    split = {"reviewed_count": 3, "self_attested_count": 1}
+    assert _coverage_gate.rests_on_self_attestation_alone(split) is False
+    empty = {"reviewed_count": 3, "self_attested_count": 3, "verdicts": []}
+    assert _coverage_gate.rests_on_self_attestation_alone(empty) is True
+
+
 def test_rests_on_self_attestation_measured_other_session_outweighs_unresolved_origins():
     """One measured other_session among unresolved origins still proves a
     reviewer independent of the author, so the row does not rest on

@@ -542,11 +542,21 @@ def rests_on_self_attestation_alone(
             return True
     from fno.pr._reviews import _human_approval_counts
 
+    verdicts = [v for v in (cov.get("verdicts") or []) if isinstance(v, dict)]
+    if not verdicts:
+        # A pre-verdicts producer recorded only the counts. The old counts
+        # path answered for this shape; refusing when the recorded count is
+        # all self-attestation keeps it fail-closed (no verdict row can
+        # prove an independent reviewer).
+        return bool(
+            isinstance(reviewed, int)
+            and reviewed > 0
+            and cov.get("self_attested_count") == reviewed
+        )
     counted = [
         v
-        for v in (cov.get("verdicts") or [])
-        if isinstance(v, dict)
-        and v.get("verdict") == "reviewed"
+        for v in verdicts
+        if v.get("verdict") == "reviewed"
         and _human_approval_counts(v, github_approval_satisfies)
     ]
     return bool(counted) and all(
