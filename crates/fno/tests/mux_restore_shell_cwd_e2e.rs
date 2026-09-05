@@ -62,8 +62,49 @@ fn attach_cd_and_force_persist(sock: &Path, origin: &str, dir: &Path) -> u64 {
     let pane = layout.panes[0].0;
     let tab = layout.squads[0].tabs[0].id;
     client.wait_prompt(pane);
-    client.input(format!("cd {}\r", dir.display()).as_bytes());
-    client.wait_prompt(pane);
+    // Gate the persist on proof the cd was EVALUATED, not on a prompt tail:
+    // dash draws its next `$` before the just-read line's output lands, so a
+    // prompt tail says nothing about whether the cd ran. The rename that
+    // persisted in that window captured the un-moved cwd and flaked the
+    // restore assertions. `pwd` printing `dir` is pane-level proof the
+    // kernel cwd moved; retry the pair until it lands, bounded, so a dead
+    // pane still fails loud.
+    let dir_line = dir.to_string_lossy().to_string();
+    // pwd's output renders on its own line (bash-as-sh) or inline after the
+    // prompt (`$ /path`, dash): strip up to the last `$` when one is present.
+    // The `cd /path` echo never qualifies either way - stripping its prompt
+    // leaves `cd /path`, not the path.
+    fn after_prompt(l: &str) -> &str {
+        match l.rsplit_once('$') {
+            Some((_, rest)) => rest.trim(),
+            None => l.trim(),
+        }
+    }
+    let mut cd_landed = false;
+    for _ in 0..10 {
+        client.input(format!("cd {}\r", dir.display()).as_bytes());
+        client.input(b"pwd\r");
+        for _ in 0..6 {
+            client.pump(Duration::from_millis(300));
+            if client
+                .pane_text(pane)
+                .lines()
+                .any(|l| after_prompt(l) == dir_line)
+            {
+                cd_landed = true;
+                break;
+            }
+        }
+        if cd_landed {
+            break;
+        }
+    }
+    assert!(
+        cd_landed,
+        "cd {} never echoed back via pwd; pane text: {:?}",
+        dir_line,
+        client.pane_text(pane)
+    );
     client.cmd(Command::RenameTab {
         tab,
         name: "cwd-marker".into(),
