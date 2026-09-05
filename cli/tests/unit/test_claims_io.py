@@ -286,11 +286,16 @@ def test_claims_dir_honors_env_when_root_none(tmp_path, monkeypatch):
     assert claims_dir() == tmp_path / ".fno/claims"
 
 
-def test_claims_dir_defaults_to_cwd_without_env(tmp_path, monkeypatch):
-    """No root + no env => cwd-local (unchanged legacy behavior)."""
+def test_claims_dir_defaults_to_the_repo_space_without_env(tmp_path, monkeypatch):
+    """No root + no env => the repo's space (no claims dir inside a checkout)."""
     monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
     monkeypatch.chdir(tmp_path)
-    assert claims_dir() == tmp_path / ".fno/claims"
+    from fno.paths import space_dir, space_slug
+
+    # The slug is a cross-language wire format (fno-agents::paths swaps the
+    # same separators); a golden value here catches a one-sided drift.
+    assert space_slug(Path("/repos/web")) == "-repos-web"
+    assert claims_dir() == space_dir(tmp_path) / "claims"
 
 
 def test_global_claims_root_env_then_home(tmp_path, monkeypatch):

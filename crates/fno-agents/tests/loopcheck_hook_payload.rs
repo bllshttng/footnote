@@ -20,6 +20,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
+#[path = "space_paths.rs"]
+mod space_paths;
+
+use space_paths::project_events;
+
 fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -112,7 +117,7 @@ fn fixture_with_manifest(manifest_body: &str) -> Fixture {
     });
     fs::write(&transcript, serde_json::to_string(&line).unwrap() + "\n").unwrap();
 
-    let events = cwd.join(".fno/events.jsonl");
+    let events = project_events(&cwd);
     let (gh, git) = green_bins(tmp.path());
     Fixture {
         _tmp: tmp,

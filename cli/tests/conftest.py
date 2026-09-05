@@ -23,6 +23,19 @@ def _sandbox_decision_index(tmp_path, monkeypatch):
     monkeypatch.setattr("fno.paths.decisions_jsonl", lambda: sandbox)
 
 
+@pytest.fixture(autouse=True)
+def _sandbox_project_spaces(tmp_path, monkeypatch):
+    """Keep project space state out of the developer's real ~/.fno/spaces.
+
+    Since the spaces move, every project-relative accessor (events, plans,
+    inbox, kings, claims, status sinks, the target manifest) resolves under
+    ``spaces_root()``. The pin rides the ``FNO_SPACES_DIR`` env var rather
+    than patching the function so multiprocessing pool children (which re
+    import fno fresh) resolve the SAME sandboxed root as the test process.
+    """
+    monkeypatch.setenv("FNO_SPACES_DIR", str(tmp_path / "spaces"))
+
+
 @pytest.fixture
 def _no_global_tick_events(monkeypatch):
     """Capture pr-watch tick emissions instead of hitting the live events log.

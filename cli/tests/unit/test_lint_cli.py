@@ -1146,7 +1146,7 @@ def test_state_files_table_records_exactly_one_unowned_state_file() -> None:
     from fno.paths import STATE_FILES
 
     unowned = {row.filename for row in STATE_FILES if row.resolver is None}
-    assert unowned == {"target-state.md"}
+    assert unowned == set()
 
 
 def test_state_roots_rule_a_fires_on_a_hand_built_events_path(tmp_path: Path) -> None:

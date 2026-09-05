@@ -85,7 +85,7 @@ JSON
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(a): init exited non-zero"
 
-STATE_A="${TMP_A}/.fno/target-state.md"
+STATE_A="$(cd "${TMP_A}" && HOME="${TMP_A}/home" fno do state path target-state 2>/dev/null || echo "${TMP_A}/.fno/target-state.md")"
 [[ -f "$STATE_A" ]] || fail "(a): target-state.md was not created"
 
 GNID_A="$(graph_node_id_of "$STATE_A")"
@@ -116,7 +116,7 @@ rm -f "${TMP_B}/home/.fno/graph.json"
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(b): init exited non-zero"
 
-STATE_B="${TMP_B}/.fno/target-state.md"
+STATE_B="$(cd "${TMP_B}" && HOME="${TMP_B}/home" fno do state path target-state 2>/dev/null || echo "${TMP_B}/.fno/target-state.md")"
 [[ -f "$STATE_B" ]] || fail "(b): target-state.md was not created"
 
 GNID_B="$(graph_node_id_of "$STATE_B")"
@@ -155,7 +155,7 @@ JSON
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(c): init exited non-zero"
 
-STATE_C="${TMP_C}/.fno/target-state.md"
+STATE_C="$(cd "${TMP_C}" && HOME="${TMP_C}/home" fno do state path target-state 2>/dev/null || echo "${TMP_C}/.fno/target-state.md")"
 [[ -f "$STATE_C" ]] || fail "(c): target-state.md was not created"
 GNID_C="$(graph_node_id_of "$STATE_C")"
 [[ "$GNID_C" == "null" ]] \
@@ -195,7 +195,7 @@ printf '{"entries":[]}\n' > "${TMP_D}/home/.fno/graph.json"
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(d): init exited non-zero"
 
-STATE_D="${TMP_D}/.fno/target-state.md"
+STATE_D="$(cd "${TMP_D}" && HOME="${TMP_D}/home" fno do state path target-state 2>/dev/null || echo "${TMP_D}/.fno/target-state.md")"
 [[ -f "$STATE_D" ]] || fail "(d): target-state.md was not created"
 GNID_D="$(graph_node_id_of "$STATE_D")"
 [[ "$GNID_D" == "ab-1100b0b0" ]] \

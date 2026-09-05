@@ -28,7 +28,6 @@
 # an owner attached, in a diff a reviewer reads.
 
 A	cli/src/fno/agent/cli.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
-A	cli/src/fno/agent/state.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/agents/context.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/agents/spawn_gate.py	claims	unowned	call the resolver STATE_FILES names for this file.
 A	cli/src/fno/agents/truth_status.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
@@ -70,7 +69,6 @@ A	cli/src/fno/pr/_attestation.py	events.jsonl	unowned	Python journal site surviv
 A	cli/src/fno/pr/_attestation.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/pr/_preflight.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/pr/_review_hold.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
-A	cli/src/fno/pr/_reviews.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/pr_watch/cli.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/provenance/spawn_think.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/provenance/spawn_think.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
@@ -79,7 +77,7 @@ A	cli/src/fno/research/cli.py	events.jsonl	unowned	Python journal site surviving
 A	cli/src/fno/resume/cli.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/retro/cli.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/scoreboard/cli.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
-A	cli/src/fno/state/cli.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
+A	cli/src/fno/agent/cli.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
 A	cli/src/fno/state/outage_handoff.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain. The site restores a worktree-scoped manifest during a handoff, so it resolves from its worktree parameter, not the process cwd.
 A	cli/src/fno/state/v2_paths.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/target_cli.py	events.jsonl	unowned	Python journal site surviving PR 1252; fix is fno.paths.project_events_json().
@@ -100,12 +98,12 @@ A	crates/fno-agents/src/loop_runtime.rs	events.jsonl	x-77f7	canonical Rust Proje
 A	crates/fno-agents/src/loop_target.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/loop_target.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	crates/fno-agents/src/loopcheck.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
-A	crates/fno-agents/src/loopcheck.rs	ledger.json	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno-agents/src/daemon.rs	ledger.json	unowned	best-effort ledger enrichment for the reap receipt; the receipt stands on the row when the path is overridden.
 A	crates/fno-agents/src/loopcheck.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	crates/fno-agents/src/graph_get.rs	graph.json	unowned	same class as crates/fno/src/backlog_view.rs below; no Rust resolver exists yet for graph.json.
 A	crates/fno-agents/src/manifest_lookup.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
-A	crates/fno-agents/src/needs.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
+A	crates/fno-agents/src/state_path.rs	target-state.md	unowned	this module IS the hook-facing resolver; the hand-built line is the one-release legacy checkout fallback and drains when it retires.
+A	crates/fno-agents/src/paths.rs	ledger.json	unowned	paths.rs IS the resolver module; the hand-built line is the ledger_path legacy checkout migration anchor and drains when it retires.
 A	crates/fno-agents/src/spawn_gate.rs	claims	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno/src/agents_view.rs	claims	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno/src/agents_view.rs	registry.json	unowned	call the resolver STATE_FILES names for this file.

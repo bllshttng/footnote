@@ -427,7 +427,11 @@ def test_apply_removal_emits_event_row(repo: Path, tmp_path: Path, monkeypatch):
             if line.strip()
         ]
 
-    project_rows = _rows(repo / ".fno" / "events.jsonl")
+    # The emit resolves the repo's space journal (the accessor the writers
+    # use); the checkout copy is retired.
+    from fno.paths import project_log
+
+    project_rows = _rows(project_log("events.jsonl", project_root=repo))
     hits = [row for row in project_rows if row.get("type") == "worktree_removed"]
     assert hits, f"removal emitted no row; project log types: {[r.get('type') for r in project_rows]}"
     data = hits[-1]["data"]

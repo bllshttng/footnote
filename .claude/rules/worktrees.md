@@ -65,4 +65,4 @@ Exception: `/speculate` keeps its own `.claude/worktrees/<name>` placement even 
 
 ## Override semantics
 
-An explicit in-conversation user request for a different path outranks this rule; note that `.fno/` state links will not exist there. Do not solicit overrides.
+An explicit in-conversation user request for a different path outranks this rule. Project state resolves through the repo's space regardless of worktree. Do not solicit overrides.

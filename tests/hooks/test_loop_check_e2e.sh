@@ -305,11 +305,12 @@ PY
 }
 
 assert_delivery_artifacts() {
-    local dir="$1" session_id="$2"
+    local dir="$1" session_id="$2" events
+    events="$(cd "$dir" && HOME="$dir/home" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
     grep -q '^status: done$' "$dir/plan.md" || return 1
-    grep -q '"type":"delivery_verdict_evaluated"' "$dir/.fno/events.jsonl" || return 1
-    grep -q 'DoneDelivery' "$dir/.fno/events.jsonl" || return 1
-    grep -q '"type":"session_finalized"' "$dir/.fno/events.jsonl" || return 1
+    grep -q '"type":"delivery_verdict_evaluated"' "$events" || return 1
+    grep -q 'DoneDelivery' "$events" || return 1
+    grep -q '"type":"session_finalized"' "$events" || return 1
     grep -R -q "session: \`${session_id}\`" "$dir/handoffs" || return 1
     grep -R -q 'fno-delivery://x-delivery-e2e/attempt-e2e/' "$dir/handoffs" || return 1
     PROJECT_DIR="$dir" uv run --project "${REPO_ROOT}/cli" python - <<'PY'
@@ -423,7 +424,7 @@ STATE
         ca_ok=false
     fi
 
-    PROJ_EVENTS="${TMP_DIR}/.fno/events.jsonl"
+    PROJ_EVENTS="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
     if [[ ! -f "$PROJ_EVENTS" ]]; then
         fail "Case A: project events.jsonl not created at $PROJ_EVENTS"
         ca_ok=false
@@ -622,7 +623,7 @@ STATE
         cc_ok=false
     fi
 
-    PROJ_EVENTS="${TMP_DIR}/.fno/events.jsonl"
+    PROJ_EVENTS="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
     if [[ ! -f "$PROJ_EVENTS" ]]; then
         fail "Case C: project events.jsonl not created"
         cc_ok=false

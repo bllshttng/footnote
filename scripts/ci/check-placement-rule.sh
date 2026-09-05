@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # check-placement-rule.sh - CI gate enforcing the placement rule (ab-f063
-# Wave 2): footnote's own accumulating state (logs, telemetry, corrections)
-# lives ONLY under ~/.fno/, <project>/.fno/, or internal/<project>/ - never
-# under .claude/ or ~/.claude/.
+# Wave 2, amended 2026-09-03 by the spaces move): footnote's own accumulating
+# state (logs, telemetry, corrections) lives ONLY under ~/.fno/, the repo's
+# space (~/.fno/spaces/<slug>/), or internal/<project>/ - never under .claude/
+# or ~/.claude/. Inside a checkout only .fno/config.toml (committed project
+# config) and the sandbox-denied breadcrumb (.fno/state-root-denied.json) are
+# legal.
 #
 # Complements check-no-hardcoded-paths.sh (which bans bare $HOME/.fno and
 # Path.home()/".fno" - i.e. paths that bypass the registry but still land in

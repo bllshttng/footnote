@@ -524,7 +524,10 @@ pub fn run_finalize(args: &[String]) -> i32 {
     let delivery_ship = predicates.delivery_ship;
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let project_events = a.events.unwrap_or_else(|| cwd.join(".fno/events.jsonl"));
+    let project_events = a
+        .events
+        .clone()
+        .unwrap_or_else(|| crate::paths::space_dir(&cwd).join("events.jsonl"));
     let global_events = a.global_events.unwrap_or_else(|| {
         home.clone()
             .unwrap_or_else(|| cwd.clone())
@@ -1004,7 +1007,7 @@ the operator's shell"
 }
 
 fn shadow_run_needs_finalize_done(cwd: &Path, run: &str) -> bool {
-    let path = cwd.join(".fno/run-log.jsonl");
+    let path = run_log_path(cwd);
     if !path.exists() {
         return false;
     }
@@ -1014,13 +1017,39 @@ fn shadow_run_needs_finalize_done(cwd: &Path, run: &str) -> bool {
     )
 }
 
+/// The per-worktree run log: the worktree slice of the repo's space. A legacy
+/// checkout-local journal is migrated on first write; until then a read falls
+/// back to it so a pre-space daemon's journal is still honored (AC7-EDGE).
+fn run_log_path(cwd: &Path) -> PathBuf {
+    let new = crate::paths::worktree_space_dir(cwd).join("run-log.jsonl");
+    if new.exists() {
+        return new;
+    }
+    let old = cwd.join(".fno/run-log.jsonl");
+    if old.exists() {
+        if old.is_symlink() || crate::paths::migrate_from_checkout(&old, &new) {
+            if new.exists() {
+                return new;
+            }
+        } else {
+            eprintln!(
+                "finalize: run log pending migration: {} (space path {})",
+                old.display(),
+                new.display()
+            );
+            return old;
+        }
+    }
+    new
+}
+
 fn record_finalize_done(
     cwd: &Path,
     run: &str,
     project_events: &Path,
     global_events: &Path,
 ) -> bool {
-    let path = cwd.join(".fno/run-log.jsonl");
+    let path = run_log_path(cwd);
     if !path.exists() {
         return true;
     }
@@ -2126,7 +2155,7 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
 /// withhold to the coverage authority (x-0eaf). Missing/unreadable -> false
 /// (fall back to the per-app check).
 fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
-    let path = cwd.join(".fno").join("events.jsonl");
+    let path = crate::paths::events_path(cwd);
     let Ok(content) = fs::read_to_string(&path) else {
         return false;
     };
@@ -2197,7 +2226,7 @@ fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
 /// The head_sha from the latest covered review_coverage event (matching the
 /// current HEAD), or None. Used to pin the auto-merge arm. (x-0eaf)
 fn covered_head_from_event(cwd: &Path) -> Option<String> {
-    let path = cwd.join(".fno").join("events.jsonl");
+    let path = crate::paths::events_path(cwd);
     let content = fs::read_to_string(&path).ok()?;
     let head = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -3801,8 +3830,12 @@ mod tests {
         let events = dir.path().join("events.jsonl");
         assert!(record_finalize_done(dir.path(), run, &events, &events));
 
+        // The legacy checkout-local journal migrates into the worktree slice of
+        // the space on first resolve; fold THAT log, not the vacated path.
+        let moved = run_log_path(dir.path());
+        assert_ne!(moved, log, "the legacy path is migrated, not reused");
         assert_eq!(
-            crate::run_state::fold_run_state(&log, run).unwrap(),
+            crate::run_state::fold_run_state(&moved, run).unwrap(),
             crate::run_state::RunState::Closed
         );
     }
@@ -3823,8 +3856,9 @@ mod tests {
 
         let events = dir.path().join("events.jsonl");
         assert!(record_finalize_done(dir.path(), run, &events, &events));
+        let moved = run_log_path(dir.path());
         assert_eq!(
-            crate::run_state::fold_run_state(&log, run).unwrap(),
+            crate::run_state::fold_run_state(&moved, run).unwrap(),
             crate::run_state::RunState::Aborted
         );
         assert!(!events.exists(), "aborted runs need no finalize transition");

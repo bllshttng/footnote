@@ -39,6 +39,7 @@ struct Env {
     fno_calls: PathBuf,
     outstanding_store: PathBuf,
     pr_info: PathBuf,
+    spaces: PathBuf,
 }
 
 /// Build a hermetic env. `register_fails` makes the register-task stub exit 1.
@@ -224,6 +225,7 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
         fno_calls: root.join("fno-calls.log"),
         outstanding_store: root.join("outstanding-store.json"),
         pr_info,
+        spaces: root.join("spaces"),
     }
 }
 
@@ -249,6 +251,7 @@ fn run_finalize(env: &Env, reason: &str) -> std::process::Output {
         // `fno.plan._stamp` children resolve the test stubs. Set to the bare
         // pypath (PYTHONPATH entries prepend to sys.path) so the stubs win over
         // any site-packages/editable install of the real package.
+        .env("FNO_SPACES_DIR", &env.spaces)
         .env("PYTHONPATH", &env.pypath)
         .env(
             "PATH",
@@ -291,6 +294,7 @@ fn run_finalize_with_transcript(
         .arg(&env.handoffs)
         .arg("--postmortems-dir")
         .arg(&env.postmortems)
+        .env("FNO_SPACES_DIR", &env.spaces)
         .env("PYTHONPATH", &env.pypath)
         .env(
             "PATH",
@@ -360,6 +364,7 @@ fn run_finalize_real_stamp(env: &Env, reason: &str) -> std::process::Output {
         .arg(&env.handoffs)
         .arg("--postmortems-dir")
         .arg(&env.postmortems)
+        .env("FNO_SPACES_DIR", &env.spaces)
         .env("PYTHONPATH", pythonpath)
         .env(
             "PATH",
@@ -510,6 +515,14 @@ fn finalize_binary_closes_the_shadow_run_after_success() {
 
     let out = run_finalize(&env, "DonePRGreen");
     assert!(out.status.success(), "finalize must succeed: {:?}", out);
+    // The first resolve migrates the seeded legacy log into the worktree
+    // slice of the space; fold the log where the binary now keeps it. The
+    // binary ran with FNO_SPACES_DIR pinned to env.spaces and hashes the
+    // raw --cwd (proj is not a git checkout), so mirror exactly that here.
+    let run_log = env
+        .spaces
+        .join(fno_agents::paths::space_slug(&env.cwd))
+        .join("run-log.jsonl");
     assert_eq!(
         fno_agents::run_state::fold_run_state(&run_log, run).unwrap(),
         fno_agents::run_state::RunState::Closed
@@ -547,6 +560,13 @@ fn finalize_binary_repairs_a_prior_ship_before_returning() {
         "repair finalize must succeed: {:?}",
         out
     );
+    // The seeded legacy log migrates into the space slice on the binary's
+    // first resolve; fold where the FNO_SPACES_DIR-pinned binary kept it,
+    // hashing the same raw --cwd the binary hashed.
+    let run_log = env
+        .spaces
+        .join(fno_agents::paths::space_slug(&env.cwd))
+        .join("run-log.jsonl");
     assert_eq!(
         fno_agents::run_state::fold_run_state(&run_log, run).unwrap(),
         fno_agents::run_state::RunState::Closed
@@ -1246,6 +1266,7 @@ fn run_finalize_shimmed(env: &Env, reason: &str, gh_body: &str) -> std::process:
         .arg(&env.handoffs)
         .arg("--postmortems-dir")
         .arg(&env.postmortems)
+        .env("FNO_SPACES_DIR", &env.spaces)
         .env("PYTHONPATH", &env.pypath)
         .env("PATH", path)
         .env("FNO_CLAIMS_ROOT", env._tmp.path().join("claims-root"))

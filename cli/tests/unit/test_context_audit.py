@@ -15,6 +15,15 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+
+def _space_journal(tmp_path: Path) -> Path:
+    """The event journal the spawned child writes: the repo's space, pinned
+    by the conftest FNO_SPACES_DIR sandbox, keyed on the child's cwd."""
+    from fno.paths import space_dir
+
+    return space_dir(tmp_path) / "events.jsonl"
+
+
 from fno import context_observation
 from fno.cli import app
 from fno.context_audit import (
@@ -637,7 +646,7 @@ def test_runtime_observer_emits_exact_session_bound_context_snapshot(
     )
 
     assert result.returncode == 0, result.stderr
-    event = json.loads((tmp_path / ".fno" / "events.jsonl").read_text())
+    event = json.loads(_space_journal(tmp_path).read_text())
     assert event["type"] == "context_snapshot"
     assert event["data"]["session_id"] == "codex-session"
     assert event["data"]["context_bytes"] == len(delivered.encode())
@@ -691,7 +700,7 @@ def test_runtime_snapshot_joins_only_footnote_owned_native_context(
     )
 
     assert result.returncode == 0, result.stderr
-    event = json.loads((tmp_path / ".fno" / "events.jsonl").read_text())
+    event = json.loads(_space_journal(tmp_path).read_text())
     manifest = event["data"]["source_manifest"]
     assert [item["source_id"] for item in manifest] == [
         "managed-footnote-block",
@@ -758,7 +767,7 @@ def test_runtime_observer_upgrades_one_incomplete_snapshot_to_one_complete(
 
     events = [
         json.loads(line)
-        for line in (tmp_path / ".fno" / "events.jsonl").read_text().splitlines()
+        for line in _space_journal(tmp_path).read_text().splitlines()
     ]
     assert len(events) == 2
     assert events[0]["data"]["measurement_complete"] is False
@@ -808,7 +817,7 @@ def test_runtime_observer_can_treat_valid_json_as_delivered_directive(
     )
 
     assert result.returncode == 0, result.stderr
-    event = json.loads((tmp_path / ".fno" / "events.jsonl").read_text())
+    event = json.loads(_space_journal(tmp_path).read_text())
     assert event["data"]["context_bytes"] == len(delivered.encode())
     assert event["data"]["source_manifest"][0]["content_hash"] == hashlib.sha256(
         delivered.encode()
@@ -858,7 +867,7 @@ def test_postcompact_hook_wrapper_preserves_output_and_emits_snapshot(
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == '{"systemMessage":"post compact directive"}\n'
-    event = json.loads((tmp_path / ".fno" / "events.jsonl").read_text())
+    event = json.loads(_space_journal(tmp_path).read_text())
     assert event["data"]["entry_state"] == "post_compact"
     assert event["data"]["context_bytes"] == len(b"post compact directive")
     assert event["data"]["measurement_complete"] is True
@@ -1290,7 +1299,7 @@ def test_parallel_recorders_collect_once_after_reversed_completion(
     ]
     events = [
         json.loads(line)
-        for line in (tmp_path / ".fno" / "events.jsonl").read_text().splitlines()
+        for line in _space_journal(tmp_path).read_text().splitlines()
     ]
     assert len(events) == 1
     snapshot = events[0]["data"]

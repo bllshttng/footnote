@@ -73,12 +73,15 @@ _bash_targets_protected() {
     # to `.fno/`) excludes only whitespace and command separators/redirects, NOT
     # quotes - a quoted path like `> "$HOME/.fno/graph.json"` is normal shell and
     # must still match (codex P1). Right-bounded by a shell separator/quote or EOL.
-    local pp='[^[:space:];|&<>]*\.fno/(graph\.json|target-state\.md)([[:space:];|&<>"'\'']|$)'
+    # Second arm: the manifest moved into the repo's space
+    # (`~/.fno/spaces/<slug>[/worktrees/<name>]/target-state.md`); the old
+    # checkout path stays matched so an edit to a stale copy is still refused.
+    local pp='([^[:space:];|&<>]*\.fno/(graph\.json|target-state\.md)|[^[:space:];|&<>]*/spaces/[^[:space:];|&<>]*target-state\.md)([[:space:];|&<>"'\'']|$)'
     # A run of non-separator chars (stays inside one command clause), and a
     # clause tail that ends at a protected path. Kept in vars because an inline
     # `[^;|&]` breaks `[[ =~ ]]` parsing (`;`/`|` are shell-special there).
     local nosep='[^;|&]*'
-    local clause="${nosep}"'\.fno/(graph\.json|target-state\.md)'
+    local clause="${nosep}"'(\.fno/(graph\.json|target-state\.md)|/spaces/[^;|&]*target-state\.md)'
     # redirect immediately targeting the path: >, >>, 2>, &>, >&, >|, >!
     # (bracket forms, not \>, to avoid the GNU word-boundary reading of \>).
     [[ "$cmd" =~ ([>]{1,2}|\&[>]|[>]\&|[>][|]|[>]!)[[:space:]]*$pp ]] && return 0
@@ -169,7 +172,7 @@ case "$TOOL" in
     if [[ "$FILE_PATH" == *".fno/graph.json" ]]; then
         _block "$_GRAPH_REASON"
     fi
-    if [[ "$FILE_PATH" == *".fno/target-state.md" ]]; then
+    if [[ "$FILE_PATH" == *".fno/target-state.md" || "$FILE_PATH" == *"/.fno/spaces/"*"target-state.md" ]]; then
         # Finding c: block unconditionally (not drive-window-only). Emit the
         # forensic audit event if this forge lands during a drive; block regardless.
         if drive_authority_active && declare -F emit_event >/dev/null 2>&1; then

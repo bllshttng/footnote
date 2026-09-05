@@ -134,6 +134,7 @@ pub mod session_start_bytes;
 pub mod spawn_gate;
 pub mod spawn_payload;
 pub mod state;
+pub mod state_path;
 pub mod stream_worker;
 pub mod subprocess_ask;
 pub mod subscribe;

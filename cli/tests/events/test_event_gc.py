@@ -228,11 +228,11 @@ def test_gc_remaps_offer_cursor_without_skipping_pending_rows(tmp_path: Path) ->
 def test_gc_preserves_rows_that_anchor_a_fanout_occurrence_cursor(tmp_path: Path) -> None:
     from fno import status_fanout
     from fno.config import StatusSinkConfig
+    from fno.paths import project_log
 
-    state_dir = tmp_path / ".fno"
-    status_dir = state_dir / "status-sinks"
+    status_dir = project_log("status-sinks", project_root=tmp_path)
     status_dir.mkdir(parents=True)
-    events = state_dir / "events.jsonl"
+    events = project_log("events.jsonl", project_root=tmp_path)
     cursor_ts = "2026-07-01T00:00:00Z"
     anchor_ts = "2026-07-01T00:00:00+00:00"
     older = _event("claim_acquired", "2026-06-30T00:00:00Z") + "\n"

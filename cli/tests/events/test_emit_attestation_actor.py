@@ -49,9 +49,16 @@ def _temp_git_repo(tmp_path: Path, manifest: str | None) -> Path:
     return sub
 
 
+def _events_file(repo: Path) -> Path:
+    """The journal the emitter resolves: the repo's space, via the accessor."""
+    from fno.paths import project_log
+
+    return project_log("events.jsonl", project_root=repo)
+
+
 def _last_event(repo: Path) -> dict:
     lines = [
-        ln for ln in (repo / ".fno" / "events.jsonl").read_text().splitlines()
+        ln for ln in _events_file(repo).read_text().splitlines()
         if ln.strip()
     ]
     return json.loads(lines[-1])
@@ -100,7 +107,7 @@ def test_attestation_adopts_sidecar_by_harness_session_id(tmp_path: Path) -> Non
     assert r.returncode == 0, r.stderr
     events = [
         json.loads(line)
-        for line in (repo / ".fno" / "events.jsonl").read_text().splitlines()
+        for line in _events_file(repo).read_text().splitlines()
         if line.strip()
     ]
     started = [
@@ -128,7 +135,7 @@ def test_attestation_marks_missing_sidecar_unjoined(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stderr
     events = [
         json.loads(line)
-        for line in (repo / ".fno" / "events.jsonl").read_text().splitlines()
+        for line in _events_file(repo).read_text().splitlines()
         if line.strip()
     ]
     started = [

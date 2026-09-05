@@ -19,6 +19,11 @@ struct GenericEnv {
     evaluator: PathBuf,
 }
 
+#[path = "space_paths.rs"]
+mod space_paths;
+
+use space_paths::project_events;
+
 fn setup(response: &str) -> GenericEnv {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("project");
@@ -40,7 +45,7 @@ fn setup(response: &str) -> GenericEnv {
         "{\"message\":{\"role\":\"assistant\",\"content\":\"<promise>\"}}\n",
     )
     .unwrap();
-    let events = cwd.join(".fno/events.jsonl");
+    let events = project_events(&cwd);
     fs::write(&events, "").unwrap();
     let global_events = tmp.path().join("global-events.jsonl");
     let evaluator = tmp.path().join("fno-evaluator");

@@ -114,17 +114,22 @@ OUT3="$(CANONICAL="$SBX3/canonical" WORKTREE="$SBX3/worktree" bash "$SETUP" 2>&1
 RC3=$?
 
 check_eq "T3: exits 0 on a genuine worktree" "0" "$RC3"
-if [ -L "$SBX3/worktree/.fno/codemap.md" ]; then
-  echo "PASS: T3: codemap.md was linked into the worktree"
-  pass=$((pass+1))
-else
-  echo "FAIL: T3: codemap.md was NOT linked (guard over-fired): $OUT3"
+# State links are retired: project state lives in the repo's space under
+# ~/.fno/spaces/<slug>/, keyed on the canonical root, so every worktree
+# resolves it without a link. .fno/ gets NOTHING linked now (config.toml is
+# found by the config loader's climb to canonical; the only link into a
+# checkout left is internal/ and .claude/).
+if [ -L "$SBX3/worktree/.fno" ] || [ -L "$SBX3/worktree/.fno/codemap.md" ] || [ -L "$SBX3/worktree/.fno/config.toml" ]; then
+  echo "FAIL: T3: an .fno state link was created (retired in x-b1ee): $OUT3"
   fail=$((fail+1))
+else
+  echo "PASS: T3: no .fno state link (project state resolves through the space)"
+  pass=$((pass+1))
 fi
-check_eq "T3: the link reads through to canonical" \
-  "CODEMAP-ORIGINAL" "$(cat "$SBX3/worktree/.fno/codemap.md" 2>/dev/null)"
-check_eq "T3: canonical is untouched" \
+check_eq "T3: canonical codemap is untouched" \
   "CODEMAP-ORIGINAL" "$(cat "$SBX3/canonical/.fno/codemap.md" 2>/dev/null)"
+check_eq "T3: canonical config.toml is untouched" \
+  "CONFIG-ORIGINAL" "$(cat "$SBX3/canonical/.fno/config.toml" 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
 # T4: a WORKTREE nobody created - refuse, and leave the path absent

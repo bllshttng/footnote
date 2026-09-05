@@ -44,7 +44,9 @@ def _scratch_repo(tmp_path: Path) -> Path:
 
 
 def _attestations(repo: Path) -> list[dict]:
-    path = repo / ".fno" / "events.jsonl"
+    from fno.paths import project_log
+
+    path = project_log("events.jsonl", project_root=repo)
     if not path.exists():
         return []
     return [

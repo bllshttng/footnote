@@ -1,9 +1,8 @@
 """Pydantic settings schema for the fno CLI.
 
-Settings are DEEP-MERGED across every candidate file that exists, with
-higher-priority files overriding lower-priority ones key-by-key (nested
-dicts merge recursively; scalars and lists replace wholesale). Candidate
-priority, highest first:
+Settings are DEEP-MERGED across every candidate file that exists, higher
+priority overriding lower key-by-key (nested dicts merge recursively,
+scalars and lists replace wholesale). Candidate priority, highest first:
   1. $FNO_CONFIG env var (explicit path; when set, the ONLY candidate)
   2. <worktree_root>/.fno/settings.yaml  (project-local to this checkout)
   3. <canonical_root>/.fno/settings.yaml  (the main checkout's config,
@@ -12,16 +11,13 @@ priority, highest first:
      deduped when 2 == 3)
   4. ~/.fno/settings.yaml  (per-user global; shared defaults)
 
-A key absent from a higher-priority file falls through to the next file
-down, so the per-user global can hold shared defaults (e.g.
-config.obsidian.vault) while each project sets only its deltas (e.g.
-config.post_merge.parking_lot_path). When no file exists, built-in defaults apply.
-This mirrors the shell reader (scripts/lib/config.sh, per-key local->global
-fallback) and the provider loader, both of which already merge project-local
-over global.
+A key absent from a higher-priority file falls through to the next file down,
+so the per-user global holds shared defaults while each project sets only its
+deltas. With no file, built-in defaults apply. This mirrors the shell reader
+(scripts/lib/config.sh, per-key local->global fallback) and the provider loader.
 
-Cache: load_settings() is cached per-process via functools.lru_cache.
-Mid-process edits to settings.yaml do not take effect; the next
+Cache: load_settings() is cached per-process via functools.lru_cache;
+mid-process edits to settings.yaml do not take effect; the next
 subprocess sees the new value.
 
 Design decisions (locked in 2026-05-14-path-config.md):
@@ -140,6 +136,7 @@ class PathsBlock(BaseModel):
     loops_paused_json: Optional[str] = None
     observer_reports_dir: Optional[str] = None
     operator_lane: Optional[str] = None
+    spaces_dir: Optional[str] = None
 
     @field_validator(
         "graph_json",
@@ -160,6 +157,7 @@ class PathsBlock(BaseModel):
         "loops_paused_json",
         "observer_reports_dir",
         "operator_lane",
+        "spaces_dir",
         mode="before",
     )
     @classmethod

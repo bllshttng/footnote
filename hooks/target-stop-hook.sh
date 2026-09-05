@@ -12,7 +12,8 @@
 #   4. $(command -v fno-agents)   (PATH fallback)
 #
 # ACTIVE-SESSION-AWARE error handling (x-81d9): the state file
-# `.fno/target-state.md` is the active-session discriminator. With NO state file
+# The session manifest (the worktree slice of the repo's space; legacy
+# `<repo>/.fno/target-state.md`) is the active-session discriminator. With NO state file
 # there is nothing to gate, so every failure path exits 0 (allow) as before.
 # With a state file present, a broken checker (missing jq, missing/stale binary,
 # verb non-zero, non-JSON output) is NOT a safe allow - silently allowing there
@@ -139,7 +140,11 @@ resolve_manifest_state() {
 # No state file -> no target session here -> nothing to gate. This is the ONLY
 # safe silent allow, and it gates every error path below: with a state file
 # present, a checker that cannot do its job must block-and-signal, never allow.
-LIVE_STATE_FILE=".fno/target-state.md"
+# The manifest lives in the worktree slice of the repo's space; resolve it
+# through the owning verb so this hook never spells the path. Degraded
+# fallback for an fno predating the verb: the legacy checkout-relative path.
+LIVE_STATE_FILE=$(fno-agents state path target-state 2>/dev/null || true)
+[[ -z "$LIVE_STATE_FILE" ]] && LIVE_STATE_FILE=".fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
 TARGET_CWD="$PWD"
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
@@ -148,6 +153,10 @@ WORKTREE_COUNT=$(git -C "$PWD" worktree list --porcelain 2>/dev/null \
 [[ "$WORKTREE_COUNT" =~ ^[0-9]+$ ]] || WORKTREE_COUNT=0
 OTHER_WORKTREE_PRESENT=0
 (( WORKTREE_COUNT > 1 )) && OTHER_WORKTREE_PRESENT=1
+# The project space root: cross-worktree journals, kings and stop-hook
+# diagnostics live here, never in the checkout.
+SPACE_DIR=$(dirname "$(fno-agents state path events 2>/dev/null || true)")
+[[ -z "$SPACE_DIR" || "$SPACE_DIR" == "." ]] && SPACE_DIR="${REPO_ROOT}/.fno"
 
 resolve_agents_bin() {
     if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
@@ -281,9 +290,9 @@ KING_STATE_FILE=""
 DRIVER="target"
 if [[ ! -f "$STATE_FILE" ]]; then
     if [[ "$TARGET_RESOLVE_BROKEN" -eq 1 ]]; then
-        RCOUNT_FILE=".fno/.loop-check-unavail-${RESOLVE_HARNESS_ID:-anon}"
+        RCOUNT_FILE="${SPACE_DIR}/.loop-check-unavail-${RESOLVE_HARNESS_ID:-anon}"
         RCOUNT=0
-        mkdir -p .fno 2>/dev/null || true
+        mkdir -p "$SPACE_DIR" 2>/dev/null || true
         [[ -f "$RCOUNT_FILE" ]] && RCOUNT=$(tr -dc '0-9' < "$RCOUNT_FILE" 2>/dev/null)
         [[ -n "$RCOUNT" ]] || RCOUNT=0
         RCOUNT=$((10#$RCOUNT + 1))
@@ -325,7 +334,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
     # Cheap pre-check: no scope manifests on disk means nothing can name this
     # session, and skipping the fno call keeps an ordinary session's stop at
     # one directory glob instead of a full Python CLI startup.
-    KINGS_DIR="${REPO_ROOT}/.fno/kings"
+    KINGS_DIR="${SPACE_DIR}/kings"
     KING_RESOLVE_BROKEN=0
     if [[ -n "$HOOK_HARNESS_ID" ]] && compgen -G "${KINGS_DIR}/*.md" >/dev/null 2>&1; then
         if command -v fno >/dev/null 2>&1; then
@@ -333,7 +342,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
             # `_find_by_session` does exact equality against the stamped
             # `harness_session_id`, so handing it a codex rollout basename
             # misses every time and disarms the king gate on codex silently.
-            MANIFEST_ARGS=(agents king manifest-path --harness-session-id "${RESOLVE_HARNESS_ID:-$HOOK_HARNESS_ID}" --state-root "$REPO_ROOT/.fno")
+            MANIFEST_ARGS=(agents king manifest-path --harness-session-id "${RESOLVE_HARNESS_ID:-$HOOK_HARNESS_ID}" --state-root "$SPACE_DIR")
             [[ -n "$HOOK_HARNESS" ]] && MANIFEST_ARGS+=(--harness "$HOOK_HARNESS")
             KING_RC=0
             KING_STATE_FILE=$(fno "${MANIFEST_ARGS[@]}" 2>/dev/null) || KING_RC=$?
@@ -356,7 +365,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
         # Bounded block, same contract as unavailable_block_or_allow, keyed by
         # this transcript's id because SESSION_ID is not derived until a state
         # file is chosen. Loud give-up, never a silent allow.
-        KCOUNT=".fno/.king-resolve-unavail-${HOOK_HARNESS_ID:-anon}"
+        KCOUNT="${SPACE_DIR}/.king-resolve-unavail-${HOOK_HARNESS_ID:-anon}"
         KNUM=0
         [[ -f "$KCOUNT" ]] && KNUM=$(tr -dc '0-9' < "$KCOUNT" 2>/dev/null)
         [[ -z "$KNUM" ]] && KNUM=0
@@ -410,7 +419,7 @@ emit_event_both() {
     # Honors an overridden config.state_dir when a caller has sourced the shell
     # stub; falls back to the default so the jq-missing give-up path still logs.
     global_events="${GLOBAL_EVENTS_PATH:-${STATE_DIR:-$HOME/.fno}/events.jsonl}"
-    _append_bounded_event target_stop_hook "$line" "${REPO_ROOT}/.fno/events.jsonl" || true
+    _append_bounded_event target_stop_hook "$line" "${SPACE_DIR}/events.jsonl" || true
     _append_bounded_event target_stop_hook "$line" "$global_events" || true
 }
 
@@ -428,7 +437,7 @@ emit_tick_row() {
 # consume each other's retry budget (AC2-EDGE). Calls exit directly.
 unavailable_block_or_allow() {
     emit_tick_row 0 checker_unavailable "driver=${DRIVER:-unknown} session=${SESSION_ID:-unknown}"
-    local counter=".fno/.loop-check-unavail-${SESSION_ID}"
+    local counter="${SPACE_DIR}/.loop-check-unavail-${SESSION_ID}"
     local count=0
     [[ -f "$counter" ]] && count=$(tr -dc '0-9' < "$counter" 2>/dev/null)
     [[ -z "$count" ]] && count=0          # absent or corrupt -> start at 0
@@ -526,13 +535,13 @@ fi
 # materialized by bash before exec, so an old binary simply ignores its stdin
 # and the captured exit code is the binary's own. (Trailing newline added by
 # <<< is harmless: serde_json tolerates trailing whitespace.)
-mkdir -p "${REPO_ROOT}/.fno" 2>/dev/null || true
+mkdir -p "$SPACE_DIR" 2>/dev/null || true
 CANDIDATE_READY=0
 if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
     && cp "$STATE_FILE" "$DELIVERY_CANDIDATE" 2>/dev/null; then
     CANDIDATE_READY=1
 fi
-LOOP_CHECK_LOG="${REPO_ROOT}/.fno/loop-check.stderr.log"
+LOOP_CHECK_LOG="${SPACE_DIR}/loop-check.stderr.log"
 DECISION_JSON=""
 verb_rc=0
 if [[ "$STATE_FILE" == "$DELIVERY_PENDING_STATE" ]]; then
@@ -596,7 +605,7 @@ fi
 # ── 8. Clean decision reached: self-heal the unavailable counter ──────────────
 # The checker worked. Reset the consecutive-failure counter FIRST so the bound
 # is on consecutive failures only and a recovered checker starts fresh (AC2-FR).
-rm -f ".fno/.loop-check-unavail-${SESSION_ID}" 2>/dev/null || true
+rm -f "${SPACE_DIR}/.loop-check-unavail-${SESSION_ID}" 2>/dev/null || true
 
 # ── 9. Translate decision to hook protocol ────────────────────────────────────
 DECISION=$(echo "$DECISION_JSON" | jq -r '.decision // "allow"')
@@ -652,7 +661,7 @@ elif [[ -n "$TERMINATION_REASON" ]]; then
             if [[ "$_REL_KEY" == node:* && -n "$_REL_HOLDER" ]]; then
                 FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$_REL_KEY" \
                     --holder "$_REL_HOLDER" --stamp-do \
-                    >/dev/null 2>>"${REPO_ROOT}/.fno/loop-check.stderr.log" || true
+                    >/dev/null 2>>"${SPACE_DIR}/loop-check.stderr.log" || true
             fi
             ;;
     esac
@@ -674,7 +683,7 @@ elif [[ -n "$TERMINATION_REASON" ]]; then
         --cwd "$TARGET_CWD" \
         --reason "$TERMINATION_REASON" 2>&1)" || FINALIZE_RC=$?
     if [[ -n "$FINALIZE_OUT" ]]; then
-        printf '%s\n' "$FINALIZE_OUT" >> "${REPO_ROOT}/.fno/finalize.stderr.log" 2>/dev/null || true
+        printf '%s\n' "$FINALIZE_OUT" >> "${SPACE_DIR}/finalize.stderr.log" 2>/dev/null || true
     fi
     if [[ $FINALIZE_RC -ne 0 ]] || printf '%s' "$FINALIZE_OUT" | grep -qi 'failed'; then
         echo "target stop-hook: finalize note (non-blocking): $(printf '%s' "$FINALIZE_OUT" | tail -n 3)" >&2
@@ -704,7 +713,7 @@ if [[ -z "$TERMINATION_REASON" && -f "$STATE_FILE" ]]; then
     if [[ "$_TC_KEY" == node:* && -n "$_TC_HOLDER" ]]; then
         FNO_CLAIMS_ROOT="$HOME" fno agents claim refresh "$_TC_KEY" \
             --holder "$_TC_HOLDER" --ttl "${_TC_TTL:-2h}" \
-            >/dev/null 2>>"${REPO_ROOT}/.fno/loop-check.stderr.log" || true
+            >/dev/null 2>>"${SPACE_DIR}/loop-check.stderr.log" || true
     fi
 fi
 

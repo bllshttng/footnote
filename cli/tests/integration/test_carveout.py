@@ -17,8 +17,14 @@ from fno.cli import app
 runner = CliRunner()
 
 
+def _ledger(repo_root: Path) -> Path:
+    from fno.paths import project_log
+
+    return project_log("carveouts.jsonl", project_root=repo_root)
+
+
 def _read_carveouts(repo_root: Path) -> list[dict]:
-    f = repo_root / ".fno" / "carveouts.jsonl"
+    f = _ledger(repo_root)
     assert f.exists(), f"expected carveouts ledger at {f}"
     return [json.loads(ln) for ln in f.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
@@ -75,14 +81,14 @@ def test_ac1_err_missing_kind(_repo: Path):
     """AC1-ERR: missing --kind -> exit 2, nothing appended."""
     result = runner.invoke(app, ["carveout", "add", "some description"])
     assert result.exit_code == 2, result.output
-    assert not (_repo / ".fno" / "carveouts.jsonl").exists()
+    assert not _ledger(_repo).exists()
 
 
 def test_ac1_err_invalid_kind(_repo: Path):
     """AC1-ERR (variant): an unknown --kind value -> exit 2, nothing appended."""
     result = runner.invoke(app, ["carveout", "add", "--kind", "bogus", "desc"])
     assert result.exit_code == 2
-    assert not (_repo / ".fno" / "carveouts.jsonl").exists()
+    assert not _ledger(_repo).exists()
 
 
 def test_ac1_err_invalid_priority(_repo: Path):
@@ -91,7 +97,7 @@ def test_ac1_err_invalid_priority(_repo: Path):
         app, ["carveout", "add", "--kind", "oos-bug", "--priority", "high", "desc"]
     )
     assert result.exit_code == 2
-    assert not (_repo / ".fno" / "carveouts.jsonl").exists()
+    assert not _ledger(_repo).exists()
 
 
 def test_ac1_ui_no_session(_repo: Path):
@@ -127,7 +133,7 @@ def test_consume_carveouts_removes_processed_ids(_repo: Path):
     """consume_carveouts removes triaged ids so they are never re-filed; keeps the rest."""
     from fno.carveout.core import consume_carveouts
 
-    ledger = _repo / ".fno" / "carveouts.jsonl"
+    ledger = _ledger(_repo)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text(
         '{"id":"cv-1","kind":"deferred","description":"a"}\n'
@@ -146,7 +152,7 @@ def test_consume_carveouts_removes_processed_ids(_repo: Path):
 def test_ac1_fr_unwritable_ledger(_repo: Path):
     """AC1-FR: an unwritable ledger -> non-zero exit + stderr (no silent success)."""
     # Make the ledger path a directory so the append open() raises OSError.
-    ledger = _repo / ".fno" / "carveouts.jsonl"
+    ledger = _ledger(_repo)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.mkdir()
     result = runner.invoke(app, ["carveout", "add", "--kind", "deferred", "desc"])
@@ -185,8 +191,8 @@ def test_add_carveout_storage_root_splits_session_and_ledger(tmp_path: Path, mon
     )
     assert unscoped is False
     assert cv.session_id == "wt-sess"  # resolved from the worktree's state
-    assert (storage_root / ".fno" / "carveouts.jsonl").exists()  # canonical ledger
-    assert not (session_root / ".fno" / "carveouts.jsonl").exists()
+    assert _ledger(storage_root).exists()  # canonical ledger
+    assert not _ledger(session_root).exists()
 
 
 def test_cli_ledger_climbs_to_canonical_root(tmp_path: Path, monkeypatch):
@@ -208,9 +214,9 @@ def test_cli_ledger_climbs_to_canonical_root(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["carveout", "add", "--kind", "deferred", "x"])
     assert result.exit_code == 0, result.output
 
-    canon_ledger = canonical / ".fno" / "carveouts.jsonl"
+    canon_ledger = _ledger(canonical)
     assert canon_ledger.exists()
-    assert not (worktree / ".fno" / "carveouts.jsonl").exists()
+    assert not _ledger(worktree).exists()
     entry = json.loads(canon_ledger.read_text(encoding="utf-8").splitlines()[0])
     assert entry["session_id"] == "wt-sess"
 
@@ -244,7 +250,7 @@ def test_backfill_kind_accepted(_repo: Path):
 
 def test_carveout_list_filters_by_kind_json(_repo: Path):
     """`fno carveout list --kind backfill --json` emits ONLY backfill rows as JSONL."""
-    ledger = _repo / ".fno" / "carveouts.jsonl"
+    ledger = _ledger(_repo)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text(
         '{"id":"cv-d","kind":"deferred","need":"q","description":"a deferred thing"}\n'
@@ -261,7 +267,7 @@ def test_carveout_list_filters_by_kind_json(_repo: Path):
 
 def test_carveout_list_all_without_kind(_repo: Path):
     """No --kind lists every carve-out (JSONL)."""
-    ledger = _repo / ".fno" / "carveouts.jsonl"
+    ledger = _ledger(_repo)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text(
         '{"id":"cv-d","kind":"deferred","description":"a"}\n'
@@ -283,7 +289,7 @@ def test_carveout_list_empty_ledger_exit_zero(_repo: Path):
 
 def test_carveout_list_skips_malformed_lines(_repo: Path):
     """A malformed ledger line is skipped, never aborts the listing (capture is never lost)."""
-    ledger = _repo / ".fno" / "carveouts.jsonl"
+    ledger = _ledger(_repo)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text(
         '{"id":"cv-b","kind":"backfill","description":"b"}\n'
@@ -300,7 +306,7 @@ def test_carveout_list_unreadable_ledger_fails_loud(_repo: Path):
     """A present-but-unreadable ledger is a FAILED read, NOT "no carve-outs":
     exit non-zero + stderr (never a silent empty that drops a real backfill)."""
     # Make the ledger PATH a directory: it exists() but read_text raises OSError.
-    ledger = _repo / ".fno" / "carveouts.jsonl"
+    ledger = _ledger(_repo)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.mkdir()
     result = runner.invoke(app, ["carveout", "list", "--kind", "backfill", "--json"])
@@ -310,7 +316,7 @@ def test_carveout_list_unreadable_ledger_fails_loud(_repo: Path):
 
 def test_carveout_resolve_removes_handled_ids(_repo: Path):
     """`fno carveout resolve <id>` removes handled backfill entries so a re-offer never repeats them."""
-    ledger = _repo / ".fno" / "carveouts.jsonl"
+    ledger = _ledger(_repo)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text(
         '{"id":"cv-b","kind":"backfill","description":"b"}\n'
@@ -331,7 +337,7 @@ def test_carveout_resolve_removes_handled_ids(_repo: Path):
 def test_carveout_resolve_shortfall_warns(_repo: Path):
     """resolve fewer than requested (id absent or ledger unwritable) surfaces a
     stderr shortfall so a failed resolve is never mistaken for success."""
-    ledger = _repo / ".fno" / "carveouts.jsonl"
+    ledger = _ledger(_repo)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text('{"id":"cv-b","kind":"backfill","description":"b"}\n', encoding="utf-8")
     # Request two ids; only cv-b exists -> removed (1) < requested (2).
@@ -344,7 +350,7 @@ def test_carveout_resolve_shortfall_warns(_repo: Path):
 def test_carveout_resolve_dedupes_no_false_shortfall(_repo: Path):
     """A duplicated id must not inflate the requested count into a false shortfall
     (consume_carveouts dedupes internally)."""
-    ledger = _repo / ".fno" / "carveouts.jsonl"
+    ledger = _ledger(_repo)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text('{"id":"cv-b","kind":"backfill","description":"b"}\n', encoding="utf-8")
     result = runner.invoke(app, ["carveout", "resolve", "cv-b", "cv-b"])
@@ -355,7 +361,7 @@ def test_carveout_resolve_dedupes_no_false_shortfall(_repo: Path):
 
 def test_carveout_list_filters_by_session(_repo: Path):
     """--session-id scopes the listing so /pr merged only sees ITS PR's backfills."""
-    ledger = _repo / ".fno" / "carveouts.jsonl"
+    ledger = _ledger(_repo)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text(
         '{"id":"cv-a","kind":"backfill","session_id":"S1","description":"mine"}\n'
@@ -381,7 +387,7 @@ def _pin_ledger(monkeypatch, path: Path, slug="bllshttng/footnote") -> None:
 
 
 def _write_backfills(repo: Path) -> None:
-    ledger = repo / ".fno" / "carveouts.jsonl"
+    ledger = _ledger(repo)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text(
         '{"id":"cv-a","kind":"backfill","session_id":"S1","description":"mine"}\n'
@@ -522,7 +528,7 @@ def test_list_rejects_pr_number_with_session_id(_repo: Path):
 
 def test_carveout_list_null_values_render_placeholders(_repo: Path):
     """Explicit JSON null fields render as placeholders, never the string 'None'."""
-    ledger = _repo / ".fno" / "carveouts.jsonl"
+    ledger = _ledger(_repo)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text(
         '{"id":null,"kind":null,"description":null,"need":null}\n', encoding="utf-8"

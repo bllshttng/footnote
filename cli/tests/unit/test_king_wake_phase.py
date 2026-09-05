@@ -46,6 +46,14 @@ class _Recorder:
     def dispatch(self, target: CrownTarget, reason: str, address: str | None) -> None:
         self.dispatches.append((target.scope, reason, address))
 
+def _king_manifest(root):
+    """The manifest path as the wake phase resolves it: the repo's space,
+    canonical-keyed (the seed must land where the reader looks)."""
+    from fno.king.state import king_manifest_path, king_state_root
+
+    return king_manifest_path("epic-x", state_root=king_state_root(root))
+
+
 
 def _court(crowns):
     return lambda rows: {"crowns": crowns, "conflicts": []}
@@ -71,7 +79,7 @@ def _run(
     rec = _Recorder()
     root = tmp_path / "proj"
     root.mkdir(exist_ok=True)
-    manifest = root / ".fno" / "kings" / "epic-x.md"
+    manifest = _king_manifest(root)
     write_manifest(
         manifest,
         scope="epic-x",
@@ -166,7 +174,7 @@ def test_the_spawned_walk_argv_carries_the_matched_address(monkeypatch, tmp_path
         holder="king-x",
         scope="epic-x",
         root=tmp_path,
-        manifest=tmp_path / ".fno" / "kings" / "epic-x.md",
+        manifest=_king_manifest(tmp_path),
         short_id="aa11bb22",
     )
     target.manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -270,7 +278,7 @@ def test_the_ceiling_question_dedupes_on_its_marker(tmp_path):
         holder="king-x",
         scope="epic-x",
         root=tmp_path,
-        manifest=tmp_path / ".fno" / "kings" / "epic-x.md",
+        manifest=_king_manifest(tmp_path),
     )
 
     first = _raise_ceiling_question(target, 32, 32)
@@ -295,7 +303,7 @@ def test_a_conflicted_scope_is_skipped(tmp_path):
     root = tmp_path / "proj"
     root.mkdir()
     write_manifest(
-        root / ".fno" / "kings" / "epic-x.md",
+        _king_manifest(root),
         scope="epic-x",
         harness_session_id="11111111-2222-3333-4444-555555555555",
     )
@@ -609,11 +617,11 @@ def test_a_configured_ceiling_of_zero_resolves_unbounded(tmp_path):
     root = tmp_path / "proj"
     root.mkdir()
     write_manifest(
-        root / ".fno" / "kings" / "epic-x.md",
+        _king_manifest(root),
         scope="epic-x",
         harness_session_id="11111111-2222-3333-4444-555555555555",
     )
-    fill(root / ".fno" / "kings" / "epic-x.md")
+    fill(_king_manifest(root))
 
     summary = run_king_wake(
         settings,
@@ -679,7 +687,7 @@ def test_the_wake_fires_on_a_real_bus_row_and_drains_by_cursor(tmp_path, monkeyp
     rec = _Recorder()
     root = tmp_path / "proj"
     root.mkdir()
-    manifest = root / ".fno" / "kings" / "epic-x.md"
+    manifest = _king_manifest(root)
     write_manifest(
         manifest,
         scope="epic-x",

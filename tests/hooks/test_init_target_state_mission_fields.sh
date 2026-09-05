@@ -36,6 +36,7 @@ log "AC1-HP: TARGET_MISSION_* set => mission fields populated"
 TMP1=$(mktemp -d -t init-mission-fields-set.XXXXXX)
 trap 'rm -rf "$TMP1" "${TMP2:-}"' EXIT
 
+export FNO_SPACES_DIR="$TMP1/spaces"
 cd "$TMP1"
 git init -q
 mkdir -p .fno
@@ -49,7 +50,7 @@ TARGET_MISSION_FROM_MSG_ID="msg-abc-foo" \
   bash "$INIT" >/dev/null 2>&1 \
   || fail "AC1-HP: init exited non-zero with mission vars set"
 
-STATE1="$TMP1/.fno/target-state.md"
+STATE1="$(cd "$TMP1" && fno do state path target-state 2>/dev/null || echo "$TMP1/.fno/target-state.md")"
 [[ -f "$STATE1" ]] || fail "AC1-HP: state file not created"
 
 # mission_id: should be "ab-test1234" (quoted in YAML since it's a string)

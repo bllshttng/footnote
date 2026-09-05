@@ -40,11 +40,12 @@ class WakeSignal:
 
 
 def signals_dir(repo_root: Path) -> Path:
-    return repo_root / ".fno" / "wake-signals"
+    from fno.paths import space_dir
+    return space_dir(repo_root) / "wake-signals"
 
 
 def drop_signal(repo_root: Path, signal: WakeSignal) -> Path:
-    """Atomically write a signal to <repo>/.fno/wake-signals/.
+    """Atomically write a signal to <space>/wake-signals/.
 
     Uses tmp-file-plus-rename to avoid partial reads from concurrent readers.
     Creates the parent directory if missing."""

@@ -1942,7 +1942,7 @@ def _warn_no_merge_dropped() -> None:
         "WARNING: --no-merge did NOT take - this session wrote no manifest, and "
         "the manifest is write-once. Merge posture is whatever the existing "
         "manifest says. Verify with:\n"
-        "  sed -n 's/^auto_merge_approved:[[:space:]]*//p' .fno/target-state.md\n"
+        "  sed -n 's/^auto_merge_approved:[[:space:]]*//p' \"$(fno-agents state path target-state)\"\n"
         "and if it is not `false`, do not rely on this flag.",
         err=True,
     )
@@ -3322,9 +3322,9 @@ def start(
     idempotent verb with a printed receipt, so a memory-less agent succeeds.
 
     Composes: ``fno agents workspace worktree ensure`` (create/reuse off origin/main, never local
-    HEAD) -> heal ``.fno`` + link shared state -> ``fno do target init`` (writes the
-    manifest, claims the node exactly once) -> receipt. Run from INSIDE a valid
-    worktree it is a no-op.
+    HEAD) -> link shared non-fno state -> ``fno do target init`` (writes the
+    manifest into the worktree's space slice, claims the node exactly once) -> receipt.
+    Run from INSIDE a valid worktree it is a no-op.
     """
     from fno._flag_aliases import refuse_retired_provider
 
@@ -3464,20 +3464,14 @@ def start(
     from_note = f"  from={_from.group(1)}" if _from else ""
 
     # policy=never: ensure returned the repo main checkout itself (launch in place,
-    # no worktree). Skip the worktree-only heal + setup-worktree.sh - both mutate
-    # the CANONICAL .fno (unlink a real symlink, re-link shared state), the exact
-    # corruption Locked Decision 4 forbids. Init still runs, in place.
+    # no worktree). Skip setup-worktree.sh - it links worktree-local state the
+    # space regime replaced. Init still runs, in place.
     in_place = wt_path.resolve() == repo_root.resolve()
 
-    # 2. Heal .fno when it arrived as a whole-dir symlink (the memory-only fix,
-    #    now in code), then link shared state via the canonical setup hook.
-    healed = False
+    # 2. Link the remaining shared non-fno state (.claude/, vault) via the
+    #    canonical setup hook. Project state needs no link: it lives in the
+    #    repo's space, which every worktree resolves identically.
     if not in_place:
-        fno_dir = wt_path / ".fno"
-        if fno_dir.is_symlink():
-            fno_dir.unlink()
-            fno_dir.mkdir()
-            healed = True
         from fno.worktree import _run_setup_worktree_hook
 
         rc, tail = _run_setup_worktree_hook(repo_root, wt_path)
@@ -3497,10 +3491,12 @@ def start(
         # codex-native branch above); resolve the same verified ref locally.
         base_label = _remote_base_ref(repo_root)
 
-    # Idempotent re-run from canonical: a manifest already in the worktree means
-    # init has run (write-once) - skip it, never double-claim or error.
-    manifest = wt_path / ".fno" / "target-state.md"
-    fno_state = "in-place" if in_place else ("healed" if healed else "ok")
+    # Idempotent re-run from canonical: a manifest in this worktree's space
+    # slice (or still at the legacy checkout path) means init has run - skip
+    # it, never double-claim or error.
+    from fno.paths import target_state_path_or_legacy
+
+    manifest = target_state_path_or_legacy(wt_path)
     if manifest.exists() and not manifest.is_symlink():
         # A manifest means init ran. Classify the live node claim from this
         # session's view: foreign-live -> park; ours -> idempotent already-claimed;
@@ -3542,7 +3538,7 @@ def start(
             raise typer.Exit(code=1)
         if verdict == "ours":
             typer.echo(
-                f"worktree={wt_path}  .fno={fno_state}  "
+                f"worktree={wt_path}  "
                 f"base={_truthful_base(cwd, base_label, measure=False)}  "
                 f"node=already-claimed holder={(claim_info or {}).get('holder') or '?'} "
                 f"state={(claim_info or {}).get('state') or '?'}"
@@ -3580,7 +3576,7 @@ def start(
             else "no prior claim"
         )
         typer.echo(
-            f"worktree={wt_path}  .fno={fno_state}  "
+            f"worktree={wt_path}  "
             f"base={_truthful_base(cwd, base_label, measure=False)}  "
             f"node=reacquired (successor took over from {prior})"
         )
@@ -3631,7 +3627,7 @@ def start(
     #    auditable (x-d7a7); absent -> today's line, byte-identical.
     model_note = f"  model={model} ({decision_source})" if model else ""
     typer.echo(
-        f"worktree={wt_path}  .fno={fno_state}  "
+        f"worktree={wt_path}  "
         f"base={_truthful_base(wt_path, base_label)}  node=claimed{from_note}{model_note}"
     )
     typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)
