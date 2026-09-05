@@ -13966,9 +13966,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     #[test]
     fn build_codex_thread_entry_stamps_the_launch_posture() {
         let worktree = tempfile::tempdir().unwrap();
-        let _guard = crate::PATH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::path_test_guard();
         let start = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -18688,9 +18686,7 @@ done
         behavior: crate::codex_fake_daemon::Behavior,
         body: impl std::future::Future<Output = ()>,
     ) {
-        let _guard = crate::PATH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::path_test_guard();
         let _daemon = crate::codex_fake_daemon::FakeDaemon::start(behavior);
         body.await;
     }

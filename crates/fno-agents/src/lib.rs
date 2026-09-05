@@ -404,6 +404,16 @@ fn raw_monotonic_nanos() -> u64 {
 #[cfg(test)]
 pub static PATH_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Hold [`PATH_TEST_MUTEX`] for the rest of the scope, poisoning ignored: a
+/// panicking test leaves the env restored by its own guard, so refusing the
+/// lock afterwards would fail every later test instead of the broken one.
+#[cfg(test)]
+pub fn path_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    PATH_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

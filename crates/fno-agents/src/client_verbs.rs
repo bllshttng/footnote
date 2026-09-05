@@ -6150,26 +6150,17 @@ mod tests {
         assert_eq!(code, 13);
     }
 
+    /// The shared helper snapshots git's path; hand-rolling it resolved by name.
     fn _git(repo: &Path, args: &[&str]) {
-        let st = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(st.success(), "git {:?} in {} failed", args, repo.display());
+        let out = crate::git_test_helpers::git_run(args, repo).unwrap();
+        assert!(out.status.success(), "git {args:?} failed in {repo:?}");
     }
 
     #[test]
     fn resolve_resume_cwd_picks_the_transcripts_worktree_over_the_stale_recorded_cwd() {
-        // This test resolves `git` through the process PATH, which is exactly
-        // the PATH-dependent work `PATH_TEST_MUTEX` covers: a sibling test in
-        // this same module points PATH at a stub dir holding only a fake `fno`,
-        // and a run that lands inside that window sees `git` as ENOENT.
-        // Observed in CI, never locally, because it is a scheduling race.
-        let _path_guard = crate::PATH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Shells git: a sibling test blanks PATH, so this is the PATH-dependent
+        // work PATH_TEST_MUTEX covers.
+        let _p = crate::path_test_guard();
         // Registered at the canonical checkout; transcript under a worktree's
         // project dir (the EnterWorktree case). Resume must resolve to the
         // worktree, not the pre-EnterWorktree recorded cwd.
