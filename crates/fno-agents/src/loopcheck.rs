@@ -2900,12 +2900,13 @@ fn read_pr_info(
     // is correct - no evidence of a local review).
     let events_text = std::fs::read_to_string(events_path).unwrap_or_default();
     // Authorship carry-forward: when this process resolved no manifest
-    // session, the previous coverage row's recorded author stands in, so a
-    // re-read from a manifest-less cwd classifies against the historical
-    // author instead of landing every local verdict Unmeasured.
+    // session, the previous coverage row's recorded author FOR THIS PR (the
+    // scan filters on the number; the events file is project-wide) stands
+    // in, so a re-read from a manifest-less cwd classifies against the
+    // historical author instead of landing every local verdict Unmeasured.
     let carried_author = author_session
         .map(str::to_string)
-        .or_else(|| carry_author_session_forward(&events_text));
+        .or_else(|| carry_author_session_forward(&events_text, number));
     let author_session = carried_author.as_deref();
     let (
         latest_review_ts,
@@ -5880,20 +5881,20 @@ pub enum ReviewState {
 
 /// Whether one verdict feeds the self-attestation-alone basis: a counted
 /// local verdict is the author's own unless its origin is a measured
-/// `OtherSession` or an attester-absent `Unknown` (env_only, recorded as a
-/// real review). ONE rule for the rests-alone term; the recorded
-/// `self_attested_count` deliberately keeps its stricter
-/// `== SelfAttested` definition below, because the count is telemetry about
-/// MEASURED authorship while this is a gate rule, and no gate reads the
-/// count any more - the Python predicate walks verdicts.
+/// `OtherSession`. Every unresolved origin refuses - `SelfAttested` is the
+/// author's own, `Unmeasured` is a comparison that failed, and `Unknown`
+/// (attester absent or empty) is no evidence of who attested at all: an
+/// author running the review from a shell with no harness marker lands
+/// there, so treating it as a peer would clear a self-review. ONE rule for
+/// the rests-alone term; the recorded `self_attested_count` deliberately
+/// keeps its stricter `== SelfAttested` definition below, because the count
+/// is telemetry about MEASURED authorship while this is a gate rule, and no
+/// gate reads the count any more - the Python predicate walks verdicts.
 fn counts_as_self_attestation_basis(v: &ReviewerVerdict, github_approval_satisfies: bool) -> bool {
     v.verdict == CoverageVerdict::Reviewed
         && human_approval_counts(v, github_approval_satisfies)
         && v.producer == CoverageProducer::LocalAttestation
-        && !matches!(
-            v.attestation_origin,
-            AttestationOrigin::OtherSession | AttestationOrigin::Unknown
-        )
+        && v.attestation_origin != AttestationOrigin::OtherSession
 }
 
 impl CoverageReport {
@@ -5926,10 +5927,10 @@ impl CoverageReport {
 
     /// Whether every counted review verdict rests on the author's own
     /// (self_attested) local attestation: no GitHub App review, no second
-    /// session. A counted local verdict corroborates only with a measured
-    /// `OtherSession` or an attester-absent `Unknown` (env_only, recorded as
-    /// a real review); `SelfAttested` is the author's own and `Unmeasured` is
-    /// a comparison that failed, so this twin refuses exactly what the
+    /// session. Only a measured `OtherSession` local verdict corroborates;
+    /// `SelfAttested` is the author's own, `Unmeasured` is a comparison that
+    /// failed, and `Unknown` is an attester nobody could observe - no
+    /// evidence of independence - so this twin refuses exactly what the
     /// serialized-row gate in the Python merge path refuses.
     pub fn rests_on_self_attestation_alone(&self) -> bool {
         let mut counted = 0usize;
@@ -7406,13 +7407,17 @@ fn coverage_event_data_full(
         // `independent_count`: the schema is explicit that `other_session` is
         // not independence, and this must not launder that.
         //
-        // Emitted ONLY when authorship was measured. classify_attestation_origin
-        // labels every verdict Unknown when `author_session` is None, so
-        // `self_attested_count()` would read 0 while the truth is unmeasured -
-        // a measured-zero shape (x-62a1: an aggregate reporting a state its
-        // inputs do not support). The field is omitted instead, never 0, so
-        // the day a gate enforces it, absence reads unmeasured rather than
-        // "no self-attest" and cannot serve as the bypass.
+        // Emitted only when an author session was established. With none,
+        // classify_attestation_origin labels a present-attester verdict
+        // Unmeasured (or Unknown when the attester is absent too), so
+        // `self_attested_count()` would read 0 while the truth is unmeasured
+        // - a measured-zero shape (x-62a1: an aggregate reporting a state
+        // its inputs do not support). The field is omitted instead, never 0,
+        // so the day a gate enforces it, absence reads unmeasured rather
+        // than "no self-attest" and cannot serve as the bypass. After a
+        // carry-forward the session may be the HISTORICAL author's, so the
+        // count is telemetry about the carried identity, not a proof this
+        // process measured anything.
         if author_session.is_some() {
             data["self_attested_count"] = serde_json::json!(rep.self_attested_count());
         }
@@ -13325,24 +13330,21 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     );
 
     // Authorship: --session-id, else the manifest's harness_session_id when one
-    // exists, else the historical author carried forward from the previous
-    // coverage row (a re-read from a manifest-less cwd must not reclassify
-    // what a measured read settled - the field is persisted for exactly this
-    // comparison), else None. Resolve it before the PR-head read so even an
-    // unknown row from that read failure keeps the established event shape.
-    let author_session = session_id
-        .or_else(|| {
-            // The manifest moved into the worktree slice of the space; the
-            // legacy checkout path is the read fallback for one release.
-            std::fs::read_to_string(crate::paths::worktree_space_dir(&cwd).join("target-state.md"))
-                .or_else(|_| std::fs::read_to_string(cwd.join(".fno/target-state.md")))
-                .ok()
-                .and_then(|content| scan_manifest_field(&content, "harness_session_id"))
-                .filter(|s| s != "null")
-        })
-        .or_else(|| {
-            carry_author_session_forward(&std::fs::read_to_string(&inputs.project_events).ok()?)
-        });
+    // exists, else None. The historical carry-forward happens inside
+    // read_pr_info, where the PR number is known: the events file is
+    // project-wide, so a carry computed before the number resolves cannot be
+    // filtered and would hand this PR a foreign PR's author. A failed PR-head
+    // read therefore emits its unknown row with no author id at all - which
+    // refuses at the corroboration gate, the correct closed posture.
+    let author_session = session_id.or_else(|| {
+        // The manifest moved into the worktree slice of the space; the
+        // legacy checkout path is the read fallback for one release.
+        std::fs::read_to_string(crate::paths::worktree_space_dir(&cwd).join("target-state.md"))
+            .or_else(|_| std::fs::read_to_string(cwd.join(".fno/target-state.md")))
+            .ok()
+            .and_then(|content| scan_manifest_field(&content, "harness_session_id"))
+            .filter(|s| s != "null")
+    });
 
     // Head precedence is explicit --head, then the named PR's head, then the
     // local checkout for the branch-inference path. A failed named-PR read
@@ -13523,7 +13525,23 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     &pr_info.coverage,
                     &head_sha,
                     &inputs.repo_slug,
-                    author_session.as_deref(),
+                    // The same author read_pr_info classified with: the
+                    // measured session, else the PR-filtered carry-forward.
+                    // Recomputed rather than threaded back so PrInfo keeps its
+                    // shape; deterministic, and idempotent across the row
+                    // read_pr_info just wrote (its own author_session_id now
+                    // answers the scan).
+                    author_session
+                        .as_deref()
+                        .map(str::to_string)
+                        .or_else(|| {
+                            carry_author_session_forward(
+                                &std::fs::read_to_string(&inputs.project_events)
+                                    .unwrap_or_default(),
+                                pr_info.number,
+                            )
+                        })
+                        .as_deref(),
                     Some(&pr_info.range_tiling),
                     pr_info.posture.as_ref(),
                 )

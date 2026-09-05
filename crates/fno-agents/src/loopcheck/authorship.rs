@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 /// Why a local verdict's authorship reads the way it does. Four states, not
 /// three: collapsing the two unmeasured ones is what let one consumer read a
 /// carried self-review as a peer and another read a manifest-less peer as
-/// the author's own. `Unknown` means the ATTESTER was unobservable (an
-/// env_only lane) and corroborates per the recorded contract; `Unmeasured`
-/// means a concrete session attested but no author session was available to
-/// compare, which is exactly the shape of an author's own re-read from a cwd
-/// without the manifest, so it refuses.
+/// the author's own. `Unknown` means the ATTESTER was unobservable (absent
+/// or empty: an env_only lane, or any event predating the field) - no
+/// evidence of who attested, so it refuses like every other unresolved
+/// origin; `Unmeasured` means a concrete session attested but no author
+/// session was available to compare, which is exactly the shape of an
+/// author's own re-read from a cwd without the manifest, so it refuses.
 ///
 /// Recorded, never gating. `coverage_count` does not read this field: every
 /// `Reviewed` verdict counts regardless of origin, `SelfAttested` included.
@@ -26,11 +27,14 @@ pub enum AttestationOrigin {
     /// Attester present, author session unavailable: refuses in the
     /// self-attestation predicate.
     Unmeasured,
-    /// Attester absent or empty (env_only): corroborates.
+    /// Attester absent or empty: no evidence of who attested (env_only, or
+    /// an event predating the field). Refuses.
     Unknown,
 }
 
 /// The deserializer's default for rows written before the field existed.
+/// Unknown refuses, so a pre-field row fails closed at the corroboration
+/// gate instead of reading as a peer's review.
 pub(crate) fn default_attestation_origin() -> AttestationOrigin {
     AttestationOrigin::Unknown
 }
@@ -39,11 +43,13 @@ pub(crate) fn default_attestation_origin() -> AttestationOrigin {
 /// worktree's authoring session. A match is `SelfAttested`; a non-empty
 /// mismatch is `OtherSession` (NOT "independent" - a self-handoff successor
 /// or a shared-worktree sibling is a different session and still not
-/// independent). A present attester with no author session is `Unmeasured`
-/// (a concrete session attested, the comparison failed - the shape of an
-/// author's own re-read from a cwd without the manifest), and an absent or
-/// empty attester is `Unknown` (env_only; the recorded contract calls those
-/// real reviews).
+/// independent - but it is the ONLY origin that corroborates). A present
+/// attester with no author session is `Unmeasured` (a concrete session
+/// attested, the comparison failed - the shape of an author's own re-read
+/// from a cwd without the manifest), and an absent or empty attester is
+/// `Unknown` (no evidence at all; an empty id is what harness_identity
+/// returns when no harness marker is in the env, so this bucket is where an
+/// author's own bare-lane self-review would land).
 pub(crate) fn classify_attestation_origin(
     attester: Option<&str>,
     author: Option<&str>,
@@ -57,22 +63,31 @@ pub(crate) fn classify_attestation_origin(
 }
 
 /// The newest non-empty `author_session_id` recorded on a `review_coverage`
-/// event, for a read whose process resolved no target manifest. The field is
-/// persisted for exactly this historical comparison (schema note on
-/// `author_session_id`): a re-read from a manifest-less cwd must not
+/// event FOR THIS PR, for a read whose process resolved no target manifest.
+/// The field is persisted for exactly this historical comparison (schema note
+/// on `author_session_id`): a re-read from a manifest-less cwd must not
 /// reclassify what an earlier measured read settled, because consumers take
 /// the latest row. The carried id is recorded as the row's own
 /// `author_session_id`, so later reads carry the same value forward.
-pub(crate) fn carry_author_session_forward(events_text: &str) -> Option<String> {
+///
+/// The scan filters on `data.pr` and the event type: the events file is
+/// PROJECT-wide (one file per repo across every worktree and PR), so an
+/// unfiltered scan carries a foreign PR's author and every later row of this
+/// PR then classifies against it - a foreign session on this PR reads as
+/// the author's own, which is the laundering this module exists to refuse.
+pub(crate) fn carry_author_session_forward(events_text: &str, pr: i64) -> Option<String> {
     let mut found = None;
     for line in events_text.lines() {
-        if !line.contains("\"review_coverage\"") {
-            continue;
-        }
         let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
+        if event.get("type").and_then(|v| v.as_str()) != Some("review_coverage") {
+            continue;
+        }
         let data = event.get("data").unwrap_or(&event);
+        if data.get("pr").and_then(|v| v.as_i64()) != Some(pr) {
+            continue;
+        }
         if let Some(id) = data.get("author_session_id").and_then(|v| v.as_str()) {
             if !id.is_empty() {
                 found = Some(id.to_string());
@@ -99,15 +114,43 @@ mod tests {
             "{\"type\":\"review_coverage\",\"data\":{\"pr\":1,\"author_session_id\":\"sess-b\"}}\n",
         );
         assert_eq!(
-            carry_author_session_forward(events).as_deref(),
+            carry_author_session_forward(events, 1).as_deref(),
             Some("sess-b")
         );
     }
 
     #[test]
+    fn never_carries_a_foreign_pr_author() {
+        // The project events file holds every PR's rows. A scan without the
+        // pr filter carries the newest author ON THE FILE - another PR's
+        // session - and a foreign attester on this PR then compares equal to
+        // it and reads as the author's own. Only this PR's rows may answer.
+        let events = concat!(
+            "{\"type\":\"review_coverage\",\"data\":{\"pr\":9,\"author_session_id\":\"sess-foreign\"}}\n",
+            "{\"type\":\"review_coverage\",\"data\":{\"pr\":1}}\n",
+        );
+        assert_eq!(carry_author_session_forward(events, 1), None);
+        assert_eq!(
+            carry_author_session_forward(events, 9).as_deref(),
+            Some("sess-foreign")
+        );
+    }
+
+    #[test]
+    fn ignores_rows_that_are_not_review_coverage_events() {
+        // Any event whose payload merely embeds the type string must not be
+        // read as a coverage row: the type check, not a substring, decides.
+        let events = concat!(
+            "{\"type\":\"review_attestation\",\"data\":{\"pr\":1,\"author_session_id\":\"sess-x\"}}\n",
+            "{\"type\":\"review_coverage\",\"data\":{\"pr\":1}}\n",
+        );
+        assert_eq!(carry_author_session_forward(events, 1), None);
+    }
+
+    #[test]
     fn none_when_no_row_ever_measured_authorship() {
         let events = "{\"type\":\"review_coverage\",\"data\":{\"pr\":1}}\n";
-        assert_eq!(carry_author_session_forward(events), None);
-        assert_eq!(carry_author_session_forward(""), None);
+        assert_eq!(carry_author_session_forward(events, 1), None);
+        assert_eq!(carry_author_session_forward("", 1), None);
     }
 }

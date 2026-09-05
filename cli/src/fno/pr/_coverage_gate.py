@@ -507,14 +507,15 @@ def rests_on_self_attestation_alone(
     counts are telemetry, not an answer, because the count cannot say WHY an
     origin went unmeasured while each verdict row can.
 
-    That rule: a counted ``local_attestation`` corroborates only with a
-    measured ``other_session`` or an attester-absent ``unknown`` (env_only,
-    recorded as a real review - refusing those wedges lanes the coverage
-    work exists to unwedge). ``self_attested`` is the author's own;
+    That rule: a counted ``local_attestation`` corroborates ONLY with a
+    measured ``other_session``. ``self_attested`` is the author's own;
     ``unmeasured`` is a comparison that failed, the shape of an author's own
-    re-read from a cwd without the manifest; an ABSENT key (a pre-fix
-    producer, or any writer that dropped the field) refuses like
-    ``unmeasured``. A row that cannot prove an independent reviewer is not
+    re-read from a cwd without the manifest; ``unknown`` is an attester
+    nobody could observe - absent or empty, and ``harness_identity`` returns
+    an EMPTY id when no harness marker is in the env, so this bucket is
+    where an author's own bare-lane self-review lands; an ABSENT key (a
+    pre-fix producer, or any writer that dropped the field) refuses like
+    ``unknown``. A row that cannot prove an independent reviewer is not
     evidence of one, and the gate refuses rather than clears.
 
     ``github_approval_satisfies`` is the resolved config flag, and it reaches
@@ -550,7 +551,7 @@ def rests_on_self_attestation_alone(
     ]
     return bool(counted) and all(
         v.get("producer") == "local_attestation"
-        and v.get("attestation_origin") not in ("other_session", "unknown")
+        and v.get("attestation_origin") != "other_session"
         for v in counted
     )
 

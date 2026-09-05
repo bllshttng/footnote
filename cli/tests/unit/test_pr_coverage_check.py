@@ -3714,12 +3714,14 @@ def test_rests_on_self_attestation_refuses_an_unmeasured_origin():
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
 
 
-def test_rests_on_self_attestation_unknown_origin_corroborates():
-    """An attester-absent unknown is an env_only lane's real review, which
-    the recorded contract counts as corroboration. Refusing it would wedge
-    exactly those lanes, so the gate clears."""
+def test_rests_on_self_attestation_counts_an_unknown_origin_as_self_attested():
+    """Unknown arm: an attester nobody could observe - absent or empty, and
+    harness_identity returns an EMPTY id when no harness marker is in the
+    env, so this bucket is where an author's own bare-lane self-review
+    lands. No evidence of an independent reviewer, so the gate refuses
+    rather than clears."""
     cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("unknown")]}
-    assert _coverage_gate.rests_on_self_attestation_alone(cov) is False
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
 
 
 def test_rests_on_self_attestation_still_clears_a_measured_other_session():
@@ -3733,14 +3735,28 @@ def test_rests_on_self_attestation_walks_verdicts_not_counts():
     """One rule on both surfaces: the recorded self_attested_count is
     telemetry, never the answer. The split row the peer review named
     (1 measured self + 1 unknown peer beside self_attested_count 1) must
-    clear here exactly as it clears on the Rust twin, instead of the counts
-    path answering 1 != 2."""
+    refuse here exactly as it refuses on the Rust twin - an unknown peer is
+    no corroboration - instead of the counts path answering 1 != 2."""
     cov = {
         "reviewed_count": 2,
         "self_attested_count": 1,
         "verdicts": [
             _carried_local_row("self_attested"),
             _carried_local_row("unknown"),
+        ],
+    }
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
+
+
+def test_rests_on_self_attestation_measured_other_session_outweighs_unresolved_origins():
+    """One measured other_session among unresolved origins still proves a
+    reviewer independent of the author, so the row does not rest on
+    self-attestation alone and the gate clears."""
+    cov = {
+        "reviewed_count": 2,
+        "verdicts": [
+            _carried_local_row("unknown"),
+            _carried_local_row("other_session"),
         ],
     }
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is False

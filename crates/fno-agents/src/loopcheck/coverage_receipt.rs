@@ -299,11 +299,10 @@ mod tests {
         // elsewhere) classifies the local verdict Unmeasured: a concrete
         // attester id is on the row, only the comparison failed - and that is
         // the shape of the author's own re-read, so the twin refuses it under
-        // require_corroboration. An attester-absent env_only row reads
-        // unknown and corroborates, per the recorded contract. The key is
-        // always present either way; Unknown used to be SKIPPED on serialize,
-        // and a consumer reading absent as "not self_attested" cleared a PR
-        // whose only review was the author's own.
+        // require_corroboration. The key is always present either way;
+        // Unknown used to be SKIPPED on serialize, and a consumer reading
+        // absent as "not self_attested" cleared a PR whose only review was
+        // the author's own.
         let events = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
         let unmeasured = classify_coverage(
             &[],
@@ -352,11 +351,15 @@ mod tests {
     }
 
     #[test]
-    fn an_env_only_review_corroborates_instead_of_wedging() {
-        // The attester id itself is unobservable on an env_only lane. The
-        // recorded contract calls that a real review; refusing it under the
-        // corroboration policy would wedge exactly those lanes. So the twin
-        // does NOT read it as the author's own: the row stays covered.
+    fn an_attestation_origin_of_unknown_or_absent_counts_as_the_author_s_own() {
+        // The pin the operator asked for, on the Rust twin: an env_only lane
+        // leaves the attester id absent, classify lands Unknown, and Unknown
+        // REFUSES - it is no evidence of who attested, and an author running
+        // the review from a shell with no harness marker (harness_identity
+        // returns an empty id) lands in exactly this bucket, so treating it
+        // as a peer would clear a self-review. The whole count is then the
+        // author's own and rests_on_self_attestation_alone is TRUE; the
+        // corroboration policy demotes the row to uncovered.
         let events = serde_json::json!({
             "type": "review_attestation",
             "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
@@ -375,16 +378,43 @@ mod tests {
             "h",
         );
         assert_eq!(rep.coverage, Coverage::Covered(1));
-        assert!(!rep.rests_on_self_attestation_alone());
+        assert!(rep.rests_on_self_attestation_alone());
+        let mut held = rep;
+        held.apply_corroboration_policy(true);
+        assert_eq!(held.coverage, Coverage::Covered(0));
+
+        // The row-level twin: a verdict whose attestation_origin key is
+        // ABSENT (a pre-field producer, or any writer that dropped the field)
+        // deserializes to the refusing default, so the predicate reads it as
+        // the author's own too. A positive marker on the default path, not a
+        // matching-word probe.
+        let events = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
+        let measured = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        let mut row = serde_json::to_value(&measured.verdicts[0]).unwrap();
+        row.as_object_mut().unwrap().remove("attestation_origin");
+        let v: ReviewerVerdict = serde_json::from_value(row).unwrap();
+        assert_eq!(v.attestation_origin, AttestationOrigin::Unknown);
+        assert!(counts_as_self_attestation_basis(&v, false));
     }
 
     #[test]
-    fn an_unmeasured_attester_with_author_refuses_and_an_absent_one_clears() {
+    fn an_unmeasured_peer_refuses_and_a_measured_one_corroborates() {
         // The mixed row the peer review named, answered by the split: a
-        // measured self plus an unmeasured peer refuses, while the same peer
-        // with an unobservable id (unknown) corroborates. Both classifications
-        // come from the same events line with the author session supplied or
-        // not.
+        // measured self plus a peer whose comparison failed (author session
+        // unavailable) refuses - the whole count then reads as the author's
+        // own - while the same peer with both sessions measured is a real
+        // OtherSession and corroborates. Both classifications come from the
+        // same events line with the author session supplied or not.
         let events = format!(
             "{}\n{}",
             attestation_line_on_branch("code-review", "h", "pass", "feature/x"),
