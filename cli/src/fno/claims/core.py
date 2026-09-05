@@ -1537,7 +1537,7 @@ def force_release_claim(
 def sweep_verdict(
     claim: Claim,
     *,
-    abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
+    abandonment_probe: Optional[Callable[..., Optional[bool]]] = None,
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
     native_verdict: Optional[dict[str, Any]] = None,
 ) -> tuple[bool, str]:
@@ -1605,7 +1605,7 @@ def reap_dead_claims(
     *,
     roots: Optional[list[Optional[Path]]] = None,
     apply: bool = False,
-    abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
+    abandonment_probe: Optional[Callable[..., Optional[bool]]] = None,
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
     optout_sink: Optional[list[Claim]] = None,
 ) -> dict[str, Any]:
