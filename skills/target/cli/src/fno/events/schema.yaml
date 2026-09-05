@@ -2801,6 +2801,32 @@ event_types:
           description: "Optional (done-path fires). Count of blocking inline findings (codex P1 / gemini critical|high) whose thread lacks a qualifying ack."
     consumers: [operator]
 
+  - name: control_plane_tick
+    description: "One tick of one control-plane arm (king_wake, watchdog, pr_watch_merge, active_backlog, auto_continue, stop_hook): what it did, or why it did nothing. The arms readout (`fno agents status`, `fno doctor`) folds these into one row per arm, newest first, red when the newest tick is older than 2x interval_s. Shape owned by crates/fno-agents/src/tick_ledger.rs; Python arms emit through fno.control_plane."
+    sources: [daemon, loop, hook, test]
+    data:
+      required: [arm, scheduler, acted, interval_s]
+      properties:
+        arm:
+          type: string
+          description: "Stable arm name: king_wake, watchdog, pr_watch_merge, active_backlog, auto_continue, stop_hook."
+        scheduler:
+          type: string
+          description: "What schedules the arm: daemon, launchd:<label>, hook:<name>, or session (an in-process caller)."
+        acted:
+          type: integer
+          description: "Actions this tick (wakes, dispatches, merges); 0 when it skipped."
+        skip_reason:
+          type: string
+          description: "Optional. One token for why nothing was done (no_crowned_target, watchdog_off, wake_disabled, env_broken, disabled, lock_held, quota, never). Absent or null when the arm acted."
+        detail:
+          type: string
+          description: "Optional. Short human detail (mission ids, counts, per-arm fields like targets/ab_live)."
+        interval_s:
+          type: integer
+          description: "The cadence this arm runs on, in seconds; the readout reads stale past twice this. 0 marks an event-driven arm (stop_hook): staleness does not apply."
+    consumers: [operator]
+
   - name: gh_probe
     description: "The stop gate's gh-availability probe conclusion, one row per fire. Tri-state: found, absent (NotFound and no file at the path), or spawn_trouble (gh exists but could not be spawned right now: ETXTBSY, EACCES, a missing interpreter). Spawn trouble reads as present, so a transient spawn failure can no longer degrade a session to advisory mode as 'gh absent'. Deliberately NOT the loop_check type: read_prior_fires counts loop_check rows as fire observations, and a fingerprint-less row would break the no-progress streak."
     sources: [hook]
