@@ -377,6 +377,31 @@ fn repo_root_of(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Canonical form with a fallback for paths that do not fully exist yet:
+/// canonicalize the deepest existing ancestor and re-append the missing tail,
+/// so a symlinked root (/var vs /private/var) compares equal even when the
+/// destination's own directory is created only by the move itself.
+fn canonical_best_effort(path: &Path) -> PathBuf {
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = path.to_path_buf();
+    loop {
+        match probe.parent() {
+            Some(parent) if probe.file_name().is_some() => {
+                if let Ok(canonical) = std::fs::canonicalize(parent) {
+                    let mut out = canonical;
+                    for component in missing.iter().rev() {
+                        out.push(component);
+                    }
+                    return out;
+                }
+                missing.push(probe.file_name().unwrap().to_os_string());
+                probe = parent.to_path_buf();
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 /// The per-repo space key: the full canonical path with `/` swapped for `-`
 /// (Claude's project-dir shape, operator ruling 2026-09-04: self-describing in
 /// both directions -- read the dir, see the path; no hash to reverse). The
@@ -457,10 +482,13 @@ pub fn migrate_from_checkout(old: &Path, new: &Path) -> bool {
         let durable_space = durable_spaces_root().join(space_slug(&canonical));
         // Compare canonical forms: macOS aliases /var to /private/var, so raw
         // spellings of the same space would false-refuse and strand the
-        // journal behind a migration that never fires.
-        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        let new_space = new.parent().map(canon).unwrap_or_else(|| canon(new));
-        if !new_space.starts_with(canon(&durable_space)) {
+        // journal behind a migration that never fires. best-effort because
+        // new's own directory is created by the move, not before it.
+        let new_space = new
+            .parent()
+            .map(canonical_best_effort)
+            .unwrap_or_else(|| canonical_best_effort(new));
+        if !new_space.starts_with(canonical_best_effort(&durable_space)) {
             return false;
         }
     }

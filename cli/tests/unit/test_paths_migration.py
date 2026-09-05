@@ -44,10 +44,13 @@ def _git_repo(path: Path) -> Path:
 
 
 # Scenario table shared with crates/fno-agents/src/paths.rs (AC3-EDGE): the
-# two parity legs must refuse the same destinations. Keep the rows aligned
-# with the Rust module's ``migrate_destination_parity`` test.
+# two parity legs must refuse the same destinations. The env-pin row is
+# mirrored in the Rust module; the config row is Python-only because the Rust
+# leg has no config axis (paths.rs spaces_root_dir: relocation through the
+# env pins, default state root otherwise), where the Python leg reads
+# config.paths.spaces_dir as part of the durable root.
 PARITY_SCENARIOS = (
-    # (name, spaces-root pin, expect move)
+    # (name, spaces-root axis, expect move)
     ("foreign-env-root-refuses", "env", False),
     ("durable-config-root-migrates", "config", True),
 )

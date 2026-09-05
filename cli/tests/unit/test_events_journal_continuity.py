@@ -1,34 +1,50 @@
 """The journal continuity invariant (x-d2e9).
 
-For every journal that has a rotated sibling, the oldest ``ts`` in the live
-file must not be later than the newest ``ts`` in that sibling: the live file
-and its rotations together cover a continuous span. A reader that computes
-merge eligibility from a journal cannot tolerate a hole, and a hole is what a
-foreign-destination move leaves behind (the pre-fix ``migrate_from_checkout``
-replaced a live journal with an unrelated, newer-windowed file).
+The real producer rotates by RENAME (``events.rs`` ROTATE_AT_BYTES): the
+former live file becomes ``.1`` and the live file restarts empty, so there is
+no overlap across a rotation boundary and never was. An earlier marker here
+demanded ``oldest_live <= newest_rotated`` and could only pass on invented
+overlap; that marker was retracted by its own author. The invariant this file
+pins is the one a rename rotation actually satisfies, and the foreign-move
+defect actually breaks:
 
-The marker is deliberately STRICT: any positive gap between the sibling's
-newest row and the live file's oldest row flags, including the seconds-wide
-boundary a rename-style rotation (``events.rs`` ROTATE_AT_BYTES) produces.
-Fail loud over quiet tolerance was the plan's call; a tolerance is a one-line
-change here if a reviewer wants the boundary admitted instead.
+- ORDER: the newest rotated row must not be LATER than the oldest live row.
+  A live journal whose rows sit entirely BEFORE its rotation history is the
+  older-window replace shape: the recent past is gone.
+- ADJACENCY: the boundary gap (``oldest_live - newest_rotated``) must stay
+  within ``MAX_ROTATION_GAP_HOURS``. A rename rotation's boundary gap is the
+  writer's own cadence (seconds); a live journal replaced by an unrelated,
+  newer-windowed file starts days after the rotation history ends - the hole
+  this suite exists to catch. The bound is deliberately generous: an idle
+  journal rotates only when a write crossed the size threshold, so the two
+  sides of a real boundary are adjacent by construction.
+
+The negative case applies the pre-fix ``migrate_from_checkout`` shape -
+``os.replace(foreign, live)`` with a newer-windowed foreign file - and
+asserts the invariant FAILS, so the suite can detect the defect it exists to
+catch.
 
 The fixture is built here, never read off the developer's machine: the
 ``event_journals()``-driven cases pin all three live roots at tmp files.
 
-Absence is never a verdict in this suite. An empty file, an unreadable line,
-or a missing sibling all pass the checker - only a PROVEN inversion fails.
+Absence is never a verdict. An empty file, an unreadable line, or a missing
+sibling all pass the checker - only a PROVEN inversion or a PROVEN gap fails.
 """
 from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from fno import paths
+
+# The boundary bound, stated so a reviewer can move it: a journal that
+# rotated and then went silent still shows a small boundary gap, because the
+# write that crossed the size threshold continued into the new file.
+MAX_ROTATION_GAP_HOURS = 24
 
 
 def _parse_ts(value: object) -> datetime | None:
@@ -62,7 +78,7 @@ def _row_timestamps(journal: Path) -> list[datetime]:
 
 
 def continuity_violations(journals: list[Path]) -> list[str]:
-    """Name every proven inversion across journal-plus-sibling pairs."""
+    """Name every proven inversion or proven boundary gap."""
     violations: list[str] = []
     for journal in journals:
         sibling = journal.with_name(journal.name + ".1")
@@ -73,11 +89,17 @@ def continuity_violations(journals: list[Path]) -> list[str]:
         if not live_ts or not rotated_ts:
             continue
         oldest_live, newest_rotated = min(live_ts), max(rotated_ts)
-        if oldest_live > newest_rotated:
+        if newest_rotated > oldest_live:
             violations.append(
-                f"{journal}: oldest live row {oldest_live.isoformat()} is newer "
-                f"than newest rotated row {newest_rotated.isoformat()}; the "
-                f"span has a hole"
+                f"{journal}: newest rotated row {newest_rotated.isoformat()} is later "
+                f"than oldest live row {oldest_live.isoformat()}; the live file lost "
+                f"the recent past (older-window replace)"
+            )
+        elif oldest_live - newest_rotated > timedelta(hours=MAX_ROTATION_GAP_HOURS):
+            violations.append(
+                f"{journal}: oldest live row {oldest_live.isoformat()} starts "
+                f"{MAX_ROTATION_GAP_HOURS}h+ after the newest rotated row "
+                f"{newest_rotated.isoformat()}; the span has a hole"
             )
     return violations
 
@@ -94,19 +116,19 @@ def _seed_journal(path: Path, timestamps: list[str]) -> Path:
     return path
 
 
-# ── AC7-HP: a rotation keeps the span continuous ────────────────────────────
+# ── AC7-HP: a rename rotation keeps the span continuous ─────────────────────
 
 
-def test_continuous_rotation_passes(tmp_path: Path) -> None:
-    """The sibling carries history up to the boundary instant; the live file
-    continues from it (overlapping boundary: oldest live == newest rotated)."""
+def test_rename_rotation_boundary_passes(tmp_path: Path) -> None:
+    """The sibling holds history up to the rotation instant; the live file
+    continues from it seconds later - the shape events.rs rename produces."""
     live = _seed_journal(
         tmp_path / "spaces" / "space" / "events.jsonl",
         ["2026-09-05T12:00:00Z", "2026-09-05T12:30:00Z"],
     )
     _seed_journal(
         tmp_path / "spaces" / "space" / "events.jsonl.1",
-        ["2026-09-05T11:00:00Z", "2026-09-05T12:00:00Z"],
+        ["2026-09-05T11:00:00Z", "2026-09-05T11:59:59Z"],
     )
     assert continuity_violations([live]) == []
 
@@ -151,7 +173,7 @@ def test_event_journals_enumeration_passes_on_seeded_pairs(
         space / "events.jsonl", ["2026-09-05T12:00:00Z", "2026-09-05T12:30:00Z"]
     )
     _seed_journal(
-        space / "events.jsonl.1", ["2026-09-05T11:00:00Z", "2026-09-05T12:00:00Z"]
+        space / "events.jsonl.1", ["2026-09-05T11:00:00Z", "2026-09-05T11:59:59Z"]
     )
     journals = paths.event_journals()
     assert space / "events.jsonl" in journals
@@ -167,19 +189,19 @@ def test_pre_fix_foreign_move_violates_continuity(
     """The pre-fix migrate shape - os.replace(foreign, live) - leaves exactly
     the hole this invariant exists to catch. The foreign file's rows all sit
     AFTER the rotated sibling's, so the replaced live file starts where the
-    rotation history ends: a gap."""
+    rotation history ended: a days-wide hole."""
     space = pinned_roots["space"]
     live = _seed_journal(
         space / "events.jsonl", ["2026-09-05T11:00:00Z", "2026-09-05T11:59:59Z"]
     )
     _seed_journal(
-        space / "events.jsonl.1", ["2026-09-04T10:00:00Z", "2026-09-05T11:59:59Z"]
+        space / "events.jsonl.1", ["2026-09-04T10:00:00Z", "2026-09-05T10:59:59Z"]
     )
     assert continuity_violations([live]) == [], "fixture itself must start clean"
 
     foreign = _seed_journal(
         tmp_path / "sandbox" / "stray" / "events.jsonl",
-        ["2026-09-05T20:00:00Z"],
+        ["2026-09-06T20:00:00Z"],
     )
     os.replace(foreign, live)  # the pre-fix move, verbatim
 
