@@ -517,6 +517,17 @@ def coverage_waive(
     raise typer.Exit(code=_coverage_gate.run_coverage_waive(pr_number, reason))
 
 
+def _parse_flags(flags_json: Optional[str]) -> Optional[List[str]]:
+    """The --flags-json payload as a list, or None when absent/unreadable."""
+    if flags_json is None:
+        return None
+    try:
+        parsed = json.loads(flags_json)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, list) and all(isinstance(flag, str) for flag in parsed) else None
+
+
 @pr_app.command(
     "review-hold",
     hidden=True,
@@ -604,14 +615,13 @@ def review_hold(
         typer.echo("review-hold acquire needs --holder", err=True)
         raise typer.Exit(code=1)
     if action == "acquire":
-        flags = None
-        if flags_json is not None:
-            try:
-                parsed_flags = json.loads(flags_json)
-            except json.JSONDecodeError:
-                parsed_flags = None
-            if isinstance(parsed_flags, list) and all(isinstance(flag, str) for flag in parsed_flags):
-                flags = parsed_flags
+        flags = _parse_flags(flags_json)
+        # The cap gate: the prefixed line lets the hook surface the denial;
+        # policy, not infra, so the one acquire failure that blocks.
+        refusal = _review_hold.review_invocation_refusal(branch, head, flags=flags, cwd=cwd)
+        if refusal:
+            typer.echo(f"review-invocation-refused: {refusal}")
+            raise typer.Exit(code=3)
         claim = _review_hold.acquire_review_hold(
             branch,
             head=head,

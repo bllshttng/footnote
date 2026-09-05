@@ -12,10 +12,13 @@
 # the worker self-invoked through the Skill tool, which is not footnote code and
 # therefore cannot register a hold on its own. The hook can.
 #
-# Contract: NEVER blocks. This runs on PreToolUse, and a review that refuses to
-# start because a lockfile write failed is strictly worse than a review that
-# runs unheld - the worktree layer of the guard covers exactly that case. Every
-# failure path here exits 0 with no permission decision.
+# Contract: NEVER blocks on infrastructure. This runs on PreToolUse, and a
+# review that refuses to start because a lockfile write failed is strictly
+# worse than a review that runs unheld - the worktree layer of the guard
+# covers exactly that case. Every infra failure path exits 0 with no
+# permission decision. The ONE exception is policy, not infra: a review
+# invocation at a spent two-round cap is denied with the gate's refusal text
+# (see the cap gate at the acquire call below).
 #
 # ACQUIRE ONLY, deliberately. A PostToolUse release was wired here and removed:
 # for an INLINE skill the Skill tool returns the SKILL.md body and the review
@@ -157,10 +160,24 @@ if [[ -n "$data" ]]; then
     --events "${FNO_EVENTS_PATH:-$cwd/.fno/events.jsonl}" >/dev/null 2>&1 || true
 fi
 
-"$FNO_BIN" do pr review-hold acquire \
+# The cap gate. Contract amendment, narrow and deliberate: the never-block
+# rule above covers INFRA failure - a lockfile write that fails must not stop
+# a review. The two-round cap is different: it is policy with a saturated,
+# visible counter behind it, and warning reproduces today's behavior exactly,
+# since the counter was already visible and already ignored. So the ONE
+# refusal `acquire` answers with - a fixed stdout prefix naming the spent
+# budget and the law's remedy - becomes a denial decision here. Every other
+# outcome still exits 0 with nothing said.
+cap_out="$("$FNO_BIN" do pr review-hold acquire \
   --branch "$branch" --head "$head" --holder "$holder" --verb "/$skill" \
   --invocation-id "$invocation_id" \
   --args-raw "$args_raw" --level "$level" --level-source "$level_source" \
   --flags-json "$flags" \
-  --repo "$cwd" >/dev/null 2>&1 || true
+  --repo "$cwd" 2>/dev/null || true)"
+reason="$(printf '%s\n' "$cap_out" | sed -n 's/^review-invocation-refused: //p' | head -1)"
+if [[ -n "$reason" ]]; then
+  jq -n --arg reason "$reason" \
+    '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}' \
+    2>/dev/null || true
+fi
 exit 0
