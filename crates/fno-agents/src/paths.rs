@@ -455,7 +455,12 @@ pub fn migrate_from_checkout(old: &Path, new: &Path) -> bool {
     if let Some(repo) = repo_root_of(old) {
         let canonical = canonical_repo_root(&repo).unwrap_or(repo);
         let durable_space = durable_spaces_root().join(space_slug(&canonical));
-        if !new.starts_with(&durable_space) {
+        // Compare canonical forms: macOS aliases /var to /private/var, so raw
+        // spellings of the same space would false-refuse and strand the
+        // journal behind a migration that never fires.
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let new_space = new.parent().map(canon).unwrap_or_else(|| canon(new));
+        if !new_space.starts_with(canon(&durable_space)) {
             return false;
         }
     }

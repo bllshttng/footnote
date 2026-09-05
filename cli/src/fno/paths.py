@@ -331,6 +331,9 @@ def migrate_from_checkout(old: Path, new: Path) -> bool:
             durable_space = spaces_root(durable=True) / space_slug(_canonical_for(repo))
             if not new.resolve().is_relative_to(durable_space.resolve()):
                 return False
+    except Exception:  # noqa: BLE001 - the documented degrade: a guard that cannot compute refuses
+        return False
+    try:
         new.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.replace(old, new)
