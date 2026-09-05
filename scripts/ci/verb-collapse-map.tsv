@@ -75,6 +75,7 @@ agents rename	T1	agents rename	0
 agents report	T1	agents report	3
 agents restart	T1	agents restart	6
 agents resume	KEEP	agents resume	43	deliberate readability slack for a high-traffic distinct operation
+agents reseat	T1	agents reseat	2
 agents retask	T1	agents retask	2
 agents review-coverage	T1	agents review-coverage	34
 agents rm	KEEP	agents rm	56	deliberate readability slack for a high-traffic distinct operation
