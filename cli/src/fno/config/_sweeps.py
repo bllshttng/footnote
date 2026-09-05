@@ -11,6 +11,7 @@ doctor`` honest about them.
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic_core.core_schema import ValidationInfo
 
 #: Keys whose configured value could not be read and fell back to the model
 #: default, recorded during ``load_settings`` and printed by
@@ -60,20 +61,20 @@ class SweepKeys(BaseModel):
         mode="before",
     )
     @classmethod
-    def _coerce_seconds(cls, value: object, info) -> object:
+    def _coerce_seconds(cls, value: object, info: ValidationInfo) -> object:
         """A bad value degrades to the default and is recorded for doctor.
 
         Raising here would fail ``load_settings()`` for the whole process, so
         one typo would make every ``fno`` command exit. Degrade toward the
         working default and make the mistake visible instead.
         """
-        default = cls.model_fields[info.field_name].default
+        name = info.field_name or ""
+        default = cls.model_fields[name].default
         try:
             seconds = int(value)  # type: ignore[call-overload]
         except (TypeError, ValueError):
-            DEGRADED[f"agents.{info.field_name}"] = repr(value)
-            return default
-        if seconds <= 0:
-            DEGRADED[f"agents.{info.field_name}"] = repr(value)
-            return default
-        return seconds
+            seconds = 0
+        if seconds > 0:
+            return seconds
+        DEGRADED[f"agents.{name}"] = repr(value)
+        return default
