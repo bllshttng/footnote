@@ -476,7 +476,10 @@ def board_cmd(
         "payload naming what it could not read instead of being killed.",
     ),
     state: Optional[Path] = typer.Option(
-        None, "--state", hidden=True, help="King manifest whose scope bounds the board."
+        None,
+        "--state",
+        help="King manifest whose scope bounds the board. Defaults to this "
+        "session's own crown; pass one explicitly to read outside it.",
     ),
 ) -> None:
     """Report every queue that would keep a king working.
@@ -484,8 +487,10 @@ def board_cmd(
     The collector is the Rust runtime (x-25b8, d-e11b2b3e): this command is a
     shell over `fno-agents board` - it resolves the binary, passes the whole
     budget and the manifest through, and renders or emits the returned payload.
-    Exits non-zero when any queue could not be read: an unreadable queue is not
-    an empty one.
+    A bare call from a crowned session defaults to that crown's manifest (the
+    registry row plus the file, never presence alone, is the authority);
+    anything else reads the fleet-wide board. Exits non-zero when any queue
+    could not be read: an unreadable queue is not an empty one.
     """
     import subprocess
 
@@ -512,6 +517,26 @@ def board_cmd(
             err=True,
         )
         raise typer.Exit(code=2)
+
+    if state is None:
+        # A king reads its own board, so the crown it already holds is the
+        # scope it means. An unreadable, terminal, or uncrowned reading
+        # resolves nothing and the board stays fleet-wide, exactly as before.
+        from fno.agents.crown import calling_agent_row
+        from fno.king.state import resolve_king_manifest_path
+
+        caller = calling_agent_row()
+        session_id = (
+            getattr(caller, "harness_session_id", None)
+            or getattr(caller, "cc_session_id", None)
+            or ""
+        )
+        if session_id:
+            resolved = resolve_king_manifest_path(
+                session_id, getattr(caller, "harness", None)
+            )
+            if resolved is not None:
+                state = resolved
 
     cmd = [str(binary), "board", "--json"]
     if budget_ms is not None:
