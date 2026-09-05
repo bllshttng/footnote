@@ -244,6 +244,7 @@ fn chain_members_count_as_reviewed_even_when_individually_stale() {
         Some(&tiling),
         None,
         false,
+        true,
     );
     let local: Vec<_> = rep
         .verdicts
@@ -272,6 +273,7 @@ fn chain_members_count_as_reviewed_even_when_individually_stale() {
         None,
         None,
         false,
+        true,
     );
     let local_untiled: Vec<_> = rep_untiled
         .verdicts
@@ -309,6 +311,7 @@ fn a_gapped_chain_does_not_rescue_its_members() {
         Some(&tiling),
         None,
         false,
+        true,
     );
     assert!(rep
         .verdicts
@@ -352,6 +355,7 @@ fn same_pair_reattest_keeps_the_newer_head() {
         None,
         None,
         false,
+        true,
     );
     let local: Vec<_> = rep
         .verdicts
@@ -392,6 +396,7 @@ fn distinct_attesters_yield_distinct_verdicts() {
         None,
         None,
         false,
+        true,
     );
     let local: Vec<_> = rep
         .verdicts
@@ -648,6 +653,7 @@ fn classify_approval(
         None,
         pr_author,
         flag,
+        true,
     )
 }
 
@@ -1238,6 +1244,7 @@ fn cap_verdict_count_for(repo: &std::path::Path, rows: &[String]) -> usize {
         Some(&tiling),
         None,
         false,
+        true,
     );
     rep.verdicts
         .iter()
@@ -1290,6 +1297,7 @@ fn cap_a_spent_budget_discharges_coverage_with_no_attestation_at_all() {
         Some(&tiling),
         None,
         false,
+        true,
     );
     // The POSITIVE marker: covered, by the budget alone, with no attestation
     // verdict behind it. Covered(0) reads as "uncovered" downstream, so the
@@ -1319,6 +1327,7 @@ fn cap_a_spent_budget_discharges_coverage_with_no_attestation_at_all() {
         Some(&under),
         None,
         false,
+        true,
     );
     assert_eq!(
         rep_under.coverage,
@@ -1458,6 +1467,7 @@ fn cap_a_reviewer_with_both_a_pass_and_a_fail_link_counts_once() {
         Some(&tiling),
         None,
         false,
+        true,
     );
     let local: Vec<_> = rep
         .verdicts
@@ -1507,6 +1517,7 @@ fn cap_a_declined_tiling_chain_counts_as_coverage_past_the_budget() {
         Some(&tiling),
         None,
         false,
+        true,
     );
     // Past the budget the newest fail link counts as Reviewed at its chain
     // head (freshness rescued by the chain, the same rule a pass link
@@ -1545,6 +1556,7 @@ fn cap_a_declined_tiling_chain_counts_as_coverage_past_the_budget() {
         Some(&under),
         None,
         false,
+        true,
     );
     assert!(
         !rep_under
@@ -1875,6 +1887,7 @@ fn xaecc_marker1_fail_only_chain_fully_dispositioned_reads_covered() {
         Some(&tiling),
         None,
         false,
+        true,
     );
     // POSITIVE markers, the row's own words: a positive count and the
     // reviewed state, never an absence. Covered(0) serializes "uncovered", so
@@ -1939,6 +1952,7 @@ fn xaecc_fixed_in_a_later_round_answers_too() {
         None,
         None,
         false,
+        true,
     );
     assert!(
         matches!(rep.coverage, Coverage::Covered(n) if n > 0),
@@ -1988,6 +2002,7 @@ fn xaecc_marker2_one_nonterminal_finding_withholds_and_is_named() {
         None,
         None,
         false,
+        true,
     );
     // The pair-half of the marker: NOT covered, and not by absence - the
     // blockers list NAMES the open finding by key.
@@ -2062,6 +2077,7 @@ fn xaecc_cap_files_the_soft_remainder_and_answers() {
         Some(&tiling),
         None,
         false,
+        true,
     );
     assert!(
         matches!(rep.coverage, Coverage::Covered(n) if n > 0),
@@ -2128,6 +2144,7 @@ fn xaecc_r1_a_retraction_never_resurrects_the_revoked_pass() {
         None,
         None,
         false,
+        true,
     );
     // The pair's latest entry is the retraction: is_pass=false,
     // is_retraction=true -> no verdict at all, covered nowhere. A `pass`
@@ -2197,6 +2214,7 @@ fn xaecc_r2_a_bystanders_findings_free_fail_stays_unanswered() {
         None,
         None,
         false,
+        true,
     );
     let locals: Vec<_> = rep
         .verdicts

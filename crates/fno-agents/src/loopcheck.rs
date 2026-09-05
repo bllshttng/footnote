@@ -2928,6 +2928,7 @@ fn read_pr_info(
                 Some(tiling),
                 pr_author.as_deref(),
                 github_approval_satisfies,
+                require_corroboration,
             );
             // Same capture-then-apply order as the external-read arm below: the
             // predicate reads the pre-downgrade report, and the `reviewed` verdict
@@ -3278,6 +3279,7 @@ fn read_pr_info(
             Some(&tiling),
             pr_author.as_deref(),
             github_approval_satisfies,
+            require_corroboration,
         );
         // The predicate reads the pre-downgrade report (the policy below only
         // flips the covered state, preserving verdicts), so capture it first.
@@ -5945,6 +5947,19 @@ pub enum ReviewState {
     Unreviewed,
 }
 
+/// Whether one verdict counts as the author attesting its own diff: a counted
+/// local verdict is the author's own unless its origin is a measured
+/// `OtherSession` - unknown authorship cannot prove an independent reviewer,
+/// so `Unknown` counts here. ONE predicate for both call sites (the recorded
+/// count and the rests-alone term): the twins disagreed on an `Unknown`
+/// origin, and a row could carry a count its own hold contradicts.
+fn counts_as_self_attested(v: &ReviewerVerdict, github_approval_satisfies: bool) -> bool {
+    v.verdict == CoverageVerdict::Reviewed
+        && human_approval_counts(v, github_approval_satisfies)
+        && v.producer == CoverageProducer::LocalAttestation
+        && v.attestation_origin != AttestationOrigin::OtherSession
+}
+
 impl CoverageReport {
     /// Count of `reviewed` verdicts, excluding human approvals. This is the one
     /// place that decides whether a human GitHub approval counts; flip the
@@ -5954,11 +5969,7 @@ impl CoverageReport {
     pub fn self_attested_count(&self) -> usize {
         self.verdicts
             .iter()
-            .filter(|v| {
-                v.verdict == CoverageVerdict::Reviewed
-                    && human_approval_counts(v, self.github_approval_satisfies)
-                    && v.attestation_origin == AttestationOrigin::SelfAttested
-            })
+            .filter(|v| counts_as_self_attested(v, self.github_approval_satisfies))
             .count()
     }
 
@@ -5974,8 +5985,11 @@ impl CoverageReport {
     /// (self_attested) local attestation: no GitHub App review, no second
     /// session. A counted local verdict is the author's own unless its
     /// origin is a measured `OtherSession` - unknown authorship cannot prove
-    /// an independent reviewer - so this twin refuses exactly what the
-    /// serialized-row gate in the Python merge path refuses.
+    /// an independent reviewer. The Python merge gate reads the same rule off
+    /// the serialized row for an ABSENT origin; it additionally clears the
+    /// explicit `unknown` (a measured-unmeasurable read), a distinction this
+    /// enum cannot see - deserialize collapses absent and unknown into one
+    /// variant.
     pub fn rests_on_self_attestation_alone(&self) -> bool {
         let mut counted = 0usize;
         let mut self_attested = 0usize;
@@ -5986,9 +6000,7 @@ impl CoverageReport {
                 continue;
             }
             counted += 1;
-            if v.producer == CoverageProducer::LocalAttestation
-                && v.attestation_origin != AttestationOrigin::OtherSession
-            {
+            if counts_as_self_attested(v, self.github_approval_satisfies) {
                 self_attested += 1;
             }
         }
@@ -6278,10 +6290,11 @@ fn in_scope_chain(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<V
 /// Terminal means: fixed (and a LATER round reviewed the fix delta),
 /// non-blocking by the gate's own re-derivation, or declined WITH
 /// corroboration the author cannot mint alone (`self_attested_alone` is the
-/// coverage row's existing predicate - a disposition pass carries its own
-/// corroboration requirement, independent of
-/// `config.review.require_corroboration`, because a disposition pass can be
-/// gamed by declining and a clean review cannot). Pure: scans the events
+/// coverage row's existing predicate, fed in raw - this function is
+/// policy-agnostic, and each caller states its gate: the classify pass
+/// honours `config.review.require_corroboration`, while the read arms feed
+/// the predicate they captured pre-downgrade, because a disposition pass can
+/// be gamed by declining and a clean review cannot). Pure: scans the events
 /// text, no IO. An empty chain has no findings and blocks nothing.
 pub fn disposition_blockers(
     events_text: &str,
@@ -7114,6 +7127,7 @@ pub fn classify_coverage(
         None,
         None,
         false,
+        true,
     )
 }
 
@@ -7123,7 +7137,9 @@ pub fn classify_coverage(
 /// `pr_author` is the PR author's login (None = unreadable, which excludes
 /// human approvals from the count fail-closed); `github_approval_satisfies`
 /// is the resolved config flag (false on the bare spelling = today's
-/// semantics for the unit-test corpus).
+/// semantics for the unit-test corpus); `require_corroboration` gates the
+/// answered-fail disposition basis (true on the bare spelling = the
+/// pre-change strict disposition semantics, for the unit-test corpus).
 #[allow(clippy::too_many_arguments)]
 pub fn classify_coverage_tiled(
     reviews: &[Value],
@@ -7138,6 +7154,7 @@ pub fn classify_coverage_tiled(
     tiling: Option<&RangeTiling>,
     pr_author: Option<&str>,
     github_approval_satisfies: bool,
+    require_corroboration: bool,
 ) -> CoverageReport {
     let (local_passes, pairs_raising_findings) =
         local_latest_attestations(events_text, head_branch, head_sha);
@@ -7355,9 +7372,12 @@ pub fn classify_coverage_tiled(
     // must have raised keyed findings (a bystander's findings-free fail never
     // rides another reviewer's dispositions), a RETRACTION entry never
     // promotes (it revokes, it never covers), and terminality is read with
-    // the pass-only authorship basis - `read_pr_info` re-runs the disposition
-    // scan with a `self_attested_alone` that INCLUDES these fail verdicts, so
-    // a solo author's decline still withholds `reviewed` there. The ROW
+    // the pass-only authorship basis, gated on `require_corroboration` - the
+    // opt-in key owns this path like every other corroboration surface, so
+    // the strict behaviour never runs at default config. `read_pr_info`
+    // re-runs the disposition scan with a `self_attested_alone` that INCLUDES
+    // these fail verdicts, so a solo author's decline still withholds
+    // `reviewed` there. The ROW
     // itself may read covered on that solo shape (mirroring the solo-pass
     // default path); the merge gate's disposition pass is the surface that
     // refuses it, and `fno do pr status`'s ready conjunct does not re-derive
@@ -7383,8 +7403,10 @@ pub fn classify_coverage_tiled(
             verdicts: verdicts.clone(),
             github_approval_satisfies,
         };
-        let blockers =
-            disposition_blockers_on_chain(&chain, basis.rests_on_self_attestation_alone());
+        let blockers = disposition_blockers_on_chain(
+            &chain,
+            require_corroboration && basis.rests_on_self_attestation_alone(),
+        );
         if !blockers_withhold(&blockers, rounds_exhausted) {
             for lp in local_passes.iter().filter(|lp| answered_fail(lp)) {
                 verdicts.push(local_attestation_verdict(
@@ -15775,6 +15797,128 @@ mod tests {
         assert!(!corr.rests_on_self_attestation_alone());
         corr.apply_corroboration_policy(true);
         assert_eq!(corr.coverage, Coverage::Covered(2));
+    }
+
+    #[test]
+    fn the_answered_fail_disposition_gate_honours_the_corroboration_key() {
+        // The answered-fail promotion reads its disposition basis through
+        // config.review.require_corroboration: unset, a reasoned decline is
+        // terminal and the answered fail promotes; set, the same chain
+        // yields the declined-uncorroborated blocker and the promotion
+        // withholds. The strict arm's positive marker is the scan itself
+        // naming the axis, so the count below is never an instrument zero.
+        let declined_fail = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "decliner", "head_sha": "h0", "verdict": "fail",
+                     "attester_session_id": "sess-author", "branch": "feature/x",
+                     "findings": [{"finding_key": "k1", "verdict": "confirmed",
+                                   "category": "correctness"}],
+                     "dispositions": [{"finding_key": "k1", "disposition": "declined",
+                                       "reason": "operator ruled the shape intended"}]}
+        })
+        .to_string();
+        let events = format!(
+            "{}\n{}",
+            attestation_line_on_branch("code-review", "h1", "pass", "feature/x"),
+            declined_fail
+        );
+        let off = classify_coverage_tiled(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h1",
+            None,
+            None,
+            false,
+            false,
+        );
+        assert!(off
+            .verdicts
+            .iter()
+            .any(|v| v.name == "decliner" && v.verdict == CoverageVerdict::Reviewed));
+
+        let on = classify_coverage_tiled(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h1",
+            None,
+            None,
+            false,
+            true,
+        );
+        let reviewed: Vec<&str> = on
+            .verdicts
+            .iter()
+            .filter(|v| v.verdict == CoverageVerdict::Reviewed)
+            .map(|v| v.name.as_str())
+            .collect();
+        assert_eq!(reviewed, vec!["code-review"]);
+
+        let chain = in_scope_chain(&events, "feature/x", "h1");
+        let blockers = disposition_blockers_on_chain(&chain, true);
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].axis, "declined-uncorroborated");
+    }
+
+    #[test]
+    fn the_self_attested_count_and_the_rests_alone_term_agree_on_unknown() {
+        // One predicate, both call sites: an Unknown-origin local verdict is
+        // counted by the recorded count AND held by the rests-alone term.
+        // The twins disagreed - the count read 0 while the term refused - so
+        // a row could carry a count its own hold contradicts.
+        let unattributed = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "branch": "feature/x"}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &unattributed,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(rep.self_attested_count(), 1);
+        assert!(rep.rests_on_self_attestation_alone());
+
+        let peer = format!(
+            "{}\n{}",
+            unattributed,
+            serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "peer-review", "head_sha": "h", "verdict": "pass",
+                         "attester_session_id": "sess-peer", "branch": "feature/x"}
+            })
+        );
+        let measured = classify_coverage(
+            &[],
+            &[],
+            &peer,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(measured.self_attested_count(), 1);
+        assert!(!measured.rests_on_self_attestation_alone());
     }
 
     #[test]

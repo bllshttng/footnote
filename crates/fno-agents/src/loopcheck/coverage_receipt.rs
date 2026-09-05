@@ -526,6 +526,7 @@ mod tests {
             None,
             None,
             false,
+            true,
         );
         mark_owed_verdicts(&mut rep, &[]);
         let line = coverage_receipt_line(&rep, None, None);
@@ -551,6 +552,7 @@ mod tests {
             None,
             None,
             false,
+            true,
         );
         mark_owed_verdicts(&mut rep, &["gemini-code-assist".to_string()]);
         let line = coverage_receipt_line(&rep, None, None);
@@ -576,6 +578,7 @@ mod tests {
             None,
             None,
             false,
+            true,
         );
         mark_owed_verdicts(&mut rep, &[]);
         let line = coverage_receipt_line(&rep, None, None);
