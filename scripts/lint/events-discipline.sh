@@ -125,7 +125,7 @@ done < <(
 # Scoped to these two directories on purpose: the remaining production sites
 # are a per-lane paydown, and their live count is named below so the debt is
 # read rather than inferred.
-HAND_BUILT_JOURNAL='\.fno[^a-zA-Z0-9_/-]{0,10}events\.jsonl'
+HAND_BUILT_JOURNAL='\.fno["'"'"' /,()]{0,10}events\.jsonl'
 while IFS= read -r hit; do
     [[ -z "$hit" ]] && continue
     echo "hand-built project journal at $hit" >&2
@@ -149,7 +149,7 @@ remaining_hand_built=$(
         | grep -v 'scripts/lint/events-discipline.sh' \
         | grep -c . || true
 )
-printf '  note: %s hand-built journal site(s) remain outside the gate lane; sweep them lane by lane\n' "$remaining_hand_built" >&2
+printf '  note: %s hand-built journal site(s) or references remain outside the gate lane; sweep them lane by lane\n' "$remaining_hand_built" >&2
 
 if [[ $violations -gt 0 ]]; then
     echo "events-discipline: $violations violation(s) found" >&2

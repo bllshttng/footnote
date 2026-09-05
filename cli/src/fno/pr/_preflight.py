@@ -429,7 +429,7 @@ def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], 
                         raise ValueError(f"ledger {field} is invalid: {exc}") from exc
             delivery_root = normalized_roots.get("root_path")
             if delivery_root is not None:
-                paths.append(delivery_root / ".fno" / "events.jsonl")
+                paths.append(project_log("events.jsonl", project_root=delivery_root))
             canonical = normalized_roots.get("canonical_root_path")
             if canonical is not None:
                 salvage = canonical / ".fno" / "salvage"
