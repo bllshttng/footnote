@@ -321,7 +321,7 @@ fn default_true() -> bool {
 /// where the slot lookup knows occupancy. Additive, so the compatibility
 /// floor does not move; a repoint keeps owning its geometry and says so.
 /// v68 (x-5baf): `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
-pub const PROTO_VERSION: u32 = 68;
+pub const PROTO_VERSION: u32 = 69;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -922,6 +922,19 @@ pub enum ControlVerb {
         /// refused outright, exactly as it always was.
         #[serde(default)]
         placement: PanePlacement,
+    },
+    /// Move the ONE existing viewer of a live pane-hosted worker INTO a portal
+    /// seat, keeping its PTY (re-seat, never re-attach): the pane becomes a
+    /// portal's seat, the row stops being persisted as a squad member, and the
+    /// caller (the registry-writing front door) flips the row's `mux` ref on
+    /// the receipt. The reply is a `Notice` naming pane, portal, and tab, or an
+    /// `Err` naming the refusal. Idempotent: a pane already seated is focused,
+    /// not moved twice.
+    ThreadReseat {
+        pane: u64,
+        /// Which portal to seat through; `None` takes the next free index.
+        #[serde(default)]
+        portal: Option<u8>,
     },
     /// Join a whole source tab into the anchor pane's tab as a split, removing
     /// the now-empty source tab -> [`ServerMsg::Ok`]. Refuses join-into-self up
@@ -4196,8 +4209,9 @@ mod tests {
         // edit; they now assert only their own wire shapes.
         // The registry-keyed identity pair (StopAgent/RemoveAgent carry
         // `harness_session_id`; AgentRow carries `liveness_age_s`) bumps it
-        // 66 -> 67. `LayoutSlot.cwd` (x-5baf) bumps it 67 -> 68.
-        assert_eq!(PROTO_VERSION, 68);
+        // 66 -> 67. `LayoutSlot.cwd` (x-5baf) bumps it 67 -> 68. The
+        // ThreadReseat control verb bumps it 68 -> 69.
+        assert_eq!(PROTO_VERSION, 69);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
