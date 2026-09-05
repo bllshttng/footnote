@@ -59,3 +59,27 @@ def test_registry_lists_the_three_keys() -> None:
         "king.goal_text",
     ):
         assert key in FIELD_META
+
+
+def test_shipped_defaults_pass_the_style_gate_that_sends_them() -> None:
+    """The mail bus lints the body it sends, so a default that fails the gate
+    refuses its own injection.
+
+    Both texts ship as the body of a `fno agents mail send --raw`, and a fresh
+    install running /fno:reign had to pass --style-exception to arm at all: the
+    old checkin text carried two semicolons and the old goal text ran one
+    39-word sentence. The assertion covers the INJECTED body, not the bare
+    default, because the `/loop <interval> ` and `/goal ` prefixes are part of
+    what the linter reads.
+    """
+    from fno import style
+    from fno.config import load_settings
+
+    settings = load_settings()
+    cap = settings.style.word_cap.mail
+    interval = settings.king.checkin_interval
+    for body in (
+        f"/loop {interval} {KING_CHECKIN_TEXT}",
+        f"/goal {KING_GOAL_TEXT}",
+    ):
+        assert style.check(body, surface="mail", word_cap=cap) == []
