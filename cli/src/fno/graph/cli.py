@@ -8967,6 +8967,9 @@ def cmd_backfill_deferred_kind(
 @cli.command("stuck-epics", hidden=True)
 def cmd_stuck_epics(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON report"),
+    closed: bool = typer.Option(
+        False, "--closed", help="Inverse report: terminal epics holding live children"
+    ),
 ) -> None:
     """Epics whose only incomplete children are deferred/superseded.
 
@@ -8976,11 +8979,39 @@ def cmd_stuck_epics(
     do, and a wont_do deferral is a decision, not a delay. Everything else
     (an unclassified or contingent deferral) holds the epic open and needs a
     human ruling.
+
+    ``--closed`` runs the inverse question on the same predicate: which
+    terminal (done/superseded) epics hold a live child. It never mutates
+    either - both directions surface, neither closes.
     """
-    from fno.graph.epics import stuck_epics
     from fno.graph.store import read_graph
 
     entries = read_graph(_graph_path())
+
+    if closed:
+        from fno.graph.epics import stuck_epics_closed
+
+        closed_rows = stuck_epics_closed(entries)
+        if json_output:
+            typer.echo(
+                json.dumps({"stuck_epics_closed": closed_rows}, default=lambda o: o.__dict__)
+            )
+            return
+        typer.echo(f"terminal parents holding open children: {len(closed_rows)}")
+        for r in closed_rows:
+            typer.echo(f"  {r.id} [{r.status}] {r.title} - held open by {r.held_open_by}")
+            for h in r.holders:
+                typer.echo(f"      {h['id']} [{h['status']}"
+                           f"{', ' + h['deferred_kind'] if h.get('deferred_kind') else ''}]")
+        if closed_rows:
+            typer.echo(
+                "  read-only: reopening or re-parenting any of these is an operator ruling, "
+                "never automatic"
+            )
+        return
+
+    from fno.graph.epics import stuck_epics
+
     rows = stuck_epics(entries)
     if json_output:
         typer.echo(json.dumps({"stuck_epics": rows}, default=lambda o: o.__dict__))
