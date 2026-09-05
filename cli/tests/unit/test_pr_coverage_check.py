@@ -3518,8 +3518,12 @@ _CAP_HARD_KEY = "cli/src/fake.py:779:correctness"
 
 
 def _cap_cov_row():
+    # self_attested_count 0 is MEASURED (one reviewer, not the author), the
+    # only shape a counts-adjacent row may lean on to read corroborated: an
+    # ABSENT count refuses like unmeasured authorship, so a fixture that
+    # omitted the key silently rode the fail-open hole it now pins shut.
     return {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 1,
-            "head_sha": f"{5:040x}", "verdicts": []}
+            "self_attested_count": 0, "head_sha": f"{5:040x}", "verdicts": []}
 
 
 def test_cap_verdict_agreement_chain_is_impossible_and_names_the_key(tmp_path):
@@ -3759,6 +3763,25 @@ def test_rests_on_self_attestation_counts_only_row_reads_all_self_attested():
     assert _coverage_gate.rests_on_self_attestation_alone(split) is False
     empty = {"reviewed_count": 3, "self_attested_count": 3, "verdicts": []}
     assert _coverage_gate.rests_on_self_attestation_alone(empty) is True
+
+
+def test_rests_on_self_attestation_counts_only_row_refuses_an_absent_count():
+    """The omit the producer itself emits when authorship was unmeasured: a
+    counts-only row with no self_attested_count key must refuse, never read
+    the None comparison as "not self-attested" and clear."""
+    assert _coverage_gate.rests_on_self_attestation_alone({"reviewed_count": 3}) is True
+    assert (
+        _coverage_gate.rests_on_self_attestation_alone(
+            {"reviewed_count": 3, "verdicts": []}
+        )
+        is True
+    )
+    assert (
+        _coverage_gate.rests_on_self_attestation_alone(
+            {"reviewed_count": 3, "self_attested_count": "3"}
+        )
+        is True
+    )
 
 
 def test_rests_on_self_attestation_measured_other_session_outweighs_unresolved_origins():

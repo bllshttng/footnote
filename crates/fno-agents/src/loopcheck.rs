@@ -7408,8 +7408,9 @@ fn coverage_event_data_full(
         // `self_attested_count()` would read 0 while the truth is unmeasured
         // - a measured-zero shape (x-62a1: an aggregate reporting a state
         // its inputs do not support). The field is omitted instead, never 0,
-        // so the day a gate enforces it, absence reads unmeasured rather
-        // than "no self-attest" and cannot serve as the bypass. After a
+        // and the gate that enforces it exists now: the Python merge gate's
+        // counts path reads an ABSENT count as refuse, so the omit cannot
+        // serve as a bypass. After a
         // carry-forward the session may be the HISTORICAL author's, so the
         // count is telemetry about the carried identity, not a proof this
         // process measured anything.
