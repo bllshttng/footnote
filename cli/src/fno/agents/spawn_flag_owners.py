@@ -1,6 +1,6 @@
 """Every ``fno agents spawn`` flag, who owns it, and how its value arrives.
 
-``fno agents spawn`` carries 43 flags in one namespace, and nothing recorded
+``fno agents spawn`` carries 42 flags in one namespace, and nothing recorded
 which of them fno actually branches on. This table is that classification;
 ``fno doctor lint spawn-flag-owners`` introspects the live parser against it,
 so a flag added without a row fails in the PR that adds it.
@@ -130,7 +130,6 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
     "--split": FlagOwner(FNO, "mux pane placement"),
     "--at": FlagOwner(FNO, "mux exact-origin placement"),
     "--tab": FlagOwner(FNO, "mux tab placement"),
-    "--portal": FlagOwner(FNO, "thread portal placement; fno owns portals"),
     "--bounded-placement": FlagOwner(FNO, "serialized placement lane under the mux lease"),
     "--crown": FlagOwner(FNO, "crown ladder; no harness has the concept"),
     "--succeed": FlagOwner(FNO, "crown succession; fno validates the transfer"),
@@ -142,6 +141,6 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
     "--no-wait": FlagOwner(FNO, "spawn-gate queueing policy"),
 }
 
-#: Growth ratchet, measured at merge: 43 flags. Falls as flags move across the
+#: Growth ratchet, measured at merge: 42 flags. Falls as flags move across the
 #: ``--`` separator; rises only in a deliberate one-line diff a reviewer sees.
-SPAWN_FLAG_CAP = 43
+SPAWN_FLAG_CAP = 42
