@@ -3422,3 +3422,56 @@ def test_a_pr_without_a_head_branch_appends_no_impossible_blocker(tmp_path):
     )
     assert "review_coverage_impossible" not in blockers
     assert blockers == []
+
+
+def _carried_local_row(origin):
+    """One counted local_attestation verdict shaped like a carried read."""
+    row = {
+        "name": "code-review",
+        "producer": "local_attestation",
+        "verdict": "reviewed",
+        "reviewed_sha": HEAD,
+        "freshness": "carried_base_sync",
+    }
+    if origin is not None:
+        row["attestation_origin"] = origin
+    return row
+
+
+def test_rests_on_self_attestation_counts_an_absent_origin_as_self_attested():
+    """Absence arm: a carried row whose attestation_origin key
+    is absent (pre-fix producer, or any producer that never wrote the field)
+    cannot prove an independent reviewer, so the predicate reads it as the
+    author's own and the gate refuses rather than clears."""
+    cov = {"reviewed_count": 1, "verdicts": [_carried_local_row(None)]}
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
+
+
+def test_rests_on_self_attestation_counts_an_unknown_origin_as_self_attested():
+    """Unknown arm: a read whose process
+    resolved no authoring session serializes attestation_origin "unknown".
+    Unknown authorship is not corroboration; the gate refuses."""
+    cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("unknown")]}
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
+
+
+def test_rests_on_self_attestation_still_clears_a_measured_other_session():
+    """The one origin that proves the count is not the author's own stays a
+    measured other_session. Absent and unknown refuse; this clears."""
+    cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("other_session")]}
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is False
+
+
+def test_rests_on_self_attestation_reroutes_a_recorded_zero_through_verdicts():
+    """The counts path cannot answer a recorded zero: 0 self_attested next to
+    counted local verdicts is either a real other-session measurement or
+    authorship that could not be measured, and the zero cannot tell them
+    apart. The measured event carried self_attested_count 0 beside an
+    unknown-origin verdict; the verdicts rule must settle it, so the gate
+    refuses instead of clearing on 0 != 1."""
+    cov = {
+        "reviewed_count": 1,
+        "self_attested_count": 0,
+        "verdicts": [_carried_local_row("unknown")],
+    }
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True

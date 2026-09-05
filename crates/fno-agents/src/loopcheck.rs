@@ -5863,13 +5863,12 @@ pub struct ReviewerVerdict {
     /// and a PR whose only attestation is self-attested is covered. Whether
     /// that should stay true is a later gate decision, not this field.
     /// Only meaningful on `local_attestation` verdicts; github_app and
-    /// human approvals carry `Unknown` (omitted on serialize) since a GitHub
-    /// login has no session to compare. Defaults to `Unknown` so every
-    /// pre-existing attestation lands there unchanged.
-    #[serde(
-        skip_serializing_if = "is_attestation_origin_unknown",
-        default = "default_attestation_origin"
-    )]
+    /// human approvals carry `Unknown` since a GitHub login has no session
+    /// to compare. Defaults to `Unknown` so every pre-existing attestation
+    /// lands there unchanged. `Unknown` serializes as `"unknown"`, never
+    /// as an absent key: a consumer reading absent as "not self_attested"
+    /// once cleared a PR whose only review was the author's own.
+    #[serde(default = "default_attestation_origin")]
     pub attestation_origin: AttestationOrigin,
     /// The commit this reviewer actually read: a github_app review object's
     /// `.commit.oid`, or a local attestation's `data.head_sha`. Empty when
@@ -5973,9 +5972,10 @@ impl CoverageReport {
 
     /// Whether every counted review verdict rests on the author's own
     /// (self_attested) local attestation: no GitHub App review, no second
-    /// session. Unmeasured origins (Unknown) are NOT self-attestation, so an
-    /// unmeasured row fails open - it is not proof of corroboration, but it is
-    /// not proof of its absence either.
+    /// session. A counted local verdict is the author's own unless its
+    /// origin is a measured `OtherSession` - unknown authorship cannot prove
+    /// an independent reviewer - so this twin refuses exactly what the
+    /// serialized-row gate in the Python merge path refuses.
     pub fn rests_on_self_attestation_alone(&self) -> bool {
         let mut counted = 0usize;
         let mut self_attested = 0usize;
@@ -5987,7 +5987,7 @@ impl CoverageReport {
             }
             counted += 1;
             if v.producer == CoverageProducer::LocalAttestation
-                && v.attestation_origin == AttestationOrigin::SelfAttested
+                && v.attestation_origin != AttestationOrigin::OtherSession
             {
                 self_attested += 1;
             }
@@ -6035,10 +6035,6 @@ fn default_true() -> bool {
 
 fn default_attestation_origin() -> AttestationOrigin {
     AttestationOrigin::Unknown
-}
-
-fn is_attestation_origin_unknown(o: &AttestationOrigin) -> bool {
-    matches!(o, AttestationOrigin::Unknown)
 }
 
 /// Label a local attestation's authorship from its emitting session vs the
