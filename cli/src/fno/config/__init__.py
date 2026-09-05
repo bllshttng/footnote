@@ -2439,19 +2439,6 @@ class AgentsBlock(BaseModel):
     # Opt in per machine after happy is installed and paired. Only routed claude
     # panes use it; primary claude, every other harness, and bg stay unchanged.
     happy_routed_panes: bool = False
-    # Dead-row GC grace window in SECONDS (x-b1aa). A finished agent-view row
-    # stays visible this long after the daemon GC first observes its process gone,
-    # before it is reaped. Default 3600 (1h). The Rust daemon + `fno agents reap`
-    # read the same `config.agents.dead_row_grace` key (agents_config.rs), so a
-    # non-default here changes both the automatic sweep and the manual verb.
-    #
-    # Also accepts a per-harness table, `agents.dead_row_grace.<harness> =
-    # <seconds>` (x-9de7 task 6): a codex worker's working session runs 6-8h,
-    # so the single global default reads its normal silence as staleness.
-    # A harness absent from the table falls back to this default, not to a
-    # sibling harness's number -- see `agents_config::dead_row_grace_secs`,
-    # the resolver this type mirrors.
-    dead_row_grace: int | dict[str, int] = 3600
     # Row-retirement grace in SECONDS (x-c672): a worker's registry row
     # retires when every node its session is named on is done AND its
     # transcript has been quiet this long. The Rust daemon's sweep reads the
@@ -2516,19 +2503,6 @@ class AgentsBlock(BaseModel):
     # (prompting, expressed positively). Interactive `fno agents spawn` does NOT
     # read this. Claude-native value, fail-closed at the spawn seam, never here.
     spawn_permission_mode: str = "bypassPermissions"
-
-    @field_validator("dead_row_grace")
-    @classmethod
-    def dead_row_grace_nonneg(cls, v: int | dict[str, int]) -> int | dict[str, int]:
-        """Grace is a duration; a negative value is a config error (would reap
-        instantly, defeating the visibility window). Checks every value when
-        `v` is a per-harness table (x-9de7 task 6), not just the shape."""
-        for secs in v.values() if isinstance(v, dict) else (v,):
-            if secs < 0:
-                raise ValueError(
-                    f"config.agents.dead_row_grace must be >= 0 seconds; got {secs}"
-                )
-        return v
 
     @field_validator("profiles", mode="before")
     @classmethod
@@ -4119,8 +4093,8 @@ class MuxBlock(BaseModel):
 
     ``notify_on_blocked`` / ``notify_on_done`` (x-dd84) fire an OS notification
     when a badge enters blocked / done. The Rust daemon reads these straight from
-    settings.yaml (``agents_config.rs``, the same split-brain as
-    ``config.agents.dead_row_grace``); modeling them here keeps every mux key
+    config.toml (``agents_config.rs``, the same split-brain as
+    ``config.agents.retire_grace_s``); modeling them here keeps every mux key
     discoverable via ``fno config get/set``, the wizard, and the generated docs.
 
     Fields

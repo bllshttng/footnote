@@ -79,11 +79,11 @@ pub struct DaemonOptions {
     /// discretion #5) skips the sweep entirely, so the first `list` reads
     /// its last recorded liveness until an idle tick settles it.
     pub reconcile_on_start: bool,
-    /// cwd the idle tick resolves `agents.dead_row_grace.<harness>` against
-    /// (x-9de7 task 6). A `Duration` cannot be pre-resolved here the way
-    /// `idle_exit` is: the grace is per-HARNESS, so the lookup happens once
-    /// per row, at sweep time, not once at startup.
-    pub dead_row_grace_cwd: PathBuf,
+    /// cwd the idle tick resolves `agents.*` config against (retire grace,
+    /// reap-receipt retention). A `Duration` cannot be pre-resolved here the
+    /// way `idle_exit` is: config candidates are per-cwd, so the lookup
+    /// happens at sweep time, not once at startup.
+    pub agents_config_cwd: PathBuf,
     /// Fire an OS notification when a badge ENTERS `blocked` (x-dd84). Default
     /// ON; overridden from `config.mux.notify_on_blocked` at startup.
     pub notify_on_blocked: bool,
@@ -98,7 +98,7 @@ impl Default for DaemonOptions {
             idle_exit: Duration::from_secs(1800),
             worker_bin: resolve_worker_bin(),
             reconcile_on_start: true,
-            dead_row_grace_cwd: PathBuf::from("."),
+            agents_config_cwd: PathBuf::from("."),
             notify_on_blocked: true,
             notify_on_done: false,
         }
@@ -2836,7 +2836,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     let flag = Arc::clone(&gc_in_flight);
                     let home = ctx.home.clone();
                     let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
-                    let grace_cwd = ctx.opts.dead_row_grace_cwd.clone();
+                    let grace_cwd = ctx.opts.agents_config_cwd.clone();
                     tokio::task::spawn_blocking(move || {
                         let _gate = SweepGate(flag);
                         let grace_secs =
@@ -10341,8 +10341,9 @@ mod tests {
         std::fs::remove_dir_all(home.root()).ok();
     }
 
-    // One-shot ask row (empty short_id + no pid): terminal, reapable on grace
-    // alone (owns no worktree). `exited_at` controls the grace clock.
+    // Generic one-shot ask row builder (empty short_id + no pid, owns no
+    // worktree). The `exited_at` argument predates reverse-join retirement;
+    // it now only feeds the liveness ladder's heartbeat rung.
     fn ask_row(name: &str, exited_at: Option<&str>) -> RegistryEntry {
         RegistryEntry {
             substrate: None,
@@ -15183,7 +15184,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 idle_exit: Duration::from_secs(1800),
                 worker_bin,
                 reconcile_on_start: true,
-                dead_row_grace_cwd: PathBuf::from("/dev/null"),
+                agents_config_cwd: PathBuf::from("/dev/null"),
                 // Off in tests: a unit test must never spawn a real `fno inbox notify`.
                 notify_on_blocked: false,
                 notify_on_done: false,
@@ -15207,7 +15208,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 idle_exit: Duration::from_secs(1800),
                 worker_bin,
                 reconcile_on_start: true,
-                dead_row_grace_cwd: PathBuf::from("/dev/null"),
+                agents_config_cwd: PathBuf::from("/dev/null"),
                 // Off in tests: a unit test must never spawn a real `fno inbox notify`.
                 notify_on_blocked: false,
                 notify_on_done: false,

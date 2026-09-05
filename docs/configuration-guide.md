@@ -117,7 +117,6 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `agents.confirm` | str | `auto` | never | Agent-launch confirmation policy (auto/always/never). |
 | `agents.auto_register_sessions` | bool | `false` | advanced | Auto-join every hand-started session to the roster at SessionStart (default false = opt-in via /fno-me). Spawned workers register regardless. |
 | `agents.happy_routed_panes` | bool | `false` | advanced | Launch routed claude panes through happy for remote monitoring; default false and pane-only. |
-| `agents.dead_row_grace` | int \| dict[str, int] | `3600` | advanced | Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600). |
 | `agents.retire_grace_s` | int | `900` | advanced | Seconds a worker's transcript must be quiet past, once every node its session is named on is done, before the daemon's retirement sweep drops its registry row (default 900). The receipt and the node's sessions[] row keep the resume handle. A legacy recovery.retire_grace_s still parses and lifts onto this key with a warning. |
 | `agents.reap_receipts.retain_days` | int | `7` | advanced | Days a reap receipt (the resume handle for a reaped row) stays before the GC sweep expires it (default 7). A receipt whose reaped_at cannot be read is kept and named, never deleted on a failed read. |
 | `agents.codex.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless codex workers. |

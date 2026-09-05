@@ -1948,15 +1948,14 @@ fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus
     }
 }
 
-/// `fno agents reap`: manual dead-row garbage collection (x-b1aa). Runs the same
+/// `fno agents reap`: manual row retirement (x-c672). Runs the same
 /// `gc_sweep` the daemon runs on its idle tick, operating on the registry
-/// directly under the shared flock (no daemon required), and reports what it did:
-/// the count removed and, for each row KEPT, the specific gate that kept it
-/// (dirty/unprobed worktree, no positive corroboration yet - x-9de7 task 5 -
-/// or the liveness re-check itself, x-98ab) so a stuck row is never silent
-/// and invisible, and a zero-reap pass over a live fleet is never silent
-/// about the rows it kept. The grace window is resolved
-/// from `config.agents.dead_row_grace` exactly as the daemon does.
+/// directly under the shared flock (no daemon required), and reports what it
+/// did: every row retired with its basis, and for each row KEPT, the named
+/// gate holding it, so a stuck row is never silent and invisible, and a
+/// zero-reap pass over a live fleet is never silent about the rows it kept.
+/// The grace window is resolved from `config.agents.retire_grace_s` exactly
+/// as the daemon does.
 ///
 /// `--dry-run` runs the identical classification with no registry write and no
 /// `agent_row_reaped` event - a reaper an operator cannot rehearse is one they

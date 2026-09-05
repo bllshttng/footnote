@@ -491,12 +491,14 @@ class AgentEntry:
     # None for every non-inside-leg row; asdict re-emits it (None -> null, which
     # Rust reads back as None). Additive-optional, gated by the v5 schema bump.
     inside_leg: Optional[dict] = None
-    # Dead-row GC exit stamp (x-b1aa). ISO 8601 UTC set by the Rust daemon's GC
-    # sweep the first tick it observes this row's process gone; anchors the
-    # config.agents.dead_row_grace window before the row is reaped. Rust is the
-    # sole writer; Python only custodies it so a row round-trips losslessly.
-    # Additive-optional: an absent key reads as None and the Rust RegistryEntry
-    # mirrors it with #[serde(default, skip_serializing_if=...)], so no schema bump.
+    # Reconcile's Exited-transition stamp (x-b1aa): ISO 8601 UTC, written the
+    # moment reconcile proves the row's child gone and cleared again when
+    # current evidence contradicts it. Retirement no longer reads it (the
+    # reverse join + transcript quiet decide); the liveness ladder's heartbeat
+    # rung does. Rust is the sole writer; Python only custodies it so a row
+    # round-trips losslessly. Additive-optional: an absent key reads as None
+    # and the Rust RegistryEntry mirrors it with #[serde(default,
+    # skip_serializing_if=...)], so no schema bump.
     exited_at: Optional[str] = None
     # Mux hosting ref (4a-G2): ``{"session": <mux session>, "pane_id": <u64>}``
     # for an agent whose PTY is a mux pane (``fno agents spawn --substrate

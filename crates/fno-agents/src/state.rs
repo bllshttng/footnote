@@ -846,17 +846,15 @@ pub struct RegistryEntry {
     /// in Python's `AgentEntry` as `inside_leg: Optional[dict]` (X3 / ab-b946b59c).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inside_leg: Option<InsideLegReport>,
-    /// When the dead-row GC first observed this row's backing process as gone
-    /// (ISO 8601 UTC), stamped by the GC sweep on the first tick it sees the row
-    /// terminal/dead and cleared again if the row re-registers live (x-b1aa). It
-    /// anchors the `config.agents.dead_row_grace` window: a row is reaped only
-    /// once `now - exited_at` is strictly past the grace. Deliberately NOT set at
-    /// the status->Exited transition (reconcile re-stamps `last_reconciled_at` on
-    /// every probe, so that field can't anchor a stable clock); the GC's
-    /// first-observation stamp is stable until the row is reaped or resurrected.
-    /// Daemon-set, mirrored in Python's `AgentEntry` as `exited_at`; skip when
-    /// absent so a pre-GC row round-trips losslessly (additive-optional, no
-    /// schema bump).
+    /// When reconcile's Exited transition proved this row's backing process
+    /// gone (ISO 8601 UTC), cleared again if current evidence contradicts it.
+    /// Retirement no longer reads it (x-c672: the reverse join plus transcript
+    /// quiet decide); the liveness ladder's heartbeat rung does, treating a
+    /// heartbeat advancing past it as life. Deliberately NOT `last_reconciled_at`
+    /// (reconcile re-stamps that on every probe, so it can't anchor a stable
+    /// clock). Daemon-set, mirrored in Python's `AgentEntry` as `exited_at`;
+    /// skip when absent so a pre-GC row round-trips losslessly
+    /// (additive-optional, no schema bump).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exited_at: Option<String>,
     /// The mux hosting ref for a pane-substrate agent (4a-G2): `Some` means

@@ -271,8 +271,6 @@ confirm = "auto"
 auto_register_sessions = false
 # Launch routed claude panes through happy for remote monitoring; default false and pane-only.
 happy_routed_panes = false
-# Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600).
-dead_row_grace = 3600
 # Seconds a worker's transcript must be quiet past, once every node its session is named on is done, before the daemon's retirement sweep drops its registry row (default 900). The receipt and the node's sessions[] row keep the resume handle. A legacy recovery.retire_grace_s still parses and lifts onto this key with a warning.
 retire_grace_s = 900
 # Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).
