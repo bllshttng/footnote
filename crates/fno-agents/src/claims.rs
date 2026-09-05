@@ -60,6 +60,9 @@ pub const MIN_TTL_MS: i64 = 60_000;
 pub const MAX_TTL_MS: i64 = 86_400_000;
 
 const CLAIMS_DIRNAME: &str = ".fno/claims";
+/// Where the single-flight latch keeps the answers its claims protect. Beside
+/// the claims dir, under the same root, so one resolver owns both.
+const FLIGHT_DIRNAME: &str = ".fno/flight";
 const EXPIRED_SUBDIR: &str = ".expired";
 
 /// Recovery-mutex wait: poll cadence + deadline (mirrors core.py's 20ms/5s).
@@ -314,6 +317,15 @@ pub(crate) fn claims_dir_for(root: Option<&Path>) -> Option<PathBuf> {
         Some(r) => Some(r.join(CLAIMS_DIRNAME)),
         None => global_claims_root().map(|r| r.join(CLAIMS_DIRNAME)),
     }
+}
+
+/// The single-flight RECORD directory, beside the claims dir the latch locks
+/// in. It lives here, not in [`crate::single_flight`], for the reason the
+/// state-roots ratchet exists: this file is the one resolver that knows the
+/// `.fno/<store>` layout, and a path hand-built anywhere else is one no guard
+/// and no `$FNO_CLAIMS_ROOT` can reach.
+pub(crate) fn flight_dir(root: &Path) -> PathBuf {
+    root.join(FLIGHT_DIRNAME)
 }
 
 // ---------------------------------------------------------------------------

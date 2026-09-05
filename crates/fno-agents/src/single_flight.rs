@@ -273,11 +273,11 @@ where
     }
 }
 
-/// `<claims root>/.fno/flight/<encoded key>.json`, beside the claims dir the
-/// latch already locks in.
+/// `<claims root>/.fno/flight/<encoded key>.json`. The directory comes from
+/// the claims resolver rather than a join here: a hand-built state path
+/// consults nothing, so no root override and no guard can reach it.
 fn record_path(root: &Path, key: &str) -> PathBuf {
-    root.join(".fno/flight")
-        .join(format!("{}.json", claims::encode_key(key)))
+    claims::flight_dir(root).join(format!("{}.json", claims::encode_key(key)))
 }
 
 /// Remove flight records nothing can still read.
@@ -298,7 +298,7 @@ pub fn prune_records(root: Option<&Path>, ttl: Duration, budget: Duration) -> us
         return 0;
     };
     let horizon = (ttl + budget) * 2;
-    let Ok(entries) = std::fs::read_dir(root.join(".fno/flight")) else {
+    let Ok(entries) = std::fs::read_dir(claims::flight_dir(&root)) else {
         return 0;
     };
     let mut removed = 0;
