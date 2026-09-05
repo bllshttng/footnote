@@ -1699,6 +1699,21 @@ async fn run_status(json_out: bool) -> i32 {
             13
         }
         Err(e) => {
+            // Unreachable daemon (socket error, timeout, ...): same degraded
+            // shape as DaemonNotRunning - the arms readout stands on its own.
+            let payload = json!({
+                "schema_version": 1,
+                "daemon": null,
+                "arms": arms,
+            });
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_default()
+                );
+            } else {
+                print_status_human(&payload, &arms);
+            }
             eprintln!("fno-agents: {e}");
             1
         }

@@ -8,7 +8,7 @@ This document covers the stop-hook decision verb (`fno-agents loop-check`) that 
 
 The stop hook reads the world; it does not maintain state. The only writer is the append-only event log. A session is done when the world (PR + CI + review) agrees it is done, not when a boolean says so.
 
-## The arms tick ledger (x-1b88)
+## The arms tick ledger
 
 Every scheduled arm appends one `control_plane_tick` row to the journal it already uses. The row says what the arm did, or why it did nothing: `data{arm, scheduler, acted, skip_reason, detail, interval_s}`.
 
