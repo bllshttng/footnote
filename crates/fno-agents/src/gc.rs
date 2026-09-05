@@ -733,11 +733,42 @@ fn parse_proc_line(line: &str) -> Option<ProcRow> {
     })
 }
 
+/// Whether this pid is STILL the process the table said it was.
+///
+/// The gap between reading the table and signalling is small, and a pid that
+/// exits inside it can be reused by something unrelated. This is a process
+/// killer, so the window gets closed rather than reasoned about: re-read the
+/// one row and require the same argv and the same inherited parent. An
+/// unreadable answer is not a match, because absence is not evidence.
+fn still_the_same(row: &ProcRow) -> bool {
+    let output = match std::process::Command::new("ps")
+        .args(["-p", &row.pid.to_string(), "-o", "ppid=,args="])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return false,
+    };
+    let text = String::from_utf8_lossy(&output);
+    let Some(line) = text.lines().next() else {
+        return false;
+    };
+    let mut fields = line.split_whitespace();
+    let ppid: u32 = match fields.next().and_then(|f| f.parse().ok()) {
+        Some(p) => p,
+        None => return false,
+    };
+    ppid == row.ppid && fields.collect::<Vec<_>>().join(" ") == row.args
+}
+
 /// SIGTERM, then SIGKILL after the grace window. Returns false when the process
-/// was already gone or the signal was refused, so the summary counts what it
-/// actually ended rather than what it aimed at.
-fn terminate(pid: u32) -> bool {
+/// was already gone, changed identity, or refused the signal, so the summary
+/// counts what it actually ended rather than what it aimed at.
+fn terminate(row: &ProcRow) -> bool {
+    let pid = row.pid;
     let alive = |p: u32| unsafe { libc::kill(p as libc::pid_t, 0) } == 0;
+    if !still_the_same(row) {
+        return false;
+    }
     if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
         return false;
     }
@@ -753,16 +784,28 @@ fn terminate(pid: u32) -> bool {
 
 /// Reap every `fno-py` child that init inherited and nobody is waiting on.
 ///
-/// `live_pids` are the pids the registry vouches for. Emits
-/// [`ORPHAN_SWEEP_EVENT`] on every run, naming the count it reaped even when
-/// that count is zero.
-pub fn orphan_sweep(emitter: &EventEmitter, older_than: Duration, live_pids: &[u32]) -> usize {
+/// `live_pids` are the pids the registry vouches for. `None` means the registry
+/// could not be read, and the sweep then reaps NOTHING: an unreadable registry
+/// is not evidence that no worker is live, and reading it that way would turn
+/// one bad file into a fleet-wide kill. It still emits, naming the refusal, so
+/// a skipped run is distinguishable from a quiet one.
+///
+/// Emits [`ORPHAN_SWEEP_EVENT`] on every run, naming the count it reaped even
+/// when that count is zero.
+pub fn orphan_sweep(
+    emitter: &EventEmitter,
+    older_than: Duration,
+    live_pids: Option<&[u32]>,
+) -> usize {
     let table = read_proc_table();
-    let candidates: Vec<&ProcRow> = table
-        .iter()
-        .filter(|row| is_reapable_orphan(row, older_than, live_pids))
-        .collect();
-    let reaped = candidates.iter().filter(|row| terminate(row.pid)).count();
+    let candidates: Vec<&ProcRow> = match live_pids {
+        Some(live) => table
+            .iter()
+            .filter(|row| is_reapable_orphan(row, older_than, live))
+            .collect(),
+        None => Vec::new(),
+    };
+    let reaped = candidates.iter().filter(|row| terminate(row)).count();
     let _ = emitter.emit(
         ORPHAN_SWEEP_EVENT,
         &serde_json::json!({
@@ -770,22 +813,25 @@ pub fn orphan_sweep(emitter: &EventEmitter, older_than: Duration, live_pids: &[u
             "candidates": candidates.len(),
             "reaped": reaped,
             "older_than_secs": older_than.as_secs(),
+            "skipped": live_pids.is_none(),
         }),
     );
     reaped
 }
 
 /// The pids the registry vouches for, so the sweep never ends a tracked worker.
-pub fn registry_live_pids(home: &AgentsHome) -> Vec<u32> {
-    registry_entries(home)
-        .map(|entries| {
-            entries
-                .iter()
-                .flat_map(|e| [e.pid, e.keeper_child_pid])
-                .flatten()
-                .collect()
-        })
-        .unwrap_or_default()
+///
+/// `None` on an unreadable registry. Degrading that to an empty list would say
+/// "no worker is live", which is the strongest possible licence to kill and the
+/// exact opposite of what a failed read establishes.
+pub fn registry_live_pids(home: &AgentsHome) -> Option<Vec<u32>> {
+    registry_entries(home).map(|entries| {
+        entries
+            .iter()
+            .flat_map(|e| [e.pid, e.keeper_child_pid])
+            .flatten()
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -885,6 +931,52 @@ mod tests {
         assert!(parse_proc_line("100 1 banana fno-py do pr wait 1").is_none());
     }
 
+    /// An unreadable registry is not evidence that no worker is live. Reading
+    /// it that way would turn one bad file into a fleet-wide kill.
+    #[test]
+    fn an_unreadable_registry_reaps_nothing_and_says_so() {
+        let dir = std::env::temp_dir().join(format!("fno-orphan-skip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let emitter = EventEmitter::new(path.clone(), "daemon");
+        // A threshold of zero would reap every orphan on the box; None must
+        // hold it back anyway.
+        let reaped = orphan_sweep(&emitter, Duration::from_secs(0), None);
+        assert_eq!(reaped, 0);
+        let line = std::fs::read_to_string(&path).unwrap();
+        assert!(line.contains("\"skipped\":true"), "{line}");
+        assert!(line.contains("\"candidates\":0"), "{line}");
+    }
+
+    /// A pid that changed identity between the table read and the signal is
+    /// somebody else's process now.
+    #[test]
+    fn a_pid_that_changed_identity_is_not_signalled() {
+        // This process is alive and is not what the row claims, so the
+        // re-verification must refuse it.
+        let row = ProcRow {
+            pid: std::process::id(),
+            ppid: 1,
+            age_secs: 86_400,
+            args: "/tools/fno/bin/fno-py agents truth --handles a".to_string(),
+        };
+        assert!(!still_the_same(&row));
+        assert!(!terminate(&row));
+    }
+
+    /// The same pid read honestly matches itself, so the guard is not simply
+    /// refusing everything - the positive control for the check above.
+    #[test]
+    fn the_guard_matches_a_row_read_from_the_live_table() {
+        let me = std::process::id();
+        let row = read_proc_table()
+            .into_iter()
+            .find(|r| r.pid == me)
+            .expect("this process must appear in its own process table");
+        assert!(still_the_same(&row));
+    }
+
     /// AC14: the sweep speaks on every run. A reaper that only speaks when it
     /// kills cannot be told apart from a reaper that never ran, and the done
     /// probe depends on the difference.
@@ -896,7 +988,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let emitter = EventEmitter::new(path.clone(), "daemon");
         // A threshold no live process can reach, so the sweep finds nothing.
-        let reaped = orphan_sweep(&emitter, Duration::from_secs(u32::MAX as u64), &[]);
+        let reaped = orphan_sweep(&emitter, Duration::from_secs(u32::MAX as u64), Some(&[]));
         assert_eq!(reaped, 0);
         let line = std::fs::read_to_string(&path).unwrap();
         assert!(line.contains(ORPHAN_SWEEP_EVENT), "{line}");

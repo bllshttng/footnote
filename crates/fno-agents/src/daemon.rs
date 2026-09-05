@@ -4145,7 +4145,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         let _ = crate::gc::orphan_sweep(
                             &emitter,
                             crate::agents_config::orphan_reap_after(&grace_cwd),
-                            &crate::gc::registry_live_pids(&home),
+                            crate::gc::registry_live_pids(&home).as_deref(),
                         );
                         // The latch's own leftovers. Its record dir is keyed by
                         // argv and the roster's handle set changes with every
