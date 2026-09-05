@@ -5,11 +5,7 @@
 //! the exit codes, the proto types) in exactly one place.
 use super::*;
 
-<<<<<<< HEAD
 /// `fno mux thread reseat <pane-id> [--portal N] [--session S]` (v70): the
-=======
-/// `fno mux thread reseat <pane-id> [--portal N] [--session S]` (v69): the
->>>>>>> 7ca6b6cf6 (feat(mux): fno mux thread reseat verb + ThreadReseat wire (proto v69))
 /// outside-the-TUI door of the re-seat move. Sends the ThreadReseat control
 /// verb, which detaches the live leaf keeping the PTY, seats the same pane in
 /// a portal, and de-recruits its squad membership; the registry `mux` flip is
