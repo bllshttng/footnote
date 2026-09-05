@@ -1968,6 +1968,37 @@ mod tests {
     }
 
     #[test]
+    fn mission_drain_tick_appends_one_control_plane_tick_row() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a"]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        let outcome = mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        assert_eq!(outcome, MissionDispatch::Continue);
+        let rows: Vec<serde_json::Value> = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "control_plane_tick")
+            .collect();
+        assert_eq!(rows.len(), 1, "exactly one arm row per tick");
+        let data = &rows[0]["data"];
+        assert_eq!(data["arm"], "active_backlog");
+        assert_eq!(data["scheduler"], "daemon");
+        assert_eq!(data["acted"], 1);
+        assert_eq!(data["interval_s"], 300);
+        assert!(data["skip_reason"].is_null());
+        assert!(data["detail"].as_str().unwrap().contains("dispatched=1"));
+    }
+
+    #[test]
     fn dispatch_mission_retires_on_deactivated() {
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();

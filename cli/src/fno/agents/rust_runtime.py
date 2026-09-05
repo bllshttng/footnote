@@ -414,7 +414,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     # the verb has a Python @agents_app.command it is no longer "Rust-only" and
     # must not appear here (test_rust_only_verb_help_covers_unregistered_verbs
     # enforces the invariant).
-    "status": "Report daemon liveness and per-agent state.",
+    "status": "Report daemon liveness and the control-plane arms table (one row per scheduled arm, red when its last tick is stale); --json for the machine payload with `arms`.",
     "reap": "Garbage-collect finished agent-view rows (terminal, past grace, clean worktree); --json for machine output, --dry-run to rehearse (names the gate keeping every held-back row, mutates nothing).",
     "loop-check": "Stop-hook decision: external-truth done()/backstop check (read-only).",
     "loop": "Unified driver loop: run --driver target [options] (step 5).",

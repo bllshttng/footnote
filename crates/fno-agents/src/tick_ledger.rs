@@ -130,7 +130,7 @@ pub struct ArmStatus {
 /// Unknown arms seen in the journals are appended after the known ones, so a
 /// new emitter deploys before its reader does.
 pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
-    let mut newest: HashMap<String, (u64, Value)> = HashMap::new();
+    let mut newest: HashMap<String, NewestTick> = HashMap::new();
     let mut paths: Vec<PathBuf> = Vec::new();
     for journal in journals {
         paths.push(journal.clone());
@@ -161,13 +161,21 @@ pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
     rows
 }
 
+/// The newest tick row seen for an arm: its parsed ts, the raw ts string, and
+/// its data object.
+struct NewestTick {
+    ts_unix: u64,
+    ts: String,
+    data: Value,
+}
+
 fn rotation_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(".1");
     PathBuf::from(s)
 }
 
-fn scan_journal(path: &Path, newest: &mut HashMap<String, (u64, Value)>) {
+fn scan_journal(path: &Path, newest: &mut HashMap<String, NewestTick>) {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return,
@@ -194,11 +202,22 @@ fn scan_journal(path: &Path, newest: &mut HashMap<String, (u64, Value)>) {
             continue;
         };
         let fresher = match newest.get(arm) {
-            Some((seen_ts, _)) => ts_unix >= *seen_ts,
+            Some(seen) => ts_unix >= seen.ts_unix,
             None => true,
         };
         if fresher {
-            newest.insert(arm.to_string(), (ts_unix, Value::Object(data.clone())));
+            newest.insert(
+                arm.to_string(),
+                NewestTick {
+                    ts_unix,
+                    ts: value
+                        .get("ts")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    data: Value::Object(data.clone()),
+                },
+            );
         }
     }
 }
@@ -206,10 +225,10 @@ fn scan_journal(path: &Path, newest: &mut HashMap<String, (u64, Value)>) {
 fn arm_status(
     arm: &str,
     default_interval_s: u64,
-    newest: Option<&(u64, Value)>,
+    newest: Option<&NewestTick>,
     now_unix: u64,
 ) -> ArmStatus {
-    let Some((ts_unix, data)) = newest else {
+    let Some(tick) = newest else {
         return ArmStatus {
             arm: arm.to_string(),
             scheduler: None,
@@ -222,19 +241,20 @@ fn arm_status(
             stale: default_interval_s > 0,
         };
     };
-    let interval_s = data
+    let interval_s = tick
+        .data
         .get("interval_s")
         .and_then(Value::as_u64)
         .unwrap_or(default_interval_s);
-    let age_s = now_unix.saturating_sub(*ts_unix);
+    let age_s = now_unix.saturating_sub(tick.ts_unix);
     ArmStatus {
         arm: arm.to_string(),
-        scheduler: str_field(data, "scheduler"),
-        last_ts: None,
+        scheduler: str_field(&tick.data, "scheduler"),
+        last_ts: Some(tick.ts.clone()),
         age_s: Some(age_s),
-        acted: data.get("acted").and_then(Value::as_u64),
-        skip_reason: str_field(data, "skip_reason"),
-        detail: str_field(data, "detail"),
+        acted: tick.data.get("acted").and_then(Value::as_u64),
+        skip_reason: str_field(&tick.data, "skip_reason"),
+        detail: str_field(&tick.data, "detail"),
         interval_s,
         stale: interval_s > 0 && age_s > interval_s * 2,
     }

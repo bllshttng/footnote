@@ -125,6 +125,28 @@ def test_disabled_dispatches_nothing(iso, monkeypatch):
     assert evs[0]["data"]["reason"] == "disabled"
 
 
+def test_advance_writes_one_control_plane_tick_row(iso, monkeypatch):
+    """x-1b88: every advance call appends exactly one auto_continue arm row,
+    carrying the skip reason the decision matrix chose."""
+    monkeypatch.setenv("FNO_AUTO_CONTINUE", "0")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: "x")
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+
+    adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    rows = [
+        json.loads(line)
+        for line in iso.read_text().splitlines()
+        if json.loads(line)["type"] == "control_plane_tick"
+    ]
+    assert len(rows) == 1
+    data = rows[0]["data"]
+    assert data["arm"] == "auto_continue"
+    assert data["skip_reason"] == "disabled"
+    assert data["interval_s"] == 1800
+    assert data["scheduler"] == "session"
+
+
 def test_no_work(iso, monkeypatch):
     monkeypatch.setattr(adv, "_next_node", lambda project: None)
     monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))

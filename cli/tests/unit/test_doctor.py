@@ -1625,6 +1625,12 @@ def test_ac3_fr_fix_rust_only_stale_runs_refresh_never_raw_cargo(
     # Same reasoning for the per-harness surface probe (`codex plugin marketplace
     # list`) - a legit advisory subprocess, not raw cargo.
     monkeypatch.setattr(doctor, "_harness_surface_report", lambda: {})
+    # Same reasoning for the control-plane arms readout (`fno-agents status
+    # --json`): a legit advisory subprocess, stubbed so the tripwire isolates
+    # cargo, not the readout.
+    monkeypatch.setattr(
+        doctor, "_control_plane_arms_report", lambda: {"arms": [], "stale": [], "unknown_reason": None}
+    )
 
     from fno import update
 
