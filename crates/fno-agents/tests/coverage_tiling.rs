@@ -13,8 +13,9 @@
 //! pass, and distinct attesters yield distinct verdicts. The live incident
 //! was a stale served row, not logic, and these tests keep it that way.
 
+use fno_agents::disposition_gate::disposition_blockers_on_chain;
 use fno_agents::loopcheck::{
-    classify_coverage_tiled, compute_range_tiling, coverage_receipt_line, Coverage,
+    classify_coverage_tiled, compute_range_tiling, coverage_receipt_line, in_scope_chain, Coverage,
     CoverageProducer, CoverageVerdict, Freshness, RangeTiling, ReviewState,
 };
 use std::fs;
@@ -1881,7 +1882,11 @@ fn xaecc_marker1_fail_only_chain_fully_dispositioned_reads_covered() {
         &events,
         &[],
         true,
-        None,
+        // The measured-authorship contract: the disposition rides the peer's
+        // own attestation (sess-peer), so with the author session resolvable
+        // the disposition is corroborated and answers the head. The
+        // author-unmeasured counterpart refuses - pinned just below.
+        Some("sess-author"),
         &at_head,
         BRANCH,
         &head,
@@ -1930,7 +1935,10 @@ fn xaecc_marker1_fail_only_chain_fully_dispositioned_reads_covered() {
 fn xaecc_fixed_in_a_later_round_answers_too() {
     // The other terminal disposition: findings raised in round 1, fixed, and
     // a LATER round reviewed the fix delta (the specimen shape). The only
-    // attestations are fails.
+    // attestations are fails. The specimen rows predate the attester field,
+    // so the test attests them (sess-peer) and resolves the author session:
+    // a fixed disposition corroborated by a measured non-author signature
+    // answers the head, the same contract the decline arm answers to.
     let at_specimen = |sha: &str| {
         if sha == SPECIMEN_HEAD {
             Freshness::Fresh
@@ -1938,14 +1946,23 @@ fn xaecc_fixed_in_a_later_round_answers_too() {
             Freshness::Stale
         }
     };
-    let events = specimen_events();
+    let events = specimen_events()
+        .lines()
+        .map(|line| {
+            let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+            v["data"]["attester_session_id"] = serde_json::json!("sess-peer");
+            v.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
     let rep = classify_coverage_tiled(
         &[],
         &[],
         &events,
         &[],
         true,
-        None,
+        Some("sess-author"),
         &at_specimen,
         BRANCH,
         SPECIMEN_HEAD,
@@ -1959,6 +1976,54 @@ fn xaecc_fixed_in_a_later_round_answers_too() {
         rep.coverage
     );
     assert_eq!(rep.review_state(), Some(ReviewState::Reviewed));
+}
+
+#[test]
+fn xaecc_answered_fail_without_a_measured_author_withholds() {
+    // The corroboration law's shape on the x-aecc chain: the same
+    // dispositioned fail with the author session UNRESOLVED. Unmeasured
+    // authorship refuses at the disposition basis, so the promotion
+    // withholds and the row reads uncovered - the twin-divergence fix; the
+    // Python gate already withheld this shape.
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, _shas, head) = repo_with(repo, 2);
+    let k = "a.py:1:correctness";
+    let events = events_file(
+        repo,
+        &[declined_round(
+            &base,
+            &head,
+            serde_json::json!([finding(k, "correctness", None, true)]),
+            serde_json::json!([declined(k)]),
+        )],
+    );
+    let at_head = |sha: &str| {
+        if sha == head {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        }
+    };
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        BRANCH,
+        &head,
+        None,
+        None,
+        false,
+    );
+    assert!(
+        !matches!(rep.coverage, Coverage::Covered(n) if n > 0),
+        "an unmeasured author cannot corroborate a disposition: {:?}",
+        rep.coverage
+    );
 }
 
 #[test]
@@ -2203,7 +2268,7 @@ fn xaecc_r2_a_bystanders_findings_free_fail_stays_unanswered() {
         &events,
         &[],
         true,
-        None,
+        Some("sess-author"),
         &at_head,
         BRANCH,
         &head,
@@ -2233,4 +2298,148 @@ fn xaecc_r2_a_bystanders_findings_free_fail_stays_unanswered() {
         1,
         "sigma stays unattested: {unattested:?}"
     );
+}
+
+#[test]
+fn the_answered_fail_disposition_pass_carries_its_own_corroboration() {
+    // Locked Decision 2, pinned after the key-gating regression: the
+    // answered-fail promotion reads its disposition basis through the raw
+    // self-attestation predicate, INDEPENDENT of
+    // config.review.require_corroboration - a disposition pass can be gamed
+    // by declining, a clean review cannot. For a solo author the reasoned
+    // decline is never terminal, the promotion withholds, and the chain
+    // yields the declined-uncorroborated blocker on every config.
+    let declined_fail = serde_json::json!({
+        "type": "review_attestation",
+        "data": {"reviewer": "decliner", "head_sha": "h0", "verdict": "fail",
+                 "attester_session_id": "sess-author", "branch": "feature/x",
+                 "findings": [{"finding_key": "k1", "verdict": "confirmed",
+                               "category": "correctness"}],
+                 "dispositions": [{"finding_key": "k1", "disposition": "declined",
+                                   "reason": "operator ruled the shape intended"}]}
+    })
+    .to_string();
+    let events = format!(
+        "{}\n{}",
+        serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h1", "verdict": "pass",
+                     "attester_session_id": "sess-author", "branch": "feature/x"}
+        })
+        .to_string(),
+        declined_fail
+    );
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        Some("sess-author"),
+        &|_| fno_agents::loopcheck::Freshness::Fresh,
+        "feature/x",
+        "h1",
+        None,
+        None,
+        false,
+    );
+    let reviewed: Vec<&str> = rep
+        .verdicts
+        .iter()
+        .filter(|v| v.verdict == CoverageVerdict::Reviewed)
+        .map(|v| v.name.as_str())
+        .collect();
+    assert_eq!(reviewed, vec!["code-review"]);
+
+    let chain = in_scope_chain(&events, "feature/x", "h1");
+    let blockers = disposition_blockers_on_chain(&chain, true);
+    assert_eq!(blockers.len(), 1);
+    assert_eq!(blockers[0].axis, "declined-uncorroborated");
+}
+
+/// The two halves of the answered-fail design on ONE fixture. The
+/// `config.review.reviewers` scan answers a reasoned decline fail-open
+/// (authorship is unknowable inside that scan - the doc on
+/// `unattested_reviewers_scan` says so), while the coverage axis re-runs the
+/// same disposition scan WITH authorship and withholds. The composite is
+/// what the gate actually reads: the reviewer shows satisfied at the
+/// required-bots conjunct and the coverage conjunct still refuses, so a solo
+/// author cannot clear the loop by declining.
+#[test]
+fn answered_fail_satisfies_the_reviewers_scan_while_the_decline_still_withholds() {
+    let events = serde_json::json!({
+        "type": "review_attestation",
+        "data": {"reviewer": "code-review", "head_sha": "h0", "verdict": "fail",
+                 "attester_session_id": "sess-author", "branch": "feature/x",
+                 "findings": [{"finding_key": "k1", "verdict": "confirmed",
+                               "category": "correctness"}],
+                 "dispositions": [{"finding_key": "k1", "disposition": "declined",
+                                   "reason": "operator ruled the shape intended"}]}
+    })
+    .to_string();
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("events.jsonl");
+    fs::write(&path, &events).unwrap();
+
+    // Half one, the scan: the reasoned decline reads terminal at the
+    // fail-open arm, so the required reviewer is satisfied.
+    let (unattested, _malformed) = unattested_reviewers_scan(
+        &path,
+        &["code-review".to_string()],
+        &|_| Freshness::Fresh,
+        "feature/x",
+        "h0",
+        false,
+    );
+    assert!(unattested.is_empty(), "scan side: {:?}", unattested);
+
+    // Half two, the same chain under the coverage axis with the author's own
+    // session: the decline is uncorroborated, the answered-fail promotion
+    // withholds, and nothing reads Reviewed.
+    let solo = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        Some("sess-author"),
+        &|_| Freshness::Fresh,
+        "feature/x",
+        "h0",
+        None,
+        None,
+        false,
+    );
+    let reviewed: Vec<&str> = solo
+        .verdicts
+        .iter()
+        .filter(|v| v.verdict == CoverageVerdict::Reviewed)
+        .map(|v| v.name.as_str())
+        .collect();
+    assert!(reviewed.is_empty(), "solo author: {:?}", reviewed);
+
+    // The counterpart: a measured other_session attester makes the same
+    // decline corroborated, so the promotion fires - corroboration, not the
+    // verdict string, is what moves this row.
+    let peer = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        Some("sess-peer"),
+        &|_| Freshness::Fresh,
+        "feature/x",
+        "h0",
+        None,
+        None,
+        false,
+    );
+    let reviewed: Vec<&str> = peer
+        .verdicts
+        .iter()
+        .filter(|v| v.verdict == CoverageVerdict::Reviewed)
+        .map(|v| v.name.as_str())
+        .collect();
+    assert_eq!(reviewed, vec!["code-review"]);
 }

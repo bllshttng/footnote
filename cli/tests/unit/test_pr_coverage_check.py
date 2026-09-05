@@ -3518,8 +3518,12 @@ _CAP_HARD_KEY = "cli/src/fake.py:779:correctness"
 
 
 def _cap_cov_row():
+    # self_attested_count 0 is MEASURED (one reviewer, not the author), the
+    # only shape a counts-adjacent row may lean on to read corroborated: an
+    # ABSENT count refuses like unmeasured authorship, so a fixture that
+    # omitted the key silently rode the fail-open hole it now pins shut.
     return {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 1,
-            "head_sha": f"{5:040x}", "verdicts": []}
+            "self_attested_count": 0, "head_sha": f"{5:040x}", "verdicts": []}
 
 
 def test_cap_verdict_agreement_chain_is_impossible_and_names_the_key(tmp_path):
@@ -3705,31 +3709,124 @@ def test_rests_on_self_attestation_counts_an_absent_origin_as_self_attested():
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
 
 
+def test_rests_on_self_attestation_refuses_an_unmeasured_origin():
+    """Unmeasured arm: a concrete attester session id with no author session
+    to compare against - the shape of an author's own re-read from a cwd
+    whose target manifest is absent. The comparison failed; the gate
+    refuses."""
+    cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("unmeasured")]}
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
+
+
 def test_rests_on_self_attestation_counts_an_unknown_origin_as_self_attested():
-    """Unknown arm: a read whose process
-    resolved no authoring session serializes attestation_origin "unknown".
-    Unknown authorship is not corroboration; the gate refuses."""
+    """Unknown arm: an attester nobody could observe - absent or empty, and
+    harness_identity returns an EMPTY id when no harness marker is in the
+    env, so this bucket is where an author's own bare-lane self-review
+    lands. No evidence of an independent reviewer, so the gate refuses
+    rather than clears."""
     cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("unknown")]}
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
 
 
 def test_rests_on_self_attestation_still_clears_a_measured_other_session():
-    """The one origin that proves the count is not the author's own stays a
-    measured other_session. Absent and unknown refuse; this clears."""
+    """The one measured origin that proves the count is not the author's own
+    stays a measured other_session. This clears."""
     cov = {"reviewed_count": 1, "verdicts": [_carried_local_row("other_session")]}
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is False
 
 
-def test_rests_on_self_attestation_reroutes_a_recorded_zero_through_verdicts():
-    """The counts path cannot answer a recorded zero: 0 self_attested next to
-    counted local verdicts is either a real other-session measurement or
-    authorship that could not be measured, and the zero cannot tell them
-    apart. The measured event carried self_attested_count 0 beside an
-    unknown-origin verdict; the verdicts rule must settle it, so the gate
-    refuses instead of clearing on 0 != 1."""
+def test_rests_on_self_attestation_walks_verdicts_not_counts():
+    """One rule on both surfaces: the recorded self_attested_count is
+    telemetry, never the answer. The split row the peer review named
+    (1 measured self + 1 unknown peer beside self_attested_count 1) must
+    refuse here exactly as it refuses on the Rust twin - an unknown peer is
+    no corroboration - instead of the counts path answering 1 != 2."""
     cov = {
-        "reviewed_count": 1,
-        "self_attested_count": 0,
-        "verdicts": [_carried_local_row("unknown")],
+        "reviewed_count": 2,
+        "self_attested_count": 1,
+        "verdicts": [
+            _carried_local_row("self_attested"),
+            _carried_local_row("unknown"),
+        ],
     }
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
+
+
+def test_rests_on_self_attestation_counts_only_row_reads_all_self_attested():
+    """A pre-verdicts producer recorded only the counts. A reviewed_count of
+    3 beside self_attested_count 3 and no verdicts key proves no independent
+    reviewer, so the predicate refuses - the answer the old counts path gave
+    and the fail-closed direction when no verdict row exists at all."""
+    cov = {"reviewed_count": 3, "self_attested_count": 3}
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
+    split = {"reviewed_count": 3, "self_attested_count": 1}
+    assert _coverage_gate.rests_on_self_attestation_alone(split) is False
+    empty = {"reviewed_count": 3, "self_attested_count": 3, "verdicts": []}
+    assert _coverage_gate.rests_on_self_attestation_alone(empty) is True
+
+
+def test_rests_on_self_attestation_counts_only_row_refuses_an_absent_count():
+    """The omit the producer itself emits when authorship was unmeasured: a
+    counts-only row with no self_attested_count key must refuse, never read
+    the None comparison as "not self-attested" and clear - at reviewed 3 and
+    at reviewed 0, the absence convention does not depend on the count that
+    is missing beside it. A measured count still answers: zero reviewed with
+    a recorded zero stays clear, as before."""
+    assert _coverage_gate.rests_on_self_attestation_alone({"reviewed_count": 3}) is True
+    assert (
+        _coverage_gate.rests_on_self_attestation_alone(
+            {"reviewed_count": 3, "verdicts": []}
+        )
+        is True
+    )
+    assert (
+        _coverage_gate.rests_on_self_attestation_alone(
+            {"reviewed_count": 3, "self_attested_count": "3"}
+        )
+        is True
+    )
+    assert _coverage_gate.rests_on_self_attestation_alone({"reviewed_count": 0}) is True
+    assert _coverage_gate.rests_on_self_attestation_alone({}) is True
+    assert (
+        _coverage_gate.rests_on_self_attestation_alone(
+            {"reviewed_count": 0, "self_attested_count": 0}
+        )
+        is False
+    )
+
+
+def test_rests_on_self_attestation_measured_other_session_outweighs_unresolved_origins():
+    """One measured other_session among unresolved origins still proves a
+    reviewer independent of the author, so the row does not rest on
+    self-attestation alone and the gate clears."""
+    cov = {
+        "reviewed_count": 2,
+        "verdicts": [
+            _carried_local_row("unknown"),
+            _carried_local_row("other_session"),
+        ],
+    }
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is False
+
+
+def test_rests_on_self_attestation_held_row_reads_preserved_verdicts():
+    """A row the corroboration policy held is rewritten to reviewed_count 0
+    and omits the count exactly when authorship was unmeasured, so the
+    preserved verdicts must answer - otherwise the operator gets a bare
+    uncovered blocker instead of the corroboration refusal naming both
+    remedies."""
+    cov = {
+        "reviewed_count": 0,
+        "verdicts": [_carried_local_row("unmeasured")],
+    }
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
+
+
+def test_rests_on_self_attestation_uncovered_row_without_evidence_refuses():
+    """A row with no self-attestation record and no verdicts refuses at
+    reviewed 0 the same as at reviewed 3: the absence convention does not
+    depend on the count that is missing beside it, and an uncovered row was
+    never the shape that leaned on this predicate clearing (the coverage
+    conjunct refuses it first). Supersedes the earlier stays-clear pin."""
+    cov = {"reviewed_count": 0}
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is True

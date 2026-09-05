@@ -7514,12 +7514,11 @@ fn coverage_origin_unknown_when_attester_empty_count_unchanged() {
     assert_eq!(rep.coverage_count(), Some(1));
 }
 
-/// No authoring session known (no manifest / unparseable) -> every local
-/// verdict Unknown, failing open so the verdict set is byte-identical to the
-/// pre-change behavior on unknown authorship. A present attester with an absent
-/// author is Unknown, not Other: the comparison is never guessed.
+/// No author session known: a concrete attester is Unmeasured (the comparison
+/// failed, never guessed) and still counts - origin is recorded, never gating,
+/// and the corroboration gate refuses a row whose whole count is unresolved.
 #[test]
-fn coverage_origin_author_unknown_is_unknown_fail_open() {
+fn coverage_origin_author_unmeasured_counts_but_refuses_uncorroborated() {
     let events = format!(
         "{}\n",
         attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR)
@@ -7530,8 +7529,9 @@ fn coverage_origin_author_unknown_is_unknown_fail_open() {
         .iter()
         .find(|v| v.producer == CoverageProducer::LocalAttestation)
         .unwrap();
-    assert_eq!(local.attestation_origin, AttestationOrigin::Unknown);
+    assert_eq!(local.attestation_origin, AttestationOrigin::Unmeasured);
     assert_eq!(rep.coverage_count(), Some(1));
+    assert!(rep.rests_on_self_attestation_alone());
 }
 
 // ── pair-key: (reviewer, attester_session_id) ────────────────────────────────

@@ -503,49 +503,63 @@ def rests_on_self_attestation_alone(
     """Whether a covered coverage row's whole count is the author's own
     (self_attested) local attestation - the same predicate the Rust gate's
     ``CoverageReport::rests_on_self_attestation_alone`` applies, read from the
-    serialized row. Prefers the recorded counts; derives from verdicts when
-    the count is absent, and also when it is a recorded ZERO: a zero alongside
-    counted local verdicts can be a real other-session measurement, but it can
-    equally be authorship that could not be measured at classify time (a
-    carried read whose process resolved no target manifest), and a recorded
-    zero cannot tell the two apart. The verdicts rule settles it per row.
+    serialized row. One rule, from verdicts, on every row: the recorded
+    counts are telemetry, not an answer, because the count cannot say WHY an
+    origin went unmeasured while each verdict row can.
 
-    That rule fails closed on authorship: a counted local_attestation
-    is treated as the author's own UNLESS its origin is a measured
-    ``other_session``. An absent key, the explicit ``unknown``, or any
-    unrecognized value means the row cannot prove an independent reviewer,
-    and a row that cannot prove one is not evidence of one - the gate refuses
-    rather than clears.
+    That rule: a counted ``local_attestation`` corroborates ONLY with a
+    measured ``other_session``. ``self_attested`` is the author's own;
+    ``unmeasured`` is a comparison that failed, the shape of an author's own
+    re-read from a cwd without the manifest; ``unknown`` is an attester
+    nobody could observe - absent or empty, and ``harness_identity`` returns
+    an EMPTY id when no harness marker is in the env, so this bucket is
+    where an author's own bare-lane self-review lands; an ABSENT key (a
+    pre-fix producer, or any writer that dropped the field) refuses like
+    ``unknown``. A row that cannot prove an independent reviewer is not
+    evidence of one, and the gate refuses rather than clears.
 
     ``github_approval_satisfies`` is the resolved config flag, and it reaches
-    the verdicts fallback through ``_reviews._human_approval_counts`` - the
-    same helper ``_derive_review_state`` and the Rust ``human_approval_counts``
-    apply. It was hardcoded to the flag-off branch here, which made this a
-    THIRD implementation of one counting rule: under the flag a non-author
-    GitHub approval corroborated on the other two paths and not on this one,
-    while the gate's own refusal advertises that approval as a remedy. The
-    default is False so a caller with no repo to resolve against (the
-    doctor's read-only display) keeps today's answer.
+    the rule through ``_reviews._human_approval_counts`` - the same helper
+    ``_derive_review_state`` and the Rust ``human_approval_counts`` apply. It
+    was hardcoded to the flag-off branch here, which made this a THIRD
+    implementation of one counting rule: under the flag a non-author GitHub
+    approval corroborated on the other two paths and not on this one, while
+    the gate's own refusal advertises that approval as a remedy. The default
+    is False so a caller with no repo to resolve against (the doctor's
+    read-only display) keeps today's answer.
     """
     reviewed = cov.get("reviewed_count")
-    self_attested = cov.get("self_attested_count")
-    if not isinstance(reviewed, int) or reviewed <= 0:
+    if isinstance(reviewed, int) and reviewed <= 0:
         # The corroboration policy itself rewrites the rows it holds to
-        # covered=uncovered / reviewed_count 0 while PRESERVING the
-        # self-attestation counts, so a 0-count row with a recorded
-        # self-attestation is exactly the held row - the one population this
-        # predicate exists to name. A 0-count row with no self-attestation is
-        # merely uncovered, not self-attested-only.
-        return isinstance(self_attested, int) and self_attested > 0
-    if isinstance(self_attested, int) and self_attested > 0:
-        return self_attested == reviewed
+        # covered=uncovered / reviewed_count 0. A rewritten row keeps its
+        # recorded self-attestation count when one was measured; a row held
+        # on unmeasured authorship omits it, so the preserved verdicts must
+        # answer instead - those are exactly the rows whose operator-facing
+        # refusal should name the corroboration remedies, not a bare
+        # uncovered.
+        self_attested = cov.get("self_attested_count")
+        if isinstance(self_attested, int) and self_attested > 0:
+            return True
     from fno.pr._reviews import _human_approval_counts
 
+    verdicts = [v for v in (cov.get("verdicts") or []) if isinstance(v, dict)]
+    if not verdicts:
+        # A pre-verdicts producer recorded only the counts. The counts path
+        # answers for this shape and fails closed on the count itself at ANY
+        # reviewed_count: an ABSENT self_attested_count (the producer's own
+        # omit when authorship was unmeasured) is the same unmeasured-author
+        # shape at reviewed 3 and at reviewed 0, and neither may read as
+        # "not self-attested".
+        self_attested = cov.get("self_attested_count")
+        if not isinstance(self_attested, int):
+            return True
+        if isinstance(reviewed, int) and reviewed > 0:
+            return self_attested == reviewed
+        return self_attested > 0
     counted = [
         v
-        for v in (cov.get("verdicts") or [])
-        if isinstance(v, dict)
-        and v.get("verdict") == "reviewed"
+        for v in verdicts
+        if v.get("verdict") == "reviewed"
         and _human_approval_counts(v, github_approval_satisfies)
     ]
     return bool(counted) and all(

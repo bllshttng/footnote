@@ -1751,10 +1751,17 @@ pub use crate::review_freshness::{
 };
 
 // Child modules named by their question (the file budget's remedy): the
-// coverage row's state deriver and the receipt line live there, not here.
+// coverage row's state deriver, the receipt line, attestation authorship, and
+// the verdict vocabulary live there, not here.
+mod authorship;
 mod coverage_receipt;
 mod review_state;
+mod verdict;
+use authorship::carry_author_session_forward;
+pub use authorship::AttestationOrigin;
+use authorship::{classify_attestation_origin, default_attestation_origin};
 pub use coverage_receipt::coverage_receipt_line;
+pub use verdict::{AttestationScope, CoverageProducer, CoverageVerdict};
 
 /// Whether a `review_attestation` line is about the PR under evaluation.
 ///
@@ -2892,6 +2899,15 @@ fn read_pr_info(
     // a missing file is empty (the local axis then contributes nothing, which
     // is correct - no evidence of a local review).
     let events_text = std::fs::read_to_string(events_path).unwrap_or_default();
+    // Authorship carry-forward: when this process resolved no manifest
+    // session, the previous coverage row's recorded author FOR THIS PR (the
+    // scan filters on the number; the events file is project-wide) stands
+    // in, so a re-read from a manifest-less cwd classifies against the
+    // historical author instead of landing every local verdict Unmeasured.
+    let carried_author = author_session
+        .map(str::to_string)
+        .or_else(|| carry_author_session_forward(&events_text, number));
+    let author_session = carried_author.as_deref();
     let (
         latest_review_ts,
         reviewed,
@@ -5718,65 +5734,8 @@ fn compute_review_info(
 
 // ── review coverage (x-0eaf) ──────────────────────────────────────────────────
 //
-// The old gate's `reviewed` boolean (loopcheck.rs `let reviewed =
-// all_required_passed() && unaddressed.is_empty() && reviewers_ok`) was a claim
-// about reviews computed entirely from what did NOT happen: nobody is still
-// owed, no finding is outstanding, no reviewer is unattested. A quota refusal is
-// dropped from `missing_bots` (PR #214) and reads as a pass; on a config with no
-// required bots, nothing can object, so `reviewed` is true on zero reviews.
-//
-// Coverage is the missing predicate: did anyone actually review? It is a
-// first-class value reported everywhere, never folded back into the objection
-// boolean (collapsing it back undoes this node).
-//
-// Producer axis, not producer string. Two review producers share the display
-// name "codex": the `chatgpt-codex-connector` GitHub App (posts review objects,
-// can refuse on quota) and the local `codex` CLI (posts none, never rate-limited
-// by the App's quota). They are told apart by `CoverageProducer`, never by the
-// reviewer string (x-9ae8's one-word-two-entities disease). A third local lane,
-// claude `/code-review`, shares the `LocalAttestation` axis.
-
-/// The channel a review verdict came from. Two producers that share a name (the
-/// `chatgpt-codex-connector` App vs the local `codex` CLI) are distinguished by
-/// this axis, never by the reviewer string alone (x-9ae8, x-0eaf).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CoverageProducer {
-    /// A GitHub App bot that posts review objects via the reviews API. Can
-    /// refuse on quota (the `usage_markers` / `body_is_usage_limit` path).
-    GithubApp,
-    /// A local reviewer that leaves NO GitHub object and instead emits a
-    /// head-pinned `review_attestation` event (`emit-attestation.sh`). Never
-    /// rate-limited by any App's quota: `/code-review`, the codex CLI, sigma.
-    LocalAttestation,
-}
-
-/// One verdict for one reviewer over one producer axis (x-0eaf). `reviewed` here
-/// is derived from observed evidence, unlike the old boolean of the same name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CoverageVerdict {
-    /// Posted a review object, or a `pass` attestation, against a commit whose
-    /// code still matches HEAD (`Freshness::counts()`). The only verdict that
-    /// counts toward coverage.
-    Reviewed,
-    /// Responded, but against a commit whose code no longer matches HEAD
-    /// (x-5b99). Positive evidence that a reviewer READ AN OLDER COMMIT, which
-    /// is a different fact from `Absent` (never responded) and needs a
-    /// different response: nudge for a re-read, do not wait for a first read.
-    /// Recorded rather than dropped so the trail shows what happened; excluded
-    /// from the count, because inheriting a verdict across a commit its author
-    /// never saw is the defect this variant exists to make visible.
-    Stale,
-    /// Responded and declined to review. Quota exhaustion is the first known
-    /// shape (detected by `body_is_usage_limit`). Positive evidence a reviewer
-    /// exists and will not help - exactly what a nudge or lane failover needs.
-    Refused,
-    /// Responded with a failure / unparseable payload.
-    Errored,
-    /// A configured reviewer that produced no response.
-    Absent,
-}
+// The verdict vocabulary (producer axis, verdict, scope) lives in the
+// `verdict` child module; attestation authorship lives in `authorship`.
 
 /// A first-class coverage value, separate from the objection predicate. Never
 /// 0-on-error: a failed read is `Unknown`, which behaves as 0 for the autonomous
@@ -5810,39 +5769,8 @@ impl Coverage {
     }
 }
 
-/// Authorship of a local attestation: did the authoring session emit it, did a
-/// different session, or is that unknowable. Computed from the attestation's
-/// `attester_session_id` against the manifest's `harness_session_id`.
-///
-/// Recorded, never gating. `coverage_count` does not read this field: every
-/// `Reviewed` verdict counts regardless of origin, `SelfAttested` included.
-///
-/// The middle state is deliberately not `Independent`. The manifest names the
-/// session that ran `fno do target init` in the worktree, so a self-handoff
-/// successor or a second agent in a shared worktree is a different session and
-/// is still not independent. A match is strong evidence of self-attestation; a
-/// mismatch is weak evidence of anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttestationOrigin {
-    SelfAttested,
-    OtherSession,
-    Unknown,
-}
-
-/// How a local attestation was scoped to this PR: it is scopeable while
-/// scope lasts (`attested_branch`: it named this PR's head branch, or it pins
-/// this PR's exact head sha), or it predates the `branch` field and was
-/// admitted on exact head equality alone (`legacy_head_match`). The second is
-/// the one a refusal must NAME rather than silently drop: a pre-branch-field
-/// attestation on a moved head is unscopeable, and a reader told only "0
-/// reviewed" cannot tell it from nobody-ever-reviewed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttestationScope {
-    AttestedBranch,
-    LegacyHeadMatch,
-}
+/// Attestation scoping and the rest of the verdict vocabulary live in
+/// [`verdict`]; authorship lives in [`authorship`].
 
 /// One reviewer's classification, for the `review_coverage` event and receipts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5865,17 +5793,13 @@ pub struct ReviewerVerdict {
     #[serde(skip_serializing_if = "is_false", default)]
     pub author_approval: bool,
     /// Whether a local attestation was emitted by the authoring session
-    /// (`SelfAttested`), a different one (`OtherSession`), or that is
-    /// unknowable (`Unknown`). `coverage_count` never reads it: a
-    /// `SelfAttested` verdict counts toward coverage exactly like any other,
-    /// and a PR whose only attestation is self-attested is covered. Whether
-    /// that should stay true is a later gate decision, not this field.
-    /// Only meaningful on `local_attestation` verdicts; github_app and
-    /// human approvals carry `Unknown` since a GitHub login has no session
-    /// to compare. Defaults to `Unknown` so every pre-existing attestation
-    /// lands there unchanged. `Unknown` serializes as `"unknown"`, never
-    /// as an absent key: a consumer reading absent as "not self_attested"
-    /// once cleared a PR whose only review was the author's own.
+    /// (`SelfAttested`), a different one (`OtherSession`), by a session that
+    /// could not be compared (`Unmeasured`), or by an unobservable attester
+    /// (`Unknown`). The gate rule over these lives in
+    /// [`counts_as_self_attestation_basis`]. `Unknown` serializes as
+    /// `"unknown"`, never as an absent key: a consumer reading absent as
+    /// "not self_attested" once cleared a PR whose only review was the
+    /// author's own.
     #[serde(default = "default_attestation_origin")]
     pub attestation_origin: AttestationOrigin,
     /// The commit this reviewer actually read: a github_app review object's
@@ -5953,20 +5877,37 @@ pub enum ReviewState {
     Unreviewed,
 }
 
+/// Whether one verdict feeds the self-attestation-alone basis: a counted
+/// local verdict is the author's own unless its origin is a measured
+/// `OtherSession`. Every unresolved origin refuses - `SelfAttested` is the
+/// author's own, `Unmeasured` is a comparison that failed, and `Unknown`
+/// (attester absent or empty) is no evidence of who attested at all: an
+/// author running the review from a shell with no harness marker lands
+/// there, so treating it as a peer would clear a self-review. ONE rule for
+/// BOTH readers: the rests-alone term and the recorded `self_attested_count`
+/// (the split definitions once serialized a count of 0 beside a gate that
+/// held the same row as the author's own).
+fn counts_as_self_attestation_basis(v: &ReviewerVerdict, github_approval_satisfies: bool) -> bool {
+    v.verdict == CoverageVerdict::Reviewed
+        && human_approval_counts(v, github_approval_satisfies)
+        && v.producer == CoverageProducer::LocalAttestation
+        && v.attestation_origin != AttestationOrigin::OtherSession
+}
+
 impl CoverageReport {
     /// Count of `reviewed` verdicts, excluding human approvals. This is the one
     /// place that decides whether a human GitHub approval counts; flip the
     /// `!v.human_approval` guard to include them (the operator's deferred call).
-    /// How many of the counted verdicts are the author attesting its own diff.
-    /// Recorded, never gating - see `coverage_event_data` for why.
+    /// How many of the counted verdicts the self-attestation rule reads as the
+    /// author's own - the SAME predicate `rests_on_self_attestation_alone`
+    /// applies, so the recorded number can never contradict the gate holding
+    /// on it. Recorded, never gating on the Rust side - see
+    /// `coverage_event_data` for why; the Python held-row reader treats a
+    /// recorded positive count as the answer.
     pub fn self_attested_count(&self) -> usize {
         self.verdicts
             .iter()
-            .filter(|v| {
-                v.verdict == CoverageVerdict::Reviewed
-                    && human_approval_counts(v, self.github_approval_satisfies)
-                    && v.attestation_origin == AttestationOrigin::SelfAttested
-            })
+            .filter(|v| counts_as_self_attestation_basis(v, self.github_approval_satisfies))
             .count()
     }
 
@@ -5980,13 +5921,14 @@ impl CoverageReport {
 
     /// Whether every counted review verdict rests on the author's own
     /// (self_attested) local attestation: no GitHub App review, no second
-    /// session. A counted local verdict is the author's own unless its
-    /// origin is a measured `OtherSession` - unknown authorship cannot prove
-    /// an independent reviewer - so this twin refuses exactly what the
+    /// session. Only a measured `OtherSession` local verdict corroborates;
+    /// `SelfAttested` is the author's own, `Unmeasured` is a comparison that
+    /// failed, and `Unknown` is an attester nobody could observe - no
+    /// evidence of independence - so this twin refuses exactly what the
     /// serialized-row gate in the Python merge path refuses.
     pub fn rests_on_self_attestation_alone(&self) -> bool {
         let mut counted = 0usize;
-        let mut self_attested = 0usize;
+        let mut basis = 0usize;
         for v in &self.verdicts {
             if v.verdict != CoverageVerdict::Reviewed
                 || !human_approval_counts(v, self.github_approval_satisfies)
@@ -5994,13 +5936,11 @@ impl CoverageReport {
                 continue;
             }
             counted += 1;
-            if v.producer == CoverageProducer::LocalAttestation
-                && v.attestation_origin != AttestationOrigin::OtherSession
-            {
-                self_attested += 1;
+            if counts_as_self_attestation_basis(v, self.github_approval_satisfies) {
+                basis += 1;
             }
         }
-        counted > 0 && counted == self_attested
+        counted > 0 && counted == basis
     }
 
     /// Apply `config.review.require_corroboration`: a covered report whose
@@ -6039,24 +5979,6 @@ fn is_true(b: &bool) -> bool {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_attestation_origin() -> AttestationOrigin {
-    AttestationOrigin::Unknown
-}
-
-/// Label a local attestation's authorship from its emitting session vs the
-/// worktree's authoring session. A match is `SelfAttested`; a non-empty
-/// mismatch is `OtherSession` (NOT "independent" - a self-handoff successor or
-/// a shared-worktree sibling is a different session and still not independent);
-/// an empty/absent attester, or an unknown author, is `Unknown`. Failing open
-/// on unknown authorship keeps the pre-change verdict set byte-identical.
-fn classify_attestation_origin(attester: Option<&str>, author: Option<&str>) -> AttestationOrigin {
-    match (attester, author) {
-        (Some(a), Some(auth)) if a == auth => AttestationOrigin::SelfAttested,
-        (Some(_), Some(_)) => AttestationOrigin::OtherSession,
-        _ => AttestationOrigin::Unknown,
-    }
 }
 
 /// One reviewer's latest attestation, the commit it pinned, and whether that
@@ -6159,7 +6081,7 @@ pub struct RangeTiling {
 /// only. ONE parse serves every consumer (disposition blockers, tiling
 /// ranges, the answered-fail predicates); a second hand-copy of this loop is
 /// how the gates drift (x-aecc review, finding 4).
-fn in_scope_chain(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<Value> {
+pub fn in_scope_chain(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<Value> {
     let mut chain: Vec<Value> = Vec::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -6883,9 +6805,9 @@ fn local_attestation_verdict(
 /// `author_session` is the manifest's `harness_session_id` (the session that ran
 /// `fno do target init` in this worktree). Each local attestation's
 /// `attester_session_id` is compared against it to label `attestation_origin`;
-/// `None` (no manifest / unparseable) leaves every local verdict `Unknown`,
-/// failing open on unknown authorship so the coverage verdict is byte-identical
-/// to the pre-change behavior. `coverage_count` never reads the origin: every
+/// `None` (no manifest / unparseable) leaves the comparison unresolved
+/// (`Unmeasured` / `Unknown`), which REFUSES at the disposition and
+/// corroboration gates. `coverage_count` never reads the origin: every
 /// `Reviewed` verdict counts regardless of it, `SelfAttested` included.
 pub fn classify_coverage(
     reviews: &[Value],
@@ -7175,11 +7097,31 @@ pub fn classify_coverage_tiled(
     }
     if local_passes.iter().any(|lp| answered_fail(lp)) {
         let chain = in_scope_chain(events_text, head_branch, head_sha);
+        // The disposition basis counts the ANSWERED-FAIL candidates too, not
+        // only the passes: a chain with no pass at all - one declined fail -
+        // left the basis empty, rests_on_self_attestation_alone read false on
+        // zero counted verdicts, and the author's own reasoned decline read
+        // terminal on the author's signature alone. The candidates' origins
+        // are exactly what the predicate must measure.
+        let mut basis_verdicts = verdicts.clone();
+        for lp in local_passes.iter().filter(|lp| answered_fail(lp)) {
+            basis_verdicts.push(local_attestation_verdict(
+                lp,
+                freshness,
+                tiling,
+                author_session,
+            ));
+        }
         let basis = CoverageReport {
             coverage: Coverage::Covered(0),
-            verdicts: verdicts.clone(),
+            verdicts: basis_verdicts,
             github_approval_satisfies,
         };
+        // Locked Decision 2: a disposition pass carries its OWN corroboration
+        // requirement, independent of config.review.require_corroboration - a
+        // disposition pass can be gamed by declining, a clean review cannot.
+        // Key-gating here let a reasoned decline read terminal at default
+        // config while both gates refused the same row.
         let blockers =
             disposition_blockers_on_chain(&chain, basis.rests_on_self_attestation_alone());
         if !blockers_withhold(&blockers, rounds_exhausted) {
@@ -7475,13 +7417,18 @@ fn coverage_event_data_full(
         // `independent_count`: the schema is explicit that `other_session` is
         // not independence, and this must not launder that.
         //
-        // Emitted ONLY when authorship was measured. classify_attestation_origin
-        // labels every verdict Unknown when `author_session` is None, so
-        // `self_attested_count()` would read 0 while the truth is unmeasured -
-        // a measured-zero shape (x-62a1: an aggregate reporting a state its
-        // inputs do not support). The field is omitted instead, never 0, so
-        // the day a gate enforces it, absence reads unmeasured rather than
-        // "no self-attest" and cannot serve as the bypass.
+        // Emitted only when an author session was established. With none,
+        // classify_attestation_origin labels a present-attester verdict
+        // Unmeasured (or Unknown when the attester is absent too), so
+        // `self_attested_count()` would read 0 while the truth is unmeasured
+        // - a measured-zero shape (x-62a1: an aggregate reporting a state
+        // its inputs do not support). The field is omitted instead, never 0,
+        // and the gate that enforces it exists now: the Python merge gate's
+        // counts path reads an ABSENT count as refuse, so the omit cannot
+        // serve as a bypass. After a
+        // carry-forward the session may be the HISTORICAL author's, so the
+        // count is telemetry about the carried identity, not a proof this
+        // process measured anything.
         if author_session.is_some() {
             data["self_attested_count"] = serde_json::json!(rep.self_attested_count());
         }
@@ -13394,11 +13341,15 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     );
 
     // Authorship: --session-id, else the manifest's harness_session_id when one
-    // exists, else None. Resolve it before the PR-head read so even an unknown
-    // row from that read failure keeps the established event shape.
+    // exists, else None. The historical carry-forward happens inside
+    // read_pr_info, where the PR number is known: the events file is
+    // project-wide, so a carry computed before the number resolves cannot be
+    // filtered and would hand this PR a foreign PR's author. A failed PR-head
+    // read therefore emits its unknown row with no author id at all - which
+    // refuses at the corroboration gate, the correct closed posture.
     let author_session = session_id.or_else(|| {
-        // The manifest moved into the worktree slice of the space; the legacy
-        // checkout path is the read fallback for one release.
+        // The manifest moved into the worktree slice of the space; the
+        // legacy checkout path is the read fallback for one release.
         std::fs::read_to_string(crate::paths::worktree_space_dir(&cwd).join("target-state.md"))
             .or_else(|_| std::fs::read_to_string(cwd.join(".fno/target-state.md")))
             .ok()
@@ -13585,7 +13536,23 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     &pr_info.coverage,
                     &head_sha,
                     &inputs.repo_slug,
-                    author_session.as_deref(),
+                    // The same author read_pr_info classified with: the
+                    // measured session, else the PR-filtered carry-forward.
+                    // Recomputed rather than threaded back so PrInfo keeps its
+                    // shape; deterministic, and idempotent across the row
+                    // read_pr_info just wrote (its own author_session_id now
+                    // answers the scan).
+                    author_session
+                        .as_deref()
+                        .map(str::to_string)
+                        .or_else(|| {
+                            carry_author_session_forward(
+                                &std::fs::read_to_string(&inputs.project_events)
+                                    .unwrap_or_default(),
+                                pr_info.number,
+                            )
+                        })
+                        .as_deref(),
                     Some(&pr_info.range_tiling),
                     pr_info.posture.as_ref(),
                 )
@@ -15041,11 +15008,12 @@ mod tests {
 
     #[test]
     fn coverage_event_omits_self_attested_count_when_authorship_unmeasured() {
-        // The manifest-less recompute shape: no author session, so every
-        // attestation classifies Unknown and self_attested_count() would read
-        // 0 while the truth is UNMEASURED. A measured zero and an unmeasured
-        // one must not serialize identically - the field is omitted, never 0,
-        // so a future gate on it cannot read absence-of-measurement as
+        // The manifest-less recompute shape: no author session, so an
+        // attested line classifies Unmeasured (a concrete attester, no
+        // comparison possible) and self_attested_count() reads 0 while the
+        // truth is UNMEASURED. A measured zero and an unmeasured one must
+        // not serialize identically - the field is omitted, never 0, so a
+        // future gate on it cannot read absence-of-measurement as
         // absence-of-self-attestation (the x-62a1 aggregate shape).
         let events = attestation_line("code-review", "h", "pass");
         let rep = classify_coverage(
@@ -15060,11 +15028,12 @@ mod tests {
             "h",
         );
         assert_eq!(rep.coverage, Coverage::Covered(1));
-        // Every origin is Unknown - the direct statement of "unmeasured".
+        // No verdict carries a MEASURED classification - the direct statement
+        // of "unmeasured" authorship.
         assert!(rep
             .verdicts
             .iter()
-            .all(|v| v.attestation_origin == AttestationOrigin::Unknown));
+            .all(|v| v.attestation_origin == AttestationOrigin::Unmeasured));
         let data = coverage_event_data(826, &rep, "h", "", None);
         assert_eq!(data["reviewed_count"], serde_json::json!(1));
         assert!(
