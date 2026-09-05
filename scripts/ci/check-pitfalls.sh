@@ -68,7 +68,9 @@ while IFS=$'\t' read -r title has_grad has_added date grad_val; do
   [[ -z "$title" ]] && continue
   ENTRY_COUNT=$((ENTRY_COUNT + 1))
   TITLES+="${title}"$'\n'
-  GRAD_LINES+="${title}"$'\t'"${grad_val}"$'\n'
+  # A missing field already fails above; an empty value would only hand the
+  # resolution pass a violation quoting '' as the value.
+  [[ -n "$grad_val" ]] && GRAD_LINES+="${title}"$'\t'"${grad_val}"$'\n'
   [[ "$has_grad" != "1" ]] && add_violation "entry '${title}' is missing a 'graduates-to:' field"
   if [[ "$has_added" != "1" ]]; then
     add_violation "entry '${title}' is missing an 'added:' field"

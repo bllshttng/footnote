@@ -272,6 +272,22 @@ def test_graduates_to_resolving_to_no_node_fails(tmp_path: Path) -> None:
     assert "resolves to no filed node" in r.stderr
 
 
+def test_missing_graduates_to_fails_once_not_twice(tmp_path: Path) -> None:
+    # An entry missing the field already fails on field presence; handing the
+    # resolution pass its empty value would print a second violation quoting
+    # '' as the value and naming it as the guard to file.
+    graph = _seeded_graph(tmp_path)
+    path = tmp_path / "agents.md"
+    path.write_text(
+        f"# AGENTS\n\n{SECTION}\n\nrationale.\n\n### Bad\n\ntrap.\n\n- added: {FRESH}\n\n{NEXT_HEADING}\n",
+        encoding="utf-8",
+    )
+    r = _run(path, env_extra={"FNO_GRAPH_JSON": str(graph)})
+    assert r.returncode == 1
+    assert "missing a 'graduates-to:' field" in r.stderr
+    assert "resolves to no filed node" not in r.stderr
+
+
 def test_graduates_to_resolves_by_node_id(tmp_path: Path) -> None:
     graph = _seeded_graph(tmp_path)
     path = _fixture(tmp_path, [("A trap", "x-1234", FRESH)])
