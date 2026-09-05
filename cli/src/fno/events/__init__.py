@@ -38,6 +38,7 @@ from typing import Any, TypeGuard
 import yaml as _yaml
 
 from ..mutex import acquire_dir_mutex, release_dir_mutex
+from ..paths import EPHEMERAL_EVENTS_SUFFIX as EPHEMERAL_SUFFIX
 from .verify_child_promise import FanInTally, tally_fan_in, verify_child_promise
 
 
@@ -149,6 +150,9 @@ ALLOWED_SOURCE_PATTERNS: list[Any]
 ALLOWED_GATES: set[str]
 RETENTION_DEFAULT: str
 RETENTION_MINIMUM_TTL_HOURS: int
+# EPHEMERAL_SUFFIX (sibling journal for ephemeral-class rows, x-add3) is
+# aliased from fno.paths at import time, one definition shared by every
+# Python reader and writer; a parity test holds it equal to the Rust const.
 _schema_load_error: SchemaUnavailableError | None = None
 
 try:
@@ -1737,6 +1741,14 @@ def append_event(
 
         events_path = project_events_json()
     requested_path = Path(events_path)
+    # Honor the declared retention class (x-add3): an ephemeral row goes to the
+    # sibling journal beside the requested one, so a high-cadence gauge cannot
+    # consume the durable journal's rotation budget. Every other class keeps
+    # the requested path. The sibling is derived from the RESOLVED journal
+    # inside the loop, so a worktree journal symlinked into the repo's space
+    # routes its ephemeral rows to that space's sibling, not a worktree-local
+    # file the symlink never covered.
+    ephemeral = retention_for(str(event.get("type", ""))) == "ephemeral"
     # Before the mkdir: a refused write must not leave a .fno/ behind either.
     _refuse_hermetic_escape(requested_path)
     requested_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1751,8 +1763,13 @@ def append_event(
         # the escape this guard targets. Judging only before the resolve leaves
         # the window the retry loop was written to acknowledge.
         _refuse_hermetic_escape(resolved_path)
-        resolved_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_dir = resolved_path.parent / (resolved_path.name + ".lock.d")
+        target_path = (
+            resolved_path.with_name(resolved_path.name + EPHEMERAL_SUFFIX)
+            if ephemeral
+            else resolved_path
+        )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_dir = target_path.parent / (target_path.name + ".lock.d")
         token = acquire_dir_mutex(lock_dir, lock_timeout_seconds)
         if token is None:
             raise TimeoutError(f"events.jsonl lock timeout: {lock_dir}")
@@ -1766,7 +1783,7 @@ def append_event(
         release_dir_mutex(lock_dir, token)
 
     try:
-        with resolved_path.open("a", encoding="utf-8") as fh:
+        with target_path.open("a", encoding="utf-8") as fh:
             fh.write(_json.dumps(event, separators=(",", ":")) + "\n")
     finally:
         release_dir_mutex(lock_dir, token)
@@ -1781,6 +1798,7 @@ __all__ = [
     "MAX_DATA_BYTES",
     "RETENTION_DEFAULT",
     "RETENTION_MINIMUM_TTL_HOURS",
+    "EPHEMERAL_SUFFIX",
     "SCHEMA",
     "SESSION_SATISFIED_SOURCES",
     "SchemaUnavailableError",

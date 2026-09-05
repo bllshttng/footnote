@@ -125,7 +125,15 @@ def scoreboard_command(
     if len(_views) > 1:
         raise typer.BadParameter(f"{' and '.join(_views)} are mutually exclusive views; pick one.")
     ledger_path = _paths.ledger_json()
-    events_paths = [ledger_path.parent / "events.jsonl"]
+    from fno.events import EPHEMERAL_SUFFIX  # lazy: keeps schema load off the help path
+
+    events_paths = [
+        ledger_path.parent / "events.jsonl",
+        # Ephemeral-class rows (human_touch among them) live in the sibling
+        # journal since retention routing landed (x-add3); the reader takes
+        # both and dedups, so pre- and post-routing rows are both visible.
+        ledger_path.parent / ("events.jsonl" + EPHEMERAL_SUFFIX),
+    ]
     graph_path = _paths.graph_json()
 
     try:

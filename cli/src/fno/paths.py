@@ -804,50 +804,87 @@ def project_events_json() -> Path:
     return _guard_state_path(space)
 
 
+# Sibling journal suffix for ephemeral-class rows (x-add3). Declared here, the
+# dependency-free module, so both `fno.events` (which aliases it as
+# EPHEMERAL_SUFFIX) and `event_journals` share one definition; the Rust
+# EventEmitter states the same string and a parity test holds all of them
+# equal.
+EPHEMERAL_EVENTS_SUFFIX = ".ephemeral"
+
+
+def journal_and_ephemeral_sibling(path: Path) -> list[Path]:
+    """The resolved journal plus its ``.ephemeral`` sibling, oldest first.
+
+    The one derivation for readers that take an explicit journal path: the
+    journal is RESOLVED first because callers pass worktree journals that are
+    symlinks into the repo space, and the sibling lives beside the real file,
+    not beside the link. Readers with a different shape (the scoreboard's
+    static ledger pair, the pane reader's rotation bridge) still derive their
+    own lists but must keep this resolve-first order.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path.absolute()
+    return [
+        resolved,
+        resolved.with_name(resolved.name + EPHEMERAL_EVENTS_SUFFIX),
+    ]
+
+
 def event_journals() -> list[Path]:
     """Return every event journal and retained rotation, oldest first.
 
     The three live journals have different owners, but each uses the same
     ``events.jsonl`` rotation convention. Resolve and de-duplicate after
     expansion because a worktree journal may be a symlink to the project log.
+    Each resolved journal also contributes its ``.ephemeral`` sibling (retention
+    routing, x-add3) plus that sibling's own numeric rotations, listed only
+    when they exist - the sibling is derived from the RESOLVED journal so a
+    symlinked worktree journal points at its space's sibling, the same file
+    the writers route to.
     """
-    live_paths = (
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    for live in (
         global_events_json(),
         agents_home_dir() / "events.jsonl",
         project_events_json(),
-    )
-    resolved: list[Path] = []
-    seen: set[Path] = set()
-    for live in live_paths:
+    ):
         try:
             resolved_live = live.resolve()
         except OSError:
             resolved_live = live.absolute()
-        parent = resolved_live.parent
-        prefix = resolved_live.name + "."
-        rotated: list[tuple[int, Path]] = []
-        entries: Iterable[Path]
-        try:
-            entries = parent.iterdir()
-        except OSError:
-            entries = ()
-        for candidate in entries:
-            if not candidate.name.startswith(prefix):
-                continue
-            suffix = candidate.name[len(prefix) :]
-            if suffix.isdigit() and candidate.exists():
-                rotated.append((int(suffix), candidate))
-        rotated.sort(key=lambda item: item[0], reverse=True)
-        candidates = [path for _, path in rotated]
-        candidates.append(resolved_live)
-        for candidate in candidates:
+        bases = [resolved_live]
+        ephemeral = resolved_live.with_name(resolved_live.name + EPHEMERAL_EVENTS_SUFFIX)
+        if ephemeral.exists():
+            bases.append(ephemeral)
+        for base in bases:
+            parent = base.parent
+            prefix = base.name + "."
+            rotated: list[tuple[int, Path]] = []
+            entries: Iterable[Path]
             try:
-                path = candidate.resolve()
+                entries = parent.iterdir()
             except OSError:
-                path = candidate.absolute()
-            if path not in seen:
-                seen.add(path)
-                resolved.append(path)
+                entries = ()
+            for candidate in entries:
+                if not candidate.name.startswith(prefix):
+                    continue
+                suffix = candidate.name[len(prefix) :]
+                if suffix.isdigit() and candidate.exists():
+                    rotated.append((int(suffix), candidate))
+            rotated.sort(key=lambda item: item[0], reverse=True)
+            candidates = [path for _, path in rotated]
+            candidates.append(base)
+            for candidate in candidates:
+                try:
+                    path = candidate.resolve()
+                except OSError:
+                    path = candidate.absolute()
+                if path not in seen:
+                    seen.add(path)
+                    resolved.append(path)
     return resolved
 
 
