@@ -80,6 +80,8 @@ pub mod events_limits;
 pub mod finalize;
 pub mod gc;
 pub mod gemini_ask;
+#[cfg(test)]
+mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
 pub mod graph_store;

@@ -8,8 +8,6 @@ dying with the board.
 
 from __future__ import annotations
 
-from typing import Optional
-
 #: Priorities a king treats as its own work. Lower bands are the operator's to
 #: rank up; a king that dispatched p2 would spend the fleet on the wrong thing.
 KING_PRIORITIES = frozenset({"p0", "p1"})
