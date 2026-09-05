@@ -3560,7 +3560,7 @@ pub fn remove_session_files(socket: &Path) -> std::io::Result<()> {
 // question it answers; the file-budget gate keeps this over-budget file
 // shrink-only.
 mod startup_guard;
-use startup_guard::{acquire_startup_guard, StartupGuard};
+use startup_guard::{claim_startup, StartupClaim};
 pub use startup_guard::{remove_startup_guard, startup_sidecar_path};
 
 pub const DEFAULT_SESSION: &str = "main";
@@ -3583,97 +3583,66 @@ pub(crate) enum ProbeOutcome {
 const PROBE_HOLDER_TERM_GRACE: Duration = Duration::from_secs(3);
 const PROBE_HOLDER_KILL_GRACE: Duration = Duration::from_secs(1);
 
-/// Bind the session socket, treating the bind itself as the lock.
+/// Claim the session socket through the startup handshake, treating the bind
+/// itself as the lock.
 ///
-/// - Fresh path: bind wins atomically.
-/// - `AddrInUse`: query-probe. A `ServerMsg::Info` response means a live server
-///   (`AlreadyRunning`). A refused connection is stale when no holder sidecar
-///   exists; when one does, it still coordinates with that holder. A
-///   markerless response is unknown: the pid sidecar must prove the old holder
-///   exited before the socket is unlinked and rebound.
+/// - Fresh path: the claim owns the marker and the bind wins atomically.
+/// - A live starter holds the marker: the claim WAITS it out - the winner
+///   answers (`AlreadyRunning`), or its marker clears or dies and the claim
+///   is retried - so no starter ever binds over a peer mid-startup, and a
+///   marker owner can never lose its bind to one. A wedged startup refuses
+///   at the claim's deadline.
+/// - `AddrInUse` once we hold the claim: query-probe. A `ServerMsg::Info`
+///   response means a live server (`AlreadyRunning`); anything else means a
+///   dead or legacy holder, which is terminated or proven gone before the
+///   path is rebound.
 ///
-/// ponytail: unlink-then-rebind has a tiny two-racers-over-a-stale-socket
-/// window (both probe dead, both unlink+bind; the second unlink can orphan the
-/// first winner's socket). The plan locks "no lockfile - bind is the lock";
-/// the cold-start race (AC4-EDGE, no stale socket) is fully atomic, and the
-/// stale+simultaneous case needs a dead server AND a photo-finish start. If it
-/// ever bites, the upgrade is an O_EXCL sidecar lock around the unlink.
+/// ponytail: unlink-then-rebind keeps a tiny two-racers-over-a-stale-socket
+/// window (both probe dead, both unlink+bind). If it ever bites, the upgrade
+/// is an O_EXCL sidecar lock around the unlink.
 pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
-    let startup = acquire_startup_guard(path)?;
-    let mut owns_startup = startup == StartupGuard::Owned;
+    match claim_startup(path)? {
+        StartupClaim::Running => return Ok(BindOutcome::AlreadyRunning),
+        StartupClaim::Own => {}
+    }
+    match UnixListener::bind(path) {
+        Ok(l) => Ok(BindOutcome::Bound(l)),
+        Err(e) if socket_in_use(&e) => match probe_status(path) {
+            ProbeOutcome::Alive => {
+                remove_startup_guard(path);
+                Ok(BindOutcome::AlreadyRunning)
+            }
+            ProbeOutcome::Unknown | ProbeOutcome::Dead if pid_sidecar_path(path).exists() => {
+                reclaim_unresponsive_holder(path)?;
+                rebind_after_release(path)
+            }
+            // No holder identity: the legacy stale-socket recovery. The claim
+            // we hold says no startup is in flight, so nothing live claimed
+            // the path between our probes.
+            ProbeOutcome::Unknown | ProbeOutcome::Dead => rebind_after_release(path),
+        },
+        Err(e) => {
+            remove_startup_guard(path);
+            Err(e)
+        }
+    }
+}
+
+/// Take the path from a holder that is dead or has been terminated. Session
+/// files, not just the socket, so a dead holder's .pid cannot outlive the
+/// rebind and name an unrelated pid. Losing the rebind means a peer won it;
+/// that peer is the server. Not Bound means the marker we claimed must not
+/// outlive the claim: a starter after us would wait out its dead pid.
+fn rebind_after_release(path: &Path) -> std::io::Result<BindOutcome> {
+    remove_session_files(path)?;
     match UnixListener::bind(path) {
         Ok(l) => Ok(BindOutcome::Bound(l)),
         Err(e) if socket_in_use(&e) => {
-            let mut reclaimed_holder = false;
-            match probe_status(path) {
-                ProbeOutcome::Alive => {
-                    if owns_startup {
-                        remove_startup_guard(path);
-                    }
-                    return Ok(BindOutcome::AlreadyRunning);
-                }
-                ProbeOutcome::Unknown if !owns_startup => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        format!("mux startup in progress at {}", path.display()),
-                    ));
-                }
-                ProbeOutcome::Unknown if pid_sidecar_path(path).exists() => {
-                    reclaim_unresponsive_holder(path)?;
-                    reclaimed_holder = true;
-                }
-                // A pre-sidecar server or a dead listener can leave one
-                // residual connection that has no positive marker. Preserve
-                // the legacy stale-socket recovery when there is no holder
-                // identity to coordinate with; current servers write `.pid`.
-                ProbeOutcome::Unknown => {}
-                ProbeOutcome::Dead if !owns_startup => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        format!("mux startup owner still holds {}", path.display()),
-                    ));
-                }
-                ProbeOutcome::Dead if pid_sidecar_path(path).exists() => {
-                    reclaim_unresponsive_holder(path)?;
-                    reclaimed_holder = true;
-                }
-                ProbeOutcome::Dead => {}
-            }
-            if reclaimed_holder && !owns_startup {
-                remove_startup_guard(path);
-                if acquire_startup_guard(path)? != StartupGuard::Owned {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        format!("mux startup in progress at {}", path.display()),
-                    ));
-                }
-                owns_startup = true;
-            }
-            // The holder is dead or has been terminated. Session files, not
-            // just the socket, so a dead holder's .pid cannot outlive the
-            // rebind and name an unrelated pid.
-            remove_session_files(path)?;
-            match UnixListener::bind(path) {
-                Ok(l) => Ok(BindOutcome::Bound(l)),
-                Err(e) if socket_in_use(&e) => {
-                    // Someone else won the rebind race; they are the server.
-                    if owns_startup {
-                        remove_startup_guard(path);
-                    }
-                    Ok(BindOutcome::AlreadyRunning)
-                }
-                Err(e) => {
-                    if owns_startup {
-                        remove_startup_guard(path);
-                    }
-                    Err(e)
-                }
-            }
+            remove_startup_guard(path);
+            Ok(BindOutcome::AlreadyRunning)
         }
         Err(e) => {
-            if owns_startup {
-                remove_startup_guard(path);
-            }
+            remove_startup_guard(path);
             Err(e)
         }
     }

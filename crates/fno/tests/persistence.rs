@@ -24,20 +24,26 @@ use fno::proto::{
 /// visible instead of burying it under a cascade of `PoisonError` panics.
 static PTY_GATE: Mutex<()> = Mutex::new(());
 
-/// Count live processes whose command line carries this scratch's socket
-/// path: exactly the servers of this test's session (the path is unique per
-/// test, so no cross-talk).
+/// Live processes whose command line carries this scratch's socket path:
+/// exactly the servers of this test's session (the path is unique per test,
+/// so no cross-talk). Each line is `pid args`, so a count failure names the
+/// extra process instead of reporting a bare `left: 2`.
 fn server_count(scratch: &Scratch) -> usize {
-    let out = std::process::Command::new("pgrep")
-        .arg("-f")
-        .arg(scratch.main_sock().to_str().unwrap())
+    server_processes(scratch).len()
+}
+
+fn server_processes(scratch: &Scratch) -> Vec<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-eo", "pid=,args="])
         .output()
         .unwrap();
-    // pgrep exits 1 with empty output when nothing matches.
+    let pattern = scratch.main_sock().to_str().unwrap().to_string();
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter(|l| !l.trim().is_empty())
-        .count()
+        .filter(|l| l.contains(&pattern))
+        .map(str::trim)
+        .map(str::to_string)
+        .collect()
 }
 
 fn kill_server(scratch: &Scratch) {
@@ -283,7 +289,8 @@ fn persistence_two_cold_clients_converge_on_one_server() {
     assert_eq!(
         server_count(&scratch),
         1,
-        "exactly one server may own the session"
+        "exactly one server may own the session; matching processes: {:?}",
+        server_processes(&scratch)
     );
 }
 

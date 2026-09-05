@@ -4,12 +4,18 @@
 //! shrink-only budget on proto.rs stays honest.
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{
     parse_pid_sidecar, pid_confirmed_dead, pid_is_zombie, pid_start_time, probe_status,
     ProbeOutcome,
 };
+
+/// How long a starter waits out a live marker before refusing. Mirrors the
+/// client's own spawn-connect budget: a wedged startup must fail loudly, not
+/// block a launch forever.
+const WAIT_STARTUP_DEADLINE: Duration = Duration::from_secs(10);
+const WAIT_STARTUP_POLL: Duration = Duration::from_millis(50);
 
 /// Marker held from socket bind until the server exits. It protects a freshly
 /// bound listener that cannot answer the query probe yet, so a concurrent
@@ -89,6 +95,18 @@ fn hold_start_marker_for_tests() {
     }
 }
 
+/// Test seam, the owner-side mirror: when the env var is set, a just-OWNED
+/// marker pauses before bind_or_probe's bind, so a test can land the racer's
+/// bind inside the owner's startup window and pin the racer's verdict against
+/// a marker held by another starter. Unset in production, a no-op.
+fn hold_owned_marker_for_tests() {
+    if let Some(v) = std::env::var_os("FNO_TEST_OWNED_HOLD_MS") {
+        if let Ok(ms) = v.to_string_lossy().parse::<u64>() {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+    }
+}
+
 /// Remove the marker, tolerating only "already gone" (the owner's own exit
 /// or a peer's reclaim). Every other error propagates: a remove that keeps
 /// failing while the marker sits there would otherwise spin this loop hot
@@ -100,11 +118,68 @@ fn remove_marker_gone_tolerant(marker: &Path) -> std::io::Result<()> {
     }
 }
 
+/// The outcome of [`claim_startup`].
+pub(crate) enum StartupClaim {
+    /// We hold the marker: bind.
+    Own,
+    /// A live server answered while we waited: attach instead.
+    Running,
+}
+
+/// Take the right to bind `socket`, waiting out a live starter instead of
+/// racing its bind. Racing is the two-server shape: this starter binds first,
+/// the marker owner resumes, loses its bind, reads the silent winner as a
+/// stale socket, and unlinks a live peer. A waiter instead converges: the
+/// winner answers (`Running`), its marker clears or dies and the claim is
+/// retried (`Own`), or a wedged startup refuses at the deadline.
+pub(crate) fn claim_startup(socket: &Path) -> std::io::Result<StartupClaim> {
+    let deadline = Instant::now() + WAIT_STARTUP_DEADLINE;
+    loop {
+        match acquire_startup_guard(socket)? {
+            StartupGuard::Owned => return Ok(StartupClaim::Own),
+            StartupGuard::ExistingLive => {
+                if probe_status(socket) == ProbeOutcome::Alive {
+                    return Ok(StartupClaim::Running);
+                }
+                let marker = startup_sidecar_path(socket);
+                let still_starting = match std::fs::read_to_string(&marker) {
+                    Ok(raw) => parse_pid_sidecar(&raw)
+                        .map(|(pid, start)| startup_guard_live(pid, start))
+                        .unwrap_or(false),
+                    Err(_) => false,
+                };
+                if still_starting {
+                    if Instant::now() >= deadline {
+                        return Err(startup_in_progress(socket));
+                    }
+                    std::thread::sleep(WAIT_STARTUP_POLL);
+                    continue;
+                }
+                // Holder gone mid-startup: clear its marker and retry the
+                // claim. A peer reclaiming the same stale marker may have
+                // removed it first - gone is gone, the loop just retries.
+                let _ = std::fs::remove_file(&marker);
+                std::thread::sleep(WAIT_STARTUP_POLL);
+            }
+        }
+    }
+}
+
+fn startup_in_progress(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        format!("mux startup in progress at {}", path.display()),
+    )
+}
+
 pub(crate) fn acquire_startup_guard(socket: &Path) -> std::io::Result<StartupGuard> {
     let marker = startup_sidecar_path(socket);
     loop {
         match create_startup_marker(&marker) {
-            Ok(()) => return Ok(StartupGuard::Owned),
+            Ok(()) => {
+                hold_owned_marker_for_tests();
+                return Ok(StartupGuard::Owned);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 // The marker's owner removes it at exit. Between this racer's
                 // create-fails-AlreadyExists and the read below, that exit
