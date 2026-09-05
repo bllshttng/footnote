@@ -1423,6 +1423,31 @@ def _write_changed_receipt(path: str, payload: dict) -> None:
         pass  # a receipt we cannot write is not a reason to fail the packet
 
 
+def _estimate_changed_minutes(selections: Sequence[dict]) -> int:
+    """Minutes the changed packet plausibly needs, from its selection alone.
+
+    The packet scales with the diff, so its CI cap must too; this estimate is
+    what the changed-smoke cap is sized from. Constants are measured ceilings,
+    not guesses: the full tree runs 894 pytest files in a 1036s step under
+    xdist (about 1.2s a file), so 1.5 tenths of a minute (9s) a file carries
+    roughly 7x headroom; a shell harness is at most about a minute (the stress
+    contract is 35.9s a trial, one trial in changed mode); provisioning
+    includes runner setup plus a cold cargo build, so it gets a flat 5 with
+    the build step adding 2 more. It is deliberately generous: the cost of
+    over-estimating is a wider ceiling on one job, the cost of
+    under-estimating is a run killed by its own cap with no receipt.
+    """
+    pytest_files = len({s["target"] for s in selections if s["kind"] == "pytest"})
+    shell = len({s["target"] for s in selections if s["kind"] == "shell"})
+    structural = {s["target"] for s in selections if s["kind"] == "step"}
+    build = 1 if _RUST_BUILD_STEP in structural else 0
+    # Tenths of a minute, so the arithmetic stays in integers. The build is
+    # priced at 3 on its own; the other structural steps at 1 each.
+    tenths = 50 + (pytest_files * 3) // 2 + shell * 10 \
+        + (len(structural) - build) * 10 + build * 30
+    return max(15, -(-tenths // 10))
+
+
 def _run_changed(root: Path, opts: dict, env: dict) -> int:
     t0 = time.monotonic()
     paths, reason, resolved_base = changed_snapshot(root, opts["base"], opts["head"])
@@ -1446,9 +1471,18 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     steps = _changed_steps(root, selections)
     select_s = time.monotonic() - t0
 
+    estimate = _estimate_changed_minutes(selections)
     print(f"smoke: base={opts['base'] or resolved_base} "
           f"head={opts['head'] or candidate[:12]} changed={len(paths)} "
           f"selected={len(steps)} unmapped={len(unmapped)}", flush=True)
+    # One line both callers size from: the CI sizer job clamps it into a job
+    # ceiling, and the run job refuses the packet when the estimate cannot fit
+    # the ceiling it was given. Printed raw (unclamped) so the fit comparison
+    # sees the real number.
+    print(f"smoke: changed-estimate minutes={estimate} "
+          f"pytest_files={len({s['target'] for s in selections if s['kind'] == 'pytest'})} "
+          f"shell={len({s['target'] for s in selections if s['kind'] == 'shell'})} "
+          f"steps={len(steps)}", flush=True)
     for s in selections:
         print(f"  select  {s['rule']:20} {s['path']} -> {s['target']}", flush=True)
     for u in unmapped:

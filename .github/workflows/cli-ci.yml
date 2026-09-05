@@ -90,17 +90,77 @@ jobs:
           FNO_REAL_CODEX_PLUGIN_TEST: "1"
         run: cli/.venv/bin/fno-py doctor test -q cli/tests/integration/test_codex_plugin_real_boundary.py
 
-  # Early, explicitly partial feedback. It runs BESIDE the canonical smoke job,
-  # never in front of it: no `needs:` edge in either direction, so both start at
-  # once and this one cannot add merge latency. Only `smoke` satisfies the merge
-  # gate - a green here means the selected packet passed and nothing more.
-  # Coverage boundary: `smoke-pytest` and `smoke-rest` are the full-gate shards
-  # on main and pull requests. `changed-smoke` is PR-only and is skipped on
-  # main; its changed-subset selector never supplies main-branch coverage.
-  changed-smoke:
+  # Sizes the changed-smoke ceiling from the packet the selector maps. The
+  # packet scales with the diff, so a fixed cap either starves a large rebase
+  # (killed at the cap, reported as an unattributable `cancelled`) or idles
+  # over a small one. Selection only: `--list` maps and prints, it runs
+  # nothing, so this job needs no smoke-setup and costs seconds. Two outputs:
+  # the raw estimate (the run job's fit assertion compares against it) and the
+  # ceiling actually applied, the estimate clamped at 45.
+  changed-packet-size:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Estimate the packet
+        id: estimate
+        env:
+          CHANGED_BASE: ${{ github.event.pull_request.base.sha }}
+          CHANGED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          est="$(uv run --project cli fno-py doctor test smoke --changed \
+            --base "$CHANGED_BASE" --head "$CHANGED_HEAD" --list 2>/dev/null \
+            | sed -n 's/.*changed-estimate minutes=\([0-9][0-9]*\).*/\1/p' \
+            | tail -1)"
+          # No estimate line is a selector regression, not a small packet, so
+          # it must not read as a ceiling of zero.
+          if [ -z "$est" ]; then
+            echo "no changed-estimate line in the selector output; refusing to size"
+            exit 1
+          fi
+          echo "estimate_minutes=$est" >> "$GITHUB_OUTPUT"
+          echo "timeout_minutes=$(( est > 45 ? 45 : est ))" >> "$GITHUB_OUTPUT"
+
+    outputs:
+      estimate_minutes: ${{ steps.estimate.outputs.estimate_minutes }}
+      timeout_minutes: ${{ steps.estimate.outputs.timeout_minutes }}
+
+  # Early, explicitly partial feedback. It runs BESIDE the canonical smoke job,
+  # never in front of it: only `smoke` satisfies the merge gate - a green here
+  # means the selected packet passed and nothing more. Its one needs edge is
+  # the sizer above, which runs no tests; nothing can make this job delay the
+  # gate. Coverage boundary: `smoke-pytest` and `smoke-rest` are the full-gate
+  # shards on main and pull requests. `changed-smoke` is PR-only and is
+  # skipped on main; its changed-subset selector never supplies main-branch
+  # coverage.
+  changed-smoke:
+    if: github.event_name == 'pull_request'
+    needs: [changed-packet-size]
+    runs-on: ubuntu-latest
+    # The ceiling is the packet-sized output of changed-packet-size, not a
+    # fixed number (needs context is legal in timeout-minutes). GitHub does
+    # not expose timeout-minutes to a step, so the same outputs are also this
+    # job's env and the reporter's third argument; the guards assert the
+    # spellings stay one value.
+    timeout-minutes: ${{ fromJSON(needs.changed-packet-size.outputs.timeout_minutes) }}
+    env:
+      CAP_MINUTES: ${{ needs.changed-packet-size.outputs.timeout_minutes }}
+      ESTIMATE_MINUTES: ${{ needs.changed-packet-size.outputs.estimate_minutes }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -124,10 +184,21 @@ jobs:
           CHANGED_BASE: ${{ github.event.pull_request.base.sha }}
           CHANGED_HEAD: ${{ github.event.pull_request.head.sha }}
           # The full stress contract remains 20 trials. The changed packet is
-          # partial evidence with a 15-minute cap; one trial proves the shell
-          # harness and the full rust-ci job owns the denominator.
+          # partial evidence under a cap sized from the packet itself; one
+          # trial proves the shell harness and the full rust-ci job owns the
+          # denominator.
           STRESS_TRIALS: "1"
         run: |
+          date +%s > "$RUNNER_TEMP/changed-start"
+          start=$SECONDS
+          trap 'bash scripts/ci/smoke-duration-report.sh changed-smoke "$(( SECONDS - start ))" "$CAP_MINUTES" || true; touch "$RUNNER_TEMP/smoke-duration-reported"' EXIT
+          # The estimate is raw (unclamped). A packet that cannot fit the
+          # ceiling fails THIS assertion, naming both numbers, instead of
+          # running until the cap kills it and the run reports cancelled.
+          if [ -z "$ESTIMATE_MINUTES" ] || [ "$ESTIMATE_MINUTES" -gt "$CAP_MINUTES" ]; then
+            echo "ASSERTION: the changed packet estimates ${ESTIMATE_MINUTES:-unknown}m, which cannot fit its ${CAP_MINUTES}m ceiling. Split the work; do not raise the cap."
+            exit 1
+          fi
           set +e
           uv run --project cli fno-py doctor test smoke --changed \
             --base "$CHANGED_BASE" --head "$CHANGED_HEAD"
@@ -142,6 +213,23 @@ jobs:
             exit 0
           fi
           exit $rc
+
+      - name: Timeout receipt (the receipt a cap kill cannot print)
+        # timeout-minutes SIGKILLs the job and the EXIT trap never runs, so an
+        # absent marker means exactly that the cap ate the run. This step then
+        # reports elapsed against the cap itself: the receipt that says
+        # TIMEOUT and names the cap, instead of leaving the reader with a bare
+        # `cancelled` and no actor.
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/smoke-duration-reported" ]; then
+            exit 0
+          fi
+          if [ ! -f "$RUNNER_TEMP/changed-start" ]; then
+            exit 0
+          fi
+          elapsed=$(( $(date +%s) - $(cat "$RUNNER_TEMP/changed-start") ))
+          bash scripts/ci/smoke-duration-report.sh changed-smoke "$elapsed" "$CAP_MINUTES" || true
 
   # The suite outgrew two runners, so the pytest full-gate lane now runs as
   # eight matrix shards and the rest lane as four. Read this before

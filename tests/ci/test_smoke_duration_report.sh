@@ -73,11 +73,59 @@ check "$([[ $rc -eq 0 ]] && echo 1)" \
 # --- the verdict word is always present -----------------------------------
 # A missing line must be distinguishable from a pass. Absence of a warning is
 # not evidence the checker ran; the verdict word is.
-for secs in 1 1063 1500 99999; do
+for secs in 1 1063 1500 1600 1795 99999; do
   out="$(bash "$SCRIPT" smoke-rest "$secs" 30 2>&1)"
-  check "$(grep -qE 'verdict=(ok|approaching)' <<<"$out" && echo 1)" \
+  check "$(grep -qE 'verdict=(ok|approaching|timeout)' <<<"$out" && echo 1)" \
         "a verdict word is printed for ${secs}s" \
         "no verdict word for ${secs}s - absence would read as a pass"
+done
+
+# --- a run within margin of the cap is called a TIMEOUT --------------------
+# A job the cap kills reports `cancelled` with no failed assertion and no trap
+# receipt, which read as an unattributable cancellation five runs in a row.
+# The verdict must say TIMEOUT and name the cap, so nobody subtracts
+# timestamps to find out what happened.
+out="$(bash "$SCRIPT" smoke-rest 1795 30 2>&1)"
+check "$(grep -q 'verdict=timeout' <<<"$out" && echo 1)" \
+      "a run within margin of the cap reports verdict=timeout" \
+      "1795s against a 30m cap did not report timeout"
+check "$(grep -q 'timeout' <<<"$out" && grep -q 'cap=30m\|30m timeout cap' <<<"$out" && echo 1)" \
+      "the timeout receipt names the cap" \
+      "the timeout receipt does not name the 30m cap"
+check "$(grep -q '::warning' <<<"$out" && echo 1)" \
+      "a timeout emits an annotation" \
+      "no ::warning annotation for a timeout"
+check "$(grep -q 'verdict=approaching' <<<"$out" || echo 1)" \
+      "timeout takes precedence over approaching" \
+      "1795s against a 30m cap also reported approaching - the precedence broke"
+summary="$(mktemp)"
+out="$(GITHUB_STEP_SUMMARY="$summary" bash "$SCRIPT" smoke-rest 1795 30 2>&1)"
+check "$([[ -s "$summary" ]] && echo 1)" \
+      "a timeout writes to GITHUB_STEP_SUMMARY" \
+      "GITHUB_STEP_SUMMARY was set and writable but a timeout wrote nothing"
+rm -f "$summary"
+
+# The margin is the one knob, so like SMOKE_WARN_PCT it validates itself and
+# an accepted value must actually move the verdict.
+out="$(SMOKE_TIMEOUT_MARGIN_SECS=300 bash "$SCRIPT" smoke-rest 1600 30 2>&1)"
+check "$(grep -q 'verdict=timeout' <<<"$out" && echo 1)" \
+      "an accepted margin override changes the verdict" \
+      "SMOKE_TIMEOUT_MARGIN_SECS=300 did not make 1600s of a 30m cap a timeout - the knob is dead"
+out="$(SMOKE_TIMEOUT_MARGIN_SECS=0 bash "$SCRIPT" smoke-rest 1795 30 2>&1)"
+check "$(grep -q 'verdict=approaching' <<<"$out" && echo 1)" \
+      "a zero margin reserves timeout for runs at or past the cap" \
+      "with margin 0, 1795s of a 30m cap still reported timeout"
+for margin in "junk" "" "0; echo pwned"; do
+  out="$(SMOKE_TIMEOUT_MARGIN_SECS="$margin" bash "$SCRIPT" smoke-rest 1795 30 2>&1)"; rc=$?
+  check "$([[ $rc -eq 0 ]] && echo 1)" \
+        "a bad margin (${margin:-empty}) still exits 0" \
+        "a bad margin (${margin:-empty}) exited $rc"
+  check "$(grep -q 'verdict=timeout' <<<"$out" && echo 1)" \
+        "a bad margin (${margin:-empty}) falls back to 90s" \
+        "a bad margin (${margin:-empty}) changed the verdict - the fallback broke"
+  check "$(grep -qx 'pwned' <<<"$out" || echo 1)" \
+        "a bad margin (${margin:-empty}) is not evaluated as shell" \
+        "SMOKE_TIMEOUT_MARGIN_SECS was evaluated as shell"
 done
 
 # --- two durations are refused, never summed ------------------------------
@@ -199,7 +247,8 @@ jobs = yaml.safe_load(open(".github/workflows/cli-ci.yml"))["jobs"]
 # alone would red this self-test the day a lint or packaging job joins the
 # gate, blaming the duration reporter for a change that has nothing to do with
 # it. "Runs the runner" alone picks up `changed-smoke`, the early partial-
-# feedback job, which deliberately carries no reporter and never gates a merge.
+# feedback job, which never gates a merge; its dynamic cap is asserted
+# separately below.
 RUNNER = "fno-py doctor test smoke"
 needs = jobs["smoke"].get("needs") or []
 if isinstance(needs, str):
@@ -257,6 +306,53 @@ for name in sorted(shards):
 if checked == 0:
     print("  FAIL: no shard job was actually checked")
     bad += 1
+
+# --- changed-smoke: a dynamic cap, so agreement is structural ---------------
+# Its ceiling is the packet-sized output of the sizer job, so there is no
+# integer to compare. What must hold instead: the timeout, the env the steps
+# read and the reporter's third argument are the SAME output spelled one way,
+# and the always() receipt step exists - because the cap kills the job and its
+# EXIT trap before either can report, and the receipt is then the only thing
+# that says TIMEOUT instead of a bare `cancelled`.
+changed = jobs["changed-smoke"]
+tm = changed.get("timeout-minutes")
+if not isinstance(tm, str) or "fromJSON(needs.changed-packet-size.outputs.timeout_minutes)" not in tm:
+    print(f"  FAIL: changed-smoke timeout-minutes is {tm!r}, not the sizer's output")
+    bad += 1
+else:
+    print("  ok: changed-smoke's ceiling is the packet-sized sizer output")
+
+env_cap = (changed.get("env") or {}).get("CAP_MINUTES")
+if env_cap != "${{ needs.changed-packet-size.outputs.timeout_minutes }}":
+    print(f"  FAIL: changed-smoke CAP_MINUTES is {env_cap!r}, not the same "
+          "output the timeout consumes")
+    bad += 1
+else:
+    print("  ok: CAP_MINUTES and the timeout are one sizer output")
+
+changed_run = "\n".join(st.get("run", "") for st in changed["steps"])
+call = next((ln for ln in changed_run.splitlines()
+             if "smoke-duration-report.sh" in ln), None)
+if call is None:
+    print("  FAIL: changed-smoke never calls the duration reporter")
+    bad += 1
+elif '"$CAP_MINUTES"' not in call:
+    print(f"  FAIL: changed-smoke calls the reporter with a fixed cap: {call.strip()}")
+    bad += 1
+else:
+    print("  ok: the changed-smoke reporter reads the dynamic cap from CAP_MINUTES")
+
+receipt = [st for st in changed["steps"]
+           if st.get("if") == "always()" and "smoke-duration-report.sh" in st.get("run", "")]
+if not receipt:
+    print("  FAIL: changed-smoke has no always() receipt step - a cap kill "
+          "would again report a bare cancelled")
+    bad += 1
+elif "smoke-duration-reported" not in changed_run:
+    print("  FAIL: the receipt step exists but no step marks the receipt written")
+    bad += 1
+else:
+    print("  ok: a cap kill is receipted by the always() step behind the trap's marker")
 
 sys.exit(1 if bad else 0)
 PY
