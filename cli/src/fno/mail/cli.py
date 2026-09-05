@@ -2459,13 +2459,16 @@ def _name_lane_send(
             # the case with no store record to read the harness off. Both
             # injectors are cheap and side-effect-free on a miss.
             probe_agent = token_reachable.agent if token_reachable is not None else None
-            if token_reachable is not None:
-                to_session, to_harness = probe_target, probe_agent
+            # Always the probed session, even with no registry row for it, so
+            # the landed check has something to grep either way.
+            to_session = probe_target
             if probe_agent == "codex":
                 _codex_probe_reason: list = []
                 injected = _mail_inject_codex(
                     probe_target, wrapped, reason_out=_codex_probe_reason
                 )
+                if injected:
+                    to_harness = "codex"
                 if not injected:
                     live_reason = (
                         _codex_probe_reason[0] if _codex_probe_reason else None
@@ -2473,6 +2476,8 @@ def _name_lane_send(
             else:
                 _probe_reason: list = []
                 injected = _mail_inject_claude(probe_target, wrapped, reason_out=_probe_reason)
+                if injected:
+                    to_harness = "claude"
                 if not injected:
                     live_reason = _probe_reason[0] if _probe_reason else None
                 if not injected and probe_agent is None:
@@ -2480,6 +2485,8 @@ def _name_lane_send(
                     injected = _mail_inject_codex(
                         probe_target, wrapped, reason_out=_both_reason
                     )
+                    if injected:
+                        to_harness = "codex"
                     if not injected and _both_reason:
                         live_reason = _both_reason[0]
             if not injected:
@@ -4844,8 +4851,7 @@ def cmd_sent(
                 state = f"handed {age_minutes(m.ts) or 0}m ago, not in transcript"
             else:
                 state = "handed, transcript unreadable"
-        # `typed`: bytes written into a PTY can be discarded by the prompt they
-        # land on, so this transport must never claim the recipient consumed it.
+        # `typed`: a PTY prompt can discard bytes, so never claim it was consumed.
         elif m.delivery == TYPED_DELIVERY:
             state = "typed (unconfirmed)"
         else:
