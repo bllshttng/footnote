@@ -9019,10 +9019,10 @@ def cmd_stuck_epics(
     if not rows:
         typer.echo("no stuck epics")
         return
-    for r in rows:
-        verdict = "closable" if r.closable else f"held open by {r.held_open_by}"
-        typer.echo(f"  {r.id} [{r.status}] {r.title} - {verdict}")
-        for h in r.holders:
+    for row in rows:
+        verdict = "closable" if row.closable else f"held open by {row.held_open_by}"
+        typer.echo(f"  {row.id} [{row.status}] {row.title} - {verdict}")
+        for h in row.holders:
             typer.echo(f"      {h['id']} [{h['status']}"
                        f"{', ' + h['deferred_kind'] if h.get('deferred_kind') else ''}]")
     typer.echo(

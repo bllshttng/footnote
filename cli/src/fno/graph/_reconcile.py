@@ -1618,10 +1618,11 @@ def diff_closure_candidates(
             continue
         overlap = sorted(node_declared_surfaces(entry) & changed)
         if overlap:
-            probe_kwargs = {"cwd": probe_cwd}
-            if probe_runner is not None:
-                probe_kwargs["runner"] = probe_runner
-            probe = evaluate_node_closure_probe(entry, **probe_kwargs)
+            probe = (
+                evaluate_node_closure_probe(entry, cwd=probe_cwd, runner=probe_runner)
+                if probe_runner is not None
+                else evaluate_node_closure_probe(entry, cwd=probe_cwd)
+            )
             out.append(
                 DiffCandidate(
                     node_id=node_id, pr_number=pr_number, pr_url=pr_url,
