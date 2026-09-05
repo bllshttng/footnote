@@ -891,8 +891,10 @@ def tick() -> None:
         # harness layer, which an unarmed tick must not pay for. The double
         # getattr matches the phase's own read: a settings stub with no king
         # block at all (the tick's test harnesses) must read as unarmed.
+        # Double getattr throughout: a settings stub with no king block at all
+        # must read as unarmed (debounce default), never crash the tick.
+        kw_i = int(getattr(getattr(settings, "king", None), "wake_debounce_seconds", 900))
         if getattr(getattr(settings, "king", None), "wake_enabled", False):
-            kw_i = int(getattr(settings.king, "wake_debounce_seconds", 900))
             try:
                 from fno.pr_watch._king_wake import run_king_wake
 
@@ -916,9 +918,7 @@ def tick() -> None:
                 _emit_tick_row("king_wake", interval_s=kw_i, skip_reason="wake_failed",
                                detail=str(exc)[:200])
         else:
-            _emit_tick_row("king_wake",
-                           interval_s=int(getattr(settings.king, "wake_debounce_seconds", 900)),
-                           skip_reason="wake_disabled")
+            _emit_tick_row("king_wake", interval_s=kw_i, skip_reason="wake_disabled")
 
         # The heal drive loop (x-974c): nothing called the healer on a timer,
         # so every red open PR waited for a hand. The loop lives in Rust; this
