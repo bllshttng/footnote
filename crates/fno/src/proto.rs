@@ -288,14 +288,11 @@ fn default_true() -> bool {
 ///
 /// v58 (x-07c2, dedicated thread pane): `ControlVerb::ThreadPane` - a NEW
 /// enum variant, so a v57 peer cannot decode it and closes the connection
-/// instead of running the reach; the handshake is what stops the skew.
-/// `AgentRow.reach` rides the same bump (additive-tolerant on its own via
-/// `#[serde(default)]`, but it is the shape change the verb belongs to).
+/// instead of running the reach. `AgentRow.reach` rides the same bump.
 ///
 /// v59 (classified lineage): `PaneInfo` gains `harness_session_id`,
-/// `predecessor_session_ids`, and `forked_from_session_id` - each
-/// additive-tolerant via `#[serde(default)]`, but the shape change belongs
-/// to one bump, and the handshake, not serde tolerance, is the skew guard.
+/// `predecessor_session_ids`, and `forked_from_session_id`, each
+/// `#[serde(default)]`; the handshake, not serde tolerance, is the skew guard.
 ///
 /// v60 (workspace restore): `ControlVerb::WorkspaceRestore` +
 /// `ServerMsg::WorkspaceRestored` ([`RestoreRow`]s). New variants: a v59 peer
@@ -310,16 +307,13 @@ fn default_true() -> bool {
 /// `AgentRow.portal` make the one thread pane an addressable set.
 /// `thread_pane` stays as a compatibility alias meaning portal 0.
 ///
-/// v65 (tab organization): `ControlVerb::TabReorder { squad, tab, to }`, the
-/// CLI door onto the reorder trunk, and `PaneInfo.shell_idle`, the measured
-/// "idle now" reading the used-shell prune sweep needs. A new verb is not
-/// additive-tolerant; the field rides the same generation.
-/// v66 (sideline rename): `Command::RenameAgent` - a new verb, this generation.
-/// The same generation also adds `ControlVerb::ThreadPane`'s
-/// `#[serde(default)]` `placement` - the tab/split/at/target a FRESH portal
-/// open honors, now that the geometry refusal lives inside `reach_portal`
-/// where the slot lookup knows occupancy. Additive, so the compatibility
-/// floor does not move; a repoint keeps owning its geometry and says so.
+/// v65 (tab organization): `ControlVerb::TabReorder { squad, tab, to }` and
+/// `PaneInfo.shell_idle`, the "idle now" reading the used-shell prune sweep
+/// needs. A new verb is not additive-tolerant; the field rides the generation.
+/// v66 (sideline rename): `Command::RenameAgent` - a new verb, this
+/// generation. Also adds `ControlVerb::ThreadPane`'s `#[serde(default)]`
+/// `placement` (the geometry a FRESH portal open honors; additive, floor
+/// unchanged; a repoint keeps owning its geometry and says so).
 /// v68 (x-5baf): `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
 /// v69 (prune sync): `ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`;
 /// a v68 peer cannot decode them, so the handshake stops the skew.
@@ -993,9 +987,8 @@ pub enum ControlVerb {
         harness: Option<String>,
     },
     /// (v69) Re-project `squads.json` into the server's member list ->
-    /// [`ServerMsg::SquadReloaded`]. The prune CLI sends this after an applied
-    /// store pass, so the next `persist_squad` cannot write the reaped
-    /// members back from memory.
+    /// [`ServerMsg::SquadReloaded`]. The prune CLI sends this after an
+    /// applied store pass, so `persist_squad` cannot write reaped members back.
     SquadReload,
 }
 

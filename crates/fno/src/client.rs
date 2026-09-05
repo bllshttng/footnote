@@ -10977,10 +10977,8 @@ async fn attach_and_run(
                 | ServerMsg::TabClosed { .. }
                 // (v60, x-7b5e) Bulk restore answers a one-shot `fno mux
                 // workspace restore` control connection, never an attached
-                // client.
-                | ServerMsg::WorkspaceRestored { .. }
-                // (v69) Same one-shot shape for the prune reload.
-                | ServerMsg::SquadReloaded { .. },
+                // client. (v69) The prune reload is the same one-shot shape.
+                | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
@@ -11456,10 +11454,8 @@ async fn attach_and_run(
                     | ServerMsg::TabLocation { .. }
                     | ServerMsg::TabClosed { .. }
                     // (v60, x-7b5e) Bulk restore answers a one-shot control
-                    // connection only.
-                    | ServerMsg::WorkspaceRestored { .. }
-                    // (v69) Same one-shot shape for the prune reload.
-                    | ServerMsg::SquadReloaded { .. }) => {}
+                    // connection only. (v69) The prune reload is the same shape.
+                    | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. }) => {}
                 Ok(ServerMsg::Copy { text }) => {
                     // Land the server-extracted selection on the clipboard: local
                     // exec first, OSC 52 to the outer terminal as fallback
