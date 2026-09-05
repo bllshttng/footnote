@@ -2134,6 +2134,10 @@ class ReachableSession:
     # directory would fail to revive a recipient that lives in another repo.
     # None means no store recorded one and the caller must fall back.
     cwd: Optional[str] = None
+    # The transcript source matched the file itself, so it hands over the
+    # path; a truth read must not re-derive it through the lossy cwd decode
+    # (a decoded cwd can be None when the project dir no longer exists).
+    transcript_path: Optional[Path] = None
 
 
 class StoreReadError(Exception):
@@ -2163,7 +2167,7 @@ class StoreReadError(Exception):
 # decoded from a transcript directory name is a lossy GUESS, while a registry
 # or roster row records the path verbatim. A verbatim cwd must be able to
 # correct a decoded one even though the decoding source ranks higher overall.
-_Hits = list[tuple[str, str, Optional[str], bool]]
+_Hits = list[tuple[str, str, Optional[str], bool, Optional[Path]]]
 
 
 def _decode_project_dir(name: str) -> Optional[str]:
@@ -2264,7 +2268,9 @@ def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, 
         sid = path.name[: -len(".jsonl")]
         if _token_matches(token, sid) and sid not in seen:
             seen.add(sid)
-            hits.append((sid, "claude", _decode_project_dir(path.parent.name), False))
+            hits.append(
+                (sid, "claude", _decode_project_dir(path.parent.name), False, path)
+            )
     return hits, True
 
 
@@ -2333,6 +2339,7 @@ def _reachable_from_registry(token: str, registry_path: Optional[Path]) -> tuple
                     harness,
                     cwd if isinstance(cwd, str) and cwd else None,
                     True,
+                    None,
                 )
             )
     return hits, True
@@ -2386,7 +2393,9 @@ def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> tuple[_Hit
         if _token_matches(token, sid) and sid not in seen:
             seen.add(sid)
             cwd = row.get("cwd")
-            hits.append((sid, "claude", cwd if isinstance(cwd, str) and cwd else None, True))
+            hits.append(
+                (sid, "claude", cwd if isinstance(cwd, str) and cwd else None, True, None)
+            )
     return hits, True
 
 
@@ -2449,6 +2458,7 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
                         harness,
                         cwd if isinstance(cwd, str) and cwd else None,
                         True,
+                        None,
                     )
                 )
     return hits, not malformed
@@ -2463,7 +2473,9 @@ def _reachable_from_harness_stores(token: str) -> tuple[_Hits, bool]:
         hits = complete_store_hits(token)
     except AgentResolutionError:
         return [], False
-    return [(hit.session_id, hit.harness, hit.cwd or None, True) for hit in hits], True
+    return [
+        (hit.session_id, hit.harness, hit.cwd or None, True, None) for hit in hits
+    ], True
 
 
 def resolve_reachable(
@@ -2538,12 +2550,16 @@ def resolve_reachable(
                 if source not in degraded:
                     degraded.append(source)
                 continue
-            for sid, agent, cwd, verbatim in hits:
+            for sid, agent, cwd, verbatim, tpath in hits:
                 key = (agent, session_identity_key(sid))
                 prior = found.get(key)
                 if prior is None:
                     found[key] = ReachableSession(
-                        session_id=sid, source=source, agent=agent, cwd=cwd
+                        session_id=sid,
+                        source=source,
+                        agent=agent,
+                        cwd=cwd,
+                        transcript_path=tpath,
                     )
                     cwd_verbatim[key] = verbatim and cwd is not None
                     continue
@@ -2559,6 +2575,7 @@ def resolve_reachable(
                         source=prior.source,
                         agent=prior.agent,
                         cwd=cwd,
+                        transcript_path=prior.transcript_path,
                     )
                     cwd_verbatim[key] = verbatim
 

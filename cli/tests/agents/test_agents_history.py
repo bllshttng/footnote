@@ -187,6 +187,7 @@ def test_live_row_reports_and_suppresses_its_receipt(history, tmp_path):
     assert "live:" in out
     assert "name:     t-live" in out
     assert "no receipt is expected" in out
+    assert "row presence, not a liveness verdict" in out, out
     assert "from:     " not in out  # the stale receipt is not reported
 
 

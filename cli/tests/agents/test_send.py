@@ -945,7 +945,12 @@ def test_cmd_send_lock_timeout_surfaces_on_stderr(
     # copy would call a just-killed recipient healthy.
     assert "is not live" not in stderr, stderr
     assert "fno agents resume" not in stderr, stderr
+    assert "was not attempted" in stderr, stderr
     assert "agent lock past the wait" in stderr, stderr
+    assert "proves nothing about the recipient in either direction" in stderr, (
+        "the arm's whole claim: the token proves neither health nor death "
+        f"because any verb holds the same lock: {stderr}"
+    )
     assert "a stop, an rm" in stderr, stderr
 
 

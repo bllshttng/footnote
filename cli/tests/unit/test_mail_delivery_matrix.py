@@ -91,7 +91,9 @@ def _seed_asleep_transcript(monkeypatch, tmp_path, *, session_id=ASLEEP_SID, age
     That combination -- the transcript exists on disk, but the session is not
     live -- IS the asleep state. Discovery correctly refuses to list it (it is a
     liveness-gated LISTING); the ladder must still reach it, because asleep is a
-    resumable state rather than voicemail.
+    resumable state rather than voicemail. The seeded row carries content: the
+    transcript reader drops a contentless row, and a stalled verdict needs a
+    record to read.
     """
     from fno.agents import discover
 
@@ -101,7 +103,7 @@ def _seed_asleep_transcript(monkeypatch, tmp_path, *, session_id=ASLEEP_SID, age
     transcript = proj / f"{session_id}.jsonl"
     transcript.write_text(
         json.dumps({"type": "assistant", "isSidechain": False,
-                    "message": {"model": "claude-opus-4-8"}}) + "\n",
+                    "message": {"model": "claude-opus-4-8", "content": "waiting on the operator."}}) + "\n",
         encoding="utf-8",
     )
     old = time.time() - age_s
@@ -463,10 +465,47 @@ def test_cell4_receipt_carries_the_inject_reason_token(runner, mailbox, monkeypa
     assert "[attach-failed]" in combined, (
         f"the receipt must name the inject's own reason, not a generic live-miss: {combined}"
     )
+    assert "was live and reachable" in combined, (
+        "the live-lane arm must credit the transcript verdict the lane "
+        f"contradicted, not just name the miss: {combined}"
+    )
     assert "is not live" not in combined, (
         "the durable preamble must not claim not-live for a lane failure the "
         f"reason token names: {combined}"
     )
+
+
+def test_stalled_head_reads_the_transcript_not_the_lane(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """A head past the stall threshold warns from the transcript verdict.
+
+    Plain-False inject carries no reason token, so live_reason stays None and
+    _warn_deferred consults resolve_session_truth; the seeded transcript's
+    age decides the arm. The receipt token is then the generic live-miss --
+    the prose is what must name the stall.
+    """
+
+    _seed_asleep_transcript(monkeypatch, tmp_path, age_s=9000)
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_and_deliver",
+        lambda *_a, **_k: (False, "spawn-exit-1"),
+    )
+
+    res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
+    combined = res.output + (res.stderr or "")
+
+    assert res.exit_code == 0, combined
+    assert "queued (durable)" in combined
+    assert "reads stalled on its transcript" in combined, (
+        f"the warning must come from the transcript verdict, not the lane: {combined}"
+    )
+    assert "silent" in combined, combined
+    assert "may never" in combined, combined
+    assert "is not live" not in combined, combined
 
 
 # ---------------------------------------------------------------------------

@@ -4,7 +4,14 @@ The gate parses AGENTS.md's `## Pitfalls corpus (capped)` section and fails on
 an over-cap corpus, a missing field, a stale entry, or a title that names a
 shipped `fno` verb as the trap. Output is captured via subprocess (not piped
 through a tee) so the asserted returncode is the real one.
+
+The resolution pass is tested too: a `graduates-to:` value must resolve to a
+filed backlog node (by id, or by title after normalization), an unreadable
+graph fails loud, and an absent graph is the legitimate skip. Fixture runs pin
+`FNO_GRAPH_JSON` to an absent path so the operator's live graph never decides
+a test.
 """
+import os
 import subprocess
 from datetime import date, timedelta
 from pathlib import Path
@@ -17,11 +24,20 @@ SECTION = "## Pitfalls corpus (capped)"
 NEXT_HEADING = "## Repository"
 
 
-def _run(target: Path) -> subprocess.CompletedProcess:
+def _run(
+    target: Path, *, lint: Path = LINT, env_extra: dict | None = None
+) -> subprocess.CompletedProcess:
+    # Fixture corpora name no real nodes, so resolution must not consult the
+    # operator's live graph: the default env pins an absent graph, which is
+    # the gate's legitimate skip.
+    env = {**os.environ, "FNO_GRAPH_JSON": str(target.parent / "absent-graph.json")}
+    if env_extra:
+        env.update(env_extra)
     return subprocess.run(
-        ["bash", str(LINT), str(target)],
+        ["bash", str(lint), str(target)],
         capture_output=True,
         text=True,
+        env=env,
     )
 
 
@@ -182,9 +198,7 @@ def test_a_registry_that_yields_no_verbs_fails_loud(tmp_path: Path) -> None:
     target = _one_entry(tmp_path, "fno backlog silently drops a node")
     lint = _transplant(tmp_path, "# a registry with no lazy-subcommand rows\n")
 
-    r = subprocess.run(
-        ["bash", str(lint), str(target)], capture_output=True, text=True
-    )
+    r = _run(target, lint=lint)
     assert r.returncode == 1
     assert "read 0 verbs" in r.stderr
     assert "broken read" in r.stderr
@@ -195,9 +209,7 @@ def test_an_absent_registry_still_skips_the_verb_check(tmp_path: Path) -> None:
     target = _one_entry(tmp_path, "fno backlog silently drops a node")
     lint = _transplant(tmp_path, None)
 
-    r = subprocess.run(
-        ["bash", str(lint), str(target)], capture_output=True, text=True
-    )
+    r = _run(target, lint=lint)
     assert r.returncode == 0, r.stderr
     assert "read 0 verbs" not in r.stderr
 
@@ -238,3 +250,97 @@ def test_an_absent_entry_releases_its_pinned_phrase(tmp_path: Path) -> None:
     r = _run(path)
     assert r.returncode == 0, r.stderr
     assert "live lockfile" not in r.stderr
+
+
+# --- the resolution pass: graduates-to must name a real filed node ----------
+
+
+def _seeded_graph(tmp_path: Path) -> Path:
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        '{"entries": [{"id": "x-1234", "title": "A real guard"}]}',
+        encoding="utf-8",
+    )
+    return graph
+
+
+def test_graduates_to_resolving_to_no_node_fails(tmp_path: Path) -> None:
+    graph = _seeded_graph(tmp_path)
+    path = _fixture(tmp_path, [("A trap", "no such guard", FRESH)])
+    r = _run(path, env_extra={"FNO_GRAPH_JSON": str(graph)})
+    assert r.returncode == 1
+    assert "resolves to no filed node" in r.stderr
+
+
+def test_graduates_to_resolves_by_node_id(tmp_path: Path) -> None:
+    graph = _seeded_graph(tmp_path)
+    path = _fixture(tmp_path, [("A trap", "x-1234", FRESH)])
+    r = _run(path, env_extra={"FNO_GRAPH_JSON": str(graph)})
+    assert r.returncode == 0, r.stderr
+
+
+def test_graduates_to_resolves_by_title_after_normalization(tmp_path: Path) -> None:
+    # The corpus writes prose, the graph holds a title: whitespace-collapse,
+    # trailing-period strip and case-folding bridge the two registers.
+    graph = _seeded_graph(tmp_path)
+    path = _fixture(tmp_path, [("A trap", "a real guard.", FRESH)])
+    r = _run(path, env_extra={"FNO_GRAPH_JSON": str(graph)})
+    assert r.returncode == 0, r.stderr
+
+
+def test_an_unreadable_graph_fails_loud(tmp_path: Path) -> None:
+    graph = tmp_path / "graph.json"
+    graph.write_text("{not json", encoding="utf-8")
+    path = _fixture(tmp_path, [GOOD])
+    r = _run(path, env_extra={"FNO_GRAPH_JSON": str(graph)})
+    assert r.returncode == 1
+    assert "cannot be read" in r.stderr
+
+
+def test_an_absent_graph_skips_resolution(tmp_path: Path) -> None:
+    # A consumer repo without the backlog still lints its corpus: no graph
+    # file is the legitimate skip, even for a value matching nothing.
+    path = _fixture(tmp_path, [("A trap", "no such guard", FRESH)])
+    r = _run(path)
+    assert r.returncode == 0, r.stderr
+
+
+def test_git_first_appearance_decides_staleness(tmp_path: Path) -> None:
+    # The prose `added:` date is written by the guarded party; where the
+    # corpus file's history can answer when the entry really landed, that
+    # date replaces it. A stale-looking prose date whose git birth is fresh
+    # passes with a note instead of failing as stale.
+    lint = _transplant(tmp_path, None)
+    # Lowercase like the other fixtures: the byte-budget half only arms on a
+    # target string-equal to the canonical AGENTS.md, and this transplant
+    # carries no sibling budget gate to consult.
+    path = tmp_path / "agents.md"
+    path.write_text(
+        f"# AGENTS\n\n{SECTION}\n\nrationale.\n\n### Old trap\n\ntrap.\n\n"
+        f"- graduates-to: a lint\n- added: {STALE}\n\n{NEXT_HEADING}\n",
+        encoding="utf-8",
+    )
+    for args in (
+        ["git", "init", str(tmp_path)],
+        ["git", "-C", str(tmp_path), "add", "agents.md"],
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "corpus",
+        ],
+    ):
+        step = subprocess.run(args, capture_output=True, text=True)
+        assert step.returncode == 0, step.stderr
+
+    r = _run(path, lint=lint)
+    assert r.returncode == 0, r.stderr
+    assert "note: entry 'Old trap'" in r.stderr
+    assert "the git date decides staleness" in r.stderr
+    assert "over the 60-day limit" not in r.stderr
