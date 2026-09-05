@@ -10,12 +10,16 @@ Filter: ``fno doctor test cli/tests/unit/test_diff_closure_candidates.py``
 """
 from __future__ import annotations
 
+import subprocess
+
 from fno.graph._reconcile import (
     DiffCandidate,
+    NodeProbeVerdict,
     PrMergeState,
     ReconcileError,
     confirm_diff_candidate,
     diff_closure_candidates,
+    evaluate_node_closure_probe,
     node_declared_surfaces,
     reconcile_diff_candidates,
 )
@@ -203,3 +207,98 @@ def test_confirming_an_unknown_node_refuses_and_stamps_nothing():
     result = confirm_diff_candidate(entries, "x-99990000", pr_number=9, pr_url=None)
     assert result.outcome == "refused"
     assert "pr_edge_derivation" not in entries[0]
+
+
+# -- evaluate_node_closure_probe (change 5, opt-in) --
+
+
+def test_no_probe_declared_returns_none():
+    assert evaluate_node_closure_probe(_node("x-1")) is None
+
+
+def test_a_passing_probe_reports_passed_true():
+    verdict = evaluate_node_closure_probe(_node("x-1", closure_probe="true"))
+    assert verdict == NodeProbeVerdict(True, "")
+
+
+def test_a_failing_probe_fails_closed_and_names_the_exit():
+    verdict = evaluate_node_closure_probe(_node("x-1", closure_probe="exit 3"))
+    assert verdict is not None
+    assert verdict.passed is False
+    assert "exited 3" in verdict.detail
+
+
+def test_a_probe_that_times_out_fails_closed():
+    def timing_out_runner(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd="sleep", timeout=30)
+
+    verdict = evaluate_node_closure_probe(
+        _node("x-1", closure_probe="sleep 999"), runner=timing_out_runner
+    )
+    assert verdict is not None
+    assert verdict.passed is False
+    assert "timed out" in verdict.detail
+
+
+def test_a_probe_that_cannot_launch_fails_closed():
+    def unlaunchable_runner(*a, **kw):
+        raise OSError("no such binary")
+
+    verdict = evaluate_node_closure_probe(
+        _node("x-1", closure_probe="does-not-exist"), runner=unlaunchable_runner
+    )
+    assert verdict is not None
+    assert verdict.passed is False
+    assert "failed to launch" in verdict.detail
+
+
+# -- probe wiring in diff_closure_candidates / reconcile_diff_candidates --
+
+
+def test_a_candidate_with_no_probe_carries_none():
+    entries = [_node("x-1", details="Fix in `cli/src/fno/plan/fidelity.py`.")]
+    out = diff_closure_candidates(
+        entries, pr_number=1, pr_url=None, changed_files=["cli/src/fno/plan/fidelity.py"],
+    )
+    assert out[0].probe is None
+
+
+def test_a_candidate_with_a_declared_probe_carries_its_verdict():
+    entries = [
+        _node(
+            "x-1", details="Fix in `cli/src/fno/plan/fidelity.py`.",
+            closure_probe="true",
+        )
+    ]
+    out = diff_closure_candidates(
+        entries, pr_number=1, pr_url=None, changed_files=["cli/src/fno/plan/fidelity.py"],
+    )
+    assert out[0].probe == NodeProbeVerdict(True, "")
+
+
+def test_reconcile_diff_candidates_threads_the_probe_runner_through():
+    entries = [
+        _node(
+            "x-1", details="Fix in `cli/src/fno/plan/fidelity.py`.",
+            closure_probe="anything",
+        )
+    ]
+
+    def fake_probe_runner(*a, **kw):
+        raise OSError("stubbed: never actually shells out in this test")
+
+    def merge_state_reader(number, *, cwd, include_files):
+        return PrMergeState(
+            number=number, state="MERGED", url="u", merged_at="t",
+            changed_files=["cli/src/fno/plan/fidelity.py"],
+        )
+
+    def list_merged(*, cwd):
+        return [{"number": 1, "url": "u", "headRefName": "feature/unrelated", "mergedAt": "t"}]
+
+    out = reconcile_diff_candidates(
+        entries, cwd="/repo", list_merged=list_merged,
+        merge_state_reader=merge_state_reader, probe_runner=fake_probe_runner,
+    )
+    assert out[0].probe.passed is False
+    assert "failed to launch" in out[0].probe.detail

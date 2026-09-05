@@ -1510,19 +1510,76 @@ def node_declared_surfaces(node: dict) -> set[str]:
     return {_normalize_surface(m.group(1)) for m in _DETAILS_PATH_RE.finditer(details)}
 
 
+# Wall clock for a node's opt-in closure_probe (reconcile's own subprocess,
+# not fno-agents probe-run's PROBE_RUN_TIMEOUT_S - a node-level probe is one
+# shell command, not a batch of a plan's close_probes).
+NODE_PROBE_TIMEOUT_S = 30.0
+
+
+@dataclass(frozen=True)
+class NodeProbeVerdict:
+    """The pass/fail/unevaluable result of one node's ``closure_probe``.
+
+    Same contract ``resolve_promise_evidence`` documents for a plan's
+    ``close_probes`` (assert a positive marker, bound in time, fail closed
+    when it cannot be evaluated) - not the same runner, because a plan-less
+    node has no plan frontmatter to declare a probe in. This shells the
+    node's own command directly instead.
+    """
+
+    passed: bool
+    detail: str
+
+
+def evaluate_node_closure_probe(
+    node: dict,
+    *,
+    cwd: Optional[str] = None,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> Optional[NodeProbeVerdict]:
+    """Run ``node``'s opt-in ``closure_probe`` shell command, fail-closed.
+
+    Returns ``None`` when the node declares no probe - the caller then
+    reports the diff candidate with no probe evidence, unchanged from
+    before this field existed. A declared probe that cannot be evaluated
+    (a timeout, a launch failure, a non-zero exit) returns ``passed=False``
+    naming why, never ``None`` - an absence must not read as a pass.
+    """
+    probe = node.get("closure_probe")
+    if not isinstance(probe, str) or not probe.strip():
+        return None
+    try:
+        proc = runner(
+            probe, shell=True, capture_output=True, text=True,
+            timeout=NODE_PROBE_TIMEOUT_S, cwd=cwd,
+        )
+    except subprocess.TimeoutExpired:
+        return NodeProbeVerdict(
+            False, f"closure_probe timed out after {NODE_PROBE_TIMEOUT_S:.0f}s"
+        )
+    except OSError as exc:
+        return NodeProbeVerdict(False, f"closure_probe failed to launch: {exc}")
+    if proc.returncode == 0:
+        return NodeProbeVerdict(True, (proc.stdout or "").strip()[:200])
+    detail = (proc.stderr or proc.stdout or "").strip()[:200] or "no diagnostic"
+    return NodeProbeVerdict(False, f"closure_probe exited {proc.returncode}: {detail}")
+
+
 @dataclass(frozen=True)
 class DiffCandidate:
     """One open node whose declared surfaces overlap a merge's changed files.
 
     Never a closure - the whole point of this edge. A file overlap is
     evidence someone worked nearby, not that the symptom is gone; a human or
-    king reads this list and confirms or discards each row.
+    king reads this list, plus ``probe`` when the node declared one, and
+    confirms or discards each row.
     """
 
     node_id: str
     pr_number: int
     pr_url: Optional[str]
     overlapping_paths: list[str]
+    probe: Optional[NodeProbeVerdict] = None
 
 
 def diff_closure_candidates(
@@ -1532,12 +1589,17 @@ def diff_closure_candidates(
     pr_url: Optional[str],
     changed_files: Iterable[str],
     matched_node_ids: Iterable[str] = (),
+    probe_cwd: Optional[str] = None,
+    probe_runner: Optional[Callable[..., subprocess.CompletedProcess]] = None,
 ) -> list[DiffCandidate]:
     """Open nodes whose declared surfaces overlap one merge's changed files.
 
     ``matched_node_ids`` excludes nodes already closing through the
     branch-name edge (:func:`_branch_matches_node`), so a PR is never
-    reported through both edges for the same node.
+    reported through both edges for the same node. A candidate node
+    carrying an opt-in ``closure_probe`` has it evaluated here (change 5) -
+    only for a node that already overlaps this merge, never repo-wide, so a
+    probe cost is paid only where the diff edge already found something.
     """
     changed = {
         _normalize_surface(p) for p in changed_files if isinstance(p, str) and p.strip()
@@ -1556,10 +1618,14 @@ def diff_closure_candidates(
             continue
         overlap = sorted(node_declared_surfaces(entry) & changed)
         if overlap:
+            probe_kwargs = {"cwd": probe_cwd}
+            if probe_runner is not None:
+                probe_kwargs["runner"] = probe_runner
+            probe = evaluate_node_closure_probe(entry, **probe_kwargs)
             out.append(
                 DiffCandidate(
                     node_id=node_id, pr_number=pr_number, pr_url=pr_url,
-                    overlapping_paths=overlap,
+                    overlapping_paths=overlap, probe=probe,
                 )
             )
     out.sort(key=lambda c: c.node_id)
@@ -1572,6 +1638,7 @@ def reconcile_diff_candidates(
     cwd: str,
     list_merged: Optional[Callable[..., list[dict]]] = None,
     merge_state_reader: Optional[Callable[..., PrMergeState]] = None,
+    probe_runner: Optional[Callable[..., subprocess.CompletedProcess]] = None,
 ) -> list[DiffCandidate]:
     """Diff-derived closure candidates across one repo's recently merged PRs.
 
@@ -1615,6 +1682,7 @@ def reconcile_diff_candidates(
             diff_closure_candidates(
                 entries, pr_number=number, pr_url=row.get("url") or state.url,
                 changed_files=state.changed_files, matched_node_ids=matched,
+                probe_cwd=cwd, probe_runner=probe_runner,
             )
         )
     candidates.sort(key=lambda c: (c.pr_number, c.node_id))
