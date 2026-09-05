@@ -1303,10 +1303,11 @@ def disposition_refusal(
     Neither list carries the fix-delta remedy the REFUSED sentence teaches -
     that remedy is exactly what an exhausted loop must stop being told.
 
-    A finding is terminal when it is fixed (and the chain moved past the round
-    that raised it), non-blocking by the gate's own re-derivation, declined
-    WITH corroboration the author cannot mint alone, or waived by the
-    override label (which answers COVERED before this runs). A declined
+    A finding is terminal when it is fixed (a later round reviewed a head the
+    finding's last raise did not sit on, with corroboration the author cannot
+    mint alone), non-blocking by the gate's own re-derivation, declined WITH
+    corroboration the author cannot mint alone, or waived by the override
+    label (which answers COVERED before this runs). A declined or fixed
     blocking finding on the author's own signature alone is NOT terminal:
     that is the whole difference between this gate and the exploit.
     """
@@ -1314,12 +1315,12 @@ def disposition_refusal(
         return "", "", [], []
     allow = _resolved_categories(cwd)
     # Latest disposition per finding_key across the chain, plus the round
-    # each blocking finding was raised in (a fixed finding is terminal only
-    # when a LATER round reviewed the fix delta).
+    # and head each blocking finding was last raised in (a fixed finding is
+    # terminal only when a later round reviewed the fix delta and the chain
+    # carries corroboration).
     dispositions: dict[str, dict] = {}
     raised_in: dict[str, int] = {}
     raised_head: dict[str, str] = {}
-    disposed_head: dict[str, str] = {}
     findings_by_key: dict[str, dict] = {}
     truncated = False
     last_round = len(chain) - 1
@@ -1335,7 +1336,6 @@ def disposition_refusal(
         for entry in event["dispositions"] or []:
             if isinstance(entry, dict) and entry.get("finding_key"):
                 dispositions[entry["finding_key"]] = entry
-                disposed_head[entry["finding_key"]] = event["head_sha"]
 
     if truncated:
         return (
@@ -1366,18 +1366,24 @@ def disposition_refusal(
         if disposition is None:
             nonterminal.append(key)
         elif disposition.get("disposition") == "fixed":
-            # Terminal when the chain moved past the round that raised it
-            # AND the disposing round attested a DIFFERENT head: a fix
-            # delta was actually reviewed. The index alone is clearable by
-            # a same-head re-run, one more row under the same branch
-            # invocation with no new commit, and an author could clear a
-            # CONFIRMED finding by re-attesting the head that raised it.
-            # Equal heads refuse even when both are empty. Exact range
-            # coverage is the tiling conjunct the covered row carries.
-            if raised_in.get(key, last_round) >= last_round:
+            # Terminal when a later round reviewed the fix delta AND the
+            # chain is not the author's own signature alone. The delta
+            # witness reads the rows AFTER the last raise, not the
+            # disposition entry: the disposition rides one event, so a
+            # last-wins copy of its head pinned the gate to a stale
+            # same-head dispose forever when the real fix's round
+            # re-emitted nothing. And head inequality alone is clearable
+            # at zero cost - an empty commit between attest and dispose -
+            # so the corroboration term is what refuses that author, the
+            # same signature test a decline already answers to.
+            later_heads = {
+                row["head_sha"]
+                for row in chain[raised_in.get(key, last_round) + 1 :]
+            }
+            if not (later_heads - {raised_head.get(key, "")}):
                 nonterminal.append(key)
-            elif disposed_head.get(key, "") == raised_head.get(key, ""):
-                nonterminal.append(key)
+            elif not corroborated:
+                uncorroborated.append(key)
         elif disposition.get("disposition") == "declined":
             reason = disposition.get("reason")
             if not isinstance(reason, str) or not reason.strip():
@@ -1408,8 +1414,8 @@ def disposition_refusal(
     if uncorroborated:
         keys = sorted(uncorroborated)
         return (
-            f"declined blocking finding(s) {', '.join(keys)} rest on the author's "
-            "own signature alone; corroboration satisfies it two ways: a second "
+            f"blocking finding(s) {', '.join(keys)} rest on the author's own "
+            "signature alone; corroboration satisfies it two ways: a second "
             "session's head-pinned attestation, or a non-author GitHub approval",
             "",
             keys,

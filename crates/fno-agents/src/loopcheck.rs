@@ -8,16 +8,17 @@
 //! Module name starts with "loop" to match the LOC-ratchet glob `crates/fno-agents/src/loop*`.
 
 use crate::{
-    cancel_sentinel::check_cancel_sentinel,
-    check_supersession::latest_per_name,
-    completion_output::allow_output,
-    delivery_completion::pr_passes,
-    disposition_gate::{disposition_blockers_on_chain, DispositionBlocker},
+    cancel_sentinel::check_cancel_sentinel, check_supersession::latest_per_name,
+    completion_output::allow_output, delivery_completion::pr_passes,
+    disposition_gate::disposition_blockers_on_chain,
 };
 // The integration tests reach the blocker predicates through loopcheck, the
 // facade they have always imported from; the predicates live in
 // disposition_gate since the line-budget refactor moved them there.
-pub use crate::disposition_gate::{blockers_impossible, blockers_withhold};
+// DispositionBlocker rides the pub use too: it is the return type of the
+// facade's `disposition_blockers`, and a private import made it unnameable
+// through the facade it is published under.
+pub use crate::disposition_gate::{blockers_impossible, blockers_withhold, DispositionBlocker};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

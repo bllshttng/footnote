@@ -53,8 +53,9 @@ fn gate_finding_blocks(primitive: &Value) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DispositionBlocker {
     pub finding_key: String,
-    /// "open", "fixed-unreviewed", "declined-uncorroborated",
-    /// "declined-without-reason", or "truncated-remainder".
+    /// "open", "fixed-unreviewed", "fixed-uncorroborated",
+    /// "declined-uncorroborated", "declined-without-reason", or
+    /// "truncated-remainder".
     pub axis: &'static str,
     /// A CONFIRMED correctness or security finding (or the truncated
     /// remainder, which cannot be inspected). At the round cap only a hard
@@ -99,12 +100,20 @@ pub fn blockers_impossible(blockers: &[DispositionBlocker], rounds_exhausted: bo
     rounds_exhausted && blockers.iter().any(|b| b.hard)
 }
 
+/// The head an attestation row pinned, for the delta-witness read.
+fn row_head(row: &Value) -> &str {
+    row.pointer("/data/head_sha")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+}
+
 /// The non-terminal blocking findings in an already-collected attestation
 /// chain (the caller that parsed the events once passes the same chain to
 /// every predicate).
 ///
-/// Terminal means: fixed (and a LATER round reviewed the fix delta),
-/// non-blocking by the gate's own re-derivation, or declined WITH
+/// Terminal means: fixed (and a LATER round reviewed a head the finding's
+/// last raise did not sit on, with corroboration the author cannot mint
+/// alone), non-blocking by the gate's own re-derivation, or declined WITH
 /// corroboration the author cannot mint alone (`self_attested_alone` is the
 /// coverage row's existing predicate - a disposition pass carries its own
 /// corroboration requirement, independent of
@@ -121,8 +130,8 @@ pub fn disposition_blockers_on_chain(
     let last_round = chain.len().saturating_sub(1);
 
     let mut findings: Vec<(String, &Value, usize, String)> = Vec::new(); // key, primitive, raised round, raised head
-    let mut dispositions: std::collections::HashMap<String, (&str, &str, String)> =
-        std::collections::HashMap::new(); // key -> (disposition, reason, disposing head)
+    let mut dispositions: std::collections::HashMap<String, (&str, &str)> =
+        std::collections::HashMap::new(); // key -> (disposition, reason)
     let mut truncated = false;
     for (index, val) in chain.iter().enumerate() {
         if val
@@ -132,11 +141,7 @@ pub fn disposition_blockers_on_chain(
         {
             truncated = true;
         }
-        let row_head = val
-            .pointer("/data/head_sha")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let head = row_head(val).to_string();
         for primitive in val
             .pointer("/data/findings")
             .and_then(|v| v.as_array())
@@ -148,9 +153,9 @@ pub fn disposition_blockers_on_chain(
                     if let Some(slot) = findings.iter_mut().find(|(k, _, _, _)| k == key) {
                         slot.1 = primitive;
                         slot.2 = index;
-                        slot.3 = row_head.clone();
+                        slot.3 = head.clone();
                     } else {
-                        findings.push((key.to_string(), primitive, index, row_head.clone()));
+                        findings.push((key.to_string(), primitive, index, head.clone()));
                     }
                 }
             }
@@ -171,7 +176,7 @@ pub fn disposition_blockers_on_chain(
                 .unwrap_or("");
             let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
             if !key.is_empty() {
-                dispositions.insert(key.to_string(), (disposition, reason, row_head.clone()));
+                dispositions.insert(key.to_string(), (disposition, reason));
             }
         }
     }
@@ -194,22 +199,36 @@ pub fn disposition_blockers_on_chain(
                 axis: "open",
                 hard: hard_finding(primitive),
             }),
-            Some(("fixed", _, disposed_head)) => {
+            Some(("fixed", _)) => {
                 // Terminal only when a LATER round reviewed the fix delta
-                // AND attested a different head: a same-head re-run is one
-                // more row under the same branch invocation with no new
-                // commit, so the index alone would let an author clear a
-                // CONFIRMED finding by re-attesting the head that raised
-                // it. Equal heads refuse, empty included.
-                if *raised >= last_round || disposed_head == raised_head {
+                // AND the chain is not the author's own signature alone.
+                // The delta witness reads the rows AFTER the last raise,
+                // not the disposition entry: the disposition rides one
+                // event, so a last-wins copy of its head pinned the gate
+                // to a stale same-head dispose forever when the real
+                // fix's round re-emitted nothing. And head inequality
+                // alone is clearable at zero cost - an empty commit
+                // between attest and dispose - so the corroboration term
+                // is what refuses that author, the same signature test a
+                // decline already answers to.
+                let delta_witnessed = chain[*raised + 1..]
+                    .iter()
+                    .any(|row| row_head(row) != raised_head.as_str());
+                if !delta_witnessed {
                     blockers.push(DispositionBlocker {
                         finding_key: key.clone(),
                         axis: "fixed-unreviewed",
                         hard: hard_finding(primitive),
                     });
+                } else if self_attested_alone {
+                    blockers.push(DispositionBlocker {
+                        finding_key: key.clone(),
+                        axis: "fixed-uncorroborated",
+                        hard: hard_finding(primitive),
+                    });
                 }
             }
-            Some(("declined", reason, _)) => {
+            Some(("declined", reason)) => {
                 if reason.trim().is_empty() {
                     blockers.push(DispositionBlocker {
                         finding_key: key.clone(),
@@ -242,8 +261,9 @@ mod tests {
 
     #[test]
     fn same_head_rerun_never_clears_a_fixed_finding() {
-        // A fixed disposition is terminal only when the disposing round
-        // attested a DIFFERENT head. A same-head re-run is one more row
+        // A fixed disposition is terminal only when a later round attested a
+        // head the finding's last raise did not sit on, with corroboration
+        // the author cannot mint alone. A same-head re-run is one more row
         // under the same branch invocation with no new commit; keyed on the
         // round index alone, an author clears a CONFIRMED finding by
         // re-attesting the head that raised it.
@@ -287,6 +307,75 @@ mod tests {
         let chain = vec![
             row("h1", "fail", vec![finding], vec![]),
             row("h2", "pass", vec![], vec![fixed_disp]),
+        ];
+        assert!(disposition_blockers_on_chain(&chain, false).is_empty());
+    }
+
+    #[test]
+    fn attest_empty_commit_dispose_still_blocks() {
+        // The exploit this closes: attest, empty-commit, dispose. A new head
+        // between raise and dispose satisfies head inequality at zero cost,
+        // so on the author's own signature alone the fixed finding stays
+        // non-terminal, refused by name as fixed-uncorroborated.
+        use serde_json::json;
+        let finding = json!({
+            "finding_key": "f.py:1:correctness",
+            "category": "correctness",
+            "verdict": "CONFIRMED",
+            "has_required_fields": true,
+        });
+        let chain = vec![
+            json!({"type": "review_attestation", "data": {
+                "head_sha": "h1", "verdict": "fail", "branch": "feature/x",
+                "findings": [finding], "dispositions": [],
+            }}),
+            json!({"type": "review_attestation", "data": {
+                "head_sha": "h2", "verdict": "pass", "branch": "feature/x",
+                "findings": [],
+                "dispositions": [{"finding_key": "f.py:1:correctness",
+                                  "disposition": "fixed",
+                                  "reason": "attested by the author"}],
+            }}),
+        ];
+        let blockers = disposition_blockers_on_chain(&chain, true);
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].finding_key, "f.py:1:correctness");
+        assert_eq!(blockers[0].axis, "fixed-uncorroborated");
+
+        // Corroboration is the missing term: the same chain corroborated
+        // reads terminal (the legitimate cross-session flow).
+        assert!(disposition_blockers_on_chain(&chain, false).is_empty());
+    }
+
+    #[test]
+    fn real_fix_after_a_stale_same_head_dispose_answers() {
+        // A same-head `fixed`, then a real fix whose round re-emits no
+        // disposition: the delta witness reads the later rows, so the
+        // corroborated chain is terminal instead of pinned to the stale
+        // same-head dispose forever.
+        use serde_json::json;
+        let finding = json!({
+            "finding_key": "f.py:1:correctness",
+            "category": "correctness",
+            "verdict": "CONFIRMED",
+            "has_required_fields": true,
+        });
+        let chain = vec![
+            json!({"type": "review_attestation", "data": {
+                "head_sha": "h1", "verdict": "fail", "branch": "feature/x",
+                "findings": [finding], "dispositions": [],
+            }}),
+            json!({"type": "review_attestation", "data": {
+                "head_sha": "h1", "verdict": "pass", "branch": "feature/x",
+                "findings": [],
+                "dispositions": [{"finding_key": "f.py:1:correctness",
+                                  "disposition": "fixed",
+                                  "reason": "same-head dispose"}],
+            }}),
+            json!({"type": "review_attestation", "data": {
+                "head_sha": "h2", "verdict": "pass", "branch": "feature/x",
+                "findings": [], "dispositions": [],
+            }}),
         ];
         assert!(disposition_blockers_on_chain(&chain, false).is_empty());
     }
