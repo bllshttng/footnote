@@ -4684,7 +4684,6 @@ pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6935,5 +6934,4 @@ mod tests {
         assert_eq!(parsed["kind"], "agent_resumed");
         fs::remove_dir_all(&dir).ok();
     }
-
 }

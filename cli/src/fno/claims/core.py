@@ -1362,11 +1362,19 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
     except ClaimGoneAway:
         return {"key": key, "state": ClaimState.FREE.value}
     except (ClaimVerdictError, ClaimVerdictUnavailable) as exc:
+        # The file itself read fine, so its identity fields are usable even
+        # though the native liveness verdict is unreachable. Dropping holder
+        # here made a visibility re-check read an instrument outage as a lost
+        # race: the dispatch gate saw a holderless row and refused with
+        # duplicate-claim / prior_holder=unknown.
         return {
             "key": key,
             "state": ClaimState.CORRUPTED.value,
             "error": str(exc),
             "path": str(path),
+            "holder": claim.holder,
+            "pid": claim.pid,
+            "host": claim.host,
         }
 
 

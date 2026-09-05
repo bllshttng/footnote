@@ -1582,7 +1582,11 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
             # The changed-smoke job has Rust but no setup build. Its selected
             # build step must run before claim tests, so keep the target path
             # present and put its directory first on PATH after the build.
+            # Pin FNO_AGENTS_BIN at the same path: the resolver checks the env
+            # name before PATH, so a stale inherited BIN would outrank the
+            # fresh build (and a missing file falls through to PATH anyway).
             debug_dir = root / "crates/fno-agents/target/debug"
+            env["FNO_AGENTS_BIN"] = str(debug_dir / "fno-agents")
             env["PATH"] = str(debug_dir) + os.pathsep + env.get("PATH", "")
         else:
             _preserve_claim_door(root, env)
