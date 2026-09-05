@@ -1,8 +1,7 @@
 use fno::agents_view::{Liveness, RegistryAgent};
 use fno::proto::AgentRow;
 use fno::squad_store::{MemberEvidence, MemberLiveness, StoredMember};
-use fno_agents::gc::{gc_action, GcAction, GcRow, KeepReason};
-use fno_agents::AgentStatus;
+use fno_agents::gc::{gc_decide, GcAction, GcRow, KeepReason};
 
 #[test]
 fn live_thread_identity_survives_store_gc_and_sideline_facts() {
@@ -74,23 +73,24 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
     };
     assert_eq!(sideline.harness_session_id.as_deref(), Some(session_id));
 
+    // A thread whose transcript was just written is WRITING now, whatever a
+    // stored status says: retirement keys on the served activity and the
+    // graph, and both hold it.
     let live = GcRow {
-        status: AgentStatus::Exited,
-        is_live: true,
-        pid_confirmed_dead: true,
+        origin: Some("spawn".into()),
+        crowned: false,
+        work: fno_agents::graph_store::WorkState::AllDone {
+            nodes: vec!["N1".into()],
+        },
+        transcript_age_s: Some(4),
         owns_worktree: false,
-        exited_at: Some(9),
-        liveness_surface: true,
-        transcript_fresh: Some(false),
-        harness_session_gone: Some(true),
-        dormant_done: false,
-        worktree_clean: Some(true),
-        probe: fno_agents::client_verbs::RowLiveness::Alive,
+        worktree_clean: None,
+        branch_merged: None,
     };
-    assert_eq!(gc_action(&live, 10_000, 1), GcAction::Keep);
+    assert_eq!(gc_decide(&live, 900).0, GcAction::Keep);
     assert_eq!(
-        fno_agents::gc::keep_reason(&live, 10_000, 1),
-        Some(KeepReason::Live)
+        gc_decide(&live, 900).1,
+        Some(KeepReason::Active { age_s: 4 })
     );
     assert_eq!(member.harness.as_deref(), Some(harness));
     assert_eq!(member.harness_session_id.as_deref(), Some(session_id));

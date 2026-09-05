@@ -98,11 +98,11 @@ The `fno agents` verbs resolve the name to the short id for you. Reach for those
 
 The registry carries `last_message_at` and not `last_message`: a timestamp is available and the content is not. Read the content with `fno agents peek`.
 
-For a fleet-wide sweep, `fno agents watchdog` reads transcript truth and prints one verdict per row (wake, reroute, reap, ghost).
+For a fleet-wide sweep, `fno agents watchdog` reads transcript truth and prints one verdict per row (wake, reroute, ghost). Row retirement is the daemon's question (`fno agents reap`).
 
 It is a dry run by default. `--apply` executes the wake lane only, the one action that cannot destroy work.
 
-`--apply-all` adds reroute and reap. The reap lane has its own opt-in: `config.recovery.watchdog.reap`, false by default. An unreadable config reads the same as false. With reap off, `--apply-all` still runs wake and reroute and still reports the reap verdict as `frozen`. That verdict names a dead row. It does not clear it. Clear the row by hand with stop and rm, or set the config to arm the lane.
+`--apply-all` adds reroute, which stops and respawns a session.
 
 ## Delivery to a live session
 

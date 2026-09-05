@@ -25,19 +25,18 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from fno.graph.statuses import is_terminal_entry
+
 Entry = dict[str, Any]
 
 
-def _is_done(e: Entry) -> bool:
-    return bool(e.get("completed_at"))
-
-
-def _is_superseded(e: Entry) -> bool:
-    return bool(e.get("superseded_by"))
-
-
 def _is_terminal(e: Entry) -> bool:
-    return _is_done(e) or _is_superseded(e)
+    # The one terminal predicate, homed in statuses: status in TERMINAL_RUNGS,
+    # superseded_by, or a non-deferred completed_at. Archive asks "closed for
+    # good", NOT "is the work done" (that is node_is_done, the status-only
+    # ruling x-c672 narrowed), so an archived-set fixture stamping only
+    # completed_at is terminal here.
+    return is_terminal_entry(e)
 
 
 def _terminal_ts(e: Entry) -> Optional[str]:

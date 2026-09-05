@@ -271,8 +271,8 @@ confirm = "auto"
 auto_register_sessions = false
 # Launch routed claude panes through happy for remote monitoring; default false and pane-only.
 happy_routed_panes = false
-# Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600).
-dead_row_grace = 3600
+# Seconds a worker's transcript must be quiet past, once every node its session is named on is done, before the daemon's retirement sweep drops its registry row (default 900). The receipt and the node's sessions[] row keep the resume handle. A legacy recovery.retire_grace_s still parses and lifts onto this key with a warning.
+retire_grace_s = 900
 # Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).
 max_live = 3
 # Per-provider budget record keyed by model provider: `lanes` is the immediate-refusal cap on concurrent live workers, `subagents` is the in-session fan-out width review route resolution reads (1 means a panel is never dispatched there). A bare integer is still legal and reads as `lanes`. Unlisted providers are uncapped in both dimensions; the built-in zai budget is lanes 5, subagents 1, because that account is shared. Renamed from `agents.max_lanes` so no two leaves share that name with `parallel.max_lanes`; the legacy spelling still parses with one deprecation line.
@@ -471,8 +471,6 @@ idle_threshold_seconds = 900
 max_nudges = 3
 # Whether daemon startup may archive orphan state directories and rewrite dead-PID rows as exited. Defaults false so restart recovery preserves every resume record.
 startup_destructive = false
-# How long a finished worker stays parked before `fno agents watchdog --apply-all` stops it (default 900 seconds; 0 turns the retire lane off). A worker that declares itself done and never exits holds a live slot against config.agents.max_live forever. The grace is the follow-up window, so a worker that just delivered can still be asked one more thing. Unlike reap this ships armed: retire only runs stop, so the worktree, the transcript and the registry row all survive and `fno agents resume` undoes it.
-retire_grace_s = 900
 # Minimum distinct-session votes required to open a provider/account breaker; default 2, configurable down to 1 so a lone worker's outage can move provider ownership when the operator says so.
 provider_outage_quorum = 2
 # Fair Usage Policy cross-session quorum window in seconds; minimum and default 300.
@@ -495,12 +493,10 @@ provider_health_marker_ttl_seconds = 120
 [recovery.watchdog]
 # Whether the external fleet watchdog lane runs on the pr_watch tick (default false). The depth it goes to is recovery.watchdog.mode.
 enabled = false
-# How far an enabled watchdog lane goes: report (default; publish the unfinished-work report: in_progress nodes with free claims, done branches ahead of origin/main, dirty ownerless worktrees, and ownerless PRs older than 24h, each finding naming its clearing verb) | wake (report, plus resume positively stalled sessions) | handoff (also permit a proved cross-provider outage transaction). Reap and reroute never fire from a tick; they need a manual `fno agents watchdog --apply-all`.
+# How far an enabled watchdog lane goes: report (default; publish the unfinished-work report: in_progress nodes with free claims, done branches ahead of origin/main, dirty ownerless worktrees, and ownerless PRs older than 24h, each finding naming its clearing verb) | wake (report, plus resume positively stalled sessions) | handoff (also permit a proved cross-provider outage transaction). Reroute never fires from a tick; it needs a manual `fno agents watchdog --apply-all`.
 mode = "report"
 # Mail handle the unfinished-work digest is pushed to when the finding set changes (agent name, short id, or project:<slug>). Empty (default) mails nobody.
 mail_to = ""
-# Whether `fno agents watchdog --apply-all` may EXECUTE the reap lane (default false). Reap runs stop then rm, which deletes the session's worktree; work that exists only there is gone with it. Wake and reroute are recoverable, so they ship on. Reap verdicts are still computed, reported and mailed when this is off - only the destructive action is withheld.
-reap = false
 
 [health_monitor]
 # Enable backlog health monitoring.

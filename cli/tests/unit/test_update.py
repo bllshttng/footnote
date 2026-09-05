@@ -2464,10 +2464,10 @@ def test_update_readiness_wire_bump_names_ended_and_revivable(monkeypatch, tmp_p
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
         agent_rows=[
-            {"name": "w1", "harness": "claude", "session_id": "s1", "status": "live"},
-            {"name": "w2", "harness": "claude", "session_id": "s2", "status": "live"},
-            {"name": "w3", "harness": "codex", "session_id": "s3", "status": "live"},
-            {"name": "w4", "harness": "claude", "session_id": None, "status": "live"},
+            {"name": "w1", "harness": "claude", "session_id": "s1", "status": "writing"},
+            {"name": "w2", "harness": "claude", "session_id": "s2", "status": "writing"},
+            {"name": "w3", "harness": "codex", "session_id": "s3", "status": "writing"},
+            {"name": "w4", "harness": "claude", "session_id": None, "status": "writing"},
         ],
     )
 
@@ -2491,7 +2491,7 @@ def test_update_readiness_revivable_excludes_non_live_rows(monkeypatch, tmp_path
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
         agent_rows=[
-            {"name": "w1", "harness": "claude", "session_id": "s1", "status": "live"},
+            {"name": "w1", "harness": "claude", "session_id": "s1", "status": "writing"},
             {"name": "w2", "harness": "claude", "session_id": "s2", "status": "exited"},
         ],
     )

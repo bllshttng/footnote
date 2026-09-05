@@ -765,13 +765,15 @@ def _node_is_done(node: str) -> bool:
     re-dispatching a finished node would spawn a worker with nothing to do. Any
     load miss (absent / corrupt graph, unknown id) degrades to False so the
     respawn proceeds — the claim + spawn path is the real backstop, not this read.
+    The WORK-done read itself is the one shared reader, ``node_is_done``.
     """
     try:
         from fno.graph.load import load_graph
+        from fno.graph.statuses import node_is_done
 
         for entry in load_graph():
             if entry.get("id") == node:
-                return entry.get("status") == "done"
+                return node_is_done(entry)
     except Exception:  # noqa: BLE001 - a status read must never crash the sweep
         return False
     return False

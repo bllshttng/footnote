@@ -6310,26 +6310,19 @@ mod tests {
 
     #[test]
     fn gc_keeps_synthesized_idle_row() {
-        // An adopted orphan row (Idle, no pid, no exited_at) must survive the GC
-        // sweep: non-terminal + no confirmed-dead pid -> gc_action Keep, so the
-        // row stays addressable until the operator resumes it.
+        // An adopted orphan row named on no node must survive the retirement
+        // sweep: NoProvenance -> Keep, so the row stays addressable until the
+        // operator resumes it or a node names it.
         let row = crate::gc::GcRow {
-            status: crate::AgentStatus::Idle,
-            is_live: false,
-            pid_confirmed_dead: false,
+            origin: Some("spawn".into()),
+            crowned: false,
+            work: crate::graph_store::WorkState::NoProvenance,
+            transcript_age_s: Some(10_000),
             owns_worktree: true,
-            exited_at: None,
-            liveness_surface: true,
-            transcript_fresh: Some(false),
-            harness_session_gone: None,
-            dormant_done: false,
             worktree_clean: None,
-            probe: RowLiveness::Alive,
+            branch_merged: None,
         };
-        assert_eq!(
-            crate::gc::gc_action(&row, 1000, 60),
-            crate::gc::GcAction::Keep
-        );
+        assert_eq!(crate::gc::gc_decide(&row, 60).0, crate::gc::GcAction::Keep);
     }
 
     #[test]

@@ -35,9 +35,12 @@ agents_app = typer.Typer(
 )
 
 class AgentStatusFilter(str, enum.Enum):
-    """Rendered family-1 liveness values accepted by ``list --status``."""
+    """Served-activity words accepted by ``list --status`` (AC7): what the
+    session is DOING, never a `live` token. See fno.agents.reachability."""
 
-    live = "live"
+    writing = "writing"
+    quiet = "quiet"
+    parked = "parked"
     orphaned = "orphaned"
     unknown = "unknown"
 
@@ -45,11 +48,9 @@ class AgentStatusFilter(str, enum.Enum):
 class AgentProgressFilter(str, enum.Enum):
     """Progress-axis values accepted by ``list --progress``.
 
-    A SECOND axis beside ``--status``, not a finer version of it: reachability
-    answers "can I reach this process"; progress answers "is it advancing,
-    awaiting the operator, parked, or refused" (fno.agents.reachability). The
-    two filter independently -- a row filtered `--progress parked` still
-    counts toward `--status live`.
+    A SECOND axis beside ``--status``: the status word answers "what is it
+    doing right now"; progress answers "is it advancing, awaiting the
+    operator, parked, or refused". The two filter independently.
     """
 
     advancing = "advancing"
@@ -3242,7 +3243,7 @@ def cmd_list(
         help="Retired: filter by --harness.",
     ),
     status: AgentStatusFilter = typer.Option(
-        None, "--status", help="Filter by liveness (live | orphaned | unknown)."
+        None, "--status", help="Filter by served activity (writing | quiet | parked | orphaned | unknown)."
     ),
     progress: AgentProgressFilter = typer.Option(
         None,
@@ -3904,16 +3905,15 @@ def cmd_register(
 
     # `origin` is write-once, so a human taking over a pane footnote spawned
     # keeps `spawned` and this call cannot change it. Silence there reads as
-    # success: the operator believes they are registered as attended, while mail
-    # still treats them as unattended and the retire lane still holds them
-    # stoppable. The refusal is deliberate - a birth fact is not a claim a later
-    # caller gets to revise - so this says it rather than hiding it.
+    # success: the operator believes they are registered as attended, while
+    # mail still treats them as unattended. The refusal is deliberate - a
+    # birth fact is not a claim a later caller gets to revise - so this says
+    # it rather than hiding it.
     if entry.origin is not None and entry.origin != "operator":
         sys.stderr.write(
             f"note: origin stays {entry.origin!r}; it records what created this "
-            "row and is written once. Mail escalation and the watchdog retire "
-            "lane both read it, so this session is still treated as "
-            f"{entry.origin!r}.\n"
+            "row and is written once. Mail escalation reads it, so this "
+            f"session is still treated as {entry.origin!r}.\n"
         )
 
     # x-481e: record a clock saying "no expiry" beside a hand-stamped policy.
@@ -4463,11 +4463,10 @@ def cmd_watchdog(
         False,
         "--apply-all",
         help=(
-            "Execute every lane: wake plus reap, reroute and retire, which all "
-            "stop a session, plus keeper collection, which kills an orphaned "
-            "keeper process and its hosted children. Only reap also deletes "
-            "its worktree; retire is a stop that `fno agents resume` undoes. "
-            "Implies --apply."
+            "Execute every lane: wake plus reroute (which stops and respawns "
+            "a session), plus keeper collection, which kills an orphaned "
+            "keeper process and its hosted children. Row retirement is the "
+            "daemon sweep's question (`fno agents reap`). Implies --apply."
         ),
     ),
     only: Optional[str] = typer.Option(
@@ -4902,7 +4901,7 @@ def cmd_stale_escalate(
     and reconciles ONE ``[watchdog-stale:*]`` operator question to that set:
     same set is a duplicate, a changed set closes the old ask and asks fresh,
     an empty set closes what is open. Report-only by contract: this verb
-    never wakes, retires, reaps, or touches a worktree - the daemon's idle
+    never wakes or reroutes, and never touches a worktree - the daemon's idle
     tick is its only scheduled caller.
     """
     from fno.agents import stale_lane as se

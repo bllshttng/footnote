@@ -1459,3 +1459,147 @@ def test_contained_node_is_never_stale_quarantined():
     # Same node, only containment differs.
     assert is_stale_ready(node, now, 21) is True
     assert is_stale_ready({**node, "contained_in": "x-6320"}, now, 21) is False
+
+
+def test_misharnessed_twin_detected_only_with_a_shape_correct_twin():
+    """The phantom shape: a codex v7 id stamped under harness claude while the
+    codex twin sits beside it. Detected and dropped only when the correct twin
+    exists; a lone mis-harnessed row and a shape-silent pair are left alone."""
+    codex_id = "01a06886-9405-74a1-8afd-5b67baf89604"
+    node = {
+        "id": "x-a78b",
+        "sessions": [
+            {"session_id": codex_id, "phase": "do", "harness": "codex"},
+            {"session_id": codex_id, "phase": "do", "harness": "claude"},
+        ],
+    }
+    twins = m.detect_misharnessed_twins([node])
+    assert [(t.node_id, t.bad_harness, t.keep_harness) for t in twins] == [
+        ("x-a78b", "claude", "codex")
+    ]
+
+    # No shape-correct twin: nothing is provably wrong, nothing reported.
+    lone = {
+        "id": "x-lone",
+        "sessions": [{"session_id": codex_id, "phase": "do", "harness": "claude"}],
+    }
+    assert m.detect_misharnessed_twins([lone]) == []
+
+    # A shape-silent id under two harness spellings is legal, not a twin.
+    legacy = {
+        "id": "x-legacy",
+        "sessions": [
+            {"session_id": "20260823T083106Z-cx87209-9d434e", "phase": "do",
+             "harness": "claude"},
+            {"session_id": "20260823T083106Z-cx87209-9d434e", "phase": "do",
+             "harness": "unknown"},
+        ],
+    }
+    assert m.detect_misharnessed_twins([legacy]) == []
+
+
+def test_apply_twin_drops_drops_only_under_the_lock_recheck():
+    """The apply half: the detected twin leaves, a claimed node is skipped,
+    and a row whose correct twin left since the scan keeps both rows."""
+    codex_id = "01a06886-9405-74a1-8afd-5b67baf89604"
+    claimed_node = {
+        "id": "x-claim",
+        "sessions": [
+            {"session_id": codex_id, "phase": "do", "harness": "codex"},
+            {"session_id": codex_id, "phase": "do", "harness": "claude"},
+        ],
+    }
+    drops = m.detect_misharnessed_twins([claimed_node])
+    assert len(drops) == 1
+
+    applied, skipped, warnings = m.apply_twin_drops([claimed_node], drops, {"x-claim"})
+    assert applied == [] and skipped == ["x-claim"] and warnings == []
+    assert len(claimed_node["sessions"]) == 2
+
+    applied, skipped, warnings = m.apply_twin_drops([claimed_node], drops, set())
+    assert [a["node_id"] for a in applied] == ["x-claim"]
+    assert skipped == [] and warnings == []
+    assert claimed_node["sessions"] == [
+        {"session_id": codex_id, "phase": "do", "harness": "codex"}
+    ]
+
+    # In-lock recheck: the correct twin left since the scan, so the drop is
+    # stale and BOTH-row removal must not fire (provenance never leaves).
+    stale_shape = {
+        "id": "x-claim",
+        "sessions": [{"session_id": codex_id, "phase": "do", "harness": "claude"}],
+    }
+    applied, _, _ = m.apply_twin_drops([stale_shape], drops, set())
+    assert applied == []
+    assert stale_shape["sessions"] == [
+        {"session_id": codex_id, "phase": "do", "harness": "claude"}
+    ]
+
+
+def test_harness_shape_fix_detected_only_without_a_shape_correct_twin():
+    """The lone mis-harness: the same codex v7 id under harness claude with NO
+    codex twin on the node. The row is the node's only record of the session,
+    so it is repaired, never dropped. A twin beside it defers to the twin leg;
+    a shape-silent id is never convicted."""
+    codex_id = "01a06886-9405-74a1-8afd-5b67baf89604"
+    lone = {
+        "id": "x-lone",
+        "sessions": [{"session_id": codex_id, "phase": "do", "harness": "claude"}],
+    }
+    fixes = m.detect_harness_shape_fixes([lone])
+    assert [(f.node_id, f.wrong_harness, f.right_harness) for f in fixes] == [
+        ("x-lone", "claude", "codex")
+    ]
+
+    # A shape-correct twin owns the wrong row: the twin leg drops it.
+    twinned = {
+        "id": "x-twin",
+        "sessions": [
+            {"session_id": codex_id, "phase": "do", "harness": "codex"},
+            {"session_id": codex_id, "phase": "do", "harness": "claude"},
+        ],
+    }
+    assert m.detect_harness_shape_fixes([twinned]) == []
+
+    # Shape-silent ids (grok/pi-style fno-minted v4s) are never convicted.
+    silent = {
+        "id": "x-silent",
+        "sessions": [
+            {"session_id": "20260823T083106Z-cx87209-9d434e", "phase": "do",
+             "harness": "claude"}
+        ],
+    }
+    assert m.detect_harness_shape_fixes([silent]) == []
+
+
+def test_apply_harness_shape_fixes_rewrites_under_the_lock_recheck():
+    """The apply half: the harness field is corrected in place, a claimed node
+    is skipped, and a row already settled since the scan is left untouched."""
+    codex_id = "01a06886-9405-74a1-8afd-5b67baf89604"
+    node = {
+        "id": "x-fix",
+        "sessions": [
+            {"session_id": codex_id, "phase": "do", "harness": "claude",
+             "started_at": "2026-09-03T20:10:03Z"},
+        ],
+    }
+    fixes = m.detect_harness_shape_fixes([node])
+    assert len(fixes) == 1
+
+    applied, skipped, warnings = m.apply_harness_shape_fixes([node], fixes, {"x-fix"})
+    assert applied == [] and skipped == ["x-fix"] and warnings == []
+    assert node["sessions"][0]["harness"] == "claude"
+
+    applied, skipped, warnings = m.apply_harness_shape_fixes([node], fixes, set())
+    assert [a["node_id"] for a in applied] == ["x-fix"]
+    assert skipped == [] and warnings == []
+    assert node["sessions"] == [
+        {"session_id": codex_id, "phase": "do", "harness": "codex",
+         "started_at": "2026-09-03T20:10:03Z"}
+    ]
+
+    # In-lock recheck: the row left since the scan, so nothing is rewritten.
+    applied, _, _ = m.apply_harness_shape_fixes(
+        [{"id": "x-fix", "sessions": []}], fixes, set()
+    )
+    assert applied == []

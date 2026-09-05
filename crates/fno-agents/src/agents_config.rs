@@ -225,7 +225,7 @@ pub fn sandbox_on_unavailable(cwd: &Path) -> SandboxUnavailablePolicy {
     SandboxUnavailablePolicy::Refuse
 }
 
-/// A direct child scalar of `agents:` (e.g. `dead_row_grace`, `max_live`), NOT a
+/// A direct child scalar of `agents:` (e.g. `max_live`), NOT a
 /// provider-nested key: `agents.<provider>.<key>` never matches here.
 fn table_agents_scalar(t: &toml::Table, key: &str) -> Option<Value> {
     t.get("agents")?.as_table()?.get(key).cloned()
@@ -303,51 +303,39 @@ pub fn effective_yolo(yolo: bool, headless_default: bool) -> bool {
     yolo || headless_default
 }
 
-/// Default dead-row grace window: 1h (matches `agents.dead_row_grace`'s
-/// Pydantic default). A finished agent-view row stays visible this long after the
-/// GC first observes its process gone, before it is reaped (x-b1aa).
-pub const DEFAULT_DEAD_ROW_GRACE_SECS: u64 = 3600;
-
-/// Resolve `agents.dead_row_grace` (seconds) for `harness`, for the daemon GC
-/// sweep and `fno agents reap`. `$FNO_AGENTS_DEAD_ROW_GRACE_SECS` is a global
-/// test/tuning override (unchanged by harness); otherwise the config.toml
-/// chain, degrading to the default.
-///
-/// This is also the transcript-freshness window (`transcript_fresh_probe`
-/// reuses whatever grace the caller resolves here), so a per-harness table is
-/// the fix for a codex worker's normal multi-hour silence being misread as
-/// staleness (x-9de7 task 6) -- not a second knob, the SAME one, keyed wider.
-///
-/// Two shapes are accepted at `agents.dead_row_grace`, mutually exclusive in
-/// TOML by construction:
-/// - a bare integer (today's shape): applies to every harness, unchanged.
-/// - a table, `agents.dead_row_grace.<harness> = <seconds>`: looked up by
-///   `harness` first; a harness with no key present falls through (to the
-///   next config candidate, then the default) rather than inheriting a
-///   sibling harness's number.
-pub fn dead_row_grace_secs(cwd: &Path, harness: &str) -> u64 {
-    if let Some(v) = non_empty_env("FNO_AGENTS_DEAD_ROW_GRACE_SECS")
-        .and_then(|s| s.to_str().and_then(|s| s.trim().parse::<u64>().ok()))
-    {
-        return v;
-    }
-    resolve(cwd, |t| match table_agents_scalar(t, "dead_row_grace")? {
-        Value::Integer(i) => u64::try_from(i).ok(),
-        Value::Table(per_harness) => per_harness
-            .get(harness)?
-            .as_integer()
-            .and_then(|i| u64::try_from(i).ok()),
-        _ => None,
-    })
-    .unwrap_or(DEFAULT_DEAD_ROW_GRACE_SECS)
-}
-
 /// Default reap-receipt retention: 7 days. A reaped row's resume handle
 /// survives a week by default before the GC sweep expires it (x-6db9).
 pub const DEFAULT_REAP_RECEIPT_RETAIN_DAYS: u64 = 7;
 
+/// Default retire grace: 15 minutes of transcript quiet past done work before
+/// a row retires (x-c672; the retired `recovery.retire_grace_s` default).
+pub const DEFAULT_RETIRE_GRACE_SECS: u64 = 900;
+
+/// Resolve `agents.retire_grace_s` for the retirement sweep. The legacy key
+/// `recovery.retire_grace_s` is read with the same precedence (coerced with a
+/// warning on the Python side; here it silently feeds the same default
+/// ladder). `$FNO_AGENTS_RETIRE_GRACE_SECS` is a global test/tuning override.
+pub fn retire_grace_secs(cwd: &Path) -> u64 {
+    if let Some(v) = non_empty_env("FNO_AGENTS_RETIRE_GRACE_SECS")
+        .and_then(|s| s.to_str().and_then(|s| s.trim().parse::<u64>().ok()))
+    {
+        return v;
+    }
+    resolve(cwd, |t| {
+        let scalar = |table: &str| -> Option<u64> {
+            t.get(table)?
+                .as_table()?
+                .get("retire_grace_s")?
+                .as_integer()
+                .and_then(|i| u64::try_from(i).ok())
+        };
+        scalar("agents").or_else(|| scalar("recovery"))
+    })
+    .unwrap_or(DEFAULT_RETIRE_GRACE_SECS)
+}
+
 /// Resolve `agents.reap_receipts.retain_days` for the GC sweep's receipt
-/// expiry, same precedence + fail-open degrade as [`dead_row_grace_secs`]:
+/// expiry, same precedence + fail-open degrade as [`retire_grace_secs`]:
 /// an unparseable value degrades to the default rather than deleting every
 /// receipt on a config typo.
 pub fn reap_receipt_retain_days(cwd: &Path) -> u64 {
@@ -364,7 +352,7 @@ pub fn reap_receipt_retain_days(cwd: &Path) -> u64 {
 }
 
 // --- Spawn-gate knobs (x-c5cc). Same precedence + fail-open degrade as
-// `dead_row_grace_secs`; all coerce invalid values to their defaults so a config
+// `retire_grace_secs`; all coerce invalid values to their defaults so a config
 // typo can never brick the spawn primitive.
 
 /// Default global cap on concurrent live worker processes (union of the fno
@@ -595,8 +583,8 @@ pub fn auto_merge_strategy(cwd: &Path) -> String {
     .unwrap_or_else(|| "merge".to_string())
 }
 
-/// The normalized raw scalar for a direct child of `agents:` (the generalized
-/// `dead_row_grace_secs` chain), so each caller applies its own coercion.
+/// The normalized raw scalar for a direct child of `agents:`, so each caller
+/// applies its own coercion.
 fn resolve_agents_value(cwd: &Path, key: &str) -> Option<String> {
     resolve(cwd, |t| {
         table_agents_scalar(t, key)
@@ -653,31 +641,6 @@ pub(crate) fn read_sandbox_on_unavailable(content: &str) -> SandboxUnavailablePo
     {
         Some("warn") => SandboxUnavailablePolicy::Warn,
         _ => SandboxUnavailablePolicy::Refuse,
-    }
-}
-
-/// `agents.dead_row_grace` (a direct child of `agents:`) from a config.toml body.
-#[cfg(test)]
-pub(crate) fn read_dead_row_grace(content: &str) -> Option<u64> {
-    table_agents_scalar(&parse_config(content)?, "dead_row_grace")?
-        .as_integer()
-        .and_then(|i| u64::try_from(i).ok())
-}
-
-/// `agents.dead_row_grace`, resolved for `harness` -- either a bare scalar
-/// (applies to every harness) or `agents.dead_row_grace.<harness>` (x-9de7
-/// task 6). Same extraction `dead_row_grace_secs` runs against a config.toml
-/// body, exposed directly so the resolution logic is tested without the
-/// candidate-file walk.
-#[cfg(test)]
-pub(crate) fn read_dead_row_grace_for_harness(content: &str, harness: &str) -> Option<u64> {
-    match table_agents_scalar(&parse_config(content)?, "dead_row_grace")? {
-        Value::Integer(i) => u64::try_from(i).ok(),
-        Value::Table(per_harness) => per_harness
-            .get(harness)?
-            .as_integer()
-            .and_then(|i| u64::try_from(i).ok()),
-        _ => None,
     }
 }
 
@@ -745,81 +708,6 @@ mod tests {
         assert!(err.contains("opencode confinement unavailable"));
         assert!(err.contains("install/configure"));
         clear_config_env();
-    }
-
-    #[test]
-    fn dead_row_grace_reads_agents_child_key() {
-        let cfg = "[agents]\nconfirm = \"auto\"\ndead_row_grace = 7200\n";
-        assert_eq!(read_dead_row_grace(cfg), Some(7200));
-    }
-
-    #[test]
-    fn dead_row_grace_absent_is_none() {
-        assert_eq!(read_dead_row_grace("[agents]\nconfirm = \"auto\"\n"), None);
-        assert_eq!(read_dead_row_grace("schema_version = 1\n"), None);
-    }
-
-    #[test]
-    fn dead_row_grace_ignores_provider_nested_and_bad_values() {
-        // A key at provider depth must NOT be read as the agents-child.
-        let nested = "[agents.codex]\ndead_row_grace = 5\n";
-        assert_eq!(read_dead_row_grace(nested), None);
-        // Non-integer value -> None (falls through to default).
-        let bad = "[agents]\ndead_row_grace = \"banana\"\n";
-        assert_eq!(read_dead_row_grace(bad), None);
-    }
-
-    #[test]
-    fn dead_row_grace_bare_integer_applies_to_every_harness() {
-        // x-9de7 task 6 AC1: today's shape, unchanged behavior for any harness.
-        let cfg = "[agents]\ndead_row_grace = 3600\n";
-        assert_eq!(read_dead_row_grace_for_harness(cfg, "codex"), Some(3600));
-        assert_eq!(read_dead_row_grace_for_harness(cfg, "claude"), Some(3600));
-    }
-
-    #[test]
-    fn dead_row_grace_per_harness_table_does_not_leak_across_harnesses() {
-        // x-9de7 task 6 AC2: agents.dead_row_grace.codex set, no claude key ->
-        // codex gets its own value, claude falls through (to the default,
-        // resolved one level up in dead_row_grace_secs -- this pure reader
-        // just proves the table lookup itself does not leak).
-        let cfg = "[agents.dead_row_grace]\ncodex = 28800\n";
-        assert_eq!(read_dead_row_grace_for_harness(cfg, "codex"), Some(28800));
-        assert_eq!(read_dead_row_grace_for_harness(cfg, "claude"), None);
-    }
-
-    #[test]
-    fn dead_row_grace_secs_resolves_per_harness_table() {
-        let dir = std::env::temp_dir().join(format!(
-            "fno-agents-config-test-grace-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(dir.join(".fno")).unwrap();
-        std::fs::write(
-            dir.join(".fno/config.toml"),
-            "[agents.dead_row_grace]\ncodex = 28800\n",
-        )
-        .unwrap();
-        // Isolate from any real env override so this reads the file alone.
-        // Under the crate-wide lock: removing the var is itself a write, and
-        // the resolver also reads $FNO_CONFIG, which sibling tests repoint at
-        // their own files. Unlocked, this read landed on someone else's config
-        // and fell back to the default.
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("FNO_AGENTS_DEAD_ROW_GRACE_SECS");
-        assert_eq!(dead_row_grace_secs(&dir, "codex"), 28800);
-        assert_eq!(
-            dead_row_grace_secs(&dir, "claude"),
-            DEFAULT_DEAD_ROW_GRACE_SECS,
-            "a harness absent from the table falls back to the default, not the codex value"
-        );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

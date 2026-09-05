@@ -24,13 +24,17 @@ from fno.harness_identity import resolve_harness_identity
 from .manifest import manifest_identity, read_target_manifest
 
 
-def _graph_node_is_terminal(node_id: str) -> Optional[bool]:
-    """Is backlog node ``node_id`` in a terminal state? None when unknowable.
+def _graph_node_closed(node_id: str) -> Optional[bool]:
+    """Is backlog node ``node_id`` closed to rebinding (done/superseded)? None
+    when unknowable.
 
-    Best-effort: a terminal node (done) must not be rebound, but an unreadable
-    graph is not itself a refusal - the manifest + claim are the ownership
-    authority, and refusing on every graph read failure would block resume
-    during a transient graph corruption. Returns None to let the caller proceed.
+    The question here is REBINDABILITY, not WORK-done: ``superseded`` belongs
+    because a replaced node must not be rebound either, which is why this
+    reads the terminal set directly instead of the one WORK-done reader
+    ``node_is_done``. Best-effort: an unreadable graph is not itself a refusal
+    - the manifest + claim are the ownership authority, and refusing on every
+    graph read failure would block resume during a transient graph corruption.
+    Returns None to let the caller proceed.
     """
     try:
         from fno.graph.load import load_graph
@@ -115,7 +119,7 @@ def resume_bind(
         }
 
     # A terminal node is settled work; never rebind it.
-    terminal = _graph_node_is_terminal(ident["graph_node_id"])
+    terminal = _graph_node_closed(ident["graph_node_id"])
     if terminal is True:
         return {
             "result": "refused",
