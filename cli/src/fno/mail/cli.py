@@ -683,6 +683,7 @@ def _sent_unclaimed_count() -> int:
     from fno.agents.self_stamp import resolve_self_identity
     from fno.config import load_settings
     from fno.harness_identity import canonical_handle
+    from fno.mail.landed import _sent_unclaimed
 
     ident = resolve_self_identity()
     if not ident.harness or not ident.session_id:
@@ -2430,6 +2431,15 @@ def _name_lane_send(
     # node x-1904: the live lane's own cause when a claude inject misses, so the
     # durable receipt names it (e.g. not-confirmed) instead of a bare live-miss.
     live_reason: Optional[str] = None
+    # The session actually injected into, for the landed check to grep (never
+    # the handle, which can outlive the process it names). Set from `resolved`
+    # when a live session was found by discovery; the token ladder below fills
+    # it in for the probe-target lane once `token_reachable` is known. Left
+    # `None` on any lane this cannot cheaply pin (e.g. an unregistered raw
+    # token with no discovery row) -- the landed check then honestly reports
+    # `landed: null` rather than guessing.
+    to_session: Optional[str] = resolved.session_id if resolved is not None else None
+    to_harness: Optional[str] = resolved.agent if resolved is not None else None
 
     if resolved is None and token is not None:
         # The ladder below the discovery miss. Discovery is a liveness-gated
@@ -2456,6 +2466,8 @@ def _name_lane_send(
             # the case with no store record to read the harness off. Both
             # injectors are cheap and side-effect-free on a miss.
             probe_agent = token_reachable.agent if token_reachable is not None else None
+            if token_reachable is not None:
+                to_session, to_harness = probe_target, probe_agent
             if probe_agent == "codex":
                 _codex_probe_reason: list = []
                 injected = _mail_inject_codex(
@@ -2604,6 +2616,8 @@ def _name_lane_send(
                 from_model=sender_model,
                 to_kind="name",
                 word_count=authored_words,
+                to_session=to_session,
+                to_harness=to_harness,
             )
         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
             print(
@@ -2868,6 +2882,8 @@ def _job_lane_send(
                 from_model=sender_model,
                 to_kind="node",
                 word_count=authored_words,
+                to_session=session_id,
+                to_harness=provider,
             )
         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
             print(
@@ -3438,6 +3454,8 @@ def _raw_send(
                 provider_to=entry.harness,
                 to_kind="session",
                 word_count=authored_words,
+                to_session=session_id,
+                to_harness=entry.harness,
             )
         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
             print(
@@ -4750,10 +4768,15 @@ def cmd_sent(
 
     ``--unclaimed`` applies exactly the predicate the nag applies, so what this
     prints is what that line is counting, never a differently-scoped set.
+
+    ``landed`` proves the text reached the recipient's own transcript. It
+    never proves the agent read it or acted on it -- that fourth state is not
+    observable, so three is the honest ceiling here.
     """
     from fno.agents.self_stamp import stamp_from
-    from fno.bus.log import HOSTED_DELIVERY, TYPED_DELIVERY
+    from fno.bus.log import HOSTED_DELIVERY, TYPED_DELIVERY, iter_messages, withdrawn_ids
     from fno.config import load_settings
+    from fno.mail.landed import _sent_unclaimed, age_minutes, landed_states
 
     # `stamp_from`, not the precedence-only resolver: this must be the SAME
     # handle the send path stamped into `from`, or the outbox lists mail this
@@ -4766,13 +4789,11 @@ def cmd_sent(
     handle = stamp_from(from_name)
 
     is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+    all_msgs = list(iter_messages())
     if unclaimed_only:
         msgs = _sent_unclaimed(handle, load_settings().inbox.unclaimed_ttl)
-        claimed_flag = {m.id: False for m in msgs}
+        unclaimed_ids = {m.id for m in msgs}
     else:
-        from fno.bus.log import iter_messages, withdrawn_ids
-
-        all_msgs = list(iter_messages())
         retracted = withdrawn_ids(all_msgs)
         # TTL of -1, not 0: `_age_exceeds` is strict `>` and bus timestamps are
         # whole seconds, so a message sent this second has age 0.0 and a TTL of 0
@@ -4780,17 +4801,25 @@ def cmd_sent(
         # picked up, which is the opposite of the truth this verb exists to tell.
         unclaimed_ids = {m.id for m in _sent_unclaimed(handle, -1)}
         msgs = [
-            m for m in all_msgs if m.from_ == handle and m.id not in retracted
+            m for m in all_msgs
+            if m.kind == "send" and m.from_ == handle and m.id not in retracted
         ]
-        # A typed row is excluded from the unclaimed scan the way a hosted row
-        # is, so "not unclaimed" silently read as "claimed" for it. Consumption
-        # is the one thing the pane transport can never assert: bytes at a
-        # prompt can be discarded by that prompt. Neither renderer below may
-        # infer it, so the ambiguity is resolved HERE, once, rather than in each.
-        claimed_flag = {
-            m.id: (m.delivery != TYPED_DELIVERY and m.id not in unclaimed_ids)
-            for m in msgs
-        }
+
+    # `claimed` has one meaning: the durable consume-cursor was read past this
+    # row. A hosted row has no cursor -- reporting `true` there unconditionally
+    # was the decoration this node exists to delete, so it reports `null`
+    # (see `landed` instead). A typed row is neither claimed nor claimABLE:
+    # bytes at a prompt can be discarded by that prompt, so it keeps its own
+    # `false` rather than falling into the cursor comparison.
+    claimed_flag: dict[str, Optional[bool]] = {}
+    for m in msgs:
+        if m.delivery == HOSTED_DELIVERY:
+            claimed_flag[m.id] = None
+        elif m.delivery == TYPED_DELIVERY:
+            claimed_flag[m.id] = False
+        else:
+            claimed_flag[m.id] = m.id not in unclaimed_ids
+    landed_flag = landed_states(all_msgs, msgs)
 
     if json_out or not is_tty:
         print(
@@ -4808,6 +4837,9 @@ def cmd_sent(
                         # durable row that can still clear, so this renderer and
                         # `--unclaimed-only` disagreed about the same row.
                         "claimable": m.delivery != TYPED_DELIVERY,
+                        # Proof the text reached the recipient's transcript.
+                        # It never proves the agent read it or acted on it.
+                        "landed": landed_flag.get(m.id),
                     }
                     for m in msgs
                 ],
@@ -4820,17 +4852,23 @@ def cmd_sent(
         print(f"no {scope}mail sent from {handle}")
         return
     for m in msgs:
-        state = (
-            "delivered" if m.delivery == HOSTED_DELIVERY
-            # `typed` gets its own word. It is excluded from the unclaimed scan
-            # like a hosted row, so it fell through to "claimed" here and told
-            # the sender the recipient had consumed it. That is the one claim
-            # this transport must never make: bytes written into a PTY can be
-            # discarded by the prompt they land on.
-            else "typed (unconfirmed)" if m.delivery == TYPED_DELIVERY
-            else "claimed" if claimed_flag[m.id]
-            else "UNCLAIMED"
-        )
+        if m.delivery == HOSTED_DELIVERY:
+            verdict = landed_flag.get(m.id)
+            if verdict is True:
+                state = "landed"
+            elif verdict is False:
+                state = f"handed {age_minutes(m.ts) or 0}m ago, not in transcript"
+            else:
+                state = "handed, transcript unreadable"
+        # `typed` gets its own word. It is excluded from the unclaimed scan
+        # like a hosted row, so it fell through to "claimed" here and told
+        # the sender the recipient had consumed it. That is the one claim
+        # this transport must never make: bytes written into a PTY can be
+        # discarded by the prompt they land on.
+        elif m.delivery == TYPED_DELIVERY:
+            state = "typed (unconfirmed)"
+        else:
+            state = "claimed" if claimed_flag[m.id] else "UNCLAIMED"
         lane = m.to_kind or "?"
         delivery = m.delivery or "durable"
         print(f"{m.id}  -> {m.to}  [{lane}/{delivery}]  {m.ts}  {state}")
@@ -4838,7 +4876,9 @@ def cmd_sent(
         "\nunclaimed means the recipient never read it. Wake it first - "
         "fno agents peek <recipient> to check, fno agents resume <recipient> "
         "to wake (the wake lane delivers); withdraw one only when stale: "
-        "fno agents mail withdraw <id>"
+        "fno agents mail withdraw <id>\n"
+        "landed proves the text reached the recipient's transcript; it never "
+        "proves the agent read it or acted on it."
     )
 
 
@@ -5537,120 +5577,6 @@ def _emit_drain_marker(
         pass
 
 
-# ---------------------------------------------------------------------------
-# Active-turn delivery helpers. The sent-unclaimed predicate remains stat-only
-# and is shared with `fno agents mail status`.
-# ---------------------------------------------------------------------------
-
-# Mail text is embedded inside a hook-owned <system-reminder> wrapper, so a
-# sender/recipient handle carrying a literal </system-reminder> could break out
-# and inject context. Defang the delimiter (open/close, case- + whitespace-
-# insensitive) in every interpolated field, mirroring born-with-why-offer-inject.sh.
-_REMINDER_TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
-
-
-def _defang_reminder(s: str) -> str:
-    return _REMINDER_TAG.sub(r"[\1system-reminder]", s)
-
-
-def _bounded_names(names: list[str], cap: int = 3) -> str:
-    """De-dupe (first-seen), defang, then cap at ``cap`` names + ``+K more``."""
-    seen: list[str] = []
-    for n in names:
-        if n not in seen:
-            seen.append(n)
-    shown = [_defang_reminder(n) for n in seen[:cap]]
-    extra = len(seen) - cap
-    return ", ".join(shown) + (f", +{extra} more" if extra > 0 else "")
-
-
-def _age_exceeds(ts: str, ttl_seconds: int, now: "datetime") -> bool:
-    """True iff bus ISO ``ts`` (``...Z`` UTC) is strictly older than TTL.
-
-    Unparseable ts -> False (never flag): degrade to quiet, never to a crash.
-    ``fromisoformat`` is lock-free (unlike ``strptime``, which grabs a global
-    locale lock) and pre-3.11-safe once the trailing ``Z`` is normalized -- it
-    runs once per sent message on the every-turn hook path, so the lock matters.
-    """
-    from datetime import datetime as _dt
-
-    try:
-        sent_at = _dt.fromisoformat(ts.replace("Z", "+00:00") if ts.endswith("Z") else ts)
-        return (now - sent_at).total_seconds() > ttl_seconds
-    except (ValueError, TypeError, AttributeError):
-        return False
-
-
-def _sent_unclaimed(handle: str, ttl_seconds: int) -> list:
-    """My sent mail still unclaimed past TTL, oldest -> newest.
-
-    Unclaimed = still past the recipient's consume cursor AND strictly older than
-    ``ttl_seconds``. Reads the bus ONCE (a single ``iter_messages`` snapshot) and
-    compares each recipient's cursor position against that snapshot, so cost is
-    ``O(bus + recipients)`` not ``O(recipients x bus)`` -- a per-recipient
-    ``scan_unread`` reparse could cross the hook's 2s timeout and silently drop
-    the nudge. Stat-only: recipient cursors are read fresh every call (never
-    cached), so a just-consumed message stops being flagged immediately; no
-    cursor is advanced.
-
-    Returns the envelopes rather than a count because for its whole life this
-    computed exactly the rows a sender needs to act -- id, recipient, age -- and
-    threw all but the tally away, which is why the nag could say "1 unclaimed"
-    every turn and offer no way to find or stop it. Callers that only want the
-    tally take ``len()``.
-    """
-    from datetime import datetime as _dt
-    from datetime import timezone as _tz
-
-    from fno.bus.cursor import read_cursor
-    from fno.bus.log import is_deliverable, iter_messages, withdrawn_ids
-
-    now = _dt.now(tz=_tz.utc)
-    all_msgs = list(iter_messages())
-    # A withdrawn message stops being unclaimed the moment it is retracted; this
-    # reader takes `iter_messages` directly and so is NOT covered by the filter
-    # in `scan_unread`. Without this line the nag survives its own withdrawal.
-    retracted = withdrawn_ids(all_msgs)
-    sent = [
-        m for m in all_msgs
-        if m.from_ == handle and m.id not in retracted and is_deliverable(m)
-    ]
-    if not sent:
-        return []
-    pos = {m.id: i for i, m in enumerate(all_msgs)}
-    # Per recipient, its consume-cursor position in the single snapshot. A
-    # message to r is unread iff it sits AFTER that position; an absent, corrupt,
-    # or rotated-out cursor means "nothing consumed" (-1 -> all unread), matching
-    # scan_unread's fail-open. A recipient name read_cursor rejects (path-
-    # traversal guard) or that errors -> sentinel len(all_msgs) so nothing is
-    # "after" it -> fully claimed / skipped: fail-open to quiet, never a crash.
-    cursor_pos: dict[str, int] = {}
-    for r in {m.to for m in sent}:
-        try:
-            cid = read_cursor(r)
-        except (ValueError, OSError):
-            cursor_pos[r] = len(all_msgs)
-            continue
-        cursor_pos[r] = pos.get(cid, -1) if cid else -1
-    out = []
-    for m in sent:
-        if pos[m.id] <= cursor_pos.get(m.to, len(all_msgs)):  # claimed / unresolvable
-            continue
-        if not _age_exceeds(m.ts, ttl_seconds, now):  # still fresh (strict >)
-            continue
-        out.append(m)
-    return out
-
-
-def _distinct_recipients(msgs: list) -> list[str]:
-    """Recipients in first-seen order, one entry each."""
-    seen: list[str] = []
-    for m in msgs:
-        if m.to not in seen:
-            seen.append(m.to)
-    return seen
-
-
 @mail_app.command("notify-self", hidden=True)
 def cmd_notify_self() -> None:
     """Write one atomic ``UserPromptSubmit`` mail payload, then acknowledge it.
@@ -5716,21 +5642,17 @@ def cmd_notify_self() -> None:
             '\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body "..."'
         )
 
+    from fno.mail.landed import _defang_reminder, _sent_unclaimed, nag_line
+
     ttl = load_settings().inbox.unclaimed_ttl
     unclaimed = _sent_unclaimed(handle, ttl)
-    if unclaimed:
-        who = _bounded_names(_distinct_recipients(unclaimed))
-        # Name the exits. This line fired every turn for hours with no way to
-        # see which message it meant or to stop it, which is what made an
-        # unclaimed message a standing tax on the sender rather than a notice.
-        lines.append(
-            f"{len(unclaimed)} sent fno agents mail unclaimed (to {who}, >{ttl // 60}m): "
-            "recipient has not picked it up; "
-            "`fno agents mail sent --unclaimed` to see them, "
-            "`fno agents peek <recipient>` to check, "
-            "`fno agents resume <recipient>` to wake one (the wake lane delivers), "
-            "`fno agents mail withdraw <id>` to retract one only when stale"
-        )
+    # Silent when everything has landed (AC6-HP). Names the keystroke because
+    # no receipt can perform it: a hosted send that never reaches its
+    # recipient's turn only resolves when a human interrupts the loop it is
+    # stuck in.
+    line = nag_line(unclaimed)
+    if line:
+        lines.append(line)
 
     if not lines:
         if unread:

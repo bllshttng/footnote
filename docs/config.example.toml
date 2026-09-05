@@ -85,6 +85,8 @@ enabled = false
 [inbox]
 # Seconds past which a sent-but-unclaimed bus message is surfaced back to its sender (turn-boundary nudge + `fno agents mail status`).
 unclaimed_ttl = 1800
+# Seconds past which an outstanding sent message drops off the nag entirely and is never grepped again.
+landed_abandon_ttl = 21600
 
 [sandbox]
 # When a headless harness has no confinement backend: refuse before spawn (default) or explicitly warn and continue unconfined.

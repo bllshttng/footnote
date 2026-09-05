@@ -9401,6 +9401,8 @@ def dispatch_send(
                                 from_model=mail_ctx.model,
                                 to_kind="session",
                                 word_count=_hosted_words,
+                                to_session=existing.harness_session_id,
+                                to_harness=existing.harness,
                             )
                         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
                             print(

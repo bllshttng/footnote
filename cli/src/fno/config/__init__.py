@@ -1951,11 +1951,17 @@ class InboxBlock(BaseModel):
     message is surfaced back to its sender (turn-boundary nudge + ``fno agents mail
     status``). Advisory-only, so a short default is low-harm; 1800s (30m) is the
     locked default (x-39a4). Non-negative.
+
+    ``landed_abandon_ttl`` is the age (seconds) past which an outstanding
+    message drops off the nag entirely and is never grepped again: an
+    unlanded send is information at 30 minutes and noise at six hours.
+    Non-negative; 21600s (6h) default.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     unclaimed_ttl: int = 1800
+    landed_abandon_ttl: int = 21600
 
     @field_validator("unclaimed_ttl")
     @classmethod
@@ -1963,6 +1969,15 @@ class InboxBlock(BaseModel):
         if v < 0:
             raise ValueError(
                 f"config.inbox.unclaimed_ttl must be >= 0; got {v}"
+            )
+        return v
+
+    @field_validator("landed_abandon_ttl")
+    @classmethod
+    def abandon_ttl_is_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                f"config.inbox.landed_abandon_ttl must be >= 0; got {v}"
             )
         return v
 

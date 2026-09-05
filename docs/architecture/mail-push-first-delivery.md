@@ -21,7 +21,7 @@ The shell hook relays the already-valid JSON directly, so no command substitutio
 There is no notify cursor: `SessionStart` and `UserPromptSubmit` race on the one canonical cursor, and whichever successfully drains first makes the other silent.
 
 - **Inbound:** unread envelopes addressed to the canonical session handle -> complete bodies, ids, and reply guidance inside a hook-owned `<system-reminder>` frame, followed by acknowledgement after flush.
-- **Sent-unclaimed:** my sent mail still returned by `scan_unread(recipient)` (recipient's cursor has not passed it) AND strictly older than `config.inbox.unclaimed_ttl` (default 1800s) -> `N sent fno agents mail unclaimed (to <recipients>, >30m): recipient has not picked it up`. Computed live every call, so a just-consumed message stops being flagged immediately.
+- **Sent-unclaimed:** hosted and durable sends (not `typed`) not yet proven `landed` in the recipient's own transcript, AND (for a durable row) still past the recipient's consume cursor, AND strictly older than `config.inbox.unclaimed_ttl` (default 1800s) -> `N message(s) to <recipients> handed <age>m ago, not in transcript - they are mid-loop, ESC to steer`. Computed live every call, so a just-landed message stops being flagged immediately, and a message past `config.inbox.landed_abandon_ttl` drops off entirely.
 
 Sent-unclaimed reporting remains stat-only and advances no recipient cursor.
 

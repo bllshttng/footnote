@@ -470,8 +470,24 @@ def record_hosted_delivery(
     from_model: Optional[str] = None,
     to_kind: Optional[str] = None,
     word_count: Optional[int] = None,
+    to_session: Optional[str] = None,
+    to_harness: Optional[str] = None,
 ) -> Envelope:
-    """Append one audit-only record after confirmed hosted delivery."""
+    """Append one audit-only record after confirmed hosted delivery.
+
+    ``to_session``/``to_harness`` name the session actually injected into --
+    never the recipient handle, and never re-resolved later, since a handle
+    can outlive the process it named at send time. That coordinate is what
+    the landed check greps: proof the text reached the recipient's own
+    transcript, which a hosted delivery alone never was -- one message
+    reached its recipient's turn only because a human pressed ESC to
+    interrupt a busy loop, after the send had already printed as delivered.
+    """
+    meta: dict = {}
+    if to_session:
+        meta["to_session"] = to_session
+    if to_harness:
+        meta["to_harness"] = to_harness
     env = Envelope.new(
         id=msg_id,
         thread=thread or msg_id,
@@ -488,6 +504,7 @@ def record_hosted_delivery(
         from_model=from_model,
         to_kind=to_kind,
         word_count=word_count,
+        meta=meta or None,
     )
     append(env)
     return env
@@ -614,6 +631,49 @@ def withdrawn_ids(msgs: list[Envelope]) -> set[str]:
         # "withdrawn: msg-xxxx" line about a message it had no power to retract.
         out.add(m.id)
         target_id = (m.meta or {}).get("withdraws")
+        target = by_id.get(target_id) if isinstance(target_id, str) else None
+        if target is None or target.from_ != m.from_ or target.to != m.to:
+            continue
+        out.add(target.id)
+    return out
+
+
+#: A landed row is control traffic proving one id reached its recipient's own
+#: transcript. Never itself deliverable, and durable rather than a re-grep:
+#: a transcript rotates and a session dies, and a state that can un-flip on
+#: that is the exact decoration this kind exists to delete.
+LANDED_KIND = "landed"
+
+
+def record_landed(*, msg_id: str, sender: str, recipient: str) -> Envelope:
+    """Append one control row proving ``msg_id`` reached ``recipient``'s transcript."""
+    env = Envelope.new(
+        from_=sender,
+        to=recipient,
+        kind=LANDED_KIND,
+        body="",
+        meta={"landed": msg_id},
+    )
+    append(env)
+    return env
+
+
+def landed_ids(msgs: list[Envelope]) -> set[str]:
+    """Ids a ``record_landed`` row proves reached their recipient's transcript.
+
+    Mirrors ``withdrawn_ids``'s read-side ownership check: a landed row counts
+    only when it marks a message the same sender sent to the same address, so
+    a hand-appended or replayed line cannot mark someone else's mail landed.
+    Unlike a withdrawal, a landed message stays visible (with ``landed:
+    true``) rather than disappearing, so the control row's own id is never
+    added to the returned set -- only the message it proves.
+    """
+    by_id = {m.id: m for m in msgs}
+    out: set[str] = set()
+    for m in msgs:
+        if m.kind != LANDED_KIND:
+            continue
+        target_id = (m.meta or {}).get("landed")
         target = by_id.get(target_id) if isinstance(target_id, str) else None
         if target is None or target.from_ != m.from_ or target.to != m.to:
             continue

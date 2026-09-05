@@ -69,6 +69,11 @@ FIELD_META: dict[str, Meta] = {
         "Seconds past which a sent-but-unclaimed bus message is surfaced back to its sender (turn-boundary nudge + `fno agents mail status`).",
         default_source="default",
     ),
+    "inbox.landed_abandon_ttl": Meta(
+        "advanced",
+        "Seconds past which an outstanding sent message drops off the nag entirely and is never grepped again.",
+        default_source="default",
+    ),
     # --- config.sandbox.* ---
     # --- config.join.* ---
     "join.sandbox": Meta(
