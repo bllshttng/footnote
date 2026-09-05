@@ -641,7 +641,7 @@ mod tests {
         // in the receipt. A count-only assertion is refused: pristine tabs
         // already close today.
         let tab = LiveTab {
-            session: "main".into(),
+            session: "no-such-fno-main".into(),
             squad_id: 1,
             squad_name: None,
             tab_id: 2,
@@ -651,7 +651,21 @@ mod tests {
             used_shell_only: false,
             orphaned: true,
         };
-        let out = prune_live_tabs(&[tab, used_shell_tab(3)], false, false, false);
+        // The companion tab shares the unreachable session, so the squad has
+        // two tabs and the last-in-squad guard lets the fold decide. A live
+        // session name here would make the suite close a REAL tab.
+        let companion = LiveTab {
+            session: "no-such-fno-main".into(),
+            squad_id: 1,
+            squad_name: None,
+            tab_id: 3,
+            tab_name: None,
+            pane_count: 1,
+            pristine: false,
+            used_shell_only: true,
+            orphaned: false,
+        };
+        let out = prune_live_tabs(&[tab, companion], false, false, false);
         assert_eq!(out.closed_orphaned, 0, "no server answers in a unit test");
         assert_eq!(out.would_close_orphaned, 0);
         assert!(
