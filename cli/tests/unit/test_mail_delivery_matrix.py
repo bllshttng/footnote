@@ -1062,3 +1062,26 @@ def test_exactly_one_receipt_line_per_send(
     else:
         assert rows[0].delivery == "hosted"
         assert scan_unread(rows[0].to) == []
+
+
+def test_deferred_head_reads_the_oracle_at_call_time(monkeypatch):
+    """The receipt sentence must honor a resolver replaced after import.
+
+    Importing the module first is the point: a name bound at import time
+    keeps the resolver this module happened to import, so the seeded
+    verdict below is ignored and the receipt reports a real session. That
+    failure depends on import order, so it hides until some other test
+    imports the module first.
+    """
+    import fno.mail.deferred_liveness as deferred_liveness
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda *_a, **_k: {"state": "unknown", "last_activity_age_s": None},
+    )
+
+    head = deferred_liveness.deferred_liveness_head("9a063cd3")
+    assert "could not be established" in head, head
+    assert "is not live" not in head, head
