@@ -140,7 +140,7 @@ def plan_base(plan_path: Optional[str]) -> str:
         raise DecomposeError(
             "epic has no plan_path; cannot address group fragments. "
             "To fold existing nodes into a plan-less epic run: "
-            "fno backlog adopt <epic> <id>...",
+            "fno backlog contain <epic> <id>...",
             exit_code=1,
         )
     return plan_path.split("#", 1)[0]

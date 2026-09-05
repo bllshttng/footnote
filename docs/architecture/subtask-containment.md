@@ -14,19 +14,19 @@ A fourth rule rides the same field. Only a child that is NOT contained in its pa
 
 ## Writers
 
-Two verbs stamp the field, both through the shared guards in `cli/src/fno/graph/_adopt.py`:
+Two verbs stamp the field, both through the shared guards in `cli/src/fno/graph/_contain.py`:
 
 - `fno backlog decompose <epic> --groups '[{adopt: [...]}]'` folds named nodes into a group child while authoring its plan fragment. A plan-less epic is refused there and pointed at the direct verb.
-- `fno backlog adopt <owner> <id>...` folds existing nodes into any not-done, live owner, with no plan and no group scaffolding. It stamps `contained_in` and `parent` in one locked mutation, atomically across the batch.
+- `fno backlog contain <owner> <id>...` folds existing nodes into any not-done, live owner, with no plan and no group scaffolding. It stamps `contained_in` and `parent` in one locked mutation, atomically across the batch. The verb name matches the field: `contain` stamps `contained_in`. An earlier `adopt` verb was a retired alias for `backlog intake`, so the name stays retired.
 
 The inverse is `fno backlog update <id> --parent null`, which un-contains a node as it moves it away.
 
 ## Guards
 
-`adopt_into` runs its guards in order. A live worker on the target refuses the fold: a node someone is building is a delivery unit in practice. Then a cycle check. Then the one-level check: a target with children leaves those children dispatchable while their parent closes. Then the mid-flight check: an open PR or accrued cost is independent delivery evidence, and a node carrying either is refused while not done. A done node with a PR or cost is adopted but containment is withheld, loudly: it already shipped on its own.
+`contain_into` runs its guards in order. A live worker on the target refuses the fold: a node someone is building is a delivery unit in practice. Then a cycle check. Then the one-level check: a target with children leaves those children dispatchable while their parent closes. Then the mid-flight check: an open PR or accrued cost is independent delivery evidence, and a node carrying either is refused while not done. A done node with a PR or cost is parented but containment is withheld, loudly: it already shipped on its own.
 
 A dead owner, deferred or superseded, is refused outright by `refuse_dead_owner`: containment under a dead unit has no verb that ever releases it.
 
-## Adopt, not defer
+## Contain, not defer
 
-Defer and containment answer different questions and are released by different hands. Defer is a judgement any groom pass can make, it hides the row from the board, and a contained row stays visible. Containment is released only by the owner's merge cascade or by moving the node away. Never defer a node to mean "this ships with that PR": adopt it, then undefer, so the node is never armed for dispatch in between.
+Defer and containment answer different questions and are released by different hands. Defer is a judgement any groom pass can make, it hides the row from the board, and a contained row stays visible. Containment is released only by the owner's merge cascade or by moving the node away. Never defer a node to mean "this ships with that PR": contain it, then undefer, so the node is never armed for dispatch in between.

@@ -214,7 +214,7 @@ Four edges connect nodes, and only the first two gate anything.
 |------|----------|---------|--------|
 | `blocked_by` | `--blocked-by` / `--add-blocker` / `--remove-blocker` | this cannot start until that lands | yes: derives `_status: blocked` |
 | `parent` | `--parent` | this was decomposed into that epic | yes: rollup, epic depth |
-| `contained_in` | `fno backlog adopt <owner> <id>...` | this ships inside that node's PR | yes: skipped by both dispatch paths, closed by the owner's merge |
+| `contained_in` | `fno backlog contain <owner> <id>...` | this ships inside that node's PR | yes: skipped by both dispatch paths, closed by the owner's merge |
 | `source_node_id` | `--source-node`, or captured ambiently | this came *out of* working on that | no |
 | `related` | `--related` | affinity: two sides of the same coin, or work that co-delivers | no |
 

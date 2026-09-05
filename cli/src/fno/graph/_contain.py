@@ -1,9 +1,9 @@
-"""The adoption guards, shared by `fno backlog decompose` and `fno backlog adopt`.
+"""The containment guards, shared by `fno backlog decompose` and `fno backlog contain`.
 
-`refuse_dead_owner` and `adopt_into` moved out of the decompose loop so both
+`refuse_dead_owner` and `contain_into` moved out of the decompose loop so both
 callers run one implementation (principle 9). The refusals keep decompose's
 message text; `context` is the caller's noun phrase where those messages say
-`group 'slug'`, so the verb reads `adopt` and decompose keeps its wording.
+`group 'slug'`, so the verb reads `contain` and decompose keeps its wording.
 The withheld-containment warning is returned, not raised: each caller renders
 its own sentence from it.
 """
@@ -54,7 +54,7 @@ def refuse_dead_owner(owner: dict, *, context: str) -> None:
 
 
 @dataclass
-class AdoptOutcome:
+class ContainOutcome:
     """One target's adoption result.
 
     `adopted` is whether the parent pointer moved this call; `warning` is the
@@ -66,14 +66,14 @@ class AdoptOutcome:
     warning: str | None
 
 
-def adopt_into(
+def contain_into(
     entries: list[dict],
     owner: dict,
     target: dict,
     *,
     live_worker,
     context: str,
-) -> AdoptOutcome:
+) -> ContainOutcome:
     """Fold `target` into `owner`: guards, then stamp `contained_in` + `parent`.
 
     Guard order is load-bearing: live worker, cycle, one-level children,
@@ -126,6 +126,6 @@ def adopt_into(
     else:
         target["contained_in"] = owner["id"]
     if target.get("parent") == owner["id"]:
-        return AdoptOutcome(adopted=False, warning=warning)  # already adopted
+        return ContainOutcome(adopted=False, warning=warning)  # already adopted
     target["parent"] = owner["id"]
-    return AdoptOutcome(adopted=True, warning=warning)
+    return ContainOutcome(adopted=True, warning=warning)

@@ -2045,7 +2045,7 @@ def cmd_decompose(
         separate_plan_path,
         validate_groups,
     )
-    from fno.graph._adopt import adopt_into, refuse_dead_owner
+    from fno.graph._contain import contain_into, refuse_dead_owner
     from fno.graph._intake import _read_plan_frontmatter
     from fno.handoff.output import emit_error, json_mode
 
@@ -2317,7 +2317,7 @@ def cmd_decompose(
             # and nothing is deleted; membership rides the `parent` pointer.
             adopted: list[str] = []
             # A dead delivery unit cannot own containment; the guard and its
-            # remedy text live in _adopt (shared with `fno backlog adopt`).
+            # remedy text live in _contain (shared with `fno backlog contain`).
             # Gated on a non-empty adopt list so a dead group child with
             # nothing to adopt still updates its title, waves, and blocked_by.
             if grp["adopt"]:
@@ -2369,7 +2369,7 @@ def cmd_decompose(
                         "reshapes the epic",
                         exit_code=2,
                     )
-                outcome = adopt_into(
+                outcome = contain_into(
                     graph_entries,
                     node,
                     target,
@@ -8667,13 +8667,13 @@ def cmd_undefer(
 
 
 @cli.command(
-    "adopt",
+    "contain",
     hidden=True,
     epilog="Inverse: `fno backlog update <id> --parent null` un-contains a node.",
 )
-def cmd_adopt(
+def cmd_contain(
     ctx: typer.Context,
-    owner: str = typer.Argument(..., help="The owning node: adopted nodes ship inside its PR."),
+    owner: str = typer.Argument(..., help="The owning node: contained nodes ship inside its PR."),
     task_ids: List[str] = typer.Argument(
         ...,
         help="Node IDs to fold (ab-XXXXXXXX). Multiple via space and/or comma.",
@@ -8682,7 +8682,7 @@ def cmd_adopt(
     """Fold existing nodes into an owner: they ship inside its PR. No plan needed.
 
     Stamps contained_in + parent in one locked mutation. Atomic across the
-    batch: any refusal stamps nothing. A deferred target is accepted (adopt
+    batch: any refusal stamps nothing. A deferred target is accepted (contain
     first, undefer second, so the node is never armed in between). Containment
     is released by the owner's merge cascade or by moving the node away.
     """
@@ -8690,7 +8690,7 @@ def cmd_adopt(
 
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
-    from fno.graph._adopt import adopt_into, refuse_dead_owner
+    from fno.graph._contain import contain_into, refuse_dead_owner
     from fno.graph._decompose import DecomposeError
     from fno.handoff.output import json_mode
 
@@ -8699,12 +8699,12 @@ def cmd_adopt(
         typer.echo("Error: at least one task_id is required", err=True)
         raise typer.Exit(code=1)
 
-    adopted: list[str] = []
+    contained: list[str] = []
     warnings: list[str] = []
     owner_id = ""
 
     def mutator(entries):
-        nonlocal adopted, warnings, owner_id
+        nonlocal contained, warnings, owner_id
         owner_node = _find_node(entries, owner)
         if owner_node is None:
             typer.echo(f"Error: owner not found: {owner}", err=True)
@@ -8717,7 +8717,7 @@ def cmd_adopt(
                 err=True,
             )
             raise typer.Exit(code=2)
-        refuse_dead_owner(owner_node, context="adopt")
+        refuse_dead_owner(owner_node, context=owner)
         seen: dict[str, str] = {}
         for tid in ids:
             target = _find_node(entries, tid)
@@ -8735,28 +8735,28 @@ def cmd_adopt(
             seen[target["id"]] = tid
         if owner_id in seen:
             typer.echo(
-                f"Error: adopt names the owner {owner_id} itself",
+                f"Error: contain names the owner {owner_id} itself",
                 err=True,
             )
             raise typer.Exit(code=1)
         for tid in ids:
             target = _find_node(entries, tid)
-            outcome = adopt_into(
+            outcome = contain_into(
                 entries,
                 owner_node,
                 target,
                 live_worker=_live_worker,
-                context="adopt",
+                context=owner_id,
             )
             if outcome.warning:
                 warnings.append(
-                    f"warning: adopted {target['id']} into {owner_id} but did "
+                    f"warning: contained {target['id']} into {owner_id} but did "
                     f"NOT mark it contained: it {outcome.warning}, so it is "
                     "its own delivery unit and is not closed by the owner's merge"
                 )
             if outcome.adopted or target.get("parent") == owner_id:
-                if target["id"] not in adopted:
-                    adopted.append(target["id"])
+                if target["id"] not in contained:
+                    contained.append(target["id"])
         return entries
 
     try:
@@ -8771,11 +8771,11 @@ def cmd_adopt(
         typer.echo(line, err=True)
     if json_mode(ctx):
         typer.echo(
-            _json.dumps({"owner": owner_id, "adopted": adopted, "warnings": warnings})
+            _json.dumps({"owner": owner_id, "contained": contained, "warnings": warnings})
         )
         return
-    for tid in adopted:
-        typer.echo(f"adopted {tid} into {owner_id}; it ships inside {owner_id}'s PR")
+    for tid in contained:
+        typer.echo(f"contained {tid} into {owner_id}; it ships inside {owner_id}'s PR")
 
 
 # -- backfill-deferred-kind --
@@ -15486,7 +15486,7 @@ _TRACKER_OWNED_VERBS = frozenset(
         "defer",
         "undefer",
         # stamps contained_in + parent under the lock
-        "adopt",
+        "contain",
         "queue",
         "unqueue",
         "pick",
