@@ -344,6 +344,14 @@ fn spaces_root_dir() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_SPACES_DIR").filter(|v| !v.is_empty()) {
         return PathBuf::from(v);
     }
+    durable_spaces_root()
+}
+
+/// [`spaces_root_dir`] with the per-process `FNO_SPACES_DIR` pin ignored: the
+/// env var rides one process (a test sandbox, an isolation run), the default
+/// state root outlives it. A one-time migration moves the ONLY copy, so its
+/// destination must be a root the repo's own processes still resolve.
+fn durable_spaces_root() -> PathBuf {
     let state_root = if let Some(v) = std::env::var_os(HOME_ENV).filter(|v| !v.is_empty()) {
         let home = PathBuf::from(&v);
         home.parent().map(|p| p.to_path_buf()).unwrap_or(home)
@@ -354,6 +362,19 @@ fn spaces_root_dir() -> PathBuf {
             .unwrap_or_else(|| PathBuf::from(".fno"))
     };
     state_root.join("spaces")
+}
+
+/// The nearest ancestor of `path` that is a checkout root, or None. A pure
+/// walk: no env, no cwd, no subprocess, so the answer about `old` cannot be
+/// bent by whoever is resolving state in this call.
+fn repo_root_of(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path.parent()?;
+    loop {
+        if candidate.join(".git").exists() {
+            return Some(candidate.to_path_buf());
+        }
+        candidate = candidate.parent()?;
+    }
 }
 
 /// The per-repo space key: the full canonical path with `/` swapped for `-`
@@ -420,9 +441,23 @@ pub fn ledger_path(cwd: &Path) -> PathBuf {
 /// `new` when `old` exists, is not a symlink, and `new` does not; leaves a
 /// `MOVED-TO` pointer naming the space so a stale reader fails loud. Best
 /// effort: any failure leaves the old file in place.
+///
+/// The destination must be the source repository's own DURABLE space (the
+/// default state root - never a per-process `FNO_SPACES_DIR` pin): a move
+/// into a sandbox root strands the only copy where the repo's own readers
+/// never look again, behind a MOVED-TO pointer they do not follow (x-d2e9).
+/// A source outside any checkout has no durable space to check against and
+/// keeps the old behavior.
 pub fn migrate_from_checkout(old: &Path, new: &Path) -> bool {
     if old == new || new.exists() || !old.exists() || old.is_symlink() {
         return false;
+    }
+    if let Some(repo) = repo_root_of(old) {
+        let canonical = canonical_repo_root(&repo).unwrap_or(repo);
+        let durable_space = durable_spaces_root().join(space_slug(&canonical));
+        if !new.starts_with(&durable_space) {
+            return false;
+        }
     }
     if let Some(parent) = new.parent() {
         if std::fs::create_dir_all(parent).is_err() {
@@ -701,6 +736,9 @@ mod tests {
         if !git_available() {
             return;
         }
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let agents_home = tmp("spaces-home");
         // Redirect the whole state root so the assertion never reads real $HOME.
         std::env::set_var(HOME_ENV, &agents_home);
@@ -764,5 +802,109 @@ mod tests {
         let new2 = base.join("space").join("link.jsonl");
         assert!(!migrate_from_checkout(&link, &new2));
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Saved-env guard: the suite may run under a neutralised environment
+    /// whose pins other tests read, so every mutation is restored, not just
+    /// removed.
+    struct EnvGuard {
+        spaces: Option<std::ffi::OsString>,
+        home: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn capture() -> Self {
+            Self {
+                spaces: std::env::var_os("FNO_SPACES_DIR"),
+                home: std::env::var_os(HOME_ENV),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.spaces {
+                Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+                None => std::env::remove_var("FNO_SPACES_DIR"),
+            }
+            match &self.home {
+                Some(v) => std::env::set_var(HOME_ENV, v),
+                None => std::env::remove_var(HOME_ENV),
+            }
+        }
+    }
+
+    /// Mirror of the Python PARITY_SCENARIOS row "foreign-env-root-refuses"
+    /// (cli/tests/unit/test_paths_migration.py): a per-process FNO_SPACES_DIR
+    /// is not the repo's home, so events_path must leave the checkout
+    /// journal in place and land nothing in the foreign space.
+    #[test]
+    fn migrate_foreign_spaces_pin_refuses_to_move_checkout_journal() {
+        if !git_available() {
+            return;
+        }
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::capture();
+        let agents_home = tmp("foreign-home");
+        std::env::set_var(HOME_ENV, &agents_home);
+        let base = tmp("foreign");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".fno")).unwrap();
+        let old = repo.join(".fno").join("events.jsonl");
+        std::fs::write(&old, "rows").unwrap();
+        git(&repo, &["init", "-q"]);
+        let sandbox = base.join("sandbox-spaces");
+        std::env::set_var("FNO_SPACES_DIR", &sandbox);
+
+        let resolved = events_path(&repo);
+
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "rows");
+        assert!(
+            !resolved.exists(),
+            "no journal may appear in the foreign space"
+        );
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&agents_home).ok();
+    }
+
+    /// Mirror of the Python row "durable-config-root-migrates": with no env
+    /// pin, the default state root IS the durable home and a genuine legacy
+    /// checkout journal still moves once, behind a MOVED-TO marker.
+    #[test]
+    fn migrate_durable_root_still_moves_checkout_journal() {
+        if !git_available() {
+            return;
+        }
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::capture();
+        let agents_home = tmp("durable-home");
+        std::env::set_var(HOME_ENV, &agents_home);
+        std::env::remove_var("FNO_SPACES_DIR");
+        let base = tmp("durable");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".fno")).unwrap();
+        let old = repo.join(".fno").join("events.jsonl");
+        std::fs::write(&old, "rows").unwrap();
+        git(&repo, &["init", "-q"]);
+        let slug = space_slug(&std::fs::canonicalize(&repo).unwrap());
+        let expected = agents_home
+            .parent()
+            .unwrap()
+            .join("spaces")
+            .join(slug)
+            .join("events.jsonl");
+
+        let resolved = events_path(&repo);
+
+        assert_eq!(resolved, expected);
+        assert_eq!(std::fs::read_to_string(&expected).unwrap(), "rows");
+        assert!(!old.exists(), "the legacy file must move exactly once");
+        assert!(repo.join(".fno").join("MOVED-TO").exists());
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&agents_home).ok();
     }
 }
