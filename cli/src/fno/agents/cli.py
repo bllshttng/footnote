@@ -2900,6 +2900,27 @@ def cmd_name(
 # library, not a command twin.
 
 
+@agents_app.command("reseat", hidden=True)
+def cmd_reseat(
+    token: str = typer.Argument(..., help="Pane-hosted worker name or session id."),
+    portal: Optional[int] = typer.Option(None, "--portal", help="Portal index; default next free."),
+    json_out: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Re-seat a live pane worker into a portal, keeping its PTY.
+
+    The row becomes a thread row: not rebuilt by restore, and rm drops it
+    without killing the pane. The work survives; the geometry does not.
+    """
+    from fno.agents.reseat import ReseatError, run_reseat
+
+    try:
+        receipt = run_reseat(token, portal=portal)
+    except ReseatError as exc:
+        typer.echo(f"agents reseat: {exc}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(json.dumps(receipt) if json_out else receipt.get("landing") or json.dumps(receipt, sort_keys=True))
+
+
 @agents_app.command("retask", hidden=True)
 def cmd_retask(
     worker: str = typer.Argument(..., help="Blueprint worker registry label or session id."),
