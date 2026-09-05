@@ -80,10 +80,10 @@ def claim_verdicts(
         if not isinstance(row, dict) or not isinstance(row.get("key"), str):
             raise ClaimVerdictError("fno-agents claim sweep returned a malformed claim row")
         verdicts[row["key"]] = row
+    roots = [global_claims_root(), root if root is not None else Path.cwd()]
     for key in requested:
         if key in verdicts:
             continue
-        roots = [global_claims_root(), root if root is not None else Path.cwd()]
         if any(claim_path(key, root=candidate).exists() for candidate in roots):
             raise ClaimVerdictError(f"native claim sweep omitted existing claim {key!r}; refusing to assume free")
         verdicts[key] = {"key": key, "state": "free"}

@@ -3108,10 +3108,7 @@ def _claim_is_live(
 
     try:
         rows = verdicts or claim_verdicts([key], root=_claims_root_for(key))
-        return rows.get(key, {}).get("state") in (
-            "live",
-            "suspect",
-        )
+        return rows.get(key, {}).get("state") in ("live", "suspect")
     except Exception:  # noqa: BLE001 - a probe error must not crash advance
         return False
 
@@ -3583,10 +3580,8 @@ def _walker_live_at(project_root: str) -> bool:
         # live OR suspect (x-ba4b): a suspect walker claim is still an occupied
         # lane; treat it as live so we never double-launch into that repo.
         key = f"walker:{project_root}"
-        return claim_verdicts([key], root=Path(project_root)).get(key, {}).get("state") in (
-            "live",
-            "suspect",
-        )
+        state = claim_verdicts([key], root=Path(project_root)).get(key, {}).get("state")
+        return state in ("live", "suspect")
     except Exception:  # noqa: BLE001 - a probe error must not block dispatch
         return False
 

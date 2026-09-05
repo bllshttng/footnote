@@ -1432,9 +1432,7 @@ def _scrub_target_bins(root: Path) -> None:
 
 
 def _pin_claim_door(env: dict[str, str], directory: Path, binary: Path) -> None:
-    """Point the claim door at one binary. resolve_binary checks the env name
-    before PATH, so the pin outranks a stale inherited BIN; hermetic children
-    forward the name."""
+    """Pin the claim door: the env name outranks PATH in resolve_binary."""
     env["FNO_AGENTS_BIN"] = str(binary)
     env["PATH"] = str(directory) + os.pathsep + env.get("PATH", "")
 
@@ -1579,9 +1577,7 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
 
     # Same faithful-ordering guard the full run applies: the pytest step must
     # see NO checkout fno-agents binary so the @requires_rust parity tests skip,
-    # as they do in CI. The native claim door is copied outside target/ first:
-    # claim consumers are ordinary Python tests now, and cannot fall through to
-    # an older PATH binary after this scrub.
+    # as they do in CI. The claim door is preserved outside target/ first.
     if any(n.startswith("Pytest (changed subset") for n, _, _ in steps):
         if _RUST_BUILD_STEP in {name for name, _, _ in steps}:
             # The changed-smoke job has Rust but no setup build. Its selected
