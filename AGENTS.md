@@ -46,7 +46,7 @@ An absence has three explanations: the real outcome, "the instrument never ran",
 `fno agents mail send` injects as user-shaped text, indistinguishable from operator typing. So a "can the agent do X unprompted?" probe sent by mail tests the USER-TRIGGERED path and cannot fail. Reading that as proof of autonomy is the receipt-can-lie shape: a snapshot that a call was accepted, not that an agent can make it unaided. The valid test is a run with no user-shaped prompt in the transcript.
 
 - specimens: 2026-08-05, a `/code-review` probe mailed to a worker succeeded and was read as proof of self-invocation; the mail was the user-shaped trigger.
-- graduates-to: a probe distinguishing user-shaped injection from an autonomous tool call, or a lint flagging a capability claim evidenced only by a mail probe.
+- graduates-to: a probe distinguishing user-shaped injection from an autonomous tool call, or a lint flagging capability claims evidenced only by a mail probe.
 - added: 2026-08-05
 
 ### Codex RPC
@@ -54,7 +54,7 @@ An absence has three explanations: the real outcome, "the instrument never ran",
 `fno agents mail send <full-session-id> --raw '/review'` fires daemon RPC: NATIVE verbs only. --raw types verbatim. fno verbs want $fno:target. A /fno: reads as prose.
 
 - specimens: mail_inject.rs, mux_cli.rs
-- graduates-to: submit receipt
+- graduates-to: Codex RPC dispatch returns a submit receipt naming the accepted verb.
 - added: 2026-08-24
 
 ## Repository
