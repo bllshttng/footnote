@@ -238,32 +238,25 @@ fn default_true() -> bool {
 /// v43 (x-d6a8, US9 drag faces): `Command::BreakPane`/`JoinTab` - the interactive
 /// drag counterparts of the `PaneBreak`/`TabJoin` control verbs, dispatching into
 /// the same `CoreMsg`s. New verbs, not additive fields, so a v42 server cannot
-/// deserialize a `BreakPane` and an unbumped client would lose its connection on
-/// the first pane-break drag rather than at handshake. Rides on top of the x-c4d4
-/// layout-template v42 bump (independent additive wire deltas, one version each).
+/// deserialize a `BreakPane`; the handshake, not the first drag, names the skew.
 ///
 /// v45 (x-a2d0, clickable links): `ServerMsg::OpenLink { url }` - the server
-/// resolves the URL under a click (OSC 8 or linkified text, see [`crate::link`])
-/// and the CLIENT opens it, because the client is the process sitting at the
-/// human's desk. A new variant, not an additive field, so a v44 client cannot
-/// decode it; the handshake is what stops the skew.
+/// resolves the URL under a click (OSC 8 or linkified text, see
+/// [`crate::link`]) and the CLIENT opens it, the process at the human's desk.
+/// New variant, not additive; handshake stops the skew.
 ///
 /// v46 (x-3e17, pane focus): `ControlVerb::PaneFocus` + `ServerMsg::PaneFocused`
-/// - the CLI door onto the focus trunk the TUI already owns. New variants, not
-/// additive fields, so a v45 server cannot deserialize a `PaneFocus`; the
-/// handshake is what stops the skew.
+/// - the CLI door onto the focus trunk the TUI already owns. New variants;
+/// handshake stops the skew.
 ///
 /// v50 (x-132c): `AgentRow.{spawned_by_session, harness_session_id}` - the
 /// lineage pair the sideline joins into a parent/child forest. Additive and
 /// `#[serde(default)]`, so an unbumped client would merely keep rendering
-/// flat; the bump names the skew so the handshake restarts an old server
-/// instead. (Numbered one past the x-5f7f resume-gesture v49 it rebases
-/// onto.)
+/// flat; the bump names the skew so the handshake restarts an old server.
 ///
 /// v52 (x-588a): pane reads and sends carry the pane's captured identity and
-/// the registry identity used to address it. Additive fields remain defaulted,
-/// but the send identity is a safety contract, so the handshake must reject an
-/// older peer rather than let it type into an unverified pane.
+/// the registry identity used to address it. Fields stay additive-defaulted,
+/// but the send identity is a safety contract: reject an older peer at handshake.
 ///
 /// v51 (x-1499, tab dictionary): `ControlVerb::TabWhere` +
 /// `ServerMsg::TabLocation`/`TabPaneOccupant` - the reverse location lookup
@@ -277,8 +270,7 @@ fn default_true() -> bool {
 ///
 /// v56 (hover affordance): `ClientMsg::LinkHover` + `ServerMsg::LinkHover` -
 /// the sequenced, initiator-only hover lookup for clickable URLs. New
-/// variants, so an unbumped peer cannot decode the pair; the handshake is
-/// what stops the skew.
+/// variants; handshake stops the skew.
 ///
 /// v57 (x-d401, unmeasured liveness): `AgentNoPaneReason::LivenessUnmeasured`
 /// - a NEW enum variant, so a v56 peer cannot decode a row carrying it, the
@@ -288,14 +280,11 @@ fn default_true() -> bool {
 ///
 /// v58 (x-07c2, dedicated thread pane): `ControlVerb::ThreadPane` - a NEW
 /// enum variant, so a v57 peer cannot decode it and closes the connection
-/// instead of running the reach; the handshake is what stops the skew.
-/// `AgentRow.reach` rides the same bump (additive-tolerant on its own via
-/// `#[serde(default)]`, but it is the shape change the verb belongs to).
+/// instead of running the reach. `AgentRow.reach` rides the same bump.
 ///
 /// v59 (classified lineage): `PaneInfo` gains `harness_session_id`,
-/// `predecessor_session_ids`, and `forked_from_session_id` - each
-/// additive-tolerant via `#[serde(default)]`, but the shape change belongs
-/// to one bump, and the handshake, not serde tolerance, is the skew guard.
+/// `predecessor_session_ids`, and `forked_from_session_id`, each
+/// `#[serde(default)]`; the handshake, not serde tolerance, is the skew guard.
 ///
 /// v60 (workspace restore): `ControlVerb::WorkspaceRestore` +
 /// `ServerMsg::WorkspaceRestored` ([`RestoreRow`]s). New variants: a v59 peer
@@ -310,16 +299,13 @@ fn default_true() -> bool {
 /// `AgentRow.portal` make the one thread pane an addressable set.
 /// `thread_pane` stays as a compatibility alias meaning portal 0.
 ///
-/// v65 (tab organization): `ControlVerb::TabReorder { squad, tab, to }`, the
-/// CLI door onto the reorder trunk, and `PaneInfo.shell_idle`, the measured
-/// "idle now" reading the used-shell prune sweep needs. A new verb is not
-/// additive-tolerant; the field rides the same generation.
-/// v66 (sideline rename): `Command::RenameAgent` - a new verb, this generation.
-/// The same generation also adds `ControlVerb::ThreadPane`'s
-/// `#[serde(default)]` `placement` - the tab/split/at/target a FRESH portal
-/// open honors, now that the geometry refusal lives inside `reach_portal`
-/// where the slot lookup knows occupancy. Additive, so the compatibility
-/// floor does not move; a repoint keeps owning its geometry and says so.
+/// v65 (tab organization): `ControlVerb::TabReorder { squad, tab, to }` and
+/// `PaneInfo.shell_idle`, the "idle now" reading the used-shell prune sweep
+/// needs. A new verb is not additive-tolerant; the field rides the generation.
+/// v66 (sideline rename): `Command::RenameAgent` - a new verb, this
+/// generation. Also adds `ControlVerb::ThreadPane`'s `#[serde(default)]`
+/// `placement` (the geometry a FRESH portal open honors; additive, floor
+/// unchanged; a repoint keeps owning its geometry and says so).
 /// v68 (x-5baf): `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
 /// v69 (x-a600): `Command::RedrawPane`, `#[serde(default)]`; floor stays 58.
 /// v71 (prune sync): `ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`;
@@ -978,9 +964,8 @@ pub enum ControlVerb {
         harness: Option<String>,
     },
     /// (v71) Re-project `squads.json` into the server's member list ->
-    /// [`ServerMsg::SquadReloaded`]. The prune CLI sends this after an applied
-    /// store pass, so the next `persist_squad` cannot write the reaped
-    /// members back from memory.
+    /// [`ServerMsg::SquadReloaded`]. The prune CLI sends this after an
+    /// applied store pass, so `persist_squad` cannot write reaped members back.
     SquadReload,
 }
 
@@ -2247,8 +2232,7 @@ pub enum ServerMsg {
     /// (v60, x-7b5e) Answer to [`ControlVerb::WorkspaceRestore`]: one row per
     /// member, including every refusal with its reason.
     WorkspaceRestored { rows: Vec<RestoreRow> },
-    /// (v71) Answer to [`ControlVerb::SquadReload`]: the member counts the
-    /// server now holds after re-reading the store.
+    /// (v71) Answer to [`ControlVerb::SquadReload`]: counts now held.
     SquadReloaded {
         squads: usize,
         members: usize,
