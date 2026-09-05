@@ -511,6 +511,107 @@ def detect_misharnessed_twins(entries: list[dict]) -> list[MisharnessedTwin]:
     return out
 
 
+def apply_twin_drops(
+    ents: list[dict],
+    drops: list[MisharnessedTwin],
+    current_claimed: set[str],
+) -> tuple[list[dict], list[str], list[str]]:
+    """Drop each detected twin inside the caller's locked mutation.
+
+    Re-checked under the lock so a row settled since the scan (the wrong twin
+    gained the shape-correct harness, or the correct twin left) never drops
+    provenance. Returns ``(applied records, claimed node ids, warnings)``.
+    """
+    applied: list[dict] = []
+    skipped: list[str] = []
+    warnings: list[str] = []
+    for drop in drops:
+        if drop.node_id in current_claimed:
+            skipped.append(drop.node_id)
+            continue
+        try:
+            n = next(
+                (
+                    e
+                    for e in ents
+                    if isinstance(e, dict) and e.get("id") == drop.node_id
+                ),
+                None,
+            )
+            rows = n.get("sessions") if isinstance(n, dict) else None
+            if not isinstance(rows, list):
+                continue
+            keep = [
+                r
+                for r in rows
+                if not (
+                    isinstance(r, dict)
+                    and r.get("session_id") == drop.session_id
+                    and r.get("phase") == drop.phase
+                    and r.get("harness") == drop.bad_harness
+                    and any(
+                        isinstance(o, dict)
+                        and o.get("session_id") == drop.session_id
+                        and o.get("phase") == drop.phase
+                        and o.get("harness") == drop.keep_harness
+                        for o in rows
+                    )
+                )
+            ]
+            if len(keep) != len(rows):
+                n["sessions"] = keep
+                applied.append(
+                    {
+                        "node_id": drop.node_id,
+                        "session_id": drop.session_id,
+                        "phase": drop.phase,
+                        "dropped_harness": drop.bad_harness,
+                        "kept_harness": drop.keep_harness,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 - one bad row must not abort
+            warnings.append(f"twin drop on {drop.node_id} failed: {exc}")
+    return applied, skipped, warnings
+
+
+def twin_payload(
+    drops: list[MisharnessedTwin], applied: list[dict], apply: bool
+) -> dict:
+    """The ``session_twins`` block of the maintain ``--json`` payload."""
+    return {
+        "applied": applied if apply else [],
+        "candidates": [
+            {
+                "node_id": t.node_id,
+                "session_id": t.session_id,
+                "phase": t.phase,
+                "dropped_harness": t.bad_harness,
+                "kept_harness": t.keep_harness,
+            }
+            for t in drops
+        ],
+    }
+
+
+def twin_lines(
+    drops: list[MisharnessedTwin], applied: list[dict], apply: bool
+) -> list[str]:
+    """Human-report lines, one per drop (or per candidate under dry-run)."""
+    if apply:
+        return [
+            f"  dropped twin {d['node_id']} ({d['session_id']}, phase "
+            f"{d['phase']}): harness {d['dropped_harness']} contradicts the "
+            f"id shape, {d['kept_harness']} twin kept"
+            for d in applied
+        ]
+    return [
+        f"  would drop twin {t.node_id} ({t.session_id}, phase {t.phase}): "
+        f"harness {t.bad_harness} contradicts the id shape, "
+        f"{t.keep_harness} twin kept"
+        for t in drops
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Leg 4: drain stale ideas (propose-only)
 # ---------------------------------------------------------------------------

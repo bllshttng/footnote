@@ -1496,3 +1496,41 @@ def test_misharnessed_twin_detected_only_with_a_shape_correct_twin():
         ],
     }
     assert m.detect_misharnessed_twins([legacy]) == []
+
+
+def test_apply_twin_drops_drops_only_under_the_lock_recheck():
+    """The apply half: the detected twin leaves, a claimed node is skipped,
+    and a row whose correct twin left since the scan keeps both rows."""
+    codex_id = "01a06886-9405-74a1-8afd-5b67baf89604"
+    claimed_node = {
+        "id": "x-claim",
+        "sessions": [
+            {"session_id": codex_id, "phase": "do", "harness": "codex"},
+            {"session_id": codex_id, "phase": "do", "harness": "claude"},
+        ],
+    }
+    drops = m.detect_misharnessed_twins([claimed_node])
+    assert len(drops) == 1
+
+    applied, skipped, warnings = m.apply_twin_drops([claimed_node], drops, {"x-claim"})
+    assert applied == [] and skipped == ["x-claim"] and warnings == []
+    assert len(claimed_node["sessions"]) == 2
+
+    applied, skipped, warnings = m.apply_twin_drops([claimed_node], drops, set())
+    assert [a["node_id"] for a in applied] == ["x-claim"]
+    assert skipped == [] and warnings == []
+    assert claimed_node["sessions"] == [
+        {"session_id": codex_id, "phase": "do", "harness": "codex"}
+    ]
+
+    # In-lock recheck: the correct twin left since the scan, so the drop is
+    # stale and BOTH-row removal must not fire (provenance never leaves).
+    stale_shape = {
+        "id": "x-claim",
+        "sessions": [{"session_id": codex_id, "phase": "do", "harness": "claude"}],
+    }
+    applied, _, _ = m.apply_twin_drops([stale_shape], drops, set())
+    assert applied == []
+    assert stale_shape["sessions"] == [
+        {"session_id": codex_id, "phase": "do", "harness": "claude"}
+    ]

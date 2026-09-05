@@ -12888,16 +12888,8 @@ def cmd_maintain(
     applied_twin_drops: list[dict] = []
     skipped_claimed: list[str] = []
 
-    if apply and (
-        rescope_fixes
-        or prune_ids
-        or defer_cands
-        or stale_ready_cands
-        or pr_url_writable
-        or twin_drops
-    ):
-        # Batch every change under ONE locked mutation so the board renders once,
-        # not per node (Domain Pitfall). Each item is guarded so one failure
+    if apply and (rescope_fixes or prune_ids or defer_cands or stale_ready_cands or pr_url_writable or twin_drops):
+        # One locked mutation: the board renders once, and one failed item
         # never strands the rest (AC1-ERR).
         def mutator(ents):
             current_claimed = claimed | _require_live_claimed_node_ids("backlog maintain --apply")
@@ -12906,7 +12898,6 @@ def cmd_maintain(
             applied_defers.clear()
             applied_stale_ready.clear()
             applied_pr_urls.clear()
-            applied_twin_drops.clear()
             skipped_claimed.clear()
             prune_set: set[str] = set()
             for fix in rescope_fixes:
@@ -12936,9 +12927,8 @@ def cmd_maintain(
                     if blocked:
                         e["blocked_by"] = [b for b in blocked if b not in prune_set]
                 ents = [e for e in ents if e.get("id") not in prune_set]
-            # Leg 2b: backfill a derived pr_url onto url-less pr_number rows.
-            # Re-check inside the lock so a url written since the pre-lock scan
-            # is never overwritten (a present url always outranks a derived one).
+            # Leg 2b: backfill a derived pr_url onto url-less pr_number rows,
+            # re-checked in-lock (a present url always outranks a derived one).
             for fix in pr_url_writable:
                 if fix.node_id in current_claimed:
                     skipped_claimed.append(fix.node_id)
@@ -12954,60 +12944,16 @@ def cmd_maintain(
                         f"warning: pr_url backfill of {fix.node_id} failed: {exc}",
                         err=True,
                     )
-            # Leg 2c: drop the mis-harnessed session twin where the
-            # shape-correct twin for the same (session_id, phase) exists.
-            # Re-check inside the lock so a row settled since the scan (the
-            # wrong twin gained the shape-correct harness, or the correct twin
-            # left) never drops provenance.
-            for drop in twin_drops:
-                if drop.node_id in current_claimed:
-                    skipped_claimed.append(drop.node_id)
-                    continue
-                try:
-                    n = _find_node(ents, drop.node_id)
-                    rows = n.get("sessions") if n else None
-                    if not isinstance(rows, list):
-                        continue
-                    keep = [
-                        r for r in rows
-                        if not (
-                            isinstance(r, dict)
-                            and r.get("session_id") == drop.session_id
-                            and r.get("phase") == drop.phase
-                            and r.get("harness") == drop.bad_harness
-                            and any(
-                                isinstance(o, dict)
-                                and o.get("session_id") == drop.session_id
-                                and o.get("phase") == drop.phase
-                                and o.get("harness") == drop.keep_harness
-                                for o in rows
-                            )
-                        )
-                    ]
-                    if len(keep) != len(rows):
-                        n["sessions"] = keep
-                        applied_twin_drops.append(
-                            {
-                                "node_id": drop.node_id,
-                                "session_id": drop.session_id,
-                                "phase": drop.phase,
-                                "dropped_harness": drop.bad_harness,
-                                "kept_harness": drop.keep_harness,
-                            }
-                        )
-                except Exception as exc:  # noqa: BLE001 - one bad row must not abort
-                    typer.echo(
-                        f"warning: twin drop on {drop.node_id} failed: {exc}",
-                        err=True,
-                    )
+            # Leg 2c: drop the mis-harnessed session twin (re-checked in-lock).
+            applied_twin_drops, twin_skipped, twin_warn = _maintain.apply_twin_drops(
+                ents, twin_drops, current_claimed
+            )
+            skipped_claimed.extend(twin_skipped)
+            for _tw in twin_warn:
+                typer.echo(f"warning: {_tw}", err=True)
             # Leg 7: auto-defer failure-prone nodes (#34). Mirrors cmd_defer's
-            # field-set. Re-check live state INSIDE the lock (Concurrency): a
-            # node done or deferred between the read and now must not be touched.
-            # Auto-defer is a state change (unlike rescope/prune's project-cwd
-            # touch-ups), so it also RE-SAMPLES live claims inside the lock - a
-            # node a session claimed between the pre-lock read and now must not
-            # be deferred ("claimed between read and write", Failure Modes /
-            # Concurrency). The strict in-lock snapshot above covers every leg.
+            # field-set; re-checks live state and claims INSIDE the lock so a
+            # node that raced to done, deferred, or claimed is not touched.
             defer_claimed = current_claimed
             for cand in defer_cands:
                 if cand.node_id in defer_claimed:
@@ -13023,16 +12969,14 @@ def cmd_maintain(
                         f"{_failure.AUTO_FAILURE_SENTINEL} {cand.streak} "
                         f"consecutive failed attempts"
                     )
-                    # Mirror cmd_defer: clear claim/completion so the cascade
-                    # derives status: deferred, then set the deferred fields.
+                    # Mirror cmd_defer: clear claim/completion so the cascade derives status.
                     n["locked_by"] = None
                     n["locked_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
                     n["deferred_reason"] = reason
-                    # Failure-cascade defers are machinery with its own sentinel
-                    # vocabulary, not an expired drift: no kind (pop so a
-                    # re-deferral cannot inherit one).
+                    # Failure-cascade defers carry the sentinel vocabulary, not
+                    # an expired drift: no kind (pop so a re-deferral cannot inherit one).
                     n.pop("deferred_kind", None)
                     applied_defers.append(
                         {"node_id": cand.node_id, "streak": cand.streak, "reason": reason}
@@ -13232,19 +13176,7 @@ def cmd_maintain(
                 ],
                 "truncated": stale_ready_truncated,
             },
-            "session_twins": {
-                "applied": applied_twin_drops if apply else [],
-                "candidates": [
-                    {
-                        "node_id": t.node_id,
-                        "session_id": t.session_id,
-                        "phase": t.phase,
-                        "dropped_harness": t.bad_harness,
-                        "kept_harness": t.keep_harness,
-                    }
-                    for t in twin_drops
-                ],
-            },
+            "session_twins": _maintain.twin_payload(twin_drops, applied_twin_drops, apply),
         }
         if validity_result is not None:
             payload["validity"] = {
@@ -13351,20 +13283,8 @@ def cmd_maintain(
             f"delivery unit, the rest are contained). Read-only: pick the unit "
             f"and `fno backlog update <other> --plan-path null` by hand."
         )
-    if apply:
-        for d in applied_twin_drops:
-            typer.echo(
-                f"  dropped twin {d['node_id']} ({d['session_id']}, phase {d['phase']}): "
-                f"harness {d['dropped_harness']} contradicts the id shape, "
-                f"{d['kept_harness']} twin kept"
-            )
-    else:
-        for t in twin_drops:
-            typer.echo(
-                f"  would drop twin {t.node_id} ({t.session_id}, phase {t.phase}): "
-                f"harness {t.bad_harness} contradicts the id shape, "
-                f"{t.keep_harness} twin kept"
-            )
+    for _tl in _maintain.twin_lines(twin_drops, applied_twin_drops, apply):
+        typer.echo(_tl)
     for nid, epic_id, score in rollup_cands:
         typer.echo(
             f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "
@@ -14077,8 +13997,7 @@ def cmd_album(
             e
             for e in read_graph(archive_path)
             if isinstance(e, dict)
-            # The one WORK-done reader (measured 0 divergence between status
-            # and completed_at in the archive, x-c672).
+            # The one WORK-done reader (0 status/completed_at divergence, x-c672).
             and node_is_done(e)
             # Superseded is derived from superseded_by (graph/types.py), so a
             # row can carry both; the album shows shipped work only.
