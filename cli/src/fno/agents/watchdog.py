@@ -898,6 +898,11 @@ def _unclaimed_node_basis(
     return f"node {row.node} carries NO claim while this row is live"
 
 
+#: The tail-read window: transcripts grow without bound, and the classifier
+#: only ever asks about the last turn, so read the trailing 256 KiB, not the file.
+_TICK_TAIL_BYTES = 256 * 1024
+
+
 def tail_entries(
     session_id: str,
     cwd: str,

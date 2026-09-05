@@ -484,10 +484,14 @@ def detect_misharnessed_twins(entries: list[dict]) -> list[MisharnessedTwin]:
         for r in rows:
             if not isinstance(r, dict):
                 continue
-            sid, phase, harness = (
-                r.get("session_id"), r.get("phase"), r.get("harness")
-            )
-            if not all(isinstance(v, str) and v for v in (sid, phase, harness)):
+            sid = r.get("session_id")
+            phase = r.get("phase")
+            harness = r.get("harness")
+            if not (
+                isinstance(sid, str) and sid
+                and isinstance(phase, str) and phase
+                and isinstance(harness, str) and harness
+            ):
                 continue
             groups.setdefault((sid, phase), []).append(r)
         for (sid, phase), group in groups.items():
@@ -538,7 +542,9 @@ def apply_twin_drops(
                 ),
                 None,
             )
-            rows = n.get("sessions") if isinstance(n, dict) else None
+            if not isinstance(n, dict):
+                continue
+            rows = n.get("sessions")
             if not isinstance(rows, list):
                 continue
             keep = [
@@ -653,10 +659,14 @@ def detect_harness_shape_fixes(entries: list[dict]) -> list[HarnessShapeFix]:
         for r in rows:
             if not isinstance(r, dict):
                 continue
-            sid, phase, harness = (
-                r.get("session_id"), r.get("phase"), r.get("harness")
-            )
-            if not all(isinstance(v, str) and v for v in (sid, phase, harness)):
+            sid = r.get("session_id")
+            phase = r.get("phase")
+            harness = r.get("harness")
+            if not (
+                isinstance(sid, str) and sid
+                and isinstance(phase, str) and phase
+                and isinstance(harness, str) and harness
+            ):
                 continue
             groups.setdefault((sid, phase), []).append(r)
         for (sid, phase), group in groups.items():
