@@ -1543,10 +1543,13 @@ def test_raw_refuses_from_self(runner, mailbox, monkeypatch):
 def _seed_codex_pane_self(mailbox, monkeypatch, attested: str):
     """This process IS a pane-spawned codex worker: the fno name_only stamp
     (no session id - the pane row is written after the child starts), both
-    codex markers, no walkable ancestry, an env_only witness. The attester is
-    pinned because a real runner's ancestry is machine-dependent: a dev shell
-    under a codex process would carry a DIFFERENT CODEX_THREAD_ID, and the
-    answer must not depend on that."""
+    codex markers, and the family proven through the launcher shape (the init
+    CLI's own walk) with the attester witnessing the marker from process
+    ancestry - the independent ground that lets a name_only worker resolve
+    its own id. A runner's real ancestry is machine-dependent, so both the
+    walk and the witness are pinned: a dev shell under a codex process would
+    carry a DIFFERENT CODEX_THREAD_ID, and the answer must not depend on
+    that."""
     _clear_harness_markers(monkeypatch)
     # The canonical pair is scrubbed too: a session-id left over from the
     # runner's own environment would complete the name_only stamp into a
@@ -1557,11 +1560,11 @@ def _seed_codex_pane_self(mailbox, monkeypatch, attested: str):
     monkeypatch.setenv("CODEX_THREAD_ID", SID_CODEX)
     monkeypatch.setenv("CODEX_SESSION_ID", SID_CODEX)
     monkeypatch.setattr(
-        "fno.claims.session_pid.resolve_session_harness", lambda *a, **k: None
+        "fno.claims.session_pid.resolve_session_harness", lambda *a, **k: "codex"
     )
     monkeypatch.setattr(
         "fno.claims.self_identity.resolve_attester_identity",
-        lambda env=None: (attested, "env_only"),
+        lambda env=None: (attested, "process"),
     )
     register_existing_session(
         provider="codex", session_id=SID_CODEX, cwd=str(mailbox), name="codexself"

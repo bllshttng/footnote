@@ -60,14 +60,30 @@ def _identity(hook_input: bytes, explicit_entry: str | None) -> tuple[str, str, 
     payload = payload if isinstance(payload, dict) else {}
     session_id = str(payload.get("session_id") or "").strip()
     harness = (os.environ.get("FNO_PLATFORM") or "").strip().lower()
-    from fno.harness_identity import HARNESS_SESSION_MARKERS
+    from fno.harness_identity import HARNESS_SESSION_MARKERS, session_identity_key
 
+    # Same family rule as the resolver: two DIFFERENT ids of one family are a
+    # disagreement, so the row records no id rather than the table-first one
+    # it would be guessing (x-0992).
+    family_value_keys: dict[str, str] = {}
+    picked_by: str = ""
     for marker, marker_harness in HARNESS_SESSION_MARKERS:
         value = (os.environ.get(marker) or "").strip()
-        if not session_id and value:
-            session_id = value
-        if not harness and value:
-            harness = marker_harness
+        if not value:
+            continue
+        seen = family_value_keys.get(marker_harness)
+        if seen is None:
+            family_value_keys[marker_harness] = session_identity_key(value)
+            if not harness:
+                harness = marker_harness
+            if not session_id:
+                session_id = value
+                picked_by = marker_harness
+        elif seen != session_identity_key(value):
+            family_value_keys[marker_harness] = "conflicted"
+            if picked_by == marker_harness:
+                session_id = ""
+                picked_by = ""
     if not harness:
         if os.environ.get("CLAUDE_PLUGIN_ROOT"):
             harness = "claude"

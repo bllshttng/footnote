@@ -52,32 +52,40 @@ def resolve_self_identity(
 
     ``collide(harness, session_id, own_pair) -> owner | None`` reports a live
     registry row owning an id. ``own_pair`` is this process's own
-    ``(harness, session_id)`` pair as completed from the canonical stamp plus
-    the same family's marker, or None when this resolver could not complete
-    one: a row agreeing with the pair on both halves is the caller's OWN row
-    and never contention (x-0992 - the pair used to be built only in the
-    target verb and only from a COMPLETE stamp, which a pane-spawned worker
-    never carries, so its own row refused it). The agreement check stays in
-    the registry; this layer computes the pair and hands it over.
+    ``(harness, session_id)`` pair as declared by a COMPLETE canonical stamp,
+    or None when the stamp does not name an id: a row agreeing with the pair
+    on both halves is the caller's OWN row and never contention. The id half
+    must come from the STAMP, never from the ambient marker under test - a
+    name_only stamp plus a marker-built pair is circular (the pair asserts
+    exactly what the marker claims), and a leaked marker meeting its owner's
+    live row would then read as self (the round-1 P1 shape, re-measured by
+    review round 2). A name_only worker instead resolves when the attester
+    witnesses its marker from process ancestry, and fails closed otherwise.
+    The agreement check stays in the registry; this layer computes the pair
+    and hands it over.
     """
     from fno.claims.session_pid import resolve_session_harness
 
     true_harness = resolve_session_harness()
     canonical = parse_canonical_identity(env)
 
-    def collide_with_pair(harness: str, session_id: str) -> Optional[str]:
+    def collide_with(pair: Optional[Tuple[str, str]]) -> Callable[[str, str], Optional[str]]:
         # The 3-arg collide (with own_pair) is THIS resolver's contract; the
-        # shared resolve_owned_identity takes the 2-arg shape. In the fallback
-        # branch there is no canonical pair, so the sentinel rides along.
-        if collide is None:
-            return None
-        return collide(harness, session_id, None)
+        # shared resolve_owned_identity takes the 2-arg shape.
+        def _collide(harness: str, session_id: str) -> Optional[str]:
+            if collide is None:
+                return None
+            return collide(harness, session_id, pair)
+
+        return _collide
 
     if canonical.disposition not in {"complete", "name_only"}:
         fallback_prove = (
             None if true_harness is None else (lambda harness, sid: harness == true_harness)
         )
-        return resolve_owned_identity(env, prove=fallback_prove, collide=collide_with_pair)
+        return resolve_owned_identity(
+            env, prove=fallback_prove, collide=collide_with(None)
+        )
 
     try:
         attested_session_id, witness = resolve_attester_identity(env)
@@ -103,22 +111,23 @@ def resolve_self_identity(
             return None
         return session_identity_key(session_id) == session_identity_key(canonical_session_id)
 
+    # The stamp-declared pair: a COMPLETE stamp names the id independently of
+    # the markers under test (spawn writes the stamp and the row in one act),
+    # which is the x-6d6c non-circular ground. A name_only stamp names only
+    # the family and completes NO pair - the ambient marker would be
+    # self-attesting, and own_pair stays None so the collider keeps its full
+    # ambient-leak strength there.
     own_pair: Optional[Tuple[str, str]] = None
-    if canonical.harness and canonical_session_id:
+    if canonical.harness and canonical.session_id:
         own_pair = (
             canonical.harness.strip().lower(),
-            session_identity_key(canonical_session_id),
+            session_identity_key(canonical.session_id),
         )
-
-    def collide_with_canonical_pair(harness: str, session_id: str) -> Optional[str]:
-        if collide is None:
-            return None
-        return collide(harness, session_id, own_pair)
 
     return resolve_owned_identity(
         env,
         prove=prove,
-        collide=None if canonical_proven else collide_with_canonical_pair,
+        collide=None if canonical_proven else collide_with(own_pair),
     )
 
 

@@ -112,10 +112,11 @@ def test_start_init_failure_on_a_reused_tree_makes_no_creation_claim(
 def test_start_reads_the_explicit_created_token_not_the_wording(
     monkeypatch, tmp_path
 ):
-    """The token decides, not the receipt's prose: created=false with no
-    'reusing' anywhere still reads as pre-existing, and created=true with
-    'reusing' still reads as created. The substring fallback only fires for
-    an installed ensure that predates the token."""
+    """The token decides, not the receipt's prose, in both directions:
+    created=false with no 'reusing' anywhere reads as pre-existing, and
+    created=true beside the word 'reusing' reads as created. The substring
+    fallback only fires for an installed ensure that predates the token
+    (the no-token direction is the two receipt tests above)."""
     canonical, wt = _worktree_fixture(tmp_path)
     _ordinary_start_stubs(monkeypatch, canonical, wt)
 
@@ -132,9 +133,27 @@ def test_start_reads_the_explicit_created_token_not_the_wording(
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
-
     result = runner.invoke(target_app, ["start", "x-0b3f"])
-
     assert result.exit_code == 3
     assert "created but unclaimed" not in result.output
     assert "predates this run" in result.output
+
+    def fake_run_created(args, **kwargs):
+        if "ensure" in args:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=str(wt),
+                stderr=f"worktree ensure: reusing worktree at {wt} created=true",
+            )
+        if "init" in args:
+            return subprocess.CompletedProcess(args, 3, stdout="", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", fake_run_created)
+    result = runner.invoke(target_app, ["start", "x-0b3f"])
+    assert result.exit_code == 3
+    assert f"worktree at {wt} is created but unclaimed" in result.output
+    assert (
+        f"reclaim with: fno agents workspace worktree archive {wt}" in result.output
+    )

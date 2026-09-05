@@ -74,19 +74,53 @@ def test_name_only_pane_stamp_resolves_without_row_or_proof(tmp_path, monkeypatc
     assert fields["COLLISION"] == ""
 
 
-def test_name_only_pane_stamp_own_row_is_not_contention(tmp_path, monkeypatch):
-    """The measured x-77be shape: the spawn-minted registry row already holds
-    the pane worker's id when the verb runs. The name_only stamp plus the
-    same-family marker complete the (codex, id) pair, the row agrees on both
-    halves, and the identity resolves instead of being refused as a competing
-    holder."""
+def test_name_only_with_live_row_and_no_witness_fails_closed(tmp_path, monkeypatch):
+    """The round-1 P1 shape, re-pinned: a name_only stamp does NOT complete an
+    own-pair from the marker under test (that would be circular), so a marker
+    naming another live session's id meets that row as CONTENTION and the
+    verb refuses, naming the owner. The stamp names the family, never the id
+    - only a process witness or the stamp's own id half proves self."""
+    from fno.agents.registry import register_existing_session
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    theirs = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
+    owner = register_existing_session(harness="codex", session_id=theirs, cwd="/x").name
+    _silent_walk_and_attester(monkeypatch, theirs)
+    monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
+    monkeypatch.setenv("CODEX_THREAD_ID", theirs)
+    monkeypatch.setenv("CODEX_SESSION_ID", theirs)
+
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["HARNESS"] == ""
+    assert fields["SESSION_ID"] == ""
+    assert fields["DISPOSITION"] == "ambiguous"
+    assert fields["COLLISION"] == owner
+
+
+def test_name_only_own_row_resolves_when_the_attester_witnesses(
+    tmp_path, monkeypatch
+):
+    """The real pane worker's resolution path: the spawn stamp names the
+    family, the launcher stamps the family proof (or the walk finds it), and
+    the attester witnesses the marker value from process ancestry. With that
+    independent ground the worker resolves its own identity even though its
+    own spawn-minted row already holds the id."""
     from fno.agents.registry import register_existing_session
     from fno.paths_testing import use_tmpdir
 
     use_tmpdir(monkeypatch, tmp_path)
     mine = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
     register_existing_session(harness="codex", session_id=mine, cwd="/x")
-    _silent_walk_and_attester(monkeypatch, mine)
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness", lambda from_pid=None: "codex"
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda env=None: (mine, "process"),
+    )
     monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
     monkeypatch.setenv("CODEX_THREAD_ID", mine)
     monkeypatch.setenv("CODEX_SESSION_ID", mine)
@@ -96,6 +130,7 @@ def test_name_only_pane_stamp_own_row_is_not_contention(tmp_path, monkeypatch):
     fields = _fields(result)
     assert fields["HARNESS"] == "codex"
     assert fields["SESSION_ID"] == mine
+    assert fields["DISPOSITION"] == "canonical"
     assert fields["COLLISION"] == ""
 
 

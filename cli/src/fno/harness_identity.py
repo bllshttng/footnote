@@ -811,35 +811,29 @@ def resolve_owned_identity(
             return OwnedHarnessIdentity(
                 identity.session_id, identity.harness, present, "canonical"
             )
-        owner = collide(identity.harness, identity.session_id) if collide else None
-        if owner:
-            canonical_rejected = (
-                {
-                    "harness": identity.harness,
-                    "session_id": identity.session_id,
-                    "reason": "owned_by_live_row",
-                    "owner": owner,
-                },
-            )
-            return OwnedHarnessIdentity(
-                None, None, present, "ambiguous", canonical_rejected
-            )
-        if verdict is not True:
-            if verdict is None and not owner and present:
-                # A silent prover with no contention is not a refusal: fall
-                # through to the marker loop below, whose single-family
-                # elimination answers exactly what resolve_harness_identity
-                # answers for the dominant case (x-0992 - a pane-spawned
-                # worker has no session id in its stamp and no ancestor to
-                # walk, and the hard ambiguous here refused every one of
-                # them). A contradicted marker (verdict False) still refuses.
-                pass
-            else:
-                return OwnedHarnessIdentity(None, None, present, "ambiguous")
+        if verdict is None and present:
+            # A silent prover is not a refusal: fall through to the marker
+            # loop below, which collides ONCE for the id and answers by the
+            # same single-family elimination resolve_harness_identity gives
+            # the dominant case (x-0992 - the hard ambiguous here refused
+            # every pane-spawned worker). A contested id is rejected there,
+            # so a stamped id a live stranger owns still refuses, named.
+            pass
         else:
-            return OwnedHarnessIdentity(
-                identity.session_id, identity.harness, present, "canonical"
-            )
+            owner = collide(identity.harness, identity.session_id) if collide else None
+            if owner:
+                canonical_rejected = (
+                    {
+                        "harness": identity.harness,
+                        "session_id": identity.session_id,
+                        "reason": "owned_by_live_row",
+                        "owner": owner,
+                    },
+                )
+                return OwnedHarnessIdentity(
+                    None, None, present, "ambiguous", canonical_rejected
+                )
+            return OwnedHarnessIdentity(None, None, present, "ambiguous")
     if not markers:
         return OwnedHarnessIdentity(None, None, (), "empty")
     distinct = {harness for _, harness, _ in markers}
