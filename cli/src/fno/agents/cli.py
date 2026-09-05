@@ -3243,10 +3243,7 @@ def cmd_list(
         help="Retired: filter by --harness.",
     ),
     status: AgentStatusFilter = typer.Option(
-        None,
-        "--status",
-        help="Filter by served activity (writing | quiet | parked | orphaned | "
-        "unknown); transcript liveness is `fno agents truth`.",
+        None, "--status", help="Filter by served activity (writing | quiet | parked | orphaned | unknown); liveness is `fno agents truth`."
     ),
     progress: AgentProgressFilter = typer.Option(
         None,
@@ -3980,17 +3977,13 @@ def cmd_top(
         "grid_updates, frames_composited, frames_emitted, cpu_ns).",
     ),
 ) -> None:
-    """Show the process census: every worker process present at scan time,
-    fno-spawned and foreign claude bg alike, with pid, RSS (MB), and status
-    (x-c5cc US4).
+    """Show every live worker process - fno-spawned and foreign claude bg
+    alike - with pid, RSS (MB), and status (x-c5cc US4).
 
-    A census, not a liveness verdict: a row's presence is launch-time
-    evidence, not an answer about whether the session behind it can move
-    now - `fno agents truth` reads the transcript for that. The same union
-    the spawn gate counts, so this is the audit surface every gate message
-    points at. Python-only (RSS via psutil; not routed to the Rust client).
-    ``--subagents`` (x-af92) appends a read-only sidechain section; those
-    rows are observable but not addressable.
+    The same union the spawn gate counts, so this is the audit surface every
+    gate message points at. Python-only (RSS via psutil; not routed to the
+    Rust client). ``--subagents`` (x-af92) appends a read-only sidechain
+    section; those rows are observable but not addressable.
     """
     from fno.agents.top import render_top
 
