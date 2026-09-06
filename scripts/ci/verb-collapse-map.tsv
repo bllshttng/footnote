@@ -188,7 +188,6 @@ backlog rank	T1	backlog rank	20
 backlog ready	T1	backlog ready	21
 backlog reconcile	KEEP	backlog reconcile	44	deliberate readability slack for a high-traffic distinct operation
 backlog reconcile-findings	T1	backlog reconcile-findings	0
-backlog rehash	T1	backlog rehash	4
 backlog relatedness build	T1	backlog relatedness build	0
 backlog relatedness get	T1	backlog relatedness get	0
 backlog remove	T1	backlog remove	7

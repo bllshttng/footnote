@@ -1158,12 +1158,10 @@ def _warn_similar_nodes(
         pr_tok = f"  PR#{pr}" if isinstance(pr, int) and not isinstance(pr, bool) else ""
         lines.append(f'  {cid}  {status:<10}{score:.2f}{pr_tok}  "{title}"')
     top_id = candidates[0][0]
-    top_cand = by_id.get(top_id, {})
-    # The intake paths can re-file with --claims to consolidate, but only against
-    # an idea-state node (intake refuses to claim a non-idea node upstream); a
-    # missing status is malformed, not idea-state, so for any other top state the
-    # receipt informs only.
-    if intake_hint and top_cand.get("status") == "idea":
+    # The intake paths can re-file with --claims to consolidate against the
+    # top candidate, in any node state; idea/add cannot, so they get the
+    # supersede/update remedy only.
+    if intake_hint:
         lines.append(
             "consolidate: `fno backlog supersede` / `fno backlog update`, or "
             f"re-file with --claims {top_id}"
@@ -1190,17 +1188,10 @@ def _prepare_intake(
     cli_project: str | None = None,
     cli_claim: str | None = None,
 ) -> _IntakeResult:
-    # Claim resolution runs FIRST so a claim on an existing idea node beats
-    # the plan_path-equality match. _resolve_claim raises ValueError on bad
-    # input; the caller surfaces those as non-zero exits via Typer.
+    # Claim resolution runs FIRST so a claim on an existing node (any state)
+    # beats the plan_path-equality match. _resolve_claim raises ValueError on
+    # bad input; the caller surfaces those as non-zero exits via Typer.
     claim_node, claim_source = _resolve_claim(cli_claim, plan_path, entries)
-    if claim_node is not None:
-        node_status = claim_node.get("status")
-        if node_status not in ("idea", None):
-            raise ValueError(
-                f'node {claim_node.get("id")} is in state {node_status!r}; '
-                f"refuse to claim a non-idea node"
-            )
 
     existing = _match_plan_in_graph(entries, plan_path, roadmap_id)
     if existing is None:

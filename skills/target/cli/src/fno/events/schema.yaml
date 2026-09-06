@@ -999,8 +999,7 @@ event_types:
   - name: graph_reloaded
     description: |
       Emitted by the megawalk walker when a mid-loop mtime check detects
-      graph.json or its sha256 sidecar has changed; the entry list has
-      been reloaded.
+      graph.json has changed; the entry list has been reloaded.
     sources: [megawalk]
     data:
       required: [old_count, new_count, mtime_ns]
@@ -1016,13 +1015,13 @@ event_types:
           description: "st_mtime_ns of graph.json at the time of reload (may be null if file was missing)."
         sidecar_mtime_ns:
           type: integer
-          description: "st_mtime_ns of graph.json.sha256 at the time of reload (may be null; optional)."
+          description: "st_mtime_ns of graph.json.sha256 at the time of reload (may be null; optional; the sidecar was retired)."
     consumers: [operator]
 
   - name: graph_reload_failed
     description: |
       Emitted by the megawalk walker when a mid-loop reload attempt
-      raised GraphCorruptionError, JSONDecodeError, or OSError; cached
+      raised JSONDecodeError or OSError; cached
       graph_entries preserved this tick.
     sources: [megawalk]
     data:
@@ -1030,13 +1029,13 @@ event_types:
       properties:
         error_kind:
           type: string
-          description: "Exception class name (GraphCorruptionError, JSONDecodeError, or OSError)."
+          description: "Exception class name (JSONDecodeError or OSError)."
         mtime_ns:
           type: integer
           description: "st_mtime_ns of graph.json that triggered the failed reload attempt (may be null if missing)."
         sidecar_mtime_ns:
           type: integer
-          description: "st_mtime_ns of graph.json.sha256 at the time of the failed reload (may be null; optional)."
+          description: "st_mtime_ns of graph.json.sha256 at the time of the failed reload (may be null; optional; the sidecar was retired)."
         detail:
           type: string
           description: "str(exc) truncated to 200 chars (optional)."

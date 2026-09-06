@@ -7,8 +7,8 @@ use serde::Deserialize;
 /// (x-244c, operator ruling 2026-09-02): `build.rs` copies it over the
 /// Python-tree table (`cli/src/fno/agents/harness_capabilities.toml`) on
 /// every build, so this is the only file a human edits. `crates/fno` reads
-/// the table through the dep instead of carrying its own copy, and
-/// `scripts/ci/check-harness-capabilities-fresh.sh` catches a hand-edited
+/// the table through the dep instead of carrying its own copy, and the
+/// rust-ci generated-copies dirty-tree step catches a hand-edited
 /// generated copy committed without a rebuild.
 pub const CAPABILITY_TOML: &str = include_str!("harness_capabilities.toml");
 

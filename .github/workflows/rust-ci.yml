@@ -22,6 +22,13 @@ on:
       - schemas/**
       - cli/src/fno/events/schema.yaml
       - scripts/check-event-schema-parity.sh
+      # The generated-copy dirty-tree step: a hand edit to a projected copy
+      # must trigger the job that diffs it against its regenerated form.
+      - cli/src/fno/agents/harness_capabilities.toml
+      - crates/fno/src/harness_capabilities.toml
+      - cli/src/fno/agents/merge_posture.toml
+      - crates/fno-agents/src/events_limits.toml
+      - docs/harnesses/capability-matrix.md
       - scripts/ci/check-registry-schema-parity.sh
       - scripts/ci/check-provider-vocabulary-parity.sh
       - tests/ci/test_provider_vocabulary_parity.sh
@@ -215,6 +222,25 @@ jobs:
         # The package clean before unit tests makes those tests and this parity
         # binary share one fresh source build. Dependencies stay cached.
         run: cargo build --bin fno-agents
+
+      - name: Generated copies match their sources
+        # The ONE freshness gate for every build-generated copy. build.rs
+        # regenerates the capability copies, the merge-posture copy, and
+        # events_limits.toml on every build; `fno doctor harness-matrix
+        # --write` renders the capability doc. A committed copy that drifted
+        # from its source (a hand edit, a forgotten rebuild) shows up here as
+        # a dirty tree - which is the wrong-merge class the retired
+        # *-fresh.sh scripts checked, at one step instead of four.
+        run: |
+          # fno-py, not fno: the project env's console script is fno-py and a
+          # bare `fno` on PATH is a stale installed tool, not this checkout.
+          (cd cli && uv run fno-py doctor harness-matrix --write)
+          git diff --exit-code -- \
+            cli/src/fno/agents/harness_capabilities.toml \
+            crates/fno/src/harness_capabilities.toml \
+            cli/src/fno/agents/merge_posture.toml \
+            crates/fno-agents/src/events_limits.toml \
+            docs/harnesses/capability-matrix.md
 
       - name: Schema parity check
         # The parity script resolves the Rust binary via `command -v fno-agents`

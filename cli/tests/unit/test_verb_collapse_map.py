@@ -100,10 +100,11 @@ def test_map_covers_current_surface_once():
     # shape` (reign) lands on the same count: 567 total from 565.
     # This branch adds `backlog contain`, the plan-less containment fold,
     # as one new row (first allocated under a retired alias, renamed in
-    # place before merge): 568 -> 569.
-    # This branch adds `agents feed`, the activity feed projection: counted
-    # from the merged file, 569 -> 570.
-    assert len(mapped) == 570, (
+    # place before merge): 568 -> 569. Main added `agents feed`, the
+    # activity feed projection: 569 -> 570 from main's side. This branch's
+    # sidecar retirement deleted the `backlog rehash` row. Counted from the
+    # merged file: 569.
+    assert len(mapped) == 569, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

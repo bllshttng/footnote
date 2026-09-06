@@ -3,7 +3,7 @@
 The store itself is ported: `crates/fno-agents/src/graph_store.rs` owns the
 byte-compatible JSON I/O, the defaults/migration pipeline,
 ``recompute_statuses``, canonicalization, slugs, the bounded lock, and the
-atomic publish with its backup + SHA256 sidecar. This module is the RPC
+atomic publish with its backup. This module is the RPC
 client the 32k lines of Python surface call; the public signatures are the
 ones the file-reading store exposed, so no caller changed shape.
 
@@ -28,8 +28,7 @@ after the lock dropped.
 Read-failure taxonomy (unchanged): :class:`GraphCorruptError` (the soft
 read's parse failure, swallowed to [] by read_graph, exit 1 by the mutate
 path), :class:`GraphUnreadableError` / :class:`GraphMalformedRootError`
-(the strict read). load.py's GraphCorruptionError is the SHA256 sidecar
-axis, checked only by load_graph.
+(the strict read).
 """
 from __future__ import annotations
 
@@ -692,10 +691,8 @@ def canonical_field_order() -> "list[str]":
 def read_file_bytes(path: Path) -> bytes:
     """The file's raw bytes through the keeper's gated read.
 
-    load.py's hash validation consumes this: the gate held across the read
-    means the bytes and the sidecar the keeper last wrote answer one
-    consistent instant, so a mismatch is real corruption, never the
-    two-write window."""
+    load_graph parses these bytes directly: the gate held across the read
+    means the bytes answer one consistent instant of the publish cycle."""
     result = _client_for(Path(path)).read_file(Path(path))
     return _base64.b64decode(result["bytes_b64"])
 
@@ -1014,7 +1011,7 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     The mutator runs client-side against the begin snapshot; the keeper
     re-derives the write pipeline (slugs, statuses, touched_at, closure
     detection, canonicalization) and publishes under the bounded lock with
-    backup + sidecar. Renders, claim releases, and the nudge run after the
+    a backup. Renders, claim releases, and the nudge run after the
     publish lands -- the same post-lock position the file leg used.
 
     The plan-rung map is computed over the MUTATED rows (the rows the
