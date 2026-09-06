@@ -403,12 +403,12 @@ def read_open_questions(
     return open_qs
 
 
-def read_answered_questions(root: Path) -> "list[dict[str, Any]]":
+def read_answered_questions() -> "list[dict[str, Any]]":
     """Every closed-with-answer question, oldest first, asker joined in: the
     closed event names who closed, not who asked, so the fold joins against
     the question's own event (a missing ask event leaves asker None). The
-    king wake phase reads this for its strongest trigger."""
-    _ = root  # machine-wide index; the argument stays for caller parity
+    king wake phase reads this machine-wide index for its strongest trigger."""
+
     asked: "dict[str, dict[str, Any]]" = {}
     answered: "list[dict[str, Any]]" = []
     for rec in _read_question_events(questions_path(), missing_hint=False):

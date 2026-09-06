@@ -158,7 +158,8 @@ Project state left the checkout. One space per repository, keyed on the CANONICA
 | `<space>/claims/` | `fno.claims` for repo-local keys (`walker:`, `review:`, `reap:`); global-id keys (`node:`, `dispatch:`, ...) stay at the global root | re-acquirable leases |
 | `<space>/kings/<scope>.md` | `cli/src/fno/king/state.py` via coronation or `fno agents king init` | one loop-state file per live crown scope; stale files are inert without a live registry crown and cleanup is best-effort (`fno agents king done` on abdication) |
 | `<space>/kings/<scope>.md.lock`, `.md.tmp` | `state.py` / `loop_king.rs` / `king/wake.py` over the manifest lock | lock lives only for the critical section; tmp is replaced on every locked write |
-| `<space>/kings/<scope>.wake.json` | `pr_watch/_king_wake.py` (the tick's wake phase) | tick-local board-hash cache with no reign meaning; refreshed only when a wake fires, so it never outlives the manifest beside it |
+| `<space>/kings/<scope>.wake.json` | `pr_watch/_king_wake.py` (the tick's wake phase) | tick-local trigger cache with no reign meaning: `board_hash` + `board_rows` (the board-change trigger) and `answered_cursor` (the answered-escalation trigger); refreshed only when a wake fires, so it never outlives the manifest beside it |
+| `<space>/kings/<scope>.wake.json.lock`, `.json.<pid>.tmp` | `pr_watch/_king_wake.py` over the manifest-lock helper | lock lives only for the sidecar's read-modify-write critical section; the pid-suffixed tmp is replaced on every locked write |
 | `<space>/kings/<scope>.md.wake.log` | `pr_watch/_king_wake.py` (detached wake-mode walk) | append-only stdout of the walks this phase spawned; the events journal is the receipt, this log is diagnosis |
 | `<space>/plans/` | `paths.plans_dir()` default (a configured vault template still wins) | permanent plan docs |
 | `<space>/inbox/` | `paths.inbox_dir()` default | per-project inbox |

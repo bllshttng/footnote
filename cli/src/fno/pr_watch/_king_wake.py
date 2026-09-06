@@ -1,24 +1,23 @@
-"""The pr-watch tick's king wake phase.
-
-A king that exited ``NoWork`` and whose board then refilled is woken from
-here: nothing inside a terminated loop can observe that. Trigger order: an
-answer to the king's own escalation, mail, board change, timer backstop.
-The wake ledger on the manifest is the rate bound, billed before dispatch.
-"""
+"""The pr-watch tick's king wake phase: a king that exited ``NoWork`` and
+whose board then refilled is woken from here, because nothing inside a
+terminated loop can observe that. Triggers, best first: an answer to the
+king's own escalation, mail, board change, timer backstop. The manifest's
+wake ledger is the rate bound, billed before dispatch."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, cast
 
 #: Ceiling-refusal question markers, deduped through the shared already-asked
-#: fold so one stranded scope asks once, not per tick. The successor marker's
-#: remedy is the manifest's respawn ceiling, not ``king.wake_ceiling``.
+#: fold so one stranded scope asks once. The successor marker's remedy is the
+#: manifest's respawn ceiling, not ``king.wake_ceiling``.
 _CEILING_MARKER = "king-wake-ceiling"
 _SUCCESSOR_CEILING_MARKER = "king-wake-respawn-ceiling"
 
@@ -51,21 +50,22 @@ class CrownTarget:
     scope: str
     root: Path
     manifest: Path
-    #: The REPLY handle mail carries. Measured 2026-08-29: of 2699 rows, 394
-    #: sit at ``to == <short_id>`` for the busiest king, ZERO at its registry
-    #: name - both spellings arrive, so both are scanned.
+    #: The REPLY handle mail carries. Measured 2026-08-29: of 2699 rows, 394 sit
+    #: at ``to == <short_id>`` for the busiest king, ZERO at its name.
     short_id: str = ""
 
 
 def _crowned(
     court_fn: Callable, rows_fn: Optional[Callable] = None
 ) -> tuple[list[CrownTarget], str]:
-    """Every crowned scope with holder, root, and manifest. A row without a
-    manifest and a scope with two live holders are both skipped."""
+    """Crowned scopes with holder, root, manifest; no-manifest and disputed
+    rows are skipped."""
     if rows_fn is None:
         from fno.agents.registry import load_registry
 
         rows_fn = load_registry
+    from fno.king.state import king_manifest_path, king_state_root
+
     rows = rows_fn()
     by_holder = {row.name: row for row in rows}
     court = court_fn(rows)
@@ -91,10 +91,8 @@ def _crowned(
             continue
         root = Path(cwd)
         # The validating helper, never a hand join: a corrupted crown_scope
-        # must refuse here, not escape .fno/kings.
+        # must refuse, not escape .fno/kings.
         try:
-            from fno.king.state import king_manifest_path, king_state_root
-
             manifest = king_manifest_path(scope, state_root=king_state_root(root))
         except ValueError:
             continue
@@ -114,9 +112,8 @@ def _crowned(
 
 
 def _holder_absent(truth: dict) -> "str | None":
-    """The refusal word for a holder that is NOT absent, else None: only
-    ``done`` and ``unknown/not-found`` are absence; instrument failures fail
-    closed (this phase spawns a whole king, unlike the board's message)."""
+    """The refusal word for a holder that is NOT absent: only ``done`` and
+    ``unknown/not-found`` are absence; instrument failures fail closed."""
     state = truth.get("state")
     if state == "done":
         return None
@@ -127,8 +124,7 @@ def _holder_absent(truth: dict) -> "str | None":
 
 
 def _mail_trigger(target: CrownTarget, unread_fn: Callable) -> Optional[str]:
-    """The matched address with undrained mail. Returned, not just reported:
-    the woken king is fresh and cannot derive the address itself."""
+    """The matched address with undrained mail, returned for the prompt."""
     from fno.agents.crown import split_scope
 
     addresses = {target.holder, target.short_id, *split_scope(target.scope)}
@@ -143,10 +139,10 @@ def _escalation_answer_trigger(
     records: list,
     cursor: str,
 ) -> tuple[Optional[str], str]:
-    """``(prompt, matched_close_ts)`` for the newest answer to the holder's own
-    question. Delivery mail addresses the full session id, which no mailbox
-    scan covers, so the journal is the trigger's source of truth. The ts is
-    stored only after a dispatch - a refused answer re-fires."""
+    """``(prompt, matched_close_ts)`` for the OLDEST unprocessed answer to the
+    holder's own question: one per tick, so a pile of answers delivers in
+    order. Delivery mail addresses the full session id, which no mailbox scan
+    covers. The ts is stored only after a dispatch - refusals re-fire."""
     addresses = {target.holder, target.short_id}
     prompt: Optional[str] = None
     matched_ts = ""
@@ -160,12 +156,13 @@ def _escalation_answer_trigger(
                 f'"{record["question"]}": {record["answer"]}.'
             )
             matched_ts = closed_ts
+            break
     return prompt, matched_ts
 
 
 def _raise_marker_question(target: CrownTarget, marker: str, question: str, ask: str) -> str:
-    """One durable operator question per scope per marker, deduped: clearing
-    the question while the scope is still stranded re-asks - correctly."""
+    """One durable question per scope per marker; clearing it while the
+    scope is still stranded re-asks - correctly."""
     import secrets
 
     from fno.agents.stale_escalate import already_asked
@@ -190,8 +187,7 @@ def _raise_marker_question(target: CrownTarget, marker: str, question: str, ask:
 
 
 def _sidecar_path(target: CrownTarget) -> Path:
-    """``.fno/kings/<scope>.wake.json`` - the tick-local cache, never the
-    write-once manifest. Declared in docs/state-root-inventory.md."""
+    """``.fno/kings/<scope>.wake.json`` - the tick-local cache, never the manifest."""
     return target.manifest.parent / f"{target.scope}.wake.json"
 
 
@@ -207,23 +203,27 @@ def _read_sidecar(target: CrownTarget) -> dict:
 def _write_sidecar(target: CrownTarget, payload: dict) -> None:
     sidecar = _sidecar_path(target)
     sidecar.parent.mkdir(parents=True, exist_ok=True)
-    tmp = sidecar.with_suffix(".json.tmp")
+    tmp = sidecar.with_suffix(f".json.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     tmp.replace(sidecar)
 
 
-def _store_sidecar_field(target: CrownTarget, key: str, value: object) -> None:
-    payload = _read_sidecar(target)
-    payload[key] = value
-    _write_sidecar(target, payload)
+def _update_sidecar(target: CrownTarget, **fields: object) -> None:
+    """Read-modify-write under the manifest-lock helper, like the ledger:
+    two overlapping ticks must not lose each other's key."""
+    from fno.king.state import _manifest_lock
+
+    with _manifest_lock(_sidecar_path(target)):
+        payload = _read_sidecar(target)
+        payload.update(fields)
+        _write_sidecar(target, payload)
 
 
 def _board_rows(
     scope: str, entries: list, resolver: Optional[Callable] = None
 ) -> "list[tuple[str, str, str, str]] | None":
     """The scope's ``(id, status, column, priority)`` rows, sorted, via
-    ``compile_scope_ids`` - never a reimplementation. None means no signal
-    (an uncompilable scope is not a board refill)."""
+    ``compile_scope_ids``; None is no signal, not an empty board."""
     from fno.king.scope import compile_scope_ids
 
     kwargs = {"resolve": resolver} if resolver is not None else {}
@@ -231,16 +231,13 @@ def _board_rows(
         ids = compile_scope_ids(scope, entries, **kwargs)
     except Exception:  # noqa: BLE001 - an uncompilable scope is not a trigger
         return None
-    return sorted(
-        (
-            str(row.get("id") or ""),
-            str(row.get("status") or ""),
-            str(row.get("_kanban_column") or ""),
-            str(row.get("priority") or ""),
-        )
+    fields = ("id", "status", "_kanban_column", "priority")
+    rows = [
+        tuple(str(row.get(f) or "") for f in fields)
         for row in entries
         if isinstance(row, dict) and str(row.get("id") or "") in ids
-    )
+    ]
+    return sorted(cast("list[tuple[str, str, str, str]]", rows))
 
 
 def _hash_rows(rows: list) -> str:
@@ -248,15 +245,42 @@ def _hash_rows(rows: list) -> str:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
+def _board_digest(scope: str, entries: list, resolver: Optional[Callable] = None) -> str:
+    """The digest the sidecar stores: sha256 over the scope's rows; no
+    observation digests as the empty string."""
+    rows = _board_rows(scope, entries, resolver)
+    return "" if rows is None else _hash_rows(rows)
+
+
+def _birth_cursor(manifest: Path) -> str:
+    """The manifest's created_at in the journal's ts shape: seeding the
+    answer cursor at the reign's birth keeps a just-closed answer live."""
+    from fno.king.state import parse_manifest
+
+    try:
+        stamp = datetime.strptime(
+            parse_manifest(manifest).get("created_at") or "", "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except ValueError:
+        return ""
+    return stamp.replace(tzinfo=timezone.utc).isoformat()
+
+
 def _read_board_sidecar(target: CrownTarget) -> "tuple[str, list[tuple[str, ...]] | None]":
-    """``(stored_hash, stored_rows)``; corrupt or row-less reads as first
-    observation (an empty row list is no observation, not an empty board)."""
+    """``(stored_hash, stored_rows)``; corrupt or row-less reads as a first
+    observation."""
     payload = _read_sidecar(target)
     stored_hash = str(payload.get("board_hash") or "")
     raw_rows = payload.get("board_rows")
     rows = None
     if isinstance(raw_rows, list) and raw_rows:
-        rows = [tuple(str(f) for f in row) for row in raw_rows if len(row) == 4]
+        # A corrupt element reads as no observation, never raises out of the
+        # tick: every later scope would be stranded with it.
+        rows = [
+            tuple(str(f) for f in row)
+            for row in raw_rows
+            if isinstance(row, (list, tuple)) and len(row) == 4
+        ] or None
     return stored_hash, rows
 
 
@@ -266,8 +290,8 @@ def _board_trigger(
     resolver: Optional[Callable] = None,
 ) -> tuple[bool, Optional[str], Optional[list], Optional[str]]:
     """``(wake?, hash+rows_to_store_after_a_dispatch, diff)``. An absent hash
-    or a row-less sidecar is a first observation; a changed hash is stored
-    only after a dispatch; an unreadable graph is no signal."""
+    or row-less sidecar is a first observation; a changed hash stores only
+    after a dispatch; an unreadable graph is no signal."""
     if not entries:
         return False, None, None, None
     rows = _board_rows(target.scope, entries, resolver)
@@ -280,21 +304,15 @@ def _board_trigger(
         return False, None, None, None
     if stored == fresh:
         return False, None, None, None
-    from fno.king.wake import render_board_diff
-
     return True, fresh, rows, render_board_diff(stored_rows, rows)
 
 
-def _store_board_hash(target: CrownTarget, digest: str, rows: Iterable = ()) -> None:
-    payload = _read_sidecar(target)
-    payload["board_hash"] = digest
-    payload["board_rows"] = [list(row) for row in rows]
-    _write_sidecar(target, payload)
+def _store_board_hash(target: CrownTarget, digest: str, rows: Iterable) -> None:
+    _update_sidecar(target, board_hash=digest, board_rows=[list(row) for row in rows])
 
 
-#: Undispatched columns the backstop counts as actionable - deliberately
-#: not the board's full actionable count: a wrong positive here costs one
-#: debounced wake that terminates NoWork.
+#: Undispatched columns the backstop counts as actionable - not the board's
+#: full count: a wrong positive costs one debounced NoWork wake.
 _ACTIONABLE_COLUMNS = frozenset({"ready", "next"})
 
 
@@ -325,9 +343,9 @@ def _backstop_due(
     backstop_s: int,
     resolver: Optional[Callable] = None,
 ) -> bool:
-    """Whether the timer backstop fires: an approximation of the mail and
-    board triggers so a missed event cannot strand a scope. A billed wake or
-    a king terminal inside the window suppresses it."""
+    """Whether the timer backstop fires: an approximation of the event
+    triggers so a missed event cannot strand a scope; a billed wake or king
+    terminal inside the window suppresses it."""
     from fno.king.state import last_run_is_fresh
     from fno.king.wake import read_wakes
     from fno.outstanding.core import events_path
@@ -343,6 +361,45 @@ def _backstop_due(
     return True
 
 
+#: Byte bound on one rendered diff: it rides the walk's argv as
+#: ``--wake-detail``, so a capped render names what it elided.
+MAX_DETAIL_CHARS = 2000
+
+
+def render_board_diff(old_rows, new_rows, *, cap: int = MAX_DETAIL_CHARS) -> str:
+    """The added/changed/removed rows between two wake observations, as
+    prompt text; a removed row is named, not hidden."""
+    old = {str(row[0]): tuple(str(f) for f in row) for row in old_rows or ()}
+    new = {str(row[0]): tuple(str(f) for f in row) for row in new_rows or ()}
+    lines: list[str] = []
+    for row_id in sorted(set(old) - set(new)):
+        lines.append(f"removed: {row_id} ({_row_label(old[row_id])})")
+    for row_id in sorted(set(new) - set(old)):
+        lines.append(f"added: {row_id} ({_row_label(new[row_id])})")
+    for row_id in sorted(set(new) & set(old)):
+        if new[row_id] != old[row_id]:
+            lines.append(
+                f"changed: {row_id} {_row_label(old[row_id])} -> {_row_label(new[row_id])}"
+            )
+    if not lines:
+        return ""
+    text = "\n".join(lines)
+    if len(text) <= cap:
+        return text
+    shown: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > cap - 32:
+            break
+        shown.append(line)
+        used += len(line) + 1
+    return "\n".join(shown) + f"\n...(+{len(lines) - len(shown)} more rows elided)"
+
+
+def _row_label(row: tuple) -> str:
+    return "/".join(part for part in row[1:] if part)
+
+
 def _dispatch_walk(
     target: CrownTarget,
     reason: str,
@@ -351,9 +408,8 @@ def _dispatch_walk(
     detail: Optional[str] = None,
     successor: bool = False,
 ) -> None:
-    """Spawn the wake-mode walk, detached (it blocks for the reign it
-    starts). The address and the diff travel on the command line: the woken
-    session is fresh and cannot derive either itself."""
+    """Spawn the wake-mode walk, detached. The address and the diff travel on
+    the command line: the fresh session cannot derive either itself."""
     argv = [
         binary,
         "loop",
@@ -426,8 +482,8 @@ def run_king_wake(
     if entries_fn is None:
 
         def entries_fn() -> list:  # noqa: F811 - lazy default, loaded once below
-            # Backend-switched like the tick's own board read: a stale graph
-            # under an external tracker backend must not drive a trigger.
+            # Backend-switched like the tick's board read: a stale graph under
+            # an external tracker backend must not drive a trigger.
             from fno.graph.store import read_graph
             from fno.paths import graph_json
             from fno.tracker import active_backend_name
@@ -456,7 +512,10 @@ def run_king_wake(
     backstop_s = _cfg_int("wake_backstop_seconds", 1800)
 
     # One question-journal read per tick, shared by every scope like `entries`.
-    answered_records: "list | None" = None
+    try:
+        answered_records: list = answered_fn()
+    except Exception:  # noqa: BLE001 - an unreadable journal is not a trigger
+        answered_records = []
 
     targets, note = _crowned(court_fn, rows_fn)
     summary: dict[str, Any] = {
@@ -473,38 +532,26 @@ def run_king_wake(
             # Liveness refusals ride the summary, not the event stream.
             summary["refused"].append({"scope": target.scope, "refusal": refusal})
             continue
-        # A GONE holder (not merely parked done) is replaced, not woken: the
-        # dispatch bills the walk arm's respawn budget, not only the ledger.
+        # A GONE holder is replaced, not woken: the dispatch bills the
+        # respawn budget, not only the wake ledger.
         holder_gone = truth.get("state") == "unknown" and truth.get("reason") == "not-found"
         reason: Optional[str] = None
         wake_address: Optional[str] = None
         wake_detail: Optional[str] = None
         answered_cursor_to_store = ""
         sidecar = _read_sidecar(target)
-        if answered_records is None:
-            try:
-                # None (unreadable journal) is not a trigger: keep it None so
-                # the cursor seed retries instead of replaying old answers.
-                answered_records = answered_fn(target.root)
-            except Exception:  # noqa: BLE001
-                pass
         if "answered_cursor" not in sidecar:
-            # A first observation seeds the cursor and wakes nothing, or the
-            # first armed tick replays every old answer as a fresh trigger.
-            if answered_records is not None:
-                _store_sidecar_field(
-                    target,
-                    "answered_cursor",
-                    max((str(r.get("closed_ts") or "") for r in answered_records), default=""),
-                )
+            # Seed at birth, never the journal max: a max seed swallows an
+            # answer closed before the first armed tick saw it.
+            _update_sidecar(target, answered_cursor=_birth_cursor(target.manifest))
         else:
             answer_prompt, matched_ts = _escalation_answer_trigger(
-                target, answered_records or [], str(sidecar.get("answered_cursor") or "")
+                target, answered_records, str(sidecar.get("answered_cursor") or "")
             )
             if answer_prompt is not None:
                 reason = "escalation_answered"
-                # Delivery mail addressed the holder's full session id, which
-                # no mailbox scan covers: name it or the row lingers unread.
+                # Delivery mail addressed the full session id: name it or the
+                # row lingers unread (no scan covers that address).
                 from fno.king.state import parse_manifest
 
                 full_id = parse_manifest(target.manifest).get("harness_session_id") or ""
@@ -515,10 +562,13 @@ def run_king_wake(
                         f"and drain it, then advance the cursor with "
                         f"`fno agents mail ack <id> --name {full_id}`."
                     )
+                if len(answer_prompt) > MAX_DETAIL_CHARS:
+                    # One argv element: a pasted log must not abort the pass.
+                    answer_prompt = answer_prompt[:MAX_DETAIL_CHARS] + " ...(truncated)"
                 wake_detail = answer_prompt
                 answered_cursor_to_store = matched_ts
-        matched = _mail_trigger(target, unread_fn)
-        if matched is not None and reason is None:
+        matched = None if reason is not None else _mail_trigger(target, unread_fn)
+        if matched is not None:
             reason = "mail"
             wake_address = matched
         fresh_board_hash: Optional[str] = None
@@ -545,7 +595,6 @@ def run_king_wake(
             from fno.king.state import at_respawn_ceiling, parse_manifest
 
             if at_respawn_ceiling(target.manifest):
-                # Refuse before billing, and put the decision to the operator.
                 fields = parse_manifest(target.manifest)
                 emit(
                     "king_wake_refused",
@@ -557,7 +606,7 @@ def run_king_wake(
                     },
                 )
                 try:
-                    _ask_respawn_ceiling(
+                    (ask_fn or _ask_respawn_ceiling)(
                         target,
                         int(fields.get("respawn_count") or 0),
                         int(fields.get("respawn_ceiling") or 0),
@@ -566,9 +615,8 @@ def run_king_wake(
                     summary["note"] = "successor ceiling question could not be raised"
                 summary["refused"].append({"scope": target.scope, "refusal": "respawn-ceiling"})
                 continue
-        # Admit-and-bill in ONE lock: `allowed` means the bill landed, so two
-        # overlapping ticks cannot both dispatch. An answered escalation skips
-        # only the debounce, never the ceiling.
+        # Admit-and-bill in ONE lock: an answered escalation skips only the
+        # debounce, never the ceiling.
         verdict = admit_fn(
             target.manifest,
             now=now,
@@ -608,8 +656,7 @@ def run_king_wake(
                 holder_gone,
             )
         if holder_gone:
-            # The new session does not exist yet; its trail is the walk's
-            # own journal under the per-invocation walk key.
+            # The new session does not exist yet; its trail is the walk's journal.
             from fno.king.state import parse_manifest as _pm
 
             emit(
@@ -624,7 +671,7 @@ def run_king_wake(
         if fresh_board_hash:
             _store_board_hash(target, fresh_board_hash, fresh_board_rows or ())
         if answered_cursor_to_store:
-            _store_sidecar_field(target, "answered_cursor", answered_cursor_to_store)
+            _update_sidecar(target, answered_cursor=answered_cursor_to_store)
         receipt = {
             "scope": target.scope,
             "reason": reason,

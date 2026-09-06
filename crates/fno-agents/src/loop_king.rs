@@ -107,19 +107,10 @@ impl KingQueue {
     /// would terminate `NoWork` and report success, which is the
     /// absence-as-evidence trap: "no work" and "nobody told me what I am
     /// watching" would produce the same clean exit.
-    pub fn from_manifest(
-        repo_root: &Path,
-        scope: &str,
-        fno_bin: String,
-        wake: bool,
-        wake_holder: Option<&str>,
-    ) -> Result<Self, LoopError> {
-        Self::from_manifest_full(repo_root, scope, fno_bin, wake, wake_holder, false)
-    }
-
-    /// The full construction: wake mode plus the successor modifier, which
-    /// only the wake phase sends (a dead holder's replacement). Ordinary and
-    /// hand-run callers keep the 5-arg spelling and never mint successors.
+    ///
+    /// The successor modifier is a parameter, not a second constructor: only
+    /// the wake phase passes `true` (a dead holder's replacement); every
+    /// other caller passes `false` and never mints successors.
     pub fn from_manifest_full(
         repo_root: &Path,
         scope: &str,
@@ -615,7 +606,8 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_ceiling: 0\n---\n",
         )
         .unwrap();
-        let q = KingQueue::from_manifest(&dir, "k", "fno".to_string(), false, None).unwrap();
+        let q = KingQueue::from_manifest_full(&dir, "k", "fno".to_string(), false, None, false)
+            .unwrap();
         assert_eq!(q.respawn_ceiling(), 0);
         assert!(!q.at_respawn_ceiling());
         fs::remove_dir_all(&dir).ok();
@@ -623,10 +615,16 @@ mod tests {
 
     #[test]
     fn refuses_an_unsafe_scope_and_names_the_manifest_it_tried() {
-        let err =
-            KingQueue::from_manifest(Path::new("."), "../escape", "fno".to_string(), false, None)
-                .err()
-                .expect("escape scope must refuse");
+        let err = KingQueue::from_manifest_full(
+            Path::new("."),
+            "../escape",
+            "fno".to_string(),
+            false,
+            None,
+            false,
+        )
+        .err()
+        .expect("escape scope must refuse");
         assert!(err.to_string().contains("unsafe king scope"));
     }
 
@@ -806,7 +804,8 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 3\nrespawn_ceiling: 4\n---\n",
         )
         .unwrap();
-        let mut q = KingQueue::from_manifest(&dir, "k", "fno".to_string(), false, None).unwrap();
+        let mut q = KingQueue::from_manifest_full(&dir, "k", "fno".to_string(), false, None, false)
+            .unwrap();
         assert!(!q.at_respawn_ceiling(), "3 of 4 is under the ceiling");
         // The concurrent winner bills the ceiling first...
         assert_eq!(bump_respawn_count(&path).unwrap(), 4);
