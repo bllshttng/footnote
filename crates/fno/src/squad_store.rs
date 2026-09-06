@@ -2100,16 +2100,19 @@ mod tests {
                     name: "aaaaaaaa".into(),
                     binding: LayoutBinding::Fno("aaaaaaaa".into()),
                     cwd: None,
+                    portal: None,
                 },
                 LayoutSlot {
                     name: "p1".into(),
                     binding: LayoutBinding::Shell,
                     cwd: None,
+                    portal: None,
                 },
                 LayoutSlot {
                     name: "p2".into(),
                     binding: LayoutBinding::Shell,
                     cwd: None,
+                    portal: None,
                 },
             ],
             focus: Some("p1".into()),
@@ -2190,6 +2193,7 @@ mod tests {
                 name: "p1".into(),
                 binding: LayoutBinding::Shell,
                 cwd: None,
+                portal: None,
             }],
             focus: None,
         };
@@ -2214,6 +2218,54 @@ mod tests {
         let loaded = load();
         assert_eq!(loaded.squads.len(), 1, "not quarantined");
         assert_eq!(loaded.squads[0].tab_trees[0].slots[0].cwd, None);
+    }
+
+    #[test]
+    fn portal_slot_field_loads_and_stays_absent_when_none() {
+        // AC2-HP (x-a9b4): a slot carrying "portal" (written by an a9b4
+        // build) loads unquarantined, and a build WITHOUT the field reading
+        // this store decodes the slot as the plain Shell slot it names -
+        // pinned here by the serde contract: an unknown-field-tolerant
+        // decode is the same wire rule a pre-a9b4 build applies. The
+        // reverse direction is pinned too: a None-portal slot emits no
+        // "portal" key, so a pre-a9b4 store round-trips byte for byte.
+        use crate::proto::{LayoutBinding, LayoutSlot, LayoutTreeSpec, PortalSlot};
+        let s = Scratch::new("portal-slot");
+        let raw_with_portal = r#"{"version":1,"squads":[{"name":"w","origins":[],"members":[],"created_at":"2026-08-11T00:00:00Z","tab_specs":[],"tab_trees":[{"tab_name":"watch","tree":{"slot":"portal1"},"slots":[{"name":"portal1","binding":"shell","cwd":null,"portal":{"index":1,"row":"deadbee1"}}],"focus":null}],"active_tab":0}]}"#;
+        std::fs::write(s.file(), raw_with_portal).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 1, "not quarantined");
+        let slot = &loaded.squads[0].tab_trees[0].slots[0];
+        assert_eq!(
+            slot.portal,
+            Some(PortalSlot {
+                index: 1,
+                row: "deadbee1".into()
+            }),
+            "the portal slot decodes with its index and row"
+        );
+        assert!(
+            matches!(slot.binding, LayoutBinding::Shell),
+            "the binding stays Shell"
+        );
+
+        // Reverse direction: a None-portal slot emits no "portal" key.
+        let plain = StoredTabTree {
+            tab_name: None,
+            tree: LayoutTreeSpec::Slot("p1".into()),
+            slots: vec![LayoutSlot {
+                name: "p1".into(),
+                binding: LayoutBinding::Shell,
+                cwd: None,
+                portal: None,
+            }],
+            focus: None,
+        };
+        let raw = serde_json::json!({ "tab_trees": [plain] }).to_string();
+        assert!(
+            !raw.contains("\"portal\""),
+            "a None-portal slot must carry no portal key: {raw}"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Workspace restore
 
-After a reboot or a killed mux server, every worker pane is gone. A pane's pty was a child of the server pid and died with it. What survives is durable identity: the squad store's member records, the agents registry, and each harness's own persisted session state. `fno mux workspace restore` walks the members and brings each one back through its own harness's resume form. The workspace is reconstructed, never survived.
+After a reboot or a killed mux server, every worker pane is gone. A pane's pty was a child of the server pid and died with it. What survives is durable identity: the squad store's member records, the agents registry, and each harness's own persisted session state. `fno mux workspace restore` walks the members and brings each one back through its own harness's resume form. The workspace is reconstructed, never survived. An open portal comes back too, as a held seat. Its `(index, row_key)` slot is stored in the tab's tree, and restore puts the entry back in the portal map with a shell in the seat.
 
 ## The verb
 
@@ -26,7 +26,7 @@ Claude is the one special case, and not here. A live claude bg session is owned 
 
 ## Startup policy and the on-demand verb
 
-Startup restore is governed by `[mux.restore] policy`. `hold` (default) rebuilds named held panes and resumes on focus. `idle` leaves members as idle rows. `resume` runs the bulk restore at startup, without being asked. The verb is the same bulk resume, on demand. A session that started under `hold` or `idle` can be restored in one command later. A script can drive the whole reboot-recovery without opening the TUI. See [pane-worker-relaunch](pane-worker-relaunch.md) for the held-pane and idle-row mechanics this builds on.
+Startup restore is governed by `[mux.restore] policy`. `hold` (default) rebuilds named held panes and resumes on focus. `idle` leaves members as idle rows. `resume` runs the bulk restore at startup, without being asked. The verb is the same bulk resume, on demand. A session that started under `hold` or `idle` can be restored in one command later. A script can drive the whole reboot-recovery without opening the TUI. See [pane-worker-relaunch](pane-worker-relaunch.md) for the held-pane and idle-row mechanics this builds on. A held portal follows the same shape: it resumes on focus of its seat, or on the row's reach.
 
 ## A live proof
 

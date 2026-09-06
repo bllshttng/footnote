@@ -40,9 +40,10 @@ use crate::proto::{
     AgentNoPaneReason, AgentRow, AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel,
     CardState, ClientMsg, Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot,
     LayoutSpec, LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo,
-    PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError, Reach, ResolvedPlacement,
-    RestoreRow, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo,
-    TabLayout, TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    PaneMeta, PanePlacement, PaneTarget, PlacementFallback, PortalSlot, ProtoError, Reach,
+    ResolvedPlacement, RestoreRow, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout,
+    SquadMeta, TabInfo, TabLayout, TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME,
+    MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 #[cfg(test)]
@@ -2530,16 +2531,25 @@ struct SlotCapture<'a> {
     pane_owner: &'a HashMap<u64, &'a str>,
     /// (x-5baf) Each pane's live cwd, read once before the tab loop.
     pane_cwd: &'a HashMap<u64, String>,
+    /// (x-a9b4) Every live portal seat -> (index, row_key), read once before
+    /// the tab loop. A seated leaf names its slot after the portal instead of
+    /// an ordinal, so the capture keeps what restore needs to hold it again.
+    portal_seats: &'a HashMap<u64, (u8, String)>,
     slots: Vec<LayoutSlot>,
     by_pane: HashMap<u64, String>,
     ordinal: usize,
 }
 
 impl<'a> SlotCapture<'a> {
-    fn new(pane_owner: &'a HashMap<u64, &str>, pane_cwd: &'a HashMap<u64, String>) -> Self {
+    fn new(
+        pane_owner: &'a HashMap<u64, &str>,
+        pane_cwd: &'a HashMap<u64, String>,
+        portal_seats: &'a HashMap<u64, (u8, String)>,
+    ) -> Self {
         SlotCapture {
             pane_owner,
             pane_cwd,
+            portal_seats,
             slots: Vec::new(),
             by_pane: HashMap::new(),
             ordinal: 0,
@@ -2574,12 +2584,21 @@ impl<'a> SlotCapture<'a> {
     }
 
     fn name_leaf(&mut self, pane: u64) -> String {
-        let base = match self.pane_owner.get(&pane) {
-            Some(id) => id.to_string(),
-            None => {
-                self.ordinal += 1;
-                format!("p{}", self.ordinal)
-            }
+        // (x-a9b4) Order is portal, owner, ordinal. A portal seat that is
+        // also an attach pane (a LIVE viewer is: the reach inserts the
+        // mapping) captures as the portal slot, never as `Fno(attach_id)` -
+        // an attach binding would re-bind the thread to the rectangle at
+        // restore, the exact thing x-07c2's never-persist rule exists for.
+        // The slot pair is the durable record; the viewer process is not.
+        let base = match self.portal_seats.get(&pane) {
+            Some((index, _)) => format!("portal{index}"),
+            None => match self.pane_owner.get(&pane) {
+                Some(id) => id.to_string(),
+                None => {
+                    self.ordinal += 1;
+                    format!("p{}", self.ordinal)
+                }
+            },
         };
         let mut name = base.clone();
         let mut n = 2;
@@ -2587,14 +2606,23 @@ impl<'a> SlotCapture<'a> {
             name = format!("{base}#{n}");
             n += 1;
         }
-        let binding = match self.pane_owner.get(&pane) {
-            Some(id) => LayoutBinding::Fno(id.to_string()),
-            None => LayoutBinding::Shell,
+        let binding = if self.portal_seats.contains_key(&pane) {
+            LayoutBinding::Shell
+        } else {
+            match self.pane_owner.get(&pane) {
+                Some(id) => LayoutBinding::Fno(id.to_string()),
+                None => LayoutBinding::Shell,
+            }
         };
+        let portal = self.portal_seats.get(&pane).map(|(index, row)| PortalSlot {
+            index: *index,
+            row: row.clone(),
+        });
         self.slots.push(LayoutSlot {
             name: name.clone(),
             binding,
             cwd: self.pane_cwd.get(&pane).cloned(),
+            portal,
         });
         self.by_pane.insert(pane, name.clone());
         name
@@ -2606,56 +2634,22 @@ impl<'a> SlotCapture<'a> {
     }
 }
 
-/// The live tree minus one pane (x-07c2): the dedicated thread pane's leaf is
-/// pruned from a topology before capture, and a split it hollowed out
-/// collapses, because the thread pane is NEVER persisted - a pane binds a
-/// session to geometry, a thread binds a session to a row, and a persisted
-/// slot would re-bind a thread to a rectangle across a restart. `None` means
-/// nothing durable remains in this subtree.
-/// (x-8f9d) Does `portal_key` name the same ROW the reach resolved?
-///
-/// Not the same KEY: the TUI door keys a portal by the attach id while
-/// `fno agents attach` keys it by the registry name, and both doors advertise
-/// the same pane. Attach ids are unique per bg session, so a portal keyed by
-/// this row's attach id IS this row whatever door the reach came from - and the
-/// reverse (keyed by name, reached again by attach id) is the same row too,
-/// which is why the name comparison runs both directions.
-///
-/// One function, two callers: the same-row focus arm for the REQUESTED portal,
-/// and the one-row-one-viewer check across every OTHER portal. Two copies of
-/// this comparison drifting apart is how a duplicate viewer gets minted.
-fn node_without_leaf(node: &Node, skip: u64) -> Option<Node> {
-    match node {
-        Node::Leaf(p) => (*p != skip).then_some(Node::Leaf(*p)),
-        Node::Branch { axis, children } => {
-            let kept: Vec<(f32, Node)> = children
-                .iter()
-                .filter_map(|(w, n)| node_without_leaf(n, skip).map(|n| (*w, n)))
-                .collect();
-            match kept.len() {
-                0 => None,
-                1 => kept.into_iter().next().map(|(_, n)| n),
-                _ => Some(Node::Branch {
-                    axis: *axis,
-                    children: kept,
-                }),
-            }
-        }
-    }
-}
-
 /// (x-9052) Whether a stored layout slot binds a done member. Bindings name
 /// workers with the exact string `worker_binding_key` builds, so the slot
 /// filter and the member-loop gate can never disagree about who is done.
+/// (x-a9b4) A portal slot names done by its ROW: the same string set the
+/// forgotten-tombstone arm fills with attach ids, so a portal onto a done
+/// claude row collapses with the done leaves instead of restoring a held
+/// ghost.
 fn slot_names_done(slot: &LayoutSlot, done: &HashSet<String>) -> bool {
     matches!(&slot.binding, LayoutBinding::Fno(id) if done.contains(id))
+        || slot.portal.as_ref().is_some_and(|p| done.contains(&p.row))
 }
 
 /// (x-9052) The stored tree minus the leaves of DONE slots (names only, the
 /// same strings `LayoutTreeSpec::Slot` carries): done work earns no pane, so
-/// its leaf collapses instead of shell-substituting. Same collapse semantics
-/// as [`node_without_leaf`]; `None` means the tree is gone and the tab is
-/// skipped.
+/// its leaf collapses instead of shell-substituting. One-child splits
+/// collapse; `None` means the tree is gone and the tab is skipped.
 fn prune_done_slots(tree: &LayoutTreeSpec, done: &HashSet<String>) -> Option<LayoutTreeSpec> {
     match tree {
         LayoutTreeSpec::Slot(name) => {
@@ -7333,66 +7327,31 @@ impl Core {
             .iter()
             .map(|(pane, name)| (*pane, name.as_str()))
             .collect();
-        // (x-8f9d) Every portal seat, collected once: the per-tab prune below
-        // folds over all of them.
-        let seats: Vec<u64> = self.portals.values().map(|p| p.seat).collect();
-        // (x-5baf) Filled per tab below, after the portal prune, so a pruned
-        // portal pane never costs a cwd syscall nothing reads.
+        // (x-a9b4) Every live portal seat -> (index, row_key), collected once.
+        // A seat is CAPTURED now, not pruned: the slot keeps the pair restore
+        // needs to hold that seat again, and a tab holding only portals is a
+        // tab like any other.
+        let portal_seats: HashMap<u64, (u8, String)> = self
+            .portals
+            .iter()
+            .map(|(idx, p)| (p.seat, (*idx, p.row_key.clone())))
+            .collect();
+        // (x-5baf) Filled per tab below.
         let mut pane_cwd: HashMap<u64, String> = HashMap::new();
         let mut trees = Vec::with_capacity(sq.tabs.len());
         let mut active_tab = 0;
-        // If pruning hollows out the active tab itself, `active_tab` has no
-        // surviving position to copy - remember where the NEXT tab lands so
-        // restore falls onto the nearest surviving tab instead of silently
-        // defaulting to index 0 (an unrelated tab picked as "active").
-        let mut active_pruned_at: Option<usize> = None;
         for (i, t) in sq.tabs.iter().enumerate() {
-            // (x-07c2) Prune every portal's leaf before capture: portals are
-            // never persisted, so restore rebuilds no pane (and no split) for
-            // a thread. A tab the prune hollowed out entirely is not captured,
-            // and a skipped tab - the active one included - never leaves a
-            // dangling `active_tab` index behind (position IS the tab's
-            // durable identity in `tab_trees`).
-            //
-            // (x-8f9d) The FOLD is the load-bearing part, not the rename.
-            // `node_without_leaf` removes ONE leaf per call, and two portals
-            // can tile in one tab - which is the whole point of portals - so
-            // a single call would capture the second and restore would
-            // rebuild it. The single-slot shape hid this because one slot
-            // could only ever put one leaf in a tab. A seat that is not in
-            // this tab is a no-op, so folding over all of them is safe.
-            let mut pruned: Option<Node> = None;
-            let mut hollowed = false;
-            for seat in seats.iter() {
-                let next = match pruned.as_ref() {
-                    Some(node) => node_without_leaf(node, *seat),
-                    None => node_without_leaf(&t.root, *seat),
-                };
-                match next {
-                    Some(root) => pruned = Some(root),
-                    None => {
-                        hollowed = true;
-                        break;
-                    }
-                }
-            }
-            if hollowed {
-                if i == sq.active_tab {
-                    active_pruned_at = Some(trees.len());
-                }
-                continue;
-            }
             if i == sq.active_tab {
                 active_tab = trees.len();
             }
-            let root = pruned.as_ref().unwrap_or(&t.root);
+            let root = &t.root;
             let cwd_of = |p| {
                 self.panes
                     .get(&p)
                     .map(|e| (e.pty.child_pid(), e.cwd.as_str()))
             };
             crate::pane_cwd::fill_leaf_cwds(tree::leaves(root), cwd_of, &mut pane_cwd);
-            let mut capture = SlotCapture::new(&pane_owner, &pane_cwd);
+            let mut capture = SlotCapture::new(&pane_owner, &pane_cwd, &portal_seats);
             let tree = capture.node_to_spec(root);
             let focus = capture.slot_of(t.focus);
             trees.push(StoredTabTree {
@@ -7401,9 +7360,6 @@ impl Core {
                 slots: capture.slots,
                 focus,
             });
-        }
-        if let Some(pos) = active_pruned_at {
-            active_tab = pos.min(trees.len().saturating_sub(1));
         }
         Some((trees, active_tab))
     }
@@ -8407,6 +8363,8 @@ impl Core {
         } = journal;
         let mut worker_members_total = 0usize;
         let mut held_workers_total = 0usize;
+        // (x-a9b4) Portal seats held idle across every restored squad.
+        let mut held_portals_total = 0usize;
         let mut refused_workers_total = 0usize;
         // (x-9052) Worker members whose work the graph says is DONE. They are
         // history, not garbage: kept as members, never held, never refused-
@@ -8449,6 +8407,10 @@ impl Core {
             // spawn time (x-caef; the tree lane binds panes into trees before
             // any tab exists, so the mapping cannot ride the tab list).
             let mut tabs: Vec<Tab> = Vec::new();
+            // (x-a9b4) Portal slots held idle by this restore: (index, row,
+            // pane, tab id). Filled in the tree lane once the tab id exists,
+            // inserted into `portals` after the squad lands.
+            let mut held_portal_seats: Vec<(u8, String, u64, TabId)> = Vec::new();
             // (x-caef) Live member panes spawned but not yet placed in a tab:
             // (attach_id, pane, stored tab name). The tree lane places them by
             // slot; the legacy lane gives each its own tab.
@@ -8780,8 +8742,7 @@ impl Core {
                 for st in &ps.tab_trees {
                     // (x-9052) Prune done leaves BEFORE any pane minting: a
                     // slot binding a done member's leaf is removed, one-child
-                    // splits collapse, same collapse semantics as
-                    // `node_without_leaf`. An all-done tab is skipped whole:
+                    // splits collapse. An all-done tab is skipped whole:
                     // the shell substitute must never rebuild a ghost tab the
                     // gate just declined to hold.
                     let done_slot_names: HashSet<String> = st
@@ -8802,11 +8763,14 @@ impl Core {
                         .collect();
                     // (x-9052) The stored shell the fresh attach shell already
                     // represents: skip the tree, no pane minted, the claim is
-                    // consumed once.
+                    // consumed once. (x-a9b4) A portal slot is not that shell:
+                    // skipping the tree would drop the portal, so an unnamed
+                    // one-slot portal tab restores as its own tab, held.
                     let pure_shell_unnamed = st.tab_name.is_none()
                         && matches!(&tree_spec, LayoutTreeSpec::Slot(_))
                         && kept_slots.len() == 1
-                        && matches!(kept_slots[0].binding, LayoutBinding::Shell);
+                        && matches!(kept_slots[0].binding, LayoutBinding::Shell)
+                        && kept_slots[0].portal.is_none();
                     if pure_shell_unnamed && fresh_home_shell_claim {
                         fresh_home_shell_claim = false;
                         continue;
@@ -8855,6 +8819,21 @@ impl Core {
                                 .or_else(|| leaves.first().copied())
                                 .unwrap_or(leaves[0]);
                             let tid = self.session.mint_tab_id();
+                            // (x-a9b4) A portal slot's seat is the shell the
+                            // substitute already minted; remember it until the
+                            // tab ids are final.
+                            for slot in &kept_slots {
+                                if let (Some(p), Some(portal)) =
+                                    (slot_pane.get(slot.name.as_str()), slot.portal.as_ref())
+                                {
+                                    held_portal_seats.push((
+                                        portal.index,
+                                        portal.row.clone(),
+                                        *p,
+                                        tid,
+                                    ));
+                                }
+                            }
                             placed.extend(leaves.iter().copied());
                             tabs.push(Tab {
                                 name: st.tab_name.clone(),
@@ -8994,6 +8973,46 @@ impl Core {
                     self.detached_panes.insert(pane, detached);
                 }
             }
+            // (x-a9b4) Re-arm every held portal seat: the entry goes back in
+            // the map, the seat pane gets its name and its held message, and
+            // the reach or a focus fills it on first demand. A held portal is
+            // NOT a squad member - the slot in its tab is the whole record.
+            for (index, row, seat, tid) in held_portal_seats {
+                let index = if self.portals.contains_key(&index) {
+                    match self.next_free_portal() {
+                        Some(free) => {
+                            self.notice_all(format!(
+                                "restore: portal {index} was taken; held {row} at portal {free} instead"
+                            ));
+                            free
+                        }
+                        None => {
+                            self.notice_all(format!(
+                                "restore: all portal indices live; portal slot for {row} skipped"
+                            ));
+                            continue;
+                        }
+                    }
+                } else {
+                    index
+                };
+                self.portals.insert(
+                    index,
+                    Portal {
+                        row_key: row.clone(),
+                        seat,
+                        tab: tid,
+                    },
+                );
+                if let Some(entry) = self.panes.get_mut(&seat) {
+                    entry.name = Some(format!("portal{index}"));
+                }
+                self.write_restore_message(
+                    seat,
+                    &format!("portal {index} ({row}, held across restart) - reach the row, or focus this pane, to resume"),
+                );
+                held_portals_total += 1;
+            }
             // Persist the reconciled membership (members dead at restore are now
             // tombstoned in the store) plus the just-restored tree capture, so a
             // second restart restores the same shape.
@@ -9025,19 +9044,25 @@ impl Core {
                 "restore: {idle_workers_total} worker row(s) idle - resume them from the agent panel"
             ));
         }
-        if hold_workers {
-            if worker_members_total == 0 {
-                self.notice_all("restore: 0 worker member(s) recorded; held 0 worker pane(s)");
+        if hold_workers && worker_members_total == 0 && held_portals_total == 0 {
+            self.notice_all("restore: 0 worker member(s) recorded; held 0 worker pane(s)");
+        } else if hold_workers || held_portals_total > 0 {
+            // (x-a9b4) One receipt for both held kinds. A zero count is not
+            // silent when the other is non-zero, so "no portal came back"
+            // and "the counter never ran" stay distinguishable.
+            let portals_note = if held_portals_total > 0 {
+                format!(" and {held_portals_total} portal(s)")
             } else {
-                self.notice_all(format!(
-                    "restore: held {held_workers_total} worker pane(s); focus one to resume it"
-                ));
-            }
-            if refused_workers_total > 0 {
-                self.notice_all(format!(
-                    "restore: {refused_workers_total} worker(s) could not be held"
-                ));
-            }
+                String::new()
+            };
+            self.notice_all(format!(
+                "restore: held {held_workers_total} worker pane(s){portals_note}; focus one to resume it"
+            ));
+        }
+        if hold_workers && refused_workers_total > 0 {
+            self.notice_all(format!(
+                "restore: {refused_workers_total} worker(s) could not be held"
+            ));
         }
         if pruned_workers > 0 {
             self.notice_all(format!(
@@ -12358,6 +12383,39 @@ impl Core {
                         }
                     }
                 }
+                // (x-a9b4) A focused portal seat that is still the held shell
+                // fills in place: the reach's repoint respawns the row's
+                // viewer in THIS seat. When the row does not resolve to
+                // exactly one live paneless row, fall through to a plain
+                // focus, so the placeholder stays focusable and readable.
+                if let Some(idx) = self.portal_of(Some(pid)) {
+                    let stand_in = self
+                        .panes
+                        .get(&pid)
+                        .is_some_and(|entry| entry.cmd.is_none());
+                    if stand_in {
+                        if let Some(Portal { row_key, .. }) = self.portals.get(&idx) {
+                            let row_key = row_key.clone();
+                            let mut hits = self.agents.iter().filter(|a| {
+                                a.mux.is_none()
+                                    && !a.exited
+                                    && (a.attach_id.as_deref() == Some(row_key.as_str())
+                                        || a.name == row_key)
+                            });
+                            if let (Some(_), None) = (hits.next(), hits.next()) {
+                                return self.reach_portal(
+                                    client_id,
+                                    view,
+                                    vp,
+                                    idx,
+                                    &row_key,
+                                    &PanePlacement::default(),
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                }
                 // Locate the leaf anywhere in the session, then view+focus it.
                 let target = self.session.find_pane(focus_pid).map(|(sid, ti)| {
                     (
@@ -12424,7 +12482,20 @@ impl Core {
                             }
                         },
                     };
-                    return self.reach_portal(client_id, view, vp, portal, &id, &placement);
+                    // (x-a9b4) `portal` names an index the CALLER chose;
+                    // `thread_pane` folds to 0 without the caller naming any,
+                    // and that default reach is allowed to go home to a held
+                    // seat that names the row.
+                    let portal_explicit = placement.portal.is_some();
+                    return self.reach_portal(
+                        client_id,
+                        view,
+                        vp,
+                        portal,
+                        &id,
+                        &placement,
+                        portal_explicit,
+                    );
                 }
                 // Validate the jobId shape (8 hex digits) BEFORE it reaches the
                 // argv - defense in depth even though spawn_pane_cmd never

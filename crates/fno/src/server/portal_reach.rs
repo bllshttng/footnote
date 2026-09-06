@@ -5,6 +5,18 @@
 
 use super::*;
 
+/// (x-8f9d) Does `portal_key` name the same ROW the reach resolved?
+///
+/// Not the same KEY: the TUI door keys a portal by the attach id while
+/// `fno agents attach` keys it by the registry name, and both doors advertise
+/// the same pane. Attach ids are unique per bg session, so a portal keyed by
+/// this row's attach id IS this row whatever door the reach came from - and the
+/// reverse (keyed by name, reached again by attach id) is the same row too,
+/// which is why the name comparison runs both directions.
+///
+/// One function, two callers: the same-row focus arm for the REQUESTED portal,
+/// and the one-row-one-viewer check across every OTHER portal. Two copies of
+/// this comparison drifting apart is how a duplicate viewer gets minted.
 pub(super) fn row_matches_portal_key(row: &RegistryAgent, key: &str, portal_key: &str) -> bool {
     portal_key == key || row.attach_id.as_deref() == Some(portal_key) || portal_key == row.name
 }
@@ -60,7 +72,8 @@ impl Core {
     /// place (the open-here mechanic: spawn-first, `tree::replace_leaf`,
     /// reap-last - the geometry never moves); a portal at `portal` on this row
     /// focuses it; a recorded pane the tree no longer knows reads as absent.
-    /// NEVER persists a squad member and is never rebuilt by restore: a pane
+    /// NEVER persists a squad member; an open portal is persisted as its
+    /// tab's slot and restored held: a pane
     /// binds a session to geometry, a thread binds a session to a row.
     ///
     /// (x-9b60) The geometry decision lives HERE, after the slot lookup that
@@ -71,14 +84,21 @@ impl Core {
     /// already has a live seat (a portal owns its geometry; x-d545's
     /// remembered tab steers the replacement), and HONORED on a fresh open,
     /// where there is no geometry to own yet.
+    ///
+    /// (x-a9b4) A portal is persisted as its tab's slot and restored held: a
+    /// stand-in seat is a HELD portal until a reach or a focus fills it, so
+    /// the one-row-one-viewer check treats a live viewer as the row's home
+    /// and a default (no explicit index) reach retargets to a held seat that
+    /// names the row. An explicit index is never hijacked.
     pub(super) fn reach_portal(
         &mut self,
         client_id: u64,
         view: (u64, TabId),
         vp: Rect,
-        portal_idx: u8,
+        mut portal_idx: u8,
         key: &str,
         placement: &PanePlacement,
+        portal_explicit: bool,
     ) -> Flow {
         // (x-9b60) open-here is never a portal, in either case below. Refused
         // before any lookup, exactly as the decode edge refused it before
@@ -119,6 +139,35 @@ impl Core {
                 return Flow::Continue;
             }
         };
+        // (x-a9b4) A DEFAULT reach goes home to the held seat that remembers
+        // the row. Restore put a shell in the seat and the entry back in the
+        // map; without this retarget the reach would open a fresh viewer at
+        // the requested index and strand the held seat. Only a stand-in
+        // (no argv provenance) qualifies - a live viewer of the row already
+        // returned through the one-row-one-viewer arm above. An explicit
+        // index is never hijacked: `--portal 0` means portal 0.
+        if !portal_explicit {
+            if let Some(held_idx) = self
+                .portals
+                .iter()
+                .find(|(idx, portal)| {
+                    **idx != portal_idx
+                        && row_matches_portal_key(&row, key, &portal.row_key)
+                        && self.session.find_pane(portal.seat).is_some()
+                        && self
+                            .panes
+                            .get(&portal.seat)
+                            .is_some_and(|entry| entry.cmd.is_none())
+                })
+                .map(|(idx, _)| *idx)
+            {
+                self.notice(
+                    client_id,
+                    format!("portal {held_idx}: resuming {}", row.name),
+                );
+                portal_idx = held_idx;
+            }
+        }
         // (x-8f9d) ONE ROW, ONE VIEWER. A reach for a row that ANOTHER portal
         // already shows focuses that portal rather than minting a second
         // viewer for it. The single slot enforced this by construction: there

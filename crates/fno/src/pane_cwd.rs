@@ -67,13 +67,13 @@ impl crate::proto::LayoutSlot {
             name,
             binding,
             cwd: None,
+            portal: None,
         }
     }
 }
 
 /// Every surviving leaf's cwd, filled from `lookup` where a pane resolves and
-/// no cwd is recorded yet (a portal seat pruned out of `leaves` never calls
-/// `lookup`, so it never costs a syscall for a cwd nothing reads).
+/// no cwd is recorded yet.
 pub fn fill_leaf_cwds<'a>(
     leaves: impl IntoIterator<Item = u64>,
     lookup: impl Fn(u64) -> Option<(Option<u32>, &'a str)>,
