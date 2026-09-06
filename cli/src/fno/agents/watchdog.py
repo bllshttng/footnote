@@ -1170,6 +1170,7 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
     from fno.agents.spawn_gate import LIVE_STATUSES
 
     seen_row_ids = {row.row_id for row in out}
+    skipped_nonclaude_no_id = 0
     for entry in registry_rows:
         if getattr(entry, "harness", None) == "claude":
             continue
@@ -1179,9 +1180,15 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             getattr(entry, "harness_session_id", None)
             or getattr(entry, "session_id", None)
             or getattr(entry, "short_id", None)
-            or getattr(entry, "name", None)
         )
-        if not row_id or str(row_id) in seen_row_ids:
+        if not row_id:
+            # Same discipline as the claude roster above: a row carrying only
+            # a name can never resolve a transcript or a claim. Falling back
+            # to the name would silently drop a same-named live row at the
+            # dedup below, so it is skipped loudly instead.
+            skipped_nonclaude_no_id += 1
+            continue
+        if str(row_id) in seen_row_ids:
             continue
         row_id = str(row_id)
         out.append(
@@ -1198,6 +1205,12 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
         warnings = [
             *warnings,
             f"{skipped_no_sid} row(s) carried no session id, unmeasurable, skipped",
+        ]
+    if skipped_nonclaude_no_id:
+        warnings = [
+            *warnings,
+            f"{skipped_nonclaude_no_id} non-claude row(s) carried no session id, "
+            "unmeasurable, skipped",
         ]
     warnings = [*warnings, *sorted(unmapped_states)]
     return out, warnings
