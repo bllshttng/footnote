@@ -1342,6 +1342,75 @@ def test_in_place_crown_refuses_a_second_live_holder_for_the_scope(
     assert [asdict(row) for row in load_registry()] == before
 
 
+def test_in_place_crown_refuses_overlapping_territory_not_just_the_same_set(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A rung-2 set is a union: a live king over e-1,e-2 already rules e-1, so
+    crowning another row over e-1 alone is a double rule. The equality-only
+    scan let it through; the guard must fire on any shared member."""
+    from fno.agents.registry import load_registry
+    import fno.agents.crown as crown_mod
+
+    incumbent = _entry(
+        "incumbent",
+        harness_session_id="incumbent-session",
+        status="busy",
+        crown_level=2,
+        crown_scope="e-1,e-2",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [incumbent, target])
+    monkeypatch.setattr(
+        crown_mod,
+        "_graph_entry",
+        lambda nid: {"id": nid, "type": "epic", "project": "fno"}
+        if nid in ("e-1", "e-2")
+        else None,
+    )
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("worker", "--scope", "e-1")
+
+    assert result.exit_code == 2
+    assert "already held" in result.output.lower()
+    assert "incumbent" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_two_epics_crown_in_place_as_one_set(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.registry import load_registry
+    import fno.agents.crown as crown_mod
+
+    target = _entry(
+        "mux-king",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [target])
+    monkeypatch.setattr(
+        crown_mod,
+        "_graph_entry",
+        lambda nid: {"id": nid, "type": "epic", "project": "fno"}
+        if nid in ("e-1", "e-2")
+        else None,
+    )
+
+    result = _invoke_crown("mux-king", "--scope", "e-1", "--scope", "e-2")
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.stdout)
+    assert (receipt["level"], receipt["scope"]) == (2, "e-1,e-2")
+    row = next(r for r in load_registry() if r.name == "mux-king")
+    assert (row.crown_level, row.crown_scope) == (2, "e-1,e-2")
+
+
 def test_a_king_cannot_crown_itself_even_to_a_strict_subset(
     tmp_path: Path, monkeypatch
 ) -> None:

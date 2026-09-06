@@ -282,6 +282,26 @@ pub(crate) fn mint_walk_key(fno_id: &str) -> String {
 /// verdict instead of parking it at the dispatch cap.
 pub(crate) const WALK_SESSION_KEY_ENV: &str = "FNO_KING_WALK_SESSION_KEY";
 
+/// Do two stored crown scopes share a member? A rung-2 crown is stored as the
+/// canonical comma-joined set, and a set-holder already reigns over each
+/// member, so the one-live-crown guard must answer set membership - never
+/// string equality, which would let a second king over one member double-rule
+/// the set-holder.
+fn scopes_overlap(held: &str, requested: &str) -> bool {
+    let members: Vec<&str> = held
+        .split(',')
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .collect();
+    if members.is_empty() {
+        return false;
+    }
+    requested
+        .split(',')
+        .map(str::trim)
+        .any(|r| !r.is_empty() && members.contains(&r))
+}
+
 /// The name of any live registry row holding a crown over `scope`, if the
 /// registry is readable and such a row exists. An unreadable registry answers
 /// `None` (fail-open to the recovery path): the walk's whole job is reviving
@@ -303,7 +323,11 @@ fn live_crown_holder_in(registry_path: &Path, scope: &str) -> Option<String> {
         .entries
         .iter()
         .filter(|row| !is_terminal(row))
-        .find(|row| row.crown_scope.as_deref() == Some(scope))
+        .find(|row| {
+            row.crown_scope
+                .as_deref()
+                .is_some_and(|held| scopes_overlap(held, scope))
+        })
         .map(|row| row.name.clone())
 }
 
@@ -654,6 +678,32 @@ mod tests {
             wrong_row.is_err(),
             "naming a row other than the live holder never doubles a live one"
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn live_crown_holder_in_set() {
+        // A rung-2 crown is stored as the canonical comma-joined set. The
+        // guard must answer set membership: a live king over {epic-a,epic-b}
+        // already reigns over epic-a alone, so a walk recovering either
+        // member - or the joined name itself - finds the holder.
+        let dir = std::env::temp_dir().join(format!("kingset-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let registry = write_registry(&dir, "busy", Some("epic-a,epic-b"));
+
+        assert_eq!(
+            live_crown_holder_in(&registry, "epic-a"),
+            Some("reigning-king".to_string())
+        );
+        assert_eq!(
+            live_crown_holder_in(&registry, "epic-b"),
+            Some("reigning-king".to_string())
+        );
+        assert_eq!(
+            live_crown_holder_in(&registry, "epic-a,epic-b"),
+            Some("reigning-king".to_string())
+        );
+        assert_eq!(live_crown_holder_in(&registry, "epic-c"), None);
         fs::remove_dir_all(&dir).ok();
     }
 

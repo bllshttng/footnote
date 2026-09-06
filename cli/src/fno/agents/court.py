@@ -51,16 +51,19 @@ def _agreement(
     if level == 2:
         if by_id is None:
             return None, "graph unreadable"
-        node_id = members[0]
-        entry = by_id.get(node_id)
-        if entry is None:
-            return False, f"{node_id!r} is not in the graph"
-        node_type = entry.get("type")
-        if node_type != "epic":
-            return False, f"{node_id!r} is a {node_type or 'node'}, not an epic"
-        status = entry.get("status")
-        if status in PLAN_TERMINAL_STATUSES:
-            return False, f"{node_id!r} status is {status!r} (terminal)"
+        # A rung-2 scope is a SET of epics; every member must be a live epic,
+        # so one dead member makes the whole crown disagree - not just the
+        # first member an earlier cut checked.
+        for node_id in members:
+            entry = by_id.get(node_id)
+            if entry is None:
+                return False, f"{node_id!r} is not in the graph"
+            node_type = entry.get("type")
+            if node_type != "epic":
+                return False, f"{node_id!r} is a {node_type or 'node'}, not an epic"
+            status = entry.get("status")
+            if status in PLAN_TERMINAL_STATUSES:
+                return False, f"{node_id!r} status is {status!r} (terminal)"
         return True, None
     # Level 0/1: a portfolio or single-project crown agrees when every member
     # resolves to a configured project - the same check `resolve_crown` makes

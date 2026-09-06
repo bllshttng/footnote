@@ -192,6 +192,63 @@ def test_unreadable_graph_answers_null_never_true_or_false(
     assert court["summary"] == {"total": 1, "disagreements": 0, "unknowns": 1}
 
 
+def test_a_crown_over_a_set_of_epics_agrees_only_if_every_member_is_a_live_epic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Rung 2 stores a set; agreement must check every member, not the first -
+    one dead member makes the whole crown disagree."""
+    from fno.agents.court import gather_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "mux-king",
+                status="busy",
+                crown_level=2,
+                crown_scope="e-1,e-2",
+                crown_grantor="human",
+            )
+        ],
+        graph_entries=[
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"},
+            {"id": "e-2", "type": "epic", "project": "beta", "status": "done"},
+        ],
+    )
+
+    court = gather_court()
+
+    row = court["crowns"][0]
+    assert row["agree"] is False
+    assert "e-2" in row["reason"]
+    assert "done" in row["reason"]
+
+
+def test_a_crown_over_two_live_epics_agrees(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.court import gather_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "mux-king",
+                status="busy",
+                crown_level=2,
+                crown_scope="e-1,e-2",
+                crown_grantor="human",
+            )
+        ],
+        graph_entries=[
+            {"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"},
+            {"id": "e-2", "type": "epic", "project": "beta", "status": "ready"},
+        ],
+    )
+
+    assert gather_court()["crowns"][0]["agree"] is True
+
+
 def test_a_portfolio_crown_over_configured_projects_agrees(
     tmp_path: Path, monkeypatch
 ) -> None:
