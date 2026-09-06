@@ -25,7 +25,7 @@ The dispatch seam refuses a `/target` at a `none` harness and at an `extension` 
 
 ## Wrapper-driven harnesses
 
-A harness with no stop boundary can still run a looping skill through `scripts/run-target-loop.sh --driver <driver>`. The wrapper runs the bot as a subprocess, scans the output for `<promise>MISSION COMPLETE</promise>`, and re-invokes the bot with conversation history re-hydrated until the tag appears or the iteration cap is hit. The wrapper does not change a cell: it is a lane outside the harness, and the matrix reports the harness. See [SETUP-HERMES.md](./SETUP-HERMES.md) and [SETUP-OPENCLAW.md](./SETUP-OPENCLAW.md) for install and first-run recipes.
+A harness with no stop boundary can still run a looping skill through `scripts/run-target-loop.sh --driver <driver>`. The wrapper runs the bot as a subprocess and scans the output for `<promise>MISSION COMPLETE</promise>`. It re-invokes the bot with conversation history re-hydrated until the tag appears or the iteration cap is hit. The wrapper does not change a cell: it is a lane outside the harness, and the matrix reports the harness. See [SETUP-HERMES.md](./SETUP-HERMES.md) and [SETUP-OPENCLAW.md](./SETUP-OPENCLAW.md) for install and first-run recipes.
 
 Driver-specific functions (`driver_invoke`, `driver_check_promise`, `driver_persist_history`, `driver_default_max`) live in `scripts/lib/driver-claude-code.sh`, `scripts/lib/driver-hermes.sh`, and `scripts/lib/driver-openclaw.sh`.
 
