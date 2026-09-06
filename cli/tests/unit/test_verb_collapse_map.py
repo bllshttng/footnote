@@ -101,10 +101,12 @@ def test_map_covers_current_surface_once():
     # This branch adds `backlog contain`, the plan-less containment fold,
     # as one new row (first allocated under a retired alias, renamed in
     # place before merge): 568 -> 569. Main added `agents feed`, the
-    # activity feed projection: 569 -> 570 from main's side. This branch's
-    # sidecar retirement deleted the `backlog rehash` row. Counted from the
-    # merged file: 569. The crown-durability branch allocated the directly
-    # invoked `agents court-orphans` sweep its row: 569 -> 570.
+    # activity feed projection, from the same base; main's sidecar
+    # retirement deleted the `backlog rehash` row. The rust-conversion
+    # ruling deleted this branch's `agents reseat` Python surface: net zero.
+    # The crown-durability branch allocated the directly invoked
+    # `agents court-orphans` sweep its row. Counted from the merged file,
+    # never taken from either side: 570.
     assert len(mapped) == 570, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"

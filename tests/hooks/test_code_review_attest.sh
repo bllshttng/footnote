@@ -128,15 +128,19 @@ if [[ "\${1:-}" == "doctor" && "\${2:-}" == "event" && "\${3:-}" == "emit" ]]; t
   exit 0
 fi
 if [[ "\${1:-}" == "do" && "\${2:-}" == "review" && "\${3:-}" == "classify" ]]; then
-  f=""; shift 3
+  f=""; attest=""; contract="json_block"; xctx="inline"; ctx="unknown"; shift 3
   while [[ \$# -gt 0 ]]; do
     case "\$1" in
       --findings-file) f="\$2"; shift 2 ;;
+      --attest) attest="\$2"; shift 2 ;;
+      --output-contract) contract="\$2"; shift 2 ;;
+      --execution-context) xctx="\$2"; shift 2 ;;
+      --reviewer-context) ctx="\$2"; shift 2 ;;
       *) shift ;;
     esac
   done
   printf '%s\n' "\$f" >> "$CLASSIFY_MARKER"
-  PYTHONPATH="\$CLASSIFY_PYTHONPATH" "\$CLASSIFY_PYTHON" - "\$f" <<'PY'
+  record="\$(PYTHONPATH="\$CLASSIFY_PYTHONPATH" "\$CLASSIFY_PYTHON" - "\$f" <<'PY'
 import json, sys
 from fno.review.cli import build_emit_record, RecordBuildError
 with open(sys.argv[1], encoding="utf-8") as fh:
@@ -147,7 +151,28 @@ except RecordBuildError as exc:
     print(f"classify: {exc}", file=sys.stderr)
     raise SystemExit(2)
 PY
-  exit \$?
+)" || exit \$?
+  if [[ -n "\$attest" ]]; then
+    # The shell delegates its findings-path emit to `classify --attest`; the
+    # stub mirrors the verb contract: verdict measured from the classified
+    # record, written as the one emit line the assertions grep. The injected
+    # emit failure fires here too, exactly as it does on the sink branch.
+    if [[ "\${FNO_TEST_EMIT_FAIL:-}" == "1" ]]; then
+      echo "injected event emit failure" >&2
+      exit 17
+    fi
+    if [[ "\$contract" == "prose_unparseable" ]]; then
+      verdict="fail"
+    else
+      verdict="\$(jq -r 'if (.findings_blocking // 1) == 0 then "pass" else "fail" end' <<<"\$record")"
+    fi
+    payload="\$(jq -cn --argjson rec "\$record" --arg verdict "\$verdict" --arg reviewer "\$attest" \
+      --arg contract "\$contract" --arg xctx "\$xctx" --arg ctx "\$ctx" \
+      '{reviewer:\$reviewer,head_sha:"stub",verdict:\$verdict,session_id:"",output_contract:\$contract,execution_context:\$xctx,reviewer_context:\$ctx} + \$rec')"
+    printf '%s\n' "doctor event emit -t review_attestation -s target -d \$payload" >> "$EMITTED"
+  fi
+  echo "\$record"
+  exit 0
 fi
 exit 0
 STUB

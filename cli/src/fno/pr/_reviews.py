@@ -637,13 +637,15 @@ def _is_after(candidate: str, baseline_ts: str, baseline: Optional[datetime]) ->
 
 
 def _is_covered(data: Optional[dict]) -> bool:
-    """Whether a coverage event reports a real pass (covered AND count > 0)."""
+    """Whether a coverage event reports covered, keyed on the WORD alone.
+
+    The count is a fact beside the word, never a conjunct of it: a budget
+    spent on fail rounds reads covered with passed_count 0, and every reader
+    that tested ``covered AND count > 0`` reported zero reviews on a PR two
+    rounds were spent reviewing."""
     if not data or data.get("coverage") != "covered":
         return False
-    try:
-        return int(data.get("reviewed_count") or 0) > 0
-    except (TypeError, ValueError):
-        return False
+    return True
 
 
 def _tiling_chain(data: dict) -> set[str]:
@@ -921,6 +923,7 @@ def read_review_coverage(
     shaped = {
         "coverage": latest.get("coverage", "unknown"),
         "reviewed_count": latest.get("reviewed_count"),
+        "passed_count": latest.get("passed_count"),
         "self_attested_count": latest.get("self_attested_count"),
         "head_sha": latest.get("head_sha"),
         "stale_verdicts": latest.get("stale_verdicts", []),
@@ -929,7 +932,7 @@ def read_review_coverage(
     # number (x-027b). Keys stay absent when the row predates them, and the
     # status payload reads that absence as "no row at this head" rather than
     # re-deriving a floor from events.
-    for _key in ("rounds_used", "rounds_max", "rounds_exhausted", "impossible"):
+    for _key in ("rounds_used", "rounds_max", "rounds_exhausted"):
         if latest.get(_key) is not None:
             shaped[_key] = latest[_key]
     if latest.get("reason"):

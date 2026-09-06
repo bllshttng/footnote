@@ -25,6 +25,7 @@ fn main() {
     // copies fresh.
     sync_harness_capabilities();
     sync_merge_posture();
+    sync_registry_schema();
     sync_events_limits();
     sync_check_supersession();
 
@@ -195,6 +196,41 @@ fn sync_merge_posture() {
         return;
     }
     write_if_different(&cli_copy, &bytes);
+}
+
+/// Render the registry schema version from its single owner and project the
+/// Python copy.
+///
+/// `src/registry_schema.toml` holds `version` alone. `state.rs` `include!`s
+/// the generated constant, and registry.py reads the projected byte copy
+/// `cli/src/fno/agents/registry_schema.toml` as package data, so a bump is
+/// one edit in one file. This replaces the parity script that compared two
+/// independent literals; the rust-ci generated-copies dirty-tree step is the
+/// tripwire for a hand edit to the projected copy.
+fn sync_registry_schema() {
+    println!("cargo:rerun-if-changed=src/registry_schema.toml");
+    let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/registry_schema.toml");
+    let text = std::fs::read_to_string(&canonical)
+        .expect("src/registry_schema.toml must exist (it is the version's only owner)");
+    let parsed: toml::Value =
+        toml::from_str(&text).expect("src/registry_schema.toml must parse as TOML");
+    let version = parsed
+        .get("version")
+        .and_then(|value| value.as_integer())
+        .expect("src/registry_schema.toml must carry an integer `version`");
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR must be set"));
+    std::fs::write(
+        out_dir.join("registry_schema.rs"),
+        format!("pub const REGISTRY_SCHEMA_VERSION: u32 = {version};\n"),
+    )
+    .expect("generated registry_schema.rs must be writable");
+
+    let Some(root) = repo_root() else { return };
+    let cli_copy = root.join("cli/src/fno/agents/registry_schema.toml");
+    if !cli_copy.is_file() {
+        return;
+    }
+    write_if_different(&cli_copy, text.as_bytes());
 }
 
 /// PRODUCE `src/events_limits.toml` from the Python-owned event schema.

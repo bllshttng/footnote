@@ -311,7 +311,7 @@ The consumer requires the exact terminal JSON record, counts the syntactically d
 A valid clean verdict with zero findings emits `review_attestation` for reviewer `peer` with verdict `pass` at the current HEAD.
 A valid blocked verdict, or any invalid output, emits `fail` when possible and exits non-zero, so the gate remains unmet and loop-check reports local work to do.
 
-After any fix commit the old attestation is stale by design. The next review covers the fix delta. The round budget bounds how many rounds that loop can take (`fno do pr status` shows it). An exhausted budget is IMPOSSIBLE, not one more round.
+After any fix commit the old attestation is stale by design. The next review covers the fix delta. The round budget bounds how many rounds that loop can take (`fno do pr status` shows it). Once the configured rounds are spent, the review phase is complete: open findings stay in the PR conversation and the PR merges on green CI. The hold hook still refuses a further hunting round past the cap.
 
 ### 7. POST (only with `--post`) - the legacy identity-backed gate
 

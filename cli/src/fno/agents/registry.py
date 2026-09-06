@@ -40,7 +40,9 @@ import os
 import re
 import sys
 import time
+import tomllib
 from dataclasses import asdict, dataclass, field, fields, replace
+from importlib import resources
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Optional, Tuple
@@ -265,7 +267,14 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # forward-compat rationale as v11-v24.
 # v26: additive served facts (liveness + its stamp, harness_title): a pre-v26
 # reader degrades (drops the keys, refuses writes) instead of TypeError at v25.
-SCHEMA_VERSION = 26
+# Read from the single-owner TOML that build.rs projects from
+# crates/fno-agents/src/registry_schema.toml; bump there, not here.
+def _read_schema_version() -> int:
+    raw = resources.files("fno.agents").joinpath("registry_schema.toml").read_text(encoding="utf-8")
+    return int(tomllib.loads(raw)["version"])
+
+
+SCHEMA_VERSION = _read_schema_version()
 
 
 

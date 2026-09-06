@@ -3,7 +3,7 @@ use super::*;
 // ---- (x-8f9d) portals: the one thread pane becomes an addressable set --
 
 /// The reach command naming an explicit portal index.
-fn portal_reach_cmd(id: &str, portal: u8) -> Command {
+pub(super) fn portal_reach_cmd(id: &str, portal: u8) -> Command {
     Command::AttachAgent {
         id: id.into(),
         placement: PanePlacement {
@@ -532,7 +532,7 @@ fn thread_reach_cmd(id: &str) -> Command {
 /// next minted one (a push does not bump `next_tab_id`), which is fine
 /// for its own tests but breaks a `find_pane`->`viewed_tab_mut` round
 /// trip that must land on the tab the thread pane actually opened.
-fn thread_core() -> (Core, u64, u64, mpsc::Receiver<ServerMsg>) {
+pub(super) fn thread_core() -> (Core, u64, u64, mpsc::Receiver<ServerMsg>) {
     let scratch = std::env::temp_dir().join(format!(
         "fno-thread-store-{}-{:?}",
         std::process::id(),

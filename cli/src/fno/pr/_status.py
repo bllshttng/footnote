@@ -454,12 +454,11 @@ def _ready_blockers(
 
     The coverage conjuncts are the merge gate's own helpers, read through
     them - one copy, never a restatement: ``covered_conjuncts`` names the
-    row conjuncts (uncovered, no_local_pass, stale_head) and
-    ``_corroboration_refusal`` the authorship policy. The round cap reads
-    the row's own ``impossible`` flag - the gate computed it over the full
-    chain with both axes, and recomputing a floor here was a second reader
-    of one number that disagreed with the gate on PR 1380 (x-027b). So
-    ``ready`` is a claim about those conjuncts and nothing wider.
+    row conjuncts (uncovered, no_local_pass, stale_head). The configured
+    round cap is not a blocker here: at the cap the gate discharges the
+    review obligation and the PR merges on green CI, so a held PR is held
+    by its row conjuncts alone. So ``ready`` is a claim about those
+    conjuncts and nothing wider.
 
     A TERMINAL PR (merged or closed) is exempt from the coverage conjunct: the
     gate guards what would merge, and a PR merged out-of-band (UI, bare gh) has
@@ -526,40 +525,15 @@ def _ready_blockers(
         if cov_word == "unknown":
             blockers.append("review_coverage_unknown")
         else:
-            from fno.pr._coverage_gate import (
-                _corroboration_refusal,
-                cap_verdict,
-                covered_conjuncts,
-            )
+            from fno.pr._coverage_gate import covered_conjuncts
 
             ok, failed = covered_conjuncts(coverage, head, code_review_required)
-            # The corroboration policy is the merge gate's own refusal, read
-            # through the same helper - one copy, never a restatement - so
-            # `ready` cannot pass a row `fno do pr merge` refuses on the
-            # authorship conjunct either. On the policy-rewritten shape
-            # (0 counted, self-attestation preserved) it is the truer
-            # blocker, exactly as the merge verb ranks it, because re-running
-            # your own review can never satisfy the policy.
-            corroboration = _corroboration_refusal(coverage, repo) if repo else None
-            # The round cap is re-derived from the PR's own chain, never read
-            # off a stored flag: the row this function holds can predate the
-            # attestations that exhaust the budget, and reading that absence
-            # (or staleness) as an acquittal is the defect this conjunct
-            # exists against. It still never reads the raw budget: under the
-            # operator's round-cap ruling an exhausted budget alone MERGES
-            # (the remainder is filed), so a blocker named off
-            # `rounds_exhausted` would hold every capped PR the law says
-            # should land.
-            cap = (
-                cap_verdict(repo, head, head_branch, coverage, reviews=None)
-                if head_branch and repo
-                else None
-            )
-            if cap is not None and cap.impossible:
-                blockers.append("review_coverage_impossible")
-            elif corroboration and (ok or failed == "uncovered"):
-                blockers.append("review_coverage_corroboration")
-            elif not ok:
+            # The configured round cap is not a conjunct here: at the cap the
+            # gate discharges the review obligation and the PR merges on
+            # green CI, so a blocker named off the budget would hold every
+            # capped PR the ruling says should land. The row conjuncts below
+            # are the whole coverage hold.
+            if not ok:
                 blockers.append(f"review_coverage_{failed}")
             # The Rust posture verdict, read the same way the merge gate reads
             # it (one producer, never a reclassification): a satisfied-conjunct
@@ -1088,9 +1062,9 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # ready: true PR refused at the merge gate. The blockers list
         # names WHICH conjunct failed - a bare false has one
         # explanation per conjunct and a reader would have to guess.
-        # `covered and reviewed_count > 0` rather than the word alone:
-        # historical events serialize a real zero as `covered`, and
-        # every existing consumer tests both.
+        # The coverage conjunct keys on the WORD: a budget spent on
+        # fail rounds reads covered, and the count beside it is a fact
+        # (N reviewed, M passed), never a second gate.
         "ready": not blockers,
         "ready_blockers": blockers,
     }
@@ -1175,6 +1149,9 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         line = f"note: review coverage {coverage.get('coverage')}"
         if coverage.get("reviewed_count") is not None:
             line += f" ({coverage['reviewed_count']} reviewed"
+            passed_n = coverage.get("passed_count")
+            if passed_n is not None:
+                line += f", {passed_n} passed"
             self_n = coverage.get("self_attested_count")
             if self_n:
                 line += f", {self_n} self-attested"

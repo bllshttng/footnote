@@ -28,7 +28,7 @@ This is a **router**, not a monolith. It parses the first argument as a mode, an
 
 ## Review-cap gate
 
-The two-round cap is enforced at the review invocation itself, not only at the merge decision: the hold hook denies a review whose PR's rounds are spent, and the denial text is the instruction - decline the remaining findings with a recorded reason and merge. Two shapes pass the gate, both the attestation law's own. `--verify-fixes` in the invocation flags declares a scoped fix-verification of named findings, which is not a round. And a rebase delta measuring at or over the interdiff budget reviews freely.
+The round cap is enforced at the review invocation itself, not only at the merge decision: the hold hook denies a review whose PR's rounds are spent, and the denial text is the instruction - decline the remaining findings with a recorded reason and merge on green CI. At the configured rounds the review phase is complete and the PR merges on green CI; open findings stay in the PR conversation. Two shapes pass the gate, both the attestation law's own. `--verify-fixes` in the invocation flags declares a scoped fix-verification of named findings, which is not a round. And a rebase delta measuring at or over the interdiff budget reviews freely.
 
 ## Active skill freshness preflight
 
