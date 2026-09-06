@@ -1885,9 +1885,6 @@ class TargetConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     dedupe_dead_duplicates: bool = False
-    # Whether a node reaching `ready` (via /blueprint) auto-launches a bg /target
-    # worker. Read by skills/blueprint/scripts/autolaunch-on-ready.sh. Default OFF.
-    auto_launch_on_blueprint: bool = False
     handoff: HandoffBlock = Field(default_factory=HandoffBlock)
     blast: BlastConfig = Field(default_factory=BlastConfig)
     defaults: TargetDefaultsBlock = Field(default_factory=TargetDefaultsBlock)
@@ -2743,7 +2740,7 @@ class AutonomyBlock(BaseModel):
 
     ``enabled=False`` stops EVERY spawner - the merge-triggered ones
     (advance, dispatch_lanes, epic converge, reconcile_dispatch), spawn_think,
-    post-merge ritual, pr_watch, keep_going, blueprint auto-launch, and the
+    post-merge ritual, pr_watch, keep_going, and the
     wave-2 ones (groom, restart, evals) - regardless of that spawner's own
     gate. It is checked BEFORE any other precedence rank, even an explicit env
     override: the whole point of a panic switch is that nothing overrides it.
@@ -5737,8 +5734,8 @@ def autonomy_master_enabled(project_root: Optional[Path] = None) -> bool:
 
     Every spawner-specific resolver (``auto_continue_enabled``,
     ``think_spawn_enabled``, ``keep_going_enabled``, ``groom_enabled``,
-    ``_revive_enabled``, ``evals_enabled``, and the post-merge / pr_watch /
-    blueprint-auto-launch config reads) calls this FIRST, before its own env
+    ``_revive_enabled``, ``evals_enabled``, and the post-merge / pr_watch
+    config reads) calls this FIRST, before its own env
     override even - a panic switch that something else can still bypass is
     not a panic switch. Callers that skip because of this return rank
     ``"autonomy"`` on their decision event rather than falling through to

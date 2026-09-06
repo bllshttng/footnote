@@ -26,8 +26,6 @@ enabled = false          # set true + a vault area name to route docs there
 # vault = "my-vault"
 
 # --- recommended per-project workflow toggles (code default: false) ---
-[target]
-auto_launch_on_blueprint = true   # /blueprint then auto-kicks /target
 
 # Mesh roster population for THIS project. Default false = opt-in: a hand-started
 # session joins the roster via /fno-me. Flip to true to auto-join every

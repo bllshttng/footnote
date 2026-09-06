@@ -8,7 +8,7 @@ argument-hint: "[quick] [group N | no-group] [no-adopt] [no-collision-check] <de
 # Abilities Plan
 
 When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly once:
-`codex posture: blueprint plans natively in this thread; auto-launch is Claude bg only, otherwise the node is visibly parked.`
+`codex posture: blueprint plans natively in this thread; the completion nudge is fno backlog advance (the dispatch resolver picks the harness); a held advance parks the node visibly.`
 
 <HARD-GATE>
 NEVER edit ~/.fno/graph.json directly via Edit/Write tools or `jq -i`/`sed -i`.
@@ -537,17 +537,16 @@ Explicit AC identifiers (`AC1-HP`, `AC7`) are preserved verbatim. Unlabeled crit
 
 Finalize validates the proposed ready + `compiled-v1` contract and atomically stamps `status: ready` and `acceptance_contract: compiled-v1` together, so a half-promoted plan never lands. Plans finalized before this feature carry no marker and keep their existing permissive brief behavior; strict reference resolution begins at `compiled-v1`.
 
-## Ready-gated auto-launch (opt-in, default OFF) — Phase 2 / US6
+## Ordered auto-launch nudge (advance, never a direct spawn)
 
-After a plan is written AND its claimed backlog node is intaked (the final step of both the single-doc creation and mutation paths), run the auto-launch gate as the LAST action:
+After a plan is written AND its claimed backlog node is intaked (the final step of both the single-doc creation and mutation paths), nudge the ordered drain as the LAST action. Resolve the adopted node's parent first (`fno backlog get <node>` prints `parent`):
 
-```bash
-bash "${SKILL_DIR}/scripts/autolaunch-on-ready.sh" "<plan-path>"
-```
+- **live epic parent** → `fno backlog advance --epic <parent>`
+- **no parent** → `fno backlog advance`
 
-This is a **no-op unless** `config.target.auto_launch_on_blueprint: true` is set in config.toml (DEFAULT OFF; an absent key reads as off, so existing behavior is unchanged for anyone who has not opted in). When enabled, it dispatches the claimed node to a fresh unsupervised `/target` worker IFF the node is `status: ready` and not deferred, exactly the work that is "up-next." Harness and substrate come from `fno agents dispatch resolve`, never a hardcode: claude and codex resolve to a native interactive thread (claude's is the `claude --bg` lane, unsupervised not headless), while opencode and agy have no journey-proven thread driver yet and degrade to `headless`. A `blocked`/`deferred` node, or one still in `idea`, is **parked** (pre-planned future work), never launched, and the gate also parks on a live `node:` claim, an epic with no ready child, a plan stamped `source: claude-plan-mode`, and a dispatch still queued at `config.agents.max_live` past the `FNO_AUTOLAUNCH_TIMEOUT` ceiling (default 180s). The dispatched run defaults to `no-merge` (it lands a PR for review, not an auto-merge; merge posture resolves per node from `config.auto_merge.grant`). On dispatch failure the node stays `ready` and the blueprinted plan is intact for a manual `/target bg <node>` retry.
+`fno backlog advance` is the sole launcher. It applies the graph's order (epic rank, parent-scoped child rank, `blocked_by`, join width) and the fleet's limits (spawn-gate headroom, live claims, the auto-continue and autonomy gates), so the node it starts is the top-ranked unblocked child - which may be a different sibling than the plan just written, and that is correct. A disabled gate, no ready child, or zero spawn headroom holds, never spawns, and the receipt names the measured reason (`skipped reason=disabled`, `lane-cap`, `already-claimed`, ...).
 
-Relay the single decision line it prints (`auto-launched …` / `parked …` / `autolaunch-failed …`) to the user; it is never silent when the gate is ON. This keeps the planning session free to batch more `/think` + `/blueprint` while the dispatched worker runs (the fresh bg process is the only real context "clear"). The gate reuses the existing backlog state model — no new concept — so the developer's own discipline (marking future work `blocked_by`/`deferred`) IS the "only launch what's up-next" control.
+Relay the receipt line it prints (`epic <id>: dispatched N, skipped M` / `dispatched <node>` / `skipped reason=...`; `--json` for the full dispatched id list) to the user. A refused or held advance is non-fatal: the plan stays intact and the node stays `ready` for a manual `/target bg <node>`. Never spawn the worker yourself and never add a blueprint-specific scheduler or spawn fallback.
 
 ## When to redirect to /think
 

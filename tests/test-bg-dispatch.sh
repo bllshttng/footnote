@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 # test-bg-dispatch.sh - regression tests for Phase 2 (ab-e366539f):
 #   - US5 targeted bg-dispatch  (skills/target/scripts/dispatch-node.sh)
-#   - US6 ready-gated auto-launch (skills/blueprint/scripts/autolaunch-on-ready.sh)
 #
 # Hermetic: a mock `fno` on PATH stands in for backlog/claim/agents, so NO real
-# bg worker is launched and NO real backlog/claim state is touched. The
-# auto-launch gate is controlled via an exported get_config stub (the
-# test_dedupe_dead_duplicates pattern), so the dotted config key needs no yq.
+# bg worker is launched and NO real backlog/claim state is touched.
 #
-# Coverage: AC5-HP/ERR/UI/EDGE/FR, AC6-HP/ERR/UI/EDGE/FR, the node:<id> claim
+# Coverage: AC5-HP/ERR/UI/EDGE/FR, the node:<id> claim
 # double-dispatch guard, the ready/blocked/deferred gate, the no-merge default,
 # and the planning-session-not-mutated invariant.
 #
@@ -19,7 +16,6 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DISPATCH="$REPO_ROOT/skills/target/scripts/dispatch-node.sh"
-AUTOLAUNCH="$REPO_ROOT/skills/blueprint/scripts/autolaunch-on-ready.sh"
 
 PASS=0; FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
@@ -28,7 +24,6 @@ skip() { printf 'SKIP: %s\n' "$*" >&2; exit 77; }
 
 command -v jq  >/dev/null 2>&1 || skip "jq required"
 [[ -f "$DISPATCH" ]]   || skip "dispatch-node.sh missing"
-[[ -f "$AUTOLAUNCH" ]] || skip "autolaunch-on-ready.sh missing"
 
 TMP=$(mktemp -d -t bg-dispatch.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
@@ -849,76 +844,6 @@ else
 fi
 
 echo ""
-echo "=============================================="
-echo "US6 - ready-gated auto-launch (autolaunch-on-ready.sh)"
-echo "=============================================="
-
-# get_config stub controls the gate via $GATE; exported so the subprocess sees
-# it and skips sourcing config.sh (no yq needed). Mirrors test_dedupe pattern.
-get_config() { printf '%s\n' "${GATE:-false}"; }
-export -f get_config
-
-mkplan() {  # mkplan <file> <claims-or-empty>
-  local f="$1" claims="$2"
-  if [[ -n "$claims" ]]; then
-    printf -- '---\ntitle: t\nclaims: %s\n---\n# t\n' "$claims" > "$f"
-  else
-    printf -- '---\ntitle: t\n---\n# t\n' > "$f"
-  fi
-}
-
-# ---- AC6-EDGE: gate OFF (default) -> silent, no dispatch (Phase-1 unchanged) ----
-reset_mock; set_status ab-aaaa1111 ready
-mkplan "$TMP/plan-ready.md" ab-aaaa1111
-out="$(GATE=false bash "$AUTOLAUNCH" "$TMP/plan-ready.md" 2>&1)"
-[[ -z "$out" && "$(ask_count)" -eq 0 ]] \
-  && pass "AC6-EDGE: gate OFF is silent and dispatches nothing (default-off)" \
-  || fail "AC6-EDGE: gate OFF not silent: [$out] asks=$(ask_count)"
-
-# ---- AC6-HP: gate ON + ready claimed node -> auto-launched ----
-reset_mock; set_status ab-aaaa1111 ready
-out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-ready.md" 2>&1)"
-echo "$out" | grep -q "^auto-launched ab-aaaa1111 " && [[ "$(ask_count)" -ge 1 ]] \
-  && pass "AC6-HP: gate ON + ready node -> auto-launched + dispatched" \
-  || fail "AC6-HP: expected auto-launched, got: $out (asks=$(ask_count))"
-
-# ---- AC6-ERR: gate ON + blocked/deferred node -> parked, NOT launched ----
-reset_mock; set_status ab-ffff6666 blocked
-mkplan "$TMP/plan-blocked.md" ab-ffff6666
-out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-blocked.md" 2>&1)"
-echo "$out" | grep -q "^parked ab-ffff6666 " && [[ "$(ask_count)" -eq 0 ]] \
-  && pass "AC6-ERR: gate ON + blocked node parked, never launched" \
-  || fail "AC6-ERR: blocked node not parked: $out (asks=$(ask_count))"
-
-# ---- AC6-FR: gate ON + dispatch fails -> surfaced, plan intact, node stays ready ----
-reset_mock; set_status ab-aaaa1111 ready; : > "$MOCKSTATE/ask.fail"
-planbefore="$(md5sum "$TMP/plan-ready.md" 2>/dev/null || md5 -q "$TMP/plan-ready.md")"
-out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-ready.md" 2>&1)"
-planafter="$(md5sum "$TMP/plan-ready.md" 2>/dev/null || md5 -q "$TMP/plan-ready.md")"
-echo "$out" | grep -q "^autolaunch-failed ab-aaaa1111 " \
-  && pass "AC6-FR: auto-launch dispatch failure surfaced" \
-  || fail "AC6-FR: failure not surfaced: $out"
-[[ "$planbefore" == "$planafter" && "$(cat "$MOCKSTATE/status_ab-aaaa1111")" == "ready" ]] \
-  && pass "AC6-FR: plan intact + node stays ready after a failed auto-launch" \
-  || fail "AC6-FR: plan or node mutated on failure"
-
-# ---- AC6-UI: gate ON + plan with no claims node -> no decision line, graceful ----
-reset_mock
-mkplan "$TMP/plan-noclaim.md" ""
-out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-noclaim.md" 2>/dev/null)"  # stderr note only
-[[ -z "$out" && "$(ask_count)" -eq 0 ]] \
-  && pass "AC6-UI: gate ON + no claims node -> no dispatch, no stdout decision" \
-  || fail "AC6-UI: no-claims path wrong: [$out] asks=$(ask_count)"
-
-# ---- gate ON + transient backlog read failure -> parked "status read failed",
-#      NOT silently mislabeled as a not-ready status, and never launched (MED) ----
-reset_mock; : > "$MOCKSTATE/get_err"
-out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-ready.md" 2>&1)"
-echo "$out" | grep -q "^parked ab-aaaa1111 reason=\"backlog status read failed" && [[ "$(ask_count)" -eq 0 ]] \
-  && pass "AC6: transient backlog read failure parked honestly (not mislabeled), no launch" \
-  || fail "AC6: backlog read failure mishandled: $out"
-
-echo ""
 echo "--- US1 - _resolved_cwd authority (node-cwd-authority, ab-c0f92987) ---"
 
 # ---- AC1-HP: _resolved_cwd present -> dispatch uses it over raw cwd ----
@@ -1174,122 +1099,6 @@ grep -q -- "--cwd $NODE_REPO " "$MOCKSTATE/ask.log" 2>/dev/null \
 [[ ! -f "$NODE_REPO/.setup-ran" ]] \
   && pass "policy-never: setup-worktree.sh not run against the repo root" \
   || fail "policy-never: setup ran against the repo root"
-
-echo ""
-echo "--- autolaunch holder gate reads the live claim ---"
-
-# A live node claim parks the launch as already-running; the sanctioned
-# structural handoff is named instead of a second worker.
-reset_mock; set_status ab-cccc1111 ready; set_claim ab-cccc1111 live
-mkplan "$TMP/plan-claimed.md" ab-cccc1111
-out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-claimed.md" 2>&1)"
-echo "$out" | grep -q '^already-running ab-cccc1111 .*claim held' \
-  && pass "holder: live claim reported as already-running" \
-  || fail "holder: live claim not reported: $out"
-echo "$out" | grep -q "handoff.sh" \
-  && pass "holder: the sanctioned handoff path is named in the reason" \
-  || fail "holder: reason omits handoff.sh: $out"
-[[ "$(ask_count)" -eq 0 ]] \
-  && pass "holder: no worker spawned over a live claim" \
-  || fail "holder: spawned over a live claim: $(ask_count)"
-
-# A failed claim read parks honestly with the rc, like the ready-gate does.
-reset_mock; set_status ab-cccc1111 ready
-: > "$MOCKSTATE/claim_err"
-out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-claimed.md" 2>&1)"
-echo "$out" | grep -q '^parked ab-cccc1111 reason="claim read failed (rc=1)' \
-  && pass "holder: failed claim read parks with the rc named" \
-  || fail "holder: failed read mishandled: $out"
-[[ "$(ask_count)" -eq 0 ]] \
-  && pass "holder: failed claim read launches nothing" \
-  || fail "holder: failed read still spawned: $(ask_count)"
-
-# A read that exits 0 but yields no parsable .state is not evidence of freedom.
-reset_mock; set_status ab-cccc1111 ready
-: > "$MOCKSTATE/claim_garbage"
-out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-claimed.md" 2>&1)"
-echo "$out" | grep -q '^parked ab-cccc1111 reason="claim read unparsable' \
-  && pass "holder: unparsable claim read parks, never dispatches" \
-  || fail "holder: unparsable read failed open: $out"
-[[ "$(ask_count)" -eq 0 ]] \
-  && pass "holder: unparsable claim read launches nothing" \
-  || fail "holder: unparsable read still spawned: $(ask_count)"
-
-echo ""
-echo "--- autolaunch frontmatter reader is robust ---"
-
-# CRLF frontmatter still resolves the claimed node.
-reset_mock; set_status ab-dddd1111 ready
-printf -- '---\r\ntitle: t\r\nclaims: ab-dddd1111\r\n---\r\n# t\r\n' > "$TMP/plan-crlf.md"
-out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-crlf.md" 2>&1)"
-echo "$out" | grep -q "^auto-launched ab-dddd1111 " \
-  && pass "frontmatter: CRLF plan resolves its claimed node" \
-  || fail "frontmatter: CRLF plan broke resolution: $out"
-
-# A stray --- inside the body is not the closing fence; the frontmatter node
-# wins over a body look-alike (the decoy is ready, so a wrong pick would launch).
-reset_mock; set_status ab-eeee1111 ready; set_status ab-99999999 ready
-printf -- '---\ntitle: t\nclaims: ab-eeee1111\n---\nbody\n---\nclaims: ab-99999999\n---\n# t\n' > "$TMP/plan-stray.md"
-out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-stray.md" 2>&1)"
-echo "$out" | grep -q "^auto-launched ab-eeee1111 " \
-  && pass "frontmatter: body fence ignored, frontmatter node launched" \
-  || fail "frontmatter: stray body fence mishandled: $out"
-
-# An unterminated block is a named read failure on stdout, never a silent skip.
-reset_mock; set_status ab-ffff7777 ready
-printf -- '---\ntitle: t\nclaims: ab-ffff7777\n' > "$TMP/plan-unterminated.md"
-out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-unterminated.md" 2>&1)"
-echo "$out" | grep -q '^autolaunch-failed - reason="plan frontmatter read failed' \
-  && pass "frontmatter: unterminated block named as a read failure" \
-  || fail "frontmatter: unterminated block silent: $out"
-[[ "$(ask_count)" -eq 0 ]] \
-  && pass "frontmatter: unterminated block launches nothing" \
-  || fail "frontmatter: unterminated block spawned: $(ask_count)"
-
-echo ""
-echo "--- autolaunch bounds the queued dispatch wait ---"
-
-# A fake plugin tree: the gate sources with-timeout.sh and dispatches
-# skills/target/scripts/dispatch-node.sh from REPO_ROOT, so both are stubbed
-# there while the gate script itself stays the real one under test.
-QREPO="$TMP/queuerepo"
-mkdir -p "$QREPO/scripts/lib" "$QREPO/skills/target/scripts"
-cp "$REPO_ROOT/scripts/lib/with-timeout.sh" "$QREPO/scripts/lib/with-timeout.sh"
-printf '#!/usr/bin/env bash\nsleep 30\n' > "$QREPO/skills/target/scripts/dispatch-node.sh"
-chmod +x "$QREPO/skills/target/scripts/dispatch-node.sh"
-
-# A dispatch still queued at the bound parks with the ceiling named, quickly.
-reset_mock; set_status ab-aaaa1111 ready
-mkplan "$TMP/plan-q.md" ab-aaaa1111
-t0=$(date +%s)
-out="$(REPO_ROOT="$QREPO" FNO_AUTOLAUNCH_TIMEOUT=2 GATE=true bash "$AUTOLAUNCH" "$TMP/plan-q.md" 2>&1)"
-dt=$(( $(date +%s) - t0 ))
-echo "$out" | grep -q 'parked ab-aaaa1111 reason="dispatch still queued after 2s' \
-  && pass "bound: queued dispatch parks with the ceiling named" \
-  || fail "bound: no queue park: $out"
-[[ "$dt" -le 8 ]] \
-  && pass "bound: park landed near the ceiling (${dt}s)" \
-  || fail "bound: park took ${dt}s"
-
-# A dispatch that launches immediately is not bounded out.
-printf '#!/usr/bin/env bash\necho "launched ab-aaaa1111 name=x session=y cwd=/z hint=h"\n' > "$QREPO/skills/target/scripts/dispatch-node.sh"
-reset_mock; set_status ab-aaaa1111 ready
-out="$(REPO_ROOT="$QREPO" FNO_AUTOLAUNCH_TIMEOUT=2 GATE=true bash "$AUTOLAUNCH" "$TMP/plan-q.md" 2>&1)"
-echo "$out" | grep -q "^auto-launched ab-aaaa1111 " \
-  && pass "bound: immediate launch still auto-launches" \
-  || fail "bound: immediate launch bounded out: $out"
-
-# A non-integer ceiling parks with its own named reason, not the wildcard
-# "unexpected dispatch output" - and never reaches the (sleeping) dispatch.
-printf '#!/usr/bin/env bash\nsleep 30\n' > "$QREPO/skills/target/scripts/dispatch-node.sh"
-reset_mock; set_status ab-aaaa1111 ready
-out="$(REPO_ROOT="$QREPO" FNO_AUTOLAUNCH_TIMEOUT=3m GATE=true bash "$AUTOLAUNCH" "$TMP/plan-q.md" 2>&1)"
-echo "$out" | grep -q 'parked ab-aaaa1111 reason="FNO_AUTOLAUNCH_TIMEOUT must be a bare integer' \
-  && pass "bound: non-integer ceiling parks with the reason named" \
-  || fail "bound: non-integer ceiling misreported: $out"
-[[ "$(ask_count)" -eq 0 ]] \
-  && pass "bound: non-integer ceiling never reaches the dispatch" \
-  || fail "bound: non-integer ceiling still dispatched: $(ask_count)"
 
 echo ""
 echo "================================"

@@ -34,7 +34,7 @@ Skills with none of these run stateless and work OOTB on every driver that loads
 | Skill | Classification | CC | HER | OC | GEM | CDX | Notes |
 |---|---|---|---|---|---|---|---|
 | audit | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Multi-perspective single-turn analysis. |
-| blueprint | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Mutates a design doc into an execution plan; unsupported auto-launch primitives are reported before work starts. |
+| blueprint | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Mutates a design doc into an execution plan; the completion nudge is `fno backlog advance`, which resolves its own harness and degrades to a held receipt on any driver. |
 | cache-keepalive | CC-only | OOTB | - | - | - | - | Claude Code prompt-cache mechanism. Not applicable to other drivers. |
 | check-pr | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | One GitHub poll per invocation. |
 | codemap | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Pure Python + tree-sitter. |

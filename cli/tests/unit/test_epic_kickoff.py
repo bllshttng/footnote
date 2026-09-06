@@ -570,6 +570,68 @@ def test_cli_stop_requires_epic(iso, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Ordered child selection: the drain takes children in shared-selection order
+# ---------------------------------------------------------------------------
+
+
+def test_capped_pass_takes_the_top_ranked_child_first(iso, tmp_path, monkeypatch):
+    """AC2-HP: an epic advance nudge dispatches the top-ranked unblocked child.
+
+    The ready surface orders the ranked child (rank 1.0) ahead of its unranked
+    sibling; a width-1 pass must dispatch THAT child, proving the epic advance
+    consumes the shared parent-scoped selection order rather than graph order.
+    """
+    entries = [
+        {"id": "x-EPIC", "title": "mission", "type": "epic", "project": "fno"},
+        {"id": "x-ranked", "parent": "x-EPIC", "project": "web", "slug": "ranked",
+         "status": "ready", "rank": 1.0, "created_at": "2026-09-02T00:00:00Z"},
+        {"id": "x-plain", "parent": "x-EPIC", "project": "web", "slug": "plain",
+         "status": "ready", "created_at": "2026-09-01T00:00:00Z"},
+    ]
+    _write_graph(tmp_path, entries, monkeypatch)
+    _patch_map(monkeypatch, {"web": str(tmp_path / "web")})
+    _patch_headroom(monkeypatch, 1)
+    calls = _patch_spawn(monkeypatch)
+    # The REAL selection key decides the order the drain sees (the shared
+    # surface _ready_leaf_children shells is sorted by this key).
+    from fno.graph._intake import make_selection_sort_key
+
+    ordered = sorted(
+        [e for e in entries if e.get("parent") == "x-EPIC"],
+        key=make_selection_sort_key(entries),
+    )
+    assert [e["id"] for e in ordered] == ["x-ranked", "x-plain"]
+    monkeypatch.setattr(
+        adv, "_ready_leaf_children", lambda e: _ready(*[(x["id"], "web") for x in ordered])
+    )
+
+    res = adv.advance_epic("x-EPIC", events_path=iso)
+
+    assert res.dispatched == ("x-ranked",)
+    assert [c["node"] for c in calls] == ["x-ranked"]
+    disp = [e for e in _events(iso) if e["type"] == "advance_dispatched"]
+    assert len(disp) == 1 and disp[0]["data"]["node_id"] == "x-ranked"
+
+
+def test_held_advance_spawns_nothing_and_names_reason(iso, tmp_path, monkeypatch):
+    """AC2-EDGE: zero spawn-gate headroom holds with a lane-cap receipt per
+    ready child; the plan and children stay intact for a later tick."""
+    _epic_graph(tmp_path, monkeypatch)
+    _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
+    _patch_headroom(monkeypatch, 0)
+    calls = _patch_spawn(monkeypatch)
+    monkeypatch.setattr(adv, "_ready_leaf_children",
+                        lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
+
+    res = adv.advance_epic("x-EPIC", events_path=iso)
+
+    assert res.dispatched == () and calls == []
+    skips = [e for e in _events(iso)
+             if e["type"] == "advance_skipped" and e["data"]["reason"] == "lane-cap"]
+    assert len(skips) == 2
+
+
+# ---------------------------------------------------------------------------
 # Continuation mode (x-a4dc K2 daemon drain): never reactivate; retire inactive
 # ---------------------------------------------------------------------------
 

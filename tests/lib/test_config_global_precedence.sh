@@ -179,9 +179,10 @@ assert_eq "pinned LOCAL_SETTINGS honored (CONFIG_FILE decoy ignored)" "local_pin
 assert_eq "pinned GLOBAL_SETTINGS honored (FNO_GLOBAL_SETTINGS_PATH decoy ignored)" "global_pinned" "$result_global"
 
 # ---------------------------------------------------------------------------
-# AC2-FR: the autolaunch symptom. With a sparse local file present, a nested
-# global-only key (target.auto_launch_on_blueprint) must read true. Dotted keys
-# require yq, so this case is yq-guarded (the design's Domain Pitfall).
+# AC2-FR: nested global-only key through a sparse local file. With a sparse
+# local file present, a nested global-only key (target.dedupe_dead_duplicates)
+# must read true. Dotted keys require yq, so this case is yq-guarded (the
+# design's Domain Pitfall).
 # ---------------------------------------------------------------------------
 echo ""
 echo "AC2-FR: nested global-only key read with a sparse local file present (yq)"
@@ -192,16 +193,16 @@ parking_lot_path = "/some/local/path"
 TOML
     cat > "$TMP/ac2fr/global.toml" <<'TOML'
 [target]
-auto_launch_on_blueprint = true
+dedupe_dead_duplicates = true
 TOML
     result=$(
         unset GLOBAL_SETTINGS LOCAL_SETTINGS
         export CONFIG_FILE="$TMP/ac2fr/.fno/config.toml"
         export FNO_GLOBAL_SETTINGS_PATH="$TMP/ac2fr/global.toml"
         source "$CONFIG_SH"
-        get_config "target.auto_launch_on_blueprint" "false"
+        get_config "target.dedupe_dead_duplicates" "false"
     )
-    assert_eq "nested global-only key reads true (autolaunch symptom gone)" "true" "$result"
+    assert_eq "nested global-only key reads true (sparse-local symptom gone)" "true" "$result"
 else
     echo "  SKIP: yq not installed - nested-key case not exercised"
 fi

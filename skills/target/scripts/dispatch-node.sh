@@ -306,7 +306,7 @@ for id in "${NODES[@]}"; do
   # ---- The shared quota route decision (same seam as backlog advance / fno
   # dispatch). This shell rung used to reach only `fno agents dispatch resolve`, which
   # answers "which harness is configured", never "does that harness have quota
-  # left" - so /target bg and blueprint auto-launch stayed on a walled account
+  # left" - so /target bg and the advance drain stayed on a walled account
   # while an idle harness sat there. `--autonomous` folds the route in.
   # No --harness is passed: an explicit harness IS a pin, and passing the
   # configured default as if it were one would disable the reroute it gates.

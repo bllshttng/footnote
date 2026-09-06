@@ -37,7 +37,7 @@ node_cwd="$(printf '%s' "$node_json" | jq -r '._resolved_cwd // .cwd // empty' 2
 
 The `// .cwd` fallback is a locked back-compat contract. An older installed fno lacks `_resolved_cwd` and degrades to the pre-fix behavior instead of breaking. The shell script upgrades with the repo checkout. `fno` upgrades through `fno doctor update`. The fallback makes the unsynchronized paths safe in either order. Both outcome lines carry `cwd=<path>`, so a wrong-repo boot is visible at dispatch time.
 
-The `/agents` skill (spawn verb) passes the same `_resolved_cwd`-with-fallback to `spawn.sh --cwd`. `autolaunch-on-ready.sh` delegates to dispatch-node.sh and is fixed transitively. Megawalk is unaffected - the walker is project-scoped and never relocates via node.cwd.
+The `/agents` skill (spawn verb) passes the same `_resolved_cwd`-with-fallback to `spawn.sh --cwd`. The advance drain reads `_resolved_cwd` on its own selection, so it is fixed transitively. Megawalk is unaffected - the walker is project-scoped and never relocates via node.cwd.
 
 ### 3. Write side: filing derives cwd from explicit project
 

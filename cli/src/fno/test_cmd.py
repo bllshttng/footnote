@@ -596,7 +596,8 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
      "bash tests/target/test_backfill_plan.sh\n"
      "bash tests/target/test_detect_pending_plan.sh\n"
      "bash tests/target/test_plan_mode_e2e.sh"),
-    ("bg-dispatch + ready-gated auto-launch harness", ".", "bash tests/test-bg-dispatch.sh"),
+    ("bg-dispatch harness", ".", "bash tests/test-bg-dispatch.sh"),
+    ("init claim-wait harness", ".", "bash tests/test-init-claim-wait.sh"),
     ("dispatch grant posture harness", ".", "bash tests/target/test_dispatch_grant_posture.sh"),
     ("agent skill harness", ".",
      "bash tests/skills/test_agent_normalize.sh\n"

@@ -32,7 +32,7 @@ You (planning session): /think + /blueprint  ->  node reaches status: ready
    You keep planning here; observe workers via `fno agents list/logs`.
 ```
 
-`skills/target/scripts/dispatch-node.sh` is a self-contained shell primitive (deps: `fno` + `jq`). It is the canonical dispatcher, called from three places: the `/target bg` subcommand (SKILL.md), the auto-launch helper (Layer 2), and a future native-plan-mode hook (deferred, see below). Per node it emits exactly one outcome line, never silent:
+`skills/target/scripts/dispatch-node.sh` is a self-contained shell primitive (deps: `fno` + `jq`). It is the canonical `/target bg` dispatcher, called from the `/target bg` subcommand (SKILL.md). Per node it emits exactly one outcome line, never silent:
 
 | Outcome | When |
 |---|---|
@@ -50,27 +50,26 @@ Locked behaviors:
 - **Fire-and-forget.** The dispatcher returns immediately and NEVER writes the planning session's `target-state.md`.
 - **No hard concurrency cap.** `--all-ready` surfaces the cost (`~Mx subscription quota while active`); quota is the throttle. `--max N` is an opt-in soft cap.
 
-### Layer 2: ready-gated auto-launch (US6, opt-in, default OFF)
+### Layer 2: the ordered advance nudge (blueprint completion)
 
 ```
-/blueprint finishes -> claimed node has a status
+/blueprint finishes intake -> resolve the adopted node's parent
         |
-        v  config.target.auto_launch_on_blueprint == true ?  --no--> nothing (manual dispatch as today)
-        |                                                  yes
-        v  node status == ready (unblocked, not deferred) ?
-        |                  |
-       yes                no  ->  PARK (pre-planned future work); never launch
-        v
-   dispatch via Layer 1 (no-merge default)
+        v  live epic parent ?  --yes--> fno backlog advance --epic <parent>
+        |                                       |
+        no                                      v
+        v                            advance applies epic rank, parent-scoped
+   fno backlog advance                child rank, blocked_by, join width,
+   (plain next-selection path)        spawn-gate headroom, claims, and the
+                                       auto-continue / autonomy gates
+                                                |
+                                                v
+                          receipt: dispatched <ids> | skipped reason=<why>
 ```
 
-`skills/blueprint/scripts/autolaunch-on-ready.sh <plan-path>` runs as the last step of `/blueprint` in every mode. It is a no-op unless `config.target.auto_launch_on_blueprint: true` (default OFF; an absent key reads as off, so existing behavior is unchanged). When enabled, it resolves the plan's `claims: ab-XXX` node, and if that node is `status: ready` it dispatches via Layer 1, printing `auto-launched <node> ...`. A `blocked`/`deferred`/`idea` node prints `parked <node> ...` and is never launched. A dispatch failure prints `autolaunch-failed <node> ...` and leaves the node `ready` and the plan intact.
+Blueprint completion never spawns a worker itself. It issues exactly one `fno backlog advance` call - the epic form when the adopted node has a live epic parent, the plain form when it has none - and relays the receipt. The advance verb is the sole launcher, so the node that starts is the top-ranked unblocked child, which may be a different sibling than the plan just written. A disabled gate, no ready child, or zero spawn headroom holds with a named reason (`skipped reason=disabled` / `lane-cap` / `already-claimed`); the plan stays intact and the node stays `ready`.
 
-The gate reuses the **existing backlog state model** (Locked Decision 3): a `ready` node is unblocked and up-next; pre-planned future work the developer marked `blocked_by`/`deferred` is parked. No new concept. The developer's own discipline IS the "only launch what's up-next" gate.
-
-## Configuration
-
-`config.target.auto_launch_on_blueprint` in `.fno/config.toml` (project) or `~/.fno/config.toml` (global). Default `false`. Read with the `get_config "target.auto_launch_on_blueprint" "false"` pattern (same shape as `config.target.dedupe_dead_duplicates`). Manual dispatch via `/target bg <node...>` is always available regardless of the flag.
+The retired launch-on-write hook (the deleted `autolaunch-on-ready.sh`, gated by a deleted `target` config leaf) dispatched the plan just written, ignoring rank, siblings, and headroom. Its tombstone lives in `scripts/ci/retired-config-leaves.txt`; the replacement is `fno backlog advance`.
 
 ## Native-plan-mode auto-launch (Task 3.3a): no hook dispatch, and why
 
@@ -79,32 +78,18 @@ That capture-hook fix is in. The hook dispatch it was waiting for is closed unbu
 
 **At capture time there is nothing to dispatch.**
 The sidecar frontmatter is hook-generated (`captured_at`, `session_id`, `slug`, `source`, `status`) and carries no node id, a native plan has no `claims:` / `graph_node_id:`, and the sidecar path is not a plan the backlog knows.
-Nothing the hook has written is resolvable to a node by any of `autolaunch-on-ready.sh`'s three tiers, so a ready-gate placed there has no ready node to see.
+Nothing the hook has written is resolvable to a node, so a dispatch placed there has no node to launch.
 The plan is not executable at that moment either. `/blueprint` compiles acceptance criteria the native plan does not yet carry. The backfill that synthesizes them runs inside a later `/target`, long after the hook has exited.
 See the "Why synthesis precedes /blueprint" section of [target-plan-mode-integration.md](target-plan-mode-integration.md).
 
-**The native path inherits Layer 2 for free.**
-The front door calls `/blueprint` on the enriched doc, and `/blueprint` runs `autolaunch-on-ready.sh` as its last action in every mode.
-An approved native plan reaches exactly the same ready-gated dispatch the blueprint path uses, with no hook involvement.
+**The native path inherits the ordered nudge for free.**
+The front door calls `/blueprint` on the enriched doc, and `/blueprint` issues the advance nudge as its last action in every mode.
+An approved native plan reaches exactly the same ordered dispatch the blueprint path uses, with no hook involvement.
 
-**That inheritance needed one guard, which is the real content of this task.**
+**That inheritance has one residual: the front-door confirm window.**
 `/blueprint` is called at front-door step 5, before the human is asked "Execute autonomously? [y/N]" at step 6.
-With the gate ON the dispatch fired while that confirm was still outstanding: answering `N` produced a bg worker the human had just declined, and answering `y` produced a second worker racing the front-door session, which executes the plan itself.
-Step 4b of `autolaunch-on-ready.sh` now parks with `plan-mode-front-door-owns-it` when the plan is a native-plan-mode plan.
-
-**The plan states its own provenance, so the guard does not have to guess.**
-`backfill-plan.sh` stamps `source: claude-plan-mode` into the enriched doc's frontmatter, and `/blueprint` round-trips frontmatter, so the key is still there when the gate runs.
-Step 4b reads that one key from the plan's frontmatter only, because a `source:` line in a doc body is prose and treating body text as authority is the same trap the `graph_node_id` tiers above already guard against.
-Two rejected alternatives are worth recording, since both look reasonable and both are wrong.
-Keying off "a `pending` sidecar exists" fails because a declined confirm deliberately leaves the sidecar `pending` and re-offerable, so every unrelated `/blueprint` inside the sidecar's TTL would park and the configured auto-launch path would silently stop working.
-Correlating on the sidecar's first body line fails because that line is whatever heading the plan opens with: `## Overview` is a whole line in twelve docs in this repo, so a common heading parks unrelated plans, while a short heading correlates with nothing and silently restores the original bug.
-
-A failed provenance read parks rather than dispatching, mirroring the ready-gate above.
-This matters because a backfilled plan carries no `claims:` or `graph_node_id:` and so resolves through the `plan_path` tier, which reads the graph and never opens the plan: an unreadable plan is therefore not screened out by an earlier exit, and "could not read" must not be allowed to masquerade as "not a plan-mode plan".
-
-**Known residual: this closes the auto-launch path, not every path.**
-During the confirm window the node is `ready` and unclaimed, so anything else that dispatches a ready node (`fno backlog advance`, the megawalk walker, a direct `dispatch-node.sh`, another session's `/target`) can still start work the human has not approved.
-Closing that properly means not leaving the node ready-and-unclaimed while the front door is still asking, which is a change to the front door rather than to this gate.
+During that window the node is `ready` and unclaimed, so anything that dispatches a ready node (the advance nudge itself, the active-backlog drain, a direct `dispatch-node.sh`, another session's `/target`) can still start work the human has not approved.
+Closing that properly means not leaving the node ready-and-unclaimed while the front door is still asking, which is a change to the front door rather than to the nudge.
 
 ## Components
 
@@ -112,12 +97,11 @@ Closing that properly means not leaving the node ready-and-unclaimed while the f
 |---|---|
 | `skills/target/scripts/dispatch-node.sh` | Layer 1 dispatch primitive (US5) |
 | `skills/target/SKILL.md` (`### 0a. Background Dispatch`) | `/target bg <node...>` subcommand |
-| `skills/blueprint/scripts/autolaunch-on-ready.sh` | Layer 2 ready-gated auto-launch (US6); step 4b parks a native-plan-mode plan (the front door owns it) |
-| `skills/blueprint/SKILL.md` (tail) | invokes the auto-launch helper after intake in every mode |
-| `skills/target/references/settings.md` | documents `config.target.auto_launch_on_blueprint` |
-| `tests/test-bg-dispatch.sh` | hermetic AC5 + AC6 regression harness (mock `fno` + `get_config` stub) |
-| `tests/test-autolaunch-gate.sh` | hermetic gate harness: caller-is-holder, node-resolution tiers, and the native-plan-mode park |
+| `skills/blueprint/SKILL.md` (tail) | issues the ordered advance nudge after intake in every mode |
+| `scripts/ci/retired-config-leaves.txt` | tombstone for the retired launch-on-write config leaf |
+| `tests/test-bg-dispatch.sh` | hermetic `/target bg` regression harness (mock `fno`) |
+| `tests/test-init-claim-wait.sh` | hermetic init claim-wait harness |
 
 ## Multi-CLI
 
-`/target bg` and the auto-launch dispatch require `claude --bg` plus the `fno agents` daemon, both Claude-Code-specific. On a driver without them the dispatch reports the failure and the node stays `ready` (degrade, never fake a launch). The auto-launch gate defaults OFF everywhere, so non-CC drivers see unchanged `/blueprint` behavior. See [SKILL-COMPAT-MATRIX.md](../SKILL-COMPAT-MATRIX.md).
+`/target bg` requires `claude --bg` plus the `fno agents` daemon, both Claude-Code-specific. On a driver without them the dispatch reports the failure and the node stays `ready` (degrade, never fake a launch). The advance nudge resolves its own harness through the dispatch resolver, so it is driver-agnostic: a held advance names the reason and changes nothing. See [SKILL-COMPAT-MATRIX.md](../SKILL-COMPAT-MATRIX.md).

@@ -214,22 +214,6 @@ def _keep_going_status(project_root: Optional[Path]) -> SpawnerStatus:
     )
 
 
-def _blueprint_auto_launch_status(project_root: Optional[Path]) -> SpawnerStatus:
-    try:
-        armed, rank = _gate_with_master(
-            project_root, lambda: _settings_for(project_root).target.auto_launch_on_blueprint
-        )
-        return SpawnerStatus(
-            "blueprint auto-launch", "/blueprint completion",
-            "config.target.auto_launch_on_blueprint", armed, rank,
-        )
-    except Exception:  # noqa: BLE001
-        return SpawnerStatus(
-            "blueprint auto-launch", "/blueprint completion",
-            "config.target.auto_launch_on_blueprint", False, "default",
-        )
-
-
 def _groom_status(project_root: Optional[Path]) -> SpawnerStatus:
     try:
         armed, rank = _gate_with_master(
@@ -317,7 +301,6 @@ def collect_status(project_root: Optional[Path] = None) -> list[SpawnerStatus]:
         _pr_watch_status(project_root),
         _recovery_status(project_root),
         _keep_going_status(project_root),
-        _blueprint_auto_launch_status(project_root),
         # x-aaaf wave 2: previously ungated, now gated - see GroomBlock /
         # RestartBlock / EvalsBlock in fno.config.
         _groom_status(project_root),

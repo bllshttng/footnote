@@ -277,13 +277,6 @@ FIELD_META: dict[str, Meta] = {
     ),
     # --- config.target.* ---
     "target.dedupe_dead_duplicates": Meta("never", "Opt-in cleanup of provably-dead duplicate state files."),
-    "target.auto_launch_on_blueprint": Meta(
-        "advanced",
-        "Auto-launch a /target worker when a node reaches ready via /blueprint. "
-        "Harness and substrate come from the dispatch capability map, never a claude hardcode: a harness whose spawn claim reads native resolves to a native interactive thread, the rest degrade to headless. "
-        "The worker defaults to no-merge and lands a PR for review; merge posture resolves per node from auto_merge.grant. "
-        "It never fires on a node that is not ready, one under a live claim, an epic with no ready child, a plan stamped source: claude-plan-mode, or a fleet at agents.max_live past the dispatch wait ceiling (FNO_AUTOLAUNCH_TIMEOUT, default 180s).",
-    ),
     "target.handoff.enabled": Meta("advanced", "Enable explicit target capability escalation."),
     "target.handoff.used_pct_trigger": Meta("never", "Context-used %% that triggers a general-session compact nudge."),
     "target.handoff.king_used_pct_trigger": Meta("advanced", "Context-used %% that triggers an earlier king compact nudge."),
