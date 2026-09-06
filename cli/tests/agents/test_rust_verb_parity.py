@@ -131,10 +131,11 @@ def _run_rust(args: list[str], home: Path) -> subprocess.CompletedProcess:
     # front's verification notice is setup noise, not part of the client verb
     # contract, and would make Rust stderr differ from the Python oracle.
     env.pop("FNO_RUST_FRONT", None)
-    # Only when the real binary is absent, so a machine that HAS fno keeps
-    # exercising the genuine article rather than a shim.
+    # Only when nothing on the PATH handed to the client provides fno, so a
+    # machine that HAS fno keeps exercising the genuine article, and a test
+    # that put its own fno shim first on PATH keeps that shim in front.
     shim_dir = _fno_shim_dir()
-    if shim_dir:
+    if shim_dir and shutil.which("fno", path=env.get("PATH", "")) is None:
         env["PATH"] = shim_dir + os.pathsep + env.get("PATH", "")
     # A short-token parity case asks the Rust client to invoke the Python
     # all-source resolver. Keep that test hermetic instead of scanning the
