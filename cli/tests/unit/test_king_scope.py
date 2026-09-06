@@ -5,7 +5,38 @@ from __future__ import annotations
 import pytest
 from typer.testing import CliRunner
 
-from fno.king.scope import compile_scope_ids, scope_undelivered
+from fno.king.scope import compile_scope_ids, scope_undelivered, territory_membership
+
+
+# --- the territory key + membership read (x-e221 AC1/AC4) ----------------------
+
+
+def test_territory_membership_returns_the_canonical_key_and_ids():
+    entries = [
+        {"id": "x-a", "type": "epic", "project": "fno"},
+        {"id": "x-a1", "parent": "x-a", "project": "fno"},
+        {"id": "x-o", "project": "fno"},
+    ]
+    m = territory_membership("x-a", entries, resolve=lambda _: (2, "x-a"))
+    assert m.state == "ok"
+    assert m.key == "x-a"
+    assert m.ids == frozenset({"x-a", "x-a1"})
+
+
+def test_territory_membership_unknown_is_never_an_empty_territory():
+    entries = [{"id": "x-root", "type": "feature"}]
+    m = territory_membership("x-root", entries, resolve=lambda _: (2, "x-root"))
+    assert m.state == "unknown"
+    assert "not an epic" in m.reason
+    assert m.ids == frozenset()
+    assert m.key is None
+
+
+def test_territory_membership_unknown_on_unreadable_entries():
+    # AC4-ERR: a malformed graph read is an explicit unknown, not an empty set.
+    m = territory_membership("x-root", [None, "garbage"], resolve=lambda _: (2, "x-root"))
+    assert m.state == "unknown"
+    assert m.reason
 
 
 def test_epic_scope_compiles_to_the_root_and_descendants():
