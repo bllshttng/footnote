@@ -582,6 +582,21 @@ fn resolve_crash(
     );
 }
 
+/// One child row from the `advance --epic --json` receipt's `children[]`, the
+/// shared vocabulary with the per-child journal events at advance.py:3638.
+/// Every field defaulted so an evolving receipt never fails the parse.
+#[derive(Debug, Default, Deserialize)]
+struct AdvanceChild {
+    #[serde(default)]
+    #[allow(dead_code)] // not read yet; kept for parity with the CLI receipt shape
+    node_id: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    decision: String,
+    #[serde(default)]
+    reason: String,
+}
+
 /// The `fno backlog advance --epic <id> --json` receipt, the only fields the
 /// mission drain reads. `#[serde(default)]` on every field so a partial or
 /// evolving receipt never fails the parse (a missing field defaults benignly).
@@ -595,6 +610,47 @@ struct AdvanceEpicReceipt {
     /// reconciled from events on later ticks.
     #[serde(default)]
     dispatched: Vec<String>,
+    /// Every child the pass considered this tick, dispatched or not - the
+    /// honest signal `mission_drain_tick` was previously discarding.
+    #[serde(default)]
+    children: Vec<AdvanceChild>,
+    /// A receipt-level gate error (e.g. `"disabled"`, `"walker-live"`) reported
+    /// with no children, distinct from a truly exhausted mission.
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Facts about one `dispatch_mission` pass beyond the fire-and-forget dispatch
+/// ids, used only by `mission_drain_tick` to name an honest skip reason when
+/// nothing new dispatched. `ready` is how many children the pass considered;
+/// `reason` is the shared per-child skip reason when every child in the pass
+/// agrees, or `"skipped-mixed"` when they don't; `error` is a receipt-level
+/// gate error reported with no children.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct DispatchFacts {
+    ready: usize,
+    reason: Option<String>,
+    error: Option<String>,
+}
+
+fn facts_from_receipt(receipt: &AdvanceEpicReceipt) -> DispatchFacts {
+    let ready = receipt.children.len();
+    let reason = if ready == 0 {
+        None
+    } else {
+        let mut reasons = receipt.children.iter().map(|c| c.reason.as_str());
+        let first = reasons.next().unwrap_or("");
+        if !first.is_empty() && reasons.all(|r| r == first) {
+            Some(first.to_string())
+        } else {
+            Some("skipped-mixed".to_string())
+        }
+    };
+    DispatchFacts {
+        ready,
+        reason,
+        error: receipt.error.clone(),
+    }
 }
 
 /// Dispatch the mission by shelling K1's converge core, recording each dispatched
@@ -609,7 +665,7 @@ fn dispatch_mission(
     cfg: &DrainConfig,
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
-) -> MissionDispatch {
+) -> (MissionDispatch, DispatchFacts) {
     let out = match retry_etxtbsy(|| {
         fno_cmd(&cfg.fno_bin)
             // --continuation: never reactivate the mission and retire an inactive
@@ -632,14 +688,14 @@ fn dispatch_mission(
                 "active_backlog_skip",
                 json!({"reason": "advance-epic-failed", "mission": cfg.mission, "detail": detail}),
             );
-            return MissionDispatch::Continue;
+            return (MissionDispatch::Continue, DispatchFacts::default());
         }
         Err(e) => {
             let _ = journal.append(
                 "active_backlog_skip",
                 json!({"reason": "advance-epic-failed", "mission": cfg.mission, "detail": format!("{e}")}),
             );
-            return MissionDispatch::Continue;
+            return (MissionDispatch::Continue, DispatchFacts::default());
         }
     };
     let receipt: AdvanceEpicReceipt = match serde_json::from_slice(&out.stdout) {
@@ -649,11 +705,12 @@ fn dispatch_mission(
                 "active_backlog_skip",
                 json!({"reason": "advance-epic-unparseable", "mission": cfg.mission, "detail": format!("{e}")}),
             );
-            return MissionDispatch::Continue;
+            return (MissionDispatch::Continue, DispatchFacts::default());
         }
     };
+    let facts = facts_from_receipt(&receipt);
     if receipt.deactivated || receipt.all_done {
-        return MissionDispatch::Retire;
+        return (MissionDispatch::Retire, facts);
     }
     let mut new_ids = Vec::new();
     for node_id in &receipt.dispatched {
@@ -677,7 +734,7 @@ fn dispatch_mission(
             json!({"mission": cfg.mission, "dispatched": new_ids, "fire_and_forget": true}),
         );
     }
-    MissionDispatch::Continue
+    (MissionDispatch::Continue, facts)
 }
 
 /// One mission drain tick: reconcile prior dispatches (feeding the breaker), then
@@ -697,17 +754,33 @@ pub fn mission_drain_tick(
     reconcile_pending(cfg, breaker, pending, journal);
     let closed = pending_before.saturating_sub(pending.len()) as u64;
     let pre_dispatch = pending.len();
-    let outcome = dispatch_mission(cfg, pending, journal);
+    let (outcome, facts) = dispatch_mission(cfg, pending, journal);
     let newly_dispatched = (pending.len() - pre_dispatch) as u64;
-    let skip_reason = match outcome {
-        MissionDispatch::Retire => Some("mission_retired"),
+    let skip_reason: Option<String> = match outcome {
+        MissionDispatch::Retire => Some("mission_retired".to_string()),
         MissionDispatch::Continue if closed + newly_dispatched > 0 => None,
-        MissionDispatch::Continue if pending.is_empty() => Some("no_work"),
-        MissionDispatch::Continue => Some("in_flight"),
+        // Something dispatched by an earlier tick is still running: a full
+        // spawn lane on THIS pass does not make that stale.
+        MissionDispatch::Continue if !pending.is_empty() => Some("in_flight".to_string()),
+        MissionDispatch::Continue => {
+            if let Some(err) = &facts.error {
+                // The `disabled` / `walker-live` early returns stop
+                // masquerading as a genuinely exhausted mission.
+                Some(format!("gate:{err}"))
+            } else if facts.ready == 0 {
+                // True exhaustion: the pass found nothing at all.
+                Some("no_work".to_string())
+            } else {
+                // Children found, none dispatched: name the real skip reason
+                // (e.g. `lane-cap`) instead of collapsing it into no_work.
+                facts.reason.clone()
+            }
+        }
     };
     let detail = format!(
-        "mission={} closed={} dispatched={} pending={}",
+        "mission={} ready={} closed={} dispatched={} pending={}",
         cfg.mission,
+        facts.ready,
         closed,
         newly_dispatched,
         pending.len()
@@ -717,7 +790,7 @@ pub fn mission_drain_tick(
         "active_backlog",
         "daemon",
         closed + newly_dispatched,
-        skip_reason,
+        skip_reason.as_deref(),
         Some(&detail),
         cfg.interval_seconds.max(1),
     );
@@ -1956,7 +2029,7 @@ mod tests {
         let (journal, project_journal) = test_journal(tmp.path());
         let mut pending = Vec::new();
 
-        let outcome = dispatch_mission(&cfg, &mut pending, &journal);
+        let (outcome, _facts) = dispatch_mission(&cfg, &mut pending, &journal);
         assert_eq!(outcome, MissionDispatch::Continue);
         assert_eq!(
             pending
@@ -2013,7 +2086,7 @@ mod tests {
         let (journal, _pj) = test_journal(tmp.path());
         let mut pending = Vec::new();
         assert_eq!(
-            dispatch_mission(&cfg, &mut pending, &journal),
+            dispatch_mission(&cfg, &mut pending, &journal).0,
             MissionDispatch::Retire
         );
     }
@@ -2030,7 +2103,7 @@ mod tests {
         let (journal, _pj) = test_journal(tmp.path());
         let mut pending = Vec::new();
         assert_eq!(
-            dispatch_mission(&cfg, &mut pending, &journal),
+            dispatch_mission(&cfg, &mut pending, &journal).0,
             MissionDispatch::Retire
         );
     }
@@ -2067,12 +2140,83 @@ mod tests {
         let (journal, project_journal) = test_journal(tmp.path());
         let mut pending = Vec::new();
         assert_eq!(
-            dispatch_mission(&cfg, &mut pending, &journal),
+            dispatch_mission(&cfg, &mut pending, &journal).0,
             MissionDispatch::Continue
         );
         assert!(pending.is_empty());
         assert!(journal_lines(&project_journal)
             .iter()
             .any(|l| l.contains("advance-epic-unparseable")));
+    }
+
+    #[test]
+    fn mission_drain_tick_names_lane_cap_instead_of_no_work() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"children":[{"node_id":"x-a","decision":"skipped","reason":"lane-cap"}],"dispatched":[]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        let outcome = mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+        assert_eq!(outcome, MissionDispatch::Continue);
+
+        let rows: Vec<serde_json::Value> = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "control_plane_tick")
+            .collect();
+        let data = &rows[0]["data"];
+        assert_eq!(data["skip_reason"], "lane-cap");
+        let detail = data["detail"].as_str().unwrap();
+        assert!(detail.contains("ready=1"), "detail was {detail}");
+        assert!(detail.contains("pending=0"), "detail was {detail}");
+    }
+
+    #[test]
+    fn mission_drain_tick_reports_no_work_only_when_truly_exhausted() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"children":[],"dispatched":[]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let rows: Vec<serde_json::Value> = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "control_plane_tick")
+            .collect();
+        assert_eq!(rows[0]["data"]["skip_reason"], "no_work");
+    }
+
+    #[test]
+    fn mission_drain_tick_names_gate_error_instead_of_no_work() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(&tmp.path().join("bin"), r#"{"error":"disabled"}"#);
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let rows: Vec<serde_json::Value> = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "control_plane_tick")
+            .collect();
+        assert_eq!(rows[0]["data"]["skip_reason"], "gate:disabled");
     }
 }
