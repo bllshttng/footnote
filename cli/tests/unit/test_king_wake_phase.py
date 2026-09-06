@@ -14,8 +14,10 @@ from fno.king.state import write_manifest
 from fno.king.wake import bill_wake
 from fno.pr_watch._king_wake import (
     CrownTarget,
+    _board_rows,
     _holder_absent,
     _raise_ceiling_question,
+    _store_board_hash,
     run_king_wake,
 )
 
@@ -36,15 +38,21 @@ def _settings(*, armed: bool = True) -> SimpleNamespace:
 class _Recorder:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict]] = []
-        self.dispatches: list[tuple[str, str]] = []
+        self.dispatches: list[tuple[str, str, str | None, str | None]] = []
         self.asks: list[tuple[str, int, int]] = []
         self.unread_calls: list[str] = []
 
     def emit(self, event_type: str, data: dict) -> None:
         self.events.append((event_type, data))
 
-    def dispatch(self, target: CrownTarget, reason: str, address: str | None) -> None:
-        self.dispatches.append((target.scope, reason, address))
+    def dispatch(
+        self,
+        target: CrownTarget,
+        reason: str,
+        address: str | None,
+        detail: str | None = None,
+    ) -> None:
+        self.dispatches.append((target.scope, reason, address, detail))
 
 def _king_manifest(root):
     """The manifest path as the wake phase resolves it: the repo's space,
@@ -117,7 +125,7 @@ def test_absent_holder_with_undrained_mail_wakes_and_bills(tmp_path):
         unread=lambda address: [object()] if address == "king-x" else [],
     )
 
-    assert rec.dispatches == [("epic-x", "mail", "king-x")], f"woke: {rec.dispatches}"
+    assert rec.dispatches == [("epic-x", "mail", "king-x", None)], f"woke: {rec.dispatches}"
     woken = [e for e in rec.events if e[0] == "king_woken"]
     assert woken and woken[0][1]["reason"] == "mail"
     assert woken[0][1]["address"] == "king-x"
@@ -136,7 +144,7 @@ def test_mail_addressed_to_the_reply_handle_short_id_wakes(tmp_path):
         unread=lambda address: [object()] if address == "aa11bb22" else [],
     )
 
-    assert rec.dispatches == [("epic-x", "mail", "aa11bb22")], (
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22", None)], (
         f"addresses: {rec.unread_calls}"
     )
 
@@ -150,7 +158,7 @@ def test_project_broadcast_address_wakes_an_absent_holder(tmp_path):
         unread=lambda address: [object()] if address == "epic-x" else [],
     )
 
-    assert rec.dispatches == [("epic-x", "mail", "epic-x")]
+    assert rec.dispatches == [("epic-x", "mail", "epic-x", None)]
 
 
 def test_the_spawned_walk_argv_carries_the_matched_address(monkeypatch, tmp_path):
@@ -233,7 +241,7 @@ def test_unknown_not_found_is_absence_and_wakes(tmp_path):
         unread=lambda address: [object()],
     )
 
-    assert rec.dispatches == [("epic-x", "mail", "aa11bb22")]
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22", None)]
 
 
 def test_unarmed_phase_reads_no_bus_and_emits_nothing(tmp_path):
@@ -396,6 +404,23 @@ _BOARD_B = _BOARD_A + [
         "priority": "p1",
     }
 ]
+#: Two rows added: the acceptance case for the diff-as-prompt change.
+_BOARD_C = _BOARD_A + [
+    {
+        "id": "x-2",
+        "project": "proj",
+        "status": "ready",
+        "_kanban_column": "ready",
+        "priority": "p1",
+    },
+    {
+        "id": "x-3",
+        "project": "proj",
+        "status": "ready",
+        "_kanban_column": "ready",
+        "priority": "p1",
+    },
+]
 
 
 class _SidecarTarget:
@@ -445,10 +470,139 @@ def test_a_changed_board_wakes_with_reason_board_and_stores_the_hash(tmp_path):
         extra={"entries_fn": lambda: _BOARD_B, "scope_resolver": _PROJECT_RESOLVER},
     )
 
-    assert rec.dispatches == [("epic-x", "board", None)], "the refill wakes"
+    assert ("epic-x", "board", None) == rec.dispatches[0][:3], "the refill wakes"
     woken = [e for e in rec.events if e[0] == "king_woken"]
     assert woken and woken[0][1]["reason"] == "board"
     assert _stored(manifest) == _board_hash("epic-x", _BOARD_B, _PROJECT_RESOLVER)
+
+
+def test_the_board_diff_names_the_two_added_rows_and_nothing_unchanged(tmp_path):
+    # Acceptance 5.2: a board that gained two rows wakes with a prompt that
+    # names those two and omits the unchanged row. The woken session is
+    # fresh; without the diff on the command line it re-reads the whole board.
+    _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: _BOARD_C, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][3], "the diff is the wake payload"
+    detail = rec.dispatches[0][3]
+    assert "added: x-2" in detail and "added: x-3" in detail, detail
+    assert "x-1" not in detail, f"an unchanged row is noise: {detail}"
+
+
+def test_a_refused_board_change_keeps_the_old_rows_so_the_diff_survives(tmp_path):
+    def prime(manifest):
+        _store_board_hash(
+            _SidecarTarget(manifest),
+            _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+        )
+        bill_wake(manifest, now=NOW - timedelta(minutes=2))  # inside debounce
+
+    _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_B, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        # outside the debounce now, so the retry dispatches
+        extra={
+            "entries_fn": lambda: _BOARD_B,
+            "scope_resolver": _PROJECT_RESOLVER,
+            "now": NOW + timedelta(minutes=20),
+        },
+    )
+
+    assert rec.dispatches, "the retry wakes once the debounce lapses"
+    assert "added: x-2" in (rec.dispatches[0][3] or ""), rec.dispatches[0][3]
+
+
+def test_a_sidecar_from_before_rows_were_stored_is_a_first_observation(tmp_path):
+    # A legacy sidecar carries a hash with no rows beside it. An honest diff
+    # needs the prior rows, so that one transition records them and wakes
+    # nothing rather than naming every row "added". The rows sit at p2 so the
+    # backstop lane stays out of the case (quiet priority, no fresh terminal).
+    quiet_b = _BOARD_A_QUIET + [
+        {"id": "x-2", "project": "proj", "status": "ready", "_kanban_column": "ready", "priority": "p2"}
+    ]
+
+    def prime(manifest):
+        _store_board_hash(
+            _SidecarTarget(manifest),
+            _board_hash("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER),
+        )
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: quiet_b, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "no honest diff, no board wake"
+    import json as json_mod
+
+    payload = json_mod.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert payload["board_rows"], "the pass records the rows it could not diff"
+
+
+def test_the_spawned_walk_argv_carries_the_board_diff(monkeypatch, tmp_path):
+    import subprocess as subprocess_mod
+
+    from fno.pr_watch import _king_wake as phase_mod
+
+    argv: list[str] = []
+
+    class _FakePopen:
+        def __init__(self, args, **kwargs):
+            argv.extend(args)
+
+    monkeypatch.setattr(subprocess_mod, "Popen", _FakePopen)
+    target = CrownTarget(
+        holder="king-x",
+        scope="epic-x",
+        root=tmp_path,
+        manifest=_king_manifest(tmp_path),
+        short_id="aa11bb22",
+    )
+    target.manifest.parent.mkdir(parents=True, exist_ok=True)
+    target.manifest.write_text("---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8")
+
+    phase_mod._dispatch_walk(
+        target, "board", "fno-agents", None, "added: x-2 (ready/p1)"
+    )
+
+    assert argv[argv.index("--wake-detail") + 1] == "added: x-2 (ready/p1)"
+
+
+def test_render_board_diff_covers_removed_changed_and_caps():
+    from fno.king.wake import MAX_DETAIL_CHARS, render_board_diff
+
+    old = [("x-1", "ready", "ready", "p1")]
+    new = [("x-1", "next", "next", "p0"), ("x-2", "ready", "ready", "p1")]
+    text = render_board_diff(old, new)
+    assert "changed: x-1" in text and "ready/ready/p1 -> next/next/p0" in text, text
+    assert "added: x-2" in text, text
+
+    removed = render_board_diff(old + [("x-9", "done", "done", "p2")], old)
+    assert "removed: x-9" in removed, removed
+    assert render_board_diff(old, old) == ""
+
+    wide = render_board_diff([], [(f"x-{n}", "ready", "ready", "p1") for n in range(500)])
+    assert len(wide) <= MAX_DETAIL_CHARS + 32, len(wide)
+    assert "more rows elided" in wide, "a capped diff names what it cut"
 
 
 def test_an_unchanged_board_wakes_nothing_and_keeps_the_stored_hash(tmp_path):
@@ -456,6 +610,7 @@ def test_an_unchanged_board_wakes_nothing_and_keeps_the_stored_hash(tmp_path):
         _store_board_hash(
             _SidecarTarget(manifest),
             _board_hash("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER),
         )
 
     rec, _summary, manifest = _run(
@@ -478,6 +633,7 @@ def test_a_refused_board_change_keeps_the_old_hash_so_it_stays_a_trigger(tmp_pat
         _store_board_hash(
             _SidecarTarget(manifest),
             _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_A, _PROJECT_RESOLVER),
         )
         bill_wake(manifest, now=NOW - timedelta(minutes=2))  # inside debounce
 
@@ -501,6 +657,7 @@ def test_a_priority_move_alone_counts_as_a_board_change(tmp_path):
         _store_board_hash(
             _SidecarTarget(manifest),
             _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_A, _PROJECT_RESOLVER),
         )
 
     rec, _summary, _manifest = _run(
@@ -513,7 +670,7 @@ def test_a_priority_move_alone_counts_as_a_board_change(tmp_path):
         },
     )
 
-    assert rec.dispatches == [("epic-x", "board", None)]
+    assert [d[:3] for d in rec.dispatches] == [("epic-x", "board", None)]
 
 
 def test_an_empty_graph_read_is_not_a_board_emptied(tmp_path):
@@ -555,7 +712,7 @@ def test_the_backstop_fires_when_no_event_did(tmp_path):
         extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
     )
 
-    assert rec.dispatches == [("epic-x", "backstop", None)], (
+    assert rec.dispatches == [("epic-x", "backstop", None, None)], (
         "actionable work, no event, no recent wake: the re-check fires"
     )
     woken = [e for e in rec.events if e[0] == "king_woken"]
@@ -649,7 +806,7 @@ def test_a_configured_ceiling_of_zero_resolves_unbounded(tmp_path):
         ask_fn=lambda *a: None,
     )
 
-    assert rec.dispatches == [("epic-x", "mail", "aa11bb22")], "ceiling 0 is unbounded"
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22", None)], "ceiling 0 is unbounded"
 
 
 def test_a_recent_king_terminal_suppresses_the_backstop(tmp_path):
@@ -735,7 +892,7 @@ def test_the_wake_fires_on_a_real_bus_row_and_drains_by_cursor(tmp_path, monkeyp
         ask_fn=lambda *a: None,
     )
 
-    assert rec.dispatches == [("epic-x", "mail", "aa11bb22")], f"woke: {rec.dispatches}"
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22", None)], f"woke: {rec.dispatches}"
 
     # The respawned session drains: the ack verb advances the cursor.
     assert advance_cursor("aa11bb22", waking.id) is True

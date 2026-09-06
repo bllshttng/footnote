@@ -345,6 +345,20 @@ fn king_wake_clause(reason: Option<&str>, address: Option<&str>) -> String {
     }
 }
 
+/// The board diff the wake caller computed, as prompt text.
+///
+/// The woken session is fresh: it cannot diff the board against anything it
+/// has seen. The diff travels on the command line so the king starts from
+/// WHAT changed - not a re-read of a board whose unchanged rows are noise.
+fn king_wake_detail_clause(detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) if !detail.is_empty() => {
+            format!("\nThe board diff since the last wake (unchanged rows omitted):\n{detail}")
+        }
+        _ => String::new(),
+    }
+}
+
 fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     // ── subcommand check ──────────────────────────────────────────────────────
     let subcommand = args.first().map(|s| s.as_str()).unwrap_or("");
@@ -370,6 +384,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let mut king_wake_reason: Option<String> = None;
     let mut king_wake_address: Option<String> = None;
     let mut king_wake_holder: Option<String> = None;
+    let mut king_wake_detail: Option<String> = None;
     let mut cwd: PathBuf = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // Helper: advance i and return the next argument, or emit a "missing value"
@@ -455,6 +470,9 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             "--wake-holder" => {
                 king_wake_holder = Some(require_value!("--wake-holder", args, i).to_string());
             }
+            "--wake-detail" => {
+                king_wake_detail = Some(require_value!("--wake-detail", args, i).to_string());
+            }
             _ => {
                 eprintln!("fno-agents loop run: unknown flag '{flag}'");
                 return Ok(2);
@@ -517,6 +535,24 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         eprintln!(
             "fno-agents loop run: --wake-holder needs --wake (it names the registry \
              row the wake caller resolved absent by transcript)"
+        );
+        return Ok(2);
+    }
+    if king_wake_detail.is_some() && !king_wake {
+        // The detail is the trigger's payload - what changed on the board.
+        // Without --wake there is no trigger whose payload it could be.
+        eprintln!(
+            "fno-agents loop run: --wake-detail needs --wake (it carries the \
+             trigger's payload: the board diff since the last wake)"
+        );
+        return Ok(2);
+    }
+    if king_wake_detail.is_some() && king_wake_reason.as_deref() != Some("board") {
+        // Only the board trigger computes a diff; a mail wake carries its
+        // address, a backstop wake has nothing new by construction.
+        eprintln!(
+            "fno-agents loop run: --wake-detail needs --wake-reason board (only the \
+             board trigger carries a diff as its payload)"
         );
         return Ok(2);
     }
@@ -663,13 +699,14 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             .unwrap_or_default();
         let wake_clause =
             king_wake_clause(king_wake_reason.as_deref(), king_wake_address.as_deref());
+        let detail_clause = king_wake_detail_clause(king_wake_detail.as_deref());
         format!(
             "You are the respawned king over {scope}. Read the board \
              (fno inbox board --json --state <your kings manifest>), work \
              every actionable row through the court duties in \
              skills/king-for-a-day, and encode each ruling in the graph before \
              your next read. This is a reign pass, not a /target resume: do not \
-             implement nodes yourself, dispatch and rule.{wake_clause}"
+             implement nodes yourself, dispatch and rule.{wake_clause}{detail_clause}"
         )
     } else {
         "/target --resume".to_string()
@@ -877,8 +914,23 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
 
 #[cfg(test)]
 mod tests {
-    use super::{cancel_path_for_driver, king_wake_clause};
+    use super::{cancel_path_for_driver, king_wake_clause, king_wake_detail_clause};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_board_wakes_detail_names_the_diff_verbatim() {
+        let clause = king_wake_detail_clause(Some("added: x-1 (ready/p1)\nadded: x-2 (next/p0)"));
+        assert!(
+            clause.contains("added: x-1") && clause.contains("added: x-2"),
+            "the diff is the payload, verbatim: {clause}"
+        );
+        assert!(
+            clause.starts_with('\n'),
+            "it appends, not splices: {clause:?}"
+        );
+        assert!(king_wake_detail_clause(None).is_empty());
+        assert!(king_wake_detail_clause(Some("")).is_empty());
+    }
 
     #[test]
     fn a_mail_wake_names_the_matched_inbox_and_its_ack() {

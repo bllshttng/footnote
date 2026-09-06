@@ -216,3 +216,50 @@ def bill_wake(path: Path, *, now: datetime, keep: int = DEFAULT_KEEP) -> int:
         stamps = sorted(stamps)[-max(1, keep):]
         _rewrite_wake_times(path, stamps)
         return len(stamps)
+
+
+#: Byte bound on one rendered board diff. The diff rides the walk's argv as
+#: ``--wake-detail``, so an unbounded render is an unbounded command line; a
+#: scope whose refill exceeds the cap names its elided row count instead.
+MAX_DETAIL_CHARS = 2000
+
+
+def render_board_diff(old_rows, new_rows, *, cap: int = MAX_DETAIL_CHARS) -> str:
+    """The board diff between two wake observations, as prompt text.
+
+    Rows are the ``(id, status, column, priority)`` tuples the wake sidecar
+    stores beside its hash. Only ADDED, CHANGED, and REMOVED rows appear: a
+    king woken on a two-row refill reads those two rows, not the board. A
+    removed row is named rather than hidden - a node leaving the scope is a
+    change the king may need to react to, and a diff that dropped it would
+    lie by omission at the exact moment the hash says something moved.
+    """
+    old = {str(row[0]): tuple(str(f) for f in row) for row in old_rows or ()}
+    new = {str(row[0]): tuple(str(f) for f in row) for row in new_rows or ()}
+    lines: list[str] = []
+    for row_id in sorted(set(old) - set(new)):
+        lines.append(f"removed: {row_id} ({_row_label(old[row_id])})")
+    for row_id in sorted(set(new) - set(old)):
+        lines.append(f"added: {row_id} ({_row_label(new[row_id])})")
+    for row_id in sorted(set(new) & set(old)):
+        if new[row_id] != old[row_id]:
+            lines.append(
+                f"changed: {row_id} {_row_label(old[row_id])} -> {_row_label(new[row_id])}"
+            )
+    if not lines:
+        return ""
+    if len("\n".join(lines)) <= cap:
+        return "\n".join(lines)
+    shown: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > cap - 32:
+            break
+        shown.append(line)
+        used += len(line) + 1
+    elided = len(lines) - len(shown)
+    return "\n".join(shown) + f"\n...(+{elided} more rows elided)"
+
+
+def _row_label(row: tuple) -> str:
+    return "/".join(part for part in row[1:] if part)

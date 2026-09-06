@@ -204,11 +204,13 @@ def _sidecar_path(target: CrownTarget) -> Path:
     return target.manifest.parent / f"{target.scope}.wake.json"
 
 
-def _board_hash(scope: str, entries: list, resolver: Optional[Callable] = None) -> str:
-    """sha256 over the scope's ``(id, status, column, priority)`` rows.
+def _board_rows(
+    scope: str, entries: list, resolver: Optional[Callable] = None
+) -> "list[tuple[str, str, str, str]] | None":
+    """The scope's ``(id, status, column, priority)`` rows, sorted.
 
     Reuses :func:`fno.king.scope.compile_scope_ids` for scope resolution -
-    never a reimplementation. An empty string means "no signal" (uncompilable
+    never a reimplementation. ``None`` means "no signal" (uncompilable
     scope), which the caller must treat as unchanged, never as a change: an
     epic that left the graph is not a board refill.
     """
@@ -218,8 +220,8 @@ def _board_hash(scope: str, entries: list, resolver: Optional[Callable] = None) 
     try:
         ids = compile_scope_ids(scope, entries, **kwargs)
     except Exception:  # noqa: BLE001 - an uncompilable scope is not a trigger
-        return ""
-    rows = sorted(
+        return None
+    return sorted(
         (
             str(row.get("id") or ""),
             str(row.get("status") or ""),
@@ -229,51 +231,76 @@ def _board_hash(scope: str, entries: list, resolver: Optional[Callable] = None) 
         for row in entries
         if isinstance(row, dict) and str(row.get("id") or "") in ids
     )
+
+
+def _hash_rows(rows: list) -> str:
     joined = "\n".join("|".join(row) for row in rows)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def _board_hash(scope: str, entries: list, resolver: Optional[Callable] = None) -> str:
+    """sha256 over the scope's ``(id, status, column, priority)`` rows."""
+    rows = _board_rows(scope, entries, resolver)
+    return "" if rows is None else _hash_rows(rows)
+
+
+def _read_board_sidecar(sidecar: Path) -> "tuple[str, list[tuple[str, str, str, str]] | None]":
+    """``(stored_hash, stored_rows)``; corrupt reads as first observation."""
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "", None
+    stored_hash = str(payload.get("board_hash") or "")
+    raw_rows = payload.get("board_rows")
+    rows = None
+    if isinstance(raw_rows, list) and raw_rows:
+        # An empty list is the no-observation spelling (a store before any
+        # rows were recorded), so it reads as unavailable, not as an empty
+        # board: diffing against "empty" would name every row "added".
+        rows = [tuple(str(f) for f in row) for row in raw_rows if len(row) == 4]
+    return stored_hash, rows
 
 
 def _board_trigger(
     target: CrownTarget,
     entries: list,
     resolver: Optional[Callable] = None,
-) -> tuple[bool, Optional[str]]:
-    """``(wake?, hash_to_store_after_a_dispatch)``.
+) -> tuple[bool, Optional[str], Optional[list], Optional[str]]:
+    """``(wake?, hash+rows_to_store_after_a_dispatch, diff_naming_what_changed)``.
 
     An ABSENT stored hash is a first observation, not a change: it is stored
     here and wakes nothing, or every new crown wakes on its first tick. A
-    CHANGED hash is returned for the caller to store only after a dispatch
-    actually fired - a refused board change must stay a trigger, exactly like
-    the refused mail a cursor has not advanced past. An unreadable graph
-    (empty entries) is not a board emptied: no signal.
+    sidecar from before rows were stored beside the hash reads the same way:
+    an honest diff needs the prior rows, so that one transition only records
+    them. A CHANGED hash is returned for the caller to store only after a
+    dispatch actually fired - a refused board change must stay a trigger,
+    exactly like the refused mail a cursor has not advanced past. An
+    unreadable graph (empty entries) is not a board emptied: no signal.
     """
     if not entries:
-        return False, None
-    fresh = _board_hash(target.scope, entries, resolver)
-    if not fresh:
-        return False, None
-    sidecar = _sidecar_path(target)
-    stored = ""
-    try:
-        stored = str(
-            json.loads(sidecar.read_text(encoding="utf-8")).get("board_hash") or ""
-        )
-    except (OSError, ValueError):
-        stored = ""  # a corrupt sidecar reads as first observation
-    if not stored:
-        _store_board_hash(target, fresh)
-        return False, None
+        return False, None, None, None
+    rows = _board_rows(target.scope, entries, resolver)
+    if rows is None:
+        return False, None, None, None
+    fresh = _hash_rows(rows)
+    stored, stored_rows = _read_board_sidecar(_sidecar_path(target))
+    if not stored or stored_rows is None:
+        _store_board_hash(target, fresh, rows)
+        return False, None, None, None
     if stored == fresh:
-        return False, None
-    return True, fresh
+        return False, None, None, None
+    from fno.king.wake import render_board_diff
+
+    return True, fresh, rows, render_board_diff(stored_rows, rows)
 
 
-def _store_board_hash(target: CrownTarget, digest: str) -> None:
+def _store_board_hash(target: CrownTarget, digest: str, rows: list = ()) -> None:
     sidecar = _sidecar_path(target)
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     tmp = sidecar.with_suffix(".json.tmp")
     tmp.write_text(
-        json.dumps({"board_hash": digest}), encoding="utf-8"
+        json.dumps({"board_hash": digest, "board_rows": [list(row) for row in rows]}),
+        encoding="utf-8",
     )
     tmp.replace(sidecar)
 
@@ -345,7 +372,11 @@ def _backstop_due(
 
 
 def _dispatch_walk(
-    target: CrownTarget, reason: str, binary: str, address: Optional[str] = None
+    target: CrownTarget,
+    reason: str,
+    binary: str,
+    address: Optional[str] = None,
+    detail: Optional[str] = None,
 ) -> None:
     """Spawn the wake-mode walk, detached.
 
@@ -356,7 +387,9 @@ def _dispatch_walk(
     the matched address: the woken session is fresh and can derive neither the
     dead holder's name nor its reply-handle short id from any whoami of its
     own, so without the address on the command line the row that woke the
-    scope is undrainable and the wake refires on it.
+    scope is undrainable and the wake refires on it. A board wake carries the
+    diff as ``--wake-detail``: the woken king starts from what changed, not a
+    re-read of the whole board.
     """
     argv = [
         binary,
@@ -374,6 +407,8 @@ def _dispatch_walk(
     ]
     if address:
         argv += ["--wake-address", address]
+    if detail:
+        argv += ["--wake-detail", detail]
     log = target.manifest.with_suffix(".md.wake.log")
     with log.open("ab") as sink:
         subprocess.Popen(  # noqa: S603 - fixed argv, no shell
@@ -473,15 +508,17 @@ def run_king_wake(
             continue
         reason: Optional[str] = None
         wake_address: Optional[str] = None
+        wake_detail: Optional[str] = None
         matched = _mail_trigger(target, unread_fn)
         if matched is not None:
             reason = "mail"
             wake_address = matched
         fresh_board_hash: Optional[str] = None
+        fresh_board_rows: Optional[list] = None
         if reason is None:
             if entries is None:
                 entries = entries_fn()
-            changed, fresh_board_hash = _board_trigger(
+            changed, fresh_board_hash, fresh_board_rows, wake_detail = _board_trigger(
                 target, entries, scope_resolver
             )
             if changed:
@@ -525,7 +562,7 @@ def run_king_wake(
             continue
         window_count = verdict.count
         if dispatch_fn is not None:
-            dispatch_fn(target, reason, wake_address)
+            dispatch_fn(target, reason, wake_address, wake_detail)
         else:
             import shutil
 
@@ -534,9 +571,10 @@ def run_king_wake(
                 reason,
                 shutil.which("fno-agents") or "fno-agents",
                 wake_address,
+                wake_detail,
             )
         if fresh_board_hash:
-            _store_board_hash(target, fresh_board_hash)
+            _store_board_hash(target, fresh_board_hash, fresh_board_rows or ())
         emit(
             "king_woken",
             {
