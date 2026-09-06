@@ -100,14 +100,14 @@ def test_map_covers_current_surface_once():
     # shape` (reign) lands on the same count: 567 total from 565.
     # This branch adds `backlog contain`, the plan-less containment fold,
     # as one new row (first allocated under a retired alias, renamed in
-    # place before merge): 568 -> 569.
-    # This branch adds `agents feed`, the activity feed projection: counted
-    # from the merged file, 569 -> 570. The reseat branch added
-    # `agents reseat` on the same base (571 together), then the
-    # rust-conversion ruling deleted that surface: the whole move is the
-    # native `fno mux thread reseat`. Counted from the merged file at the
-    # post-1508 rebase: 571 - 1 = 570.
-    assert len(mapped) == 570, (
+    # place before merge): 568 -> 569. Both sides then added `agents feed`,
+    # the activity feed projection, from that same base, so +1 exactly once.
+    # The rust-conversion ruling deleted this branch's `agents reseat` Python
+    # surface (the whole move is the native `fno mux thread reseat`): net
+    # zero. Main's sidecar retirement deleted the `backlog rehash` row: -1.
+    # Counted from the merged file, never taken from either side: 569 + 1 -
+    # 1 = 569.
+    assert len(mapped) == 569, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

@@ -1,6 +1,6 @@
 """All graph readers speak one migrated vocabulary.
 
-`load_graph` (hash-validated) and `read_graph_nodes` (scoreboard) used to parse
+`load_graph` and `read_graph_nodes` (scoreboard) used to parse
 graph.json themselves. `load_graph` folded the `_status` -> `status` KEY rename
 but not the `claimed` -> `in_progress` VALUE rename, so its ~10 callers -- among
 them `recovery.py`, `target_cli.py`, and `dispatch.py` -- read a status

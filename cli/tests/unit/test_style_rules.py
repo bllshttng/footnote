@@ -19,11 +19,11 @@ from fno import style
 
 
 def rule_set(text: str) -> set[int]:
-    return {v.rule for v in style.check(text)}
+    return {v.rule for v in style.check(text, surface="pr-body")}
 
 
 def rule_one(text: str) -> int | None:
-    hits = [v.rule for v in style.check(text)]
+    hits = [v.rule for v in style.check(text, surface="pr-body")]
     return hits[0] if hits else None
 
 
@@ -52,6 +52,21 @@ def test_mail_body_over_80_masked_words_fails_with_both_counts():
 def test_mail_body_at_80_masked_words_passes_word_cap():
     body = " ".join("word" for _ in range(80)) + "."
     assert 7 not in {v.rule for v in style.check(body, surface="mail")}
+
+
+def test_mail_body_with_semicolons_passes_the_cap():
+    # Semicolons are prose shape for text a human reads; the relay contract
+    # caps length only, so an 80-word body carrying them is accepted.
+    body = " ".join("word" for _ in range(77)) + " a; b; c"
+    assert style.check(body, surface="mail") == []
+
+
+def test_mail_body_runs_only_the_cap():
+    # Rules 1 to 6 do not run on mail: sentence shape that fails every prose
+    # rule still passes the gate at 80 words or fewer.
+    body = ("you should always run it; and don't stop if it fails; " * 3).strip()
+    assert len(body.split()) <= 80
+    assert style.check(body, surface="mail") == []
 
 
 def test_word_cap_is_not_used_on_other_surfaces_or_added_lines():
@@ -446,13 +461,13 @@ def test_link_text_kept_target_dropped():
 
 def test_multiple_modals_in_one_sentence_each_report():
     text = "you should run it and you would try it."
-    violations = style.check(text)
+    violations = style.check(text, surface="pr-body")
     assert sum(1 for v in violations if v.rule == 3) == 2
 
 
 def test_multiple_contractions_in_one_sentence_each_report():
     text = "don't stop and don't wait."
-    violations = style.check(text)
+    violations = style.check(text, surface="pr-body")
     assert sum(1 for v in violations if v.rule == 4) == 2
 
 
@@ -464,7 +479,7 @@ def test_format_returns_empty_when_clean():
 
 def test_format_names_each_rule():
     text = "you should run it."
-    msg = style.format_violations(style.check(text))
+    msg = style.format_violations(style.check(text, surface="pr-body"))
     assert "rule 3" in msg
     assert "modal" in msg
 
@@ -478,14 +493,14 @@ def test_format_reports_every_violation_class_in_one_pass():
         "you should run it.\n\n"
         "stop when the queue is empty.\n"
     )
-    msg = style.format_violations(style.check(body))
+    msg = style.format_violations(style.check(body, surface="pr-body"))
     for rule in (1, 2, 3, 5):
         assert f"rule {rule}" in msg
 
 
 def test_format_groups_by_rule_number():
     text = "you should try it and you would run it."
-    msg = style.format_violations(style.check(text))
+    msg = style.format_violations(style.check(text, surface="pr-body"))
     first = msg.index("rule 3")
     second = msg.index("rule 3", first + 1)
     assert first < second
@@ -493,19 +508,19 @@ def test_format_groups_by_rule_number():
 
 def test_format_quotes_an_excerpt_of_the_offending_text():
     text = "you should run it."
-    msg = style.format_violations(style.check(text))
+    msg = style.format_violations(style.check(text, surface="pr-body"))
     assert '"you should run it."' in msg
 
 
 def test_format_caps_the_excerpt_at_twelve_words():
     words = " ".join("w" for _ in range(26))
-    msg = style.format_violations(style.check(words + "."))
+    msg = style.format_violations(style.check(words + ".", surface="pr-body"))
     assert "..." in msg
     assert " ".join(["w"] * 13) not in msg
 
 
 def test_format_names_the_local_dry_run():
-    msg = style.format_violations(style.check("you should run it."))
+    msg = style.format_violations(style.check("you should run it.", surface="pr-body"))
     assert "fno doctor lint style --stdin" in msg
 
 
@@ -519,7 +534,7 @@ def test_format_adds_word_cap_recipe_only_for_rule_7():
     assert "Approval:" in wordcap_msg
     assert "Put findings on the node" in wordcap_msg
 
-    other_msg = style.format_violations(style.check("you should run it."))
+    other_msg = style.format_violations(style.check("you should run it.", surface="pr-body"))
     assert "Cut articles" not in other_msg
     assert "Status:" not in other_msg
     assert "Approval:" not in other_msg
@@ -530,7 +545,7 @@ def test_format_excerpt_survives_an_inner_double_quote():
     # A sentence carrying a literal double quote must not close the wrapping
     # quote early and expose the rest of the excerpt to the word count.
     text = 'you should run "the check" now.'
-    msg = style.format_violations(style.check(text))
+    msg = style.format_violations(style.check(text, surface="pr-body"))
     assert style.check(msg, surface="pr-body") == [], msg
 
 
@@ -539,7 +554,7 @@ def test_format_detail_survives_an_unmatched_quote_on_a_later_hit():
     # unmatched quote, which used to shift every later quote pairing and
     # leave a real word unmasked, failing the refusal's own self-check.
     text = 'you should run and would" stop.'
-    msg = style.format_violations(style.check(text))
+    msg = style.format_violations(style.check(text, surface="pr-body"))
     assert style.check(msg, surface="pr-body") == [], msg
 
 
@@ -547,7 +562,7 @@ def test_the_refusal_message_passes_its_own_rules():
     # The gate must not violate its own rule. The refusal message is itself
     # style-checked; every banned word it names is quoted, so masking exempts it.
     text = "you should don't; run if x."
-    msg = style.format_violations(style.check(text))
+    msg = style.format_violations(style.check(text, surface="pr-body"))
     # The refusal goes to stderr, not a mail body, so it models rules 1 to 6.
     assert style.check(msg, surface="pr-body") == [], msg
 
@@ -556,12 +571,12 @@ def test_format_names_the_mention_escape_for_word_rules():
     # A rule 3 or rule 4 refusal is looking straight at a working
     # demonstration of the fix - every banned word the refusal names is
     # quoted - so it must say so, on the exact word that was refused.
-    msg = style.format_violations(style.check("you should run it."))
+    msg = style.format_violations(style.check("you should run it.", surface="pr-body"))
     assert "A quoted word is a mention, not a use." in msg
     assert 'Wrap "should" in double quotes or backticks to name it.' in msg
     assert "This refusal does that with every word it names." in msg
 
-    rule4_msg = style.format_violations(style.check("don't run it."))
+    rule4_msg = style.format_violations(style.check("don't run it.", surface="pr-body"))
     assert "A quoted word is a mention, not a use." in rule4_msg
     # The demonstration word is the one the reader actually wrote, never a
     # hardcoded modal: a rule 4 refusal demonstrates on the contraction.
@@ -573,7 +588,7 @@ def test_format_adds_the_mention_escape_only_for_word_rules():
     # line is absent: an advisory that fires on every refusal trains the
     # reader to skip the paragraph where the answer is.
     body = " ".join("word" for _ in range(81)) + "."
-    length_msg = style.format_violations(style.check(body))
+    length_msg = style.format_violations(style.check(body, surface="pr-body"))
     assert "A quoted word is a mention" not in length_msg
     assert "double quotes or backticks" not in length_msg
 
@@ -581,7 +596,7 @@ def test_format_adds_the_mention_escape_only_for_word_rules():
 def test_the_refusal_message_survives_a_rule_6_violation():
     # Rule 6 is the one rule whose refusal is multi-line by nature, so it is the
     # one most able to break the self-consistency invariant above.
-    msg = style.format_violations(style.check("a paragraph broken\nacross two lines."))
+    msg = style.format_violations(style.check("a paragraph broken\nacross two lines.", surface="pr-body"))
     assert "rule 6" in msg
     # The refusal goes to stderr, not a mail body, so it models rules 1 to 6.
     assert style.check(msg, surface="pr-body") == [], msg
@@ -647,7 +662,7 @@ def test_no_exception_is_none():
 # --- Boundaries ---------------------------------------------------------------
 
 def test_empty_body_is_clean():
-    assert style.check("") == []
+    assert style.check("") == []  # mail default: cap-only, empty passes
 
 
 def test_only_a_code_fence_is_clean():

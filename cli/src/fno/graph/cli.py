@@ -3100,7 +3100,8 @@ def cmd_intake(
         None,
         "--claims",
         help=(
-            "ab-XXXXXXXX of an existing idea-state node this plan implements. "
+            "ab-XXXXXXXX of an existing node, in any state, that this plan "
+            "implements. "
             "Updates the node in place rather than creating a new one. "
             "Beats any frontmatter 'claims:' value."
         ),
@@ -14152,8 +14153,8 @@ def cmd_unarchive(
 
 
 def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, project: Optional[str]):
-    """Update a claimed idea node in place: attach the plan, merge the
-    doc-declared fields, promote idea -> ready.
+    """Bind a claimed node to the plan in place, in any state: attach the
+    plan, merge the doc-declared fields, promote idea -> ready.
 
     The single-plan claim lane's mutator body, shared with the multi lane so
     a claim lands identically from either surface. A second copy here would
@@ -14266,9 +14267,11 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
                 entry["project"] = resolved_project
             if entry.get("cwd") is None and resolved_cwd:
                 entry["cwd"] = resolved_cwd
-        # Promote idea -> ready by clearing any stale locked_at.
+        # Promote idea -> ready by clearing a stale idea lock; a node with a
+        # live work lock (locked_by set) keeps it.
         # status is recomputed by recompute_statuses on the next read.
-        entry["locked_at"] = None
+        if entry.get("locked_by") is None:
+            entry["locked_at"] = None
         break
     return es
 
@@ -14917,63 +14920,6 @@ def cmd_new(
     typer.echo(new_id_holder[0])
 
 
-# -- rehash --
-
-
-@cli.command("rehash", hidden=True)
-def cmd_rehash(
-    revert: bool = typer.Option(
-        False,
-        "--revert",
-        help="Restore graph.json from the latest backup instead of rehashing.",
-    ),
-) -> None:
-    """Acknowledge an external edit to graph.json by rehashing the sidecar (default).
-
-    With --revert: locate the most recent graph.json.bak.* backup and restore it,
-    then update the sidecar to match.
-    """
-    import hashlib
-    import tempfile
-
-    path = _graph_path()
-
-    if revert:
-        # Find the most-recent .bak.* file
-        backups = sorted(path.parent.glob(f"{path.name}.bak.*"))
-        if not backups:
-            typer.echo(f"No backups found for {path}. Cannot revert.", err=True)
-            raise typer.Exit(code=1)
-        latest_backup = backups[-1]
-        # Atomic restore: temp + rename
-        tmp_fd, tmp_path_str = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-        try:
-            with os.fdopen(tmp_fd, "wb") as f:
-                f.write(latest_backup.read_bytes())
-            os.replace(tmp_path_str, str(path))
-        except Exception:
-            Path(tmp_path_str).unlink(missing_ok=True)
-            raise
-        typer.echo(f"Reverted graph.json from {latest_backup.name}")
-
-    # Rehash sidecar to match current (possibly just-restored) content
-    if not path.exists():
-        typer.echo(f"graph.json not found at {path}", err=True)
-        raise typer.Exit(code=1)
-
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    sidecar = Path(str(path) + ".sha256")
-    tmp_fd2, tmp_path2 = tempfile.mkstemp(dir=path.parent, suffix=".sha256.tmp")
-    try:
-        with os.fdopen(tmp_fd2, "w") as f:
-            f.write(digest + "\n")
-        os.replace(tmp_path2, str(sidecar))
-    except Exception:
-        Path(tmp_path2).unlink(missing_ok=True)
-        raise
-    typer.echo(f"Reconciled to hash {digest[:8]}")
-
-
 # ---------------------------------------------------------------------------
 # collisions sub-app: file-overlap detection between plans
 # ---------------------------------------------------------------------------
@@ -15178,18 +15124,6 @@ def cmd_supersede(
                 err=True,
             )
             raise typer.Exit(code=1)
-        if old_node.get("deferred_at"):
-            # A pre-existing deferral is an independent park supersede would
-            # overwrite, and unsupersede cannot tell that park from its own, so
-            # the deferral would be lost on reversal. Resolve it first - same
-            # shape as the done/already-superseded refusals above.
-            typer.echo(
-                f"Error: cannot supersede {replaces}: it is deferred. Undefer it "
-                f"first (`fno backlog undefer {replaces}`); superseding would "
-                f"overwrite that pause and an unsupersede could not restore it.",
-                err=True,
-            )
-            raise typer.Exit(code=1)
 
         # Guard the death transition: a unit with live children cannot
         # be killed without orphaning them, and orphaning is a deliberate act.
@@ -15239,9 +15173,9 @@ def cmd_supersede(
             "evidence_pr": None,
             "matched_surfaces": [],
         }
-        old_node["deferred_at"] = None
-        old_node["deferred_reason"] = None
-        old_node.pop("deferred_kind", None)
+        # A pre-existing deferral stays: status precedence reads superseded
+        # above deferred, so the park resurfaces if the supersession is
+        # reversed.
         # Release anything that was shipping inside it (x-e957, sigma). Same
         # trap `cmd_remove` was fixed for, one step short of deletion: a
         # superseded unit will never merge, so `_strandable_contained_ids`
@@ -15301,13 +15235,11 @@ def cmd_unsupersede(
 ) -> None:
     """Reverse a supersede on ``node_id``. Idempotent in the safe direction.
 
-    Clears ``superseded_by``, ``deferred_at``, and ``deferred_reason`` (the
-    latter two were set by ``cmd_supersede`` and must go together, else the
-    status precedence drops the node from ``superseded`` straight into
-    ``deferred``) and removes ``node_id`` from the replacer's ``supersedes``
-    list. The status then recomputes to the node's underlying state, and the
-    plan doc is forced off terminal ``superseded`` (the forward-only projector
-    will not leave a terminal on its own).
+    Clears ``superseded_by`` and removes ``node_id`` from the replacer's
+    ``supersedes`` list; any ``deferred_at`` park the node carried before the
+    supersession survives, so the status recomputes back to ``deferred``
+    after the reversal. The plan doc is forced off terminal ``superseded``
+    (the forward-only projector will not leave a terminal on its own).
 
     A node that is merely deferred (no ``superseded_by``) is left untouched:
     reactivating parked work is ``undefer``'s job, and clearing a deferral here
@@ -15360,9 +15292,7 @@ def cmd_unsupersede(
             ]
         node["superseded_by"] = None
         node["supersession"] = None
-        node["deferred_at"] = None
-        node["deferred_reason"] = None
-        node.pop("deferred_kind", None)
+        # Any pre-supersession deferral survives the reversal on purpose.
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -15495,7 +15425,6 @@ _TRACKER_OWNED_VERBS = frozenset(
         "archive",
         "unarchive",
         "archive-dedupe-ids",
-        "rehash",
         "maintain",
         "groom",
         # graph-row mutation (stamps deferred_kind under the lock)

@@ -150,9 +150,9 @@ fn write_if_different(path: &Path, bytes: &[u8]) {
 /// does not depend on fno-agents as a cargo dep), so a dep would tie fno's
 /// publishability to a registry state that lags this repo. The developer who
 /// edits the canonical is the developer who builds this crate, so the sync
-/// happens where the edit happens and silent drift is impossible.
-/// `scripts/ci/check-harness-capabilities-fresh.sh` stays only as a tripwire
-/// for a copy edited by hand.
+/// happens where the edit happens and silent drift is impossible. The
+/// rust-ci generated-copies dirty-tree step is the tripwire for a copy
+/// edited by hand.
 ///
 /// No-op when `cli/` or the sibling crate is absent: that is the `cargo
 /// package` / crates.io tarball case, where the crate must still build
@@ -207,8 +207,8 @@ fn sync_merge_posture() {
 /// crates.io build compiles against and the link is a real dependency edge.
 ///
 /// No-op when the schema is absent (tarball case) and on any parse failure: the
-/// committed file is then the value, and `scripts/ci/check-events-limits-fresh.sh`
-/// is the tripwire against a hand edit.
+/// committed file is then the value, and the rust-ci generated-copies
+/// dirty-tree step is the tripwire against a hand edit.
 fn sync_events_limits() {
     let generated = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/events_limits.toml");
     let Some(root) = repo_root() else { return };

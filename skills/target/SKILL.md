@@ -63,7 +63,7 @@ That is the whole job when a backlog node or plan is already bound. `fno do targ
 <HARD-GATE>
 NEVER edit ~/.fno/graph.json directly via Edit/Write tools or `jq -i`/`sed -i`.
 ALWAYS use `fno backlog` commands or call `locked_mutate_graph()` from Python.
-Direct edits are blocked by the PreToolUse hook AND detected via hash sidecar.
+Direct edits are blocked by `hooks/graph-write-protect.sh`.
 </HARD-GATE>
 
 <HARD-GATE>

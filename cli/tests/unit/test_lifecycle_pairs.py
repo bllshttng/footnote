@@ -112,7 +112,7 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
         "idea", "intake", "join", "lane-fill", "lanes", "maintain", "migrate-difficulty",
         "migrate-priorities", "migrate-updated-at", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",
-        "rank", "ready", "reconcile", "reconcile-findings", "rehash", "retro",
+        "rank", "ready", "reconcile", "reconcile-findings", "retro",
         "relatedness", "remove", "render-views", "reopen", "reprioritize", "roadmap",
         "session", "status", "stuck-epics", "supersede", "task", "triage",
         "unarchive", "unclaim", "undefer", "undispatched", "unqueue", "unsupersede", "update",

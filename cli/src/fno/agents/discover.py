@@ -2412,7 +2412,7 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
     but never enough to claim liveness.
     """
     try:
-        from fno.graph.load import GraphCorruptionError, load_graph
+        from fno.graph.load import load_graph
     except ImportError:
         return [], False
     try:
@@ -2421,10 +2421,10 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
         # Every other load_graph caller takes the filtered default, so no other
         # consumer has to guard against a row it cannot index.
         entries = load_graph(keep_malformed=True)
-    except (OSError, ValueError, GraphCorruptionError):
-        # Corrupt, torn, or hash-mismatched: unreadable, NOT empty. Reporting
-        # empty here would let a graph problem masquerade as "this token names
-        # nothing" and drop the mail.
+    except (OSError, ValueError):
+        # Unparseable or unreadable: NOT empty. Reporting empty here would let
+        # a graph problem masquerade as "this token names nothing" and drop
+        # the mail.
         return [], False
     hits: _Hits = []
     # Node stamps carry their own harness, so identity is the pair (x-c670).
