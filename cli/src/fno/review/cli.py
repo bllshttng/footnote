@@ -349,8 +349,14 @@ def _attest_from_record(
     # idempotent at (pr, head); a repo with no PR yet posts nothing.
     if record.get("dispositions"):
         try:
+            # `pr=None` is explicit: called as a function, the Typer default
+            # is an OptionInfo object, which is not None and reaches the REST
+            # reader as a PR number.
             post_dispositions(
-                findings_file=findings_file, head=head_sha, reviewer=data["reviewer"]
+                findings_file=findings_file,
+                head=head_sha,
+                reviewer=data["reviewer"],
+                pr=None,
             )
         except Exception:  # noqa: BLE001 - the attestation is the gate evidence
             pass
@@ -564,9 +570,13 @@ def post_dispositions(
         raise typer.Exit(code=3)
     pr_head = info.get("head_sha")
     if pr_head and pr_head != head:
+        # Full shas on both sides: an abbreviated --head compares unequal to
+        # the PR's full head, and a truncated message would show two equal
+        # prefixes refusing each other.
         typer.secho(
-            f"post-dispositions: refusing: PR {pr} head {str(pr_head)[:9]} is not the "
-            f"attested head {head[:9]}; re-request review at the new head",
+            f"post-dispositions: refusing: PR {pr} head {pr_head} is not the "
+            f"attested head {head} (--head takes the full sha); re-request "
+            "review at the new head",
             err=True,
         )
         raise typer.Exit(code=3)
