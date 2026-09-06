@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from fno.agents.crown import (
     _canonical_project,
+    _crown_rivals,
     _graph_index,
     _territory_key,
     crown_reading,
@@ -67,30 +68,59 @@ def _agreement(
 
 
 def _conflicts(rows: list) -> list[dict[str, Any]]:
-    """Territory two live crowned rows hold at once, one entry per scope.
+    """Territory two live crowned rows double-rule, one entry per rivalry.
 
-    Groups on :func:`_territory_key`, the key crown's own checks use.
+    Keys on :func:`_crown_rivals`, the same ladder-aware rule the grant-time
+    holder scan uses, so a conflict here and the refusal at grant time can
+    never disagree about what "double rule" means: a set-holder rivals a
+    holder over one member, while a portfolio and the project kings of its
+    court are two legitimate crowns.
     """
     # Joined on crown_scope, not a full crown_reading: a scope claims territory
     # with or without a level, and gather_court surfaces those rows too.
-    claims: list[tuple[Any, str]] = []
+    claims: list[tuple[Any, str, frozenset[str]]] = []
     for row in rows:
         scope = getattr(row, "crown_scope", None)
         if isinstance(scope, str) and scope.strip():
-            claims.append((row, scope))
-    seen: dict[frozenset[str], tuple[str, list[str]]] = {}
-    for row, scope in claims:
-        key = _territory_key(scope)
-        if not key:
-            continue
-        existing = seen.get(key)
-        if existing is None:
-            seen[key] = (scope, [row.name])
-        else:
-            existing[1].append(row.name)
+            key = _territory_key(scope)
+            if key:
+                claims.append((row, scope, key))
+    # Rivals group together: pairwise comparison over live crowned rows (a
+    # handful at fleet scale), with each group reporting the union of the
+    # territories its pairs actually share - never a member only one row holds.
+    parent = list(range(len(claims)))
+
+    def _root(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    pair_shared: list[tuple[int, int, set[str]]] = []
+    for i in range(len(claims)):
+        for j in range(i + 1, len(claims)):
+            row_i, scope_i, key_i = claims[i]
+            row_j, scope_j, key_j = claims[j]
+            if not _crown_rivals(
+                scope_i,
+                getattr(row_i, "crown_level", None),
+                scope_j,
+                getattr(row_j, "crown_level", None),
+            ):
+                continue
+            parent[_root(i)] = _root(j)
+            pair_shared.append((i, j, set(key_i & key_j)))
+    # Shared members fold under the FINAL roots: a set keyed at pair time can
+    # sit under a root a later pair merged away.
+    shared: dict[int, set[str]] = {}
+    for i, _j, members in pair_shared:
+        shared.setdefault(_root(i), set()).update(members)
+    groups: dict[int, list[str]] = {}
+    for i, (row, _scope, _key) in enumerate(claims):
+        groups.setdefault(_root(i), []).append(row.name)
     return [
-        {"scope": scope, "holders": holders}
-        for scope, holders in seen.values()
+        {"scope": ",".join(sorted(shared.get(root, set()))), "holders": holders}
+        for root, holders in groups.items()
         if len(holders) > 1
     ]
 

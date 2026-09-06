@@ -25,6 +25,7 @@
 //!     rewrites `shape` on the scope's manifest under the manifest lock;
 //!     exit 0 prints the shape now on the file, exit 1 carries the refusal.
 
+use crate::loop_king::scopes_overlap;
 use crate::state::{load_registry, RegistryEntry};
 use serde::Serialize;
 use std::fs;
@@ -313,10 +314,20 @@ pub fn reign_state(
         }
     };
 
-    // Scope form: live holders over the named territory.
+    // Scope form: live holders over the named territory. A rung-2 crown is
+    // stored as the joined set and a set-holder reigns over each member, so
+    // the scan answers shared membership through the same alias-aware helper
+    // the walk guard uses - never string equality, which reads a live king
+    // over e-1,e-2 as "no crown over e-1".
+    let projects = crate::king_board::project_map(root).unwrap_or_default();
     let holders: Vec<&RegistryEntry> = rows
         .iter()
-        .filter(|r| !is_terminal(r) && r.crown_scope.as_deref() == Some(scope.as_str()))
+        .filter(|r| {
+            !is_terminal(r)
+                && r.crown_scope
+                    .as_deref()
+                    .is_some_and(|held| scopes_overlap(held, &scope, &projects))
+        })
         .collect();
     if holders.is_empty() {
         let reason = format!("no live crowned row over {scope}");
@@ -338,10 +349,17 @@ pub fn reign_state(
     };
     if holders.len() > 1 {
         state.unknown_reason = Some(format!(
-            "multiple live rows hold {scope}; court conflicts names them all"
+            "multiple live rows hold {scope}; fno agents court shows every crown"
         ));
     }
-    with_manifest(state, &scope, root)
+    // The manifest keys on the HOLDER's own scope: a holder found through one
+    // member of its set arms the set's manifest, and a manifest named for the
+    // member alone does not exist.
+    let holder_scope = holders[0]
+        .crown_scope
+        .clone()
+        .unwrap_or_else(|| scope.clone());
+    with_manifest(state, &holder_scope, root)
 }
 
 /// Rewrite `shape` in place on one scope's existing manifest, under the same
@@ -814,6 +832,35 @@ mod tests {
         assert_eq!(
             state.registry_session.as_deref(),
             Some("bbbb2222-0000-4000-8000-000000000002")
+        );
+    }
+
+    #[test]
+    fn scope_form_finds_a_set_holder_through_any_member() {
+        // A rung-2 crown is stored as the joined set; asking after one member
+        // must still find the king that holds it, and the manifest read keys
+        // on the HOLDER's own scope, not the member the caller named.
+        let root = tmp("setholder");
+        let sid = "aaaa1111-0000-4000-8000-00000000000a";
+        let reg = registry_file(
+            &root,
+            &[row(
+                "set-king",
+                sid,
+                Some("epic-a,epic-b"),
+                AgentStatus::Busy,
+            )],
+        );
+        write_manifest(&root, "epic-a,epic-b", sid, "pass");
+
+        let state = reign_state(&root, Some("epic-a"), None, None, &reg);
+        assert_eq!(state.crowned, Some(true));
+        assert_eq!(state.live, Some(true));
+        assert_eq!(state.shape.as_deref(), Some("pass"));
+        assert_eq!(
+            state.manifest_session.as_deref(),
+            Some(sid),
+            "the manifest read keys on the holder's own scope"
         );
     }
 

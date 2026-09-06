@@ -1416,6 +1416,79 @@ def test_in_place_crown_refuses_overlapping_territory_not_just_the_same_set(
     assert [asdict(row) for row in load_registry()] == before
 
 
+def test_a_portfolio_kings_court_holds_project_kings(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The ladder documents a portfolio king's court AS project kings, so a
+    live row over 'alpha,beta' and a new crown over 'alpha' are two legitimate
+    crowns. Bare member overlap refused exactly that grant."""
+    from fno.agents.registry import load_registry
+
+    incumbent = _entry(
+        "portfolio-king",
+        harness_session_id="portfolio-session",
+        status="busy",
+        crown_level=0,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [incumbent, target])
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.stdout)
+    assert (receipt["level"], receipt["scope"]) == (1, "alpha")
+    held = {r.name: r.crown_scope for r in load_registry()}
+    assert held == {"portfolio-king": "alpha,beta", "worker": "alpha"}
+
+
+def test_a_project_kings_grant_covers_an_epic_set_under_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A king could grant one epic but never two: scope_contains read every
+    multi-member inner as a set-subset test, and a set of epic ids is never a
+    subset of a set of project names. The set must fall under the crown that
+    holds every member."""
+    import fno.agents.crown as crown_mod
+    from fno.agents.crown import grant_error
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(
+        crown_mod,
+        "_graph_entry",
+        lambda nid: {"id": nid, "type": "epic", "project": "alpha"}
+        if nid in ("e-1", "e-2")
+        else None,
+    )
+    king = _entry(
+        "king",
+        harness_session_id="king-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="alpha",
+        crown_grantor="human",
+    )
+
+    assert grant_error("e-1,e-2", king) is None
+    assert grant_error("e-1,e-3", king) is not None
+
+
+def test_the_store_gate_passes_a_rung_2_epic_set() -> None:
+    """A multi-member scope is level 0 (a project portfolio) or level 2 (an
+    epic set). The gate read multi-member as portfolio-only and refused the
+    rung-2 set the resolver had just minted on the spawn path."""
+    from fno.agents.crown import crown_validation_error
+
+    assert crown_validation_error(2, "e-1,e-2") is None
+    assert crown_validation_error(1, "e-1,e-2") is not None
+
+
 def test_two_epics_crown_in_place_as_one_set(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1430,10 +1503,11 @@ def test_two_epics_crown_in_place_as_one_set(
     _prepare_crown_cli(monkeypatch, tmp_path, [target])
     monkeypatch.setattr(
         crown_mod,
-        "_graph_entry",
-        lambda nid: {"id": nid, "type": "epic", "project": "fno"}
-        if nid in ("e-1", "e-2")
-        else None,
+        "_graph_index",
+        lambda: {
+            nid: {"id": nid, "type": "epic", "project": "fno"}
+            for nid in ("e-1", "e-2")
+        },
     )
 
     result = _invoke_crown("mux-king", "--scope", "e-1", "--scope", "e-2")

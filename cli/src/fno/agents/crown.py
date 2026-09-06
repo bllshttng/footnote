@@ -235,14 +235,15 @@ def _canonical_project(name: str) -> Optional[str]:
         return None
 
 
-def _epic_or_refuse(raw: str) -> str:
+def _epic_or_refuse(raw: str, *, graph_entry=None) -> str:
     """``raw`` as a backlog epic id, or the refusal that names why not.
 
     One message set for the single-epic and epic-set paths alike: a member of
     a set that is a typo or a non-epic node gets the same named remedy it
-    would get alone.
+    would get alone. ``graph_entry`` lets a set-resolving caller pass one
+    ``_graph_index`` read so members do not pay a full graph parse apiece.
     """
-    entry = _graph_entry(raw)
+    entry = (graph_entry or _graph_entry)(raw)
     if entry is None:
         raise CrownScopeError(
             f"{raw!r} is neither a configured project nor a backlog node; "
@@ -258,11 +259,11 @@ def _epic_or_refuse(raw: str) -> str:
     return raw
 
 
-def _member_rung(raw: str, canon: Optional[str]) -> str:
+def _member_rung(raw: str, canon: Optional[str], *, graph_entry=None) -> str:
     """One scope member spelled with its rung, for a mixed-rung refusal."""
     if canon:
         return f"{canon} (a project)"
-    entry = _graph_entry(raw)
+    entry = (graph_entry or _graph_entry)(raw)
     if entry is not None and entry.get("type") == "epic":
         return f"{raw} (an epic)"
     if entry is not None:
@@ -299,13 +300,20 @@ def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
             scope = canonical_scope(projects)
             # One project named twice collapses to one project, not a portfolio.
             return (0 if len(split_scope(scope)) > 1 else 1), scope
+        # ONE graph parse serves every per-member refusal below; a graph this
+        # rung could not read answers None, and the per-call fallback keeps
+        # the single-read behavior for that machine.
+        by_id = _graph_index()
+        entry_of = _graph_entry if by_id is None else by_id.get
         if not projects:
             # Rung 2 rules a SET of epics, stored with the same separator: a
             # king over two epics at once is one crown, not a failed portfolio.
-            return 2, canonical_scope([_epic_or_refuse(raw) for raw in non_projects])
+            return 2, canonical_scope(
+                [_epic_or_refuse(raw, graph_entry=entry_of) for raw in non_projects]
+            )
         raise CrownScopeError(
             "a multi-scope crown rules PROJECTS or EPICS, never both at once: "
-            f"{', '.join(_member_rung(raw, canon) for raw, canon in resolved)}. "
+            f"{', '.join(_member_rung(raw, canon, graph_entry=entry_of) for raw, canon in resolved)}. "
             "Name projects only (a portfolio) or epics only (a set)."
         )
 
@@ -347,7 +355,16 @@ def scope_contains(
         return False  # a peer crown, not a subordinate one
 
     if len(inner_members) > 1:
-        return inner_members < outer_members
+        if inner_members < outer_members:
+            return True  # a portfolio inside a wider portfolio
+        # The other multi-member inner is a rung-2 epic set (mixed scopes are
+        # refused at resolve time). Epic ids never equal project names, so the
+        # subset test above cannot place it: a set is contained exactly when
+        # EVERY member is contained, member by member.
+        return all(
+            scope_contains(outer, m, graph_entry=graph_entry)
+            for m in split_scope(inner)
+        )
 
     name = next(iter(inner_members))
     if name in outer_members:
@@ -507,6 +524,28 @@ def _territories_overlap(a: Optional[str], b: Optional[str]) -> bool:
     return bool(left) and bool(right) and bool(left & right)
 
 
+def _crown_rivals(
+    a_scope: Optional[str],
+    a_level: Optional[int],
+    b_scope: Optional[str],
+    b_level: Optional[int],
+) -> bool:
+    """Do two live crowns double-rule territory, ladder-aware?
+
+    Bare overlap over-refuses: the ladder's documented shape is that a
+    portfolio king's court IS project kings and a project king's court IS
+    epic kings, so a live row over ``alpha,beta`` and a crown over ``alpha``
+    are two legitimate crowns. Rivalry is therefore rung-scoped: crowns on the
+    SAME rung double-rule when their territories overlap (a set-holder rules
+    each member), and crowns on DIFFERENT rungs double-rule only when they
+    name the same territory outright. A row missing its level is half a crown
+    no legal writer produces; any overlap it shows is surfaced, not excused.
+    """
+    if a_level is not None and b_level is not None and a_level != b_level:
+        return _same_territory(a_scope, b_scope)
+    return _territories_overlap(a_scope, b_scope)
+
+
 def crown_scope_matches(held: Optional[str], requested: Optional[str]) -> bool:
     """Will the row-keyed king readers accept a crown over ``held`` for
     ``requested``? Territory equality, aliases normalized.
@@ -639,7 +678,7 @@ def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
                 for row in rows
                 if row.name not in {holder_name, target.name}
                 and row.status not in TERMINAL_STATUSES
-                and _territories_overlap(row.crown_scope, scope)
+                and _crown_rivals(row.crown_scope, row.crown_level, scope, level)
             ),
             None,
         )
@@ -859,7 +898,9 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
 
         # An agent grantor's own row legitimately overlaps the delegated scope
         # (grant_error verified a STRICT containment before the write), so the
-        # caller is not a second ruler; every other overlapping live row is.
+        # caller is not a second ruler; every other RIVAL live row is. Rivalry
+        # is ladder-aware, not bare overlap: a live portfolio over the scope's
+        # project is the new king's court, not a second ruler of it.
         delegating = {target.name} | ({grantor} if caller is not None else set())
         holder = next(
             (
@@ -867,7 +908,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 for row in rows
                 if row.name not in delegating
                 and row.status not in TERMINAL_STATUSES
-                and _territories_overlap(row.crown_scope, scope)
+                and _crown_rivals(row.crown_scope, row.crown_level, scope, level)
             ),
             None,
         )
@@ -1075,6 +1116,9 @@ def crown_validation_error(level: Any, scope: Any) -> Optional[str]:
             "crown scope must be canonical (sorted, deduped, no blank members); "
             f"got {scope!r}, want {canonical_scope(members)!r}"
         )
-    if len(members) > 1 and level != 0:
-        return f"a scope naming {len(members)} projects is level 0, not {level}"
+    if len(members) > 1 and level not in (0, 2):
+        return (
+            f"a scope naming {len(members)} members is level 0 (a portfolio of "
+            f"projects) or 2 (a set of epics), not {level}"
+        )
     return None

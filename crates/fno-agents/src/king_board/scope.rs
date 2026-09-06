@@ -147,21 +147,67 @@ pub(crate) fn compile_scope_ids(
             .find(|e| s_str(e, "id").map(|i| i == id).unwrap_or(false))
     };
 
-    // resolve_crown: the (level, canonical) pair, derived together.
+    // resolve_crown: the (level, canonical) pair, derived together. A
+    // multi-member scope is a project portfolio OR a rung-2 SET of epics -
+    // the Python twin (king/scope.py) rules both; mixed is a refusal, and an
+    // epic-set member must be a live epic exactly as a single-epic scope must.
     let (level_two, canonical): (bool, String) = if members.len() > 1 {
-        let mut resolved = Vec::new();
+        let mut project_members: Vec<String> = Vec::new();
+        let mut epic_members: Vec<String> = Vec::new();
         for m in &members {
             match projects.get(m.as_str()) {
-                Some(canon) => resolved.push(canon.clone()),
-                None => {
-                    return Err(format!(
-                        "a multi-scope crown rules PROJECTS, but {m} is not a configured \
-                         project. Name projects from your config, or pass a single epic instead."
-                    ))
-                }
+                Some(canon) => project_members.push(canon.clone()),
+                None => epic_members.push(m.clone()),
             }
         }
-        (false, canonical_scope(&resolved))
+        if !project_members.is_empty() && !epic_members.is_empty() {
+            return Err(format!(
+                "a multi-scope crown rules PROJECTS or EPICS, never both at once: {}. \
+                 Name projects only (a portfolio) or epics only (a set).",
+                members
+                    .iter()
+                    .map(|m| match projects.get(m.as_str()) {
+                        Some(canon) => format!("{canon} (a project)"),
+                        None => match entry_by_id(m) {
+                            Some(e) if s_str(e, "type") == Some("epic") => {
+                                format!("{m} (an epic)")
+                            }
+                            Some(e) => format!(
+                                "{m} (a {}, not an epic)",
+                                s_str(e, "type").unwrap_or("node")
+                            ),
+                            None => format!("{m} (not a configured project or a known node)"),
+                        },
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !epic_members.is_empty() {
+            for m in &epic_members {
+                match entry_by_id(m) {
+                    None => {
+                        return Err(format!(
+                            "{m:?} is neither a configured project nor a backlog node; \
+                             nothing to reign over (check for a typo)"
+                        ))
+                    }
+                    Some(entry) => {
+                        if s_str(entry, "type") != Some("epic") {
+                            return Err(format!(
+                                "{m:?} is a {}, not an epic. Implementers get no crowns - \
+                                 a single node is work, not a territory. Crown the epic \
+                                 above it, or its project.",
+                                s_str(entry, "type").unwrap_or("node")
+                            ));
+                        }
+                    }
+                }
+            }
+            (true, canonical_scope(&epic_members))
+        } else {
+            (false, canonical_scope(&project_members))
+        }
     } else {
         let raw = members[0].as_str();
         if let Some(canon) = projects.get(raw) {
@@ -185,29 +231,40 @@ pub(crate) fn compile_scope_ids(
     };
 
     if level_two {
-        let Some(root) = entry_by_id(&canonical) else {
-            return Err(format!(
-                "crown scope {canonical:?} is not an epic in the graph"
-            ));
-        };
-        if s_str(root, "type") != Some("epic") {
-            return Err(format!(
-                "crown scope {canonical:?} is not an epic in the graph"
-            ));
-        }
         let mut ids: HashSet<String> = HashSet::new();
-        ids.insert(canonical.clone());
-        // descendants_of: BFS over parent links, cycle-safe.
+        // descendants_of: BFS over parent links, cycle-safe. A rung-2 scope
+        // is a SET: the board sees the nodes under EVERY member, so the walk
+        // starts from each root, not just the first.
         let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
         for e in entries {
             if let (Some(id), Some(parent)) = (s_str(e, "id"), s_str(e, "parent")) {
                 children.entry(parent).or_default().push(id);
             }
         }
-        let mut frontier: Vec<&str> = children
-            .get(canonical.as_str())
-            .cloned()
-            .unwrap_or_default();
+        let mut frontier: Vec<&str> = Vec::new();
+        for root_id in canonical
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            match entry_by_id(root_id) {
+                None => {
+                    return Err(format!(
+                        "crown scope {root_id:?} is not an epic in the graph"
+                    ))
+                }
+                Some(entry) if s_str(entry, "type") != Some("epic") => {
+                    return Err(format!(
+                        "crown scope {root_id:?} is not an epic in the graph"
+                    ));
+                }
+                _ => {}
+            }
+            ids.insert(root_id.to_string());
+            if let Some(next) = children.get(root_id) {
+                frontier.extend(next.iter().copied());
+            }
+        }
         let mut seen: HashSet<&str> = HashSet::new();
         while let Some(id) = frontier.pop() {
             if !seen.insert(id) {
@@ -307,6 +364,48 @@ mod tests {
         let entries = vec![node("x-aaaa", "ready", "p1")];
         let projects = Ok(HashMap::new());
         let err = compile_scope_ids("x-aaaa", &entries, &projects).unwrap_err();
+        assert!(err.contains("not an epic"), "{err}");
+    }
+
+    #[test]
+    fn a_multi_scope_crown_of_epics_compiles_as_the_union() {
+        // The Python twin (king/scope.py) rules a rung-2 SET of epics: the
+        // board sees the nodes under EVERY member, not just the first. This
+        // twin refused any multi-scope that was not all projects, so a set
+        // crown never resolved its board.
+        let entries = vec![
+            json!({"id": "e-1", "type": "epic", "status": "ready", "priority": "p1"}),
+            json!({"id": "e-1a", "parent": "e-1", "status": "ready", "priority": "p1"}),
+            json!({"id": "e-2", "type": "epic", "status": "ready", "priority": "p1"}),
+            json!({"id": "e-2a", "parent": "e-2", "status": "ready", "priority": "p1"}),
+            json!({"id": "x-outs", "status": "ready", "priority": "p1"}),
+        ];
+        let projects = Ok(HashMap::new());
+        let ids = compile_scope_ids("e-2,e-1", &entries, &projects).unwrap();
+        for expected in ["e-1", "e-1a", "e-2", "e-2a"] {
+            assert!(ids.contains(expected), "missing {expected}: {ids:?}");
+        }
+        assert!(!ids.contains("x-outs"));
+    }
+
+    #[test]
+    fn a_mixed_project_and_epic_multi_scope_is_refused() {
+        let entries =
+            vec![json!({"id": "e-1", "type": "epic", "status": "ready", "priority": "p1"})];
+        let mut map = HashMap::new();
+        map.insert("alpha".to_string(), "alpha".to_string());
+        let err = compile_scope_ids("alpha,e-1", &entries, &Ok(map)).unwrap_err();
+        assert!(err.contains("never both at once"), "{err}");
+    }
+
+    #[test]
+    fn a_multi_scope_member_that_is_not_an_epic_is_refused() {
+        let entries = vec![
+            json!({"id": "e-1", "type": "epic", "status": "ready", "priority": "p1"}),
+            json!({"id": "n-1", "type": "feature", "status": "ready", "priority": "p1"}),
+        ];
+        let projects = Ok(HashMap::new());
+        let err = compile_scope_ids("e-1,n-1", &entries, &projects).unwrap_err();
         assert!(err.contains("not an epic"), "{err}");
     }
 }
