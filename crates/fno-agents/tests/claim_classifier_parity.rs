@@ -17,7 +17,9 @@
 //! captured from the proven-correct Python leg before deletion; normal runs
 //! never invoke Python.
 
-use fno_agents::claims::{machine_id, now_ms, ClaimRecord};
+use fno_agents::claims::{
+    basis, machine_id, now_ms, ClaimRecord, SessionWitness, UNRESOLVED_GRACE_MS,
+};
 use serde_json::{json, Value};
 use std::process::Command;
 
@@ -70,6 +72,23 @@ struct Case {
     /// disagree about codex.
     harness: Option<&'static str>,
     probe: ProbeSpec,
+    /// The record's session id (x-a613). `None` keeps every pre-existing case
+    /// on the pid-only verdicts its golden line froze; a session id routes
+    /// the verdict through the injected session witness.
+    session_id: Option<&'static str>,
+    /// The session witness answer the case wants, injected at the witness
+    /// seam the production sweep threads.
+    witness: WitnessSpec,
+}
+
+/// The session witness behavior a session-arm case wants.
+#[derive(Clone, Copy)]
+enum WitnessSpec {
+    /// Never answered (only valid with session_id: None).
+    None,
+    RegistryLive,
+    TranscriptLive,
+    Unresolved,
 }
 
 fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
@@ -102,6 +121,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: None,
             harness: None,
             probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             label: "live_ttl_unexpired",
@@ -114,6 +135,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: None,
             harness: None,
             probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             label: "pid_absent_pid_liveness",
@@ -126,6 +149,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: None,
             harness: None,
             probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             label: "pid_reused_pid_liveness",
@@ -141,6 +166,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: None,
             harness: None,
             probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             label: "offhost_pid_liveness",
@@ -153,6 +180,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: None,
             harness: None,
             probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             label: "offhost_ttl_unexpired",
@@ -165,6 +194,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: None,
             harness: None,
             probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             label: "pid_unavailable_ttl_unexpired",
@@ -177,6 +208,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: None,
             harness: None,
             probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             label: "suspect_ttl_unexpired_dead_pid",
@@ -189,6 +222,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: None,
             harness: None,
             probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             label: "stale_ttl_expired_unproven_live_pid",
@@ -203,6 +238,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: None,
             harness: None,
             probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             label: "hybrid_live_expired_proven_live_pid",
@@ -215,6 +252,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: Some("session-prover"),
             harness: None,
             probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             // The specimen, in fixture form. Identical to the case above in
@@ -233,6 +272,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: Some("session-prover"),
             harness: Some("codex"),
             probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             // The must-not-break twin, named so a fix that stales everything
@@ -247,6 +288,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: Some("session-prover"),
             harness: Some("claude"),
             probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             label: "stale_ttl_expired_proven_dead_pid",
@@ -259,6 +302,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: Some("session-prover"),
             harness: None,
             probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             // The holder EXISTS and refuses inspection: never a proof of
@@ -274,6 +319,8 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: None,
             harness: None,
             probe: ProbeSpec::Refused,
+            session_id: None,
+            witness: WitnessSpec::None,
         },
         Case {
             label: "access_denied_ttl_unexpired",
@@ -286,6 +333,94 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             pid_provenance: None,
             harness: None,
             probe: ProbeSpec::Refused,
+            session_id: None,
+            witness: WitnessSpec::None,
+        },
+        Case {
+            // x-0c29, in fixture form: the TTL expired and the recorded pid is
+            // gone, but the session id's registry row carries a live pid. The
+            // witness heals the verdict pid arithmetic read as provably dead.
+            label: "resumed_session_expired_dead_pid_registry_live",
+            pid: Some(ABSENT_PID),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(past),
+            pid_provenance: Some("session-prover"),
+            harness: None,
+            probe: ProbeSpec::Real,
+            session_id: Some("ses_parity"),
+            witness: WitnessSpec::RegistryLive,
+        },
+        Case {
+            // x-ba96, in fixture form: the lease is still inside its window
+            // and the recorded pid is permanently dead (the resume shape). A
+            // live transcript witness ends the Suspect limbo.
+            label: "resumed_session_in_window_dead_pid_transcript_live",
+            pid: Some(ABSENT_PID),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(future),
+            pid_provenance: Some("session-prover"),
+            harness: None,
+            probe: ProbeSpec::Real,
+            session_id: Some("ses_parity"),
+            witness: WitnessSpec::TranscriptLive,
+        },
+        Case {
+            // The bounded unknown: expired, no witness answer either way,
+            // inside the grace window. Protected, never stealable, never
+            // provably dead - Suspect with a named basis.
+            label: "session_expired_unresolved_within_grace",
+            pid: Some(ABSENT_PID),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(past),
+            pid_provenance: Some("session-prover"),
+            harness: None,
+            probe: ProbeSpec::Real,
+            session_id: Some("ses_parity"),
+            witness: WitnessSpec::Unresolved,
+        },
+        Case {
+            // The same unknown PAST the grace: Stale, reapable by policy -
+            // the arm PR 1509 destroyed when unknown collapsed into alive and
+            // the reaper starved (assert 0 == 5). Exits on a clock, never on
+            // a proof that never arrives.
+            label: "session_expired_unresolved_past_grace",
+            pid: Some(ABSENT_PID),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(past - UNRESOLVED_GRACE_MS - 1),
+            pid_provenance: Some("session-prover"),
+            harness: None,
+            probe: ProbeSpec::Real,
+            session_id: Some("ses_parity"),
+            witness: WitnessSpec::Unresolved,
+        },
+        Case {
+            // The must-not-change twin for the witness itself: no session id
+            // on the record, so even a live-answering witness is never
+            // consulted and the pre-change verdict stands byte for byte.
+            label: "session_absent_expired_ignores_witness",
+            pid: Some(ABSENT_PID),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(past),
+            pid_provenance: Some("session-prover"),
+            harness: None,
+            probe: ProbeSpec::Real,
+            session_id: None,
+            witness: WitnessSpec::RegistryLive,
         },
     ]
 }
@@ -302,7 +437,7 @@ fn record(c: &Case) -> ClaimRecord {
         expires_at: c.expires_at,
         reason: None,
         harness: c.harness.map(str::to_string),
-        session_id: None,
+        session_id: c.session_id.map(str::to_string),
         pid_provenance: c.pid_provenance.map(str::to_string),
         machine_id: c.machine_id.clone(),
         metadata: Default::default(),
@@ -319,7 +454,23 @@ fn rust_classify_all(cases: &[Case], now: i64) -> Value {
             ProbeSpec::Real => &|pid| fno_agents::claims::probe_pid(pid),
             ProbeSpec::Refused => &|_| fno_agents::claims::PidProbe::Refused,
         };
-        let (state, basis) = fno_agents::claims::classify_with_basis(&record(c), Some(now), probe);
+        let witness: SessionWitness = match c.witness {
+            WitnessSpec::None => &|_| fno_agents::claims::SessionLiveness::Unresolved,
+            WitnessSpec::RegistryLive => {
+                &|_| fno_agents::claims::SessionLiveness::Live(basis::REGISTRY_SESSION_LIVE)
+            }
+            WitnessSpec::TranscriptLive => {
+                &|_| fno_agents::claims::SessionLiveness::Live(basis::TRANSCRIPT_LIVE)
+            }
+            WitnessSpec::Unresolved => &|_| fno_agents::claims::SessionLiveness::Unresolved,
+        };
+        let (state, basis) = fno_agents::claims::classify_with_basis_and_exclusivity(
+            &record(c),
+            Some(now),
+            probe,
+            None,
+            Some(witness),
+        );
         rows.insert(
             c.label.to_string(),
             json!({"state": state.as_str(), "basis": basis}),
