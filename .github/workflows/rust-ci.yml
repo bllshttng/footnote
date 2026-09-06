@@ -232,7 +232,9 @@ jobs:
         # a dirty tree - which is the wrong-merge class the retired
         # *-fresh.sh scripts checked, at one step instead of four.
         run: |
-          (cd cli && uv run fno doctor harness-matrix --write)
+          # fno-py, not fno: the project env's console script is fno-py and a
+          # bare `fno` on PATH is a stale installed tool, not this checkout.
+          (cd cli && uv run fno-py doctor harness-matrix --write)
           git diff --exit-code -- \
             cli/src/fno/agents/harness_capabilities.toml \
             crates/fno/src/harness_capabilities.toml \
