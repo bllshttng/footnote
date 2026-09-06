@@ -175,11 +175,21 @@ reviewer_registry = {}
 reviewers = []
 # When true (default), a code payload floors the harness-resolved self-review reviewer (claude /code-review, codex /review) onto the required set on a stock install, so a /target that ships code is held for a head-pinned attestation instead of asking an epic leader. Set false only under a live claim; the opt-out lapses after review.optout_ttl_minutes and disarms unattended auto-merge while held.
 self_review_required = true
-# When true (default false), a PR whose only coverage is the author's own (self_attested) local attestation reads as uncovered; the refusal names both satisfying paths: a second session's head-pinned attestation, or a GitHub App review. Read `fno doctor`'s self-attestation report before flipping it - that row is the number of recent merged PRs that would have been held.
+# DEPRECATED, ignored: origin never gates, so whoever attested, the verdict is
+# the same. The key is kept only so an existing config still loads.
 require_corroboration = false
-# When true (default), a non-author human GitHub APPROVED review satisfies coverage on its own and the corroboration term - the one producer a stranger's GitHub project emits with no footnote machinery. The approver's login must differ from the PR author's (GitHub refuses an author's approval server-side; the gate asserts it, and an unreadable PR author excludes fail-closed). Set false to keep today's recorded-but-never-counted behavior. Limit: GitHub's refusal is per identity, not per human - a second account with its own token can still self-approve.
+# When true (default), a non-author human GitHub APPROVED review satisfies coverage on its own - the one producer a stranger's GitHub project emits with no footnote machinery. The approver's login must differ from the PR author's (GitHub refuses an author's approval server-side; the gate asserts it, and an unreadable PR author excludes fail-closed). Set false to keep today's recorded-but-never-counted behavior. Limit: GitHub's refusal is per identity, not per human - a second account with its own token can still self-approve.
 github_approval_satisfies = true
-# The maximum number of review rounds (default 2): a PR gets AT MOST this many reviews and never waits for a round to come back clean. Two means two, counted across the whole life of the PR. A round is one reviewed HEAD. Two verdicts at one unchanged head are one round. A cap whose size depends on how a reviewer batches its output is not a cap. A pass is a round like any verdict: it still satisfies coverage, but it refunds nothing. Past this many rounds, a finding still open is FILED as a backlog node and the merge proceeds. The exception is a CONFIRMED correctness or security finding, or a truncated remainder. Those keep the IMPOSSIBLE verdict and need a non-author GitHub approval or the coverage-override label. CI failures, lint failures and rebases are not rounds. One review stays the floor, so an unreviewed PR is still uncovered. Validated at parse: at least 1.
+# The review-round budget, and the whole review gate (default 2): a PR gets
+# AT MOST this many reviews, and reaching the number satisfies the review
+# obligation - the PR merges on green CI with open findings left in the PR
+# conversation. Two means two, counted across the whole life of the PR.
+# A round is one reviewed HEAD. Two verdicts at one unchanged head are one
+# round. A cap whose size depends on how a reviewer batches its output is not
+# a cap. A pass is a round like any verdict: it still satisfies coverage, but
+# it refunds nothing. CI failures, lint failures and rebases are not rounds.
+# One review stays the floor, so an unreviewed PR is still uncovered.
+# Validated at parse: at least 1.
 max_rounds = 2
 # How many interdiff lines a rebase or fix commit may add while a verdict from the older head still counts as a review of the new one (default 100, the threshold of the attestation law d-608344c1). The measure is the multiset symmetric difference of the two PR-code patches against the base, never a direct head-to-head diff, so base movement contributes nothing. UNDER the bound carries; at or over it, or with an unreadable patch on either side, the verdict is stale and a fresh round is owed. 0 disables the arm.
 carry_interdiff_lines = 100
