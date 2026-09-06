@@ -148,9 +148,9 @@ the same `walker:<cwd>` singleton, so they are mutually exclusive.
 
 ## Operator receipts
 
-An exhausted mission tick keeps the stable `skip_reason=no_work` token and adds `stranded=N` to its detail. `N` is the board-wide count from `fno backlog undispatched --json`, which names finalized ready leaf plans with no execution claim outside the mission that just returned no ready children. A failed or malformed observer read reports `stranded=unknown`; it never fabricates zero. The mission remains pinned, so this receipt improves visibility without releasing the drain to the general queue.
+An exhausted mission tick keeps the stable `skip_reason=no_work` token. It adds `stranded=N` to its detail. The value comes from `fno backlog undispatched --json`. That command counts finalized ready leaf plans with no execution claim outside the exhausted mission. A failed or malformed observer read reports `stranded=unknown`. It never fabricates zero. The mission remains pinned, so visibility improves without releasing the drain to the general queue.
 
-`fno backlog rank <id> --top` still changes only the node's board rank. After a successful mutation, its receipt names `no live dispatcher will take it` when the node is outside every resolved active mission scope, and names `dispatcher scope unavailable` when that scope cannot be read. A node inside a mission keeps the normal rank receipt; ranking never broadens mission membership.
+To change only the node's board rank, run `fno backlog rank <id> --top`. When the node is outside every resolved active mission scope, the receipt says `no live dispatcher will take it`. If scope cannot be read, the receipt says `dispatcher scope unavailable`. A node inside a mission keeps the normal rank receipt. Ranking never broadens mission membership.
 
 ## Events
 
