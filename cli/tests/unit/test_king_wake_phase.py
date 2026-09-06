@@ -189,6 +189,19 @@ def test_the_spawned_walk_argv_carries_the_matched_address(monkeypatch, tmp_path
     assert argv[argv.index("--wake-holder") + 1] == "king-x"
 
 
+def test_king_wake_permission_mode_the_woken_session_argv_carries_bypass():
+    # The operator's 2026-08-23 report (wakes landing on an approve prompt)
+    # named a resume that repeated no permission mode. Measured 2026-09-05:
+    # the wake path holds no resume to fix - it dispatches the walk, and the
+    # session the walk launches runs THIS driver's argv, which hardcodes full
+    # bypass (a mode every spawn recording subsumes). The pin is the one edit
+    # that could bring the report back: dropping the flag from driver_invoke.
+    repo = Path(__file__).resolve().parents[3]
+    driver = repo / "scripts" / "lib" / "driver-claude-code.sh"
+    invoke = driver.read_text(encoding="utf-8").split("driver_invoke()", 1)[1]
+    assert "--dangerously-skip-permissions" in invoke
+
+
 def test_working_stalled_and_broken_instrument_holders_never_wake(tmp_path):
     for n, truth in enumerate(
         (
