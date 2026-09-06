@@ -885,14 +885,15 @@ mod tests {
         // exists to stop.
         let dir = std::env::temp_dir().join(format!("kingalias-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let config = dir.join("config.toml");
+        let config = dir.join(".fno").join("config.toml");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
         fs::write(
             &config,
             "[work.workspaces.ws1]\nprojects = [{ name = \"alpha\", short_name = \"a\" }]\n",
         )
         .unwrap();
-        // project_map walks cwd upward, so the registry dir itself carries the
-        // config.
+        // project_map reads `<cwd>/.fno/config.toml`, so the registry dir's
+        // own .fno carries the map.
         let registry = write_registry_with_level(&dir, "busy", Some("alpha"), 1);
 
         assert_eq!(
