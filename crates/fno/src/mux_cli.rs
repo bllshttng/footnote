@@ -6731,6 +6731,10 @@ mod tests {
     #[path = "paneless_hint_tests.rs"]
     mod paneless_hint_tests;
 
+    // The reseat registry-half tests, same reason.
+    #[path = "reseat_verb_tests.rs"]
+    mod reseat_verb_tests;
+
     #[test]
     fn squad_target_reads_the_id_spelling_pane_ls_reports() {
         // `pane ls` answers with a squad id; before this the tab verbs took only
