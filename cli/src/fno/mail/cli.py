@@ -59,6 +59,7 @@ from fno.mail.codex_review_target import (
     explicit_review_pr_number,
     resolve_codex_review_target as _codex_review_target,
 )
+from fno.mail.receipts import _live_miss_age_suffix
 from fno.inbox.store import (
     DEPRECATED_KINDS,
     ProjectIdentificationError,
@@ -2203,24 +2204,6 @@ def _row_hosts_keeper_thread(session_id: str) -> bool:
         return False
     sock = getattr(entry, "messaging_socket_path", None) or ""
     return "mux/threads/" in sock
-
-
-def _live_miss_age_suffix(recipient: str) -> str:
-    """The transcript-age suffix a bare live-miss receipt carries (x-6d89 AC8).
-
-    A bare live-miss reads the same for a transient miss to a genuinely live
-    peer (re-send works) and for a session that stood down hours ago (nothing
-    will drain it); the age is the discriminator. An unreadable transcript
-    prints unknown, never 0s. Three lanes emit that receipt (the name lane,
-    the job lane, the registered-agent lane), so the suffix lives here once.
-    """
-    from fno.agents.session_truth import resolve_session_truth
-    from fno.agents.top import _fmt_age
-
-    age_s = resolve_session_truth(recipient).get("last_activity_age_s")
-    if age_s is None:
-        return ", transcript age unknown"
-    return f", transcript quiet {_fmt_age(age_s)}"
 
 
 def _name_lane_send(
