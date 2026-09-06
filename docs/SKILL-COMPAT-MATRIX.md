@@ -4,7 +4,7 @@ Which footnote skills run on each harness. The table itself is generated: [docs/
 
 ## Where a cell comes from
 
-A cell is a projection of two sources, never a hand-filled claim. The harness side is the capability table, `crates/fno-agents/src/harness_capabilities.toml`, rendered as [capability-matrix.md](harnesses/capability-matrix.md). The skill side is the `requires.harness` list in each skill's frontmatter, a closed vocabulary of `loop`, `spawn`, and `subagent_dispatch`. `fno doctor harness-matrix --write` joins the two; the rust-ci generated-copies step fails on a stale copy.
+A cell is a projection of two sources, never a hand-filled claim. The harness side is the capability table, `crates/fno-agents/src/harness_capabilities.toml`, rendered as [capability-matrix.md](harnesses/capability-matrix.md). The skill side is the `requires.harness` list in each skill's frontmatter, a closed vocabulary of `loop`, `spawn`, and `subagent_dispatch`. `fno doctor harness-matrix --write` joins the two. The rust-ci generated-copies step fails on a stale copy.
 
 The states are the features vocabulary: `native` (fno drives it through a wired lane), `capable` (real on the harness, no wired arm), `absent` (measured not to exist), `unmeasured` (nobody has looked). A harness with no capability row reads `unmeasured` on every verb, which is the honest default: hermes and openclaw read that way today. A harness whose dispatch surface is refused reads `absent` on every verb. Gemini is that harness.
 

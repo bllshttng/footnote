@@ -10,7 +10,7 @@ A cell is a projection, never a fresh measurement. The rule, in order:
 
 1. No capability row for the harness: `unmeasured`.
 2. `command_surface = "refused"`: `absent`. Dispatch refuses to render any verb there.
-3. Otherwise start at `native` and take the worst over the skill's declared needs, ordered absent < unmeasured < capable < native.
+3. Otherwise start at `native` and take the worst declared need, ordered absent < unmeasured < capable < native.
 
 The needs vocabulary is closed. `loop` reads `loop_participation`: `native` is native, `extension` with a shipped `loop_extension` is native, `extension` with an empty one is capable, and `none` is absent. `spawn` and `subagent_dispatch` read `features.<key>.state`, and an unwritten key is unmeasured. A skill with no needs runs inline through ordinary tool calls and reads native wherever dispatch renders it. A row covers the skill's DEFAULT lane. A sub-mode that needs more (execute waves, review peer, think subagent) is not a row. A need the table has no key for (a claude prompt cache, say) cannot be declared, so that row reads the dispatch surface. Add the key and its probe to the table first.
 
