@@ -1160,15 +1160,8 @@ def inject_spawn_defaults(
     effort/substrate/permission_mode degrade open on an incompatible resolved
     provider (warn, skip); an explicit flag stays fail-closed downstream.
 
-    ``apply_permission_builtin`` (default True) gates the unattended
-    ``SPAWN_PERMISSION_BUILTIN`` rung (x-7198). A real dispatch wants it: a
-    verb-seeded spawn with nothing else pinning permission_mode should still
-    launch bypassed. A coordinate-resolution PROBE that never launches
-    anything (``retask.resolve_target_coordinate``, diffing a candidate
-    dispatch against an already-live worker) wants it off - the builtin is
-    implicit and always-on, so it is never a real difference from what that
-    live worker already got at its own spawn, and treating it as one made
-    every verb-seeded retask refuse and demand a fresh spawn instead.
+    ``apply_permission_builtin`` (default True) gates the ``SPAWN_PERMISSION_BUILTIN``
+    rung (x-7198); off for a probe that never launches (see ``retask.py``).
     """
     out = list(args)
     if not out or out[0] != "spawn":
