@@ -1032,6 +1032,12 @@ struct PaneEntry {
     /// This pane's monotonic counters. Same `Arc` as the registry row, so the
     /// core loop increments without touching the registry lock.
     stats: Arc<PaneCounters>,
+    /// (x-a600) A repaint request due to fire after the resize dust settles.
+    /// Set by the geometry pass when the grid changed; fired by the 1s core
+    /// tick. Deferral is the point: an immediate re-signal lands in the same
+    /// signal burst the resize itself raised and coalesces into it, so a
+    /// renderer that repaints exactly once on the burst never sees it.
+    nudge_due: Option<Instant>,
 }
 
 /// Extract the `FNO_NODE` value from a pane-run `argv`. The `_mesh_env_wrapper`
@@ -3735,6 +3741,7 @@ impl Core {
                 refused_worker,
                 last_output: Instant::now(),
                 stats: Arc::clone(&stats),
+                nudge_due: None,
             },
         );
         self.pane_stats.write().unwrap().insert(id, stats);
@@ -7625,6 +7632,35 @@ impl Core {
     /// One write per gesture, not one per drag event.
     const TOPOLOGY_DEBOUNCE: Duration = Duration::from_secs(2);
 
+    /// (x-a600) How long after a grid-changing resize the deferred repaint
+    /// request waits before firing: past the child's own SIGWINCH repaint,
+    /// short enough to feel instant. Fired by the 1s core tick, so the real
+    /// delay is this floor plus up to one tick.
+    const NUDGE_DELAY: Duration = Duration::from_millis(300);
+
+    /// Fire every due deferred repaint request (the 1s core tick's pass).
+    /// Re-reads each pane's CURRENT size, so a nudge armed by an older
+    /// geometry never re-introduces a stale winsize.
+    fn fire_due_nudges(&mut self) {
+        let due: Vec<u64> = self
+            .panes
+            .iter()
+            .filter_map(|(pid, e)| {
+                (e.nudge_due.is_some_and(|t| Instant::now() >= t)).then_some(*pid)
+            })
+            .collect();
+        for pid in due {
+            if let Some(entry) = self.panes.get_mut(&pid) {
+                entry.nudge_due = None;
+                let (rows, cols) = entry.vt.size();
+                entry.pty.nudge_winch(rows, cols);
+                e2e_log(format_args!(
+                    "resize repaint nudge fired for pane {pid} at {rows}x{cols}"
+                ));
+            }
+        }
+    }
+
     /// Mark the topology dirty (called from every `push_layout(true)`, the one
     /// funnel every layout mutation crosses) and flush immediately when the
     /// debounce window is already past, so an isolated mutation does not wait
@@ -10135,6 +10171,11 @@ impl Core {
                             eprintln!("fno mux: pty resize failed: {e}");
                         }
                         entry.vt.resize(r.rows, r.cols);
+                        // (x-a600) Ask the child to repaint once the resize dust
+                        // settles: arm a deferred nudge the 1s core tick fires.
+                        // An immediate re-signal would coalesce into the burst
+                        // the resize itself raised and change nothing.
+                        entry.nudge_due = Some(Instant::now() + Self::NUDGE_DELAY);
                     }
                 }
             }
@@ -13796,6 +13837,50 @@ impl Core {
                 }
                 Flow::Continue
             }
+            Command::RedrawPane { pane } => {
+                // (x-a600) The repaint gesture for a garbled pane: nudge the
+                // child's winsize so a SIGWINCH-respecting renderer repaints at
+                // the settled size, then re-seed the pane's frame to every
+                // viewer - the same flush-then-re-emit the push_layout reemit
+                // pass does, scoped to one pane. `None` is the sender's viewed
+                // tab's focus; a named pane is resolved session-wide and a
+                // stale id is refused fail-closed, like FocusPane.
+                let pid = match pane {
+                    Some(p) => p,
+                    None => match self.viewed_tab(view) {
+                        Some(tab) => tab.focus,
+                        None => return Flow::Continue,
+                    },
+                };
+                let Some(entry) = self.panes.get(&pid) else {
+                    self.notice(client_id, format!("{pid}: no such pane"));
+                    return Flow::Continue;
+                };
+                let (rows, cols) = entry.vt.size();
+                let frame = entry.vt.frame();
+                entry.pty.nudge_winch(rows, cols);
+                let mut seeded = 0usize;
+                for c in &mut self.clients {
+                    if c.visible.contains(&pid) {
+                        // One composite per enqueue, matching broadcast_pane's
+                        // per-viewing-client convention.
+                        entry
+                            .stats
+                            .frames_composited
+                            .fetch_add(1, Ordering::Relaxed);
+                        let mut d = c.dirty.lock().unwrap();
+                        d.insert(pid, frame.clone());
+                        drop(d);
+                        c.notify.notify_one();
+                        seeded += 1;
+                    }
+                }
+                e2e_log(format_args!(
+                    "redraw pane {pid}: nudged {rows}x{cols}, re-seeded to {seeded} viewer(s)"
+                ));
+                self.notice(client_id, format!("pane {pid} repaint requested"));
+                Flow::Continue
+            }
         }
     }
 
@@ -15565,6 +15650,8 @@ async fn serve(
                 }
             }
             _ = pane_reap_tick.tick() => {
+                // (x-a600) Deferred repaint requests ride the same 1s pass.
+                core.fire_due_nudges();
                 // Snapshot first: reader completion guarantees all output for
                 // these panes was enqueued before this point. Drain it, then
                 // close exactly the snapshot even if another reader finishes
@@ -27351,184 +27438,11 @@ mod tests {
             });
     }
 
-    /// Rig: a Core with one live `/bin/cat` pane fed `bytes` through the real
-    /// pty-output drain path (our own channel stands in for the pty reader
-    /// thread). Returns the core and the pane id. The pane is tiny (2x4) on
-    /// purpose: a serialized Frame scales with cells, and a full-size grid
-    /// overflows the 4096-byte duplex the emission tests read only AFTER the
-    /// write returns, deadlocking the writer.
-    fn counter_core(bytes: &[u8]) -> (Core, u64) {
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let pid = core.spawn_pane(2, 4, "/tmp").expect("pane");
-        core.panes.get_mut(&pid).unwrap().node = Some("x-deadbeef".into());
-        core.panes.get_mut(&pid).unwrap().name = Some("peer".into());
-        core.panes.get_mut(&pid).unwrap().cmd = Some("claude".into());
-        let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
-        tx.try_send((pid, bytes.to_vec())).unwrap();
-        drop(tx);
-        let mut first_out = HashSet::new();
-        drain_pty_output(&mut core, &mut rx, None, &mut first_out);
-        (core, pid)
-    }
-
-    #[test]
-    fn pane_counters_count_fed_bytes_bursts_and_cpu() {
-        let (core, pid) = counter_core(b"hello");
-        let c = &core.panes[&pid].stats;
-        assert_eq!(c.bytes_in.load(Ordering::Relaxed), 5);
-        assert_eq!(c.grid_updates.load(Ordering::Relaxed), 1);
-        assert!(
-            c.cpu_ns.load(Ordering::Relaxed) > 0,
-            "feeding one burst must attribute nonzero handling time"
-        );
-    }
-
-    #[test]
-    fn watcherless_pane_stamps_last_output_on_every_burst() {
-        // (x-d401) `note_pane_output` returns early with no `pane wait`
-        // subscriber, which is why `last_activity_age_s` read None for panes
-        // running real workloads. The stamp lives on the drain path itself:
-        // every fed burst advances it whether or not anyone watches. The
-        // marker is the stamp's recency against a pre-feed Instant - only the
-        // drain path can produce it.
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let pid = core.spawn_pane(2, 4, "/tmp").expect("pane");
-        let registered = core.panes[&pid].last_output;
-        let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
-        let mut first_out = HashSet::new();
-        tx.try_send((pid, b"burst".to_vec())).unwrap();
-        drop(tx);
-        let before = Instant::now();
-        drain_pty_output(&mut core, &mut rx, None, &mut first_out);
-        assert!(
-            core.panes[&pid].last_output >= before,
-            "the drain path must stamp last_output with no watcher attached"
-        );
-        assert!(
-            core.panes[&pid].last_output > registered,
-            "a second burst must advance the registration stamp"
-        );
-    }
-
-    #[test]
-    fn hidden_pane_is_fed_but_never_composites() {
-        // No client is attached, so broadcast_pane's visible-gate returns
-        // before vt.frame(): the counter set must show fed-but-never-
-        // composited, the exact reading that separates feeding from display.
-        let (core, pid) = counter_core(b"data");
-        let c = &core.panes[&pid].stats;
-        assert_eq!(c.frames_composited.load(Ordering::Relaxed), 0);
-        assert_eq!(c.bytes_in.load(Ordering::Relaxed), 4);
-    }
-
-    #[test]
-    fn dropped_dirty_frame_composites_but_never_emits() {
-        // Two broadcasts with no writer drain: the newest-wins map keeps one
-        // frame, so composited advances twice and emitted once - the gap is
-        // the measurement, never "fixed" by counting the dropped frame.
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                let (mut core, pid) = counter_core(b"x");
-                core.panes.get_mut(&pid).unwrap().vt.feed(b"$ ");
-                let (tx, _rx) = mpsc::channel::<ServerMsg>(8);
-                let dirty: DirtyMap = Arc::default();
-                let notify = Arc::new(Notify::new());
-                core.clients.push(Client {
-                    id: 9,
-                    reliable_tx: tx,
-                    dirty: dirty.clone(),
-                    notify: notify.clone(),
-                    synced_modes: Modes::default(),
-                    view: (1, 1),
-                    visible: HashSet::from([pid]),
-                    dims: (24, 80),
-                    passive: false,
-                    last_press: None,
-                });
-                let base = core.panes[&pid]
-                    .stats
-                    .frames_composited
-                    .load(Ordering::Relaxed);
-                core.broadcast_pane(pid);
-                core.broadcast_pane(pid);
-                let c = &core.panes[&pid].stats;
-                assert_eq!(c.frames_composited.load(Ordering::Relaxed), base + 2);
-                assert_eq!(dirty.lock().unwrap().len(), 1, "newest-wins coalescing");
-
-                // The Bye flush is one wire path: one emitted frame.
-                let (mut writer, mut reader) = tokio::io::duplex(4096);
-                let stats = core.pane_stats.clone();
-                write_reliable(
-                    &mut writer,
-                    &ServerMsg::Bye { reason: "d".into() },
-                    &dirty,
-                    &stats,
-                )
-                .await
-                .unwrap();
-                let _ = read_msg::<_, ServerMsg>(&mut reader).await;
-                assert_eq!(c.frames_emitted.load(Ordering::Relaxed), 1);
-
-                // A reliable Frame (the cold-attach snapshot path) emits too.
-                write_reliable(
-                    &mut writer,
-                    &ServerMsg::Frame {
-                        pane_id: pid,
-                        frame: core.panes[&pid].vt.frame(),
-                    },
-                    &dirty,
-                    &stats,
-                )
-                .await
-                .unwrap();
-                let _ = read_msg::<_, ServerMsg>(&mut reader).await;
-                assert_eq!(c.frames_emitted.load(Ordering::Relaxed), 2);
-                // A pane with no registry row (reaped mid-drain) skips
-                // silently rather than counting a phantom emit.
-                count_frame_emitted(&stats, u64::MAX);
-                assert_eq!(c.frames_emitted.load(Ordering::Relaxed), 2);
-            });
-    }
-
-    #[test]
-    fn pane_stats_payload_carries_provenance_and_totals() {
-        let (core, pid) = counter_core(b"abc");
-        let payload = core.pane_stats_payload().expect("live pane -> payload");
-        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        assert_eq!(v["session"], "test");
-        let row = v["panes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["pane_id"].as_u64() == Some(pid))
-            .expect("the live pane's row");
-        assert_eq!(row["node"], "x-deadbeef");
-        assert_eq!(row["name"], "peer");
-        assert_eq!(row["cmd"], "claude");
-        assert_eq!(row["bytes_in"], 3);
-        for key in [
-            "grid_updates",
-            "frames_composited",
-            "frames_emitted",
-            "cpu_ns",
-        ] {
-            assert!(row[key].is_u64(), "{key} must be a number");
-        }
-        assert!(empty_core().pane_stats_payload().is_none());
-    }
-
-    #[test]
-    fn reaping_a_pane_drops_its_counter_row() {
-        let (mut core, pid) = counter_core(b"z");
-        assert!(core.pane_stats.read().unwrap().contains_key(&pid));
-        core.reap_pane(pid);
-        assert!(!core.pane_stats.read().unwrap().contains_key(&pid));
-    }
+    // Pane-counter and frame-emission family (plus the x-a600 repaint
+    // gesture tests) moved verbatim into its own module: this file is over
+    // the shrink-only line, and test motion is the sanctioned shrink.
+    #[path = "pane_frame_flow_tests.rs"]
+    mod pane_frame_flow_tests;
 
     #[test]
     fn cold_attach_delivers_every_pane_frame_on_the_reliable_channel() {
