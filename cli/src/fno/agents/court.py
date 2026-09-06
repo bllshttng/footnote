@@ -14,9 +14,18 @@ instead of once. So ``agree`` is ``True`` only when the graph was actually
 read and the scope checked out; an unreadable graph or an external tracker
 backend answers ``None`` with a stated reason, and the summary line counts
 unknowns separately from disagreements.
+
+Each crown also names its manifest limb (x-f0d2): the manifest path, the
+holder session it records, and ``crown_source`` - ``row``, ``manifest``,
+``both``, or ``split``. The manifest is the durable crown record and the row
+its cache, so a scope whose manifest and row name different holders counts as
+a SPLIT in the summary, apart from disagreements and unknowns (two truthful
+stores disagreeing is a different failure from a graph the registry
+contradicts).
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional
 
 from fno.agents.crown import (
@@ -112,6 +121,114 @@ def _conflicts(rows: list) -> list[dict[str, Any]]:
     ]
 
 
+def _manifest_limb(scope: str, row: Any) -> dict[str, Any]:
+    """The manifest side of one crown, rendered from the single reader.
+
+    ``reign_state`` is the one site comparing manifest identity to registry
+    identity (x-7b36); court renders its answer and never re-derives the
+    comparison. ``crown_source`` names where this crown is durably recorded:
+
+    - ``both`` - the manifest carries the crown and names the row's holder;
+    - ``row`` - no durable copy: the manifest is absent, unreadable, or
+      predates crown fields, so the row is the only store holding the crown;
+    - ``split`` - both stores are readable and name different holders.
+
+    The root is the row's own project space, so a court spanning repos reads
+    each crown where its project writes it.
+    """
+    from fno.king.state import king_manifest_path, king_state_root, parse_manifest, reign_state
+
+    limb: dict[str, Any] = {
+        "manifest_path": None,
+        "manifest_session": None,
+        "crown_source": "row",
+    }
+    # A corrupted scope (None, an int) must never crash the render limb; the
+    # half-crown branch in gather_court surfaces exactly those rows.
+    if not isinstance(scope, str) or not scope.strip():
+        return limb
+    cwd = getattr(row, "cwd", None)
+    if not isinstance(cwd, str) or not cwd.strip():
+        return limb
+    try:
+        root = king_state_root(Path(cwd))
+        path = king_manifest_path(scope, state_root=root)
+    except (OSError, ValueError):
+        return limb
+    state = reign_state(scope, state_root=root)
+    limb["manifest_session"] = state.manifest_session
+    if state.split is True or (
+        state.manifest_session is not None
+        and state.registry_session is not None
+        and state.manifest_session != state.registry_session
+    ):
+        limb["crown_source"] = "split"
+    if path.is_file():
+        limb["manifest_path"] = str(path)
+        # Identity agreement is not durability: a manifest written before
+        # crown fields existed names the holder but holds no crown copy.
+        if limb["crown_source"] != "split" and parse_manifest(path).get("crown_scope") == scope:
+            limb["crown_source"] = "both"
+    return limb
+
+
+def _manifest_only_crowns(live_rows: list, held_territories: set) -> list[dict[str, Any]]:
+    """Crowns whose registry row is gone but whose manifest still holds them.
+
+    The manifest is the durable record (x-f0d2), so a scope whose row
+    vanished is not an empty court: the file IS the crown. Surfaced with
+    ``crown_source: manifest`` and ``agree: None`` - the graph cannot
+    adjudicate a crown no row renders - with the manifest path named so the
+    operator can see where the crown lives.
+    """
+    from fno.king.state import king_state_root, parse_manifest
+
+    entries: list[dict[str, Any]] = []
+    seen_roots: set[Path] = set()
+    for row in live_rows:
+        cwd = getattr(row, "cwd", None)
+        if not isinstance(cwd, str) or not cwd.strip():
+            continue
+        try:
+            root = king_state_root(Path(cwd))
+        except (OSError, ValueError):
+            continue
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
+        kings = root / "kings"
+        if not kings.is_dir():
+            continue
+        for path in sorted(kings.glob("*.md")):
+            fields = parse_manifest(path)
+            scope = fields.get("crown_scope") or ""
+            if not scope or _territory_key(scope) in held_territories:
+                continue
+            holder = fields.get("harness_session_id") or path.stem
+            try:
+                level = int(fields.get("crown_level", ""))
+            except ValueError:
+                level = None
+            entries.append(
+                {
+                    "holder": holder,
+                    "level": level,
+                    "scope": scope,
+                    "grantor": fields.get("crown_grantor") or "human",
+                    "status": "manifest-only",
+                    "agree": None,
+                    "reason": (
+                        "crown lives on the manifest; no live registry row holds it"
+                    ),
+                    "manifest_path": str(path),
+                    "manifest_session": fields.get("harness_session_id"),
+                    "crown_source": "manifest",
+                }
+            )
+            held_territories.add(_territory_key(scope))
+    return entries
+
+
 def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     """The whole court: every crown, its verdict, and any territorial conflict.
 
@@ -140,6 +257,7 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
                     "total": None,
                     "disagreements": None,
                     "unknowns": None,
+                    "splits": None,
                     "reason": f"registry unreadable: {exc}",
                 },
             }
@@ -150,6 +268,7 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     # a caller deciding whether to trust the absence of a disagreement.
     by_id = _graph_index()
     entries: list[dict[str, Any]] = []
+    held_territories: set = set()
     for row in live_rows:
         reading = crown_reading(row)
         if reading is None:
@@ -170,6 +289,7 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
                         "status": row.status,
                         "agree": False,
                         "reason": "half a crown: scope is set but level is missing",
+                        **_manifest_limb(row.crown_scope, row),
                     }
                 )
             continue
@@ -183,11 +303,19 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
                 "status": row.status,
                 "agree": agree,
                 "reason": reason,
+                **_manifest_limb(reading["scope"], row),
             }
         )
+        held_territories.add(_territory_key(reading["scope"]))
+
+    # Crowns that outlived their rows: the manifest keeps them, the court
+    # shows them. Rendered after the row entries so a reader taking the first
+    # rows still sees the registry's own answer first.
+    entries.extend(_manifest_only_crowns(live_rows, held_territories))
 
     disagreements = sum(1 for e in entries if e["agree"] is False)
     unknowns = sum(1 for e in entries if e["agree"] is None)
+    splits = sum(1 for e in entries if e["crown_source"] == "split")
     return {
         "crowns": entries,
         "conflicts": _conflicts(live_rows),
@@ -197,6 +325,7 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
             "total": len(entries),
             "disagreements": disagreements,
             "unknowns": unknowns,
+            "splits": splits,
         },
     }
 
@@ -210,7 +339,8 @@ def _fmt_row(e: dict[str, Any]) -> str:
     # SURFACE that corruption, on exactly the input it exists to show.
     return (
         f"{str(e['scope']):<16} {str(e['level']):<5} {str(e['holder']):<20} "
-        f"{str(e['grantor']):<16} {str(e['status']):<7} {agree:<4}{reason}"
+        f"{str(e['grantor']):<16} {str(e['status']):<14} {agree:<4} "
+        f"{str(e.get('crown_source')):<8}{reason}"
     )
 
 
@@ -227,7 +357,7 @@ def render_court(as_json: bool) -> str:
     if not court["crowns"]:
         return "court: no live crowns"
 
-    header = f"{'SCOPE':<16} {'LEVEL':<5} {'HOLDER':<20} {'GRANTOR':<16} {'STATUS':<7} AGREE"
+    header = f"{'SCOPE':<16} {'LEVEL':<5} {'HOLDER':<20} {'GRANTOR':<16} {'STATUS':<14} AGREE SOURCE"
     lines = [header] + [_fmt_row(e) for e in court["crowns"]]
     for c in court["conflicts"]:
         holders = ", ".join(c["holders"])
@@ -237,6 +367,7 @@ def render_court(as_json: bool) -> str:
         f"\ncourt: {s['total']} crown{'s' if s['total'] != 1 else ''}, "
         f"{s['disagreements']} disagreement"
         f"{'s' if s['disagreements'] != 1 else ''}, {s['unknowns']} unknown"
-        f"{'s' if s['unknowns'] != 1 else ''}"
+        f"{'s' if s['unknowns'] != 1 else ''}, {s['splits']} split"
+        f"{'s' if s['splits'] != 1 else ''}"
     )
     return "\n".join(lines)

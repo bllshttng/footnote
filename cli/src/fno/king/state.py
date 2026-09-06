@@ -3,11 +3,12 @@
 A separate file, not a ``driver: king`` field on the target manifest: a king
 runs in the canonical checkout where a target manifest may also exist, and one
 manifest naming both is how two sessions share a discriminator. Each crown
-scope owns ``.fno/kings/<scope>.md``; the registry row is authority, so a
-leftover file is inert while a resumed session finds the same file through its
-current row. ``last_run_is_fresh`` is the second done-probe: a file test would
-pass the moment the manifest existed, so it reads the events journal for the
-newest king termination inside a window instead.
+scope owns ``<space>/kings/<scope>.md``; the manifest is the durable crown
+record and a registry row its cache, rebuilt from these files by heal
+(x-f0d2), so a leftover file is never inert - it is the record a lost row is
+restored from. ``last_run_is_fresh`` is the second done-probe: a file test
+would pass the moment the manifest existed, so it reads the events journal
+for the newest king termination inside a window instead.
 """
 from __future__ import annotations
 
@@ -359,8 +360,10 @@ def reign_state(
         harness = ident.harness or None
 
     root = state_root if state_root is not None else _owner_state_root(None)
-    repo_root = root.parent if root.name == ".fno" else root
-
+    # The state root passes through unchanged: the Rust reader treats --root
+    # as the state root itself and joins <root>/kings (loop_reign.rs), for the
+    # space layout and the legacy <repo>/.fno layout alike. Stripping a .fno
+    # suffix here sent the reader to a phantom <repo>/kings no writer uses.
     binary = resolve_binary()
     if binary is None:
         return _unknown_state(
@@ -368,7 +371,7 @@ def reign_state(
             "fno-agents binary not found: the reign reader lives in Rust. "
             "Reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN.",
         )
-    argv = [str(binary), "reign-state", "--root", str(repo_root)]
+    argv = [str(binary), "reign-state", "--root", str(root)]
     if scope:
         argv += ["--scope", scope]
     if session_id:
