@@ -14,7 +14,7 @@
 //! hardcoded to `/target --resume` and `Unit.extra_env` was read by nothing,
 //! so the spawned session was a target resume that did not know it was a king.
 //! The lifecycle those defects sat on is now real: manifests are per-scope at
-//! `.fno/kings/<scope>.md`, coronation arms them, `fno agents king done`
+//! `<space>/kings/<scope>.md`, coronation arms them, `fno agents king done`
 //! expires them, and a leftover file is inert without a live registry crown.
 //!
 //! The rebuild fixes the identity split at the source: the walk keys its unit
@@ -101,7 +101,7 @@ pub struct KingQueue {
 }
 
 impl KingQueue {
-    /// Read `.fno/kings/<scope>.md` from `repo_root` and construct the queue.
+    /// Read `<space>/kings/<scope>.md` from `repo_root` and construct the queue.
     ///
     /// A missing manifest is an error, not an empty queue. An empty queue
     /// would terminate `NoWork` and report success, which is the
@@ -156,10 +156,7 @@ impl KingQueue {
                 "unsafe king scope for the walk: {scope:?}"
             )));
         }
-        let state_root =
-            crate::paths::canonical_repo_root(repo_root).unwrap_or_else(|| repo_root.to_path_buf());
-        let manifest_path = state_root
-            .join(".fno")
+        let manifest_path = crate::paths::space_dir(repo_root)
             .join("kings")
             .join(format!("{scope}.md"));
         let content = fs::read_to_string(&manifest_path).map_err(|_| {
@@ -598,7 +595,7 @@ mod tests {
         // the only bound); reading it as "at ceiling" would refuse every
         // respawn for a scope that deliberately disabled the counter.
         let dir = std::env::temp_dir().join(format!("kingq-{}", std::process::id()));
-        let kings = dir.join(".fno").join("kings");
+        let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         let path = kings.join("k.md");
         fs::write(
@@ -610,6 +607,7 @@ mod tests {
             .unwrap();
         assert_eq!(q.respawn_ceiling(), 0);
         assert!(!q.at_respawn_ceiling());
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -650,7 +648,8 @@ mod tests {
     #[test]
     fn a_live_crown_holder_read_from_the_registry_refuses_the_walk() {
         let dir = std::env::temp_dir().join(format!("kinglive-{}", std::process::id()));
-        let kings = dir.join(".fno").join("kings");
+        fs::create_dir_all(&dir).unwrap();
+        let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         fs::write(kings.join("k.md"), "---\nfno_id: k-1\nscope: epic-x\n---\n").unwrap();
         let registry = write_registry(&dir, "busy", Some("epic-x"));
@@ -714,6 +713,7 @@ mod tests {
             wrong_row.is_err(),
             "naming a row other than the live holder never doubles a live one"
         );
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -766,7 +766,7 @@ mod tests {
         // respawn budget binds it. The gate fires before any board read, so
         // this needs no live fno binary to prove the refusal.
         let dir = std::env::temp_dir().join(format!("kingsucc-{}", std::process::id()));
-        let kings = dir.join(".fno").join("kings");
+        let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         fs::write(
             &kings.join("k.md"),
@@ -787,6 +787,7 @@ mod tests {
             q.next().is_ok_and(|unit| unit.is_none()),
             "an at-ceiling successor yields no unit, before any board read"
         );
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -796,7 +797,7 @@ mod tests {
         // locked increment return a count PAST the ceiling and must yield no
         // unit. Simulated by bumping the file between construction and next().
         let dir = std::env::temp_dir().join(format!("kingrace-{}", std::process::id()));
-        let kings = dir.join(".fno").join("kings");
+        let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         let path = kings.join("k.md");
         fs::write(
@@ -814,6 +815,7 @@ mod tests {
             !q.bill_one_respawn().unwrap(),
             "the race loser must not dispatch"
         );
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
         fs::remove_dir_all(&dir).ok();
     }
 }

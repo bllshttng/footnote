@@ -88,6 +88,7 @@ def _run(
     pre=None,
     extra=None,
     fresh_manifest=True,
+    manifest_session_id="11111111-2222-3333-4444-555555555555",
 ):
     rec = _Recorder()
     root = tmp_path / "proj"
@@ -97,7 +98,7 @@ def _run(
         write_manifest(
             manifest,
             scope="epic-x",
-            harness_session_id="11111111-2222-3333-4444-555555555555",
+            harness_session_id=manifest_session_id,
             force=True,
         )
     if pre is not None:
@@ -266,6 +267,20 @@ def test_an_answered_king_escalation_wakes_with_the_answer_as_the_prompt(tmp_pat
 
     payload = _json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
     assert payload["answered_cursor"] == "2026-08-29T11:00:00Z"
+
+
+def test_an_answered_codex_escalation_matches_the_manifest_session_handle(tmp_path):
+    codex_session = "019c7714-3b77-74d1-9866-e1f484aae2ab"
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=_seed_cursor,
+        manifest_session_id=codex_session,
+        extra={"answered_fn": lambda: [_answered(asker="019c7714")]},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "escalation_answered"
 
 
 def test_the_answer_delivery_address_is_invisible_to_the_mail_trigger(tmp_path):
@@ -517,6 +532,29 @@ def test_a_dead_holder_at_the_respawn_ceiling_spawns_nothing_and_escalates(tmp_p
     assert [e for e in rec.events if e[0] == "king_spawned_successor"] == []
     # The bill never landed: the refusal spends no wake slot.
     assert [e for e in rec.events if e[0] == "king_woken"] == []
+
+
+def test_a_dead_holder_with_an_absent_ceiling_asks_with_the_default(tmp_path):
+    def spent_legacy(manifest):
+        manifest.write_text(
+            "---\n"
+            "fno_id: k-1\n"
+            "scope: epic-x\n"
+            "harness_session_id: 11111111-2222-3333-4444-555555555555\n"
+            "respawn_count: 4\n"
+            "---\n",
+            encoding="utf-8",
+        )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "unknown", "reason": "not-found"},
+        unread=lambda a: [object()] if a == "king-x" else [],
+        pre=spent_legacy,
+    )
+
+    assert rec.dispatches == []
+    assert rec.asks == [("epic-x", 4, 4)]
 
 
 def test_the_spawned_walk_argv_carries_the_successor_flag(monkeypatch, tmp_path):

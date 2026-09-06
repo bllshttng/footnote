@@ -297,11 +297,8 @@ def parse_manifest(path: Path) -> dict[str, str]:
     return out
 
 
-def at_respawn_ceiling(path: Path) -> bool:
-    """Whether the respawn budget is spent - the pre-check; the Rust walk's
-    read (loop_king.rs) is the authority. An ABSENT ceiling defaults to
-    DEFAULT_RESPAWN_CEILING as Rust's parse_king_manifest does (0 here would
-    spawn Budget-terminated walks every tick); explicit 0 stays unbounded."""
+def respawn_ceiling(path: Path) -> int:
+    """Read the manifest ceiling with the Rust walk's default semantics."""
     manifest = parse_manifest(path)
 
     def _int(key: str, default: int) -> int:
@@ -313,7 +310,23 @@ def at_respawn_ceiling(path: Path) -> bool:
         except (TypeError, ValueError):
             return default
 
-    ceiling = _int("respawn_ceiling", DEFAULT_RESPAWN_CEILING)
+    return _int("respawn_ceiling", DEFAULT_RESPAWN_CEILING)
+
+
+def at_respawn_ceiling(path: Path) -> bool:
+    """Whether the respawn budget is spent; the Rust walk is the authority."""
+    manifest = parse_manifest(path)
+
+    def _int(key: str, default: int) -> int:
+        raw = manifest.get(key)
+        if not raw:
+            return default
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+
+    ceiling = respawn_ceiling(path)
     return ceiling > 0 and _int("respawn_count", 0) >= ceiling
 
 

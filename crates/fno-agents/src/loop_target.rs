@@ -628,7 +628,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
 
     // ── preflight (all before any dispatch) ───────────────────────────────────
     // 1. Manifest exists (exit 1 on missing). Which manifest depends on the
-    // driver: a king reads its per-scope file `.fno/kings/<scope>.md` (expired
+    // driver: a king reads its per-scope file `<space>/kings/<scope>.md` (expired
     // by `fno agents king done` on abdication) and never touches the target one.
     let driver_name = driver.clone().unwrap_or_else(|| "target".to_string());
     let mut target_queue: Option<TargetQueue> = None;
@@ -641,7 +641,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             eprintln!(
                 "fno-agents loop run: --driver king needs --scope <scope> (the crowned \
                  territory to respawn a king over; the manifest is \
-                 .fno/kings/<scope>.md)"
+                 <space>/kings/<scope>.md)"
             );
             return Ok(2);
         };

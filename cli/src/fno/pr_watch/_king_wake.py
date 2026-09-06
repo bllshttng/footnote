@@ -144,6 +144,12 @@ def _escalation_answer_trigger(
     order. Delivery mail addresses the full session id, which no mailbox scan
     covers. The ts is stored only after a dispatch - refusals re-fire."""
     addresses = {target.holder, target.short_id}
+    from fno.harness_identity import canonical_handle
+    from fno.king.state import parse_manifest
+
+    full_id = parse_manifest(target.manifest).get("harness_session_id") or ""
+    if full_id:
+        addresses.update({full_id, canonical_handle(full_id)})
     prompt: Optional[str] = None
     matched_ts = ""
     for record in records:
@@ -558,7 +564,7 @@ def run_king_wake(
         if reason is None:
             continue
         if holder_gone:
-            from fno.king.state import at_respawn_ceiling, parse_manifest
+            from fno.king.state import at_respawn_ceiling, parse_manifest, respawn_ceiling
 
             if at_respawn_ceiling(target.manifest):
                 fields = parse_manifest(target.manifest)
@@ -575,7 +581,7 @@ def run_king_wake(
                     (ask_fn or _ask_respawn_ceiling)(
                         target,
                         int(fields.get("respawn_count") or 0),
-                        int(fields.get("respawn_ceiling") or 0),
+                        respawn_ceiling(target.manifest),
                     )
                 except Exception:  # noqa: BLE001 - a failed ask never blocks the lane
                     summary["note"] = "successor ceiling question could not be raised"
