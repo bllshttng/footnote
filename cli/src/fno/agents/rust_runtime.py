@@ -90,6 +90,11 @@ FOLDED_AGENT_SUBCOMMANDS = {
         "Restart running fno processes onto fresh binaries.",
         {"hidden": True},
     ),
+    "reseat": (
+        "fno.agents.reseat:reseat_command",
+        "Re-seat a live pane worker into a portal, keeping its PTY.",
+        {"hidden": True},
+    ),
     "roles": (
         "fno.roles.cli:roles_app",
         "Inspect bounded business-role definitions and resolutions.",
@@ -305,8 +310,7 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     "retask",
     # v70 substrate mobility: drives the Rust mux control verb as a subprocess,
     # then clears the registry row's mux ref (the server never writes the
-    # registry). No Rust client port of the registry half, so it must never
-    # auto-route to the daemon.
+    # registry). No Rust client port of the registry half; never auto-routes.
     "reseat",
     # The cadence-deadline silence backstop. Pure Python: it reads the registry
     # and each row's transcript truth through fno.agents.sweep, writes nothing,
