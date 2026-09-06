@@ -467,3 +467,43 @@ def test_default_from_name_is_fno(workdir, fake_codex_create):
         lock_handle=_FakeLockHandle(),
     )
     assert fake_codex_create.call_args.kwargs["from_name"] == "fno"
+
+
+# ---------------------------------------------------------------------------
+# Project assignment (x-dc97)
+# ---------------------------------------------------------------------------
+
+
+def test_assign_codex_project_detached_execs_the_verb(workdir, monkeypatch):
+    """The helper execs the hidden fno-agents verb detached, never waiting."""
+    import subprocess
+
+    from fno.agents.dispatch import _assign_codex_project_detached
+
+    popen = MagicMock()
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: workdir / "fno-agents")
+
+    _assign_codex_project_detached(workdir, "thread-1")
+
+    assert popen.call_count == 1
+    argv = popen.call_args.args[0]
+    assert argv[1] == "codex-assign-project"
+    assert "--thread-id" in argv and argv[argv.index("--thread-id") + 1] == "thread-1"
+    assert popen.call_args.kwargs["start_new_session"] is True
+
+
+def test_assign_codex_project_detached_fails_open(workdir, monkeypatch):
+    """Empty session id or a missing binary leaves nothing behind, no raise."""
+    from fno.agents.dispatch import _assign_codex_project_detached
+
+    popen = MagicMock()
+    import subprocess
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
+
+    _assign_codex_project_detached(workdir, "")
+    _assign_codex_project_detached(workdir, "thread-1")  # binary None -> no exec
+
+    assert popen.call_count == 0

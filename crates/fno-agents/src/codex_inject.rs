@@ -1271,6 +1271,341 @@ pub async fn run_loaded_thread_discovery() -> i32 {
     0
 }
 
+// ---------------------------------------------------------------------------
+// Project assignment (x-dc97). Codex never derives a thread's project from its
+// cwd: a thread carries an explicit projectId and a project carries an ARRAY
+// of root paths, and Desktop writes the assignment only for worktrees it
+// created itself under CODEX_HOME/worktrees. Every other spawn falls back to
+// a cwd-keyed bucket the UI labels with the folder basename - which for fno
+// worktrees is the node id (measured 2026-09-01: 3054 threads, 0 assigned).
+// Two lanes assign. The interactive thread lane puts projectId straight on
+// `thread/start`; the headless lane has no argv flag and calls
+// `thread/metadata/update` after its rollout binds, through the hidden
+// `codex-assign-project` verb below.
+// ---------------------------------------------------------------------------
+
+const PROJECT_PAGE_SIZE: u32 = 100;
+const MAX_PROJECT_PAGES: usize = 64;
+
+/// `project/list` page request. Response shape (app-server-protocol
+/// `ProjectListResponse`): `{data: [Project], nextCursor}`.
+pub fn project_list_request_json(id: u64, limit: u32, cursor: Option<&str>) -> String {
+    serde_json::json!({
+        "id": id,
+        "method": "project/list",
+        "params": {"limit": limit, "cursor": cursor}
+    })
+    .to_string()
+}
+
+/// `project/create`. The idempotency key is REQUIRED (`ProjectCreateParams`)
+/// and codex persists it, so one repo must always send one key: a repeated
+/// create answers with the first project instead of a twin.
+pub fn project_create_request_json(
+    id: u64,
+    name: &str,
+    root: &Path,
+    idempotency_key: &str,
+) -> String {
+    serde_json::json!({
+        "id": id,
+        "method": "project/create",
+        "params": {
+            "name": name,
+            "roots": [{"path": root}],
+            "idempotencyKey": idempotency_key,
+        }
+    })
+    .to_string()
+}
+
+/// `project/update` carrying a whole replacement roots array (the protocol has
+/// no append verb, so the caller extends the list it listed).
+pub fn project_update_roots_request_json(id: u64, project_id: &str, roots: &[PathBuf]) -> String {
+    serde_json::json!({
+        "id": id,
+        "method": "project/update",
+        "params": {
+            "projectId": project_id,
+            "roots": roots.iter().map(|root| json!({"path": root})).collect::<Vec<_>>(),
+        }
+    })
+    .to_string()
+}
+
+/// `thread/metadata/update`: the headless lane's assignment carrier. An empty
+/// projectId is the protocol's explicit CLEAR; this builder always assigns.
+pub fn thread_metadata_update_request_json(id: u64, thread_id: &str, project_id: &str) -> String {
+    serde_json::json!({
+        "id": id,
+        "method": "thread/metadata/update",
+        "params": {"threadId": thread_id, "projectId": project_id}
+    })
+    .to_string()
+}
+
+/// One `project/list` row, narrowed to what the resolver matches on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectSummary {
+    pub id: String,
+    pub name: String,
+    pub roots: Vec<PathBuf>,
+}
+
+/// Parse one `project/list` page into `(rows, next_cursor)`.
+pub fn parse_project_page(
+    raw: &str,
+) -> Result<(Vec<ProjectSummary>, Option<String>), &'static str> {
+    let v: serde_json::Value = serde_json::from_str(raw).map_err(|_| "rpc-error")?;
+    if v.get("error").is_some() {
+        return Err("rpc-error");
+    }
+    let data = v
+        .pointer("/result/data")
+        .and_then(|d| d.as_array())
+        .ok_or("rpc-error")?;
+    let mut projects = Vec::with_capacity(data.len());
+    for item in data {
+        let id = item
+            .get("id")
+            .and_then(|id| id.as_str())
+            .filter(|id| !id.is_empty())
+            .ok_or("rpc-error")?;
+        let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        let roots = item
+            .get("roots")
+            .and_then(|roots| roots.as_array())
+            .map(|roots| {
+                roots
+                    .iter()
+                    .filter_map(|root| root.get("path").and_then(|p| p.as_str()))
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        projects.push(ProjectSummary {
+            id: id.to_string(),
+            name: name.to_string(),
+            roots,
+        });
+    }
+    let next_cursor = match v.pointer("/result/nextCursor") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(value.as_str().ok_or("rpc-error")?.to_string()),
+    };
+    let next_cursor = next_cursor.filter(|cursor| !cursor.is_empty());
+    Ok((projects, next_cursor))
+}
+
+/// The project whose roots contain `repo_root`. Both sides canonicalize, so a
+/// symlinked repo or a `/var`-vs-`/private/var` spelling difference still
+/// matches.
+pub fn parse_project_id_for_root(raw: &str, repo_root: &Path) -> Option<String> {
+    let wanted = std::fs::canonicalize(repo_root).ok()?;
+    let (projects, _) = parse_project_page(raw).ok()?;
+    projects
+        .into_iter()
+        .find(|project| {
+            project
+                .roots
+                .iter()
+                .any(|root| std::fs::canonicalize(root).is_ok_and(|resolved| resolved == wanted))
+        })
+        .map(|project| project.id)
+}
+
+/// The `project.id` from a `project/create` or `project/update` response.
+pub fn parse_created_project_id(raw: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()?
+        .pointer("/result/project/id")
+        .and_then(|id| id.as_str())
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// One repo, one key, forever: the key derives from the canonical root, so
+/// every spawn for a repo sends the same create and codex answers with the
+/// first project every time.
+fn project_idempotency_key(repo_root: &Path) -> String {
+    format!("fno:{}", repo_root.display())
+}
+
+/// Resolve (or create) the codex project whose roots contain `repo_root`.
+/// Three steps, first hit wins: a root match returns as-is; a project already
+/// named after the repo directory gains the root; otherwise one is created.
+///
+/// Fail open at every step - an absent socket, a refused handshake, a rejected
+/// write all return None and the caller spawns unchanged, the rule
+/// `codex_git_writable_args` states. Even though this lane now WRITES, a
+/// project we cannot resolve must never break a spawn.
+pub async fn ensure_project_for_root(repo_root: &Path) -> Option<String> {
+    let repo_root = std::fs::canonicalize(repo_root).ok()?;
+    let (mut sink, mut stream) = connect_app_server(&codex_app_server_socket_path())
+        .await
+        .ok()?;
+
+    let mut projects: Vec<ProjectSummary> = Vec::new();
+    let mut seen_cursors = HashSet::new();
+    let mut cursor: Option<String> = None;
+    let mut request_id = 2_u64;
+    let mut complete = false;
+    for _ in 0..MAX_PROJECT_PAGES {
+        sink.send(Message::Text(
+            project_list_request_json(request_id, PROJECT_PAGE_SIZE, cursor.as_deref()).into(),
+        ))
+        .await
+        .ok()?;
+        let raw = read_until_id(&mut stream, &serde_json::json!(request_id))
+            .await
+            .ok()?;
+        let (page, next_cursor) = parse_project_page(&raw).ok()?;
+        projects.extend(page);
+        request_id += 1;
+        match next_cursor {
+            None => {
+                complete = true;
+                break;
+            }
+            Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
+            Some(_) => return None,
+        }
+    }
+    if !complete {
+        // The listing never finished: creating now could mint a twin of a
+        // project a later page would have matched. Fail open instead.
+        return None;
+    }
+
+    if let Some(existing) = projects.iter().find(|project| {
+        project
+            .roots
+            .iter()
+            .any(|root| std::fs::canonicalize(root).is_ok_and(|resolved| resolved == repo_root))
+    }) {
+        return Some(existing.id.clone());
+    }
+    let dir_name = repo_root.file_name()?.to_string_lossy().into_owned();
+    if let Some(named) = projects.iter().find(|project| project.name == dir_name) {
+        let mut roots = named.roots.clone();
+        roots.push(repo_root.clone());
+        sink.send(Message::Text(
+            project_update_roots_request_json(request_id, &named.id, &roots).into(),
+        ))
+        .await
+        .ok()?;
+        let raw = read_until_id(&mut stream, &serde_json::json!(request_id))
+            .await
+            .ok()?;
+        return parse_created_project_id(&raw);
+    }
+    sink.send(Message::Text(
+        project_create_request_json(
+            request_id,
+            &dir_name,
+            &repo_root,
+            &project_idempotency_key(&repo_root),
+        )
+        .into(),
+    ))
+    .await
+    .ok()?;
+    let raw = read_until_id(&mut stream, &serde_json::json!(request_id))
+        .await
+        .ok()?;
+    parse_created_project_id(&raw)
+}
+
+/// [`ensure_project_for_root`] for a worker cwd: a linked worktree resolves to
+/// its repo through the git COMMON dir, whose parent is the canonical root.
+/// None outside a repo. Bounded as a whole so a wedged socket cannot stall a
+/// spawn past [`HANDSHAKE_TIMEOUT`].
+pub async fn ensure_project_for_cwd(cwd: &Path) -> Option<String> {
+    let common = crate::provider::git_common_dir(cwd)?;
+    let repo_root = Path::new(&common).parent()?;
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, ensure_project_for_root(repo_root))
+        .await
+        .ok()?
+}
+
+/// Assign a bound thread to `project_id` over `thread/metadata/update`. The
+/// headless lane calls this AFTER its session binds - a thread with no rollout
+/// yet answers "no rollout found", which is why the call cannot precede the
+/// bind. An unknown project and every transport failure fold into None; the
+/// spawn is already complete and nothing upstream reacts to this.
+pub async fn assign_thread_to_project(thread_id: &str, project_id: &str) -> Option<()> {
+    let (mut sink, mut stream) = connect_app_server(&codex_app_server_socket_path())
+        .await
+        .ok()?;
+    sink.send(Message::Text(
+        thread_metadata_update_request_json(2, thread_id, project_id).into(),
+    ))
+    .await
+    .ok()?;
+    let raw = read_until_id(&mut stream, &serde_json::json!(2))
+        .await
+        .ok()?;
+    let accepted = serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()?
+        .get("error")
+        .is_none();
+    accepted.then_some(())
+}
+
+/// The hidden `fno-agents codex-assign-project` verb (x-dc97): resolve or
+/// create the repo's project for `--cwd`, and when `--thread-id` is given,
+/// assign that bound thread to it. This is how the HEADLESS lane reaches the
+/// resolver - the Python codex create path captures the thread id from
+/// `thread.started` and shells this binary fire-and-forget. Same `matches!`
+/// treatment as `review-start` so it stays out of CLIENT_VERB_USAGE /
+/// RUST_CLIENT_VERBS and the routable-verb parity guard. Prints one JSON line;
+/// exits 0 on a resolved project, 1 when resolution failed.
+pub async fn run_codex_assign_project(rest: &[String]) -> i32 {
+    let mut cwd: Option<PathBuf> = None;
+    let mut thread_id: Option<String> = None;
+    let mut it = rest.iter();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--cwd" => cwd = it.next().map(PathBuf::from),
+            "--thread-id" => thread_id = it.next().cloned(),
+            other => {
+                eprintln!("codex-assign-project: unknown flag: {other}");
+                return 2;
+            }
+        }
+    }
+    let Some(cwd) = cwd else {
+        eprintln!("codex-assign-project: --cwd is required");
+        return 2;
+    };
+    let outcome = async {
+        let project_id = ensure_project_for_cwd(&cwd).await?;
+        let assigned = match thread_id.as_deref() {
+            Some(thread_id) => assign_thread_to_project(thread_id, &project_id)
+                .await
+                .is_some(),
+            None => false,
+        };
+        Some((project_id, assigned))
+    };
+    match outcome.await {
+        Some((project_id, assigned)) => {
+            println!(
+                "{}",
+                json!({"available": true, "projectId": project_id, "assigned": assigned})
+            );
+            0
+        }
+        None => {
+            println!(
+                "{}",
+                json!({"available": false, "reason": "project-unresolved"})
+            );
+            1
+        }
+    }
+}
+
 /// The connect + initialize handshake + `turn/start` round-trip. Split out so
 /// [`deliver_via_codex_daemon`] can wrap it in a total timeout.
 async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
@@ -2120,5 +2455,192 @@ mod tests {
         let missing =
             std::env::temp_dir().join(format!("missing-codex-probe-{}", std::process::id()));
         assert!(!probe_codex_app_server(&missing));
+    }
+
+    // --- project assignment (x-dc97) -------------------------------------
+
+    /// Positive-control the matcher on the exact shape a real page carries.
+    #[test]
+    fn parse_project_page_reads_rows_and_cursor() {
+        let raw = r#"{"id":2,"result":{"data":[
+            {"id":"proj-a","name":"footnote","roots":[{"path":"/repo/a"}],"position":0},
+            {"id":"proj-b","name":"other","roots":[]}
+        ],"nextCursor":null}}"#;
+        let (projects, cursor) = parse_project_page(raw).unwrap();
+        assert_eq!(cursor, None);
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0].id, "proj-a");
+        assert_eq!(projects[0].name, "footnote");
+        assert_eq!(projects[0].roots, vec![PathBuf::from("/repo/a")]);
+        assert!(projects[1].roots.is_empty());
+    }
+
+    #[test]
+    fn parse_project_page_refuses_error_frames() {
+        assert_eq!(
+            parse_project_page(r#"{"id":2,"error":{"message":"x"}}"#),
+            Err("rpc-error")
+        );
+        assert_eq!(parse_project_page("not-json"), Err("rpc-error"));
+    }
+
+    /// The matcher canonicalizes BOTH sides: the listed root may spell the repo
+    /// through a different prefix (macOS /var vs /private/var) and still match
+    /// a cwd handed over uncanonicalized.
+    #[test]
+    fn parse_project_id_for_root_matches_across_path_spellings() {
+        let temp = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(temp.path()).unwrap();
+        let raw = format!(
+            r#"{{"id":2,"result":{{"data":[{{"id":"proj-a","name":"x","roots":[{{"path":"{}"}}]}}],"nextCursor":null}}}}"#,
+            canonical.display()
+        );
+        assert_eq!(
+            parse_project_id_for_root(&raw, temp.path()).as_deref(),
+            Some("proj-a")
+        );
+        // A repo whose root no listed project carries matches nothing.
+        assert_eq!(
+            parse_project_id_for_root(raw.as_str(), temp.path().join("nope").as_path()),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_created_project_id_reads_the_created_project() {
+        assert_eq!(
+            parse_created_project_id(r#"{"id":3,"result":{"project":{"id":"proj-new"}}}"#),
+            Some("proj-new".to_string())
+        );
+        assert_eq!(parse_created_project_id(r#"{"id":3,"result":{}}"#), None);
+    }
+
+    /// Builder shapes are pinned: the idempotency key and the roots array are
+    /// what make a retried create return the first project instead of a twin.
+    #[test]
+    fn project_request_builders_pin_the_wire_shapes() {
+        let list: serde_json::Value =
+            serde_json::from_str(&project_list_request_json(2, 100, None)).unwrap();
+        assert_eq!(list["method"], "project/list");
+        assert_eq!(list["params"]["limit"], 100);
+        let create: serde_json::Value = serde_json::from_str(&project_create_request_json(
+            3,
+            "footnote",
+            Path::new("/repo"),
+            "fno:/repo",
+        ))
+        .unwrap();
+        assert_eq!(create["method"], "project/create");
+        assert_eq!(create["params"]["idempotencyKey"], "fno:/repo");
+        assert_eq!(create["params"]["roots"][0]["path"], "/repo");
+        let update: serde_json::Value = serde_json::from_str(&project_update_roots_request_json(
+            4,
+            "proj-a",
+            &[PathBuf::from("/repo/a"), PathBuf::from("/repo")],
+        ))
+        .unwrap();
+        assert_eq!(update["method"], "project/update");
+        assert_eq!(update["params"]["projectId"], "proj-a");
+        assert_eq!(update["params"]["roots"].as_array().unwrap().len(), 2);
+        let assign: serde_json::Value = serde_json::from_str(&thread_metadata_update_request_json(
+            5, "thread-1", "proj-a",
+        ))
+        .unwrap();
+        assert_eq!(assign["method"], "thread/metadata/update");
+        assert_eq!(assign["params"]["threadId"], "thread-1");
+        assert_eq!(assign["params"]["projectId"], "proj-a");
+    }
+
+    /// Root match: the resolver answers with the existing id and creates
+    /// nothing. Positive controls: the list actually ran, and the create never
+    /// fired.
+    #[tokio::test]
+    async fn resolver_returns_the_matching_project_and_creates_nothing() {
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick().with_projects(vec![json!({
+                "id": "proj-a", "name": "somewhere-else",
+                "roots": [{"path": root.display().to_string()}]
+            })]),
+        );
+        let id = ensure_project_for_root(temp.path()).await;
+        assert_eq!(id.as_deref(), Some("proj-a"));
+        assert!(
+            daemon.first_params("project/list").is_some(),
+            "the listing must have run"
+        );
+        assert!(
+            daemon.first_params("project/create").is_none(),
+            "a root match must not create"
+        );
+    }
+
+    /// A project already named after the repo directory gains the root instead
+    /// of a second project with the same label.
+    #[tokio::test]
+    async fn resolver_extends_a_same_named_project_instead_of_creating_a_twin() {
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let dir_name = temp
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick().with_projects(vec![json!({
+                "id": "proj-b", "name": dir_name, "roots": [{"path": "/elsewhere"}]
+            })]),
+        );
+        let id = ensure_project_for_root(temp.path()).await;
+        assert_eq!(id.as_deref(), Some("proj-b"));
+        let update = daemon.first_params("project/update");
+        assert!(
+            update.is_some(),
+            "a same-named project must be extended, not duplicated"
+        );
+        assert_eq!(update.unwrap()["projectId"], "proj-b");
+    }
+
+    /// Neither root nor name matches: create, carrying the derived idempotency
+    /// key, and return the created id.
+    #[tokio::test]
+    async fn resolver_creates_when_nothing_matches() {
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick(),
+        );
+        let id = ensure_project_for_root(temp.path()).await;
+        assert_eq!(id.as_deref(), Some("proj-created-fno"));
+        let create = daemon.first_params("project/create").expect("create ran");
+        assert_eq!(
+            create["idempotencyKey"],
+            format!(
+                "fno:{}",
+                std::fs::canonicalize(temp.path()).unwrap().display()
+            )
+        );
+        assert_eq!(
+            create["roots"][0]["path"],
+            std::fs::canonicalize(temp.path())
+                .unwrap()
+                .display()
+                .to_string()
+        );
+    }
+
+    /// Outside a repo there is no root to ensure, and the resolver answers
+    /// None without touching the socket.
+    #[tokio::test]
+    async fn resolver_for_cwd_answers_none_outside_a_repo() {
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        // No daemon: reaching the socket would hang past the guard, so a hit
+        // here would only come from the git step refusing first.
+        let id = ensure_project_for_cwd(temp.path()).await;
+        assert_eq!(id, None);
     }
 }

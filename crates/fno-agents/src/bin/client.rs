@@ -170,6 +170,16 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::codex_inject::run_review_start(&args[1..]).await;
     }
 
+    // `codex-assign-project` is the hidden project-assignment verb (x-dc97):
+    // resolve or create the repo's codex project for --cwd, and when
+    // --thread-id is given, assign that bound thread to it. The Python headless
+    // create lane shells this binary fire-and-forget after `thread.started`.
+    // Same `matches!` treatment as `review-start` so it stays out of
+    // CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the routable-verb parity guard.
+    if matches!(verb, "codex-assign-project") {
+        return fno_agents::codex_inject::run_codex_assign_project(&args[1..]).await;
+    }
+
     // `claim` is the HIDDEN debug front over the native claims module
     // (`fno_agents::claims`): the cross-impl compatibility matrix drives the
     // Rust side of the lockfile protocol through it, and it doubles as an ops

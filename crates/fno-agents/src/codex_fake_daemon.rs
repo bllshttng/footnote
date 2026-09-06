@@ -70,6 +70,11 @@ pub struct Behavior {
     /// (codex offered 0.149.1 to 0.150.1 on the machine x-296f was measured
     /// on). A client that treats the id match as success reads HEALTHY here.
     pub refuse_initialize: bool,
+    /// The canned `project/list` page. One page, no cursor: the resolver's
+    /// three branches (root match, name match, create) all fit in it, and the
+    /// fake models no project store on purpose - whether the REAL app-server
+    /// persists a create is a question for the live daemon, not the double.
+    pub projects: Vec<Value>,
     /// Every request frame this fake received, in arrival order.
     ///
     /// The fake models no sandbox and deliberately never will: whether the
@@ -91,6 +96,7 @@ impl Default for Behavior {
             event_frames: 0,
             stray_completion_after: None,
             refuse_initialize: false,
+            projects: Vec::new(),
             received: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -146,6 +152,11 @@ impl Behavior {
 
     pub fn with_refused_initialize(mut self) -> Self {
         self.refuse_initialize = true;
+        self
+    }
+
+    pub fn with_projects(mut self, projects: Vec<Value>) -> Self {
+        self.projects = projects;
         self
     }
 }
@@ -397,6 +408,15 @@ async fn serve(conn: UnixStream, behavior: Behavior) {
                     "message": format!("turn-{turn_n} is not active")
                 }}),
             },
+            Some("project/list") => json!({
+                "id": id, "result": {"data": behavior.projects, "nextCursor": null}
+            }),
+            Some("project/create") => {
+                json!({"id": id, "result": {"project": {"id": "proj-created-fno"}}})
+            }
+            Some("project/update") => json!({"id": id, "result": {"project": {
+                "id": msg.pointer("/params/projectId").cloned().unwrap_or(Value::Null)
+            }}}),
             _ => continue,
         };
         if send(&mut sink, reply).await.is_err() {
