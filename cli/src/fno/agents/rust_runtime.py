@@ -303,7 +303,7 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # Pane retasking remains Python-owned orchestration. Label rename went the
     # other way: the Rust client carries it over the daemon RPC.
     "retask",
-    # v69 substrate mobility: drives the Rust mux control verb as a subprocess,
+    # v70 substrate mobility: drives the Rust mux control verb as a subprocess,
     # then clears the registry row's mux ref (the server never writes the
     # registry). No Rust client port of the registry half, so it must never
     # auto-route to the daemon.

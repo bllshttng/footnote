@@ -836,7 +836,7 @@ enum CoreMsg {
         agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
-    /// (v69) Re-seat a live pane-hosted worker into a portal seat, keeping the
+    /// (v70) Re-seat a live pane-hosted worker into a portal seat, keeping the
     /// PTY (see [`ControlVerb::ThreadReseat`]). The server moves the topology;
     /// the registry `mux` flip is the caller's half, on this receipt.
     ReseatPane {
@@ -16682,7 +16682,7 @@ mod tests {
     mod portal_tests;
     // Same treatment: the lifecycle-resolution test family.
     mod lifecycle_tests;
-    // The (v69) re-seat test family, same treatment.
+    // The (v70) re-seat test family, same treatment.
     mod reseat_tests;
 
     // The sideline rename test family, same treatment.
