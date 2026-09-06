@@ -3134,6 +3134,23 @@ event_types:
           description: "Optional. The decision_id this overturns, when it overturns one."
     consumers: [operator, fno inbox decisions]
 
+  - name: operator_notice
+    description: "One operator-attention notice left the notify chokepoint (fno.notify._impl.send_notification). The local OS toast is one leg; this row is the other: a status sink with events=[operator_notice] carries it off the host, so a remote operator sees it (x-5f06). A notice is a POINTER to the durable queue, never a copy: pointer names the verb that shows the content, and body carries counts, never rows."
+    sources: [python, daemon, test]
+    data:
+      required: [title, body]
+      properties:
+        title:
+          type: string
+          description: "Short headline, as the toast showed it."
+        body:
+          type: string
+          description: "Counts plus context, never queue content."
+        pointer:
+          type: string
+          description: "Optional. The verb (or URL) that shows the durable state, e.g. `fno inbox outstanding`."
+    consumers: [status_sinks, operator]
+
   - name: decision_retracted
     retention: durable
     description: "An append-only retraction of one decision. The original operator_decision remains unchanged and readers fold the newest valid event into its lifecycle."
