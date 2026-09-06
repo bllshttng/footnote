@@ -361,6 +361,37 @@ def whoami_command(
         print(f"error: {exc}", file=sys.stderr)
         raise typer.Exit(code=4) from exc
     agent_self = (os.environ.get("FNO_AGENT_SELF") or "").strip()
+    # x-8bfb: FNO_AGENT_SELF only reaches a process the spawn path started
+    # with it set. A worker that joined via /fno-me, an adopted session, or a
+    # restored pane has no such env, though its registry row already answers
+    # the same question. Tier 2 of resolve_self (whoami.py) is exactly that
+    # fallback; called with no live_status_fn it costs one registry read and
+    # spawns no `claude` subprocess (AC4-FR), so it is safe on this hot
+    # SessionStart path. Silent on every failure (AC3-HP): a human session or
+    # a broken registry must render byte-for-byte as before.
+    agent_registry_name: Optional[str] = None
+    if not agent_self:
+        try:
+            from fno.agents import whoami as whoami_mod
+            from fno.agents.registry import RegistryVersionError, load_registry
+            from fno.agents.self_stamp import resolve_self_identity
+
+            _ident = resolve_self_identity(os.environ)
+            if _ident.session_id and _ident.harness:
+                try:
+                    _registry = load_registry()
+                except RegistryVersionError:
+                    _registry = []
+                _result = whoami_mod.resolve_self(
+                    env=os.environ,
+                    registry=_registry,
+                    session_uuid=_ident.session_id,
+                    harness=_ident.harness,
+                )
+                if _result.registered and _result.name:
+                    agent_registry_name = _result.name
+        except Exception:  # noqa: BLE001 - this pointer never gains a failure mode
+            agent_registry_name = None
     mail_unread = _mail_unread_count(mail, agent_self, harness_sid, state.project_root)
     # Context pressure from the same transcript the model line resolves. Probed
     # once here and reused in both render branches so the file is not tailed
@@ -482,6 +513,8 @@ def whoami_command(
     # unchanged. The focused, complete answer remains `fno agents whoami`.
     if agent_self:
         typer.echo(f"agent:    {agent_self} (mesh)")
+    elif agent_registry_name:
+        typer.echo(f"agent:    {agent_registry_name} (registry)")
     if crown is not None:
         typer.echo(f"crown:    {crown['text']}")
     _emit_warnings(state)
