@@ -659,6 +659,17 @@ def _payload(
         "fleet_percent_measured_cpu": measured_share,
         "leak_verdict": leak_verdict(reading.direct_process_count, process_threshold),
         "capacity_verdict": capacity_verdict(load_snapshot),
+        # x-5283 AC7: a verdict names the axis it was derived from and prints
+        # the numbers that decided it. This verdict reads the LOAD snapshot -
+        # the sustained-CPU line two rows below is a different axis, on
+        # purpose, and must never be mistaken for the thing that decided.
+        "capacity_verdict_axis": (
+            "load_1m"
+            if capacity_verdict(load_snapshot) != "unknown"
+            else "unknown"
+        ),
+        "capacity_verdict_value": getattr(load_snapshot, "load_1m", None),
+        "capacity_verdict_threshold": getattr(load_snapshot, "load_ceiling", None),
         "load_1m": getattr(load_snapshot, "load_1m", None),
         "load_5m": getattr(load_snapshot, "load_5m", None),
         "load_15m": getattr(load_snapshot, "load_15m", None),
@@ -772,7 +783,8 @@ def _emit_result(
                 )
         typer.echo(
             f"sustained CPU: {reading.sustained_cpu_cores:.3f} cores "
-            f"(threshold {threshold_cores:.3f} from {payload['cpu_capacity_cores']} cpus)"
+            f"(threshold {threshold_cores:.3f} from {payload['cpu_capacity_cores']} cpus; "
+            "a separate axis - it did not decide the verdict)"
         )
         typer.echo(
             f"descendant CPU: {reading.descendant_cpu_cores:.3f} cores "
@@ -799,12 +811,26 @@ def _emit_result(
                 f"attribution gap: {reading.attribution_gap} "
                 "(fleet share is an undercount, not headroom)"
             )
+        axis = payload["capacity_verdict_axis"]
+        axis_numbers = ""
+        if axis != "unknown":
+            value = payload["capacity_verdict_value"]
+            threshold = payload["capacity_verdict_threshold"]
+            axis_numbers = (
+                f" on {axis} ({value:.1f} against {threshold:.1f})"
+                if isinstance(value, (int, float))
+                and isinstance(threshold, (int, float))
+                else f" on {axis}"
+            )
         if exit_code == EXIT_CAPACITY_OVER:
-            typer.echo(f"verdict: capacity over (exit {exit_code})")
+            typer.echo(f"verdict: capacity over{axis_numbers} (exit {exit_code})")
         elif exit_code == EXIT_LEAK:
-            typer.echo(f"verdict: leak (exit {exit_code})")
+            typer.echo(f"verdict: leak{axis_numbers} (exit {exit_code})")
         else:
-            typer.echo(f"verdict: {capacity} (exit {exit_code})")
+            typer.echo(
+                f"verdict: {payload['capacity_verdict']}{axis_numbers} "
+                f"(exit {exit_code})"
+            )
         if reading.unparsed_lines:
             typer.echo(f"unparsed lines: {reading.unparsed_lines}")
         if note is not None:

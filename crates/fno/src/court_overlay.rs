@@ -314,7 +314,10 @@ impl Panel {
             (Some(load), Some(ceiling)) => {
                 let mut l = format!("  load      {load:.1} of {ceiling:.1} max");
                 if load > ceiling {
-                    l.push_str(&format!(" · {:.1}x", load / ceiling));
+                    // x-5283: the over verdict names the axis it read, so a
+                    // high load average is never mistaken for the cpu line's
+                    // sustained reading.
+                    l.push_str(&format!(" · {:.1}x over on load_1m", load / ceiling));
                 }
                 l
             }
@@ -390,7 +393,7 @@ impl Panel {
                     second.push_str(&format!(" = {per_cpu:.1} per cpu x {ncpu:.0} cores"));
                 }
                 if load > ceiling {
-                    second.push_str(&format!(" · {:.1}x over", load / ceiling));
+                    second.push_str(&format!(" · {:.1}x over on load_1m", load / ceiling));
                 }
                 lines.push(second);
                 lines.push("            load counts QUEUED threads, not busy time".to_string());
@@ -736,7 +739,7 @@ mod tests {
             text.contains("ceiling 96.0 = 8.0 per cpu x 12 cores"),
             "{text}"
         );
-        assert!(text.contains("1.1x over"), "{text}");
+        assert!(text.contains("1.1x over on load_1m"), "{text}");
         assert!(
             text.contains("load counts QUEUED threads, not busy time"),
             "{text}"

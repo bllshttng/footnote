@@ -1193,7 +1193,7 @@ def test_ac7_edge_short_lived_descendant_counts_in_fleet_cpu(
 
     assert result.exit_code == 0, result.output
     assert "fleet CPU: 1.200 cores" in result.stdout
-    assert "verdict: within (exit 0)" in result.stdout
+    assert "verdict: within on load_1m" in result.stdout
 
 
 def test_ac8_edge_descendants_do_not_consume_direct_process_threshold(
@@ -1281,7 +1281,7 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 0, result.output
-    assert "sustained CPU: 0.200 cores (threshold 0.400 from 4 cpus)" in result.stdout
+    assert "sustained CPU: 0.200 cores (threshold 0.400 from 4 cpus; a separate axis - it did not decide the verdict)" in result.stdout
     assert "processes: 2" in result.stdout
     assert "unexplained processes: 0 (2 direct, roster explains 3)" in result.stdout
     assert "transient calls: 1" in result.stdout
@@ -1319,7 +1319,7 @@ def test_ac4_edge_capacity_over_exits_three_and_names_top_consumers(
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 3
-    assert "verdict: capacity over (exit 3)" in result.stdout
+    assert "verdict: capacity over on load_1m" in result.stdout
     assert "unexplained processes: 1 (2 direct, roster explains 1)" in result.stdout
     assert "fno mux serve (80.0%)" in result.stdout
     assert "fno-agents-daemon --serve (40.0%)" in result.stdout
@@ -1352,7 +1352,7 @@ def test_ac4_edge_unexplained_processes_get_their_own_exit(
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 5
-    assert "verdict: leak (exit 5)" in result.stdout
+    assert "verdict: leak on load_1m" in result.stdout
     assert "sustained CPU: 0.200 cores" in result.stdout
     assert "processes: 2" in result.stdout
     assert "unexplained processes: 1 (2 direct, roster explains 1)" in result.stdout
@@ -1551,3 +1551,34 @@ def test_spawn_gate_treats_a_gap_reading_as_not_headroom(monkeypatch):
     )
     assert spawn_gate._fleet_cpu_reading() is None
     assert spawn_gate._footprint_cause_evidence() is None
+
+
+def test_capacity_verdict_names_its_axis_and_deciding_numbers(monkeypatch):
+    """AC7-HP (x-5283): load over its ceiling while sustained CPU is under
+    its threshold - the verdict names load_1m as its axis and prints the
+    numbers that decided it, and the sustained line disclaims the verdict.
+    On main neither surface said which axis produced the verdict, so the
+    footprint's headroom reading and the gate's saturation refusal looked
+    like a contradiction."""
+    from fno import doctor_footprint
+
+    reading = doctor_footprint.parse_footprint(
+        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 0.5 1024 fno daemon\n",
+        excluded_root_pids=set(),
+        attributed_root_pids=set(),
+        threshold_excluded_root_pids=set(),
+    )
+    monkeypatch.setattr(
+        doctor_footprint, "cause_reading", lambda: (reading, None)
+    )
+    _pin_load(monkeypatch, status="exceeded", load=110.4, ceiling=96.0)
+    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
+    payload = json.loads(result.stdout)
+    assert payload["capacity_verdict"] == "over"
+    assert payload["capacity_verdict_axis"] == "load_1m"
+    assert payload["capacity_verdict_value"] == 110.4
+    assert payload["capacity_verdict_threshold"] == 96.0
+
+    shown = runner.invoke(app, ["doctor", "footprint", "--cause-only"])
+    assert "verdict: over on load_1m (110.4 against 96.0)" in shown.output
+    assert "a separate axis - it did not decide the verdict" in shown.output
