@@ -642,7 +642,6 @@ def _payload(
         if reading.measured_cpu_cores > 0
         else 0.0
     )
-    payload_capacity = capacity_verdict(load_snapshot)
     payload: dict[str, object] = {
         "sustained_cpu_cores": reading.sustained_cpu_cores,
         "descendant_cpu_cores": reading.descendant_cpu_cores,
@@ -659,14 +658,10 @@ def _payload(
         "fleet_percent_capacity": reading.fleet_cpu_cores / cpu_capacity * 100,
         "fleet_percent_measured_cpu": measured_share,
         "leak_verdict": leak_verdict(reading.direct_process_count, process_threshold),
-        "capacity_verdict": payload_capacity,
         # x-5283 AC7: the verdict reads the LOAD snapshot; the sustained-CPU
-        # line two rows below is a different axis and decided nothing.
-        "capacity_verdict_axis": (
-            "load_1m" if payload_capacity != "unknown" else "unknown"
-        ),
-        "capacity_verdict_value": getattr(load_snapshot, "load_1m", None),
-        "capacity_verdict_threshold": getattr(load_snapshot, "load_ceiling", None),
+        # line below is a different axis and decided nothing.
+        "capacity_verdict": (cv := capacity_verdict(load_snapshot)),
+        "capacity_verdict_axis": "load_1m" if cv != "unknown" else "unknown",
         "load_1m": getattr(load_snapshot, "load_1m", None),
         "load_5m": getattr(load_snapshot, "load_5m", None),
         "load_15m": getattr(load_snapshot, "load_15m", None),
@@ -811,9 +806,7 @@ def _emit_result(
         axis = payload["capacity_verdict_axis"]
         axis_numbers = ""
         if axis != "unknown":
-            value, threshold = payload["capacity_verdict_value"], payload[
-                "capacity_verdict_threshold"
-            ]
+            value, threshold = payload["load_1m"], payload["load_ceiling"]
             axis_numbers = (
                 f" on {axis} ({value:.1f} against {threshold:.1f})"
                 if isinstance(value, (int, float))

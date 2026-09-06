@@ -1576,8 +1576,8 @@ def test_capacity_verdict_names_its_axis_and_deciding_numbers(monkeypatch):
     payload = json.loads(result.stdout)
     assert payload["capacity_verdict"] == "over"
     assert payload["capacity_verdict_axis"] == "load_1m"
-    assert payload["capacity_verdict_value"] == 110.4
-    assert payload["capacity_verdict_threshold"] == 96.0
+    assert payload["load_1m"] == 110.4
+    assert payload["load_ceiling"] == 96.0
 
     shown = runner.invoke(app, ["doctor", "footprint", "--cause-only"])
     assert "verdict: over on load_1m (110.4 against 96.0)" in shown.output
