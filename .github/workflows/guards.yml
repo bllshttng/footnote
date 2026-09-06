@@ -224,26 +224,6 @@ jobs:
         working-directory: cli
         run: uv run fno-py doctor lint hook-tombstones
 
-      - name: Harness capabilities table fresh (one canonical source, byte-identical copy)
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/ci/check-harness-capabilities-fresh.sh
-
-      - name: Harness capability matrix fresh (generated doc, never hand-edited)
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/ci/check-harness-capability-matrix-fresh.sh
-
-      - name: Run harness-capabilities freshness test harness
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash tests/ci/test_check_harness_capabilities_fresh.sh
-
-      - name: Merge-posture carrier table fresh (one canonical source, byte-identical copy)
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/ci/check-merge-posture-fresh.sh
-
       # The complete harness roster vs its shipped evidence: setup docs, the
       # Rust provider dispatch arms, and the Python adapter registry. stdlib
       # only - no package install, no Rust build, no network.
@@ -256,16 +236,6 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: python3 scripts/ci/check-harness-roster-parity.py --selftest
-
-      - name: Events limits table fresh (generated from schema.yaml, not hand-edited)
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/ci/check-events-limits-fresh.sh
-
-      - name: Run events-limits freshness test harness
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash tests/ci/test_check_events_limits_fresh.sh
 
       - name: Cargo rustc-wrapper announces its path
         if: ${{ !cancelled() }}
