@@ -103,8 +103,9 @@ def test_map_covers_current_surface_once():
     # place before merge): 568 -> 569. Main added `agents feed`, the
     # activity feed projection: 569 -> 570 from main's side. This branch's
     # sidecar retirement deleted the `backlog rehash` row. Counted from the
-    # merged file: 569.
-    assert len(mapped) == 569, (
+    # merged file: 569. The crown-durability branch allocated the directly
+    # invoked `agents court-orphans` sweep its row: 569 -> 570.
+    assert len(mapped) == 570, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

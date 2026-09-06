@@ -13,6 +13,7 @@ agents claim session-pid	T1	agents claim session-pid	2
 agents claim status	T1	agents claim status	32
 agents codex-session-for-pid	T1	agents codex-session-for-pid	3
 agents court	T1	agents court	3
+agents court-orphans	T1	agents court-orphans	0
 agents crown	T1	agents crown	17
 agents digest	T1	agents digest	7
 agents discovered-json	T1	agents discovered-json	9
