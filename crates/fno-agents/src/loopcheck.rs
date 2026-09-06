@@ -12896,12 +12896,27 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     };
 
     if board.actionable == 0 {
-        let message = if board.unreadable > 0 {
-            "board clean on every readable queue; exiting NoWork"
-        } else {
-            "board clean; exiting NoWork"
-        };
-        return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
+        // The goal keys completion on the crown draining, not on any queue
+        // (2026-09-06 ruling): a board reading clean while nodes sit driven
+        // but unshipped is a quiet beat, never a finish line. An unreadable
+        // drain read must not certify the scope drained, so it skips this
+        // exit and the dry-fire ceiling below bounds the wait.
+        let drained = manifest.scope.is_empty()
+            || crate::loop_king::scope_undelivered_count(
+                &parsed.fno_bin,
+                &parsed.cwd,
+                &manifest.scope,
+            )
+            .unwrap_or(i64::MAX)
+                == 0;
+        if drained {
+            let message = if board.unreadable > 0 {
+                "board clean on every readable queue; exiting NoWork"
+            } else {
+                "board clean; exiting NoWork"
+            };
+            return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
+        }
     }
 
     // The ceiling `fno agents king init --max-iterations` advertises. Before this it
