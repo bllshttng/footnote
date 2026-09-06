@@ -83,7 +83,7 @@ enum Role {
     /// naming 0 and 1 put two threads in two panes for the tab menu's Join
     /// actions to tile.
     MuxThread(Vec<OsString>),
-    /// (v69) `mux thread reseat <pane-id> [--portal N]`: move a live
+    /// (v70) `mux thread reseat <pane-id> [--portal N]`: move a live
     /// pane-hosted worker into a portal seat, keeping its PTY. The registry
     /// `mux` flip is the Python front door's half (`fno agents reseat`).
     MuxThreadReseat(Vec<OsString>),
@@ -235,7 +235,7 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             Some("where") if args.len() > 2 => Role::MuxWhere(args[2..].to_vec()),
             // (x-07c2, hidden) thread: drive the dedicated thread pane for a
             // row from outside the TUI - the door `fno agents attach` uses.
-            // (v69) `thread reseat <pane>` is its own door: the re-seat move.
+            // (v70) `thread reseat <pane>` is its own door: the re-seat move.
             Some("thread") if args.len() > 3 && args[2] == "reseat" => {
                 Role::MuxThreadReseat(args[3..].to_vec())
             }
