@@ -884,3 +884,55 @@ def test_no_live_crowns_renders_a_plain_statement(tmp_path: Path, monkeypatch) -
     _prepare(monkeypatch, tmp_path, [], graph_entries=[])
 
     assert render_court(as_json=False) == "court: no live crowns"
+
+
+def test_crowning_an_adopted_row_never_makes_it_the_grantors_worker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC6-HP (x-5283): adoption is vouching, not spawning. The adopted row
+    keeps ``spawned_by_session`` null, records the grantor on
+    ``adopted_by_session``, and the grantor's ``held`` is unchanged across
+    the crown - on main the adoption stamped the grantor as spawner, so
+    crowning moved the row's cost into the grantor's share."""
+    from fno.agents import spawn_gate
+    from fno.agents.registry import (
+        load_registry,
+        register_existing_session,
+        write_registry,
+    )
+
+    grantor = "aaaaaaaa-1111-2222-3333-444455556666"
+    adopted = "bbbbbbbb-1111-2222-3333-444455556666"
+    for marker in (
+        "CODEX_THREAD_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "GEMINI_SESSION_ID",
+        "OPENCODE_SESSION_ID",
+    ):
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", grantor)
+
+    _prepare(monkeypatch, tmp_path, [])
+    row = register_existing_session(
+        session_id=adopted, cwd="/w", harness="claude", origin="adopted"
+    )
+    assert row.spawned_by_session is None
+    assert row.adopted_by_session == grantor
+
+    import os
+
+    worker = _entry("w1", spawned_by_session=grantor, pid=os.getpid())
+    uncrowned = [worker, load_registry()[-1]]
+    write_registry(uncrowned)
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: uncrowned)
+    before = spawn_gate.share_reading(spawn_gate.census(), 30, grantor)
+    assert before["held"] == 1
+
+    # The crown itself (the verb's field write): the adopted row becomes a
+    # king; its spawner stays null and nobody's held moves.
+    uncrowned[-1].crown_level = 1
+    write_registry(uncrowned)
+    after = spawn_gate.share_reading(spawn_gate.census(), 30, grantor)
+    assert after["held"] == 1
+    assert adopted in after["king_sessions"]

@@ -414,6 +414,12 @@ class AgentEntry:
     spawned_by_session: Optional[str] = None
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
+    # x-5283 LD3: adoption is VOUCHING, not spawning. ``spawned_by_*`` keeps
+    # one meaning - who spawned this row, whose share pays for it - so the
+    # grantor of an adopted row lives here instead, and crowning can never
+    # move a row's cost into the grantor's account. Additive-optional, the
+    # same shape and reason as the triple above.
+    adopted_by_session: Optional[str] = None
     # x-42c5: the CAUSE of the spawn, distinct from spawned_by_* above (which
     # identify WHO called `fno agents spawn`, not WHY). An automated dispatcher
     # sets FNO_SPAWN_TRIGGER before shelling out so the subprocess's own
@@ -2060,21 +2066,27 @@ def register_existing_session(
             suffix += 1
         # Parent edge (x-132c), captured for every NON-operator birth: a row
         # an operator's SessionStart registered has no spawner, and stamping
-        # the operator's own session env would record a self-edge. Adopted and
-        # synthesized rows DO take the registering session as their parent -
-        # it is the session that vouched for them. The identity guard below
-        # covers every OTHER self-registration caller (e.g. a mail hold
-        # registering the session it runs in): a row whose captured parent IS
-        # its own session id never stamps itself as its own parent, whatever
-        # origin the caller passed. Lazy import: dispatch owns the capture
-        # helper and imports this module at load time.
-        if origin == "operator":
-            _sb_session = _sb_harness = _sb_cwd = None
-        else:
+        # the operator's own session env would record a self-edge. ADOPTED
+        # rows are different (x-5283 LD3): adoption is vouching, not
+        # spawning, so the captured session lands on adopted_by_session and
+        # the spawned_by_* edge stays empty - the share is charged on the
+        # spawn edge, and crowning must not move a row's cost to the
+        # grantor. The identity guard below covers every OTHER
+        # self-registration caller (e.g. a mail hold registering the session
+        # it runs in): a row whose captured parent IS its own session id
+        # never stamps itself as its own parent, whatever origin the caller
+        # passed. Lazy import: dispatch owns the capture helper and imports
+        # this module at load time.
+        _sb_session = _sb_harness = _sb_cwd = None
+        _adopted_by = None
+        if origin != "operator":
             from fno.agents.dispatch import _capture_parent_edge
 
             _sb_session, _sb_harness, _sb_cwd = _capture_parent_edge()
             if _sb_session is not None and _sb_session == session_id:
+                _sb_session = _sb_harness = _sb_cwd = None
+            if origin == "adopted":
+                _adopted_by = _sb_session
                 _sb_session = _sb_harness = _sb_cwd = None
         fresh = AgentEntry(
             name=chosen,
@@ -2099,6 +2111,7 @@ def register_existing_session(
             spawned_by_session=_sb_session,
             spawned_by_harness=_sb_harness,
             spawned_by_cwd=_sb_cwd,
+            adopted_by_session=_adopted_by,
             delivery_policy=(
                 None if delivery_policy in (None, "off") else delivery_policy
             ),
