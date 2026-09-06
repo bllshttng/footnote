@@ -60,7 +60,6 @@ from fno.mail.codex_review_target import (
     resolve_codex_review_target as _codex_review_target,
 )
 from fno.mail.receipts import (
-    _is_live_lane_failure,
     _live_miss_age_suffix,
     _warn_deferred,
 )
