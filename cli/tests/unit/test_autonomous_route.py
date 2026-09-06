@@ -39,9 +39,7 @@ class TestRouteActions:
     def test_ac4_hp_real_probe_cuts_over_to_the_healthy_record(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
-        """The live signal and rotation walk name the usable destination."""
         import time
-
         from fno.adapters.providers.error_taxonomy import ErrorRule
         from fno.adapters.providers.model import QuotaConfig
         from fno.adapters.providers.rotation import Combo, next_healthy_provider
@@ -52,7 +50,6 @@ class TestRouteActions:
             update_provider_health,
             write_usage_snapshot,
         )
-
         monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime.json"))
         quota = QuotaConfig(observe=True, defer_dispatch=True)
         monkeypatch.setattr(
@@ -74,18 +71,15 @@ class TestRouteActions:
             now=now - PROVIDER_HEALTH_TTL_SECONDS - 1,
             resets_at=now + 3600,
         )
-
         def destination(_cwd, _exhausted):
             chosen = next_healthy_provider(
                 Combo(name="fallback", providers=("healthy",)), quota=quota
             )
             return (chosen, "codex", {}) if chosen else None
-
         monkeypatch.setattr(ar, "_select_destination", destination)
         route = ar.select_autonomous_route(
             provider_id="source", node_cwd=str(tmp_path), now=now
         )
-
         assert route.action == "cutover"
         assert route.record_id == "healthy"
 

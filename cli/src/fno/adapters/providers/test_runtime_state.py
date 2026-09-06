@@ -218,7 +218,6 @@ class TestResetProviderHealth:
             resets_at=now + 9 * 3600,
         )
         before = json.loads(state_path.read_text(encoding="utf-8"))["provider_health"]["B"]
-
         reset_provider_health("A", now=now)
 
         after = json.loads(state_path.read_text(encoding="utf-8"))["provider_health"]["B"]
@@ -1470,10 +1469,8 @@ class TestLockAuthoritativeHeadroom:
         assert verdict.state is HeadroomState.UNKNOWN
 
     def test_ac1_hp_fresh_usage_beats_a_future_lock(self, state_path: Path) -> None:
-        """A live usage read is stronger than a stale reactive lock."""
         from fno.adapters.providers.runtime_state import write_usage_snapshot
         from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
-
         now = time.time()
         update_provider_health(
             "acct", ErrorRule(status=429, backoff=True), now=now,
@@ -1488,21 +1485,17 @@ class TestLockAuthoritativeHeadroom:
             ),
             now=now + 1,
         )
-
         verdict = headroom("acct", now=now + 1)
-
         assert verdict.state is HeadroomState.OK
 
     def test_ac2_edge_ttl_drops_a_stale_entry_even_when_its_lock_is_future(
         self, state_path: Path
     ) -> None:
-        """A long-lived lock cannot keep old account health alive forever."""
         now = time.time()
         old = now - PROVIDER_HEALTH_TTL_SECONDS - 1
         update_provider_health(
             "stale-acct", ErrorRule(status=429, backoff=True), now=old,
             resets_at=now + 9 * 3600,
         )
-
         assert "stale-acct" not in read_state(now=now).provider_health
         assert headroom("stale-acct", now=now).state is HeadroomState.UNKNOWN
