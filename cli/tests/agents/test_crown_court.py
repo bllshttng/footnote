@@ -510,6 +510,36 @@ def test_a_crown_on_only_the_manifest_is_surfaced_crownless_in_the_registry(
     assert "no live registry row" in orphan["reason"]
 
 
+def test_a_manifest_crown_survives_its_project_having_no_rows_at_all(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The vanished-row case this read exists for: the row is GONE, so no row
+    names the project and no cwd can be derived. The sweep must key on the
+    spaces root, not on rows, or the orphan crown is invisible exactly when
+    the fleet lost it."""
+    import fno.king.state as king_state
+    from fno.agents.court import gather_court
+    from fno.paths import space_dir
+
+    _prepare(monkeypatch, tmp_path, [], graph_entries=[])
+    manifest = space_dir(tmp_path) / "kings" / "x-dede.md"
+    king_state.write_manifest(
+        manifest,
+        scope="x-dede",
+        harness_session_id="gone-king",
+        owner_cwd=str(tmp_path),
+        crown_level=2,
+        crown_scope="x-dede",
+        crown_grantor="operator",
+    )
+
+    court = gather_court()
+
+    orphan = next(e for e in court["crowns"] if e["scope"] == "x-dede")
+    assert orphan["crown_source"] == "manifest"
+    assert orphan["manifest_path"] == str(manifest)
+
+
 def test_unreadable_registry_nulls_the_court_rather_than_reporting_it_empty(
     tmp_path: Path, monkeypatch
 ) -> None:

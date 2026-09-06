@@ -121,7 +121,7 @@ def _conflicts(rows: list) -> list[dict[str, Any]]:
     ]
 
 
-def _manifest_limb(scope: str, row: Any) -> dict[str, Any]:
+def _manifest_limb(scope: Any, row: Any) -> dict[str, Any]:
     """The manifest side of one crown, rendered from the single reader.
 
     ``reign_state`` is the one site comparing manifest identity to registry
@@ -157,11 +157,7 @@ def _manifest_limb(scope: str, row: Any) -> dict[str, Any]:
         return limb
     state = reign_state(scope, state_root=root)
     limb["manifest_session"] = state.manifest_session
-    if state.split is True or (
-        state.manifest_session is not None
-        and state.registry_session is not None
-        and state.manifest_session != state.registry_session
-    ):
+    if state.split is True:
         limb["crown_source"] = "split"
     if path.is_file():
         limb["manifest_path"] = str(path)
@@ -172,31 +168,26 @@ def _manifest_limb(scope: str, row: Any) -> dict[str, Any]:
     return limb
 
 
-def _manifest_only_crowns(live_rows: list, held_territories: set) -> list[dict[str, Any]]:
+def _manifest_only_crowns(held_territories: set) -> list[dict[str, Any]]:
     """Crowns whose registry row is gone but whose manifest still holds them.
 
     The manifest is the durable record (x-f0d2), so a scope whose row
-    vanished is not an empty court: the file IS the crown. Surfaced with
-    ``crown_source: manifest`` and ``agree: None`` - the graph cannot
-    adjudicate a crown no row renders - with the manifest path named so the
-    operator can see where the crown lives.
+    vanished is not an empty court: the file IS the crown. The sweep walks
+    every project space under the spaces ROOT, not the rows' own projects: a
+    vanished row names no cwd, and the vanished-row scope is exactly the case
+    this read exists to surface. Surfaced with ``crown_source: manifest`` and
+    ``agree: None`` - the graph cannot adjudicate a crown no row renders -
+    with the manifest path named so the operator can see where it lives.
     """
-    from fno.king.state import king_state_root, parse_manifest
+    from fno.king.state import parse_manifest
+    from fno.paths import spaces_root
 
     entries: list[dict[str, Any]] = []
-    seen_roots: set[Path] = set()
-    for row in live_rows:
-        cwd = getattr(row, "cwd", None)
-        if not isinstance(cwd, str) or not cwd.strip():
-            continue
-        try:
-            root = king_state_root(Path(cwd))
-        except (OSError, ValueError):
-            continue
-        if root in seen_roots:
-            continue
-        seen_roots.add(root)
-        kings = root / "kings"
+    root = spaces_root()
+    if not root.is_dir():
+        return entries
+    for space in sorted(root.iterdir()):
+        kings = space / "kings"
         if not kings.is_dir():
             continue
         for path in sorted(kings.glob("*.md")):
@@ -311,7 +302,7 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     # Crowns that outlived their rows: the manifest keeps them, the court
     # shows them. Rendered after the row entries so a reader taking the first
     # rows still sees the registry's own answer first.
-    entries.extend(_manifest_only_crowns(live_rows, held_territories))
+    entries.extend(_manifest_only_crowns(held_territories))
 
     disagreements = sum(1 for e in entries if e["agree"] is False)
     unknowns = sum(1 for e in entries if e["agree"] is None)
