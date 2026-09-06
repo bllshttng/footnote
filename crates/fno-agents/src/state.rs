@@ -2110,9 +2110,50 @@ fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[Regi
         .ok()
         .and_then(|exe| exe.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "unknown".to_string());
-    for entry in removed {
+    for entry in &removed {
         crate::receipt::stage_removal_accounting(&home, entry, &remover, &emitter);
     }
+    // One grouped `registry_rows_lost` beside the per-row events (x-f0d2): the
+    // per-row events carry receipts, this one names the writer, pid and verb,
+    // so a save that drops rows can no longer vanish without a door being
+    // named. Emitted after the per-row events, so a reader taking the first
+    // line still sees a row receipt.
+    let lost: Vec<serde_json::Value> = removed
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "harness_session_id": e.harness_session_id.clone().unwrap_or_default(),
+                "name": e.name.clone(),
+            })
+        })
+        .collect();
+    let _ = emitter.emit(
+        "registry_rows_lost",
+        &serde_json::json!({
+            "writer": "rust",
+            "pid": std::process::id(),
+            "verb": invocation_verb(),
+            "lost": lost,
+        }),
+    );
+}
+
+/// The command line that named this write, bounded: argv0's basename plus up
+/// to five following arguments, 200 chars. The binary name alone cannot tell
+/// `agents reap --apply` from `board --json`, and which door dropped rows is
+/// exactly the question the grouped loss event exists to answer.
+fn invocation_verb() -> String {
+    let mut parts: Vec<String> = std::env::args_os()
+        .take(6)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    if let Some(first) = parts.first_mut() {
+        if let Some(basename) = Path::new(&*first).file_name() {
+            *first = basename.to_string_lossy().into_owned();
+        }
+    }
+    let joined = parts.join(" ");
+    joined.chars().take(200).collect()
 }
 
 type IdentitySignature = (String, String, String, String);
@@ -3894,12 +3935,17 @@ mod tests {
         let reg = load_registry(&path).unwrap();
         assert_eq!(reg.entries.len(), 2);
 
-        // One event on the agent-lifecycle log, naming the row, the remover,
-        // and a staged receipt.
+        // One per-row event on the agent-lifecycle log, naming the row, the
+        // remover, and a staged receipt (the grouped registry_rows_lost line
+        // lands after it; the tests for that event assert its own shape).
         let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
-        let lines: Vec<&str> = events.lines().collect();
-        assert_eq!(lines.len(), 1, "exactly one removal event: {events}");
-        let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let removals: Vec<serde_json::Value> = events
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter(|e| e["type"] == "registry_row_removed")
+            .collect();
+        assert_eq!(removals.len(), 1, "exactly one removal event: {events}");
+        let event: serde_json::Value = removals[0].clone();
         assert_eq!(event["type"], "registry_row_removed");
         assert_eq!(event["source"], "daemon");
         assert_eq!(event["data"]["name"], "dropped");
@@ -3921,6 +3967,56 @@ mod tests {
         assert_eq!(receipt["row_name"], "dropped");
         assert_eq!(receipt["removed_by"], event["data"]["remover"]);
         assert!(receipt["resume"].as_str().is_some_and(|s| !s.is_empty()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_registry_emits_registry_rows_lost_naming_the_writer() {
+        // x-f0d2: beside the per-row receipts, one grouped event names the
+        // writer that dropped rows: pid, the verb that ran, and the lost ids
+        // with their names. The 09-03 rows vanished with no journal naming a
+        // writer; this is that instrument.
+        let dir = tmpdir("rows-lost");
+        let home = dir.join("agents");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("registry.json");
+        std::fs::write(
+            &path,
+            seeded_registry_body(&[
+                loss_shaped_row("kept", "claude", Some("kept-s")),
+                loss_shaped_row("dropped", "claude", Some("dropped-s")),
+            ]),
+        )
+        .unwrap();
+
+        update_registry(&path, |r| {
+            r.entries.retain(|e| e.name != "dropped");
+        })
+        .unwrap();
+
+        let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
+        let lost: Vec<serde_json::Value> = events
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter(|e| e["type"] == "registry_rows_lost")
+            .collect();
+        assert_eq!(lost.len(), 1, "exactly one grouped loss event: {events}");
+        let data = &lost[0]["data"];
+        assert_eq!(data["writer"], "rust");
+        assert_eq!(data["pid"], std::process::id());
+        assert!(
+            data["verb"].as_str().is_some_and(|s| !s.is_empty()),
+            "the verb names the door, not just the binary: {}",
+            lost[0]
+        );
+        let ids: Vec<&str> = data["lost"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["harness_session_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["dropped-s"]);
+        assert_eq!(data["lost"][0]["name"], "dropped");
         std::fs::remove_dir_all(&dir).ok();
     }
 

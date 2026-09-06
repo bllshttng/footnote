@@ -2447,6 +2447,53 @@ def test_update_registry_emits_nothing_when_nothing_is_removed(
     assert not events_path.exists(), "a removal-free write never opens the stream"
 
 
+def test_update_registry_journals_rows_lost_naming_the_writer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """x-f0d2: a lossy save journals one grouped registry_rows_lost event.
+
+    The per-row registry_row_removed events carry the remover; the grouped
+    event is the writer-naming instrument the 09-03 investigation lacked:
+    writer (python), pid, the verb that ran, and every lost id with its name.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, update_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
+    _seed_rows(
+        registry_path,
+        [
+            AgentEntry(
+                name="kept", harness="claude", harness_session_id="kept-s",
+                cwd="/tmp", log_path="/tmp/k.log",
+            ),
+            AgentEntry(
+                name="dropped", harness="claude", harness_session_id="dropped-s",
+                cwd="/tmp", log_path="/tmp/d.log",
+            ),
+        ],
+    )
+
+    update_registry(
+        lambda es: [e for e in es if e.name != "dropped"], path=registry_path
+    )
+
+    lines = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    lost = [e for e in lines if e["type"] == "registry_rows_lost"]
+    assert len(lost) == 1, f"exactly one grouped loss event: {lines}"
+    data = lost[0]["data"]
+    assert data["writer"] == "python"
+    assert isinstance(data["pid"], int)
+    assert data["verb"], "the verb names the door, not just the binary"
+    assert data["lost"] == [
+        {"harness_session_id": "dropped-s", "name": "dropped"}
+    ]
+
+
 def test_update_registry_announces_a_removal_it_cannot_build_a_receipt_for(
     tmp_path: Path, monkeypatch
 ) -> None:
