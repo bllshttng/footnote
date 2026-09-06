@@ -118,7 +118,7 @@ if ! deny_json; then
   echo "--- hook stderr ---"; cat "$WORK/hook.err"
 fi
 deny_json; check "third review at the spent cap is denied end to end" $?
-grep -q "two-round cap is spent" "$WORK/hook.out"; check "the denial names the spent budget and remedy" $?
+grep -q "the configured round cap is spent" "$WORK/hook.out"; check "the denial names the spent budget and remedy" $?
 
 # --- carveout: scoped fix-verification passes through the identical path ----
 run_hook "$repo" "--verify-fixes"
