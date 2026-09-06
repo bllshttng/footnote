@@ -341,6 +341,10 @@ fn king_wake_clause(reason: Option<&str>, address: Option<&str>) -> String {
         Some("backstop") => " No event fired; this is the periodic re-check, and an \
              unchanged board is a legitimate NoWork exit."
             .to_string(),
+        Some("escalation_answered") => " You were woken by the answer to a question \
+             this crown asked the operator; it is quoted below - apply it before \
+             your next ruling."
+            .to_string(),
         _ => String::new(),
     }
 }
@@ -353,7 +357,8 @@ fn king_wake_clause(reason: Option<&str>, address: Option<&str>) -> String {
 fn king_wake_detail_clause(detail: Option<&str>) -> String {
     match detail {
         Some(detail) if !detail.is_empty() => {
-            format!("\nThe board diff since the last wake (unchanged rows omitted):\n{detail}")
+            format!("\nThe trigger's payload - the board diff since the last wake, or the \
+                 operator's answer you were woken on:\n{detail}")
         }
         _ => String::new(),
     }
@@ -509,10 +514,10 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             );
             return Ok(2);
         }
-        if !matches!(reason, "mail" | "board" | "backstop") {
+        if !matches!(reason, "mail" | "board" | "backstop" | "escalation_answered") {
             eprintln!(
-                "fno-agents loop run: --wake-reason must be mail|board|backstop, got \
-                 '{reason}'"
+                "fno-agents loop run: --wake-reason must be \
+                 mail|board|backstop|escalation_answered, got '{reason}'"
             );
             return Ok(2);
         }
@@ -547,12 +552,15 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         );
         return Ok(2);
     }
-    if king_wake_detail.is_some() && king_wake_reason.as_deref() != Some("board") {
-        // Only the board trigger computes a diff; a mail wake carries its
-        // address, a backstop wake has nothing new by construction.
+    if king_wake_detail.is_some()
+        && !matches!(king_wake_reason.as_deref(), Some("board") | Some("escalation_answered"))
+    {
+        // Only the board trigger computes a diff and only the answer trigger
+        // quotes one; a mail wake carries its address, a backstop wake has
+        // nothing new by construction.
         eprintln!(
-            "fno-agents loop run: --wake-detail needs --wake-reason board (only the \
-             board trigger carries a diff as its payload)"
+            "fno-agents loop run: --wake-detail needs --wake-reason board or \
+             escalation_answered (only those triggers carry a payload)"
         );
         return Ok(2);
     }

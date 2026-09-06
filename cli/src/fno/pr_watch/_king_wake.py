@@ -6,10 +6,13 @@ arrived) is woken from here. Nothing inside the king loop can observe that - a
 terminated loop is not running - and the fleet watchdog implements a different
 predicate (``stalled``), which a cleanly-exited king never is.
 
-Triggers, in the order the operator fixed: mail first (the strongest - the
-signal already exists, is durable, and its arrival for an absent holder is a
-complete positive wake marker), board change second, and a timer backstop
-last, kept only so a missed event cannot strand a scope forever.
+Triggers, in the order the operator fixed: an answer to the king's own
+escalation first (the king asked for it, and its mail delivery addresses the
+holder's full session id, which no scanned mailbox spelling covers), mail
+second (the strongest of the ambient signals - durable, and its arrival for
+an absent holder is a complete positive wake marker), board change third,
+and a timer backstop last, kept only so a missed event cannot strand a
+scope forever.
 
 The wake ledger (``fno.king.wake``, rolling 24h window on the manifest) is the
 rate bound; ``should_wake`` gates every trigger through it, and the bill lands
@@ -156,6 +159,59 @@ def _mail_trigger(target: CrownTarget, unread_fn: Callable) -> Optional[str]:
     return None
 
 
+def _escalation_answer_trigger(
+    target: CrownTarget,
+    answered_fn: Callable,
+    cursor: str,
+) -> tuple[Optional[str], str]:
+    """``(prompt, matched_close_ts)`` for the newest answer to the holder's own question.
+
+    The answer's mail delivery addresses the holder's FULL session id
+    (``outstanding/deliver.py``), which no scanned mailbox spelling covers,
+    so the mail trigger cannot fire on it - the question journal is this
+    trigger's own source of truth. Only closes newer than ``cursor`` count:
+    an answer already woken on must not re-fire on every tick. The newest
+    matching answer wins; older ones still ride their mail delivery. The
+    matched close ts is returned for the caller to store only after a
+    dispatch actually fired - a refused answer stays a trigger.
+    """
+    try:
+        answered = answered_fn(target.root)
+    except Exception:  # noqa: BLE001 - an unreadable journal is not a trigger
+        return None, ""
+    addresses = {target.holder, target.short_id}
+    prompt: Optional[str] = None
+    matched_ts = ""
+    for record in answered:
+        asker = getattr(record, "asker", None)
+        closed_ts = str(getattr(record, "closed_ts", "") or "")
+        if not closed_ts or closed_ts <= cursor:
+            continue
+        if asker in addresses:
+            prompt = (
+                f"Answer to your question {record.id} "
+                f'"{getattr(record, "question", "")}": {getattr(record, "answer", "")}.'
+            )
+            matched_ts = closed_ts
+    return prompt, matched_ts
+
+
+def _init_answered_cursor(target: CrownTarget, answered_fn: Callable) -> str:
+    """Seed the cursor to the newest close already on record, waking nothing.
+
+    An absent cursor is a first observation, not "everything is new": without
+    this, the first armed tick would replay every answer the holder ever
+    received as a fresh trigger.
+    """
+    try:
+        answered = answered_fn(target.root)
+    except Exception:  # noqa: BLE001 - an unreadable journal seeds an empty cursor
+        answered = []
+    newest = max((str(getattr(r, "closed_ts", "") or "") for r in answered), default="")
+    _store_sidecar_field(target, "answered_cursor", newest)
+    return newest
+
+
 def _raise_ceiling_question(target: CrownTarget, count: int, ceiling: int) -> str:
     """One durable operator question per scope at the ceiling.
 
@@ -195,13 +251,36 @@ def _raise_ceiling_question(target: CrownTarget, count: int, ceiling: int) -> st
 
 
 def _sidecar_path(target: CrownTarget) -> Path:
-    """``.fno/kings/<scope>.wake.json`` - the tick-local board-hash cache.
+    """``.fno/kings/<scope>.wake.json`` - the tick-local wake-phase cache.
 
     Not the manifest: this is a cache with no reign meaning, and the
     manifest's write-once contract should not absorb a value that changes
     every ten minutes. Declared in docs/state-root-inventory.md.
     """
     return target.manifest.parent / f"{target.scope}.wake.json"
+
+
+def _read_sidecar(target: CrownTarget) -> dict:
+    """The whole sidecar payload; unreadable reads as empty."""
+    try:
+        payload = json.loads(_sidecar_path(target).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_sidecar(target: CrownTarget, payload: dict) -> None:
+    sidecar = _sidecar_path(target)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    tmp = sidecar.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(sidecar)
+
+
+def _store_sidecar_field(target: CrownTarget, key: str, value: object) -> None:
+    payload = _read_sidecar(target)
+    payload[key] = value
+    _write_sidecar(target, payload)
 
 
 def _board_rows(
@@ -244,12 +323,9 @@ def _board_hash(scope: str, entries: list, resolver: Optional[Callable] = None) 
     return "" if rows is None else _hash_rows(rows)
 
 
-def _read_board_sidecar(sidecar: Path) -> "tuple[str, list[tuple[str, str, str, str]] | None]":
+def _read_board_sidecar(target: CrownTarget) -> "tuple[str, list[tuple[str, str, str, str]] | None]":
     """``(stored_hash, stored_rows)``; corrupt reads as first observation."""
-    try:
-        payload = json.loads(sidecar.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return "", None
+    payload = _read_sidecar(target)
     stored_hash = str(payload.get("board_hash") or "")
     raw_rows = payload.get("board_rows")
     rows = None
@@ -283,7 +359,7 @@ def _board_trigger(
     if rows is None:
         return False, None, None, None
     fresh = _hash_rows(rows)
-    stored, stored_rows = _read_board_sidecar(_sidecar_path(target))
+    stored, stored_rows = _read_board_sidecar(target)
     if not stored or stored_rows is None:
         _store_board_hash(target, fresh, rows)
         return False, None, None, None
@@ -295,14 +371,10 @@ def _board_trigger(
 
 
 def _store_board_hash(target: CrownTarget, digest: str, rows: list = ()) -> None:
-    sidecar = _sidecar_path(target)
-    sidecar.parent.mkdir(parents=True, exist_ok=True)
-    tmp = sidecar.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps({"board_hash": digest, "board_rows": [list(row) for row in rows]}),
-        encoding="utf-8",
-    )
-    tmp.replace(sidecar)
+    payload = _read_sidecar(target)
+    payload["board_hash"] = digest
+    payload["board_rows"] = [list(row) for row in rows]
+    _write_sidecar(target, payload)
 
 
 #: The undispatched columns a backstop counts as actionable. Not full parity
@@ -429,6 +501,7 @@ def run_king_wake(
     rows_fn: Optional[Callable] = None,
     truth_fn: Optional[Callable] = None,
     unread_fn: Optional[Callable] = None,
+    answered_fn: Optional[Callable] = None,
     entries_fn: Optional[Callable] = None,
     scope_resolver: Optional[Callable] = None,
     admit_fn: Optional[Callable] = None,
@@ -456,6 +529,10 @@ def run_king_wake(
         from fno.bus.cursor import scan_unread
 
         unread_fn = scan_unread
+    if answered_fn is None:
+        from fno.outstanding.core import read_answered_questions
+
+        answered_fn = read_answered_questions
     if entries_fn is None:
         def entries_fn() -> list:  # noqa: F811 - lazy default, loaded once below
             # Backend-switched, mirroring the tick's own board read: under an
@@ -509,8 +586,23 @@ def run_king_wake(
         reason: Optional[str] = None
         wake_address: Optional[str] = None
         wake_detail: Optional[str] = None
+        answered_cursor_to_store = ""
+        sidecar = _read_sidecar(target)
+        if "answered_cursor" not in sidecar:
+            # First observation of the answer journal seeds the cursor and
+            # wakes nothing, or the first armed tick replays every answer
+            # the holder ever received as a fresh trigger.
+            _init_answered_cursor(target, answered_fn)
+        else:
+            answer_prompt, matched_ts = _escalation_answer_trigger(
+                target, answered_fn, str(sidecar.get("answered_cursor") or "")
+            )
+            if answer_prompt is not None:
+                reason = "escalation_answered"
+                wake_detail = answer_prompt
+                answered_cursor_to_store = matched_ts
         matched = _mail_trigger(target, unread_fn)
-        if matched is not None:
+        if matched is not None and reason is None:
             reason = "mail"
             wake_address = matched
         fresh_board_hash: Optional[str] = None
@@ -536,8 +628,14 @@ def run_king_wake(
         # Admit-and-bill in ONE lock: `allowed` means the bill already landed,
         # so two overlapping ticks cannot both dispatch - the loser sees the
         # winner's stamp inside the critical section and takes the refusal.
+        # An answered escalation skips only the debounce, never the ceiling:
+        # the king asked for this wake itself, but it is still one more wake
+        # against the rolling window.
         verdict = admit_fn(
-            target.manifest, now=now, ceiling=ceiling, debounce_s=debounce_s
+            target.manifest,
+            now=now,
+            ceiling=ceiling,
+            debounce_s=0 if reason == "escalation_answered" else debounce_s,
         )
         if not verdict.allowed:
             emit(
@@ -575,6 +673,8 @@ def run_king_wake(
             )
         if fresh_board_hash:
             _store_board_hash(target, fresh_board_hash, fresh_board_rows or ())
+        if answered_cursor_to_store:
+            _store_sidecar_field(target, "answered_cursor", answered_cursor_to_store)
         emit(
             "king_woken",
             {

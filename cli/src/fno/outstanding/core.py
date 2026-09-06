@@ -411,6 +411,54 @@ def read_open_questions(
     return open_qs
 
 
+@dataclass(frozen=True)
+class AnsweredQuestion:
+    """One closed question that carried an answer, joined with its asker."""
+
+    id: str
+    asker: Optional[str] = None
+    question: str = ""
+    answer: str = ""
+    closed_ts: str = ""
+
+
+def read_answered_questions(root: Path) -> "list[AnsweredQuestion]":
+    """Every closed-with-answer question, oldest first, asker joined in.
+
+    The closed event names who CLOSED, not who asked, so the fold joins it
+    against the question's own event. A question whose ask event never
+    landed keeps ``asker=None``: a caller attributing answers treats that as
+    "cannot attribute" and never acts on it. The king wake phase reads this
+    because an answer to the crowned holder's own escalation is that
+    holder's strongest wake trigger - the king asked for it.
+    """
+    _ = root  # The index is machine-wide; retain the argument for caller parity.
+    asked: "dict[str, dict[str, Any]]" = {}
+    answered: "list[AnsweredQuestion]" = []
+    for rec in _read_question_events(questions_path(), missing_hint=False):
+        data = rec.get("data")
+        if not isinstance(data, dict):
+            continue
+        qid = str(data.get("question_id") or "")
+        if not qid:
+            continue
+        if rec.get("type") == QUESTION_EVENT:
+            asked[qid] = data
+        elif rec.get("type") == QUESTION_CLOSED_EVENT and data.get("answer"):
+            origin = asked.get(qid) or {}
+            answered.append(
+                AnsweredQuestion(
+                    id=qid,
+                    asker=origin.get("asker") or None,
+                    question=str(origin.get("question") or ""),
+                    answer=str(data["answer"]),
+                    closed_ts=str(rec.get("ts") or ""),
+                )
+            )
+    answered.sort(key=lambda a: (a.closed_ts, a.id))
+    return answered
+
+
 def _capture_project_roots(root: Path) -> "list[Path]":
     """This project plus every project root the machine-wide graph names.
 
