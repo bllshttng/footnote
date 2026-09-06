@@ -1882,26 +1882,6 @@ fi
     )
 }
 
-/// FNV-1a over bytes: tiny, dependency-free, deterministic - exactly what a
-/// stable-per-epic synthetic id needs (no crypto property required).
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &b in bytes {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
-/// The synthetic squad id for a mission's `SquadMeta` header, deterministic
-/// per epic id so the same mission maps to the same id across ticks. High bit
-/// (`proto::MISSION_SQUAD_BASE`) set so it never collides with a real squad
-/// id (those start at 1 and increment by one - see `next_squad_id`).
-fn mission_sid(epic_id: &str) -> u64 {
-    use crate::proto::MISSION_SQUAD_BASE;
-    MISSION_SQUAD_BASE | (fnv1a(epic_id.as_bytes()) & (MISSION_SQUAD_BASE - 1))
-}
-
 /// Sanitize a wire-supplied name: strip control characters (they would corrupt
 /// chrome cells), trim, cap at `cap` chars. The cap lives HERE and not only in
 /// the overlay: `Command` is a wire surface, and the TUI is not the only
@@ -10195,17 +10175,11 @@ impl Core {
             })
             .collect();
         // Synthetic "mission squad" headers: one per active mission, done/total
-        // baked into the name so no proto bump is needed. Renders even with
-        // zero tagged workers - "nothing running" must stay visible, never
-        // vanish (empty-but-active).
-        squads.extend(self.missions.missions.iter().map(|m| SquadMeta {
-            id: mission_sid(&m.epic_id),
-            name: format!("{}  {}/{}", m.slug, m.done, m.total),
-            canonical_cwd: String::new(),
-            tabs: vec![],
-            active_tab: 0,
-            panes: 0,
-        }));
+        // and the rotation `(i of n)` baked into the name so no proto bump is
+        // needed. Renders even with zero tagged workers - "nothing running"
+        // must stay visible, never vanish (empty-but-active). Identity +
+        // naming: mission_squad.
+        squads.extend(crate::mission_squad::headers(&self.missions.missions));
         ServerMsg::Layout {
             squads,
             active_squad: view.0,
@@ -10446,7 +10420,7 @@ impl Core {
             self.missions
                 .node_to_epic
                 .get(&node_id)
-                .map(|epic| mission_sid(epic))
+                .map(|epic| crate::mission_squad::mission_sid(epic))
         };
 
         // 1. Pane rows: one per live tab leaf, deterministic (squad -> tab ->
@@ -22429,7 +22403,7 @@ mod tests {
             bg_row("king-cliverbs-x-c1b9-g2", "/w", None),
             bg_row("build-xcd1e", "/w", None),
         ];
-        let sid = mission_sid("x-aaaa");
+        let sid = crate::mission_squad::mission_sid("x-aaaa");
         let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
         let squads = match &msg {
             ServerMsg::Layout { squads, .. } => squads,
@@ -22461,7 +22435,9 @@ mod tests {
             ServerMsg::Layout { squads, .. } => squads,
             _ => unreachable!(),
         };
-        assert!(squads.iter().any(|s| s.id == mission_sid("x-aaaa")));
+        assert!(squads
+            .iter()
+            .any(|s| s.id == crate::mission_squad::mission_sid("x-aaaa")));
     }
 
     #[test]
