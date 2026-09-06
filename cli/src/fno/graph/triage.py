@@ -1877,7 +1877,17 @@ def cmd_health(
         rate = evals_summary["regression_pass_rate"]
         alarm = " ALARM" if evals_summary["regression_alarm"] else ""
         rate_txt = f"regression pass {rate:.0%}, " if rate is not None else ""
-        typer.echo(f"  evals: {rate_txt}flakes {evals_summary['flake_count']}{alarm}")
+        age = evals_summary.get("age_days")
+        if evals_summary.get("never_ran"):
+            age_txt = " age never"
+        elif age is not None:
+            age_txt = f" age {int(age)}d"
+        else:
+            age_txt = ""
+        stale = " STALE" if evals_summary.get("stale") else ""
+        typer.echo(
+            f"  evals: {rate_txt}flakes {evals_summary['flake_count']}{age_txt}{stale}{alarm}"
+        )
     if routing_metrics:
         rm = routing_metrics
         total = rm["total"]

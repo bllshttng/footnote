@@ -960,13 +960,14 @@ def _mux_front_door_report() -> dict[str, Any]:
 
 
 # Runtime files no code writes anymore (Group 3 GC wave: convo-signals
-# capture, tasks.json/md migration, evals-history, metrics.jsonl analytics).
+# capture, tasks.json/md migration, metrics.jsonl analytics). evals-history
+# left this list at x-ab72: the eval bank's runner appends it on every
+# scheduled run, and the evals staleness row reads the same file.
 # Purely informational - never changes doctor's status or exit code.
 _ORPHAN_BASENAMES = (
     "convo-signals.jsonl",
     "tasks.json",
     "tasks.md",
-    "evals-history.jsonl",
     "metrics.jsonl",
 )
 
@@ -1167,6 +1168,43 @@ def _post_merge_sync_health() -> dict[str, Any]:
         }
     except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
         return {"state": "unknown", "stale": False, "behind": None, "detail": ""}
+
+
+def _evals_health() -> dict[str, Any]:
+    """Is the newest regression-tier eval run inside its staleness window?
+
+    The failure class is DISUSE: the eval harness is fully built, nothing
+    forced a run, and a 40-day-old 100% rendered exactly like a fresh one.
+    The window is ``config.evals.stale_days``; the vocabulary matches the
+    neighbouring arms - STALE proven only from the history's newest
+    regression ts, UNKNOWN when there is no history, no regression row, or
+    an unreadable timestamp (never asserts staleness on unknown). Advisory:
+    never changes doctor's status or exit code.
+    """
+    try:
+        from fno.evals.report import evals_health_summary
+        from fno.paths import evals_history
+
+        s = evals_health_summary(evals_history())
+    except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
+        return {"state": "unknown", "stale": False, "age_days": None,
+                "detail": "evals history unreadable"}
+    if s is None:
+        return {"state": "unknown", "stale": False, "age_days": None,
+                "detail": "no eval history"}
+    if s["never_ran"]:
+        return {"state": "unknown", "stale": False, "age_days": None,
+                "detail": "history has no regression-tier run"}
+    if s["age_days"] is None:
+        return {"state": "unknown", "stale": False, "age_days": None,
+                "detail": "history rows carry no readable timestamp"}
+    age = s["age_days"]
+    return {
+        "state": "stale" if s["stale"] else "fresh",
+        "stale": bool(s["stale"]),
+        "age_days": age,
+        "detail": f"newest regression run {int(age)}d old",
+    }
 
 
 def _source_checkout_sync(source: Optional[Path]) -> dict[str, Any]:
@@ -2460,6 +2498,23 @@ def _emit_human(
             "fno doctor: post-merge sync UNKNOWN - could not read merge state "
             f"({pms.get('detail') or 'gh unavailable or unauthenticated'}); "
             "run `gh auth status`."
+        )
+
+    # Evals demand (x-ab72), advisory like the arms above: a red evals row is
+    # an escalation, never a gate. Silent when fresh, like every neighbour.
+    ev = result.get("evals") or {}
+    if ev.get("stale"):
+        out(
+            "fno doctor: evals STALE - the newest regression-tier run is "
+            f"{int(ev.get('age_days') or 0)}d old; run "
+            "`fno doctor evals run --tier regression -y`."
+        )
+    elif ev.get("state") == "unknown":
+        # No history is not a clean bill: staleness is unmeasured, not fine.
+        out(
+            "fno doctor: evals UNKNOWN "
+            f"({ev.get('detail') or 'no eval history'}); "
+            "run `fno doctor evals run --tier regression -y`."
         )
 
     agents = result.get("launch_agents") or {}
@@ -4026,6 +4081,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     result["groom"] = _groom_health()
     result["archive_id_collisions"] = _archive_id_collisions()
     result["post_merge_sync"] = _post_merge_sync_health()
+    result["evals"] = _evals_health()
     result["source_checkout_sync"] = _source_checkout_sync(src)
     result["launch_agents"] = _launch_agent_failures()
 

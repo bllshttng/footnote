@@ -104,6 +104,15 @@ def _stub_signals(
         "_control_plane_arms_report",
         lambda: {"stale": [], "unknown_reason": None},
     )
+    # Evals demand (x-ab72): the collector reads the real evals history, so a
+    # developer machine with a stale bank would leak a STALE line into
+    # full-output assertions. Fresh and quiet by default; dedicated tests
+    # monkeypatch the collector directly.
+    monkeypatch.setattr(
+        doctor,
+        "_evals_health",
+        lambda: {"state": "fresh", "stale": False, "age_days": 1.0, "detail": ""},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2675,3 +2684,153 @@ def test_plugin_file_json_contains_positive_record(
 # by test_doctor_silent_switch.py::test_armed_unknown_manifests_name_stale_plugin_cache_as_cause,
 # which owns the armed-manifest fixture this branch needs. Asserting it here too
 # would be a second implementation of one check.
+
+
+# ---------------------------------------------------------------------------
+# Evals demand (x-ab72): staleness row for the eval bank
+# ---------------------------------------------------------------------------
+
+
+def _patch_evals_summary(
+    monkeypatch: pytest.MonkeyPatch, summary: dict | None
+) -> None:
+    """Pin the collector's inputs: a fake history path + a canned summary.
+
+    The lazy imports resolve at call time from their source modules, so
+    patching there reaches the collector without going through the real
+    ``~/.fno`` history.
+    """
+    monkeypatch.setattr("fno.paths.evals_history", lambda: Path("/evals/h.jsonl"))
+    monkeypatch.setattr(
+        "fno.evals.report.evals_health_summary", lambda _path, **_kw: summary
+    )
+
+
+def test_evals_health_stale_when_newest_regression_run_old(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_evals_summary(
+        monkeypatch,
+        {
+            "regression_pass_rate": 1.0,
+            "flake_count": 0,
+            "regression_alarm": [],
+            "newest_regression_ts": "2026-09-01T00:00:00Z",
+            "age_days": 9.0,
+            "stale": True,
+            "never_ran": False,
+        },
+    )
+    verdict = doctor._evals_health()
+    assert verdict["state"] == "stale" and verdict["stale"] is True
+    assert verdict["age_days"] == 9.0
+
+
+def test_evals_health_fresh_inside_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_evals_summary(
+        monkeypatch,
+        {
+            "regression_pass_rate": 1.0,
+            "flake_count": 0,
+            "regression_alarm": [],
+            "newest_regression_ts": "2026-09-13T00:00:00Z",
+            "age_days": 2.0,
+            "stale": False,
+            "never_ran": False,
+        },
+    )
+    verdict = doctor._evals_health()
+    assert verdict["state"] == "fresh" and verdict["stale"] is False
+
+
+def test_evals_health_unknown_without_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_evals_summary(monkeypatch, None)
+    verdict = doctor._evals_health()
+    assert verdict["state"] == "unknown" and verdict["stale"] is False
+
+
+def test_evals_health_unknown_when_never_ran(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_evals_summary(
+        monkeypatch,
+        {
+            "regression_pass_rate": None,
+            "flake_count": 0,
+            "regression_alarm": [],
+            "newest_regression_ts": None,
+            "age_days": None,
+            "stale": False,
+            "never_ran": True,
+        },
+    )
+    verdict = doctor._evals_health()
+    assert verdict["state"] == "unknown" and verdict["stale"] is False
+
+
+def test_evals_health_unreadable_history_reads_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(_path: object) -> None:
+        raise RuntimeError("disk gone")
+
+    monkeypatch.setattr("fno.paths.evals_history", lambda: Path("/evals/h.jsonl"))
+    monkeypatch.setattr("fno.evals.report.evals_health_summary", _boom)
+    verdict = doctor._evals_health()
+    assert verdict["state"] == "unknown" and verdict["stale"] is False
+
+
+def test_doctor_renders_evals_stale_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_evals_health",
+        lambda: {"state": "stale", "stale": True, "age_days": 9.0, "detail": ""},
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "evals STALE" in result.stdout
+    assert "9d old" in result.stdout
+    assert "fno doctor evals run --tier regression" in result.stdout
+
+
+def test_doctor_renders_evals_unknown_row_without_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_evals_health",
+        lambda: {"state": "unknown", "stale": False, "age_days": None,
+                 "detail": "no eval history"},
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "evals UNKNOWN" in result.stdout
+
+
+def test_doctor_stays_silent_when_evals_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "evals" not in result.stdout

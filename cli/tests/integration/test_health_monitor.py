@@ -928,3 +928,48 @@ def test_health_mismatch_check_exit4(tmp_graph, monkeypatch):
         f"expected exit 4 on project_cwd_mismatch breach, got {result.exit_code}\n"
         f"stdout: {result.output}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Evals demand (x-ab72): the health line carries the regression run's age
+# ---------------------------------------------------------------------------
+
+
+def _append_eval_row(path, row):
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
+def test_health_evals_line_carries_age_and_stale(tmp_graph, monkeypatch):
+    """A 9-day-old newest regression run reads 'age 9d STALE', not a healthy
+    100%: the line demands a fresh run instead of only displaying history."""
+    hist = tmp_graph / "evals-history.jsonl"
+    now = datetime.now(timezone.utc)
+    _append_eval_row(hist, {
+        "ts": (now - timedelta(days=9)).isoformat().replace("+00:00", "Z"),
+        "task_id": "regression-cli-help-smoke", "tier": "regression",
+        "pass": True, "reason": "", "duration_s": 1.0, "repeat_index": 0,
+        "bank_rev": None, "worker_provider": None,
+    })
+    monkeypatch.setattr("fno.paths.evals_history", lambda: hist)
+
+    result = runner.invoke(app, ["backlog", "triage", "health", "--all"])
+    assert result.exit_code == 0, result.output
+    assert "age 9d STALE" in result.stdout
+
+
+def test_health_evals_line_fresh_has_no_stale_marker(tmp_graph, monkeypatch):
+    hist = tmp_graph / "evals-history.jsonl"
+    now = datetime.now(timezone.utc)
+    _append_eval_row(hist, {
+        "ts": (now - timedelta(days=2)).isoformat().replace("+00:00", "Z"),
+        "task_id": "regression-cli-help-smoke", "tier": "regression",
+        "pass": True, "reason": "", "duration_s": 1.0, "repeat_index": 0,
+        "bank_rev": None, "worker_provider": None,
+    })
+    monkeypatch.setattr("fno.paths.evals_history", lambda: hist)
+
+    result = runner.invoke(app, ["backlog", "triage", "health", "--all"])
+    assert result.exit_code == 0, result.output
+    assert "evals:" in result.stdout
+    assert "STALE" not in result.stdout

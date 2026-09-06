@@ -13,6 +13,7 @@ below 100%) and graduation (a capability task that passed its last N runs).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -143,23 +144,76 @@ def graduation_candidates(rows: list[dict[str, object]], *, n: int = 3) -> list[
     return candidates
 
 
-def evals_health_summary(history_path: Path) -> Optional[dict[str, Any]]:
-    """One-line evals health for `fno backlog triage health`, or None.
+def _parse_ts(value: object) -> Optional[datetime]:
+    """Parse a history row's ``ts`` (ISO-8601, Z or offset), or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def evals_health_summary(
+    history_path: Path,
+    *,
+    stale_days: Optional[int] = None,
+    now: Optional[datetime] = None,
+) -> Optional[dict[str, Any]]:
+    """One-line evals health for `fno backlog triage health` and `fno doctor`, or None.
 
     Returns None when no history exists or it holds no rows, so the triage-health
     consumer shows an evals line ONLY when there is data (the consumption armor:
     the report has a real consumer from day one). Never raises.
+
+    The age fields are the demand side (x-ab72): the harness went 40 days
+    unridden while a stale 100% rendered as healthy, because both consumers
+    displayed history and never demanded it. ``stale`` is True when the newest
+    regression-tier run is older than *stale_days* (resolved from
+    ``config.evals.stale_days``, default 7). A history with rows but no
+    regression run reads ``never_ran``: due, not aged. A regression row
+    without a readable ts degrades to ``age_days=None`` and never asserts
+    staleness - unknown is not fresh.
     """
     if not history_path.exists():
         return None
-    report = build_report(load_rows(history_path))
+    rows = load_rows(history_path)
+    report = build_report(rows)
     if report["no_data"]:
         return None
     reg = report["tiers"].get("regression")
+    if stale_days is None:
+        try:
+            from fno.config import load_settings
+
+            stale_days = int(load_settings().evals.stale_days)
+        except Exception:  # noqa: BLE001 - the summary never raises
+            stale_days = 7
+    if now is None:
+        now = datetime.now(timezone.utc)
+    newest_dt: Optional[datetime] = None
+    newest_ts: Optional[str] = None
+    for r in rows:
+        if r.get("tier") != "regression":
+            continue
+        dt = _parse_ts(r.get("ts"))
+        if dt is not None and (newest_dt is None or dt > newest_dt):
+            newest_dt = dt
+            ts = r.get("ts")
+            newest_ts = ts if isinstance(ts, str) else None
+    never_ran = reg is None
+    age_days: Optional[float] = None
+    if newest_dt is not None:
+        age_days = round((now - newest_dt).total_seconds() / 86400, 3)
+    stale = bool(never_ran is False and age_days is not None and age_days > stale_days)
     return {
         "regression_pass_rate": reg["pass_rate"] if reg else None,
         "flake_count": len(report["flakes"]),
         "regression_alarm": report["regression_alarm"],
+        "newest_regression_ts": newest_ts,
+        "age_days": age_days,
+        "stale": stale,
+        "never_ran": never_ran,
     }
 
 
