@@ -23,7 +23,10 @@ pub(crate) fn remove_dead(a: &super::AgentRow) -> Command {
         _ => Command::RemoveAgent {
             name: a.name.clone(),
             harness_session_id: a.harness_session_id.clone(),
-            pane_id: a.pane_id,
+            // A dead row's pane is gone or dangling; the pane leg has
+            // nothing to answer, so resolution stays registry-only here.
+            // The live-row gesture path carries pane_id itself.
+            pane_id: None,
         },
     }
 }

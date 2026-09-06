@@ -13988,6 +13988,10 @@ async fn execute_row_menu_action(
                     label: a.name.clone(),
                 });
             } else {
+                // The confirm path stamps the row when it commits; the default
+                // dispatch gets the same treatment, so the outcome notice
+                // renders at the row either way.
+                view.arm_row_stamp(&kind);
                 let sent = match kind.command() {
                     Some(cmd) => {
                         write_msg(sock_w, &ClientMsg::Command(cmd))
@@ -14357,6 +14361,8 @@ async fn execute_aux_action(
         }
         AuxAction::ToggleResourceMeter => {
             view.resource_meter_on = !view.resource_meter_on;
+            view.resource_meter_gate
+                .store(view.resource_meter_on, std::sync::atomic::Ordering::Relaxed);
             // The run loop owns the spawn (one-shot via resource_meter_sampling);
             // clearing the text here means the row reads "sensor unavailable"
             // until the first sample lands - never a stale reading.

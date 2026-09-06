@@ -171,7 +171,17 @@ pub(crate) fn scan_panes<'a>(
             return Some(hit);
         }
     }
-    panes.iter().find(|p| p.name.as_deref() == Some(name))
+    // The name tier answers only when exactly one pane carries the name:
+    // a second match is ambiguity, and a gesture never guesses between two
+    // same-named panes (the same fail-closed rule the registry tier keeps).
+    let by_name: Vec<&crate::proto::PaneInfo> = panes
+        .iter()
+        .filter(|p| p.name.as_deref() == Some(name))
+        .collect();
+    match by_name.as_slice() {
+        [one] => Some(one),
+        _ => None,
+    }
 }
 
 impl super::Core {
@@ -413,6 +423,19 @@ mod tests {
         // A name-shaped identity is never treated as an id; the name tier answers.
         let by_name = scan_panes(&panes, None, "other");
         assert!(by_name.is_none());
+    }
+
+    #[test]
+    fn scan_panes_name_tier_refuses_an_ambiguous_family() {
+        let pane = |id: u64| -> crate::proto::PaneInfo {
+            serde_json::from_value(serde_json::json!({
+                "pane_id": id, "squad_id": 0, "tab_id": 0, "cwd": "/tmp",
+                "name": "t-dup"
+            }))
+            .unwrap()
+        };
+        let panes = vec![pane(1), pane(2)];
+        assert!(scan_panes(&panes, None, "t-dup").is_none());
     }
 }
 /// (x-e763) Ask one session's server for the pane hosting `row` when the
