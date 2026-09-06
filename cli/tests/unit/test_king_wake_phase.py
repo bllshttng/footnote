@@ -255,6 +255,9 @@ def test_an_answered_king_escalation_wakes_with_the_answer_as_the_prompt(tmp_pat
     assert rec.dispatches and rec.dispatches[0][:3] == ("epic-x", "escalation_answered", None)
     detail = rec.dispatches[0][3]
     assert "q-ab12cd34" in detail and "ship it" in detail, detail
+    assert "11111111-2222-3333-4444-555555555555" in detail, (
+        f"the prompt names the delivery address so the mail row can be drained: {detail}"
+    )
     woken = [e for e in rec.events if e[0] == "king_woken"]
     assert woken and woken[0][1]["reason"] == "escalation_answered"
     import json as _json

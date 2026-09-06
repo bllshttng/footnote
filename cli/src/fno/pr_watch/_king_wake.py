@@ -165,9 +165,27 @@ def _mail_trigger(target: CrownTarget, unread_fn: Callable) -> Optional[str]:
     return None
 
 
+def _answer_records(answered_fn: Callable, root: Path) -> "list | None":
+    """The answered-question records, or ``None`` for an unreadable journal.
+
+    Read ONCE per tick and shared across scopes (the journal is machine-wide;
+    a per-scope read would fold the same file once per crown). ``None`` is
+    the unreadable spelling, kept distinct from ``[]`` (clean) so the cursor
+    seed can retry instead of writing a replay-everything cursor.
+    """
+    try:
+        return answered_fn(root)
+    except Exception:  # noqa: BLE001 - an unreadable journal is not a trigger
+        return None
+
+
+def _newest_close_ts(records: list) -> str:
+    return max((str(getattr(r, "closed_ts", "") or "") for r in records), default="")
+
+
 def _escalation_answer_trigger(
     target: CrownTarget,
-    answered_fn: Callable,
+    records: list,
     cursor: str,
 ) -> tuple[Optional[str], str]:
     """``(prompt, matched_close_ts)`` for the newest answer to the holder's own question.
@@ -181,14 +199,10 @@ def _escalation_answer_trigger(
     matched close ts is returned for the caller to store only after a
     dispatch actually fired - a refused answer stays a trigger.
     """
-    try:
-        answered = answered_fn(target.root)
-    except Exception:  # noqa: BLE001 - an unreadable journal is not a trigger
-        return None, ""
     addresses = {target.holder, target.short_id}
     prompt: Optional[str] = None
     matched_ts = ""
-    for record in answered:
+    for record in records:
         asker = getattr(record, "asker", None)
         closed_ts = str(getattr(record, "closed_ts", "") or "")
         if not closed_ts or closed_ts <= cursor:
@@ -202,22 +216,19 @@ def _escalation_answer_trigger(
     return prompt, matched_ts
 
 
-def _init_answered_cursor(target: CrownTarget, answered_fn: Callable) -> str:
+def _seed_answered_cursor(target: CrownTarget, records: "list | None") -> None:
     """Seed the cursor to the newest close already on record, waking nothing.
 
     An absent cursor is a first observation, not "everything is new": without
     this, the first armed tick would replay every answer the holder ever
-    received as a fresh trigger. An UNREADABLE journal seeds nothing - an
-    empty cursor written on a read failure would replay that same history
-    the moment the journal becomes readable, so the init retries next tick.
+    received as a fresh trigger. An UNREADABLE journal (``records is None``)
+    seeds nothing - an empty cursor written on a read failure would replay
+    that same history the moment the journal became readable, so the init
+    retries next tick.
     """
-    try:
-        answered = answered_fn(target.root)
-    except Exception:  # noqa: BLE001 - an unreadable journal is not a cursor
-        return ""
-    newest = max((str(getattr(r, "closed_ts", "") or "") for r in answered), default="")
-    _store_sidecar_field(target, "answered_cursor", newest)
-    return newest
+    if records is None:
+        return
+    _store_sidecar_field(target, "answered_cursor", _newest_close_ts(records))
 
 
 def _raise_ceiling_question(target: CrownTarget, count: int, ceiling: int) -> str:
@@ -615,6 +626,11 @@ def run_king_wake(
     debounce_s = _cfg_int("wake_debounce_seconds", 900)
     backstop_s = _cfg_int("wake_backstop_seconds", 1800)
 
+    # One question-journal read per tick, shared by every scope (mirroring
+    # `entries`): the journal is machine-wide, so a per-scope fold would read
+    # the same file once per crown.
+    answered_records: "list | None" = None
+
     targets, note = _crowned(court_fn, rows_fn)
     summary: dict[str, Any] = {
         "armed": True,
@@ -642,17 +658,33 @@ def run_king_wake(
         wake_detail: Optional[str] = None
         answered_cursor_to_store = ""
         sidecar = _read_sidecar(target)
+        if answered_records is None:
+            answered_records = _answer_records(answered_fn, target.root)
         if "answered_cursor" not in sidecar:
             # First observation of the answer journal seeds the cursor and
             # wakes nothing, or the first armed tick replays every answer
             # the holder ever received as a fresh trigger.
-            _init_answered_cursor(target, answered_fn)
+            _seed_answered_cursor(target, answered_records)
         else:
             answer_prompt, matched_ts = _escalation_answer_trigger(
-                target, answered_fn, str(sidecar.get("answered_cursor") or "")
+                target, answered_records or [], str(sidecar.get("answered_cursor") or "")
             )
             if answer_prompt is not None:
                 reason = "escalation_answered"
+                # The delivery mail went to the holder's FULL session id - an
+                # address no mailbox scan covers, including the woken session's
+                # own. Name it in the prompt or the row can never be drained
+                # and lingers unread forever.
+                from fno.king.state import parse_manifest
+
+                full_id = parse_manifest(target.manifest).get("harness_session_id") or ""
+                if full_id:
+                    answer_prompt += (
+                        f" The answer was also delivered as mail addressed to "
+                        f"{full_id}: run `fno agents mail unread --name {full_id}` "
+                        f"and drain it, then advance the cursor with "
+                        f"`fno agents mail ack <id> --name {full_id}`."
+                    )
                 wake_detail = answer_prompt
                 answered_cursor_to_store = matched_ts
         matched = _mail_trigger(target, unread_fn)
