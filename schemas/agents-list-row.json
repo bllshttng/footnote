@@ -101,6 +101,7 @@
     "$comment": "AgentEntry fields intentionally omitted from the list-row projection. The field's registry.py docstring owns the reason; do not duplicate those rationales here.",
     "keys": [
       "account_record_id",
+      "adopted_by_session",
       "aliases",
       "cc_session_id",
       "exited_at",

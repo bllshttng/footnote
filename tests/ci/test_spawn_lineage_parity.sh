@@ -69,7 +69,7 @@ write_fixtures() {
     'if origin == "operator":' \
     'spawned_by_session=_sb_session,' \
     'def restamp_harness_session_id(' > "$tmp/registry.py"
-  printf '%s\n' 'spawned_by_session=_sb_session,' > "$tmp/fallback.py"
+  printf '%s\n' 'adopted_by_session=_sb_session,' > "$tmp/fallback.py"
 }
 
 run_check() {
@@ -121,6 +121,18 @@ printf '%s\n' \
   'def restamp_harness_session_id(' > "$tmp/registry.py"
 if out=$(run_check 2>&1); then
   echo "FAIL: check passed a register path with no operator refusal: $out" >&2
+  exit 1
+fi
+
+# Negative: a fallback that stamps a spawn edge; adoption vouches instead.
+write_fixtures
+printf '%s\n' 'spawned_by_session=_sb_session,' > "$tmp/fallback.py"
+if out=$(run_check 2>&1); then
+  echo "FAIL: check passed a fallback that stamps a spawn edge: $out" >&2
+  exit 1
+fi
+if [[ "$out" != *'Python store fallback'* ]]; then
+  echo "FAIL: failure did not name the fallback site: $out" >&2
   exit 1
 fi
 

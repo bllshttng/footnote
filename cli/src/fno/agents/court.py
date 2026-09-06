@@ -267,6 +267,24 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     }
 
 
+def crowned_sessions(rows: list) -> set[str]:
+    """The sessions that hold a crown, read the way ``gather_court`` reads.
+
+    Same non-terminal rows, same ``crown_level`` field: a row is a king here
+    iff it is a king in the court (x-5283 LD1). The spawn gate divides
+    ``max_live`` by this set; callers guard readability themselves.
+    """
+    from fno.agents.registry import TERMINAL_STATUSES
+
+    return {
+        row.harness_session_id
+        for row in rows
+        if row.status not in TERMINAL_STATUSES
+        and row.crown_level is not None
+        and row.harness_session_id
+    }
+
+
 def _fmt_row(e: dict[str, Any]) -> str:
     agree = "?" if e["agree"] is None else ("yes" if e["agree"] else "no")
     reason = f"   {e['reason']}" if e["reason"] else ""

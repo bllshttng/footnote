@@ -539,8 +539,9 @@ def test_register_operator_row_never_stamps_itself_as_parent(tmp_path, monkeypat
 
 
 def test_register_adopted_row_stamps_the_adopting_session(tmp_path, monkeypatch):
-    """An adopted row takes the session that found and vouched for it as its
-    parent edge - the best answer the registry can hold for lineage."""
+    """An adopted row records the session that vouched for it on
+    ``adopted_by_session`` (x-5283 LD3) and keeps ``spawned_by_*`` empty:
+    vouching is not spawning, and the share is charged on the spawn edge."""
     from fno.agents.registry import register_existing_session
 
     _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "adopter-session-1")
@@ -551,9 +552,9 @@ def test_register_adopted_row_stamps_the_adopting_session(tmp_path, monkeypatch)
         origin="adopted",
         registry_path=tmp_path / "registry.json",
     )
-    assert entry.spawned_by_session == "adopter-session-1"
-    assert entry.spawned_by_harness == "claude"
-    assert entry.spawned_by_cwd
+    assert entry.spawned_by_session is None
+    assert entry.spawned_by_harness is None
+    assert entry.adopted_by_session == "adopter-session-1"
 
 
 def test_register_self_registration_never_stamps_its_own_id(tmp_path, monkeypatch):
@@ -574,3 +575,43 @@ def test_register_self_registration_never_stamps_its_own_id(tmp_path, monkeypatc
         )
         assert entry.spawned_by_session is None, f"origin={origin}"
         assert entry.spawned_by_cwd is None, f"origin={origin}"
+
+
+# ---------------------------------------------------------------------------
+# AC4-HP (x-5283): a birth with no recordable requester names WHY in the event
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_with_no_requester_carries_lineage_reason_in_the_event(
+    workdir_claude, captured_emits, monkeypatch
+):
+    """The event carries either a session id or a reason, never both empty.
+    An absent spawned_by_session has three explanations and only one of them
+    is "identity was genuinely ambiguous"; the positive marker is the reason
+    string itself, captured at spawn time into the durable journal."""
+    monkeypatch.delenv("OPENCODE_SESSION_ID", raising=False)
+    monkeypatch.setenv("PWD", "/parent/working/dir")
+
+    from fno.agents.cli import agents_app
+    from typer.testing import CliRunner
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "test-lineage-reason", "-H", "claude", "do something", "--substrate", "bg"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, f"expected exit 0, got {result.exit_code}\noutput: {result.output}"
+
+    spawned_events = [(k, d) for k, d in captured_emits if k == "agent_spawned"]
+    assert len(spawned_events) == 1, (
+        f"expected exactly 1 agent_spawned event, got {len(spawned_events)}: {spawned_events}"
+    )
+    ev_data = spawned_events[0][1]
+    assert ev_data.get("spawned_by_session") is None
+    reason = ev_data.get("lineage_reason")
+    assert isinstance(reason, str) and reason.strip(), (
+        f"lineage_reason must be a non-empty reason, got {reason!r}"
+    )
+    assert "identity disposition=" in reason

@@ -2077,6 +2077,9 @@ event_types:
         spawned_by_cwd:
           type: string
           description: "Parent cwd, used by the per-harness transcript-path resolver."
+        lineage_reason:
+          type: string
+          description: "Why spawned_by_session is absent: the identity resolution's own reason at spawn time (x-5283). A birth names either its parent or why it could not."
 
   - name: agent_stopped
     description: "An agent was stopped (graceful SIGTERM sequence completed)."

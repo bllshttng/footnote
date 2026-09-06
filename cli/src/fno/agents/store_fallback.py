@@ -532,11 +532,11 @@ def adopt_store_hit(
             f"could not register it ({exc}); the row will appear on a later "
             "resolution.\n"
         )
-        # The adopting session vouches for this row, and this fallback copy
-        # reaches the caller without passing register_session's parent stamping.
+        # The adopting session VOUCHED for this row (x-5283 LD3); this
+        # fallback copy skips register_session, stating the same split itself.
         from fno.agents.dispatch import _capture_parent_edge
 
-        _sb_session, _sb_harness, _sb_cwd = _capture_parent_edge()
+        _sb_session = _capture_parent_edge()[0]
         return AgentEntry(
             name=_fallback_name(hit.session_id),
             cwd=hit.cwd,
@@ -545,9 +545,10 @@ def adopt_store_hit(
             harness_session_id=hit.session_id,
             status="orphaned",
             short_id=short_id,
-            spawned_by_session=_sb_session,
-            spawned_by_harness=_sb_harness,
-            spawned_by_cwd=_sb_cwd,
+            spawned_by_session=None,
+            spawned_by_harness=None,
+            spawned_by_cwd=None,
+            adopted_by_session=_sb_session,
             # Same fact as the registered row above, and it has to be stated
             # here too: this one is handed straight back to the caller when
             # registration fails, so it reaches a reader without ever passing

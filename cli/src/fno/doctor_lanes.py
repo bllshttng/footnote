@@ -333,6 +333,17 @@ def _census(
     together. The gap rides as its own field for the same reason (x-e040).
     Full rule: docs/architecture/resource-meter.md.
     """
+    # The caller's own share reading (x-5283), from the ONE function the
+    # spawn gate refuses on; None when it cannot be read.
+    try:
+        from fno.agents.spawn_gate import census as gate_census, share_reading
+        from fno.claims.self_identity import resolve_self_identity
+        from fno.config import load_settings
+
+        share = share_reading(gate_census(), int(load_settings().agents.max_live),
+                              resolve_self_identity().session_id)
+    except Exception:
+        share = None
     census: dict[str, Any] = {
         "kings": None, "king_conflicts": None, "workers": None,
         "tests": None if reading is None else reading.test_process_count,
@@ -343,6 +354,7 @@ def _census(
         # view; a dark footprint leaves them None rather than fabricating a
         # list.
         "top_consumers": None,
+        "share": share,
         # An unread count NAMES why, the rule every arm follows: without it
         # "unknown rows" cannot be told from an incomplete registry.
         "roster_error": rows_error,

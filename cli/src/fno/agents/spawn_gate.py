@@ -235,11 +235,12 @@ class LiveCensus:
     #: (dedup-independent) so the slot cap mirrors the Rust gate exactly — see
     #: :attr:`slot_count`.
     fno_slot_workers: int = 0
-    #: live slot-holding rows per king session id (x-3f84 W4). None keys the
-    #: rows no king is attributable to (operator-run / pre-lineage rows): they
-    #: still consume ``max_live`` but never divide the share, because an
-    #: unknown lineage must not shrink everyone else's share to hide in it.
-    king_counts: dict[Optional[str], int] = field(default_factory=dict)
+    #: False when the registry read failed: share counts unknown, never zero.
+    registry_readable: bool = True
+    #: Crowned sessions via court.crowned_sessions (x-5283 LD1); the divisor.
+    crowned_sessions: set[str] = field(default_factory=set)
+    #: Worker rows per ``spawned_by_session``; None = the LD4 bucket.
+    worker_rows: dict[Optional[str], list[str]] = field(default_factory=dict)
 
     @property
     def count(self) -> int:
@@ -357,6 +358,7 @@ def census() -> LiveCensus:
         out.warnings.append(
             f"spawn-gate: fno registry unreadable ({exc}); registry rows omitted from the census"
         )
+        out.registry_readable = False
         rows = []
     claim_live_cache: dict[str, bool] = {}
     for row in rows:
@@ -405,9 +407,9 @@ def census() -> LiveCensus:
         # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
         out.fno_slot_workers += 1
-        out.king_counts[row.spawned_by_session] = (
-            out.king_counts.get(row.spawned_by_session, 0) + 1
-        )
+        # x-5283: a crowned row divides the cap and pays no per-king tax.
+        if row.crown_level is None:
+            out.worker_rows.setdefault(row.spawned_by_session, []).append(row.name)
         live_registry_names.add(row.name)
         dedup_key = row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
@@ -480,6 +482,12 @@ def census() -> LiveCensus:
         )
 
     out.slot_claims = _live_worker_slot_claims(out.warnings, live_registry_names)
+
+    # The divisor reads crowns through the court's own primitive (LD1/AC3).
+    if out.registry_readable:
+        from fno.agents.court import crowned_sessions
+
+        out.crowned_sessions = crowned_sessions(rows)
     return out
 
 
@@ -1424,20 +1432,45 @@ def _check_load_ceiling(
     )
 
 
-def _king_share(cap: int, king_counts: dict[Optional[str], int], caller: str) -> int:
-    """One king's fair share of the ceiling: a DIVISOR, never a second record.
+def _king_share(cap: int, crowned: set[str], caller: str) -> int:
+    """One king's fair share of the ceiling: ``cap // crowns`` (x-5283 LD1).
 
-    ``max_live`` stays the one ceiling; the share is ``cap // kings`` where
-    kings are the distinct attributed spawners among live rows, plus the
-    caller (a king spawning its FIRST worker still counts, or N kings with
-    live rows would admit an unbounded N+1th). Unattributed rows (None) never
-    divide the share - an unknown lineage must not shrink everyone else's
-    share to hide inside it. The floor of 1 keeps a crowded fleet able to
-    start one worker per king.
+    The divisor counts CROWNS from the court's own ``crown_level`` field; the
+    caller folds in only when itself crowned (LD2: still share-checked, never
+    in the divisor). The floor of 1 keeps a crowded fleet able to start one
+    worker per king. A fleet with NO crowns divides by nothing, so every
+    uncrowned caller's share floors at 1: a session holds one worker until
+    someone is crowned. That is the crownless fleet refusing to be
+    ungoverned, not a malfunction, and the refusal's "across 0 kings" names
+    it.
     """
-    kings = {k for k in king_counts if k is not None}
-    kings.add(caller)
-    return max(1, cap // len(kings))
+    divisor = len(crowned | ({caller} if caller in crowned else set()))
+    return max(1, cap // divisor) if divisor else 1
+
+
+def share_reading(census_obj: "LiveCensus", cap: int, caller: Optional[str]) -> dict:
+    """One share reading, printed by every surface that answers the question.
+
+    ``kings``/``share``/``held``/``held_rows`` (the caller's worker rows, by
+    name) and ``unattributed`` (the LD4 bucket: live rows that name nobody).
+    An unreadable registry returns None for every count (x-5283 AC9).
+    """
+    if not census_obj.registry_readable:
+        return {"kings": None, "share": None, "held": None,
+                "held_rows": None, "unattributed": None}
+    king_sessions = set(census_obj.crowned_sessions)
+    unattributed_rows = census_obj.worker_rows.get(None, [])
+    held_rows = list(census_obj.worker_rows.get(caller, [])) if caller else []
+    return {
+        "kings": len(king_sessions),
+        "share": _king_share(cap, king_sessions, caller or ""),
+        "held": len(held_rows),
+        "held_rows": held_rows,
+        "unattributed": {
+            "count": len(unattributed_rows),
+            "rows": list(unattributed_rows),
+        },
+    }
 
 
 def _take_headless_slot(
@@ -1461,25 +1494,34 @@ def _check_king_share(
 ) -> None:
     """Refuse (never queue) when the calling king holds its full share (x-3f84 W4).
 
-    Six kings dispatching into one undivided ``max_live`` converge on the cap
-    by construction, however reasonable each king is alone. The share divides
-    THAT ceiling, and only for a caller whose session identity resolved: an
-    operator terminal or cron job has no lineage and is not competing for the
-    commons, so an unattributed caller skips the check. Waiting cannot help -
-    only the caller's own workers dying frees its share - so this refuses like
-    the provider cap rather than queueing.
+    The share divides ``max_live`` by CROWNS (x-5283 LD1); ``held`` counts
+    the caller's worker rows only; only a caller whose session identity
+    resolved is checked; and waiting cannot help - only the caller's own
+    workers dying frees its share - so this refuses like the provider cap.
+    Every number comes from :func:`share_reading`: the count the gate
+    refuses on and the count any readout prints are one value.
     """
     if not caller_session:
         return
-    share = _king_share(cap, census_obj.king_counts, caller_session)
-    held = census_obj.king_counts.get(caller_session, 0)
+    reading = share_reading(census_obj, cap, caller_session)
+    held, share, kings = reading["held"], reading["share"], reading["kings"]
+    if held is None or share is None or kings is None:
+        # An unreadable registry leaves every count unknown; there is nothing
+        # to enforce and no zero to fail open on.
+        return
     if held >= share:
-        kings = len({k for k in census_obj.king_counts if k is not None} | {caller_session})
-        _warn(
+        msg = (
             f"spawn-gate: king {caller_session[:8]} holds {held} of max_live {cap} "
             f"across {kings} kings (share {share}); refusing to spawn -- waiting "
             f"cannot help while your own workers hold the share (--force to bypass)"
         )
+        unattributed = reading["unattributed"] or {}
+        if unattributed.get("count"):
+            shown = ", ".join(unattributed["rows"][:5])
+            extra = "..." if unattributed["count"] > 5 else ""
+            msg += f"; {unattributed['count']} live row(s) name nobody and sit " \
+                f"in the unattributed bucket ({shown}{extra})"
+        _warn(msg)
         _refuse(
             EXIT_KING_SHARE,
             reason="king_share",

@@ -10,4 +10,10 @@
 # launch_account "default" already says nobody chose, a revive inherits the
 # source row's stamp, and mints that cannot attribute stay silent. Rationale
 # lives beside the column in state.rs / registry.py.
-version = 27
+#
+# v28 (x-5283): additive `adopted_by_session` - the session that VOUCHED for
+# an adopted row. LD3 splits one field's two meanings: `spawned_by_session`
+# keeps "who spawned this row, whose share pays for it", and the adoption
+# grantor moves here, so crowning can never re-attribute a row's cost.
+# Rationale lives beside the column in state.rs / registry.py.
+version = 28

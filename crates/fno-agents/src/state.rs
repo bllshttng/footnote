@@ -988,17 +988,17 @@ pub struct RegistryEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_trigger: Option<String>,
     /// The spawn-time parent edge (x-132c), mirroring Python's `AgentEntry`
-    /// (declared x-30f6, read 0-of-30 on the live fleet because no writer
-    /// stamped it). Ambient-captured from the SPAWNING session's environment
-    /// at every mint site; never required of a caller. Same X3 passthrough as
-    /// `origin`: a field this struct does not know is dropped on daemon
-    /// write-back, which is exactly how the fleet lost the Python stamps.
+    /// (x-30f6): ambient-captured at every mint site, never required of a
+    /// caller. Same X3 passthrough as `origin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by_session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by_harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by_cwd: Option<String>,
+    /// x-5283 LD3: the session that VOUCHED for an adopted row (X3 passthrough).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_by_session: Option<String>,
     /// v9 backfill-only (x-1b1e): the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into

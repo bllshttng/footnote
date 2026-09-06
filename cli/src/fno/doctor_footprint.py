@@ -664,7 +664,9 @@ def _payload(
         "fleet_percent_capacity": reading.fleet_cpu_cores / cpu_capacity * 100,
         "fleet_percent_measured_cpu": measured_share,
         "leak_verdict": leak_verdict(reading.direct_process_count, process_threshold),
-        "capacity_verdict": capacity_verdict(load_snapshot),
+        # x-5283 AC7: the verdict reads the LOAD snapshot, not sustained CPU.
+        "capacity_verdict": (cv := capacity_verdict(load_snapshot)),
+        "capacity_verdict_axis": "load_1m" if cv != "unknown" else "unknown",
         "load_1m": getattr(load_snapshot, "load_1m", None),
         "load_5m": getattr(load_snapshot, "load_5m", None),
         "load_15m": getattr(load_snapshot, "load_15m", None),
@@ -778,7 +780,8 @@ def _emit_result(
                 )
         typer.echo(
             f"sustained CPU: {reading.sustained_cpu_cores:.3f} cores "
-            f"(threshold {threshold_cores:.3f} from {payload['cpu_capacity_cores']} cpus)"
+            f"(threshold {threshold_cores:.3f} from {payload['cpu_capacity_cores']} cpus; "
+            "a separate axis - it did not decide the verdict)"
         )
         typer.echo(
             f"descendant CPU: {reading.descendant_cpu_cores:.3f} cores "
@@ -805,12 +808,25 @@ def _emit_result(
                 f"attribution gap: {reading.attribution_gap} "
                 "(fleet share is an undercount, not headroom)"
             )
+        axis = payload["capacity_verdict_axis"]
+        axis_numbers = ""
+        if axis != "unknown":
+            value, threshold = payload["load_1m"], payload["load_ceiling"]
+            axis_numbers = (
+                f" on {axis} ({value:.1f} against {threshold:.1f})"
+                if isinstance(value, (int, float))
+                and isinstance(threshold, (int, float))
+                else f" on {axis}"
+            )
         if exit_code == EXIT_CAPACITY_OVER:
-            typer.echo(f"verdict: capacity over (exit {exit_code})")
+            typer.echo(f"verdict: capacity over{axis_numbers} (exit {exit_code})")
         elif exit_code == EXIT_LEAK:
-            typer.echo(f"verdict: leak (exit {exit_code})")
+            typer.echo(f"verdict: leak{axis_numbers} (exit {exit_code})")
         else:
-            typer.echo(f"verdict: {capacity} (exit {exit_code})")
+            typer.echo(
+                f"verdict: {payload['capacity_verdict']}{axis_numbers} "
+                f"(exit {exit_code})"
+            )
         if reading.unparsed_lines:
             typer.echo(f"unparsed lines: {reading.unparsed_lines}")
         if note is not None:
