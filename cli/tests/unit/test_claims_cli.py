@@ -267,6 +267,19 @@ def test_release_stamp_do_no_op_on_non_node_key_is_silent(cwd_tmp):
     assert "do stamp skipped" not in result.output
 
 
+def test_release_rollback_do_skipped_on_no_op_names_the_key(cwd_tmp):
+    """The rollback_do sibling of the stamp_do no-op skip above: a release
+    that unlinked nothing must not silently drop the rollback message
+    either, the same false-positive-by-omission class the stamp_do skip
+    fixes."""
+    result = runner.invoke(
+        cli, ["release", "node:never-acquired", "--holder", "h", "--rollback-do"]
+    )
+    assert result.exit_code == 0
+    assert "do rollback skipped" in result.output
+    assert "node:never-acquired" in result.output
+
+
 def test_status_free(cwd_tmp):
     result = runner.invoke(cli, ["status", "nothing", "--json"])
     assert result.exit_code == 0

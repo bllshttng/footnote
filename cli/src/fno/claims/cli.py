@@ -538,19 +538,26 @@ def release(
             _stamp_do_on_release(key, released, holder)
         elif rollback_do:
             _rollback_do_on_release(key, released, holder)
-    elif released is None and stamp_do and key.startswith("node:"):
+    elif released is None and key.startswith("node:"):
         # release_claim's own docstring names four ways it returns None (the
         # file is already gone, the holder does not match, the file is
         # corrupted, the recovery mutex timed out) - in all four nothing was
-        # unlinked, so the do row this call would have closed stays open.
-        # Named here rather than silent: this is the gap x-2146 traces 386
-        # unclosed do rows to. Gated to node: keys, matching the success
-        # branch above - a do row was never in play for any other key type.
-        typer.echo(
-            f"do stamp skipped for {key}: release was a no-op "
-            "(nothing was unlinked, so no do row was closed)",
-            err=True,
-        )
+        # unlinked, so the do row this call would have touched stays as it
+        # was. Named here rather than silent, for both flags: a do row was
+        # never in play for any key type outside node: (the success branch
+        # above shares the same gate).
+        if stamp_do:
+            typer.echo(
+                f"do stamp skipped for {key}: release was a no-op "
+                "(nothing was unlinked, so no do row was closed)",
+                err=True,
+            )
+        elif rollback_do:
+            typer.echo(
+                f"do rollback skipped for {key}: release was a no-op "
+                "(nothing was unlinked, so no do row was dropped)",
+                err=True,
+            )
 
     # released is None means nothing was unlinked - a false "released: true"
     # here is the receipt that let the missing do-row close go unnoticed.

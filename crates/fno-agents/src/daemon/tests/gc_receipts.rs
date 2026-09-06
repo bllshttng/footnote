@@ -348,7 +348,7 @@ fn an_open_do_row_on_a_done_node_holds_the_retirement() {
     assert!(reg.entries.iter().any(|e| e.name == "row-d"));
 }
 
-/// Counterpart to the hold above, named rather than counted (x-2146): the
+/// Counterpart to the hold above, named rather than counted: the
 /// same row, but its `do` entry carries `ended_at` (so it is absent from
 /// `open_do` - the injected seam models an open row by its presence there,
 /// a closed one by its absence). The exact `(short_id, node)` identity must
