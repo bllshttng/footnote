@@ -770,6 +770,15 @@ def questions_jsonl() -> Path:
     return _guard_state_path(ledger_json().parent / "questions.jsonl")
 
 
+def notify_signals_json() -> Path:
+    """Return the notify-signal dedupe map (fno.notify._signal).
+
+    The signals it collapses are machine-wide reads (the king board and the
+    court), so like the ledger it is one file per install, not per repo.
+    """
+    return _guard_state_path(state_dir() / "notify-signals.json")
+
+
 def project_events_json() -> Path:
     """The per-repository event journal in the space, or the pin a harness sets.
 

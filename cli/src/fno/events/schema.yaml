@@ -2868,14 +2868,14 @@ event_types:
     consumers: [operator]
 
   - name: control_plane_tick
-    description: "One tick of one control-plane arm (king_wake, watchdog, pr_watch_merge, active_backlog, auto_continue, stop_hook): what it did, or why it did nothing. The arms readout (`fno agents status`, `fno doctor`) folds these into one row per arm, newest first, red when the newest tick is older than 2x interval_s. Shape owned by crates/fno-agents/src/tick_ledger.rs; Python arms emit through fno.control_plane."
+    description: "One tick of one control-plane arm (king_wake, watchdog, pr_watch_merge, active_backlog, auto_continue, stop_hook, notify_watch): what it did, or why it did nothing. The arms readout (`fno agents status`, `fno doctor`) folds these into one row per arm, newest first, red when the newest tick is older than 2x interval_s. Shape owned by crates/fno-agents/src/tick_ledger.rs; Python arms emit through fno.control_plane."
     sources: [daemon, loop, hook, test]
     data:
       required: [arm, scheduler, acted, interval_s]
       properties:
         arm:
           type: string
-          description: "Stable arm name: king_wake, watchdog, pr_watch_merge, active_backlog, auto_continue, stop_hook."
+          description: "Stable arm name: king_wake, watchdog, pr_watch_merge, active_backlog, auto_continue, stop_hook, notify_watch."
         scheduler:
           type: string
           description: "What schedules the arm: daemon, launchd:<label>, hook:<name>, or session (an in-process caller)."
@@ -3134,6 +3134,23 @@ event_types:
           type: string
           description: "Optional. The decision_id this overturns, when it overturns one."
     consumers: [operator, fno inbox decisions]
+
+  - name: operator_notice
+    description: "One operator-attention notice left the notify chokepoint (fno.notify._impl.send_notification). The local OS toast is one leg; this row is the other: a status sink with events=[operator_notice] carries it off the host, so a remote operator sees it (x-5f06). A notice is a POINTER to the durable queue, never a copy: pointer names the verb that shows the content, and body carries counts, never rows."
+    sources: [python, daemon, test]
+    data:
+      required: [title, body]
+      properties:
+        title:
+          type: string
+          description: "Short headline, as the toast showed it."
+        body:
+          type: string
+          description: "Counts plus context, never queue content."
+        pointer:
+          type: string
+          description: "Optional. The verb (or URL) that shows the durable state, e.g. `fno inbox outstanding`."
+    consumers: [status_sinks, operator]
 
   - name: decision_retracted
     retention: durable

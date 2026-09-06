@@ -4270,6 +4270,21 @@ class StatusSinkConfig(BaseModel):
         return self
 
 
+class NotifyConfig(BaseModel):
+    """Operator-notification subscription (config.notify, x-5f06).
+
+    The notify_watch arm samples computed signals (king board queues, the
+    court, main CI) and notifies the operator only on a state CHANGE. An empty
+    ``signals`` list disables the arm entirely: an operator who configures
+    nothing gets exactly today's behavior.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    min_interval_s: int = Field(default=300, ge=0)
+    signals: list[str] = Field(default_factory=list)
+
+
 class DevBlock(BaseModel):
     """Maintainer local-dev settings (nested under 'config.dev').
 
@@ -4559,6 +4574,7 @@ class ConfigBlock(BaseModel):
     loops: dict[str, LoopEntry] = Field(default_factory=dict)
     status_sinks: list[StatusSinkConfig] = Field(default_factory=list)
     status_fanout: StatusFanoutConfig = Field(default_factory=StatusFanoutConfig)
+    notify: NotifyConfig = Field(default_factory=NotifyConfig)
     king: KingBlock = Field(default_factory=KingBlock)
     accounts: AccountsBlock = Field(default_factory=AccountsBlock)
 
@@ -4603,6 +4619,12 @@ class ConfigBlock(BaseModel):
     def _coerce_status_fanout(cls, v: object) -> object:
         """Fail-safe: a non-mapping ``status_fanout:`` degrades to defaults."""
         return v if isinstance(v, (dict, StatusFanoutConfig)) else {}
+
+    @field_validator("notify", mode="before")
+    @classmethod
+    def _coerce_notify(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``notify:`` degrades to defaults."""
+        return v if isinstance(v, (dict, NotifyConfig)) else {}
 
     @field_validator("model_routing", mode="before")
     @classmethod

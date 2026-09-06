@@ -55,3 +55,27 @@ Put the value in `~/.fno/.env` (`FNO_STATUS_DISCORD=https://...`) for unattended
 - **At-least-once with retry.** A connect-class failure or a 5xx/429/401/403/408 holds the cursor and retries next tick (bounded by `retries`); a permanent 4xx drops the event and advances.
   Drops and short-circuits are logged to `.fno/status-sinks/<name>.errors.jsonl` (the var name, never its value).
 - **Discord User-Agent.** Every webhook POST sends an explicit `User-Agent`; Discord 403s the stdlib default `Python-urllib`, so without it a Discord sink would never deliver.
+
+## Reaching a remote operator (`operator_notice`)
+
+`fno inbox notify TITLE BODY` (and every automatic caller behind `send_notification`) now also appends an `operator_notice` event to the project journal. A sink that routes that type carries the notice off the host, so an operator who is not at the machine still sees it:
+
+```toml
+[[status_sinks]]
+name = "phone"
+type = "text-webhook"
+url_env = "FNO_STATUS_PHONE"          # e.g. an ntfy topic or a Discord webhook
+field = "content"
+events = ["operator_notice"]
+template = "fno [{project}] {data.title} - {data.body} ({data.pointer})"
+enabled = true
+
+[notify]
+min_interval_s = 300
+signals = ["operator_question", "mergeable_pr", "undriven_pr", "crown_set", "main_ci"]
+```
+
+Two facts about the notices themselves:
+
+- A notice is a pointer, never a second inbox. `data.pointer` names the verb that shows the durable state (`fno inbox outstanding`, `fno inbox board`). `data.body` carries counts, never queue rows.
+- Subscribed signals notify on a state change only. The `notify_watch` arm samples the king board, the court and main CI every pass. The same state answers `deduped`. A changed state inside `min_interval_s` is held for the next pass. Signal state lives in `~/.fno/notify-signals.json`. An empty `signals` list (the default) disables the arm. With no sink configured, nothing leaves the host.

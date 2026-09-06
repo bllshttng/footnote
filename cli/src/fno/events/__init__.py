@@ -1088,6 +1088,31 @@ def operator_question_closed(
     return _build("operator_question_closed", source, data)
 
 
+NOTICE_CAP = 2000
+
+
+def operator_notice(
+    *,
+    title: str,
+    body: str,
+    pointer: str = "",
+    source: str = "python",
+) -> dict[str, Any]:
+    """Build an ``operator_notice`` event (the notify chokepoint's journal leg).
+
+    A notice is a pointer to the durable queue, never a second inbox, so
+    ``pointer`` carries the verb that shows the content and ``body`` carries
+    counts, not rows.
+    """
+    data: dict[str, Any] = {
+        "title": title[:NOTICE_CAP],
+        "body": body[:NOTICE_CAP],
+    }
+    if pointer:
+        data["pointer"] = pointer[:NOTICE_CAP]
+    return _build("operator_notice", source, data)
+
+
 def operator_decision(
     *,
     decision_id: str,

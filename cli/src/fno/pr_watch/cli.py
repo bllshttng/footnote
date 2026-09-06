@@ -920,6 +920,31 @@ def tick() -> None:
         else:
             _emit_tick_row("king_wake", interval_s=kw_i, skip_reason="wake_disabled")
 
+        # Operator-notice subscription (x-5f06): samples the king board, the
+        # court and main CI, and pushes one pointer notification per signal on
+        # a state change. Delivery rides the status-sink lane; with no sink
+        # configured nothing leaves the host. Guard first, import inside: the
+        # launchd hot path pays nothing unarmed, and the double getattr reads
+        # a settings stub with no notify block as disabled.
+        set_tick_phase("notify_watch")
+        _nw_i = int(getattr(getattr(settings, "notify", None), "min_interval_s", 300))
+        _nw_signals = list(getattr(getattr(settings, "notify", None), "signals", []) or [])
+        if _nw_signals:
+            try:
+                from fno.pr_watch._notify_watch import run_notify_watch
+
+                acted_n, nw_skip, nw_detail = run_notify_watch(
+                    settings, _nw_signals, roots=_catchup_roots()
+                )
+                _emit_tick_row("notify_watch", interval_s=_nw_i, acted=acted_n,
+                               skip_reason=nw_skip, detail=nw_detail)
+            except Exception as exc:  # noqa: BLE001 - never let a notice break the tick
+                log.warning("pr-watch: notify_watch phase failed: %s", exc)
+                _emit_tick_row("notify_watch", interval_s=_nw_i, skip_reason="notify_failed",
+                               detail=str(exc)[:200])
+        else:
+            _emit_tick_row("notify_watch", interval_s=_nw_i, skip_reason="notify_disabled")
+
         # The heal drive loop (x-974c): nothing called the healer on a timer,
         # so every red open PR waited for a hand. The loop lives in Rust; this
         # phase is only the gate, before stranded so a PR healed this tick is

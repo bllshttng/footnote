@@ -232,3 +232,6 @@
 {"expect":"invalid","reason":"single_flight_gate missing outcome","event":{"ts":"2026-09-05T10:00:00Z","type":"single_flight_gate","source":"fno-loop","data":{"key_hash":"a1b2c3d4e5f6","waited_ms":0,"answered":true}}}
 {"expect":"valid","reason":"orphan_reap_sweep reaped nothing","event":{"ts":"2026-09-05T10:00:00Z","type":"orphan_reap_sweep","source":"daemon","data":{"scanned":1385,"candidates":0,"reaped":0,"older_than_secs":5400}}}
 {"expect":"invalid","reason":"orphan_reap_sweep missing reaped","event":{"ts":"2026-09-05T10:00:00Z","type":"orphan_reap_sweep","source":"daemon","data":{"scanned":10,"candidates":1,"older_than_secs":5400}}}
+{"expect":"valid","reason":"operator_notice with pointer","event":{"ts":"2026-09-05T10:00:00Z","type":"operator_notice","source":"python","data":{"title":"operator questions","body":"3 open operator questions.","pointer":"fno inbox outstanding"}}}
+{"expect":"valid","reason":"operator_notice without the optional pointer","event":{"ts":"2026-09-05T10:00:00Z","type":"operator_notice","source":"daemon","data":{"title":"t","body":"b"}}}
+{"expect":"invalid","reason":"operator_notice missing body","event":{"ts":"2026-09-05T10:00:00Z","type":"operator_notice","source":"python","data":{"title":"t"}}}

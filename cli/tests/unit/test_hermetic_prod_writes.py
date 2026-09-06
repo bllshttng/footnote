@@ -301,7 +301,7 @@ def test_hermetic_run_still_degrades_loudly_with_no_notifier(monkeypatch):
     assert code == 1 and "no OS notification tool available" in err
 
 
-def test_notification_dispatches_outside_a_hermetic_run(monkeypatch):
+def test_notification_dispatches_outside_a_hermetic_run(monkeypatch, tmp_path):
     """Production still notifies; the guard keys on the receipt, nothing else."""
     import fno.notify._impl as impl
 
@@ -309,5 +309,8 @@ def test_notification_dispatches_outside_a_hermetic_run(monkeypatch):
     monkeypatch.setattr(impl.subprocess, "run", lambda *a, **k: calls.append(a))
     monkeypatch.setattr(impl.platform, "system", lambda: "Darwin")
     monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
+    # The unsuppressed run also emits the operator_notice journal row (x-5f06);
+    # pin the journal inside the sandbox so the row never reaches a live one.
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / "events.jsonl"))
     assert impl.send_notification("t", "m") == (0, "")
     assert calls, "no dispatch attempted outside a hermetic run"
