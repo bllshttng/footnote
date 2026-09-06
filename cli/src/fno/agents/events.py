@@ -255,6 +255,7 @@ def emit_spawned(
     spawned_by_session: Optional[str] = None,
     spawned_by_harness: Optional[str] = None,
     spawned_by_cwd: Optional[str] = None,
+    lineage_reason: Optional[str] = None,
     harness_session_id: Optional[str] = None,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
@@ -279,6 +280,10 @@ def emit_spawned(
         "spawned_by_session": spawned_by_session,
         "spawned_by_harness": spawned_by_harness,
         "spawned_by_cwd": spawned_by_cwd,
+        # x-5283: a birth names either its parent or why it could not - the
+        # absence of spawned_by_session alone has three explanations, and
+        # only one of them is "identity was genuinely ambiguous".
+        "lineage_reason": lineage_reason,
     }
     if pid is not None:
         data["pid"] = pid

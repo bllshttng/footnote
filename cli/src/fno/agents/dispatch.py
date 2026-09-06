@@ -750,7 +750,7 @@ def _codex_create_path(
     # stamp the event only, leaving the row - the surface consumers read -
     # without lineage).
     _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
-    _report_unlinked_parent(_cx_session)
+    _cx_lineage_reason = _report_unlinked_parent(_cx_session)
     new_entry = AgentEntry(
         name=name,
         cwd=str(cwd),
@@ -815,6 +815,7 @@ def _codex_create_path(
         spawned_by_session=_cx_session,
         spawned_by_harness=_cx_harness,
         spawned_by_cwd=_cx_cwd,
+        lineage_reason=_cx_lineage_reason,
     )
     _emit_ev(
         "agent_ask_done",
@@ -886,15 +887,17 @@ def _reign_typed_message(
     return message, False
 
 
-def _report_unlinked_parent(session_id: Optional[str]) -> None:
-    """Name an unrecorded parent edge in the spawn output.
+def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
+    """Name an unrecorded parent edge in the spawn output, and return the
+    reason so the spawn event can carry it (x-5283: stderr is not a record).
 
     A null can be CORRECT (an inherited foreign marker would record a stranger
     as parent); the defect was its silence. Say it with the identity
-    resolution's own reason, so the spawner reads WHY.
+    resolution's own reason, so the spawner reads WHY. The event carries
+    either a session id or this reason, never both empty.
     """
     if session_id:
-        return
+        return None
     try:
         from fno.claims.self_identity import resolve_self_identity
 
@@ -908,6 +911,7 @@ def _report_unlinked_parent(session_id: Optional[str]) -> None:
         "appear in its spawner's orphan check",
         file=sys.stderr,
     )
+    return reason
 
 
 def _capture_spawn_trigger() -> Optional[str]:
@@ -1946,7 +1950,7 @@ def _claude_create_path(
     # Best-effort: never raises, degrades to (None, None, None) when absent.
     # spawn_trigger was already popped before bg_create above (x-42c5 ordering fix).
     spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
-    _report_unlinked_parent(spawned_by_session)
+    lineage_reason = _report_unlinked_parent(spawned_by_session)
 
     # Crown stamp (US9), same contract as the pane path: the grantor is the
     # spawning session captured just above, or "human" for a direct human spawn
@@ -2245,6 +2249,7 @@ def _claude_create_path(
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,
         spawned_by_cwd=spawned_by_cwd,
+        lineage_reason=lineage_reason,
     )
 
     # Done event.

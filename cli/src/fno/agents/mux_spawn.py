@@ -4408,7 +4408,7 @@ def dispatch_spawn_pane(
                 exit_code=1,
             )
         spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
-        _report_unlinked_parent(spawned_by_session)
+        lineage_reason = _report_unlinked_parent(spawned_by_session)
         # spawn_trigger was already popped before the pane-run env snapshot above.
 
         # The receipt's two independent facts (see MuxSpawnResult.bound), plus
@@ -4960,6 +4960,7 @@ def dispatch_spawn_pane(
                 spawned_by_session=spawned_by_session,
                 spawned_by_harness=spawned_by_harness,
                 spawned_by_cwd=spawned_by_cwd,
+                lineage_reason=lineage_reason,
             )
         except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
             # No row was written, so the orphan's later death would join no
