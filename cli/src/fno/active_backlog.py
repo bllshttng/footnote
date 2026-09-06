@@ -86,7 +86,8 @@ def _active_missions(*, strict: bool = False) -> list[dict]:
     """Epic nodes with ``mission_active=true`` (K1's durable activation record),
     across all projects. The field ``fno backlog advance --epic`` sets/clears;
     a store read fault (or an external backend selection, which can never carry
-    a footnote-set activation flag) yields none (fail-safe, never raises)."""
+    a footnote-set activation flag) yields none by default. Strict callers raise
+    on the same read failures so a receipt can distinguish unknown from empty."""
     try:
         from fno.tracker.metadata import read_entries
 
