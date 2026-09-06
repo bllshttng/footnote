@@ -2205,6 +2205,24 @@ def _row_hosts_keeper_thread(session_id: str) -> bool:
     return "mux/threads/" in sock
 
 
+def _live_miss_age_suffix(recipient: str) -> str:
+    """The transcript-age suffix a bare live-miss receipt carries (x-6d89 AC8).
+
+    A bare live-miss reads the same for a transient miss to a genuinely live
+    peer (re-send works) and for a session that stood down hours ago (nothing
+    will drain it); the age is the discriminator. An unreadable transcript
+    prints unknown, never 0s. Three lanes emit that receipt (the name lane,
+    the job lane, the registered-agent lane), so the suffix lives here once.
+    """
+    from fno.agents.session_truth import resolve_session_truth
+    from fno.agents.top import _fmt_age
+
+    age_s = resolve_session_truth(recipient).get("last_activity_age_s")
+    if age_s is None:
+        return ", transcript age unknown"
+    return f", transcript quiet {_fmt_age(age_s)}"
+
+
 def _name_lane_send(
     message: str,
     *,
@@ -2717,21 +2735,7 @@ def _name_lane_send(
     else:
         reason = "self-send" if self_send else (live_reason or "live-miss")
         if reason == "live-miss":
-            # x-6d89 AC8: a bare live-miss reads the same for a transient miss
-            # to a genuinely live peer (re-send works) and for a session that
-            # stood down hours ago (nothing will drain it). The transcript age
-            # is the discriminator, so the receipt carries it; an unreadable
-            # transcript prints unknown, never 0s.
-            from fno.agents.session_truth import resolve_session_truth
-            from fno.agents.top import _fmt_age
-
-            age_s = resolve_session_truth(recipient).get("last_activity_age_s")
-            age_note = (
-                f"transcript quiet {_fmt_age(age_s)}"
-                if age_s is not None
-                else "transcript age unknown"
-            )
-            reason = f"live-miss, {age_note}"
+            reason = f"live-miss{_live_miss_age_suffix(recipient)}"
     hint = ""
     if hold_note:
         hint = f" `fno agents mail withdraw {msg_id}` retracts it."
@@ -2958,7 +2962,10 @@ def _job_lane_send(
         return
     print(f"mail: {recipient} live-inject missed; durable until a holder drains",
           file=sys.stderr)
-    print(f"{th.thread_id} queued (durable) for {recipient} [job-live-miss]{holder_tag}")
+    print(
+        f"{th.thread_id} queued (durable) for {recipient} "
+        f"[job-live-miss{_live_miss_age_suffix(recipient)}]{holder_tag}"
+    )
 
 
 # Send-time human escalation for a question, per (sender, recipient). A burst
@@ -4712,6 +4719,8 @@ def cmd_send(
         )
     else:
         reason_tok = result.reason or "live-miss"
+        if reason_tok == "live-miss":
+            reason_tok += _live_miss_age_suffix(name)
         _warn_deferred(name, reason=result.reason)
         print(f"{result.msg_id} queued (durable) [{reason_tok}]")
 

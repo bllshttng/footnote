@@ -538,6 +538,15 @@ def test_live_miss_receipt_names_the_transcript_age(
     )
 
 
+def test_live_miss_age_suffix_names_unknown_when_no_transcript(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """The suffix's unknown branch: an unreadable transcript never reads 0s."""
+    from fno.mail.cli import _live_miss_age_suffix
+
+    assert _live_miss_age_suffix("nobody-here") == ", transcript age unknown"
+
+
 # ---------------------------------------------------------------------------
 # Cell 5: unknown token -> exit 16. The typo guard survives the widened ladder.
 # ---------------------------------------------------------------------------
