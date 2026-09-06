@@ -74,7 +74,9 @@ pub(crate) fn feed_overlay_lines(o: &FeedOverlay) -> Vec<String> {
             ANSWER_OVERLAY_W,
         ));
     }
-    if o.items.is_empty() && !o.degraded {
+    // The empty notice only when the fold has SETTLED empty: "no activity"
+    // beside a still-running fold is a claim the fold has not earned yet.
+    if o.items.is_empty() && !o.degraded && !o.inflight {
         lines.push(pad_to("   no activity in the last 24h", ANSWER_OVERLAY_W));
     }
     let footer = if o.degraded {

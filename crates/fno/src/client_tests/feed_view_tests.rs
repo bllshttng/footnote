@@ -143,3 +143,14 @@ fn empty_overlay_renders_an_empty_notice_and_footer() {
     assert!(lines.iter().any(|l| l.contains("no activity")));
     assert!(lines.last().unwrap().contains("0 events"));
 }
+
+#[test]
+fn folding_first_open_claims_no_activity() {
+    // While the fold is in flight the body claims nothing: "no activity" is
+    // a statement only a settled fold has earned.
+    let mut o = overlay(vec![]);
+    o.inflight = true;
+    let lines = feed_overlay_lines(&o);
+    assert!(!lines.iter().any(|l| l.contains("no activity")));
+    assert!(lines.iter().any(|l| l.contains("folding...")));
+}
