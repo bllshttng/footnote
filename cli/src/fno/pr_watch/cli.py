@@ -168,6 +168,49 @@ def _catchup_roots() -> list[Path]:
     return [p for p in roots.values() if p.is_dir()]
 
 
+def _run_notify_watch_phase() -> None:
+    """Run the Rust notify_watch arm and turn its receipt into the tick row.
+
+    The arm lives in fno-agents (``notify-watch``); the sampler, the signal
+    store and the ``[notify]`` config are all read in Rust, so this phase is
+    only spawn, parse and emit. The subprocess runs inside the first catch-up
+    root: launchd starts this daemon in ``/``, where a board read would read
+    an empty world. An absent binary, a non-zero run and an unparseable
+    receipt all land as ``notify_failed`` - a dead notice lane never raises
+    out of the tick.
+    """
+    from fno.pr_watch._dispatch import set_tick_phase
+
+    set_tick_phase("notify_watch")
+    try:
+        import subprocess
+
+        from fno.rust_binary import resolve_binary
+
+        binary = resolve_binary()
+        if binary is None:
+            _emit_tick_row("notify_watch", interval_s=300,
+                           skip_reason="notify_failed", detail="rust binary absent")
+            return
+        roots = _catchup_roots()
+        argv = [str(binary), "notify-watch", "--json"]
+        for root in roots:
+            argv += ["--root", str(root)]
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, check=False, timeout=240,
+            cwd=str(roots[0]) if roots else None,
+        )
+        payload = json.loads(proc.stdout or "{}")
+        _emit_tick_row("notify_watch", interval_s=300,
+                       acted=int(payload.get("acted") or 0),
+                       skip_reason=payload.get("skip_reason"),
+                       detail=(payload.get("detail") or "")[:200])
+    except Exception as exc:  # noqa: BLE001 - never let a notice break the tick
+        log.warning("pr-watch: notify_watch phase failed: %s", exc)
+        _emit_tick_row("notify_watch", interval_s=300,
+                       skip_reason="notify_failed", detail=str(exc)[:200])
+
+
 def _watchdog_recovery_roots() -> list[Path]:
     """Resolve every distinct project scope for the launchd watchdog scan.
 
@@ -919,6 +962,11 @@ def tick() -> None:
                                detail=str(exc)[:200])
         else:
             _emit_tick_row("king_wake", interval_s=kw_i, skip_reason="wake_disabled")
+
+        # The operator-notice sampler (x-87fb): one phase, always run; the
+        # Rust arm answers notify_off itself when the [notify] signals list
+        # is empty, so the readout shows the arm whether or not it is armed.
+        _run_notify_watch_phase()
 
         # The heal drive loop (x-974c): nothing called the healer on a timer,
         # so every red open PR waited for a hand. The loop lives in Rust; this
