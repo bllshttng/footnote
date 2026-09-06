@@ -227,11 +227,18 @@ def resolve_target_coordinate(
     if effort is not None:
         args += ["--effort", effort]
     args.append(f"/fno:target {node}")
+    # x-7198: this is a coordinate PROBE, not a real dispatch - it diffs a
+    # candidate relaunch against an already-live worker (detect_retask below).
+    # The unattended permission-mode builtin is implicit and always-on for a
+    # verb-seeded spawn, so it is never a real difference from what the live
+    # worker already got at its own spawn; counting it as one made every
+    # verb-seeded retask refuse and demand a fresh spawn instead.
     resolved = inject_spawn_defaults(
         args,
         settings=settings,
         env=env,
         stderr=io.StringIO(),
+        apply_permission_builtin=False,
     )
     harness = _flag_value(resolved, "--harness", "-H")
     if not harness:
