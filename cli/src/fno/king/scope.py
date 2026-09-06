@@ -23,10 +23,18 @@ def compile_scope_ids(scope: str, entries: list[dict], *, resolve=None) -> set[s
         from fno.graph._intake import descendants_of
 
         by_id = {row.get("id"): row for row in entries if isinstance(row, dict)}
-        root = by_id.get(canonical)
-        if not root or root.get("type") != "epic":
-            raise ValueError(f"crown scope {canonical!r} is not an epic in the graph")
-        return {canonical, *descendants_of(entries, canonical)}
+        # A rung-2 scope is a SET of epics; the king's board sees the nodes
+        # under EVERY member, not just the first.
+        ids: set[str] = set()
+        for root_id in split_scope(canonical):
+            root = by_id.get(root_id)
+            if not root or root.get("type") != "epic":
+                raise ValueError(
+                    f"crown scope {root_id!r} is not an epic in the graph"
+                )
+            ids.add(root_id)
+            ids.update(descendants_of(entries, root_id))
+        return ids
 
     projects = set(split_scope(canonical))
     return {

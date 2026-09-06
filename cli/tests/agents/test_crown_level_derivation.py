@@ -2,7 +2,7 @@
 
     0   several projects   scope names 2+ config projects (a portfolio)
     1   one project        scope names one config project
-    2   one epic           scope is a backlog node with type == "epic"
+    2   a set of epics     every scope names a backlog node with type == "epic"
 
 There is no operator-supplied level anywhere in the surface. That is the point of
 these tests: the old grammar made callers hand-type an altitude on a ladder whose
@@ -23,7 +23,7 @@ from fno.projects import resolve as proj_resolve
 
 @pytest.fixture
 def territory(tmp_path, monkeypatch):
-    """A graph with one epic + one ordinary node, and two configured projects.
+    """A graph with two epics + one ordinary node, and two configured projects.
 
     The projects go through the REAL resolver against a temp config rather than a
     monkeypatched stub: "is this a project?" is half the ladder, so a stub would
@@ -39,6 +39,7 @@ def territory(tmp_path, monkeypatch):
             {
                 "entries": [
                     {"id": "e-1", "type": "epic", "project": "alpha"},
+                    {"id": "e-2", "type": "epic", "project": "beta"},
                     {"id": "n-1", "type": "feature", "project": "alpha"},
                 ]
             }
@@ -127,6 +128,55 @@ def test_a_mixed_scope_is_refused_rather_than_coerced(territory, scopes) -> None
     assert "rules PROJECTS" in _refusal(scopes)
 
 
+def test_a_mixed_scope_names_each_scopes_rung(territory) -> None:
+    """The refusal names what each scope IS, so the operator can see the
+    mistake (a project beside an epic) rather than just that one exists."""
+    msg = _refusal(["alpha", "e-1"])
+    assert "alpha (a project)" in msg
+    assert "e-1 (an epic)" in msg
+
+
+# --- rung 2 rules a SET of epics ----------------------------------------------
+#
+# The operator's mux king oversees two epics at once; before the set grammar
+# that king had no legal crown: two epics was read as a failed portfolio.
+
+
+def test_two_epics_crown_as_one_set_at_rung_2(territory) -> None:
+    from fno.agents.crown import resolve_crown
+
+    assert resolve_crown(["e-1", "e-2"]) == (2, "e-1,e-2")
+
+
+def test_the_epic_set_is_canonical_order_and_dedup(territory) -> None:
+    """The stored form is the canonical join, so two spellings of one set are
+    one crown - the one-live-crown guard compares stored scopes."""
+    from fno.agents.crown import resolve_crown
+
+    assert resolve_crown(["e-2", "e-1", "e-2"]) == (2, "e-1,e-2")
+
+
+def test_a_set_of_epics_and_projects_refuses_naming_the_mixed_rungs(
+    territory,
+) -> None:
+    msg = _refusal(["e-1", "alpha", "e-2"])
+    assert "alpha (a project)" in msg
+    assert "e-1 (an epic)" in msg
+
+
+def test_a_non_epic_node_in_a_multi_scope_crown_is_refused(territory) -> None:
+    """Implementers get no crowns, alone or inside a set."""
+    msg = _refusal(["e-1", "n-1"])
+    assert "n-1" in msg
+    assert "not an epic" in msg
+
+
+def test_an_unknown_member_of_a_set_is_refused_as_a_typo(territory) -> None:
+    assert "neither a configured project nor a backlog node" in _refusal(
+        ["e-1", "banana"]
+    )
+
+
 # --- containment is now real, not an honor system ----------------------------
 
 
@@ -175,3 +225,16 @@ def test_containment_is_checkable_across_the_ladder(territory) -> None:
     assert scope_contains("alpha,beta", "e-1") is True       # epic in the portfolio
     assert scope_contains("beta", "e-1") is False            # epic of another project
     assert scope_contains("alpha", "alpha") is False         # a peer, not below
+
+
+def test_a_rung_2_set_is_a_union_for_containment(territory) -> None:
+    """A crown over two epics contains a crown over either member: the king
+    over both epics can grant inside each. The set itself is a peer of its own
+    spelling, and an epic outside the set is not contained."""
+    from fno.agents.crown import scope_contains
+
+    assert scope_contains("e-1,e-2", "e-1") is True
+    assert scope_contains("e-1,e-2", "e-2") is True
+    assert scope_contains("e-2,e-1", "e-1") is True      # stored order-free
+    assert scope_contains("e-1,e-2", "e-1,e-2") is False  # a peer, not below
+    assert scope_contains("e-1", "e-1,e-2") is False       # narrower holds less

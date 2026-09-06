@@ -39,18 +39,18 @@ Two rules keep the court from growing:
 2. **The ladder is three rungs, and the rung is a fact about the territory, not a number you pick:**
    - **Level 0** - several projects; a portfolio. Its court is project kings.
    - **Level 1** - one project. Its court is epic kings.
-   - **Level 2** - one epic. Its court is the workers on that epic's nodes.
+   - **Level 2** - one epic, or a set of epics (one king over two epics at once is one crown, not two). Its court is the workers on those epics' nodes.
 
    **There is no rung for an implementer.** A node that is not an epic is work, not a territory, and nobody reigns for a day over a single task, so a crown aimed at one is refused rather than granted at some bottom rung. Each king courts its *direct reports only*: a portfolio king reconciles project kings and never reaches past one to drive an epic. Because projects contain epics contain nodes, you run out of scope before you run out of rungs, so the subset rule is the whole bound. Most reigns stay single-level - one epic king over one epic is the common case; anoint a portfolio king only when several projects genuinely run at once.
 
 State your level, altitude, and scope in your own opening line, so the transcript records what you believed you were authorized to do.
 
 **The crown is stamped by a grantor, never self-declared.**
-Bestow it at spawn: `fno agents spawn ... --crown <scope>` (short form `-k`), repeating the flag for a portfolio.
+Bestow it at spawn: `fno agents spawn ... --crown <scope>` (short form `-k`), repeating the flag for a portfolio or a set of epics.
 
 When a human promotes an already-running session, the target first runs `fno agents register`. The human then runs `fno agents crown <printed-handle> --scope <scope>` from another attended terminal. When its own crown strictly contains the scope, a live king can run this path too, to re-scope a subordinate. The registry records the actual grantor, either the attended `human` or the granting king. It preserves the target's transcript and placement and never performs succession.
 You never pass a level.
-Naming one epic makes an epic king, one project a project king, and several projects a portfolio king; naming anything else is refused, because a scope that is not a territory has no rung to derive.
+Naming one epic makes an epic king, several epics one epic king over the set, one project a project king, and several projects a portfolio king; naming anything else is refused, because a scope that is not a territory has no rung to derive.
 The row records the derived `level`, the `scope`, and the grantor (a live superset-king, or the attended `human`), the same provenance discipline as harness-stamped mail identity.
 That derivation is the point: the old surface made you hand-type an altitude on a ladder that reads backwards, and a wrong guess minted real authority at the wrong height with no error at all.
 

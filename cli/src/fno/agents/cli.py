@@ -907,8 +907,8 @@ def cmd_crown(
         [],
         "--scope",
         help=(
-            "Territory to grant. Repeat for a multi-project portfolio; the "
-            "crown level is derived and cannot be supplied."
+            "Territory to grant. Repeat for a multi-project portfolio or a "
+            "set of epics; the crown level is derived and cannot be supplied."
         ),
     ),
     reclaim: bool = typer.Option(
@@ -1523,7 +1523,8 @@ def cmd_spawn(
         help=(
             "Grant an orchestrator crown on the spawned worker, over the "
             "territory named here. Repeatable: pass ONE epic id (a Director), "
-            "ONE project name (a project king), or SEVERAL project names for a "
+            "SEVERAL epic ids (one Director over the set), ONE project name "
+            "(a project king), or SEVERAL project names for a "
             "portfolio (`-k etl -k web`). The ladder altitude is derived from "
             "what you name - there is no --level, and a node that is not an epic "
             "is refused, since implementers get no crowns. Stamped with the "

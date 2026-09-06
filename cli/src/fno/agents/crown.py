@@ -6,7 +6,7 @@ THE LADDER IS THREE RUNGS, EACH A FACT ABOUT THE SCOPE:
 
     0   several projects   scope names 2+ config projects (a portfolio)
     1   one project        scope names one config project
-    2   one epic           scope is a backlog node with type == "epic"
+    2   a set of epics     every scope names a backlog node with type == "epic"
 
 No rung for an implementer: a non-epic node is work, not territory, so a crown
 aimed at one is REFUSED - which is why no caller passes a level;
@@ -235,45 +235,13 @@ def _canonical_project(name: str) -> Optional[str]:
         return None
 
 
-def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
-    """``scopes`` -> the (rung, stored scope) they imply, both derived together.
+def _epic_or_refuse(raw: str) -> str:
+    """``raw`` as a backlog epic id, or the refusal that names why not.
 
-    ONE call rather than a derive-then-encode pair, because the two answers must
-    agree and a caller holding them separately can mismatch them: the rung is
-    counted over CANONICAL project names, so a scope encoded from the raw
-    spelling would be a different territory than the one that was counted.
-
-    Raises :class:`CrownScopeError` when the scopes name no territory - the
-    refusal that keeps implementers uncrowned. Mixed scopes are refused rather
-    than coerced: a portfolio is projects, so naming a project and an epic
-    together is a mistake about what is being ruled, not a level-0 crown over
-    both.
+    One message set for the single-epic and epic-set paths alike: a member of
+    a set that is a typo or a non-epic node gets the same named remedy it
+    would get alone.
     """
-    members = split_scope(canonical_scope(scopes))
-    if not members:
-        raise CrownScopeError("a crown needs a scope: name an epic or a project")
-
-    # Resolve aliases FIRST, then dedupe: `-k alpha -k a` is one project spelled
-    # twice, not a two-project portfolio.
-    resolved = [(m, _canonical_project(m)) for m in members]
-    projects = [canon for _, canon in resolved if canon]
-
-    if len(members) > 1:
-        unknown = [raw for raw, canon in resolved if not canon]
-        if unknown:
-            raise CrownScopeError(
-                f"a multi-scope crown rules PROJECTS, but {', '.join(unknown)} "
-                f"{'is not a configured project' if len(unknown) == 1 else 'are not configured projects'}. "
-                "Name projects from your config, or pass a single epic instead."
-            )
-        scope = canonical_scope(projects)
-        # One project named twice collapses to one project, not a portfolio.
-        return (0 if len(split_scope(scope)) > 1 else 1), scope
-
-    raw = members[0]
-    if projects:
-        return 1, projects[0]
-
     entry = _graph_entry(raw)
     if entry is None:
         raise CrownScopeError(
@@ -287,7 +255,64 @@ def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
             f"If {raw} IS meant to be an epic: fno backlog update {raw} --type epic. "
             "Otherwise crown the epic above it, or its project."
         )
-    return 2, raw
+    return raw
+
+
+def _member_rung(raw: str, canon: Optional[str]) -> str:
+    """One scope member spelled with its rung, for a mixed-rung refusal."""
+    if canon:
+        return f"{canon} (a project)"
+    entry = _graph_entry(raw)
+    if entry is not None and entry.get("type") == "epic":
+        return f"{raw} (an epic)"
+    if entry is not None:
+        return f"{raw} (a {entry.get('type') or 'node'}, not an epic)"
+    return f"{raw} (not a configured project or a known node)"
+
+
+def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
+    """``scopes`` -> the (rung, stored scope) they imply, both derived together.
+
+    ONE call rather than a derive-then-encode pair, because the two answers must
+    agree and a caller holding them separately can mismatch them: the rung is
+    counted over CANONICAL project names, so a scope encoded from the raw
+    spelling would be a different territory than the one that was counted.
+
+    Raises :class:`CrownScopeError` when the scopes name no territory - the
+    refusal that keeps implementers uncrowned. Mixed scopes are refused rather
+    than coerced: a portfolio is projects and rung 2 is a set of epics, so
+    naming a project and an epic together is a mistake about what is being
+    ruled, not a crown over both.
+    """
+    members = split_scope(canonical_scope(scopes))
+    if not members:
+        raise CrownScopeError("a crown needs a scope: name an epic or a project")
+
+    # Resolve aliases FIRST, then dedupe: `-k alpha -k a` is one project spelled
+    # twice, not a two-project portfolio.
+    resolved = [(m, _canonical_project(m)) for m in members]
+    projects = [canon for _, canon in resolved if canon]
+    non_projects = [raw for raw, canon in resolved if not canon]
+
+    if len(members) > 1:
+        if not non_projects:
+            scope = canonical_scope(projects)
+            # One project named twice collapses to one project, not a portfolio.
+            return (0 if len(split_scope(scope)) > 1 else 1), scope
+        if not projects:
+            # Rung 2 rules a SET of epics, stored with the same separator: a
+            # king over two epics at once is one crown, not a failed portfolio.
+            return 2, canonical_scope([_epic_or_refuse(raw) for raw in non_projects])
+        raise CrownScopeError(
+            "a multi-scope crown rules PROJECTS or EPICS, never both at once: "
+            f"{', '.join(_member_rung(raw, canon) for raw, canon in resolved)}. "
+            "Name projects only (a portfolio) or epics only (a set)."
+        )
+
+    raw = members[0]
+    if projects:
+        return 1, projects[0]
+    return 2, _epic_or_refuse(raw)
 
 
 def derive_crown_level(scopes: list[str]) -> int:
@@ -470,6 +495,18 @@ def _same_territory(a: Optional[str], b: Optional[str]) -> bool:
     return bool(left) and left == right
 
 
+def _territories_overlap(a: Optional[str], b: Optional[str]) -> bool:
+    """Do two stored scopes share ANY territory, aliases normalized?
+
+    The one-live-crown scans key on this, not on equality: a stored set
+    (a portfolio, or a rung-2 epic set) already rules each of its members,
+    so a second crown over any member alone is a double rule even though no
+    two stored strings are equal.
+    """
+    left, right = _territory_key(a), _territory_key(b)
+    return bool(left) and bool(right) and bool(left & right)
+
+
 def crown_scope_matches(held: Optional[str], requested: Optional[str]) -> bool:
     """Will the row-keyed king readers accept a crown over ``held`` for
     ``requested``? Territory equality, aliases normalized.
@@ -602,14 +639,14 @@ def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
                 for row in rows
                 if row.name not in {holder_name, target.name}
                 and row.status not in TERMINAL_STATUSES
-                and _same_territory(row.crown_scope, scope)
+                and _territories_overlap(row.crown_scope, scope)
             ),
             None,
         )
         if other is not None:
             raise CrownPromotionError(
-                f"cannot reclaim {scope!r}: live row {other.name!r} also "
-                "holds the scope"
+                f"cannot reclaim {scope!r}: live row {other.name!r} already "
+                f"holds overlapping territory ({other.crown_scope!r})"
             )
 
         armed = False
@@ -818,20 +855,25 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 "fno agents rm it, then crown the re-registered session."
             )
 
+        # An agent grantor's own row legitimately overlaps the delegated scope
+        # (grant_error verified a STRICT containment before the write), so the
+        # caller is not a second ruler; every other overlapping live row is.
+        delegating = {target.name} | ({grantor} if caller is not None else set())
         holder = next(
             (
                 row
                 for row in rows
-                if row.name != target.name
+                if row.name not in delegating
                 and row.status not in TERMINAL_STATUSES
-                and _same_territory(row.crown_scope, scope)
+                and _territories_overlap(row.crown_scope, scope)
             ),
             None,
         )
         if holder is not None:
             raise CrownPromotionError(
                 f"refusing to crown {target.name!r}: scope {scope!r} is already "
-                f"held by live row {holder.name!r}. Three ways out, cheapest "
+                f"held by live row {holder.name!r} (holding "
+                f"{holder.crown_scope!r}). Three ways out, cheapest "
                 "first:\n"
                 f"  re-scope the holder   fno agents crown {holder.name} --scope "
                 "<other territory>   (both sessions stay live; retry this "

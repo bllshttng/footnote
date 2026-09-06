@@ -29,6 +29,31 @@ def test_project_scope_compiles_to_the_project_union():
     ) == {"f-1", "e-1"}
 
 
+def test_an_epic_set_compiles_to_the_union_of_both_roots():
+    """A rung-2 crown over two epics is a set: the king's board must see the
+    nodes under EITHER member, not just the ones under the first."""
+    entries = [
+        {"id": "x-a", "type": "epic", "project": "fno"},
+        {"id": "x-a1", "parent": "x-a", "project": "fno"},
+        {"id": "x-b", "type": "epic", "project": "fno"},
+        {"id": "x-b1", "parent": "x-b", "project": "fno"},
+        {"id": "x-o", "project": "fno"},
+    ]
+    ids = compile_scope_ids(
+        "x-a,x-b", entries, resolve=lambda _: (2, "x-a,x-b")
+    )
+    assert ids == {"x-a", "x-a1", "x-b", "x-b1"}
+
+
+def test_every_member_of_an_epic_set_must_be_an_epic():
+    entries = [
+        {"id": "x-a", "type": "epic", "project": "fno"},
+        {"id": "x-n", "type": "feature", "project": "fno"},
+    ]
+    with pytest.raises(ValueError):
+        compile_scope_ids("x-a,x-n", entries, resolve=lambda _: (2, "x-a,x-n"))
+
+
 def test_a_non_epic_root_is_refused():
     entries = [{"id": "x-root", "type": "feature"}]
     with pytest.raises(ValueError):
