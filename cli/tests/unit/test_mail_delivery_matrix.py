@@ -508,6 +508,36 @@ def test_stalled_head_reads_the_transcript_not_the_lane(
     assert "is not live" not in combined, combined
 
 
+def test_live_miss_receipt_names_the_transcript_age(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """x-6d89 AC8: a [live-miss] receipt names the recipient's transcript age.
+
+    A bare live-miss reads identically for a transient miss to a genuinely
+    live peer (x-b610: re-send works) and for a session that stood down two
+    hours ago (nothing will drain it). The age is the discriminator, and an
+    unreadable transcript must print unknown, never 0s.
+    """
+
+    _seed_asleep_transcript(monkeypatch, tmp_path, age_s=9000)
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_and_deliver",
+        lambda *_a, **_k: (False, "spawn-exit-1"),
+    )
+
+    res = runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
+    combined = res.output + (res.stderr or "")
+
+    assert res.exit_code == 0, combined
+    assert "[live-miss, transcript quiet 2h]" in combined, (
+        f"the live-miss receipt must name the transcript age the sender needs "
+        f"to tell transient from stood-down: {combined}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Cell 5: unknown token -> exit 16. The typo guard survives the widened ladder.
 # ---------------------------------------------------------------------------
