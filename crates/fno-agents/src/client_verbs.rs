@@ -1555,16 +1555,6 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
     // the CLIENT process, so the markers name the session that vouched for
     // the adopted row.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
-    // Built before the literal: `claude_session_uuid` below moves `session`,
-    // and the struct-update base is evaluated last.
-    let base = RegistryEntry::new(
-        Some(session.clone()),
-        Lineage {
-            session: parent_session,
-            harness: parent_harness,
-            cwd: parent_cwd,
-        },
-    );
     RegistryEntry {
         node: None,
         // Synthesized from an identity that arrived without a row; the lane
@@ -1601,7 +1591,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         cwd: id.owner_cwd.clone(),
         project_root: id.owner_cwd.clone(),
         session_id: None,
-        claude_session_uuid: if is_claude { Some(session) } else { None },
+        claude_session_uuid: is_claude.then(|| session.clone()),
         messaging_socket_path: None,
         codex_session_id: None,
         gemini_session_id: None,
@@ -1632,7 +1622,10 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         delivery_policy: None,
         sandbox_posture: None,
         spawn_trigger: None,
-        ..base
+        ..RegistryEntry::new(
+            Some(session),
+            Lineage::captured((parent_session, parent_harness, parent_cwd)),
+        )
     }
 }
 

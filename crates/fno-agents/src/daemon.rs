@@ -3740,11 +3740,7 @@ fn build_claude_stream_entry(
         sandbox_posture: None,
         ..RegistryEntry::new(
             Some(uuid.into()),
-            Lineage {
-                session: parent_session,
-                harness: parent_harness,
-                cwd: parent_cwd,
-            },
+            Lineage::captured((parent_session, parent_harness, parent_cwd)),
         )
     }
 }

@@ -766,10 +766,8 @@ def _codex_create_path(
         model=model,
         model_basis="requested" if model else None,
         effort=effort,
-        # The THIRD Python path that mints a worker row, after the pane and bg
-        # paths. Its Rust counterpart in codex_ask.rs stamps this, so leaving it
-        # off here made one codex worker read "spawn" and another read absent
-        # purely by which language created it.
+        # The THIRD Python mint path, after the pane and bg paths; the Rust
+        # counterpart in codex_ask.rs stamps the same field.
         origin="spawn",
         # x-98ab: the node this spawn was FOR, resolved by the caller's
         # provenance pass - never this process's ambient value, which names
