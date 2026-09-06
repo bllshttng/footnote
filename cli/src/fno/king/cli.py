@@ -642,14 +642,19 @@ def drain_cmd(
     nonzero on purpose - a walk that cannot see the scope must not read the
     failure as drained.
     """
-    from fno.graph._constants import GRAPH_JSON
-    from fno.graph.store import GraphUnreadableError, StoreUnavailable, read_graph_strict
+    from fno.graph.store import GraphUnreadableError, StoreUnavailable
     from fno.king.scope import scope_undelivered
+    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
 
     try:
-        entries = read_graph_strict(GRAPH_JSON)
+        entries = read_entries("king drain", strict=True)
         undelivered = scope_undelivered(scope, entries)
-    except (GraphUnreadableError, StoreUnavailable, ValueError) as exc:
+    except (
+        ExternalMetadataUnavailable,
+        GraphUnreadableError,
+        StoreUnavailable,
+        ValueError,
+    ) as exc:
         typer.echo(f"king: drain for {scope!r} unreadable: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(json.dumps({"scope": scope, "undelivered": undelivered}))

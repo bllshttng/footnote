@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from typer.testing import CliRunner
 
 from fno.king.scope import compile_scope_ids, scope_undelivered
 
@@ -99,6 +100,21 @@ def test_scope_undelivered_raises_on_an_uncompilable_scope():
     entries = [{"id": "x-root", "type": "feature"}]
     with pytest.raises(ValueError):
         scope_undelivered("x-root", entries, resolver=lambda _: (2, "x-root"))
+
+
+def test_drain_refuses_graph_scope_reads_under_an_external_tracker(
+    tmp_path, monkeypatch
+):
+    from fno.king.cli import agents_king_app
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+
+    result = CliRunner().invoke(agents_king_app, ["drain", "x-root"])
+
+    assert result.exit_code == 1, result.output
+    assert "unavailable under an external tracker backend" in result.output
 
 
 # --- the human board renderer ------------------------------------------------

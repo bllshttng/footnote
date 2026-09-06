@@ -276,15 +276,32 @@ pub(crate) fn scope_undelivered_count(
     cwd: &Path,
     scope: &str,
 ) -> Result<i64, LoopError> {
-    let output = Command::new(fno_bin)
-        .args(["agents", "king", "drain", scope])
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output();
-    let out = output
-        .map_err(|e| LoopError::Queue(format!("cannot run {fno_bin} agents king drain: {e}")))?;
+    scope_undelivered_count_with_timeout(
+        fno_bin,
+        cwd,
+        scope,
+        crate::loopcheck::stopgate_read_timeout(),
+    )
+}
+
+fn scope_undelivered_count_with_timeout(
+    fno_bin: &str,
+    cwd: &Path,
+    scope: &str,
+    timeout: std::time::Duration,
+) -> Result<i64, LoopError> {
+    let out = crate::loopcheck::bounded_read(
+        std::ffi::OsStr::new(fno_bin),
+        &["agents", "king", "drain", scope],
+        cwd,
+        "king drain",
+        timeout,
+    )
+    .map_err(|error| {
+        LoopError::Queue(format!("king drain for {scope} failed: {}", error.render()))
+    })?;
     if !out.status.success() {
-        let detail = String::from_utf8_lossy(&out.stderr);
+        let detail = String::from_utf8_lossy(&out.stderr_tail);
         return Err(LoopError::Queue(format!(
             "king drain for {scope} failed ({}): {}",
             out.status,
@@ -733,6 +750,32 @@ mod tests {
             "a failed drain must not certify a clean scope"
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drain_kills_a_hung_command_inside_its_read_bound() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fno-drain-hung");
+        fs::write(&path, "#!/bin/sh\nsleep 1\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let started = std::time::Instant::now();
+        let result = scope_undelivered_count_with_timeout(
+            path.to_str().unwrap(),
+            dir.path(),
+            "epic-x",
+            std::time::Duration::from_millis(100),
+        );
+
+        let error = result.expect_err("a hung drain must not certify a scope");
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "drain exceeded its wall-clock bound: {:?}",
+            started.elapsed()
+        );
     }
 
     fn write_registry(dir: &Path, status: &str, scope: Option<&str>) -> PathBuf {

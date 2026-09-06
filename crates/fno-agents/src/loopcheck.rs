@@ -11009,7 +11009,7 @@ thread_local! {
 /// Effective bound for one stop-gate read: the configured ceiling (flag or
 /// production default) clamped to whatever remains of this fire's aggregate
 /// budget, floored so the answer is always a positive killable bound.
-fn stopgate_read_timeout() -> std::time::Duration {
+pub(crate) fn stopgate_read_timeout() -> std::time::Duration {
     STOPGATE_READS.with(|cell| {
         let (override_ms, _) = *cell.borrow();
         let configured = if override_ms > 0 {
@@ -11120,7 +11120,7 @@ impl GhReadError {
         }
     }
 
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         match self.kind {
             ReadErrorKind::TimedOut => format!(
                 "external read '{}' timed out after {:.1}s and was killed; retrying next fire",
@@ -12541,6 +12541,9 @@ pub(crate) struct KingBoard {
     pub(crate) actionable_ids: Vec<String>,
     /// Session ids that own open operator questions on this board.
     pub(crate) operator_question_sessions: Vec<String>,
+    /// The outstanding-question source could not be read. A report-only
+    /// queue must still block a clean termination when the goal depends on it.
+    pub(crate) operator_questions_unreadable: bool,
 }
 
 fn row_identity(queue: &str, row: &Value) -> String {
@@ -12565,9 +12568,15 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
     let mut top_row = None;
     let mut actionable_ids: Vec<String> = Vec::new();
     let mut operator_question_sessions: Vec<String> = Vec::new();
+    let mut operator_questions_unreadable = false;
     if let Some(queues) = value.get("queues").and_then(|q| q.as_array()) {
         for queue in queues {
             let name = queue.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            if name == "operator_question"
+                && queue.get("status").and_then(|v| v.as_str()) == Some("unreadable")
+            {
+                operator_questions_unreadable = true;
+            }
             if queue.get("status").and_then(|v| v.as_str()) == Some("unreadable") {
                 if top_row.is_none() {
                     let err = queue.get("error").and_then(|v| v.as_str()).unwrap_or("");
@@ -12608,6 +12617,7 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
         unreadable,
         actionable_ids,
         operator_question_sessions,
+        operator_questions_unreadable,
     })
 }
 
@@ -12905,6 +12915,18 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     };
 
     if board.actionable == 0 {
+        if board.operator_questions_unreadable {
+            return (
+                0,
+                king_output(
+                    "block",
+                    None,
+                    "board clean but outstanding operator questions are unreadable; blocking completion",
+                    0,
+                    dry,
+                ),
+            );
+        }
         let open_question = board
             .operator_question_sessions
             .iter()

@@ -367,6 +367,40 @@ fn an_open_question_from_this_king_blocks_a_clean_board() {
 }
 
 #[test]
+fn an_unreadable_question_source_blocks_a_clean_board() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-question-unreadable");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let spec = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
+    king_prepare_fixture(cwd, bin_dir.path(), &spec);
+    fs::write(
+        bin_dir.path().join("stubs").join("fno-py"),
+        "#!/bin/sh\ncase \"$*\" in\n  *\"inbox outstanding\"*) exit 1;;\n  *\"backlog ready\"*) echo '[]';;\n  *) echo '{}';;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        bin_dir.path().join("stubs").join("fno-py"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    let (code, d) = king_spawn(&state, cwd, &events, bin_dir.path());
+
+    assert_eq!(code, 0);
+    assert_eq!(d["decision"], "block");
+    assert_eq!(d["termination_reason"], serde_json::Value::Null);
+    assert!(
+        d["reason"]
+            .as_str()
+            .unwrap()
+            .contains("outstanding operator questions are unreadable"),
+        "the block must name the unreadable question source: {d}"
+    );
+}
+
+#[test]
 fn king_arm_allows_silently_when_no_king_manifest_exists() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
