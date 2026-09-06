@@ -63,8 +63,8 @@ Read both texts with `fno config get`. The defaults, verbatim, so a fresh instal
 
 ```
 king.checkin_interval = 30m
-king.checkin_text = reign check-in. Run the check-in body of the reign skill (skills/reign/SKILL.md). Journal reign_checkin. Print 'no change' and stop when nothing changed since the last check-in.
-king.goal_text = reign goal. The goal is met when fno inbox board --json reports no actionable rows for the crown scope. It also needs fno agents court --json to show no split. A stand-down order from the operator ends the reign too. Until then keep reigning. Never /goal clear on NoProgress.
+king.checkin_text = reign check-in. Run the check-in body of the reign skill (skills/reign/SKILL.md). Journal reign_checkin. When nothing changed since the last check-in, print 'no change' and stop.
+king.goal_text = reign goal. When every node in the crown scope reads done or superseded, the goal is met. An open operator question blocks completion. An empty actionable queue is a quiet beat, never a finish line. A stand-down order from the operator ends the reign. Until then keep reigning. Never /goal clear on NoProgress.
 ```
 
 These defaults pass `fno doctor lint style`, and that is load-bearing rather than cosmetic. The mail bus lints the body it sends, so a default carrying a semicolon or a 26-word sentence refuses its own injection. A fresh install running this skill hit that on its first command and had to pass `--style-exception` to arm at all.

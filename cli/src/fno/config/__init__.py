@@ -1317,39 +1317,32 @@ class ReviewBlock(BaseModel):
     peer_identity: Optional[str] = None
     peer_token_env: Optional[str] = None
     # Reviewer logins honored-if-present but NOT required (x-4baa): the gate
-    # never waits for them (their absence never blocks - kills the App-bot
-    # usage-limit wedge), but a blocking finding from one still holds the gate.
-    # None (unset) resolves to DEFAULT_OPTIONAL_APPS via resolved_optional_apps;
-    # an explicit [] is a real opt-out and wins over the default; a non-empty
-    # list EXTENDS the default rather than replacing it. The RAW field
-    # stays None-vs-list because truthiness of it doubles as the "is a review
-    # lane configured" probe in the merge path, which the default must not flip.
+    # never waits for them, but a blocking finding from one still holds it.
+    # None resolves to DEFAULT_OPTIONAL_APPS via resolved_optional_apps;
+    # explicit [] is a real opt-out; a non-empty list EXTENDS the default.
+    # The RAW field stays None-vs-list because its truthiness doubles as the
+    # "is a review lane configured" probe in the merge path.
     optional_apps: Optional[list[str]] = None
     # Per-login bot-review nudge overrides, as `[review.nudge.<login>]` tables
     # ({review_handle, wait_minutes, ceiling, enabled}). Consumed by the Rust
-    # stop gate (loop-check), which resolves it against its built-in bot
-    # profiles; kept permissively typed here (parity with the Rust parser, which
-    # degrades a malformed entry to non-nudgeable rather than rejecting the file)
-    # so this model documents the key without adding validation that could
-    # diverge. Absent = the built-in profiles alone decide nudgeability.
+    # stop gate (loop-check) against its built-in bot profiles. Kept
+    # permissively typed for parity: the Rust parser degrades a malformed
+    # entry to non-nudgeable rather than rejecting the file. Absent lets the
+    # built-in profiles alone decide nudgeability.
     nudge: dict[str, Any] = Field(default_factory=dict)
-    # Project-registered reviewers: name -> the same ReviewerDescriptor field
-    # vocabulary the built-ins use. Declared as `[review.reviewer_registry.<name>]`
-    # in the flat config.toml. Unioned with the built-ins at lookup time by
-    # `resolvable_reviewers()`; NEVER merged into `_RESOLVABLE_REVIEWERS`, and
-    # built-ins win a name collision so a project cannot weaken a shipped gate.
-    #
-    # Declared BEFORE `reviewers` on purpose: `coerce_and_resolve_reviewers`
-    # reads it off `ValidationInfo.data`, which only carries fields already
-    # validated, and pydantic validates in declaration order.
+    # Project-registered reviewers: name -> ReviewerDescriptor fields, as
+    # `[review.reviewer_registry.<name>]` tables. Unioned with the built-ins
+    # at lookup by `resolvable_reviewers()`; NEVER merged into
+    # `_RESOLVABLE_REVIEWERS`, and built-ins win a name collision so a project
+    # cannot weaken a shipped gate. Declared BEFORE `reviewers` on purpose:
+    # `coerce_and_resolve_reviewers` reads it off `ValidationInfo.data`,
+    # which only carries fields pydantic has already validated.
     reviewer_registry: dict[str, ReviewerDescriptor] = Field(default_factory=dict)
     # Local-attestation reviewers (x-e703, Phase 2): skill/agent/command names
-    # (sigma | /code-review | declare) that produce NO GitHub review object, so
-    # loop-check accepts a head-pinned `review_attestation` event as gate
-    # evidence instead of a login match. A leading '/' is stripped so
-    # `/code-review` and `code-review` name the same reviewer. An unresolvable
-    # name fails LOUD here (a typo must never silently become no-gate) and is
-    # unsatisfiable at loop-check (Rust, fail closed).
+    # (sigma | /code-review | declare) that produce NO GitHub review object,
+    # so loop-check accepts a head-pinned `review_attestation` event as gate
+    # evidence. A leading '/' is stripped. An unresolvable name fails LOUD
+    # here, and is unsatisfiable at loop-check (Rust, fail closed).
     reviewers: list[str] = Field(default_factory=list)
     # Whether a code payload floors the harness-resolved self-review reviewer
     # onto `reviewers` on a stock install (no lane configured). Default true:
@@ -4389,11 +4382,11 @@ KING_CHECKIN_TEXT = (
     "since the last check-in, print 'no change' and stop."
 )
 KING_GOAL_TEXT = (
-    "reign goal. When fno inbox board --json reports no actionable rows "
-    "for the crown scope, the goal is met. It also needs fno agents court "
-    "--json to show no split. A stand-down order from the operator ends "
-    "the reign too. Until then keep reigning. Never /goal clear on "
-    "NoProgress."
+    "reign goal. When every node in the crown scope reads done or "
+    "superseded, the goal is met. An open operator question blocks "
+    "completion. An empty actionable queue is a quiet beat, never a "
+    "finish line. A stand-down order from the operator ends the reign. "
+    "Until then keep reigning. Never /goal clear on NoProgress."
 )
 
 

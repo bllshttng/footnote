@@ -662,7 +662,7 @@ checkin_interval = "30m"
 # The /loop prompt text a reign self-injects at each check-in (default: run the reign skill's check-in body, journal reign_checkin, print 'no change' when idle).
 checkin_text = "reign check-in. Run the check-in body of the reign skill (skills/reign/SKILL.md). Journal reign_checkin. When nothing changed since the last check-in, print 'no change' and stop."
 # The /goal conditions a reign self-injects (default: board clean for the scope, court unsplit, no stand-down order; never /goal clear on NoProgress).
-goal_text = "reign goal. When fno inbox board --json reports no actionable rows for the crown scope, the goal is met. It also needs fno agents court --json to show no split. A stand-down order from the operator ends the reign too. Until then keep reigning. Never /goal clear on NoProgress."
+goal_text = "reign goal. When every node in the crown scope reads done or superseded, the goal is met. An open operator question blocks completion. An empty actionable queue is a quiet beat, never a finish line. A stand-down order from the operator ends the reign. Until then keep reigning. Never /goal clear on NoProgress."
 
 [accounts]
 # Name of the account record currently active for provider rotation.
