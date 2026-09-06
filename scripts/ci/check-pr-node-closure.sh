@@ -140,7 +140,9 @@ if [[ $claimed -eq 0 ]]; then
     echo "  Add a line reading:"
     echo "    Backlog-Closure: <the node id this PR closes>"
     echo "  Generate it with: fno do pr closure-trailer <node-id>, which checks the"
-    echo "  id against the graph. Do NOT paste a candidate from this message:"
+    echo "  id against the graph and PRINTS the line. The verb does not edit the"
+    echo "  PR: append the printed line to the PR body yourself. Do NOT paste a"
+    echo "  candidate from this message:"
     echo "  a branch segment can match the id grammar without being a real node,"
     echo "  and one unknown id voids the whole binding at merge."
   } >&2
