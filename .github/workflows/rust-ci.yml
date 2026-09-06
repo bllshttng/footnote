@@ -29,7 +29,7 @@ on:
       - cli/src/fno/agents/merge_posture.toml
       - crates/fno-agents/src/events_limits.toml
       - docs/harnesses/capability-matrix.md
-      - scripts/ci/check-registry-schema-parity.sh
+      - cli/src/fno/agents/registry_schema.toml
       - scripts/ci/check-provider-vocabulary-parity.sh
       - tests/ci/test_provider_vocabulary_parity.sh
       - scripts/ci/check-session-identity-parity.sh
@@ -225,12 +225,13 @@ jobs:
 
       - name: Generated copies match their sources
         # The ONE freshness gate for every build-generated copy. build.rs
-        # regenerates the capability copies, the merge-posture copy, and
-        # events_limits.toml on every build; `fno doctor harness-matrix
-        # --write` renders the capability doc. A committed copy that drifted
-        # from its source (a hand edit, a forgotten rebuild) shows up here as
-        # a dirty tree - which is the wrong-merge class the retired
-        # *-fresh.sh scripts checked, at one step instead of four.
+        # regenerates the capability copies, the merge-posture copy,
+        # events_limits.toml, and the registry-schema copy on every build;
+        # `fno doctor harness-matrix --write` renders the capability doc. A
+        # committed copy that drifted from its source (a hand edit, a
+        # forgotten rebuild) shows up here as a dirty tree - which is the
+        # wrong-merge class the retired *-fresh.sh scripts checked, at one
+        # step instead of four.
         run: |
           # fno-py, not fno: the project env's console script is fno-py and a
           # bare `fno` on PATH is a stale installed tool, not this checkout.
@@ -240,6 +241,7 @@ jobs:
             crates/fno/src/harness_capabilities.toml \
             cli/src/fno/agents/merge_posture.toml \
             crates/fno-agents/src/events_limits.toml \
+            cli/src/fno/agents/registry_schema.toml \
             docs/harnesses/capability-matrix.md
 
       - name: Schema parity check
@@ -288,14 +290,6 @@ jobs:
         # both directions. Catches a finished port that still advertises a dual
         # implementation, which is how two of these files were miscounted.
         run: bash scripts/ci/check-parity-test-provenance.sh
-
-      - name: Registry schema parity check (ab-0baecaed)
-        # Cross-language schema_version lockstep: catches a Rust-only bump of
-        # REGISTRY_SCHEMA_VERSION that forgot the Python SCHEMA_VERSION side.
-        # Pure text extraction; no binary needed (the build above is for the
-        # event-schema check). cli-ci.yml runs the same check for Python-only
-        # bumps and also runs the detector selftest.
-        run: bash scripts/ci/check-registry-schema-parity.sh
 
       - name: Provider vocabulary parity check
         # Rust registry/claim writers and Python's resolver/claim reader share

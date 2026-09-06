@@ -172,7 +172,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // bump is what makes a pre-v26 reader degrade (drop the keys, refuse the
 // write) instead of TypeError on the unknown AgentEntry kwargs at an equal
 // version number. Accepted set widens to 1..=26.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 26;
+// Rendered by build.rs from src/registry_schema.toml (the version's single
+// owner); see that file for the bump protocol.
+include!(concat!(env!("OUT_DIR"), "/registry_schema.rs"));
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
