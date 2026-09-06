@@ -8973,46 +8973,11 @@ impl Core {
                     self.detached_panes.insert(pane, detached);
                 }
             }
-            // (x-a9b4) Re-arm every held portal seat: the entry goes back in
-            // the map, the seat pane gets its name and its held message, and
-            // the reach or a focus fills it on first demand. A held portal is
-            // NOT a squad member - the slot in its tab is the whole record.
-            for (index, row, seat, tid) in held_portal_seats {
-                let index = if self.portals.contains_key(&index) {
-                    match self.next_free_portal() {
-                        Some(free) => {
-                            self.notice_all(format!(
-                                "restore: portal {index} was taken; held {row} at portal {free} instead"
-                            ));
-                            free
-                        }
-                        None => {
-                            self.notice_all(format!(
-                                "restore: all portal indices live; portal slot for {row} skipped"
-                            ));
-                            continue;
-                        }
-                    }
-                } else {
-                    index
-                };
-                self.portals.insert(
-                    index,
-                    Portal {
-                        row_key: row.clone(),
-                        seat,
-                        tab: tid,
-                    },
-                );
-                if let Some(entry) = self.panes.get_mut(&seat) {
-                    entry.name = Some(format!("portal{index}"));
-                }
-                self.write_restore_message(
-                    seat,
-                    &format!("portal {index} ({row}, held across restart) - reach the row, or focus this pane, to resume"),
-                );
-                held_portals_total += 1;
-            }
+            // (x-a9b4) Re-arm every held portal seat (in portal_reach): the
+            // entry goes back in the map, the seat pane gets its name and its
+            // held message, and the reach or a focus fills it on first demand.
+            held_portals_total +=
+                portal_reach::rearm_held_portal_seats(self, std::mem::take(&mut held_portal_seats));
             // Persist the reconciled membership (members dead at restore are now
             // tombstoned in the store) plus the just-restored tree capture, so a
             // second restart restores the same shape.
@@ -12384,35 +12349,12 @@ impl Core {
                     }
                 }
                 // (x-a9b4) A focused portal seat that is still the held shell
-                // fills in place: the reach's repoint respawns the row's
-                // viewer in THIS seat. When the row does not resolve to
-                // exactly one live paneless row, fall through to a plain
-                // focus, so the placeholder stays focusable and readable.
-                if let Some(idx) = self.portal_of(Some(pid)) {
-                    let stand_in = self
-                        .panes
-                        .get(&pid)
-                        .is_some_and(|entry| entry.cmd.is_none());
-                    if stand_in {
-                        if let Some(Portal { row_key, .. }) = self.portals.get(&idx) {
-                            let row_key = row_key.clone();
-                            let mut hits = self
-                                .agents
-                                .iter()
-                                .filter(|a| portal_reach::row_answers_key(a, &row_key));
-                            if let (Some(_), None) = (hits.next(), hits.next()) {
-                                return self.reach_portal(
-                                    client_id,
-                                    view,
-                                    vp,
-                                    idx,
-                                    &row_key,
-                                    &PanePlacement::default(),
-                                    false,
-                                );
-                            }
-                        }
-                    }
+                // fills in place (portal_reach); anything else falls through
+                // to a plain focus.
+                if let Some(flow) =
+                    portal_reach::fill_held_portal_seat(self, client_id, view, vp, pid)
+                {
+                    return flow;
                 }
                 // Locate the leaf anywhere in the session, then view+focus it.
                 let target = self.session.find_pane(focus_pid).map(|(sid, ti)| {

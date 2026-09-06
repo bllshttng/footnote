@@ -28,6 +28,90 @@ pub(super) fn row_answers_key(a: &RegistryAgent, key: &str) -> bool {
     a.mux.is_none() && !a.exited && (a.attach_id.as_deref() == Some(key) || a.name == key)
 }
 
+/// (x-a9b4) Re-arm every held portal seat after restore: the entry goes back
+/// in the map, the seat pane gets its name and its held message, and the
+/// reach or a focus fills it on first demand. A held portal is NOT a squad
+/// member - the slot in its tab is the whole record. Returns the count of
+/// seats re-armed, for the restore receipt.
+pub(super) fn rearm_held_portal_seats(
+    core: &mut Core,
+    seats: Vec<(u8, String, u64, TabId)>,
+) -> usize {
+    let mut held = 0;
+    for (index, row, seat, tid) in seats {
+        let index = if core.portals.contains_key(&index) {
+            match core.next_free_portal() {
+                Some(free) => {
+                    core.notice_all(format!(
+                        "restore: portal {index} was taken; held {row} at portal {free} instead"
+                    ));
+                    free
+                }
+                None => {
+                    core.notice_all(format!(
+                        "restore: all portal indices live; portal slot for {row} skipped"
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            index
+        };
+        core.portals.insert(
+            index,
+            Portal {
+                row_key: row.clone(),
+                seat,
+                tab: tid,
+            },
+        );
+        if let Some(entry) = core.panes.get_mut(&seat) {
+            entry.name = Some(format!("portal{index}"));
+        }
+        core.write_restore_message(
+            seat,
+            &format!("portal {index} ({row}, held across restart) - reach the row, or focus this pane, to resume"),
+        );
+        held += 1;
+    }
+    held
+}
+
+/// (x-a9b4) A focused portal seat that is still the held shell fills in
+/// place: the reach's repoint respawns the row's viewer in THIS seat.
+/// `None` falls through to a plain focus, so a seat whose row resolves to
+/// zero or several live paneless rows stays a readable placeholder.
+pub(super) fn fill_held_portal_seat(
+    core: &mut Core,
+    client_id: u64,
+    view: (u64, TabId),
+    vp: Rect,
+    pid: u64,
+) -> Option<Flow> {
+    let idx = core.portal_of(Some(pid))?;
+    let stand_in = core
+        .panes
+        .get(&pid)
+        .is_some_and(|entry| entry.cmd.is_none());
+    if !stand_in {
+        return None;
+    }
+    let row_key = core.portals.get(&idx)?.row_key.clone();
+    let mut hits = core.agents.iter().filter(|a| row_answers_key(a, &row_key));
+    if let (Some(_), None) = (hits.next(), hits.next()) {
+        return Some(core.reach_portal(
+            client_id,
+            view,
+            vp,
+            idx,
+            &row_key,
+            &PanePlacement::default(),
+            false,
+        ));
+    }
+    None
+}
+
 /// One control-door reach parked while the row's re-entry plan resolves
 /// off-loop: the observer stays registered, the harvest receiver and the
 /// held reply wait here, and the ReentryPlanReady replay finishes the reach
