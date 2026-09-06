@@ -786,19 +786,6 @@ pub fn classify_with_basis_and_exclusivity(
         if cause == basis::ACCESS_DENIED {
             return (ClaimState::Suspect, cause);
         }
-        // An ambient pid is the pid the WRITER could observe, not the
-        // holder's own, so its absence (or replacement - reuse) proves that
-        // pid died, never the holder - a re-protect handover keeps the
-        // spawn-era pid and its live holder must not read provably dead.
-        // Only a prover-proven pid's death is proof of death. Records with
-        // no provenance field keep the legacy stealable verdict: a no-TTL
-        // Suspect has no expiry path, so widening this to legacy records
-        // would brick their keys.
-        let ambient_gone = rec.pid_provenance.as_deref() == Some("ambient")
-            && (cause == basis::PID_ABSENT || cause == basis::PID_REUSE);
-        if ambient_gone {
-            return (ClaimState::Suspect, cause);
-        }
         return (ClaimState::Stale, cause);
     }
     // TTL claim, still inside its window: live pid => Live, dead/replaced pid
@@ -3672,77 +3659,6 @@ mod tests {
         unp.pid_unavailable = true;
         unp.schema_version = 2;
         assert_eq!(basis_of(&unp, &probe_pid), basis::PID_UNAVAILABLE);
-    }
-
-    #[test]
-    fn ambient_pid_absent_is_suspect_never_provably_dead() {
-        let me = std::process::id() as i32;
-        let host = hostname();
-        let now = now_ms();
-        let dead = dead_pid() as i32;
-        // A no-TTL claim whose recorded pid is gone, where the pid was
-        // AMBIENT: observed by the writer, never proven to be the holder's
-        // own process (a re-protect handover keeps the spawn-era pid). Its
-        // absence proves that pid died, not the holder, so the verdict is
-        // SUSPECT and a sweep cannot free the claim of a live holder.
-        let mut ambient = record(dead, now, None, &host);
-        ambient.pid_provenance = Some("ambient".into());
-        assert_eq!(
-            classify_with_basis(&ambient, Some(now), &probe_pid),
-            (ClaimState::Suspect, basis::PID_ABSENT)
-        );
-        assert_eq!(
-            classify_for_sweep(&ambient, Some(now), &probe_pid, None),
-            (false, "suspect")
-        );
-        // A legacy record carries no provenance field: it keeps the legacy
-        // stealable verdict, because a no-TTL Suspect has no expiry path and
-        // widening the arm would brick those keys.
-        assert_eq!(
-            classify(&record(dead, now, None, &host), Some(now)),
-            ClaimState::Stale
-        );
-        // The asymmetry is the point: a PROVER-PROVEN pid's absence IS proof
-        // of death (the pid was the holder's own process), so that stays
-        // STALE and sweepable.
-        let mut proven = record(dead, now, None, &host);
-        proven.pid_provenance = Some("session-prover".into());
-        assert_eq!(
-            classify_with_basis(&proven, Some(now), &probe_pid),
-            (ClaimState::Stale, basis::PID_ABSENT)
-        );
-        assert_eq!(
-            classify_for_sweep(&proven, Some(now), &probe_pid, None),
-            (true, "")
-        );
-        // Reuse is the same weak evidence: the slot now holds a NEWER
-        // process, so the observed ambient pid is gone, not the holder.
-        let mut reused_ambient = record(me, 1, None, &host);
-        reused_ambient.pid_provenance = Some("ambient".into());
-        assert_eq!(
-            classify_with_basis(&reused_ambient, Some(now), &probe_pid),
-            (ClaimState::Suspect, basis::PID_REUSE)
-        );
-        assert_eq!(
-            classify_for_sweep(&reused_ambient, Some(now), &probe_pid, None),
-            (false, "suspect")
-        );
-        // A reused PROVEN pid is still proof: the holder's own process was
-        // replaced.
-        let mut reused_proven = record(me, 1, None, &host);
-        reused_proven.pid_provenance = Some("session-prover".into());
-        assert_eq!(
-            classify_with_basis(&reused_proven, Some(now), &probe_pid),
-            (ClaimState::Stale, basis::PID_REUSE)
-        );
-        // Live-holder sanity: the ambient arm only fires when the pid is
-        // actually gone.
-        let mut live_ambient = record(me, now, None, &host);
-        live_ambient.pid_provenance = Some("ambient".into());
-        assert_eq!(
-            classify_with_basis(&live_ambient, Some(now), &probe_pid),
-            (ClaimState::Live, basis::LIVE)
-        );
     }
 
     #[test]
