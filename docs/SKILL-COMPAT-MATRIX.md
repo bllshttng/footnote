@@ -6,7 +6,7 @@ Which footnote skills run on each harness. The table itself is generated: [docs/
 
 A cell is a projection of two sources, never a hand-filled claim. The harness side is the capability table, `crates/fno-agents/src/harness_capabilities.toml`, rendered as [capability-matrix.md](harnesses/capability-matrix.md). The skill side is the `requires.harness` list in each skill's frontmatter, a closed vocabulary of `loop`, `spawn`, and `subagent_dispatch`. `fno doctor harness-matrix --write` joins the two. The rust-ci generated-copies step fails on a stale copy.
 
-The states are the features vocabulary: `native` (fno drives it through a wired lane), `capable` (real on the harness, no wired arm), `absent` (measured not to exist), `unmeasured` (nobody has looked). A harness with no capability row reads `unmeasured` on every verb, which is the honest default: hermes and openclaw read that way today. A harness whose dispatch surface is refused reads `absent` on every verb. Gemini is that harness.
+The states are the features vocabulary. `native` means fno drives it through a wired lane. `capable` means real on the harness with no wired arm. `absent` is measured not to exist. `unmeasured` means nobody has looked. A harness with no capability row reads `unmeasured` on every verb, which is the honest default: hermes and openclaw read that way today. A harness whose dispatch surface is refused reads `absent` on every verb. Gemini is that harness.
 
 A row covers the skill's default lane. `execute` runs flat, `review` runs inline, `think` researches inline, so those rows declare no needs. Their sub-modes (`execute waves`, `review peer`, `think subagent`) need subagent dispatch and are not rows. A need the capability table has no key for, such as the claude prompt cache `cache-keepalive` depends on, cannot be declared. Add the key and its probe to the table first.
 
@@ -21,7 +21,7 @@ A verb that declares `loop` (target, reign, king-for-a-day) runs only where the 
 | `extension`, `loop_extension` empty | The harness exposes an extension point and fno ships nothing for it yet. | `capable` |
 | `none` | No boundary at all. | `absent` |
 
-The dispatch seam refuses a `/target` at a `none` harness and at an `extension` harness whose artifact fno has not written, naming the harness and the reason. A one-shot at either still dispatches, because the gate is scoped to the `/target` family. When you need the current answer, read the field rather than this page. The page is prose. The field is the contract.
+The dispatch seam refuses a `/target` at a `none` harness. It also refuses at an `extension` harness whose artifact fno has not written. The refusal names the harness and the reason. A one-shot at either still dispatches, because the gate is scoped to the `/target` family. When you need the current answer, read the field rather than this page. The page is prose. The field is the contract.
 
 ## Wrapper-driven harnesses
 
