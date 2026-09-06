@@ -2675,27 +2675,11 @@ def _account_for_removed_rows(
             append_event(event, events_path=events_path)
         except Exception:  # noqa: BLE001 - an audit gap must not fail the write
             pass
-    _journal_rows_lost(
-        events_path,
-        [
-            {
-                "harness_session_id": (entry.harness_session_id or "").strip(),
-                "name": entry.name,
-            }
-            for entry in removed
-        ],
-    )
+    _journal_rows_lost(events_path, removed)
 
 
-def _journal_rows_lost(events_path: Path, lost: list[dict]) -> None:
-    """One grouped ``registry_rows_lost`` event per lossy save (x-f0d2).
-
-    The per-row events above carry the remover; this event is the instrument
-    the 09-03 investigation lacked: which writer, which pid, which verb, and
-    every lost id in one read. Emitted after the per-row events so a reader
-    taking the first line still sees a row receipt. Best-effort, same
-    contract as the per-row accounting.
-    """
+def _journal_rows_lost(events_path: Path, removed: list) -> None:
+    """One grouped ``registry_rows_lost`` per lossy save; best-effort like above."""
     from fno.events import append_event
 
     argv = [a if i else Path(a).name for i, a in enumerate(sys.argv[:6])]
@@ -2707,7 +2691,8 @@ def _journal_rows_lost(events_path: Path, lost: list[dict]) -> None:
             "writer": "python",
             "pid": os.getpid(),
             "verb": " ".join(argv)[:200],
-            "lost": lost,
+            "lost": [{"harness_session_id": (e.harness_session_id or "").strip(), "name": e.name}
+                     for e in removed],
         },
     }
     try:

@@ -355,16 +355,19 @@ def test_render_court_table_names_scope_holder_and_agreement(
 # --- the manifest limb (x-f0d2): manifest is the durable record, row the cache
 
 
-def _stub_reign_reader(monkeypatch, tmp_path: Path, payload: dict) -> None:
-    """Answer every reign-state call with a canned payload (test_crown_court
-    pins the RENDER, not the reader; loop_reign.rs pins the comparison)."""
+def _stub_reign_reader(monkeypatch, tmp_path: Path, payload: dict, orphans=None) -> None:
+    """Answer reign-state with a canned payload and court-orphans with a
+    canned array (test_crown_court pins the RENDER, not the reader;
+    loop_reign.rs pins the comparison and the sweep)."""
     import stat
 
     script = tmp_path / "fno-agents"
     script.write_text(
-        "#!/usr/bin/env python3\nimport sys\nsys.stdout.write("
-        + repr(json.dumps(payload))
-        + ")\n",
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"REIGN = {repr(json.dumps(payload))}\n"
+        f"ORPHANS = {repr(json.dumps(orphans or []))}\n"
+        "sys.stdout.write(ORPHANS if 'court-orphans' in sys.argv else REIGN)\n",
         encoding="utf-8",
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
@@ -416,7 +419,9 @@ def test_court_names_the_manifest_and_crown_source_per_scope(
         crown_scope="e-1",
         crown_grantor="human",
     )
-    _stub_reign_reader(monkeypatch, tmp_path, _agreeing_reader("e-1", "king-session"))
+    payload = _agreeing_reader("e-1", "king-session")
+    payload.update(crown_on_manifest=True, manifest_path=str(manifest))
+    _stub_reign_reader(monkeypatch, tmp_path, payload)
 
     court = gather_court()
 
@@ -499,6 +504,13 @@ def test_a_crown_on_only_the_manifest_is_surfaced_crownless_in_the_registry(
         crown_scope="x-dede",
         crown_grantor="operator",
     )
+    _stub_reign_reader(
+        monkeypatch, tmp_path, _agreeing_reader("x-dede", "gone-king"),
+        orphans=[{
+            "scope": "x-dede", "level": 2, "grantor": "operator",
+            "manifest_session": "gone-king", "manifest_path": str(manifest),
+        }],
+    )
 
     court = gather_court()
 
@@ -531,6 +543,13 @@ def test_a_manifest_crown_survives_its_project_having_no_rows_at_all(
         crown_level=2,
         crown_scope="x-dede",
         crown_grantor="operator",
+    )
+    _stub_reign_reader(
+        monkeypatch, tmp_path, _agreeing_reader("x-dede", "gone-king"),
+        orphans=[{
+            "scope": "x-dede", "level": 2, "grantor": "operator",
+            "manifest_session": "gone-king", "manifest_path": str(manifest),
+        }],
     )
 
     court = gather_court()

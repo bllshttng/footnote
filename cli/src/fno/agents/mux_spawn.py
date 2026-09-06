@@ -4884,11 +4884,7 @@ def dispatch_spawn_pane(
                     king_loop_armed = arm_king_manifest(
                         entry.crown_scope,
                         entry.harness_session_id or "",
-                        owner_pid=entry.pid,
-                        owner_cwd=entry.cwd,
-                        crown_level=entry.crown_level,
-                        crown_scope=entry.crown_scope,
-                        crown_grantor=entry.crown_grantor,
+                        row=entry,
                     ) is not None
                 except ValueError as exc:
                     # Same contract as dispatch.py: a short_id/name fallback
