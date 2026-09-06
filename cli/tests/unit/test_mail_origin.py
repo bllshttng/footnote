@@ -485,9 +485,12 @@ def test_crowned_sender_trailer_reports_standing_without_content_warrant(
     assert "operator-authored mail" not in rendered
 
 
-def test_unreadable_registry_never_grants_sender_standing(monkeypatch):
+def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch):
     import fno.mail.envelope as envelope
 
+    monkeypatch.setattr(
+        envelope, "agents_registry_path", lambda: tmp_path / "registry.json"
+    )
     monkeypatch.setattr(
         envelope,
         "load_registry",
