@@ -6,6 +6,7 @@ ever asserted beside a same-run positive that proves the phase actually ran.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -946,7 +947,16 @@ def test_a_sidecar_from_before_rows_were_stored_is_a_first_observation(tmp_path)
         extra={"entries_fn": lambda: quiet_b, "scope_resolver": _PROJECT_RESOLVER},
     )
 
-    assert rec.dispatches == [], "no honest diff, no board wake"
+    sidecar = _sidecar(manifest)
+    sidecar_contents = sidecar.read_text(encoding="utf-8") if sidecar.is_file() else "<missing>"
+    assert rec.dispatches == [], (
+        "no honest diff, no board wake; "
+        f"cwd={Path.cwd()} FNO_SPACES_DIR={os.environ.get('FNO_SPACES_DIR', '<unset>')} "
+        f"FNO_REPO_ROOT={os.environ.get('FNO_REPO_ROOT', '<unset>')} "
+        f"FNO_CONFIG={os.environ.get('FNO_CONFIG', '<unset>')} "
+        f"manifest={manifest} sidecar={sidecar} sidecar_contents={sidecar_contents!r} "
+        f"events={rec.events!r}"
+    )
     import json as json_mod
 
     payload = json_mod.loads(_sidecar(manifest).read_text(encoding="utf-8"))
