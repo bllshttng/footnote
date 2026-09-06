@@ -2926,11 +2926,9 @@ def _job_lane_send(
         )
         raise typer.Exit(code=12) from exc
     # One stdout line (the receipt contract) + an advisory on stderr naming the
-    # recovery: the message waits for the holder's next drain, not a reply window.
-    # A bus-only holder skipped the inject by policy (x-e21e), so the receipt
-    # says the policy, not a miss. A node:<id> thread is NOT surfaced by the
-    # holder's turn-boundary notify-self (that scan reads only the session's
-    # own handle): it drains at a holder's SessionStart scan, so the receipt
+    # recovery: the message waits for the holder's next drain, not a reply
+    # window. A node:<id> thread drains at a holder's SessionStart scan (the
+    # notify-self scan reads only the session's own handle), so the receipt
     # must not promise turn-boundary visibility.
     if bus_only:
         print(
@@ -2945,10 +2943,8 @@ def _job_lane_send(
         return
     print(f"mail: {recipient} live-inject missed; durable until a holder drains",
           file=sys.stderr)
-    print(
-        f"{th.thread_id} queued (durable) for {recipient} "
-        f"[job-live-miss{_live_miss_age_suffix(recipient)}]{holder_tag}"
-    )
+    suffix = _live_miss_age_suffix(recipient)
+    print(f"{th.thread_id} queued (durable) for {recipient} [job-live-miss{suffix}]{holder_tag}")
 
 
 # Send-time human escalation for a question, per (sender, recipient). A burst
