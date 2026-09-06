@@ -401,8 +401,7 @@ def patch_graph(
         return counters
 
     # locked_mutate_graph is the canonical graph write surface: flock on
-    # /tmp/fno-graph.lock, timestamped backup, SHA256 sidecar, and
-    # derived-view re-render. Imported from the in-repo source tree so the
+    # /tmp/fno-graph.lock, timestamped backup, and derived-view re-render. Imported from the in-repo source tree so the
     # script works without the cli package installed system-wide.
     sys.path.insert(0, str(REPO_ROOT / "cli" / "src"))
     from fno.graph.store import locked_mutate_graph

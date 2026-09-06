@@ -24,26 +24,23 @@ Both surfaces are now built from the same shell variables (`$no_external`, `$no_
 
 ### Reload trigger
 
-At the top of every walker tick (after the resume / pause-sentinel / budget checks), the walker stats BOTH `graph.json` AND its sha256 sidecar (`graph.json.sha256`). If EITHER `st_mtime_ns` differs from the cached baseline for that file, `load_graph` is called. The new entry list replaces the cached one and both baselines advance. Id-based comparisons mean the existing `completed_ids` / `blocked_ids` overlay sets continue to match correctly against the fresh dicts.
-
-Tracking both files is necessary because `locked_mutate_graph` writes `graph.json` BEFORE its sidecar in two atomic-rename steps. A reader that lands in that gap sees a sha mismatch (`GraphCorruptionError`), and the later sidecar write does NOT bump `graph.json`'s mtime. Reloading only on graph mtime would leave the walker permanently stuck on stale entries until the next mutation. The sidecar catching up later counts as a fresh signal that triggers retry without needing a second graph mutation.
+At the top of every walker tick (after the resume / pause-sentinel / budget checks), the walker stats `graph.json`. If `st_mtime_ns` differs from the cached baseline, `load_graph` is called. The new entry list replaces the cached one and the baseline advances. Id-based comparisons mean the existing `completed_ids` / `blocked_ids` overlay sets continue to match correctly against the fresh dicts. (The sha256 sidecar this section once tracked alongside the graph is retired; the store keeper's gated read is what publishes consistent bytes.)
 
 ### Failure handling
 
-`load_graph` reads bytes from disk before attempting JSON parse. Three exception classes can surface from a mid-write race or filesystem hiccup:
+`load_graph` reads bytes before attempting JSON parse. The exception classes that can surface from a mid-write race or filesystem hiccup:
 
 | Exception | Cause |
 |-----------|-------|
-| `GraphCorruptionError` | sha256 sidecar mismatch (writer crashed mid-write before sidecar update) |
 | `json.JSONDecodeError` | partial / truncated JSON read (writer in `os.replace` window) |
 | `OSError` (any subclass) | EIO, NFS hiccup, EACCES on inode swap, or `FileNotFoundError` if the file was unlinked between `os.stat` and `read_bytes` |
 
-The reload `try` catches all three. On any failure the walker:
+The reload `try` catches both. On any failure the walker:
 1. Emits a `graph_reload_failed` event with `error_kind`, `mtime_ns`, `sidecar_mtime_ns`, and a 200-char `detail`.
 2. Keeps the cached `graph_entries` for this tick.
-3. **Advances both `_graph_mtime_ns` and `_sidecar_mtime_ns` to the failed values.**
+3. **Advances `_graph_mtime_ns` (and `_sidecar_mtime_ns`, kept as a nullable field) to the failed values.**
 
-Step 3 is the no-retry-storm contract: a slow concurrent writer (an `fno backlog intake` taking 3-4s on a 1s poll loop) would otherwise re-trigger `load_graph` and emit `graph_reload_failed` every tick until the writer finished. Advancing both baselines means the next reload attempt waits for a fresh mtime mutation on EITHER file rather than hammering the same broken pair. When the writer reaches step 2 and the sidecar mtime advances, the walker picks it up next tick and retries; this handles the `GraphCorruptionError` recovery path without requiring a second mutation to graph.json itself.
+Step 3 is the no-retry-storm contract: a slow concurrent writer (an `fno backlog intake` taking 3-4s on a 1s poll loop) would otherwise re-trigger `load_graph` and emit `graph_reload_failed` every tick until the writer finished. Advancing the baseline means the next reload attempt waits for a fresh mtime mutation rather than hammering the same broken read.
 
 The seed-time `os.stat` is also wrapped in `except OSError` (per [memory note on FileNotFoundError ⊂ OSError](../../README.md)) so a permission flap or NFS hiccup at startup falls through to `_graph_mtime_ns = None` rather than crashing the walker.
 

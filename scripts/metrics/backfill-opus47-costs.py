@@ -184,12 +184,6 @@ def patch_graph(
 
     if apply and patched > 0:
         atomic_write_json(path, d)
-        # graph.json is validated against a sha256 sidecar on read, so a writer
-        # that bypasses locked_mutate_graph must re-bless it. A stale sidecar
-        # makes the next reader raise GraphCorruptionError on a file this
-        # script wrote correctly.
-        from fno.graph.store import _write_sha256_sidecar
-        _write_sha256_sidecar(path)
     return patched, old_sum, new_sum, skipped_unknown
 
 

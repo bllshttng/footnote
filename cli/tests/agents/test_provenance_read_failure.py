@@ -1,7 +1,7 @@
 """US5 / AC2-FR: a graph read failure never degrades into wrong provenance.
 
-resolve_provenance reads the graph to normalize a slug input to an id. Under the
-sidecar two-write window that read can raise. The old `except Exception: pass`
+resolve_provenance reads the graph to normalize a slug input to an id. That
+read can raise. The old `except Exception: pass`
 left `node` as the slug and exported FNO_NODE=<slug>, which the origin-capture
 side then drops as an unknown node -- landing source_node_id null and blaming a
 bad node id for what was really a read failure. The read failure must instead
@@ -22,10 +22,8 @@ def _clear_ambient(monkeypatch):
 
 
 def _make_load_graph_fail(monkeypatch):
-    from fno.graph.load import GraphCorruptionError
-
     def _boom(*_a, **_k):
-        raise GraphCorruptionError.__new__(GraphCorruptionError)  # any read failure
+        raise OSError("graph read failed")  # any read failure
 
     monkeypatch.setattr("fno.graph.load.load_graph", _boom)
 

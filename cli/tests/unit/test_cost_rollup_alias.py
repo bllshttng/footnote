@@ -203,19 +203,13 @@ def test_cost_update_replaces_an_existing_session_row(tmp_path):
     assert node["cost_usd"] == 9.0
 
 
-def test_cost_update_leaves_the_sidecar_valid(tmp_path):
-    """A stale sidecar makes the next load_graph raise GraphCorruptionError,
-    after which cost attribution is silently skipped from then on."""
-    import hashlib
+def test_cost_update_leaves_the_graph_readable(tmp_path):
+    """A cost write publishes clean bytes: the next load_graph reads them."""
     from fno.cost import _update_graph_node
     from fno.graph.load import load_graph
 
     graph_path = _graph(tmp_path)
-    load_graph(graph_path)  # first contact writes the sidecar
     _update_graph_node(graph_path, "ab-12345678", "S1", 4.0)
-
-    sidecar = Path(str(graph_path) + ".sha256")
-    assert sidecar.read_text().strip() == hashlib.sha256(graph_path.read_bytes()).hexdigest()
     assert load_graph(graph_path)[0]["cost_usd"] == 4.0
 
 

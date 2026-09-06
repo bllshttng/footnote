@@ -1,22 +1,16 @@
 """Integration tests for graph state hygiene safeguards (Phase 01).
 
 Tests cover:
-  - Hash sidecar written by locked_mutate_graph
-  - load_graph() validates SHA256 hash
-  - GraphCorruptionError raised on hash mismatch
-  - First-run lazy sidecar creation
-  - fno backlog rehash command (rehash and --revert)
+  - load_graph() reads entries through the keeper's gated read
+  - A stale .sha256 sidecar left on disk is ignored, never read
   - Backup rotation (last 10 backups)
   - PreToolUse hook blocks/allows edits to graph.json
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -32,10 +26,6 @@ runner = CliRunner()
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _make_graph(path: Path, entries: list | None = None) -> None:
     """Write a minimal graph.json to path."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,33 +34,11 @@ def _make_graph(path: Path, entries: list | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 1.1 / 1.5: sidecar + backup
+# Reads
 # ---------------------------------------------------------------------------
 
-def test_locked_mutate_writes_sidecar(tmp_path):
-    """After a locked_mutate_graph call, sidecar hash == SHA256 of graph.json."""
-    from fno.graph.load import load_graph, GraphCorruptionError
-
-    graph_path = tmp_path / "graph.json"
-    sidecar_path = Path(str(graph_path) + ".sha256")
-
-    # Use locked_mutate_graph to do a no-op add (bootstrap an entry)
-    from fno.graph.store import locked_mutate_graph
-
-    def _add_entry(entries):
-        entries.append({"id": "ab-test01", "title": "Test 01", "status": "ready"})
-        return entries
-
-    locked_mutate_graph(graph_path, _add_entry)
-
-    assert sidecar_path.exists(), "sidecar should be written after mutation"
-    actual_hash = _sha256(graph_path)
-    stored_hash = sidecar_path.read_text().strip()
-    assert stored_hash == actual_hash, "sidecar must match actual graph.json hash"
-
-
-def test_load_graph_validates_hash_match(tmp_path):
-    """load_graph() succeeds when sidecar matches file content."""
+def test_load_graph_reads_entries_after_a_mutation(tmp_path):
+    """load_graph() returns the entries a locked_mutate_graph published."""
     from fno.graph.load import load_graph
     from fno.graph.store import locked_mutate_graph
 
@@ -82,147 +50,43 @@ def test_load_graph_validates_hash_match(tmp_path):
 
     locked_mutate_graph(graph_path, _add_entry)
 
-    # Should not raise
     entries = load_graph(graph_path)
     assert len(entries) == 1
     assert entries[0]["id"] == "ab-test02"
 
 
-def test_load_graph_raises_on_mismatch(tmp_path):
-    """load_graph() raises GraphCorruptionError when graph.json is tampered."""
-    from fno.graph.load import load_graph, GraphCorruptionError
-    from fno.graph.store import locked_mutate_graph
+def test_stale_sidecar_on_disk_is_ignored(tmp_path):
+    """A leftover graph.json.sha256 neither blocks a read nor gets rewritten.
 
-    graph_path = tmp_path / "graph.json"
-
-    def _add_entry(entries):
-        entries.append({"id": "ab-test03", "title": "Test 03"})
-        return entries
-
-    locked_mutate_graph(graph_path, _add_entry)
-
-    # Tamper graph.json without updating sidecar
-    original = graph_path.read_bytes()
-    graph_path.write_text('{"entries":[{"id":"ab-TAMPERED","title":"injected"}]}\n')
-
-    with pytest.raises(GraphCorruptionError) as exc_info:
-        load_graph(graph_path)
-
-    err = exc_info.value
-    assert err.actual != err.expected
-    assert "rehash" in str(err).lower()
-
-
-def test_first_run_writes_sidecar_lazily(tmp_path):
-    """If graph.json exists but no sidecar, load_graph() writes sidecar and returns entries."""
+    The sidecar gate is retired; whatever an older install left behind is an
+    inert file. The mtime assert is the positive marker: nothing still writes
+    the sidecar.
+    """
     from fno.graph.load import load_graph
+    from fno.graph.store import locked_mutate_graph
 
     graph_path = tmp_path / "graph.json"
     sidecar_path = Path(str(graph_path) + ".sha256")
 
-    _make_graph(graph_path, [{"id": "ab-first", "title": "First run"}])
-    assert not sidecar_path.exists(), "pre-condition: no sidecar"
+    def _add_entry(entries):
+        entries.append({"id": "ab-stale01", "title": "Stale sidecar"})
+        return entries
+
+    locked_mutate_graph(graph_path, _add_entry)
+    sidecar_path.write_text("0" * 64 + "\n")
+    before = sidecar_path.stat().st_mtime_ns
 
     entries = load_graph(graph_path)
-    assert len(entries) == 1
-    assert entries[0]["id"] == "ab-first"
-    assert sidecar_path.exists(), "sidecar should be lazily written"
-    assert sidecar_path.read_text().strip() == _sha256(graph_path)
+    assert [e["id"] for e in entries] == ["ab-stale01"]
+
+    time.sleep(0.01)
+    assert sidecar_path.exists()
+    assert sidecar_path.stat().st_mtime_ns == before
+    assert sidecar_path.read_text().strip() == "0" * 64
 
 
 # ---------------------------------------------------------------------------
-# Task 1.4: rehash command
-# ---------------------------------------------------------------------------
-
-def _patch_graph_path(monkeypatch, graph_path: Path) -> None:
-    """Monkeypatch all graph-path constants to point at graph_path (tmp file).
-
-    Mirrors the pattern used by test_graph_cli.py's tmp_graph fixture.
-    """
-    import fno.graph._constants as gc
-    import fno.graph.store as gs
-
-    monkeypatch.setattr(gc, "GRAPH_JSON", graph_path)
-    monkeypatch.setattr(gc, "GRAPH_MD", graph_path.parent / "graph.md")
-    monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", graph_path.parent / "graph-archive.json")
-    monkeypatch.setattr(gs, "GRAPH_JSON", graph_path)
-    # Seam readers resolve fno.paths.graph_json at call time; pin the
-    # resolver to the same hermetic file (module-attr pins do not reach it).
-    monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
-
-
-def test_rehash_rehashes_sidecar(tmp_path, monkeypatch):
-    """After tamper, fno backlog rehash rehashes sidecar so load_graph() passes."""
-    from fno.graph.load import load_graph
-    from fno.graph.store import locked_mutate_graph
-
-    graph_path = tmp_path / "graph.json"
-    _patch_graph_path(monkeypatch, graph_path)
-
-    def _add(entries):
-        entries.append({"id": "ab-rec01", "title": "Reconcile test"})
-        return entries
-
-    locked_mutate_graph(graph_path, _add)
-
-    # Tamper
-    graph_path.write_text('{"entries":[{"id":"ab-tampered","title":"bad"}]}\n')
-
-    # rehash via CLI (_graph_path() picks up gc.GRAPH_JSON monkeypatched above)
-    result = runner.invoke(app, ["backlog", "rehash"])
-    assert result.exit_code == 0, f"rehash failed: {result.output}"
-
-    # load_graph should now pass
-    entries = load_graph(graph_path)
-    assert entries[0]["id"] == "ab-tampered"  # tampered content kept, hash updated
-
-
-def test_rehash_revert_restores_backup(tmp_path, monkeypatch):
-    """fno backlog rehash --revert restores graph.json from the last backup.
-
-    Requires 2 mutations so that a backup of the good state exists before tamper.
-    """
-    from fno.graph.load import load_graph
-    from fno.graph.store import locked_mutate_graph
-
-    graph_path = tmp_path / "graph.json"
-    _patch_graph_path(monkeypatch, graph_path)
-
-    # First mutation: creates the file (no backup yet, file didn't exist)
-    def _add_good(entries):
-        entries.append({"id": "ab-good", "title": "Good entry"})
-        return entries
-
-    locked_mutate_graph(graph_path, _add_good)
-
-    # Second mutation: triggers backup of the good state BEFORE writing new state
-    def _add_second(entries):
-        entries.append({"id": "ab-second", "title": "Second entry"})
-        return entries
-
-    locked_mutate_graph(graph_path, _add_second)
-
-    # Now we have a backup of the state after the first mutation
-    backups = sorted(tmp_path.glob("graph.json.bak.*"))
-    assert len(backups) >= 1, "Expected at least one backup after second mutation"
-
-    # Tamper
-    graph_path.write_text('{"entries":[{"id":"ab-bad","title":"bad content"}]}\n')
-
-    # Revert via CLI - should restore from the most-recent backup
-    result = runner.invoke(app, ["backlog", "rehash", "--revert"])
-    assert result.exit_code == 0, f"rehash --revert failed: {result.output}"
-
-    # Should be back to good content (the backup, not the tampered content)
-    entries = load_graph(graph_path)
-    ids = [e["id"] for e in entries]
-    assert "ab-bad" not in ids
-    # The most-recent backup contains both ab-good and ab-second
-    assert "ab-good" in ids
-
-
-# ---------------------------------------------------------------------------
-# Task 1.5: backup rotation
+# Backup rotation
 # ---------------------------------------------------------------------------
 
 def test_locked_mutate_keeps_last_10_backups(tmp_path):
@@ -247,7 +111,7 @@ def test_locked_mutate_keeps_last_10_backups(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 1.6/1.7: PreToolUse hook
+# PreToolUse hook
 # ---------------------------------------------------------------------------
 
 HOOK_SCRIPT = Path(__file__).parent.parent.parent.parent / "hooks" / "graph-write-protect.sh"

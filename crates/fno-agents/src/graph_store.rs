@@ -4,7 +4,7 @@
 //! This is the ported half of the graph store: byte-compatible JSON I/O, the
 //! defaults/migration pipeline every read applies, `recompute_statuses`, the
 //! canonical key ordering, slug assignment, a bounded advisory lock, and the
-//! atomic publish with its backup + SHA256 sidecar. The Python module that
+//! atomic publish with its backup. The Python module that
 //! mirrors it becomes the RPC client in
 //! `crates/fno-agents/src/graph_keeper.rs`'s protocol; the store logic lives
 //! HERE and only here.
@@ -1906,15 +1906,8 @@ impl Drop for BoundedLock {
 }
 
 // ---------------------------------------------------------------------------
-// Atomic publish: backup, write, sidecar
+// Atomic publish: backup, write
 // ---------------------------------------------------------------------------
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(bytes);
-    let d = h.finalize();
-    d.iter().map(|b| format!("{b:02x}")).collect()
-}
 
 /// Copy the current file to a timestamped backup, prune to
 /// GRAPH_BACKUP_KEEP, and return the backup path (store._create_backup).
@@ -1971,26 +1964,6 @@ pub fn write_atomic(path: &Path, body: &str) -> Result<(), StoreError> {
         f.sync_all().ok();
     }
     std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-/// Write the SHA256 sidecar of `path` atomically
-/// (store._write_sha256_sidecar).
-pub fn write_sha256_sidecar(path: &Path) -> Result<(), StoreError> {
-    let bytes = std::fs::read(path)?;
-    let sidecar = PathBuf::from(format!("{}.sha256", path.display()));
-    let tmp = path.with_file_name(format!(
-        "{}.sha256.tmp-{}",
-        path.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        std::process::id()
-    ));
-    {
-        let mut f = File::create(&tmp)?;
-        writeln!(f, "{}", sha256_hex(&bytes))?;
-    }
-    std::fs::rename(&tmp, sidecar)?;
     Ok(())
 }
 
@@ -2061,7 +2034,7 @@ pub fn file_content_version(path: &Path) -> String {
 /// The store-side half of the locked read-modify-write cycle. Holds the
 /// bounded lock; re-derives the pre-image; runs slugs, recompute, the
 /// touched_at stamp, the closure-detection hook, canonicalization, and the
-/// atomic publish with backup + sidecar. The MUTATOR is the caller's: it ran
+/// atomic publish with backup. The MUTATOR is the caller's: it ran
 /// client-side against the begin snapshot, and contention is resolved by the
 /// caller retrying on [`StoreError::LockTimeout`] or a version conflict.
 pub fn locked_mutate(
@@ -2216,7 +2189,6 @@ pub fn locked_mutate(
     let backup = create_backup(path);
     let body = serialize_graph_file(&entries);
     write_atomic(path, &body)?;
-    write_sha256_sidecar(path)?;
 
     Ok(MutateOutcome {
         entries,
@@ -2640,10 +2612,6 @@ mod tests {
         let body = std::fs::read_to_string(&graph).unwrap();
         assert!(body.starts_with("{\n  \"entries\": [\n    {"));
         assert!(body.ends_with("\n"));
-        assert!(
-            graph.with_extension("json.sha256").exists()
-                || PathBuf::from(format!("{}.sha256", graph.display())).exists()
-        );
         assert!(out.dropped == 0);
     }
 

@@ -14920,63 +14920,6 @@ def cmd_new(
     typer.echo(new_id_holder[0])
 
 
-# -- rehash --
-
-
-@cli.command("rehash", hidden=True)
-def cmd_rehash(
-    revert: bool = typer.Option(
-        False,
-        "--revert",
-        help="Restore graph.json from the latest backup instead of rehashing.",
-    ),
-) -> None:
-    """Acknowledge an external edit to graph.json by rehashing the sidecar (default).
-
-    With --revert: locate the most recent graph.json.bak.* backup and restore it,
-    then update the sidecar to match.
-    """
-    import hashlib
-    import tempfile
-
-    path = _graph_path()
-
-    if revert:
-        # Find the most-recent .bak.* file
-        backups = sorted(path.parent.glob(f"{path.name}.bak.*"))
-        if not backups:
-            typer.echo(f"No backups found for {path}. Cannot revert.", err=True)
-            raise typer.Exit(code=1)
-        latest_backup = backups[-1]
-        # Atomic restore: temp + rename
-        tmp_fd, tmp_path_str = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-        try:
-            with os.fdopen(tmp_fd, "wb") as f:
-                f.write(latest_backup.read_bytes())
-            os.replace(tmp_path_str, str(path))
-        except Exception:
-            Path(tmp_path_str).unlink(missing_ok=True)
-            raise
-        typer.echo(f"Reverted graph.json from {latest_backup.name}")
-
-    # Rehash sidecar to match current (possibly just-restored) content
-    if not path.exists():
-        typer.echo(f"graph.json not found at {path}", err=True)
-        raise typer.Exit(code=1)
-
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    sidecar = Path(str(path) + ".sha256")
-    tmp_fd2, tmp_path2 = tempfile.mkstemp(dir=path.parent, suffix=".sha256.tmp")
-    try:
-        with os.fdopen(tmp_fd2, "w") as f:
-            f.write(digest + "\n")
-        os.replace(tmp_path2, str(sidecar))
-    except Exception:
-        Path(tmp_path2).unlink(missing_ok=True)
-        raise
-    typer.echo(f"Reconciled to hash {digest[:8]}")
-
-
 # ---------------------------------------------------------------------------
 # collisions sub-app: file-overlap detection between plans
 # ---------------------------------------------------------------------------
@@ -15482,7 +15425,6 @@ _TRACKER_OWNED_VERBS = frozenset(
         "archive",
         "unarchive",
         "archive-dedupe-ids",
-        "rehash",
         "maintain",
         "groom",
         # graph-row mutation (stamps deferred_kind under the lock)

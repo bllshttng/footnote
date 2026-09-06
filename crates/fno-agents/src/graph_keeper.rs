@@ -193,8 +193,8 @@ fn read_one_frame(stream: &mut UnixStream) -> Incoming {
 }
 
 /// The keeper's shared state. Writes serialize here; reads take the same
-/// mutex because a read mid-publish would observe the file between the two
-/// atomic replaces (bytes then sidecar).
+/// mutex because a read mid-publish would otherwise observe a half-written
+/// file.
 struct StoreState {
     graph: PathBuf,
     canonical: bool,
@@ -497,10 +497,9 @@ fn handle_settle_edges(params: &Value) -> Result<Value, StoreError> {
     }))
 }
 
-/// The raw file bytes + their digest, for the hash-validated read
-/// (load_graph): the sidecar contract is the client's to enforce against
-/// these bytes, and the keeper's serialized publish guarantees the reads
-/// never observe the two-write window the Python retry loop existed for.
+/// The raw file bytes + their digest (the version token): load_graph parses
+/// the bytes, and the keeper's serialized publish guarantees the reads never
+/// observe a half-written file.
 fn handle_read_file(state: &StoreState) -> Result<Value, StoreError> {
     use std::io::Read as _;
     let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
