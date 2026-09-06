@@ -121,9 +121,7 @@ def _emit_audit(
     repo_root: str, state_file: str, pr_number: str, reason: str, extra: Optional[dict] = None
 ) -> None:
     """Append a transcript_audit_failed event (best-effort; never fatal)."""
-    from fno.paths import project_log
-
-    events_file = str(project_log("events.jsonl", project_root=Path(repo_root)))
+    events_file = _events_file(repo_root, reason)
     nonce = _read_field(state_file, "provenance_nonce")
     sid = _read_field(state_file, "session_id")
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -140,12 +138,31 @@ def _emit_audit(
     _append_event_lenient(events_file, event, reason)
 
 
-def _append_event_lenient(events_file: str, event: dict, reason: str) -> None:
+def _events_file(repo_root: str, reason: str) -> Optional[str]:
+    """Resolve the events journal, or None with a warning when the space cannot be.
+
+    Every audit write is best-effort: a repo root the space resolver refuses
+    (a detached checkout, a missing canonical) must not turn a verdict into a
+    traceback, so the failure is one stderr line and the event is dropped.
+    """
+    try:
+        from fno.paths import project_log
+
+        return str(project_log("events.jsonl", project_root=Path(repo_root)))
+    except Exception as exc:
+        sys.stderr.write(f"pr-verify: events journal unresolved (reason={reason}): {exc}\n")
+        return None
+
+
+def _append_event_lenient(events_file: Optional[str], event: dict, reason: str) -> None:
     """Validate-with-warning, then append under the events mkdir-mutex.
 
     Mirrors the bash: a schema-validation failure logs a warning but the event
     is appended anyway (missing audit evidence is worse than a relaxed shape).
+    An unresolved journal (None) was already warned about by ``_events_file``.
     """
+    if events_file is None:
+        return
     try:
         from fno.events import validate
 
@@ -803,9 +820,7 @@ def run_verify_reviews(pr_number: str, state_file: str, cwd: Optional[str] = Non
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     nonce = _read_field(state_file, "provenance_nonce")
     sid = _read_field(state_file, "session_id")
-    from fno.paths import project_log
-
-    events_file = str(project_log("events.jsonl", project_root=Path(repo_root)))
+    events_file = _events_file(repo_root, "missing_reply")
     for reviewer in missing:
         last_at = reviewer_map.get(reviewer) or ""
         event = {
