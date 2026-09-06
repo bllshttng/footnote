@@ -65,16 +65,7 @@ pub(crate) fn classify_planned_unclaimed(
         let status_ready = s_str(entry, "status") == Some("ready");
         let leaf = s_str(entry, "type") != Some("epic") && !child_ids.contains(&node_id);
         let completed = entry.get("completed_at").map(truthy).unwrap_or(false);
-        let has_pr = entry.get("pr_number").map(truthy).unwrap_or(false)
-            || entry
-                .get("additional_prs")
-                .and_then(Value::as_array)
-                .map(|extras| {
-                    extras
-                        .iter()
-                        .any(|e| e.is_object() && e.get("number").map(truthy).unwrap_or(false))
-                })
-                .unwrap_or(false);
+        let has_pr = node_has_pr(entry);
         let batch_owner = entry.get("batch").map(truthy).unwrap_or(false);
         let blocked = entry
             .get("blocked_by")
@@ -247,14 +238,29 @@ pub(crate) fn holder_is_active(probe: Option<&crate::truth_probe::TruthProbe>) -
     }
 }
 
+/// A node bound to a PR, by `pr_number` or any `additional_prs` entry.
+pub(crate) fn node_has_pr(node: &Value) -> bool {
+    node.get("pr_number").map(truthy).unwrap_or(false)
+        || node
+            .get("additional_prs")
+            .and_then(Value::as_array)
+            .map(|extras| {
+                extras
+                    .iter()
+                    .any(|e| e.is_object() && e.get("number").map(truthy).unwrap_or(false))
+            })
+            .unwrap_or(false)
+}
+
 /// Who is driving this node: active, stalled, crowned, or none. One answer,
 /// three queues: stalled_holder selects stalled, undriven_pr and
 /// unheld_progress select none. `crowned` is a live crown driving the epic it
 /// reigns over: scope ids reach the build only through a king manifest, and
 /// the session holding that manifest is the one building, so a scope hit is a
-/// live crown. The epic carries no claim of its own (a crown is not a claim)
-/// and no PR (children carry those), so without this state the reigning epic
-/// reads "none" and no verb can clear the row. In-scope leaves stay
+/// live crown. The epic carries no claim of its own (a crown is not a claim),
+/// so without this state the reigning epic reads "none" and no verb can clear
+/// the row. A PR bound to the epic keeps it reading none - undriven_pr owns
+/// that shape, and a PR needs a driver of its own. In-scope leaves stay
 /// claim-driven: a dead worker under a crown is still a dead handoff.
 pub(crate) fn node_driver<'a>(
     node: &Value,
@@ -263,8 +269,9 @@ pub(crate) fn node_driver<'a>(
     crown_ids: Option<&HashSet<String>>,
 ) -> (&'static str, Option<&'a Value>) {
     let node_id = s_str(node, "id").unwrap_or("");
-    let crowned =
-        crown_ids.is_some_and(|ids| ids.contains(node_id)) && s_str(node, "type") == Some("epic");
+    let crowned = crown_ids.is_some_and(|ids| ids.contains(node_id))
+        && s_str(node, "type") == Some("epic")
+        && !node_has_pr(node);
     let claim = claim_by_node.get(node_id);
     let Some(claim) = claim else {
         if crowned {
@@ -372,6 +379,14 @@ mod tests {
         assert_eq!(
             node_driver(&epic, &claims, &activity, Some(&crown)).0,
             "crowned"
+        );
+        // an epic bound to its own PR keeps reading none: undriven_pr owns
+        // that shape, and a PR needs a driver of its own (measured 2026-09-06:
+        // six graph epics carry a pr_number)
+        let epic_pr = json!({"id": "x-epic", "type": "epic", "pr_number": 42});
+        assert_eq!(
+            node_driver(&epic_pr, &claims, &activity, Some(&crown)).0,
+            "none"
         );
         // without the crown the same epic is an unheld dead handoff
         assert_eq!(node_driver(&epic, &claims, &activity, None).0, "none");

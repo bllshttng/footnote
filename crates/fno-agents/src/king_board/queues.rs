@@ -1,5 +1,5 @@
 //! The operator lane parser and the twelve-queue board build (pure; no I/O).
-use super::classify::node_driver;
+use super::classify::{node_driver, node_has_pr};
 use super::prs::derived_status;
 use super::scope::operator_lane_path;
 use super::{
@@ -333,17 +333,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             {
                 continue;
             }
-            let has_pr = node.get("pr_number").map(truthy).unwrap_or(false)
-                || node
-                    .get("additional_prs")
-                    .and_then(Value::as_array)
-                    .map(|extras| {
-                        extras
-                            .iter()
-                            .any(|e| e.is_object() && e.get("number").map(truthy).unwrap_or(false))
-                    })
-                    .unwrap_or(false);
-            if has_pr {
+            if node_has_pr(node) {
                 continue; // undriven_pr owns the PR-bound shape.
             }
             let (state, claim) = node_driver(
