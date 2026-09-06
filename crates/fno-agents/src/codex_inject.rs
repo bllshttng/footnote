@@ -1287,6 +1287,14 @@ pub async fn run_loaded_thread_discovery() -> i32 {
 const PROJECT_PAGE_SIZE: u32 = 100;
 const MAX_PROJECT_PAGES: usize = 64;
 
+/// The inline pre-spawn resolve must cost less than a spawn is worth: the
+/// standalone `codex-assign-project` verb may take the full
+/// [`HANDSHAKE_TIMEOUT`], but `ensure_project_for_cwd` runs BEFORE thread/start
+/// on every interactive spawn, so a wedged app-server costs a spawn this much,
+/// not ten seconds. One list round-trip on a unix socket is milliseconds; this
+/// bound exists for the pathological case.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// `project/list` page request. Response shape (app-server-protocol
 /// `ProjectListResponse`): `{data: [Project], nextCursor}`.
 pub fn project_list_request_json(id: u64, limit: u32, cursor: Option<&str>) -> String {
@@ -1321,6 +1329,8 @@ pub fn project_create_request_json(
 
 /// `project/update` carrying a whole replacement roots array (the protocol has
 /// no append verb, so the caller extends the list it listed).
+/// `project/update` carrying a whole replacement roots array (the protocol has
+/// no append verb, so the caller extends the list it listed).
 pub fn project_update_roots_request_json(id: u64, project_id: &str, roots: &[PathBuf]) -> String {
     serde_json::json!({
         "id": id,
@@ -1329,6 +1339,19 @@ pub fn project_update_roots_request_json(id: u64, project_id: &str, roots: &[Pat
             "projectId": project_id,
             "roots": roots.iter().map(|root| json!({"path": root})).collect::<Vec<_>>(),
         }
+    })
+    .to_string()
+}
+
+/// `project/read`, the fresh-roots read that must precede a roots update:
+/// `project/update` replaces the array rather than appending, so extending
+/// from a page the list returned moments ago would drop anything written
+/// between that page and the update.
+pub fn project_read_request_json(id: u64, project_id: &str) -> String {
+    serde_json::json!({
+        "id": id,
+        "method": "project/read",
+        "params": {"projectId": project_id}
     })
     .to_string()
 }
@@ -1424,6 +1447,19 @@ pub fn parse_created_project_id(raw: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The roots array from a `project/read` response.
+pub fn parse_project_roots(raw: &str) -> Option<Vec<PathBuf>> {
+    let v = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    Some(
+        v.pointer("/result/project/roots")?
+            .as_array()?
+            .iter()
+            .filter_map(|root| root.get("path").and_then(|p| p.as_str()))
+            .map(PathBuf::from)
+            .collect(),
+    )
+}
+
 /// One repo, one key, forever: the key derives from the canonical root, so
 /// every spawn for a repo sends the same create and codex answers with the
 /// first project every time.
@@ -1487,7 +1523,28 @@ pub async fn ensure_project_for_root(repo_root: &Path) -> Option<String> {
     }
     let dir_name = repo_root.file_name()?.to_string_lossy().into_owned();
     if let Some(named) = projects.iter().find(|project| project.name == dir_name) {
-        let mut roots = named.roots.clone();
+        // Re-read the roots fresh: the list can be pages old, and the update
+        // below REPLACES the array - extending from a stale read would drop a
+        // root written since. A failed re-read falls back to the listed roots.
+        let mut roots = {
+            sink.send(Message::Text(
+                project_read_request_json(request_id, &named.id).into(),
+            ))
+            .await
+            .ok()?;
+            let raw = read_until_id(&mut stream, &serde_json::json!(request_id))
+                .await
+                .ok()?;
+            request_id += 1;
+            parse_project_roots(&raw).unwrap_or_else(|| named.roots.clone())
+        };
+        if roots
+            .iter()
+            .any(|root| std::fs::canonicalize(root).is_ok_and(|resolved| resolved == repo_root))
+        {
+            // A concurrent writer already attached this repo: done, no write.
+            return Some(named.id.clone());
+        }
         roots.push(repo_root.clone());
         sink.send(Message::Text(
             project_update_roots_request_json(request_id, &named.id, &roots).into(),
@@ -1518,12 +1575,12 @@ pub async fn ensure_project_for_root(repo_root: &Path) -> Option<String> {
 
 /// [`ensure_project_for_root`] for a worker cwd: a linked worktree resolves to
 /// its repo through the git COMMON dir, whose parent is the canonical root.
-/// None outside a repo. Bounded as a whole so a wedged socket cannot stall a
-/// spawn past [`HANDSHAKE_TIMEOUT`].
+/// None outside a repo. Bounded by [`RESOLVE_TIMEOUT`] as a whole, because this
+/// sits inline before thread/start on every interactive spawn.
 pub async fn ensure_project_for_cwd(cwd: &Path) -> Option<String> {
     let common = crate::provider::git_common_dir(cwd)?;
     let repo_root = Path::new(&common).parent()?;
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, ensure_project_for_root(repo_root))
+    tokio::time::timeout(RESOLVE_TIMEOUT, ensure_project_for_root(repo_root))
         .await
         .ok()?
 }
@@ -2549,6 +2606,14 @@ mod tests {
         assert_eq!(assign["method"], "thread/metadata/update");
         assert_eq!(assign["params"]["threadId"], "thread-1");
         assert_eq!(assign["params"]["projectId"], "proj-a");
+        let read: serde_json::Value =
+            serde_json::from_str(&project_read_request_json(6, "proj-a")).unwrap();
+        assert_eq!(read["method"], "project/read");
+        assert_eq!(read["params"]["projectId"], "proj-a");
+        let roots =
+            parse_project_roots(r#"{"id":6,"result":{"project":{"roots":[{"path":"/repo"}]}}}"#)
+                .unwrap();
+        assert_eq!(roots, vec![PathBuf::from("/repo")]);
     }
 
     /// Root match: the resolver answers with the existing id and creates

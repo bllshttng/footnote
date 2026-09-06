@@ -411,6 +411,21 @@ async fn serve(conn: UnixStream, behavior: Behavior) {
             Some("project/list") => json!({
                 "id": id, "result": {"data": behavior.projects, "nextCursor": null}
             }),
+            Some("project/read") => {
+                // Model the store: echo the canned project this id names, else
+                // a bare project with no roots.
+                let pid = msg
+                    .pointer("/params/projectId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let project = behavior
+                    .projects
+                    .iter()
+                    .find(|p| p.get("id").and_then(Value::as_str) == Some(pid))
+                    .cloned()
+                    .unwrap_or(json!({"id": pid, "roots": []}));
+                json!({"id": id, "result": {"project": project}})
+            }
             Some("project/create") => {
                 json!({"id": id, "result": {"project": {"id": "proj-created-fno"}}})
             }
