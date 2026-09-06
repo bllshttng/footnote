@@ -114,10 +114,9 @@ def _manifest_limb(scope: Any, row: Any) -> dict[str, Any]:
 
 def _manifest_only_crowns(held: list[str]) -> tuple[list[dict[str, Any]], bool]:
     """Crowns whose row is gone but whose manifest holds them: the Rust sweep
-    (`fno-agents court-orphans`) walks the spaces ROOT, because a vanished
-    row names no cwd. Returns ``(entries, ran)``: ``ran`` False means the sweep
-    could not answer (no binary, non-zero exit, timeout, bad JSON), so an
-    empty list is an ABSENCE, never zero orphans."""
+    (`fno-agents court-orphans`) walks the spaces ROOT because a vanished row
+    names no cwd. Returns ``(entries, ran)``: ``ran`` False means the sweep
+    could not answer, so an empty list is an ABSENCE, never zero orphans."""
     import json
     import subprocess
 
@@ -197,8 +196,7 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
             # crown_reading returns None whenever crown_level is None,
             # regardless of crown_scope; surface the anomaly, never skip it.
             if getattr(row, "crown_scope", None):
-                # The half crown still HOLDS its territory: _conflicts counts
-                # it as a claim, so the sweep must too.
+                # The half crown still HOLDS its territory; _conflicts counts it as a claim.
                 if isinstance(row.crown_scope, str) and row.crown_scope.strip():
                     held_scopes.append(row.crown_scope)
                 entries.append(
@@ -242,8 +240,7 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
         "registry_readable": True,
         "graph_readable": by_id is not None,
         "summary": {
-            # total counts ROW crowns only: the census computes workers from
-            # it, so a manifest-only entry would subtract a live worker.
+            # total counts ROW crowns only: the census computes workers from it.
             "total": len(entries) - len(orphans),
             "manifest_only": len(orphans),
             "sweep_ran": sweep_ran,
@@ -284,14 +281,13 @@ def render_court(as_json: bool) -> str:
         holders = ", ".join(c["holders"])
         lines.append(f"\nconflicts: scope {c['scope']!r} held by {len(c['holders'])} live rows ({holders})")
     s = court["summary"]
-    manifest_only = s.get("manifest_only") or 0
     lines.append(
         f"\ncourt: {s['total']} crown{'s' if s['total'] != 1 else ''}, "
         f"{s['disagreements']} disagreement"
         f"{'s' if s['disagreements'] != 1 else ''}, {s['unknowns']} unknown"
         f"{'s' if s['unknowns'] != 1 else ''}, {s['splits']} split"
         f"{'s' if s['splits'] != 1 else ''}"
-        + (f", {manifest_only} manifest-only" if manifest_only else "")
+        + (f", {s['manifest_only']} manifest-only" if s.get("manifest_only") else "")
     )
     if s.get("sweep_ran") is False:
         lines.append("orphan sweep did not run (stale or missing binary): zero manifest-only entries is an absence, not a finding")
