@@ -1245,6 +1245,26 @@ def _reanchor_pid_for(
     if verdict.get("bucket") == "offhost":
         return None
 
+    # Repair ONLY a corpse. A recorded pid that is still the same live
+    # process needs no repair, and rewriting it would let any holder-string
+    # holder take over a running session's anchor - the first None case this
+    # docstring states. This sits BEFORE the session-keyed branch so a row
+    # naming a DIFFERENT live process (a keeper pid: rows record the keeper,
+    # not the child) can never steal a healthy anchor, and it uses the pid
+    # FACT, not the verdict, because the witness may have healed an
+    # in-window claim to LIVE while its recorded pid stayed a corpse.
+    if existing.pid is not None:
+        try:
+            import psutil
+
+            recorded_alive = (
+                psutil.Process(existing.pid).create_time() * 1000 <= existing.acquired_at
+            )
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            recorded_alive = False
+        if recorded_alive:
+            return None
+
     # Session-keyed re-anchor (x-a613), BEFORE the state gate: when the claim
     # carries a session id and the registry row keyed by it carries a LIVE
     # pid, that pid is the anchor REGARDLESS of create time versus

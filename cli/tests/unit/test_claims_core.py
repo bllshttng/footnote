@@ -1141,6 +1141,29 @@ class TestSessionWitnessVerdicts:
         assert status["state"] == "stale"
         assert "session_basis" not in status
 
+    def test_refresh_never_reanchors_a_live_recorded_pid(self, tmp_path, monkeypatch):
+        """A healthy claim (recorded pid alive) is never re-anchored, even when
+        its registry row names a DIFFERENT live process (the keeper-pid shape:
+        rows record the keeper, not the child). Rewriting a running session's
+        anchor is the takeover the first None case exists to prevent."""
+        import fno.claims.core as claims_core
+
+        foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            # Let the child's create time fall clearly BEFORE acquired_at, so
+            # the recorded pid reads as the same live process, not a reuse.
+            time.sleep(0.3)
+            rec = self._write_claim(tmp_path, "k", "ses_live", foreign.pid, 600_000)
+            monkeypatch.setattr(
+                claims_core, "_registry_session_pid", lambda sid: os.getpid()
+            )
+            refreshed = refresh_claim("k", HOLDER_A, ttl_ms=600_000, root=tmp_path)
+            assert refreshed.pid == foreign.pid, "a live anchor must stay put"
+            assert refreshed.acquired_at == rec.acquired_at
+        finally:
+            foreign.terminate()
+            foreign.wait()
+
     def test_refresh_reanchors_to_registry_row_pid_under_resume(self, tmp_path, monkeypatch):
         """AC6: a claim whose recorded pid is dead and whose session row names
         a live pid re-anchors to THAT pid on renewal - created after
