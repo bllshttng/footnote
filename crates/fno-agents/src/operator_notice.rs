@@ -39,8 +39,7 @@ pub fn notify_operator(title: &str, body: &str, pointer: Option<&str>) -> bool {
 /// by a test (`FNO_LOOPCHECK_FNO_BIN`) resolve their own binary and pass it
 /// here; the args array stays in this one place.
 pub fn notify_operator_with(bin: &OsStr, title: &str, body: &str, pointer: Option<&str>) -> bool {
-    let bin = bin.to_os_string();
-    let mut cmd = std::process::Command::new(&bin);
+    let mut cmd = std::process::Command::new(bin);
     cmd.args(["inbox", "notify", title, body]);
     if let Some(p) = pointer {
         cmd.args(["--pointer", p]);
@@ -48,17 +47,23 @@ pub fn notify_operator_with(bin: &OsStr, title: &str, body: &str, pointer: Optio
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    // The child outlives this call by design; only the reap waits.
-    std::thread::spawn(move || match cmd.spawn() {
+    // Spawn is a fork, not a wait: it answers here, so the caller learns
+    // whether the notice left, and only the reap rides a detached thread.
+    match cmd.spawn() {
         Ok(mut child) => {
-            let _ = child.wait();
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            true
         }
-        Err(e) => eprintln!(
-            "fno-agents: operator notice skipped ({} inbox notify): {e}",
-            bin.to_string_lossy()
-        ),
-    });
-    true
+        Err(e) => {
+            eprintln!(
+                "fno-agents: operator notice skipped ({} inbox notify): {e}",
+                bin.to_string_lossy()
+            );
+            false
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -769,6 +774,31 @@ mod tests {
             "no state for a notice that never left"
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn failed_spawn_through_the_real_path_rolls_back() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let signals_path = temp_path("rollback-real");
+        let bin = std::env::var_os("FNO_BIN");
+        let prev = std::env::var_os("FNO_NOTIFY_SIGNALS");
+        std::env::set_var("FNO_BIN", "/nonexistent/fno-binary-for-tests");
+        std::env::set_var("FNO_NOTIFY_SIGNALS", &signals_path);
+        let verdict = notify_signal("k", "t1", "T", "B", None, 300);
+        match bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        match prev {
+            Some(v) => std::env::set_var("FNO_NOTIFY_SIGNALS", v),
+            None => std::env::remove_var("FNO_NOTIFY_SIGNALS"),
+        }
+        assert!(matches!(verdict, Verdict::SendFailed));
+        assert!(
+            load_store(&signals_path).get("k").is_none(),
+            "a spawn that failed must not commit state"
+        );
+        std::fs::remove_file(&signals_path).ok();
     }
 
     #[test]
