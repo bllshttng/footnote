@@ -90,6 +90,17 @@ jobs:
           uv run mypy src/
           echo "main-python-static: checked ${python_files} Python files with ruff + mypy"
 
+      # The verb x harness doc is a projection of the capability table and
+      # skills/*/SKILL.md frontmatter. It lives here, not in rust-ci, because
+      # a skill prose edit must not pay a cargo build to prove one doc fresh.
+      - name: Verb matrix fresh
+        if: ${{ !cancelled() }}
+        working-directory: cli
+        run: |
+          set -euo pipefail
+          uv run fno-py doctor harness-matrix --write
+          git diff --exit-code -- ../docs/harnesses/verb-matrix.md
+
       # x-3d21 R4/R5: a state path built by hand consults nothing, so no env
       # pin, guard or refusal can reach it. The ratchet fails in BOTH
       # directions - a new hand-built path, and a baselined line whose site was

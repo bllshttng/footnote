@@ -73,11 +73,10 @@ doctor_app.command("harness", hidden=True)(harness_probe_command)
 
 
 # `doctor harness-matrix` renders the two matrix docs from the table: the
-# features matrix (x-a3e8) and the verb x harness projection (x-b7a1).
-# Hidden per the new-verb convention; the freshness gate is the tripwire,
-# this verb is the regenerator. The renderer is the diagnostics script the
-# gate also calls, so the render lives in one place outside the runtime
-# package.
+# features matrix and the verb x harness projection. Hidden per the
+# new-verb convention; the freshness gates are the tripwire, this verb is
+# the regenerator. The renderer is the diagnostics script the gates also
+# call, so the render lives in one place outside the runtime package.
 @doctor_app.command("harness-matrix", hidden=True)
 def harness_matrix_command(
     write: bool = typer.Option(

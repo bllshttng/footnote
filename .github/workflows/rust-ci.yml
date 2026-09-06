@@ -29,8 +29,6 @@ on:
       - cli/src/fno/agents/merge_posture.toml
       - crates/fno-agents/src/events_limits.toml
       - docs/harnesses/capability-matrix.md
-      - docs/harnesses/verb-matrix.md
-      - skills/*/SKILL.md
       - cli/src/fno/agents/registry_schema.toml
       - scripts/ci/check-provider-vocabulary-parity.sh
       - tests/ci/test_provider_vocabulary_parity.sh
@@ -229,9 +227,9 @@ jobs:
         # The ONE freshness gate for every build-generated copy. build.rs
         # regenerates the capability copies, the merge-posture copy,
         # events_limits.toml, and the registry-schema copy on every build;
-        # `fno doctor harness-matrix --write` renders the capability doc and
-        # the verb x harness doc (the latter also reads skills/*/SKILL.md
-        # frontmatter, hence that trigger path). A committed copy that
+        # `fno doctor harness-matrix --write` renders the capability doc (and
+        # the verb doc, whose own cheap freshness step lives in guards.yml
+        # because it also reads skills/*/SKILL.md). A committed copy that
         # drifted from its source (a hand edit, a forgotten rebuild) shows up
         # here as a dirty tree - which is the wrong-merge class the retired
         # *-fresh.sh scripts checked, at one step instead of four.
@@ -245,8 +243,7 @@ jobs:
             cli/src/fno/agents/merge_posture.toml \
             crates/fno-agents/src/events_limits.toml \
             cli/src/fno/agents/registry_schema.toml \
-            docs/harnesses/capability-matrix.md \
-            docs/harnesses/verb-matrix.md
+            docs/harnesses/capability-matrix.md
 
       - name: Schema parity check
         # The parity script resolves the Rust binary via `command -v fno-agents`

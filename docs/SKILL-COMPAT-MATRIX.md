@@ -4,11 +4,11 @@ Which footnote skills run on each harness. The table itself is generated: [docs/
 
 ## Where a cell comes from
 
-A cell is a projection of two sources, never a hand-filled claim. The harness side is the capability table, `crates/fno-agents/src/harness_capabilities.toml`, rendered as [capability-matrix.md](harnesses/capability-matrix.md). The skill side is the `requires.harness` list in each skill's frontmatter, a closed vocabulary of `loop`, `spawn`, and `subagent_dispatch`. `fno doctor harness-matrix --write` joins the two. The rust-ci generated-copies step fails on a stale copy.
+A cell is a projection of two sources, never a hand-filled claim. The harness side is the capability table, `crates/fno-agents/src/harness_capabilities.toml`, rendered as [capability-matrix.md](harnesses/capability-matrix.md). The skill side is the `requires.harness` list in each skill's frontmatter. Its vocabulary is `loop`, every feature key the table declares a probe for, and every harness name. `fno doctor harness-matrix --write` joins the two. The guards workflow fails on a stale copy.
 
 The states are the features vocabulary. `native` means fno drives it through a wired lane. `capable` means real on the harness with no wired arm. `absent` is measured not to exist. `unmeasured` means nobody has looked. A harness with no capability row reads `unmeasured` on every verb, which is the honest default: hermes and openclaw read that way today. A harness whose dispatch surface is refused reads `absent` on every verb. Gemini is that harness.
 
-A row covers the skill's default lane. `execute` runs flat, `review` runs inline, `think` researches inline, so those rows declare no needs. Their sub-modes (`execute waves`, `review peer`, `think subagent`) need subagent dispatch and are not rows. A need the capability table has no key for, such as the claude prompt cache `cache-keepalive` depends on, cannot be declared. Add the key and its probe to the table first.
+A row covers the skill's default lane. `execute` runs flat, `review` runs inline, `think` researches inline, so those rows declare no needs. Their sub-modes (`execute waves`, `review peer`, `think subagent`) need subagent dispatch and are not rows. A skill tied to one harness names it. `cache-keepalive` declares `claude` and reads `absent` everywhere else.
 
 ## Loop participation: which harnesses can close the loop
 
@@ -36,4 +36,4 @@ Driver-specific functions (`driver_invoke`, `driver_check_promise`, `driver_pers
 3. Run `fno doctor harness-matrix --write` and commit both generated docs.
 4. For a wrapper-driven harness, implement `scripts/lib/driver-<name>.sh` with the four function contract, optionally a promise sentinel plugin (`docs/harnesses/promise-sentinel.md`), and write `docs/SETUP-<NAME>.md`.
 
-A new skill needs no step here. Its row appears from its `SKILL.md`. When its default lane needs the loop, a spawn, or a subagent, declare `requires.harness`.
+A new skill needs no step here. Its row appears from its `SKILL.md`. When its default lane needs the loop, a feature, or one harness, declare `requires.harness`.
