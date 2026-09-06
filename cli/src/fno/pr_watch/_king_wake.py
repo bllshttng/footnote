@@ -33,6 +33,12 @@ from typing import Any, Callable, Optional
 #: the shared already-asked fold so one stranded scope asks once, not per tick.
 _CEILING_MARKER = "king-wake-ceiling"
 
+#: Marker for the operator question a RESPAWN ceiling refusal raises when a
+#: dead holder's successor cannot be afforded. Distinct from the wake ceiling:
+#: the remedy is the manifest's respawn ceiling or a fresh crown, not
+#: ``king.wake_ceiling``.
+_SUCCESSOR_CEILING_MARKER = "king-wake-respawn-ceiling"
+
 
 @dataclass(frozen=True)
 class CrownTarget:
@@ -250,6 +256,43 @@ def _raise_ceiling_question(target: CrownTarget, count: int, ceiling: int) -> st
     return qid
 
 
+def _raise_successor_ceiling_question(
+    target: CrownTarget, count: int, ceiling: int
+) -> str:
+    """One durable operator question per scope when a successor is unaffordable.
+
+    A dead holder with a live trigger and a spent respawn budget is the exact
+    stranded state this phase exists to end, so the refusal escalates once
+    (marker-deduped) instead of repeating silently every tick.
+    """
+    import secrets
+
+    from fno.agents.stale_escalate import already_asked
+    from fno.events import operator_question
+    from fno.outstanding.core import append_question_event
+
+    existing = already_asked(target.root, target.scope, marker=_SUCCESSOR_CEILING_MARKER)
+    if existing:
+        return existing
+    qid = f"q-{secrets.token_hex(4)}"
+    append_question_event(
+        operator_question(
+            question_id=qid,
+            question=(
+                f"[{_SUCCESSOR_CEILING_MARKER}:{target.scope}] Holder {target.holder} of "
+                f"scope {target.scope} is gone, a wake trigger is live, and the respawn "
+                f"budget is spent ({count}/{ceiling} on the king manifest). No successor "
+                f"can be spawned; decide whether this scope still needs a king."
+            ),
+            cwd=str(target.root),
+            ask=f"crown a fresh king for {target.scope} or raise its respawn ceiling",
+            source="daemon",
+        ),
+        target.root,
+    )
+    return qid
+
+
 def _sidecar_path(target: CrownTarget) -> Path:
     """``.fno/kings/<scope>.wake.json`` - the tick-local wake-phase cache.
 
@@ -449,6 +492,7 @@ def _dispatch_walk(
     binary: str,
     address: Optional[str] = None,
     detail: Optional[str] = None,
+    successor: bool = False,
 ) -> None:
     """Spawn the wake-mode walk, detached.
 
@@ -481,6 +525,8 @@ def _dispatch_walk(
         argv += ["--wake-address", address]
     if detail:
         argv += ["--wake-detail", detail]
+    if successor:
+        argv += ["--wake-successor"]
     log = target.manifest.with_suffix(".md.wake.log")
     with log.open("ab") as sink:
         subprocess.Popen(  # noqa: S603 - fixed argv, no shell
@@ -576,13 +622,19 @@ def run_king_wake(
         "note": note,
     }
     for target in targets:
-        refusal = _holder_absent(truth_fn(target.holder))
+        truth = truth_fn(target.holder)
+        refusal = _holder_absent(truth)
         if refusal is not None:
             # Liveness refusals are routine (a live king reads "working"):
             # they ride the summary, not the event stream - one event per
             # crown per 600s tick is noise that buries the real refusals.
             summary["refused"].append({"scope": target.scope, "refusal": refusal})
             continue
+        # A holder whose session is GONE entirely (not merely parked with a
+        # finished transcript) is replaced, not woken: the dispatch below is a
+        # new king generation under the recorded crown, billed to the walk
+        # arm's respawn budget rather than only the wake ledger.
+        holder_gone = truth.get("state") == "unknown" and truth.get("reason") == "not-found"
         reason: Optional[str] = None
         wake_address: Optional[str] = None
         wake_detail: Optional[str] = None
@@ -625,6 +677,34 @@ def run_king_wake(
                 reason = "backstop"
         if reason is None:
             continue
+        if holder_gone:
+            from fno.king.state import at_respawn_ceiling, parse_manifest
+
+            if at_respawn_ceiling(target.manifest):
+                # No successor can be afforded: refuse before billing the
+                # wake ledger, and put the decision to the operator once.
+                fields = parse_manifest(target.manifest)
+                emit(
+                    "king_wake_refused",
+                    {
+                        "scope": target.scope,
+                        "refusal": "respawn-ceiling",
+                        "reason": reason,
+                        "holder": target.holder,
+                    },
+                )
+                try:
+                    _raise_successor_ceiling_question(
+                        target,
+                        int(fields.get("respawn_count") or 0),
+                        int(fields.get("respawn_ceiling") or 0),
+                    )
+                except Exception:  # noqa: BLE001 - a failed ask never blocks the lane
+                    summary["note"] = "successor ceiling question could not be raised"
+                summary["refused"].append(
+                    {"scope": target.scope, "refusal": "respawn-ceiling"}
+                )
+                continue
         # Admit-and-bill in ONE lock: `allowed` means the bill already landed,
         # so two overlapping ticks cannot both dispatch - the loser sees the
         # winner's stamp inside the critical section and takes the refusal.
@@ -660,7 +740,7 @@ def run_king_wake(
             continue
         window_count = verdict.count
         if dispatch_fn is not None:
-            dispatch_fn(target, reason, wake_address, wake_detail)
+            dispatch_fn(target, reason, wake_address, wake_detail, holder_gone)
         else:
             import shutil
 
@@ -670,6 +750,25 @@ def run_king_wake(
                 shutil.which("fno-agents") or "fno-agents",
                 wake_address,
                 wake_detail,
+                holder_gone,
+            )
+        if holder_gone:
+            # The successor receipt. The old id is the manifest's recorded
+            # holder; the new session does not exist yet (the walk launches
+            # it after this process returns), so the successor side of the
+            # trail is the walk's own journal: loop_unit_dispatched under the
+            # per-invocation walk key, and the reign terminations under the
+            # manifest fno_id it inherits.
+            from fno.king.state import parse_manifest as _pm
+
+            emit(
+                "king_spawned_successor",
+                {
+                    "scope": target.scope,
+                    "holder": target.holder,
+                    "old_session_id": _pm(target.manifest).get("harness_session_id") or "",
+                    "trigger": reason,
+                },
             )
         if fresh_board_hash:
             _store_board_hash(target, fresh_board_hash, fresh_board_rows or ())
@@ -681,11 +780,17 @@ def run_king_wake(
                 "scope": target.scope,
                 "reason": reason,
                 "address": wake_address,
+                "successor": holder_gone,
                 "window_count": window_count,
                 "ceiling": ceiling,
             },
         )
         summary["woke"].append(
-            {"scope": target.scope, "reason": reason, "address": wake_address}
+            {
+                "scope": target.scope,
+                "reason": reason,
+                "address": wake_address,
+                "successor": holder_gone,
+            }
         )
     return summary

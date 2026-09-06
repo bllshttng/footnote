@@ -390,6 +390,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let mut king_wake_address: Option<String> = None;
     let mut king_wake_holder: Option<String> = None;
     let mut king_wake_detail: Option<String> = None;
+    let mut king_wake_successor = false;
     let mut cwd: PathBuf = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // Helper: advance i and return the next argument, or emit a "missing value"
@@ -478,6 +479,9 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             "--wake-detail" => {
                 king_wake_detail = Some(require_value!("--wake-detail", args, i).to_string());
             }
+            "--wake-successor" => {
+                king_wake_successor = true;
+            }
             _ => {
                 eprintln!("fno-agents loop run: unknown flag '{flag}'");
                 return Ok(2);
@@ -540,6 +544,20 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         eprintln!(
             "fno-agents loop run: --wake-holder needs --wake (it names the registry \
              row the wake caller resolved absent by transcript)"
+        );
+        return Ok(2);
+    }
+    if king_wake_successor
+        && (!king_wake || king_wake_holder.is_none())
+    {
+        // A successor spawn is the respawn of a scope whose holder transcript
+        // truth resolved gone. It needs the wake caller to have named that
+        // holder (the guard skip is what lets the walk respawn over the dead
+        // row), and there is no successor outside wake mode.
+        eprintln!(
+            "fno-agents loop run: --wake-successor needs --wake and --wake-holder \
+             (it marks this walk as the dead holder's replacement, which only \
+             the wake phase may assert)"
         );
         return Ok(2);
     }
@@ -622,12 +640,13 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             return Ok(2);
         };
         let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
-        match crate::loop_king::KingQueue::from_manifest(
+        match crate::loop_king::KingQueue::from_manifest_full(
             &cwd,
             scope,
             fno_bin,
             king_wake,
             king_wake_holder.as_deref(),
+            king_wake_successor,
         ) {
             Ok(q) => {
                 unit_display = (q.walk_key().to_string(), q.scope().to_string());
@@ -791,12 +810,12 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // new king is a defect to look at, not a loop to fund. This is the
     // ceiling's authority; KingQueue re-checks for mid-walk races. Wake mode
     // skips BOTH guards (this one and the queue's): the caller's wake ledger
-    // is the bound there, enforced before the walk was invoked. Skipping the
-    // queue guard alone would leave the walk terminating Budget here before
-    // it ever dequeued. An operator running --wake by hand is bypassing a
-    // rate limit, not a safety limit.
+    // is the bound there, enforced before the walk was invoked. A successor
+    // wake is the exception - it IS a king generation, so the respawn budget
+    // binds it like any walk. An operator running --wake by hand is bypassing
+    // a rate limit, not a safety limit.
     if let Some(kq) = king_queue.as_ref() {
-        if !king_wake && kq.at_respawn_ceiling() {
+        if (!king_wake || king_wake_successor) && kq.at_respawn_ceiling() {
             journal.append(
                 "loop_terminated",
                 json!({

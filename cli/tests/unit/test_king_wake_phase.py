@@ -39,6 +39,7 @@ class _Recorder:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict]] = []
         self.dispatches: list[tuple[str, str, str | None, str | None]] = []
+        self.successor_flags: list[bool] = []
         self.asks: list[tuple[str, int, int]] = []
         self.unread_calls: list[str] = []
 
@@ -51,8 +52,10 @@ class _Recorder:
         reason: str,
         address: str | None,
         detail: str | None = None,
+        successor: bool = False,
     ) -> None:
         self.dispatches.append((target.scope, reason, address, detail))
+        self.successor_flags.append(successor)
 
 def _king_manifest(root):
     """The manifest path as the wake phase resolves it: the repo's space,
@@ -362,6 +365,101 @@ def test_a_ceiling_refused_answer_keeps_the_cursor_so_it_stays_a_trigger(tmp_pat
     )
 
     assert rec.dispatches and rec.dispatches[0][1] == "escalation_answered"
+
+
+# ── the successor path for a dead holder ───────────────────────────────────
+
+
+def _spent_respawn_budget(manifest):
+    """Rewrite the manifest with its respawn budget spent (4 of 4)."""
+    manifest.write_text(
+        "---\n"
+        "fno_id: k-1\n"
+        "scope: epic-x\n"
+        "harness_session_id: 11111111-2222-3333-4444-555555555555\n"
+        "respawn_count: 4\n"
+        "respawn_ceiling: 4\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_dead_holder_wakes_a_successor_under_the_recorded_crown(tmp_path):
+    # Acceptance 5.4: the holder's session is gone (not-found), a trigger is
+    # live, so the dispatch is a NEW king generation, not an ordinary wake.
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "unknown", "reason": "not-found"},
+        unread=lambda a: [object()] if a == "king-x" else [],
+    )
+
+    assert rec.dispatches and rec.dispatches[0][:3] == ("epic-x", "mail", "king-x")
+    assert rec.successor_flags == [True]
+    spawned = [e for e in rec.events if e[0] == "king_spawned_successor"]
+    assert spawned and spawned[0][1]["old_session_id"] == (
+        "11111111-2222-3333-4444-555555555555"
+    )
+    assert spawned[0][1]["trigger"] == "mail"
+    woken = [e for e in rec.events if e[0] == "king_woken"]
+    assert woken and woken[0][1]["successor"] is True
+
+
+def test_a_parked_holder_wakes_without_the_successor_flag(tmp_path):
+    # "done" is a parked holder (a transcript that ended), not a gone one:
+    # its wake is ordinary and journals no successor.
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [object()] if a == "king-x" else [],
+    )
+
+    assert rec.dispatches and rec.successor_flags == [False]
+    assert [e for e in rec.events if e[0] == "king_spawned_successor"] == []
+
+
+def test_a_dead_holder_at_the_respawn_ceiling_spawns_nothing_and_escalates(tmp_path):
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "unknown", "reason": "not-found"},
+        unread=lambda a: [object()] if a == "king-x" else [],
+        pre=_spent_respawn_budget,
+    )
+
+    assert rec.dispatches == [], "no spawn happens at the respawn ceiling"
+    refused = [e for e in rec.events if e[0] == "king_wake_refused"]
+    assert refused and refused[0][1]["refusal"] == "respawn-ceiling"
+    assert refused[0][1]["reason"] == "mail"
+    assert [e for e in rec.events if e[0] == "king_spawned_successor"] == []
+    # The bill never landed: the refusal spends no wake slot.
+    assert [e for e in rec.events if e[0] == "king_woken"] == []
+
+
+def test_the_spawned_walk_argv_carries_the_successor_flag(monkeypatch, tmp_path):
+    import subprocess as subprocess_mod
+
+    from fno.pr_watch import _king_wake as phase_mod
+
+    argv: list[str] = []
+
+    class _FakePopen:
+        def __init__(self, args, **kwargs):
+            argv.extend(args)
+
+    monkeypatch.setattr(subprocess_mod, "Popen", _FakePopen)
+    target = CrownTarget(
+        holder="king-x",
+        scope="epic-x",
+        root=tmp_path,
+        manifest=_king_manifest(tmp_path),
+        short_id="aa11bb22",
+    )
+    target.manifest.parent.mkdir(parents=True, exist_ok=True)
+    target.manifest.write_text("---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8")
+
+    phase_mod._dispatch_walk(target, "mail", "fno-agents", "king-x", None, True)
+
+    assert "--wake-successor" in argv
+    assert argv[argv.index("--wake-holder") + 1] == "king-x"
 
 
 def test_working_stalled_and_broken_instrument_holders_never_wake(tmp_path):

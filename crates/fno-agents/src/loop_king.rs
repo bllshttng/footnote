@@ -90,6 +90,14 @@ pub struct KingQueue {
     /// the CALLER before invoking the walk; an operator running `--wake` by
     /// hand is deliberately bypassing a rate limit, not a safety limit.
     wake: bool,
+    /// Successor mode (`--wake-successor`): the wake fired because the holder
+    /// is GONE, so the dispatch this walk performs is a new king generation -
+    /// exactly what the respawn budget exists to bound. Unlike an ordinary
+    /// wake (a parked holder resuming, normal operation billed to the wake
+    /// ledger alone), a successor bills `respawn_count` and is refused by the
+    /// respawn ceiling like any walk respawn. There is no second respawn
+    /// budget: same counter, same ceiling.
+    successor: bool,
 }
 
 impl KingQueue {
@@ -106,6 +114,20 @@ impl KingQueue {
         wake: bool,
         wake_holder: Option<&str>,
     ) -> Result<Self, LoopError> {
+        Self::from_manifest_full(repo_root, scope, fno_bin, wake, wake_holder, false)
+    }
+
+    /// The full construction: wake mode plus the successor modifier, which
+    /// only the wake phase sends (a dead holder's replacement). Ordinary and
+    /// hand-run callers keep the 5-arg spelling and never mint successors.
+    pub fn from_manifest_full(
+        repo_root: &Path,
+        scope: &str,
+        fno_bin: String,
+        wake: bool,
+        wake_holder: Option<&str>,
+        successor: bool,
+    ) -> Result<Self, LoopError> {
         let home = crate::paths::AgentsHome::from_env();
         Self::from_manifest_with_registry(
             repo_root,
@@ -113,6 +135,7 @@ impl KingQueue {
             fno_bin,
             wake,
             wake_holder,
+            successor,
             &home.registry_json(),
         )
     }
@@ -121,12 +144,14 @@ impl KingQueue {
     /// decision is unit-testable without mutating process env (a set_var race
     /// against parallel tests reading the same env would test the scheduler,
     /// not the guard).
+    #[allow(clippy::too_many_arguments)]
     pub fn from_manifest_with_registry(
         repo_root: &Path,
         scope: &str,
         fno_bin: String,
         wake: bool,
         wake_holder: Option<&str>,
+        successor: bool,
         registry_path: &Path,
     ) -> Result<Self, LoopError> {
         let scope = scope.trim();
@@ -202,7 +227,15 @@ impl KingQueue {
             manifest_path,
             billed: false,
             wake,
+            successor,
         })
+    }
+
+    /// Whether this walk's dispatches count against the respawn budget. An
+    /// ordinary wake does not (the caller's wake ledger is its bound); a
+    /// successor does, because each successor IS a king generation.
+    fn respawn_accounted(&self) -> bool {
+        !self.wake || self.successor
     }
 
     /// The walk refuses to respawn another king past the manifest ceiling.
@@ -469,7 +502,7 @@ impl KingQueue {
 
 impl Queue for KingQueue {
     fn next(&mut self) -> Result<Option<Unit>, LoopError> {
-        if !self.wake && self.at_respawn_ceiling() {
+        if self.respawn_accounted() && self.at_respawn_ceiling() {
             return Ok(None);
         }
         // Stays in wake mode too: a spurious trigger over an empty board must
@@ -478,7 +511,7 @@ impl Queue for KingQueue {
         if self.board_actionable()? == 0 {
             return Ok(None);
         }
-        if !self.wake && !self.bill_one_respawn()? {
+        if self.respawn_accounted() && !self.bill_one_respawn()? {
             return Ok(None);
         }
         Ok(Some(Unit {
@@ -498,7 +531,8 @@ impl Queue for KingQueue {
     /// check reports Budget rather than queueing a past-ceiling respawn.
     /// Wake mode drops the ceiling term for the same reason `next()` does.
     fn has_pending(&mut self) -> Result<bool, LoopError> {
-        Ok((self.wake || !self.at_respawn_ceiling()) && self.board_actionable()? > 0)
+        Ok((!self.respawn_accounted() || !self.at_respawn_ceiling())
+            && self.board_actionable()? > 0)
     }
 
     /// Inert close: see the module doc for why this does nothing.
@@ -639,6 +673,7 @@ mod tests {
             "fno".to_string(),
             false,
             None,
+            false,
             &registry,
         );
         assert!(plain.is_err(), "an ordinary walk never doubles a live row");
@@ -648,6 +683,7 @@ mod tests {
             "fno".to_string(),
             true,
             None,
+            false,
             &registry,
         );
         assert!(
@@ -660,6 +696,7 @@ mod tests {
             "fno".to_string(),
             true,
             Some("reigning-king"),
+            false,
             &registry,
         );
         assert!(
@@ -672,6 +709,7 @@ mod tests {
             "fno".to_string(),
             true,
             Some("someone-else"),
+            false,
             &registry,
         );
         assert!(
@@ -719,6 +757,37 @@ mod tests {
             live_crown_holder_in(&dir.join("no-such-registry.json"), "epic-x"),
             None,
             "an unreadable registry fails open to the recovery path"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_successor_wake_is_refused_by_the_respawn_ceiling_like_any_walk() {
+        // Wake mode normally drops the ceiling term (the caller's wake ledger
+        // is the bound there); a successor is a king generation, so the
+        // respawn budget binds it. The gate fires before any board read, so
+        // this needs no live fno binary to prove the refusal.
+        let dir = std::env::temp_dir().join(format!("kingsucc-{}", std::process::id()));
+        let kings = dir.join(".fno").join("kings");
+        fs::create_dir_all(&kings).unwrap();
+        fs::write(
+            &kings.join("k.md"),
+            "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 4\nrespawn_ceiling: 4\n---\n",
+        )
+        .unwrap();
+        let mut q = KingQueue::from_manifest_full(
+            &dir,
+            "k",
+            "fno".to_string(),
+            true,
+            Some("reigning-king"),
+            true,
+        )
+        .unwrap();
+        assert!(q.at_respawn_ceiling());
+        assert!(
+            q.next().is_ok_and(|unit| unit.is_none()),
+            "an at-ceiling successor yields no unit, before any board read"
         );
         fs::remove_dir_all(&dir).ok();
     }

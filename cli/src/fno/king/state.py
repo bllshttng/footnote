@@ -308,6 +308,28 @@ def parse_manifest(path: Path) -> dict[str, str]:
     return out
 
 
+def at_respawn_ceiling(path: Path) -> bool:
+    """Whether the manifest's respawn budget is spent, the Python half.
+
+    The Rust walk's own read is the authority (``KingQueue::at_respawn_ceiling``);
+    this is the wake phase's pre-check, so a successor dispatch that can only
+    terminate on Budget is never spawned. Mirrors the convention: ceiling 0 is
+    the unbounded spelling, and an unreadable manifest (no counter, no
+    ceiling) reads as under it - the walk's error surface owns a missing
+    manifest, not this read.
+    """
+    manifest = parse_manifest(path)
+
+    def _int(key: str) -> int:
+        try:
+            return int(manifest.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    ceiling = _int("respawn_ceiling")
+    return ceiling > 0 and _int("respawn_count") >= ceiling
+
+
 @dataclass
 class ReignState:
     """One read of who is reigning, over what, in what shape, and is it live.
