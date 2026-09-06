@@ -693,6 +693,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = std::env::temp_dir().join(format!("kingdrain-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
         let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         fs::write(
