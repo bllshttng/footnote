@@ -166,8 +166,11 @@ def send_notification(title: str, message: str, pointer: str = "") -> tuple[int,
 
     local = _dispatch_local(title, message)
     row = _emit_operator_notice(title, message, pointer)
-    remote = row and _sink_routes("operator_notice")
-
-    if local or remote:
+    if local:
+        return 0, ""
+    # No local tool: the sink lane is the only possible channel, so the only
+    # case where the config read buys an answer is this one. A host with a
+    # working notifier never pays a settings load here.
+    if row and _sink_routes("operator_notice"):
         return 0, ""
     return 1, _NO_TOOL_MSG
