@@ -57,6 +57,11 @@ class DrainTarget:
     ``mission`` is the epic id the daemon converges (``advance --epic``); ``project``/
     ``cwd`` are the epic's own project, rooting the loop's journal + close/defer reads
     (all node-global operations - a mission fans out across projects at dispatch time).
+
+    x-e221 adds the territory keying: ``scope`` is the canonical crown scope the
+    target drains (empty only on a legacy receipt), ``rung`` the crown rung,
+    ``kingless`` whether no live crown holds the scope, and ``members`` the ids
+    one tick converges - epic ids at rung 2, project names at rungs 0/1.
     """
 
     project: str
@@ -64,6 +69,10 @@ class DrainTarget:
     interval_seconds: int
     failure_limit: int
     mission: Optional[str]
+    scope: str = ""
+    rung: int = 1
+    kingless: bool = True
+    members: tuple[str, ...] = ()
 
 
 def _workspace_paths(*, strict: bool = False) -> dict[str, str]:
@@ -113,20 +122,113 @@ def _active_missions(*, strict: bool = False) -> list[dict]:
         return []
 
 
-def resolve_drain_targets(*, strict: bool = False) -> list[DrainTarget]:
-    """One drain target per ACTIVE mission, in epic-id order (x-a4dc K2).
+def _live_crowns(*, strict: bool = False) -> list[dict]:
+    """Live crown scopes from the registry cache (x-f0d2: the row is a cache;
+    the daemon reads it as court does). One ``{scope, level}`` per DISTINCT
+    canonical scope, in scope order. A registry read fault yields none by
+    default; strict callers raise so a receipt can distinguish unknown from
+    empty."""
+    try:
+        from fno.agents.crown import canonical_scope, split_scope
+        from fno.agents.registry import TERMINAL_STATUSES, load_registry
 
-    A mission is an epic with ``mission_active=true`` (K1's activation record).
-    The daemon drains each by shelling K1's converge core (``advance --epic``),
-    which fans out the epic's ready leaf children across ALL projects; the epic id
-    rides on the target's ``mission``. The legacy per-project interval drain and
-    its opt-in escape env are deleted (epic Locked Decision 4) - merge-triggered
-    ``fno backlog advance`` is the same-project coverage, and no per-project drain
-    ever comes back.
+        rows = load_registry()
+    except Exception:  # noqa: BLE001 - an unreadable registry drains nothing
+        if strict:
+            raise
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        scope = getattr(row, "crown_scope", None)
+        if not scope or getattr(row, "status", "") in TERMINAL_STATUSES:
+            continue
+        canon = canonical_scope(split_scope(scope))
+        if not canon or canon in seen:
+            continue
+        seen.add(canon)
+        try:
+            level = int(getattr(row, "crown_level", 0) or 0)
+        except (TypeError, ValueError):
+            level = 0
+        out.append({"scope": canon, "level": level})
+    out.sort(key=lambda c: c["scope"])
+    return out
+
+
+def _territories(*, strict: bool = False) -> list[dict]:
+    """The territory list (x-e221): one entry per live crown scope plus one
+    rung-1 territory per workspace project no live project-rung crown rules.
+    A crownless territory still drains - ``kingless`` only names it in the
+    readout. Fail-safe: partial reads shrink the list, never raise."""
+    territories: list[dict] = []
+    ruled_projects: set[str] = set()
+    from fno.agents.crown import _canonical_project, split_scope
+
+    for crown in _live_crowns(strict=strict):
+        members = split_scope(crown["scope"])
+        if crown["level"] != 2:
+            ruled_projects.update(members)
+        territories.append(
+            {
+                "scope": crown["scope"],
+                "rung": crown["level"],
+                "kingless": False,
+                "members": members,
+            }
+        )
+    try:
+        projects = _workspace_paths(strict=strict) if strict else _workspace_paths()
+    except Exception:  # noqa: BLE001 - no workspace map: crowned territories only
+        projects = {}
+    for name in sorted(projects):
+        try:
+            canon = _canonical_project(name) or name
+        except Exception:  # noqa: BLE001 - a config fault degrades to the raw name
+            canon = name
+        if canon in ruled_projects:
+            continue
+        territories.append(
+            {
+                "scope": canon,
+                "rung": 1,
+                "kingless": True,
+                "members": [canon],
+            }
+        )
+    return territories
+
+
+def _epic_project(epic_id: str) -> Optional[str]:
+    """The project an epic node lives in, or None when unreadable/unmapped."""
+    try:
+        from fno.tracker.metadata import read_entries
+
+        entries = read_entries("active_backlog")
+        for row in entries:
+            if isinstance(row, dict) and row.get("id") == epic_id:
+                project = row.get("project")
+                return project if isinstance(project, str) and project else None
+    except Exception:  # noqa: BLE001 - a graph read fault roots nothing
+        pass
+    return None
+
+
+def resolve_drain_targets(*, strict: bool = False) -> list[DrainTarget]:
+    """One drain target per TERRITORY, in scope order (x-e221).
+
+    The crown list seeds the mission list: one target per live crown scope
+    (``mission == crown scope``; a scope with no live crown still drains and
+    the readout names it kingless), plus one rung-1 territory per workspace
+    project no live project-rung crown rules, draining that project's loose
+    nodes independently of the epic territories. ``mission_active`` stays
+    K1's record for ``advance --epic``'s own bookkeeping; it no longer gates
+    the daemon's target list.
 
     ``config.active_backlog`` stays the daemon's master switch: an unenabled
-    config or invalid interval yields no targets. A mission whose epic project has
-    no workspace path is skipped (cannot root the loop). Fail-safe throughout.
+    config or invalid interval yields no targets. A territory that cannot be
+    rooted (a rung-2 scope whose first member epic has no workspace path, an
+    unmapped project) is skipped. Fail-safe throughout.
     """
     try:
         from fno.config import load_settings
@@ -145,24 +247,37 @@ def resolve_drain_targets(*, strict: bool = False) -> list[DrainTarget]:
 
     paths = _workspace_paths(strict=True) if strict else _workspace_paths()
     targets: list[DrainTarget] = []
-    missions = _active_missions(strict=True) if strict else _active_missions()
-    for epic in sorted(missions, key=lambda e: e["id"]):
-        project = epic["project"]
-        # Respect the per-project enable contract: with enabled={proj: bool} an
-        # explicitly-disabled project's mission does not drain, even though
-        # any_enabled() is true for the daemon as a whole.
-        if not cfg.is_enabled_for(project):
+    for territory in sorted(_territories(strict=strict), key=lambda t: t["scope"]):
+        members = territory["members"]
+        if territory["rung"] == 2:
+            # Root at the first member epic's own project; the converge core
+            # fans out across projects at dispatch time.
+            root_project = _epic_project(members[0]) if members else None
+            mission = members[0] if members else None
+        else:
+            root_project = members[0] if members else None
+            mission = None
+        if not root_project:
             continue
-        cwd = paths.get(project)
+        # Respect the per-project enable contract: with enabled={proj: bool} an
+        # explicitly-disabled project's territory does not drain, even though
+        # any_enabled() is true for the daemon as a whole.
+        if not cfg.is_enabled_for(root_project):
+            continue
+        cwd = paths.get(root_project)
         if not cwd:
             continue
         targets.append(
             DrainTarget(
-                project=project,
+                project=root_project,
                 cwd=cwd,
                 interval_seconds=interval,
                 failure_limit=cfg.failure_limit,
-                mission=epic["id"],
+                mission=mission,
+                scope=territory["scope"],
+                rung=territory["rung"],
+                kingless=territory["kingless"],
+                members=tuple(members),
             )
         )
     return targets
@@ -219,9 +334,11 @@ def fanout_targets_as_dicts() -> list[dict]:
 def drain_targets_as_dicts() -> list[dict]:
     """JSON-serializable form of :func:`resolve_drain_targets` for the daemon.
 
-    The mission drain shells ``advance --epic``, which resolves each child
-    project's ``batch`` / ``max_lanes`` itself - so, unlike the deleted per-project
-    arm, the target carries no per-repo dispatch config."""
+    The mission drain shells ``advance --epic`` / ``advance --loose``, which
+    resolve each child project's ``batch`` / ``max_lanes`` themselves - so,
+    unlike the deleted per-project arm, the target carries no per-repo
+    dispatch config. The territory fields (x-e221) ride additively: a receipt
+    consumer older than them reads the legacy fields only."""
     return [
         {
             "project": t.project,
@@ -229,6 +346,10 @@ def drain_targets_as_dicts() -> list[dict]:
             "interval_seconds": t.interval_seconds,
             "failure_limit": t.failure_limit,
             "mission": t.mission,
+            "scope": t.scope,
+            "rung": t.rung,
+            "kingless": t.kingless,
+            "members": list(t.members),
         }
         for t in resolve_drain_targets()
     ]

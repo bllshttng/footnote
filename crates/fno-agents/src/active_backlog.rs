@@ -133,6 +133,16 @@ pub struct DrainConfig {
     pub fno_bin: String,
     /// The active mission's epic id - the `advance --epic <mission>` argument.
     pub mission: String,
+    /// The territory key (x-e221): the canonical crown scope this loop drains.
+    /// Empty on a legacy receipt; the loop then keys by `mission`.
+    pub scope: String,
+    /// No live crown holds this territory; the readout names it kingless while
+    /// the drain continues (machinery does not need a king to dispatch).
+    pub kingless: bool,
+    /// What one tick converges: epic members shell `advance --epic`, project
+    /// members shell `advance --loose --project`. Empty falls back to a single
+    /// epic member = `mission` (the legacy single-mission receipt).
+    pub members: Vec<DrainMember>,
     /// Cross-tick consecutive-failure limit (the circuit breaker).
     pub failure_limit: u32,
     /// The mission's poll interval, for the control-plane tick row's staleness.
@@ -145,6 +155,16 @@ pub struct DrainConfig {
     /// with no workspace path drains nowhere but still renders - and two bare `of
     /// N` suffixes with different N read as a contradiction.
     pub rotation: Option<(usize, usize)>,
+}
+
+/// One member a territory tick converges (x-e221).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrainMember {
+    /// The epic id (rung 2) or project name (rungs 0/1) to converge.
+    pub id: String,
+    /// True: shell `advance --epic <id> --continuation`; false: shell
+    /// `advance --loose --project <id>`.
+    pub epic: bool,
 }
 
 /// What one [`mission_drain_tick`]'s reconcile did, for tests. Dispatch itself
@@ -684,31 +704,41 @@ fn facts_from_receipt(receipt: &AdvanceEpicReceipt) -> DispatchFacts {
     }
 }
 
-/// Dispatch the mission by shelling K1's converge core, recording each dispatched
-/// child in `pending` for later reconcile. Returns [`MissionDispatch::Retire`]
-/// when `advance --epic` reports the mission deactivated / all children done.
+/// Dispatch ONE territory member by shelling K1's converge core, recording each
+/// dispatched child in `pending` for later reconcile. Epic members run
+/// `advance --epic <id> --continuation` (Retire on deactivated/all-done);
+/// project members run `advance --loose --project <id>` (never retire - a
+/// loose territory has no mission lifecycle, x-e221).
 ///
 /// The converge core owns ALL dispatch policy (cross-project fan-out, per-root
 /// `walker:` respect, `max_lanes` cap, claim dedup), so this never forks it. A
 /// non-zero exit or unparseable receipt is a transient skip (Continue) - a truly
 /// gone mission is caught by the loop's re-resolve, not guessed at here.
-fn dispatch_mission(
+fn dispatch_member(
     cfg: &DrainConfig,
+    member: &DrainMember,
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
 ) -> (MissionDispatch, DispatchFacts) {
+    let mut args = vec![
+        "backlog".to_string(),
+        "advance".to_string(),
+        "--json".to_string(),
+    ];
+    if member.epic {
+        // --continuation: never reactivate the mission and retire an inactive
+        // one, so an operator `--stop` between drain ticks is not undone.
+        args.push("--epic".to_string());
+        args.push(member.id.clone());
+        args.push("--continuation".to_string());
+    } else {
+        args.push("--loose".to_string());
+        args.push("--project".to_string());
+        args.push(member.id.clone());
+    }
     let out = match retry_etxtbsy(|| {
         fno_cmd(&cfg.fno_bin)
-            // --continuation: never reactivate the mission and retire an inactive
-            // one, so an operator `--stop` between drain ticks is not undone.
-            .args([
-                "backlog",
-                "advance",
-                "--epic",
-                &cfg.mission,
-                "--continuation",
-                "--json",
-            ])
+            .args(&args)
             .current_dir(&cfg.cwd)
             .output()
     }) {
@@ -740,7 +770,7 @@ fn dispatch_mission(
         }
     };
     let facts = facts_from_receipt(&receipt);
-    if receipt.deactivated || receipt.all_done {
+    if member.epic && (receipt.deactivated || receipt.all_done) {
         return (MissionDispatch::Retire, facts);
     }
     let mut new_ids = Vec::new();
@@ -766,6 +796,52 @@ fn dispatch_mission(
         );
     }
     (MissionDispatch::Continue, facts)
+}
+
+/// Dispatch the territory by converging EVERY member, recording each dispatched
+/// child in `pending` for later reconcile. Retires only when the territory has
+/// epic members and EVERY one reports deactivated / all children done - a
+/// project member never retires its territory (x-e221: a loose territory has
+/// no mission lifecycle; it drains while the workspace exists).
+fn dispatch_mission(
+    cfg: &DrainConfig,
+    pending: &mut Vec<PendingDispatch>,
+    journal: &Journal,
+) -> (MissionDispatch, DispatchFacts) {
+    let members: Vec<DrainMember> = if cfg.members.is_empty() {
+        // Legacy single-mission receipt: one epic member = the mission itself.
+        vec![DrainMember {
+            id: cfg.mission.clone(),
+            epic: true,
+        }]
+    } else {
+        cfg.members.clone()
+    };
+    let mut merged = DispatchFacts::default();
+    let mut epic_members = 0usize;
+    let mut retired = 0usize;
+    for member in &members {
+        let (outcome, facts) = dispatch_member(cfg, member, pending, journal);
+        merged.ready += facts.ready;
+        if merged.error.is_none() {
+            merged.error = facts.error.clone();
+        }
+        if merged.reason.is_none() {
+            merged.reason = facts.reason.clone();
+        }
+        if member.epic {
+            epic_members += 1;
+            if outcome == MissionDispatch::Retire {
+                retired += 1;
+            }
+        }
+    }
+    let outcome = if epic_members > 0 && retired == epic_members {
+        MissionDispatch::Retire
+    } else {
+        MissionDispatch::Continue
+    };
+    (outcome, merged)
 }
 
 /// One mission drain tick: reconcile prior dispatches (feeding the breaker), then
@@ -812,9 +888,22 @@ pub fn mission_drain_tick(
         .rotation
         .map(|(pos, total)| format!(" ({pos} of {total} draining)"))
         .unwrap_or_default();
+    let (label, kingless_mark) = if cfg.scope.is_empty() {
+        (format!("mission={}", cfg.mission), String::new())
+    } else {
+        (
+            format!("territory={}", cfg.scope),
+            if cfg.kingless {
+                " kingless".to_string()
+            } else {
+                String::new()
+            },
+        )
+    };
     let detail = format!(
-        "mission={}{} ready={} closed={} dispatched={} pending={}{}",
-        cfg.mission,
+        "{}{}{} ready={} closed={} dispatched={} pending={}{}",
+        label,
+        kingless_mark,
         rotation,
         facts.ready,
         closed,
@@ -860,6 +949,29 @@ pub struct ResolvedTarget {
     /// mission is skipped by the supervisor.
     #[serde(default)]
     pub mission: Option<String>,
+    /// The territory key (x-e221): the canonical crown scope, empty on a
+    /// legacy receipt (the loop then keys by `mission`).
+    #[serde(default)]
+    pub scope: String,
+    /// The crown rung of the scope; 0 on a legacy receipt.
+    #[serde(default)]
+    pub rung: u8,
+    /// No live crown holds the scope; the drain continues regardless.
+    #[serde(default)]
+    pub kingless: bool,
+    /// What one tick converges: epic ids at rung 2, project names at rungs 0/1.
+    #[serde(default)]
+    pub members: Vec<String>,
+}
+
+/// The drain loop's key: the territory scope when the receipt carries one,
+/// else the legacy mission id (an older Python resolver still in the field).
+fn territory_key(target: &ResolvedTarget) -> String {
+    if target.scope.is_empty() {
+        target.mission.clone().unwrap_or_default()
+    } else {
+        target.scope.clone()
+    }
 }
 
 /// Shell `fno config active-backlog --json` to discover enabled drain targets.
@@ -1005,11 +1117,26 @@ fn drain_config_for(
     fno_bin: &str,
     rotation: Option<(usize, usize)>,
 ) -> Option<DrainConfig> {
-    let mission = target.mission.clone()?;
+    let key = territory_key(target);
+    if key.is_empty() {
+        // A malformed receipt (no scope and no mission) keys an unnamed loop.
+        return None;
+    }
+    let members: Vec<DrainMember> = target
+        .members
+        .iter()
+        .map(|id| DrainMember {
+            id: id.clone(),
+            epic: target.rung == 2,
+        })
+        .collect();
     Some(DrainConfig {
         cwd: PathBuf::from(&target.cwd),
         fno_bin: fno_bin.to_string(),
-        mission,
+        mission: target.mission.clone().unwrap_or_else(|| key.clone()),
+        scope: target.scope.clone(),
+        kingless: target.kingless,
+        members,
         failure_limit: target.failure_limit,
         interval_seconds: target.interval_seconds,
         rotation,
@@ -1140,14 +1267,16 @@ pub async fn run_supervisor(
         }
 
         for target in targets {
-            // Key by mission (epic id). A target with no mission is a malformed
-            // receipt; skip it rather than key an unnamed loop.
-            let Some(mission) = target.mission.clone() else {
+            // Key by territory (x-e221): the canonical crown scope; a legacy
+            // receipt without one still keys by mission. An empty key is a
+            // malformed receipt; skip it rather than key an unnamed loop.
+            let key = territory_key(&target);
+            if key.is_empty() {
                 continue;
-            };
-            // Entry API (single lookup): only spawn when this mission has no live
-            // loop yet, mirroring the fanout family below.
-            if let std::collections::hash_map::Entry::Vacant(slot) = tasks.entry(mission) {
+            }
+            // Entry API (single lookup): only spawn when this territory has no
+            // live loop yet, mirroring the fanout family below.
+            if let std::collections::hash_map::Entry::Vacant(slot) = tasks.entry(key) {
                 slot.insert(tokio::spawn(mission_drain_loop(
                     target,
                     fno_bin.clone(),
@@ -1209,10 +1338,10 @@ async fn mission_drain_loop(
     emitter: EventEmitter,
     shutdown: Arc<AtomicBool>,
 ) {
-    // A malformed target with no mission is filtered by the supervisor before
+    // A malformed target with no key is filtered by the supervisor before
     // spawn; default to empty so this never panics if one slips through (the
     // re-resolve below then finds no match and exits).
-    let mission = target.mission.clone().unwrap_or_default();
+    let key = territory_key(&target);
     let mut breaker = CircuitBreaker::new(target.failure_limit);
     // In-flight fire-and-forget dispatches, reconciled from events across ticks
     // (x-0ad6). Resident like the breaker so a worker dispatched one tick is
@@ -1226,16 +1355,13 @@ async fn mission_drain_loop(
             break;
         }
 
-        // Re-resolve this mission's liveness. If its epic dropped out of the
-        // target set (mission_active cleared externally), exit the loop (the
+        // Re-resolve this territory's liveness. If its scope dropped out of the
+        // target set (crown revoked / workspace gone), exit the loop (the
         // supervisor will not respawn it). The position in this list (already
-        // epic-id ordered) names the rotation in the tick's detail row; a lone
-        // mission prints no `(1 of 1)` - that reads as a fault, not a count.
+        // scope-ordered) names the rotation in the tick's detail row; a lone
+        // territory prints no `(1 of 1)` - that reads as a fault, not a count.
         let all = resolve_targets(&fno_bin);
-        let Some(pos) = all
-            .iter()
-            .position(|t| t.mission.as_deref() == Some(mission.as_str()))
-        else {
+        let Some(pos) = all.iter().position(|t| territory_key(t) == key) else {
             break;
         };
         let t = &all[pos];
@@ -1266,17 +1392,15 @@ async fn mission_drain_loop(
                 pending = p;
                 backoff = Duration::from_secs(1);
                 if outcome == MissionDispatch::Retire {
-                    let _ = emitter.emit(
-                        "active_backlog_mission_retired",
-                        &json!({"mission": mission}),
-                    );
+                    let _ =
+                        emitter.emit("active_backlog_mission_retired", &json!({"mission": key}));
                     break;
                 }
             }
             Err(join_err) => {
                 let _ = emitter.emit(
                     "active_backlog_task_crashed",
-                    &json!({"mission": mission, "error": join_err.to_string()}),
+                    &json!({"mission": key, "error": join_err.to_string()}),
                 );
                 // The panicked breaker's streak is lost (rare); a fresh one is
                 // safe (a crash-looping node re-accrues failures and re-defers).
@@ -1467,6 +1591,9 @@ mod tests {
             cwd: tmp.to_path_buf(),
             fno_bin,
             mission: "x-epic".to_string(),
+            scope: String::new(),
+            kingless: false,
+            members: Vec::new(),
             failure_limit,
             interval_seconds: 300,
             rotation: None,

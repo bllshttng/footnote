@@ -10243,6 +10243,72 @@ def _canonical_post_close(
 # -- reconcile (close merged-PR drift) --
 
 
+def _run_advance_loose(
+    project: str,
+    *,
+    max_dispatch: Optional[int],
+    json_out: bool,
+    verbose: bool,
+    model: Optional[str],
+    provider: Optional[str],
+) -> None:
+    """Run the project territory's loose-node drain and render its receipt (x-e221).
+
+    Same JSON shape as the epic receipt so the Rust drain parses both with one
+    struct. Never reports deactivated: a loose territory has no mission
+    lifecycle to retire on.
+    """
+    from fno.backlog.advance import advance_project_loose
+
+    try:
+        result = advance_project_loose(
+            project,
+            max_dispatch=max_dispatch,
+            verbose=verbose,
+            model=model,
+            provider=provider,
+        )
+    except Exception as exc:  # noqa: BLE001 - the drain itself is non-fatal per-child
+        typer.echo(f"advance --loose: unexpected error (non-fatal): {exc}", err=True)
+        raise typer.Exit(code=0)
+
+    if json_out:
+        typer.echo(
+            json.dumps(
+                {
+                    "epic_id": result.epic_id,
+                    "error": result.error,
+                    "activated": result.activated,
+                    "deactivated": result.deactivated,
+                    "all_done": result.all_done,
+                    "dispatched": list(result.dispatched),
+                    "children": [
+                        {
+                            "node_id": r.node_id,
+                            "decision": r.decision,
+                            "reason": r.reason,
+                            "short_id": r.short_id,
+                        }
+                        for r in result.child_results
+                    ],
+                },
+                indent=2,
+            )
+        )
+    else:
+        if result.error:
+            typer.echo(f"loose {result.epic_id}: {result.error}", err=True)
+        else:
+            n = len(result.dispatched)
+            skips = [r for r in result.child_results if r.decision == "skipped"]
+            fails = [r for r in result.child_results if r.decision == "failed"]
+            typer.echo(
+                f"loose {result.epic_id}: dispatched {n}"
+                + (f", skipped {len(skips)}" if skips else "")
+                + (f", failed {len(fails)}" if fails else "")
+            )
+
+
 def _run_advance_epic(
     epic: str,
     *,
@@ -10686,6 +10752,11 @@ def cmd_advance(
         "--stop",
         help="With --epic: deactivate the mission (clear mission_active) and dispatch nothing.",
     ),
+    loose: bool = typer.Option(
+        False,
+        "--loose",
+        help="With --project: drain the project territory's loose (parentless) ready nodes - no mission lifecycle, never retires (x-e221 rung-1).",
+    ),
     continuation: bool = typer.Option(
         False,
         "--continuation",
@@ -10815,6 +10886,9 @@ def cmd_advance(
         if closed is not None:
             typer.echo("advance: --epic and --closed are mutually exclusive", err=True)
             raise typer.Exit(code=2)
+        if loose:
+            typer.echo("advance: --loose and --epic are mutually exclusive", err=True)
+            raise typer.Exit(code=2)
         _run_advance_epic(
             epic,
             stop=stop,
@@ -10824,6 +10898,22 @@ def cmd_advance(
             model=model,
             provider=provider,
             continuation=continuation,
+        )
+        return
+    if loose:
+        if closed is not None:
+            typer.echo("advance: --loose and --closed are mutually exclusive", err=True)
+            raise typer.Exit(code=2)
+        if not project:
+            typer.echo("advance: --loose requires --project", err=True)
+            raise typer.Exit(code=2)
+        _run_advance_loose(
+            project,
+            max_dispatch=max_dispatch,
+            json_out=json_out,
+            verbose=verbose,
+            model=model,
+            provider=provider,
         )
         return
     if stop or max_dispatch is not None or continuation:
