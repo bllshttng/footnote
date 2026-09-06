@@ -1660,7 +1660,12 @@ def test_quota_probe_is_scoped_to_the_node_repository(state_path: Path, monkeypa
     import fno.adapters.providers.runtime_state as rs
 
     monkeypatch.setattr(
-        rs, "refresh_usage", lambda pid, **k: seen.update(refresh=k.get("repo_root"))
+        rs,
+        "refresh_usage_detailed",
+        lambda pid, **k: (
+            seen.update(refresh=k.get("repo_root"))
+            or rs.UsageRefresh(None, "probe-failed")
+        ),
     )
     evaluate_quota_signal("p1", priority="p2", now=1000.0, repo_root=tmp_path)
     assert seen["quota"] == tmp_path
@@ -1680,8 +1685,11 @@ def test_a_lost_persist_does_not_turn_exhausted_into_unknown(state_path: Path, m
     monkeypatch.setattr(loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True))
     # The probe returns a walled snapshot; the disk keeps nothing.
     monkeypatch.setattr(
-        rs, "refresh_usage",
-        lambda pid, **k: _snap(pid, UsageWindow("5h", 100.0, 9e18), probed_at=1000.0),
+        rs,
+        "refresh_usage_detailed",
+        lambda pid, **k: rs.UsageRefresh(
+            _snap(pid, UsageWindow("5h", 100.0, 9e18), probed_at=1000.0)
+        ),
     )
     sig = evaluate_quota_signal("p1", priority="p2", now=1000.0)
     assert sig.state is HeadroomState.EXHAUSTED
