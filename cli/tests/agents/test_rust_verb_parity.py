@@ -58,12 +58,24 @@ def _fno_shim_dir() -> str | None:
 
     The shim resolves ``fno-py`` at exec time rather than install time, because
     it is the surrounding ``uv run`` that puts the venv bin on PATH.
+
+    ``mux`` never forwards: the Python front execs whichever ``fno`` is on
+    PATH for that verb, which here is this shim again, and the recursion runs
+    until the runner kills it. The Rust attach verb reaches the mux through
+    ``fno mux thread``, so the shim answers as a box with no live mux server.
     """
     if shutil.which("fno"):
         return None
     d = tempfile.mkdtemp(prefix="fno-parity-shim-")
     shim = Path(d) / "fno"
-    shim.write_text('#!/bin/sh\nexec fno-py "$@"\n')
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = mux ]; then\n'
+        '  echo "fno mux: no live mux server (parity shim)" >&2\n'
+        "  exit 24\n"
+        "fi\n"
+        'exec fno-py "$@"\n'
+    )
     shim.chmod(0o755)
     return d
 
