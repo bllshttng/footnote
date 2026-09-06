@@ -513,6 +513,7 @@ pub fn dispatch_opencode_serve(
     cwd: &Path,
     model: Option<&str>,
     effort: Option<&str>,
+    node: Option<&str>,
 ) -> AskOutcome {
     dispatch_opencode_serve_inner(
         home,
@@ -522,6 +523,7 @@ pub fn dispatch_opencode_serve(
         cwd,
         model,
         effort,
+        node,
         crate::claude_ask::state_dirs_from_env(),
         "opencode",
     )
@@ -539,6 +541,7 @@ fn dispatch_opencode_serve_inner(
     cwd: &Path,
     model: Option<&str>,
     effort: Option<&str>,
+    node: Option<&str>,
     state_dirs: Vec<String>,
     opencode_bin: &str,
 ) -> AskOutcome {
@@ -796,7 +799,7 @@ fn dispatch_opencode_serve_inner(
         route_provider_id: Some("opencode".to_string()),
         model_name: model.filter(|m| !m.is_empty()).map(str::to_string),
         account_record_id: Some("default".to_string()),
-        node: std::env::var("FNO_NODE").ok().filter(|v| !v.is_empty()),
+        node: node.filter(|v| !v.is_empty()).map(str::to_string),
         // The serve-hosted worker lane (a detached run --attach writer behind
         // a shared serve): the public "thread" name for the local bg
         // selector.
@@ -1297,6 +1300,7 @@ mod tests {
             &cwd,
             None,
             None,
+            Some("x-535c"),
             vec![state_dir.to_string_lossy().to_string()],
             &stub.to_string_lossy(),
         );
@@ -1305,6 +1309,8 @@ mod tests {
         let receipt: serde_json::Value = serde_json::from_str(outcome.stdout.trim()).unwrap();
         assert_eq!(receipt["session_id"], "ses_dispatchtest1");
         assert_eq!(receipt["ok"], true);
+        let registry = crate::state::load_registry(&h.registry_json()).unwrap();
+        assert_eq!(registry.entries[0].node.as_deref(), Some("x-535c"));
         // The registry row exists with the harness session bound AND the
         // writer's pid as its liveness axis (spawn-gate cap + reconcile).
         let reg = load_registry(&h.registry_json()).unwrap();
@@ -1354,6 +1360,7 @@ mod tests {
             Path::new("/tmp"),
             None,
             None,
+            None,
             Vec::new(),
             "opencode",
         );
@@ -1374,6 +1381,7 @@ mod tests {
             "m",
             "op",
             Path::new("/tmp"),
+            None,
             None,
             None,
             Vec::new(),

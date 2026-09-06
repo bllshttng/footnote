@@ -17,6 +17,7 @@ use crate::events::EventEmitter;
 // point (`state::update_registry`) can stage the same recovery record for a
 // row removed through ANY door; re-exported so the reap path's references
 // are unchanged.
+use crate::codex_thread_entry::build_codex_thread_entry;
 pub use crate::gc::{gc_sweep, gc_sweep_dry_run};
 use crate::identity::canonical_handle;
 use crate::paths::{self, AgentsHome};
@@ -4122,105 +4123,6 @@ async fn spawn_claude_stream_lane(
     )
 }
 
-/// Build the registry row for a Codex app-server thread. Codex has no fno
-/// short id: the full harness session id is both the resume handle and the
-/// canonical registry identity.
-fn build_codex_thread_entry(
-    name: &str,
-    cwd: &Path,
-    driver: &crate::codex_thread::CodexThread,
-    model: Option<&str>,
-    effort: Option<&str>,
-    yolo: bool,
-) -> RegistryEntry {
-    let cwd_s = cwd.to_string_lossy().into_owned();
-    let session_id = driver.thread_id().to_string();
-    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
-    RegistryEntry {
-        node: None,
-        // v25: the route axes this lane actually used. Codex's ambient auth
-        // is the account it positively pinned nothing past, so "default".
-        route_provider_id: Some("openai".into()),
-        model_name: model.filter(|m| !m.is_empty()).map(str::to_string),
-        account_record_id: Some("default".into()),
-        // The daemon-hosted codex app-server thread lane.
-        substrate: Some("thread".into()),
-        name: name.into(),
-        short_id: String::new(),
-        legacy_provider: String::new(),
-        provider: Some("openai".into()),
-        model: model.map(str::to_string),
-        // The model arrived on the spawn request, so requested is its basis -
-        // the field no longer reads unpopulated on this mint.
-        model_basis: model.map(|_| "requested".to_string()),
-        effort: effort.map(str::to_string),
-        // v23 (x-2019): the request beside the effect; verbatim as typed.
-        requested_model: model.filter(|m| !m.is_empty()).map(str::to_string),
-        requested_provider: None,
-        requested_effort: effort.filter(|v| !v.is_empty()).map(str::to_string),
-        harness: Some("codex".into()),
-        harness_session_id: Some(session_id.clone()),
-        predecessor_session_ids: Vec::new(),
-        forked_from_session_id: None,
-        // x-d285: non-claude harness; the account axis does not apply.
-        launch_account: None,
-        related_session_id: None,
-        cwd: cwd_s.clone(),
-        project_root: cwd_s,
-        session_id: None,
-        origin: Some("spawn".into()),
-        spawn_trigger: None,
-        spawned_by_session: parent_session,
-        spawned_by_harness: parent_harness,
-        spawned_by_cwd: parent_cwd,
-        legacy_claude_short_id: None,
-        claude_session_uuid: None,
-        messaging_socket_path: None,
-        codex_session_id: Some(session_id.clone()),
-        gemini_session_id: None,
-        mcp_channel_id: None,
-        cc_session_id: None,
-        host_mode: Some(crate::state::HOST_MODE_INTERACTIVE.into()),
-        status: AgentStatus::Live,
-        last_message_at: Some(now_rfc3339_like()),
-        created_at: now_rfc3339_like(),
-        // No pid, deliberately. A codex thread worker owns NO process: its
-        // app-server is the shared daemon, serving every other codex session
-        // on the machine too. `pid` is a LIVENESS surface, and writing the
-        // daemon's pid here made every thread row carry the same always-alive
-        // pid. A stopped row then read `Unmeasured` forever in `derive_liveness`
-        // (the status-contradicts-pid tier) and `pid_confirmed_dead` in gc
-        // could never corroborate its removal. Ownership is provable from the
-        // control socket and `thread/loaded/list`, which is where it belongs.
-        pid: None,
-        pid_start_time: None,
-        keeper_child_pid: None,
-        log_path: Some(driver.rollout_path().to_string_lossy().into_owned()),
-        last_reconciled_at: None,
-        inside_leg: None,
-        exited_at: None,
-        mux: None,
-        screen_state: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_grantor: None,
-        route_settings_path: None,
-        fno_id: Some(session_id),
-        delivery_policy: None,
-        // v19: the launch posture is the resume posture. The doc's old warning
-        // that "a registry row records no sandbox posture" died here.
-        sandbox_posture: Some(
-            if yolo {
-                "danger-full-access"
-            } else {
-                "workspace-write"
-            }
-            .to_string(),
-        ),
-        ..Default::default()
-    }
-}
-
 /// Start and register one Codex app-server thread. The seed turn is detached
 /// after registration so spawn returns a live row immediately while the held
 /// process remains available for later `ask` calls. Reached by the derived
@@ -4258,6 +4160,7 @@ async fn spawn_codex_thread_lane(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let effort = req.params.get("effort").and_then(Value::as_str);
+    let node = req.params.get("node").and_then(Value::as_str);
     // Hop 2 of the state-root grant (x-f22f). Read the roots from the REQUEST,
     // never from this process's environment. This daemon is long-lived and
     // shared across every thread on the machine, so its own env is not the
@@ -4301,7 +4204,7 @@ async fn spawn_codex_thread_lane(
             return Response::err(req.id, ErrorCode::SpawnFailed, error.to_string());
         }
     };
-    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort, yolo);
+    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort, yolo, node);
     let session_id = entry.harness_session_id.clone().unwrap_or_default();
     let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
         if registry
@@ -12514,14 +12417,15 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                     .await
                     .expect("yolo thread starts")
             });
-        let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true);
+        let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true, None);
         assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
         assert!(
             entry_posture_is_full_access(&yolo)
                 && yolo.fno_id.as_deref() == Some("thread-p")
                 && yolo.mux.is_none()
         );
-        let bounded = build_codex_thread_entry("t", worktree.path(), &start, None, None, false);
+        let bounded =
+            build_codex_thread_entry("t", worktree.path(), &start, None, None, false, None);
         assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
         assert!(!entry_posture_is_full_access(&bounded));
         // A requested model stamps its basis on the row; an absent one
@@ -12533,6 +12437,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             Some("gpt-5.6-sol"),
             None,
             false,
+            None,
         );
         assert_eq!(modeled.model.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(modeled.model_basis.as_deref(), Some("requested"));
@@ -12544,6 +12449,34 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert_eq!(modeled.route_provider_id.as_deref(), Some("openai"));
         assert_eq!(modeled.model_name.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(modeled.account_record_id.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn build_codex_thread_entry_stamps_the_request_node() {
+        let worktree = tempfile::tempdir().unwrap();
+        let _guard = crate::path_test_guard();
+        let start = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+                    crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-node"),
+                );
+                crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
+                    .await
+                    .expect("yolo thread starts")
+            });
+        let entry = build_codex_thread_entry(
+            "t",
+            worktree.path(),
+            &start,
+            None,
+            None,
+            true,
+            Some("x-535c"),
+        );
+        assert_eq!(entry.node.as_deref(), Some("x-535c"));
     }
 
     /// AC12: a PRE-v19 row (no posture key) still parses and reads the safe

@@ -1684,7 +1684,14 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // on the serve IS the worker (steering/mail over the API is a filed
         // follow-up).
         ("opencode", "bg") => emit!(fno_agents::opencode_serve::dispatch_opencode_serve(
-            home, name, &message, from_name, &cwd, model, effort,
+            home,
+            name,
+            &message,
+            from_name,
+            &cwd,
+            model,
+            effort,
+            params.get("node").and_then(|v| v.as_str()),
         )),
 
         ("agy", "headless") => {
@@ -2187,6 +2194,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--cwd",
         "--message",
         "--name",
+        "--node",
         "--session-id",
         "--status",
         "--progress",
@@ -2328,6 +2336,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             // fallback below keeps a direct `fno-agents spawn <name>` working.
             "--name" => {
                 params.insert("name".into(), str_arg(&mut it, "--name")?);
+            }
+            "--node" => {
+                params.insert("node".into(), str_arg(&mut it, "--node")?);
             }
             "--session-id" => {
                 params.insert("session_id".into(), str_arg(&mut it, "--session-id")?);

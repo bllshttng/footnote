@@ -775,6 +775,14 @@ mod tests {
         // the only bound); reading it as "at ceiling" would refuse every
         // respawn for a scope that deliberately disabled the counter.
         let dir = std::env::temp_dir().join(format!("kingq-{}", std::process::id()));
+        // space_dir resolves through FNO_SPACES_DIR and HOME, which are
+        // process-global and shared by every test thread. Take the env lock
+        // and pin the spaces root here, so the resolution is race-free and
+        // never touches the real $HOME.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FNO_SPACES_DIR", &dir);
         let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         let path = kings.join("k.md");
@@ -788,6 +796,7 @@ mod tests {
         assert_eq!(q.respawn_ceiling(), 0);
         assert!(!q.at_respawn_ceiling());
         fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
+        std::env::remove_var("FNO_SPACES_DIR");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -812,6 +821,12 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("kingdrain-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
+        // Same env-lock and pin as the ceiling test: space_dir reads global
+        // state, and an unlocked read raced another test's env mutation.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FNO_SPACES_DIR", &dir);
         let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         fs::write(
@@ -855,6 +870,7 @@ mod tests {
             "a drained scope terminates NoWork"
         );
         fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
+        std::env::remove_var("FNO_SPACES_DIR");
     }
 
     #[test]
@@ -929,6 +945,11 @@ mod tests {
     fn a_live_crown_holder_read_from_the_registry_refuses_the_walk() {
         let dir = std::env::temp_dir().join(format!("kinglive-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
+        // Env lock + pin: space_dir reads process-global state.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FNO_SPACES_DIR", &dir);
         let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         fs::write(kings.join("k.md"), "---\nfno_id: k-1\nscope: epic-x\n---\n").unwrap();
@@ -994,6 +1015,7 @@ mod tests {
             "naming a row other than the live holder never doubles a live one"
         );
         fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
+        std::env::remove_var("FNO_SPACES_DIR");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1195,6 +1217,11 @@ mod tests {
         // respawn budget binds it. The gate fires before any board read, so
         // this needs no live fno binary to prove the refusal.
         let dir = std::env::temp_dir().join(format!("kingsucc-{}", std::process::id()));
+        // Env lock + pin: space_dir reads process-global state.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FNO_SPACES_DIR", &dir);
         let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         fs::write(
@@ -1217,6 +1244,7 @@ mod tests {
             "an at-ceiling successor yields no unit, before any board read"
         );
         fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
+        std::env::remove_var("FNO_SPACES_DIR");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1226,6 +1254,11 @@ mod tests {
         // locked increment return a count PAST the ceiling and must yield no
         // unit. Simulated by bumping the file between construction and next().
         let dir = std::env::temp_dir().join(format!("kingrace-{}", std::process::id()));
+        // Env lock + pin: space_dir reads process-global state.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("FNO_SPACES_DIR", &dir);
         let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         let path = kings.join("k.md");
@@ -1245,6 +1278,7 @@ mod tests {
             "the race loser must not dispatch"
         );
         fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
+        std::env::remove_var("FNO_SPACES_DIR");
         fs::remove_dir_all(&dir).ok();
     }
 }

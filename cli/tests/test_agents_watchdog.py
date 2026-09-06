@@ -468,6 +468,58 @@ def test_rows_without_a_session_id_are_skipped_loudly(monkeypatch, tmp_path):
     assert any("no session id" in w for w in warnings)
 
 
+def test_fleet_rows_includes_live_nonclaude_registry_rows(monkeypatch, tmp_path):
+    """The Claude roster is not the fleet: live Codex rows still join by node."""
+    from fno.agents import registry as registry_mod
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.registry import AgentEntry
+
+    row = AgentEntry(
+        name="codex-thread",
+        harness="codex",
+        harness_session_id="thread-535c",
+        cwd=str(tmp_path),
+        log_path="",
+        status="live",
+        origin="spawn",
+        node="x-535c",
+    )
+    monkeypatch.setattr(registry_mod, "load_registry", lambda: [row])
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **_k: ([], []))
+
+    rows, warnings = watchdog.fleet_rows()
+
+    assert warnings == []
+    assert rows == [Row("thread-535c", "codex-thread", "live", "x-535c", str(tmp_path))]
+
+
+def test_fleet_rows_skips_a_name_only_nonclaude_row_loudly(monkeypatch, tmp_path):
+    """A row carrying only a name cannot resolve a transcript or a claim, so a
+    name-based row id is never minted for it: it would silently drop a live
+    same-named row at the dedup. Skipped loudly, like the claude roster."""
+    from fno.agents import registry as registry_mod
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.registry import AgentEntry
+
+    row = AgentEntry(
+        name="codex-thread",
+        harness="codex",
+        harness_session_id=None,
+        cwd=str(tmp_path),
+        log_path="",
+        status="live",
+        origin="spawn",
+        node="x-535c",
+    )
+    monkeypatch.setattr(registry_mod, "load_registry", lambda: [row])
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **_k: ([], []))
+
+    rows, warnings = watchdog.fleet_rows()
+
+    assert rows == []
+    assert any("no session id" in w for w in warnings)
+
+
 def test_reroute_delegates_to_the_full_failover(monkeypatch):
     # These exercise the failover mechanism PAST the shared-manifest
     # guard, which has its own test.
@@ -3790,5 +3842,4 @@ def _receipt_row(**over):
     for k, v in over.items():
         setattr(row, k, v)
     return row
-
 

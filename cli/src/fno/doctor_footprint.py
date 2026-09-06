@@ -357,9 +357,15 @@ def _live_root_pids(
         fleet_unrouted = [
             row for row in unrouted_rows if _unrouted_row_costs_fleet(row, deadline)
         ]
+        gap_labels = sorted(
+            f"{getattr(row, 'name', '?')} "
+            f"(node={getattr(row, 'node', None) or 'unknown'})"
+            for row in fleet_unrouted
+        )
         gap_rows: list[str] = [
             f"{len(fleet_unrouted)} pidless row(s) with no identity route "
-            f"({', '.join(sorted({str(row.harness) for row in fleet_unrouted}))})"
+            f"({', '.join(sorted({str(row.harness) for row in fleet_unrouted}))}; "
+            f"rows: {', '.join(gap_labels)})"
         ] if fleet_unrouted else []
         if not routed_rows:
             return roots, AttributionGap("; ".join(gap_rows)) if gap_rows else None
