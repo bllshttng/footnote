@@ -247,18 +247,35 @@ pub(crate) fn holder_is_active(probe: Option<&crate::truth_probe::TruthProbe>) -
     }
 }
 
-/// Who is driving this node: active, stalled, or none. One answer, two queues:
-/// stalled_holder selects stalled and undriven_pr selects none.
+/// Who is driving this node: active, stalled, crowned, or none. One answer,
+/// three queues: stalled_holder selects stalled, undriven_pr and
+/// unheld_progress select none. `crowned` is a live crown driving the epic it
+/// reigns over: scope ids reach the build only through a king manifest, and
+/// the session holding that manifest is the one building, so a scope hit is a
+/// live crown. The epic carries no claim of its own (a crown is not a claim)
+/// and no PR (children carry those), so without this state the reigning epic
+/// reads "none" and no verb can clear the row. In-scope leaves stay
+/// claim-driven: a dead worker under a crown is still a dead handoff.
 pub(crate) fn node_driver<'a>(
-    node_id: &str,
+    node: &Value,
     claim_by_node: &'a HashMap<String, Value>,
     activity: &'a HashMap<String, crate::truth_probe::TruthProbe>,
+    crown_ids: Option<&HashSet<String>>,
 ) -> (&'static str, Option<&'a Value>) {
+    let node_id = s_str(node, "id").unwrap_or("");
+    let crowned =
+        crown_ids.is_some_and(|ids| ids.contains(node_id)) && s_str(node, "type") == Some("epic");
     let claim = claim_by_node.get(node_id);
     let Some(claim) = claim else {
+        if crowned {
+            return ("crowned", None);
+        }
         return ("none", None);
     };
     if DEAD_CLAIM_STATES.contains(&s_str(claim, "state").unwrap_or("")) {
+        if crowned {
+            return ("crowned", None);
+        }
         return ("none", Some(claim));
     }
     let holder = s_str(claim, "holder").unwrap_or("");
@@ -340,6 +357,39 @@ mod tests {
         };
         assert!(holder_is_active(Some(&parked)));
         assert!(!holder_is_active(None));
+    }
+
+    #[test]
+    fn a_live_crown_drives_the_epic_but_not_its_leaves() {
+        let epic = json!({"id": "x-epic", "type": "epic"});
+        let leaf = json!({"id": "x-leaf", "parent": "x-epic"});
+        let claims: HashMap<String, Value> = HashMap::new();
+        let activity = HashMap::new();
+        let crown: HashSet<String> = ["x-epic", "x-leaf"]
+            .map(str::to_string)
+            .into_iter()
+            .collect();
+        assert_eq!(
+            node_driver(&epic, &claims, &activity, Some(&crown)).0,
+            "crowned"
+        );
+        // without the crown the same epic is an unheld dead handoff
+        assert_eq!(node_driver(&epic, &claims, &activity, None).0, "none");
+        // an in-scope leaf stays claim-driven
+        assert_eq!(
+            node_driver(&leaf, &claims, &activity, Some(&crown)).0,
+            "none"
+        );
+        // a live claim outranks the crown
+        let mut held = claims.clone();
+        held.insert(
+            "x-epic".to_string(),
+            json!({"key": "node:x-epic", "state": "live", "holder": "claude:h"}),
+        );
+        assert_eq!(
+            node_driver(&epic, &held, &activity, Some(&crown)).0,
+            "stalled"
+        );
     }
 
     #[test]

@@ -264,9 +264,10 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             continue;
         }
         let (state, claim) = node_driver(
-            s_str(node, "id").unwrap_or(""),
+            node,
             &claim_by_node,
             &inputs.holder_activity,
+            inputs.scope_ids.as_ref(),
         );
         if state != "stalled" {
             continue;
@@ -346,9 +347,10 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 continue; // undriven_pr owns the PR-bound shape.
             }
             let (state, claim) = node_driver(
-                s_str(node, "id").unwrap_or(""),
+                node,
                 &claim_by_node,
                 &inputs.holder_activity,
+                inputs.scope_ids.as_ref(),
             );
             if state != "none" {
                 continue;
@@ -483,9 +485,10 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 continue;
             }
             let (state, _claim) = node_driver(
-                s_str(node, "id").unwrap_or(""),
+                node,
                 &claim_by_node,
                 &inputs.holder_activity,
+                inputs.scope_ids.as_ref(),
             );
             if state != "none" {
                 continue;
