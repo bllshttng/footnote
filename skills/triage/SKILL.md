@@ -2,6 +2,9 @@
 name: triage
 description: "Propose and apply optimal ordering for pending specs on the graph backlog. LLM proposes, human approves. Use when: 'triage the backlog', 'what should I work on next', 'reorder my specs', 'find duplicates in graph'."
 argument-hint: "[deep] [all] [each] [dry-run] [--project NAME] [--roadmap-id ID]"
+requires:
+  harness:
+    - subagent_dispatch
 ---
 
 # Triage

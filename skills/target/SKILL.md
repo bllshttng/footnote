@@ -9,6 +9,8 @@ requires:
     - "fno >= 0.1"
     - "gh >= 2.0"
     - "git >= 2.30"
+  harness:
+    - loop
 ---
 
 <!-- style-exception: this file's established "- **only if** <condition>: <action>" bullet heading, used by dozens of pre-existing bullets below, puts "if" after "only" rather than leading the sentence (rule 5). Rewriting that file-wide convention is out of scope for x-42c5, which only touches one such bullet's body. -->

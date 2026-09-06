@@ -8,6 +8,8 @@ requires:
   binaries:
     - "fno >= 0.1"
     - "jq >= 1.6"
+  harness:
+    - spawn
 ---
 
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->

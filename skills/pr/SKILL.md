@@ -7,6 +7,8 @@ requires:
     - "fno >= 0.1"
     - "gh >= 2.0"
     - "git >= 2.0"
+  harness:
+    - subagent_dispatch
 ---
 
 # PR
