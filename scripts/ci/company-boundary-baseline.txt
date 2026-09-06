@@ -35,8 +35,8 @@ cli/src/fno/claims/cli.py:953: L1 core -> L5 runtime / from fno.agents.watchdog 
 # or opencode worker). tail_facts IS the transcript reader; there is no
 # lower-layer copy to call instead, and the same shape as the two entries
 # above it.
-cli/src/fno/claims/cli.py:1156: L1 core -> L5 runtime / from fno.agents.watchdog import tail_facts
-cli/src/fno/claims/cli.py:1425: L1 core -> L5 runtime / from fno.agents.watchdog import (
-cli/src/fno/claims/cli.py:1449: L1 core -> L5 runtime / from fno.agents.watchdog import (
-cli/src/fno/claims/cli.py:1469: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
+cli/src/fno/claims/cli.py:1161: L1 core -> L5 runtime / from fno.agents.watchdog import tail_facts
+cli/src/fno/claims/cli.py:1430: L1 core -> L5 runtime / from fno.agents.watchdog import (
+cli/src/fno/claims/cli.py:1454: L1 core -> L5 runtime / from fno.agents.watchdog import (
+cli/src/fno/claims/cli.py:1474: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
 layer cycle: L0 platform -> L5 runtime -> L0 platform
