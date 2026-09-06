@@ -1,6 +1,6 @@
 //! Config/path resolution and crown-scope compilation (king/lane.py, projects/resolve.py).
 use super::s_str;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -339,6 +339,7 @@ pub(crate) fn parse_manifest(path: &Path) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     fn node(id: &str, status: &str, priority: &str) -> Value {
         json!({"id": id, "slug": id, "status": status, "priority": priority, "type": "feature"})
     }
