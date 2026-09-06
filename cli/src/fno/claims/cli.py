@@ -538,9 +538,25 @@ def release(
             _stamp_do_on_release(key, released, holder)
         elif rollback_do:
             _rollback_do_on_release(key, released, holder)
+    elif released is None and stamp_do:
+        # release_claim's own docstring names four ways it returns None (the
+        # file is already gone, the holder does not match, the file is
+        # corrupted, the recovery mutex timed out) - in all four nothing was
+        # unlinked, so the do row this call would have closed stays open.
+        # Named here rather than silent: this is the gap x-2146 traces 386
+        # unclosed do rows to.
+        typer.echo(
+            f"do stamp skipped for {key}: release was a no-op "
+            f"(nothing held by {holder}, so no do row was closed)",
+            err=True,
+        )
 
+    # released is None means nothing was unlinked - a false "released: true"
+    # here is the receipt that let the missing do-row close go unnoticed.
     if json_output:
-        typer.echo(json.dumps({"key": key, "released": True}))
+        typer.echo(json.dumps({"key": key, "released": released is not None}))
+    elif released is None:
+        typer.echo(f"no-op: {key} was not held by {holder} (nothing released)")
     else:
         typer.echo(f"released: {key}")
 
