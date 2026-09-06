@@ -5859,6 +5859,14 @@ pub struct ReviewerVerdict {
     /// keeps today's exact semantics.
     #[serde(skip_serializing_if = "is_true", default = "default_true")]
     pub required: bool,
+    /// Whether the review behind this verdict PASSED: a local attestation with
+    /// `verdict == pass`, or a GitHub review object that approved. The counted
+    /// axis (`Reviewed`) says the reviewer READ the head whatever it concluded
+    /// (x-aecc), so the pass subset lives here and reaches the row only as the
+    /// aggregate `passed_count` - never serialized per verdict, because no
+    /// reader keys on it and the schema stays byte-stable.
+    #[serde(skip)]
+    pub passed: bool,
 }
 
 /// The one counting rule for human GitHub approvals: a `reviewed` verdict
@@ -5919,6 +5927,21 @@ impl CoverageReport {
                     .count(),
             ),
         }
+    }
+
+    /// The pass subset of the counted verdicts: reviews that concluded PASS,
+    /// against [`Self::coverage_count`]'s "the reviewer read the head" whatever
+    /// it concluded. At a discharged budget the two can differ by design - a
+    /// spent round with declined findings reads reviewed without passing.
+    pub fn passed_count(&self) -> usize {
+        self.verdicts
+            .iter()
+            .filter(|v| {
+                v.verdict == CoverageVerdict::Reviewed
+                    && human_approval_counts(v, self.github_approval_satisfies)
+                    && v.passed
+            })
+            .count()
     }
 }
 
@@ -6489,6 +6512,7 @@ fn local_refused_verdicts(events_text: &str, head_sha: &str) -> Vec<ReviewerVerd
             // A refusal row records an attempt that RAN and declined: real
             // work with a real remedy, always owed its own name.
             required: true,
+            passed: false,
         });
     }
     out
@@ -6738,6 +6762,7 @@ fn local_attestation_verdict(
         // The local lane is the config-floored reviewer (`self_review_required`);
         // its verdict is always owed, whatever the required bot list says.
         required: true,
+        passed: lp.is_pass,
     }
 }
 
@@ -6899,6 +6924,9 @@ pub fn classify_coverage_tiled(
             // fallbacks keep a responded-but-outdated verdict RECORDED rather
             // than dropped, which is what makes the tightening auditable.
             let (verdict, reviewed_sha, fresh) = bot_verdict(login, reviews, comments, freshness);
+            // A bot `reviewed` verdict means the predicate read an approval or
+            // clean-pass marker, so the pass subset counts it.
+            let passed = verdict == CoverageVerdict::Reviewed;
             verdicts.push(ReviewerVerdict {
                 producer: CoverageProducer::GithubApp,
                 name: login.to_string(),
@@ -6915,6 +6943,7 @@ pub fn classify_coverage_tiled(
                 // the resolved required set (mark_owed_verdicts) is what may
                 // downgrade an optional login, never this scan.
                 required: true,
+                passed,
             });
         }
         // (3) Known-App reviewers NOT in the configured list still count
@@ -6939,6 +6968,8 @@ pub fn classify_coverage_tiled(
                     reviewer_context: None,
                     // Not in any configured list, so a fortiori not owed.
                     required: false,
+                    // A recorded GitHub review read with an approving state.
+                    passed: fresh.counts(),
                 });
             }
         }
@@ -6998,6 +7029,8 @@ pub fn classify_coverage_tiled(
                     reviewer_context: None,
                     // Not in any configured list, so a fortiori not owed.
                     required: false,
+                    // An APPROVED review object is a pass by definition.
+                    passed: fresh.counts(),
                 });
             }
         }
@@ -7194,6 +7227,9 @@ pub fn classify_coverage_tiled(
                     reviewer_context: lp.reviewer_context.clone(),
                     // Local-attestation lane: always owed.
                     required: true,
+                    // A cap-arm rescue: the attestation said fail, and only the
+                    // spent budget discharged it.
+                    passed: false,
                 });
             }
         }
@@ -7258,15 +7294,17 @@ pub fn classify_coverage_tiled(
 
 /// Build the `review_coverage` event payload. The per-reviewer verdicts
 /// serialize via their serde derives (producer/verdict snake_cased);
-/// `reviewed_count` is included only when coverage is `Covered` (omitted, not
-/// null, when Unknown, matching the schema).
+/// `reviewed_count` and `passed_count` ride EVERY row: a review that happened
+/// with findings open must not read as zero reviews, whatever the coverage
+/// word says (the fail rounds count as reviews - the operator's round-cap
+/// ruling).
 ///
 /// `repo` is the git-remote slug, and it is what makes this event safe to write
 /// into the CROSS-PROJECT `~/.fno/events.jsonl`: `pr` alone is a bare integer,
 /// so a reader scanning the global log for PR 781 would otherwise accept
 /// another repo's PR 781 as coverage for this one. Omitted (not null) when the
 /// slug is unresolvable, and a reader must then decline to match it globally.
-fn coverage_event_data(
+pub fn coverage_event_data(
     pr: i64,
     rep: &CoverageReport,
     head_sha: &str,
@@ -7276,7 +7314,7 @@ fn coverage_event_data(
     coverage_event_data_tiled(pr, rep, head_sha, repo, author_session, None)
 }
 
-fn coverage_event_data_tiled(
+pub fn coverage_event_data_tiled(
     pr: i64,
     rep: &CoverageReport,
     head_sha: &str,
@@ -7345,7 +7383,14 @@ fn coverage_event_data_full(
         if author_session.is_some() {
             data["self_attested_count"] = serde_json::json!(rep.self_attested_count());
         }
+    } else {
+        // Unknown rows keep the honest measured count rather than omitting
+        // it: the coverage word is unmeasured, the review count is not - the
+        // GitHub read can fail after two attestations landed, and silence
+        // there reads downstream as "nobody reviewed".
+        data["reviewed_count"] = serde_json::json!(rep.coverage_count().unwrap_or(0));
     }
+    data["passed_count"] = serde_json::json!(rep.passed_count());
     if let Some(author_session_id) = author_session {
         data["author_session_id"] = serde_json::json!(author_session_id);
     }
@@ -14880,6 +14925,8 @@ mod tests {
         let data = coverage_event_data(826, &rep, "h", "", Some("sess-author"));
         assert_eq!(data["coverage"], serde_json::json!("covered"));
         assert_eq!(data["reviewed_count"], serde_json::json!(2));
+        // The pass subset: both verdicts came from pass attestations.
+        assert_eq!(data["passed_count"], serde_json::json!(2));
         assert_eq!(data["self_attested_count"], serde_json::json!(1));
         assert_eq!(data["author_session_id"], serde_json::json!("sess-author"));
     }
@@ -16824,6 +16871,7 @@ git_bounded();";
                     refusal_reason: None,
                     reviewer_context: None,
                     required: true,
+                    passed: false,
                 }],
             };
             pr
@@ -21201,6 +21249,7 @@ git_bounded();";
             refusal_reason: None,
             reviewer_context: None,
             required,
+            passed: false,
         };
         let mut pr = watch_pr();
         pr.coverage = CoverageReport {

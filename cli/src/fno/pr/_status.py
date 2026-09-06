@@ -1062,9 +1062,9 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # ready: true PR refused at the merge gate. The blockers list
         # names WHICH conjunct failed - a bare false has one
         # explanation per conjunct and a reader would have to guess.
-        # `covered and reviewed_count > 0` rather than the word alone:
-        # historical events serialize a real zero as `covered`, and
-        # every existing consumer tests both.
+        # The coverage conjunct keys on the WORD: a budget spent on
+        # fail rounds reads covered, and the count beside it is a fact
+        # (N reviewed, M passed), never a second gate.
         "ready": not blockers,
         "ready_blockers": blockers,
     }
@@ -1149,6 +1149,9 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         line = f"note: review coverage {coverage.get('coverage')}"
         if coverage.get("reviewed_count") is not None:
             line += f" ({coverage['reviewed_count']} reviewed"
+            passed_n = coverage.get("passed_count")
+            if passed_n is not None:
+                line += f", {passed_n} passed"
             self_n = coverage.get("self_attested_count")
             if self_n:
                 line += f", {self_n} self-attested"

@@ -441,14 +441,17 @@ event_types:
         coverage:
           type: string
           enum: [covered, uncovered, unknown]
-          description: "`covered` (count > 0) carries a count in reviewed_count; `uncovered` is a real, known zero; `unknown` means the review read failed and no local evidence confirmed a review (fail closed for autonomy, honest in the receipt). `uncovered` was added in x-5b99: a zero count previously serialized as the string `covered`, so `coverage: covered` and `reviewed_count: 0` co-occurred on three PRs in flight and the reassuring WORD sat beside the honest NUMBER. Additive for every reader, all of which already test `covered AND count > 0`, so a historical `covered` event with a zero count keeps reading as not-covered."
+          description: "The WORD is the gate: `covered` means the review obligation is satisfied (the chain tiles with no open finding, or the configured rounds are spent), and every consumer keys on this string, never on the count beside it. `uncovered` is a real, known zero below the cap; `unknown` means the review read failed and no local evidence confirmed a review (fail closed for autonomy, honest in the receipt). A covered row CAN carry passed_count 0: a spent budget discharges the obligation whatever the rounds concluded."
         review_state:
           type: string
           enum: [reviewed, unreviewed, reviewer_refused]
           description: "Known review outcome when the evidence read succeeded. reviewed wins when any current non-human verdict counts; otherwise reviewer_refused wins when a configured reviewer refused; otherwise unreviewed. Omitted when coverage is unknown so transport failure never becomes a known review outcome."
         reviewed_count:
           type: integer
-          description: "Count of reviewed verdicts EXCLUDING human approvals (whether a human approval counts is the operator's deferred call; lean exclude). A verdict counts only while its freshness is not `stale`. Present whenever coverage is covered or uncovered (omitted only on unknown)."
+          description: "Count of reviewed verdicts EXCLUDING human approvals (whether a human approval counts is the operator's deferred call; lean exclude). A verdict counts only while its freshness is not `stale`. A review that concluded FAIL counts here too: the reviewer read the head, and the round-cap ruling counts the round whatever it concluded. Present on every row, unknown included - the coverage word can be unmeasured while the review count is not."
+        passed_count:
+          type: integer
+          description: "The pass subset of reviewed_count: verdicts whose review concluded PASS (a local attestation with verdict pass, or a GitHub approval). At a discharged round budget the two counts can differ by design - rounds spent on fails read reviewed without passing. Present on every row beside reviewed_count."
         self_attested_count:
           type: integer
           description: "How many of reviewed_count are the AUTHOR attesting its own diff (attestation_origin == self_attested). Recorded, never gating, and deliberately not named `independent_count` - the schema is explicit below that other_session is not independence, and this must not launder that. A self-attested pass counts, because self-review is the DEFAULT path (config.review.self_review_required floors the harness review verb onto the author's own head), so refusing one would wedge every single-session PR. What x-62a1 asked for is that the answer be visible in the verdict rather than asserted in prose: a gate that wants to demand a second reader is now one predicate over this number, not a redesign. Present alongside reviewed_count."

@@ -1875,6 +1875,7 @@ def test_read_review_coverage_from_events(tmp_path):
         "coverage": "uncovered",
         "review_state": "unreviewed",
         "reviewed_count": 0,
+        "passed_count": None,
         "self_attested_count": None,
         "head_sha": "a",
         "stale_verdicts": [],

@@ -14,8 +14,9 @@
 //! was a stale served row, not logic, and these tests keep it that way.
 
 use fno_agents::loopcheck::{
-    classify_coverage_tiled, compute_range_tiling, coverage_receipt_line, Coverage,
-    CoverageProducer, CoverageVerdict, Freshness, RangeTiling, ReviewState,
+    classify_coverage_tiled, compute_range_tiling, coverage_event_data_tiled,
+    coverage_receipt_line, Coverage, CoverageProducer, CoverageVerdict, Freshness, RangeTiling,
+    ReviewState,
 };
 use std::fs;
 use std::path::Path;
@@ -627,10 +628,7 @@ fn truncated_remainder_blocks() {
 
 #[test]
 fn empty_chain_blocks_nothing() {
-    assert_eq!(
-        disposition_blockers("", BRANCH, SPECIMEN_HEAD),
-        Vec::new()
-    );
+    assert_eq!(disposition_blockers("", BRANCH, SPECIMEN_HEAD), Vec::new());
 }
 
 // --- AC6: a non-author GitHub approval is a sufficient producer ---
@@ -1637,7 +1635,10 @@ fn cap_truncated_remainder_is_always_hard() {
     )]
     .join("\n");
     let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD);
-    assert!(blockers[0].hard, "what cannot be inspected is recorded hard");
+    assert!(
+        blockers[0].hard,
+        "what cannot be inspected is recorded hard"
+    );
     // Below the cap it withholds; at the cap the budget discharges it too.
     assert!(blockers_withhold(&blockers, false));
     assert!(!blockers_withhold(&blockers, true));
@@ -1914,6 +1915,46 @@ fn xaecc_marker1_fail_only_chain_fully_dispositioned_reads_covered() {
         unattested.is_empty(),
         "an answered fail satisfies the reviewers gate: {unattested:?}"
     );
+
+    // The counter counts REVIEWS, passes or not: a fail round that answered
+    // the head reads reviewed_count 1 and passed_count 0, and a second
+    // reviewer's fail round makes it 2 and 0 - never "zero reviews" on a PR
+    // two rounds were spent reviewing.
+    let data = coverage_event_data_tiled(1, &rep, &head, "", None, Some(&tiling));
+    assert_eq!(data["reviewed_count"], serde_json::json!(1));
+    assert_eq!(data["passed_count"], serde_json::json!(0));
+    let peer_decline = {
+        let mut row: serde_json::Value = serde_json::from_str(&declined_round(
+            &base,
+            &head,
+            serde_json::json!([finding("c.py:3:correctness", "correctness", None, true)]),
+            serde_json::json!([declined("c.py:3:correctness")]),
+        ))
+        .unwrap();
+        row["ts"] = serde_json::json!("2026-08-26T20:00:00Z");
+        row["data"]["reviewer"] = serde_json::json!("peer");
+        row.to_string()
+    };
+    let mut lines_two: Vec<String> = events.lines().map(str::to_string).collect();
+    lines_two.push(peer_decline);
+    let events_two = events_file(repo, &lines_two);
+    let rep_two = classify_coverage_tiled(
+        &[],
+        &[],
+        &events_two,
+        &[],
+        true,
+        None,
+        &at_head,
+        BRANCH,
+        &head,
+        Some(&tiling),
+        None,
+        false,
+    );
+    let data_two = coverage_event_data_tiled(1, &rep_two, &head, "", None, Some(&tiling));
+    assert_eq!(data_two["reviewed_count"], serde_json::json!(2));
+    assert_eq!(data_two["passed_count"], serde_json::json!(0));
 }
 
 #[test]
