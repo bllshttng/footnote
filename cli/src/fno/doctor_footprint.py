@@ -632,13 +632,8 @@ def leak_verdict(direct_processes: int, threshold: int | None) -> str:
 
 
 def _confirmed_orphans(reading: Footprint) -> list[OrphanTestBinary]:
-    """The parser's orphan candidates whose target dir proves it is cargo's.
-
-    A path-shape match alone is a NAME match: ``cli/src/fno/target`` is a
-    source tree, and a sweep that trusted shapes deleted 66 real cargo target
-    dirs across 26 worktrees. Only a genuine cargo target dir carries
-    ``CACHEDIR.TAG``, so that file - never the directory's name - decides.
-    """
+    """Candidates whose owning target dir carries CACHEDIR.TAG. A path-shape
+    match alone is a name match: `cli/src/fno/target` is a source tree."""
     confirmed: list[OrphanTestBinary] = []
     for orphan in reading.orphan_test_binaries:
         argv = orphan.command.split()
@@ -652,11 +647,8 @@ def _confirmed_orphans(reading: Footprint) -> list[OrphanTestBinary]:
 
 
 def _orphan_min_elapsed_seconds() -> int:
-    """``config.test.orphan_min_elapsed_seconds``, default 900.
-
-    Every measured specimen was over three hours old, so a younger orphan may
-    be a live run and is reported, never killed. The env override exists so a
-    positive control can plant a fresh orphan and still exercise the kill."""
+    """``config.test.orphan_min_elapsed_seconds`` (900): a younger orphan may
+    be a live run. The env override lets a positive control plant a fresh one."""
     raw = os.environ.get("FNO_TEST_ORPHAN_MIN_ELAPSED_SECONDS")
     if raw is not None:
         try:
@@ -1002,8 +994,8 @@ def footprint_command(
                 json_output=json_output,
             )
             raise typer.Exit(code=4)
-        reading = parse_footprint(ps_output, excluded_root_pids={os.getpid()})
-        _emit_reap_result(reading, apply=apply, json_output=json_output)
+        reap_reading = parse_footprint(ps_output, excluded_root_pids={os.getpid()})
+        _emit_reap_result(reap_reading, apply=apply, json_output=json_output)
 
     reading, cause_error = cause_reading()
     if cause_error is not None or reading is None:

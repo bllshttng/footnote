@@ -22,14 +22,9 @@ _FNO_BINARIES = frozenset(
 
 
 class OrphanTestBinary(NamedTuple):
-    """One orphaned/wedged cargo test binary: a deps/ binary argv[0] that is
-    parentless (ppid 1) or holds a zombie pile at any ppid.
-
-    A test binary whose parent runner died without reaping it reparents to
-    init; a wedged one holds its dead children as zombies even with its
-    parent alive. Confirmation (a CACHEDIR.TAG in the owning target dir) is
-    the caller's job: this parser never touches the filesystem.
-    """
+    """A deps test binary that is parentless (ppid 1) or holds a zombie pile.
+    Confirmation (CACHEDIR.TAG) is the caller's job; this parser never touches
+    the filesystem."""
 
     pid: int
     command: str
@@ -59,24 +54,20 @@ class Footprint(NamedTuple):
     # Whole-machine on purpose: a test a person started competes for the same
     # box as a lane.
     test_process_count: int = 0
-    # Orphaned/wedged cargo test binaries, worst zombie count first. A
-    # deps-binary argv[0] at ppid 1 is the parentless shape; a deps binary
-    # holding ORPHAN_MIN_ZOMBIES dead children is the wedged-reaper shape.
+    # Orphaned/wedged cargo test binaries, worst zombie count first.
     orphan_test_binaries: tuple[OrphanTestBinary, ...] = ()
 
 
 #: argv[0] basenames that are a test runner on their own.
 _TEST_RUNNER_NAMES = frozenset({"pytest", "py.test"})
 
-#: argv[0] of a compiled cargo test binary: `<...>/target/<profile>/deps/<crate>-<16 hex>`.
-#: This PATH SHAPE alone is a name match - the confirmer in doctor_footprint
-#: demands a CACHEDIR.TAG in the owning target dir before anything is named.
+#: argv[0] of a compiled cargo test binary. A path-shape match alone is a name
+#: match; the confirmer demands a CACHEDIR.TAG before anything is named.
 _DEPS_BINARY_RE = re.compile(r"/target/(?:debug|release)/deps/[A-Za-z0-9_]+-[0-9a-f]{16}$")
 
 #: macOS renders a dead-unreaped child as exactly this command.
 _DEFUNCT_COMMAND = "<defunct>"
-#: Zombie children at which a deps binary at ANY ppid reads as a wedged
-#: reaper, not a running suite. The reproduction sampler used the same bar.
+#: Zombie children at which a parented deps binary reads as a wedged reaper.
 ORPHAN_MIN_ZOMBIES = 20
 
 
@@ -352,10 +343,8 @@ def parse_footprint(
             sustained.append((process.cpu_percent, process.command))
 
     sustained.sort(key=lambda item: (-item[0], item[1]))
-    # Orphan candidates, from the same snapshot: a deps test binary is named
-    # when it is parentless (ppid 1, always wrong) or when it holds a wedged
-    # reaper's pile of zombies at any ppid - the measured live case had a
-    # living, pipe-blocked cargo parent, so ppid 1 alone missed it.
+    # A deps binary is named when parentless or holding a zombie pile at any
+    # ppid (the measured live case had a living, pipe-blocked cargo parent).
     defunct_by_ppid: dict[int, int] = {}
     for process in processes.values():
         if process.command == _DEFUNCT_COMMAND and process.ppid is not None:
