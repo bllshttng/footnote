@@ -16,7 +16,7 @@ from fno.pr_watch._king_wake import (
     CrownTarget,
     _board_rows,
     _holder_absent,
-    _raise_ceiling_question,
+    _ask_wake_ceiling,
     _store_board_hash,
     run_king_wake,
 )
@@ -217,15 +217,13 @@ def test_king_wake_permission_mode_the_woken_session_argv_carries_bypass():
 
 
 def _answered(asker, answer="ship it", closed_ts="2026-08-29T11:00:00Z", qid="q-ab12cd34"):
-    from types import SimpleNamespace as _NS
-
-    return _NS(
-        id=qid,
-        asker=asker,
-        question="what does the operator want for epic-x?",
-        answer=answer,
-        closed_ts=closed_ts,
-    )
+    return {
+        "id": qid,
+        "asker": asker,
+        "question": "what does the operator want for epic-x?",
+        "answer": answer,
+        "closed_ts": closed_ts,
+    }
 
 
 def _seed_cursor(manifest, cursor="2026-08-29T10:00:00Z"):
@@ -557,8 +555,8 @@ def test_the_ceiling_question_dedupes_on_its_marker(tmp_path):
         manifest=_king_manifest(tmp_path),
     )
 
-    first = _raise_ceiling_question(target, 32, 32)
-    second = _raise_ceiling_question(target, 32, 32)
+    first = _ask_wake_ceiling(target, 32, 32)
+    second = _ask_wake_ceiling(target, 32, 32)
 
     assert first == second, "an open question must not be re-asked each tick"
 
@@ -629,7 +627,17 @@ def test_an_unreadable_registry_wakes_nothing(tmp_path):
 
 # ── the board-change trigger ──────────────────────────────────────────────
 
-from fno.pr_watch._king_wake import _board_hash, _store_board_hash  # noqa: E402
+from fno.pr_watch._king_wake import (  # noqa: E402
+    _board_rows,
+    _hash_rows,
+    _store_board_hash,
+)
+
+
+def _board_hash(scope, entries, resolver=None):
+    """The digest the phase stores: sha256 over the scope rows."""
+    rows = _board_rows(scope, entries, resolver)
+    return "" if rows is None else _hash_rows(rows)
 
 #: Fixture rung: a level-1 project crown over "proj", so no machine config
 #: or graph shape is load-bearing in these tests.
