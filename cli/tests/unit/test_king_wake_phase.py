@@ -917,7 +917,14 @@ def test_a_sidecar_from_before_rows_were_stored_is_a_first_observation(tmp_path)
     # nothing rather than naming every row "added". The rows sit at p2 so the
     # backstop lane stays out of the case (quiet priority, no fresh terminal).
     quiet_b = _BOARD_A_QUIET + [
-        {"id": "x-2", "project": "proj", "status": "ready", "_kanban_column": "ready", "priority": "p2"}
+        {
+            "id": "x-2",
+            "project": "proj",
+            "status": "done",
+            "completed_at": "2026-09-06T00:00:00Z",
+            "_kanban_column": "done",
+            "priority": "p2",
+        }
     ]
 
     def prime(manifest):
