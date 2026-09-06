@@ -207,3 +207,69 @@ def test_young_bank_past_stale_but_inside_schedule_skips_quietly(
     assert row["skip_reason"] == "fleet_full"
     assert emitted == []
     assert notices == []
+
+
+def test_tick_command_wires_the_phase_with_a_resolved_binary(
+    monkeypatch, tmp_path
+) -> None:
+    """The tick block resolves a real fno binary path and passes the row on.
+
+    Regression guard: the block once called a name that did not exist, which
+    the non-fatal wrap swallowed into an evals_failed tick row every tick.
+    """
+    import os
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+
+    monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
+
+    class _PrWatch:
+        max_age_days = 30
+        retries = 3
+        interval_seconds = 600
+        enabled = False
+        graphql_min_remaining = 0
+        tick_timeout_seconds = 0
+
+    class _Recovery:
+        enabled = False
+
+    settings = _Settings(evals=_Evals(schedule=7))
+    settings.pr_watch = _PrWatch()
+    settings.recovery = _Recovery()
+
+    class _Autonomy:
+        enabled = True
+
+    settings.autonomy = _Autonomy()
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
+
+    captured: dict = {}
+
+    def _fake_phase(s, *, emit, budget_left_s, fno_bin, **_kw):
+        captured["fno_bin"] = fno_bin
+        captured["budget_left_s"] = budget_left_s
+        return {"acted": 0, "skip_reason": "fresh", "detail": "wired"}
+
+    monkeypatch.setattr(ep, "run_evals_phase", _fake_phase, raising=True)
+
+    events: list[tuple[str, dict]] = []
+
+    def _capture(event_type, data, *, events_path=None):
+        events.append((event_type, dict(data)))
+        return True
+
+    monkeypatch.setattr(prcli, "_emit_event", _capture, raising=True)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    res = CliRunner().invoke(app, [])
+    assert res.exit_code == 0, res.output
+    assert captured["fno_bin"]
+    assert isinstance(captured["fno_bin"], str)
+    assert captured["budget_left_s"] > 0
+    rows = [d for t, d in events
+            if t == "control_plane_tick" and d.get("arm") == "evals"]
+    assert rows and rows[-1]["skip_reason"] == "fresh"

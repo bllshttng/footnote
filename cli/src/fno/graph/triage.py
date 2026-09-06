@@ -1884,9 +1884,9 @@ def cmd_health(
             age_txt = f" age {int(age)}d"
         else:
             age_txt = ""
-        stale = " STALE" if evals_summary.get("stale") else ""
+        stale_txt = " STALE" if evals_summary.get("stale") else ""
         typer.echo(
-            f"  evals: {rate_txt}flakes {evals_summary['flake_count']}{age_txt}{stale}{alarm}"
+            f"  evals: {rate_txt}flakes {evals_summary['flake_count']}{age_txt}{stale_txt}{alarm}"
         )
     if routing_metrics:
         rm = routing_metrics

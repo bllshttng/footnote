@@ -875,7 +875,7 @@ def tick() -> None:
                     settings,
                     emit=_emit_event,
                     budget_left_s=left,
-                    fno_bin=_fno_binary(),
+                    fno_bin=_resolve_fno_binary(),
                 )
                 _emit_tick_row(
                     "evals", interval_s=_evals_sched * 86400,
