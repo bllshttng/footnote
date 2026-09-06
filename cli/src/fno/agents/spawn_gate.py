@@ -1461,7 +1461,11 @@ def _king_share(cap: int, crowned: set[str], caller: str) -> int:
     an ordinary worker that spawned once never shrinks a king's share). The
     caller folds in only when it is itself crowned (LD2: an uncrowned caller
     stays share-checked but never enters the divisor). The floor of 1 keeps a
-    crowded fleet able to start one worker per king.
+    crowded fleet able to start one worker per king. A fleet with NO crowns
+    at all divides by nothing, so every uncrowned caller's share floors at 1:
+    a session holds one worker until someone is crowned. That is the
+    crownless fleet refusing to be ungoverned, not a malfunction, and the
+    refusal's "across 0 kings" names it.
     """
     divisor = len(crowned | ({caller} if caller in crowned else set()))
     return max(1, cap // divisor) if divisor else 1
