@@ -5,10 +5,13 @@
 //! never assigned a mission id), so its identity is derived, not stored: the
 //! id is a hash of the epic id (stable across ticks), and the name carries the
 //! live `done/total` counter. With several active missions each name also
-//! carries its rotation `(i of n)` in epic-id order - the drain's own order -
-//! so one header sampled from the band never reads as the whole population; a
-//! lone mission keeps its bare name, because `(1 of 1)` reads as a fault, not
-//! a count.
+//! carries its rotation `(i of n active)` in epic-id order - the graph's own
+//! order - so one header sampled from the band never reads as the whole
+//! population; a lone mission keeps its bare name, because `(1 of 1)` reads as
+//! a fault, not a count. The base is labeled `active` because the arms-table
+//! drain rows count only drainable missions (no workspace path drains nowhere
+//! but still renders here), and two bare `of N` suffixes with different N read
+//! as a contradiction.
 
 use crate::backlog_view::Mission;
 use crate::proto::{SquadMeta, MISSION_SQUAD_BASE};
@@ -48,7 +51,7 @@ pub fn headers(missions: &[Mission]) -> Vec<SquadMeta> {
                 m.done,
                 m.total,
                 if rotation_total > 1 {
-                    format!("  ({} of {})", i + 1, rotation_total)
+                    format!("  ({} of {} active)", i + 1, rotation_total)
                 } else {
                     String::new()
                 }
@@ -83,9 +86,9 @@ mod tests {
             mission("x-bbbb", "beta", 1, 3),
         ]);
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].name, "alpha  0/2  (1 of 2)");
+        assert_eq!(got[0].name, "alpha  0/2  (1 of 2 active)");
         assert_eq!(got[0].id, mission_sid("x-aaaa"));
-        assert_eq!(got[1].name, "beta  1/3  (2 of 2)");
+        assert_eq!(got[1].name, "beta  1/3  (2 of 2 active)");
     }
 
     #[test]

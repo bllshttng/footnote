@@ -137,10 +137,13 @@ pub struct DrainConfig {
     pub failure_limit: u32,
     /// The mission's poll interval, for the control-plane tick row's staleness.
     pub interval_seconds: u64,
-    /// 1-based position and population of this mission in the active rotation
-    /// (epic-id order), `None` when it is the only active mission. Readout-only:
-    /// the arms-table detail prints `mission=x (1 of 4)` so one row sampled from
-    /// a many-mission drain cannot read as the whole population.
+    /// 1-based position and population of this mission in the drain rotation
+    /// (epic-id order), `None` when it is the only drainable mission. Readout-only:
+    /// the arms-table detail prints `mission=x (1 of 4 draining)` so one row sampled
+    /// from a many-mission drain cannot read as the whole population. The base is
+    /// labeled because the mux band counts all graph-active missions - a mission
+    /// with no workspace path drains nowhere but still renders - and two bare `of
+    /// N` suffixes with different N read as a contradiction.
     pub rotation: Option<(usize, usize)>,
 }
 
@@ -784,7 +787,7 @@ pub fn mission_drain_tick(
     };
     let rotation = cfg
         .rotation
-        .map(|(pos, total)| format!(" ({pos} of {total})"))
+        .map(|(pos, total)| format!(" ({pos} of {total} draining)"))
         .unwrap_or_default();
     let detail = format!(
         "mission={}{} ready={} closed={} dispatched={} pending={}",
@@ -2121,7 +2124,7 @@ mod tests {
             .map(|v| v["data"]["detail"].as_str().unwrap().to_string())
             .expect("one tick row");
         assert!(
-            detail.contains("mission=x-epic (1 of 4) "),
+            detail.contains("mission=x-epic (1 of 4 draining) "),
             "rotation named in: {detail}"
         );
     }
