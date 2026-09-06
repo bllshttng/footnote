@@ -8822,18 +8822,12 @@ impl Core {
                             // (x-a9b4) A portal slot's seat is the shell the
                             // substitute already minted; remember it until the
                             // tab ids are final.
-                            for slot in &kept_slots {
-                                if let (Some(p), Some(portal)) =
-                                    (slot_pane.get(slot.name.as_str()), slot.portal.as_ref())
-                                {
-                                    held_portal_seats.push((
-                                        portal.index,
-                                        portal.row.clone(),
-                                        *p,
-                                        tid,
-                                    ));
-                                }
-                            }
+                            portal_reach::collect_portal_slot_seats(
+                                &kept_slots,
+                                &slot_pane,
+                                tid,
+                                &mut held_portal_seats,
+                            );
                             placed.extend(leaves.iter().copied());
                             tabs.push(Tab {
                                 name: st.tab_name.clone(),
@@ -9012,17 +9006,7 @@ impl Core {
         if hold_workers && worker_members_total == 0 && held_portals_total == 0 {
             self.notice_all("restore: 0 worker member(s) recorded; held 0 worker pane(s)");
         } else if hold_workers || held_portals_total > 0 {
-            // (x-a9b4) One receipt for both held kinds. A zero count is not
-            // silent when the other is non-zero, so "no portal came back"
-            // and "the counter never ran" stay distinguishable.
-            let portals_note = if held_portals_total > 0 {
-                format!(" and {held_portals_total} portal(s)")
-            } else {
-                String::new()
-            };
-            self.notice_all(format!(
-                "restore: held {held_workers_total} worker pane(s){portals_note}; focus one to resume it"
-            ));
+            portal_reach::notify_held_receipt(self, held_workers_total, held_portals_total);
         }
         if hold_workers && refused_workers_total > 0 {
             self.notice_all(format!(

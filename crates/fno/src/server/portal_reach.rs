@@ -28,6 +28,35 @@ pub(super) fn row_answers_key(a: &RegistryAgent, key: &str) -> bool {
     a.mux.is_none() && !a.exited && (a.attach_id.as_deref() == Some(key) || a.name == key)
 }
 
+/// (x-a9b4) Remember every restored portal slot's seat (index, row, pane,
+/// tab id) until the tab ids are final.
+pub(super) fn collect_portal_slot_seats(
+    kept_slots: &[&crate::proto::LayoutSlot],
+    slot_pane: &HashMap<&str, u64>,
+    tid: TabId,
+    into: &mut Vec<(u8, String, u64, TabId)>,
+) {
+    for slot in kept_slots {
+        if let (Some(p), Some(portal)) = (slot_pane.get(slot.name.as_str()), slot.portal.as_ref()) {
+            into.push((portal.index, portal.row.clone(), *p, tid));
+        }
+    }
+}
+
+/// (x-a9b4) One restore receipt for both held kinds. A zero count is not
+/// silent when the other is non-zero, so "no portal came back" and "the
+/// counter never ran" stay distinguishable.
+pub(super) fn notify_held_receipt(core: &mut Core, workers_total: usize, portals_total: usize) {
+    let portals_note = if portals_total > 0 {
+        format!(" and {portals_total} portal(s)")
+    } else {
+        String::new()
+    };
+    core.notice_all(format!(
+        "restore: held {workers_total} worker pane(s){portals_note}; focus one to resume it"
+    ));
+}
+
 /// (x-a9b4) Re-arm every held portal seat after restore: the entry goes back
 /// in the map, the seat pane gets its name and its held message, and the
 /// reach or a focus fills it on first demand. A held portal is NOT a squad
