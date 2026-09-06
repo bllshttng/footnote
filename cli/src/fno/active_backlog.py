@@ -151,7 +151,13 @@ def _live_crowns(*, strict: bool = False) -> list[dict]:
             level = int(getattr(row, "crown_level", 0) or 0)
         except (TypeError, ValueError):
             level = 0
-        out.append({"scope": canon, "level": level})
+        out.append(
+            {
+                "scope": canon,
+                "level": level,
+                "holder": str(getattr(row, "name", "") or ""),
+            }
+        )
     out.sort(key=lambda c: c["scope"])
     return out
 
@@ -353,3 +359,93 @@ def drain_targets_as_dicts() -> list[dict]:
         }
         for t in resolve_drain_targets()
     ]
+
+
+def territory_rows(*, strict: bool = False) -> list[dict]:
+    """One readout row per territory (x-e221 AC7): the projection status, the
+    king check-in, and the operational probe share so none of them can
+    disagree with another.
+
+    A row names the canonical scope, its mission ids (epic members; a project
+    territory has none), the crown holder or an explicit kingless state, the
+    live node-working count against ``agents.max_live_per_territory``, and
+    the standing blueprinter's handle with its delivery totals. Read-only and
+    fail-safe: an unreadable source shrinks that row's answer (membership
+    ``unknown``, live ``None``, no blueprinter), never the whole projection.
+    """
+    try:
+        from fno.config import load_settings
+
+        cap = int(getattr(load_settings().agents, "max_live_per_territory", 4))
+    except Exception:  # noqa: BLE001 - an unreadable config keeps the default
+        cap = 4
+
+    crowns = {c["scope"]: c for c in _live_crowns(strict=strict)}
+    try:
+        from fno.agents.spawn_gate import census
+
+        census_live = census()
+        live_names = set(census_live.live_registry_names)
+        live_nodes = [n for n in census_live.live_row_nodes if n]
+    except Exception:  # noqa: BLE001 - an unreadable census reads as no rows
+        live_names, live_nodes = set(), []
+    try:
+        from fno.graph.store import read_graph
+        from fno import paths as _paths
+
+        entries = read_graph(str(_paths.graph_json()))
+        if not isinstance(entries, list):
+            entries = []
+    except Exception:  # noqa: BLE001 - an unreadable graph reads as unknown
+        entries = []
+
+    from fno.king.scope import territory_membership
+    from fno.worker.blueprint import _read_record
+
+    # Exclusive membership (x-e221): a crowned node counts for its crown
+    # scope only. A kingless project territory's ids drop every node a live
+    # crown already claims, so a worker can never cost two territories at
+    # once - the same rule the spawn gate enforces.
+    memberships: list = []
+    crown_ids: set = set()
+    for territory in _territories(strict=strict):
+        tm = territory_membership(territory["scope"], entries)
+        memberships.append((territory, tm))
+        if not territory["kingless"] and tm.state == "ok":
+            crown_ids |= tm.ids
+
+    rows: list[dict] = []
+    for territory, tm in memberships:
+        scope = territory["scope"]
+        tm_key = (tm.key or scope) if tm.state == "ok" else scope
+        ids = tm.ids if tm.state == "ok" else frozenset()
+        if territory["kingless"]:
+            ids = ids - crown_ids
+        live: "int | None" = None
+        if tm.state == "ok":
+            live = sum(1 for n in live_nodes if n in ids)
+        record = _read_record(tm_key)
+        worker = record.get("worker") or None
+        blueprinter = None
+        if worker:
+            blueprinter = {
+                "name": worker.get("name"),
+                "live": worker.get("name") in live_names,
+                "spawned_at": worker.get("spawned_at"),
+                "fed": len(record.get("fed") or {}),
+                "repairs": len(record.get("repairs") or []),
+            }
+        rows.append(
+            {
+                "scope": tm_key,
+                "membership": tm.state,
+                "rung": territory["rung"],
+                "kingless": territory["kingless"],
+                "holder": crowns.get(scope, {}).get("holder"),
+                "mission": territory["members"][0] if territory["rung"] == 2 and territory["members"] else None,
+                "live": live,
+                "cap": cap,
+                "blueprinter": blueprinter,
+            }
+        )
+    return rows

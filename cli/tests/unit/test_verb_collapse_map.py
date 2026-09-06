@@ -109,7 +109,10 @@ def test_map_covers_current_surface_once():
     # never taken from either side: 570. This branch also adds
     # `agents king drain`, the scope drain read the reign terminations key on:
     # 570 -> 571.
-    assert len(mapped) == 571, (
+    # x-e221 adds `agents worker blueprint-feed` (+ its `worker` mirror) and
+    # the hidden territory readout `config active-backlog-territories`:
+    # counted from the merged file, 571 -> 574.
+    assert len(mapped) == 574, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

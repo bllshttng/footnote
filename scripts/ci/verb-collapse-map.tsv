@@ -100,6 +100,7 @@ agents watch	T1	agents watch	5
 agents watchdog	T1	agents watchdog	4
 agents whoami	T1	agents whoami	9
 agents worker blueprint	T1	agents worker blueprint	0
+agents worker blueprint-feed	T1	agents worker blueprint-feed	0
 agents worker external	T1	agents worker external	0
 agents worker reconcile	T1	agents worker reconcile	0
 agents worker review	T1	agents worker review	0
@@ -241,6 +242,7 @@ claim status	T1	claim status	32
 codemap	KEEP	codemap	18	single-leaf group
 config accounts	KEEP	config accounts	71	deliberate readability slack for a high-traffic distinct operation
 config active-backlog	T1	config active-backlog	5
+config active-backlog-territories	T1	config active-backlog-territories	0
 config assert-subagent-budget	T1	config assert-subagent-budget	6	
 config doctor	T1	config doctor	20
 config get	KEEP	config get	69	deliberate readability slack for a high-traffic distinct operation
@@ -551,6 +553,7 @@ think inspect	T1	think inspect	7
 update	KEEP	update	88	single-leaf group
 version	KEEP	version	15	single-leaf group
 worker blueprint	T1	worker blueprint	0
+worker blueprint-feed	T1	worker blueprint-feed	0
 worker external	T1	worker external	0
 worker reconcile	T1	worker reconcile	0
 worker review	T1	worker review	0

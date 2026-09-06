@@ -851,6 +851,44 @@ def active_backlog_cmd(
         )
 
 
+@app.command("active-backlog-territories", hidden=True)
+def active_backlog_territories_cmd(
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit a JSON list of territory rows."
+    ),
+) -> None:
+    """The territory readout (x-e221 AC7): one row per scope.
+
+    Names each territory's canonical scope, mission, crown holder or
+    kingless state, live count against the per-territory cap, and the
+    standing blueprinter's handle. The same projection the king check-in
+    and the operational probe read, so none of them can disagree.
+    Read-only and best-effort, like active-backlog.
+    """
+    import json as _json
+
+    from fno.active_backlog import territory_rows
+
+    rows = territory_rows()
+    if json_out:
+        typer.echo(_json.dumps(rows))
+        return
+    if not rows:
+        typer.echo("territories: none")
+        return
+    for r in rows:
+        worker = r.get("blueprinter")
+        worker_txt = (
+            f" blueprinter={worker['name']}{'!' if worker['live'] else '?'}"
+            if worker
+            else ""
+        )
+        holder = f" king={r['holder']}" if r.get("holder") else " kingless"
+        typer.echo(
+            f"{r['scope']}\trung={r['rung']}{holder}\tlive={r['live']}/{r['cap']}{worker_txt}"
+        )
+
+
 @app.command("status-sinks")
 def status_sinks_cmd(
     json_out: bool = typer.Option(

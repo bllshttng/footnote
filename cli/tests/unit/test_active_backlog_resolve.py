@@ -170,17 +170,25 @@ def test_live_crowns_dedups_and_orders_canonical_scopes(monkeypatch):
     import fno.agents.registry as registry
 
     class _Row:
-        def __init__(self, scope, level, status="live"):
+        def __init__(self, scope, level, status="live", name=""):
             self.crown_scope = scope
             self.crown_level = level
             self.status = status
+            self.name = name
 
     monkeypatch.setattr(
         registry, "load_registry",
-        lambda: [_Row("x-b", 2), _Row("x-a,x-b", 2), _Row("x-dead", 1, status="exited")],
+        lambda: [
+            _Row("x-b", 2),
+            _Row("x-a,x-b", 2),
+            _Row("x-dead", 1, status="exited"),
+        ],
     )
     crowns = ab._live_crowns()
-    assert crowns == [{"scope": "x-a,x-b", "level": 2}, {"scope": "x-b", "level": 2}]
+    assert crowns == [
+        {"scope": "x-a,x-b", "level": 2, "holder": ""},
+        {"scope": "x-b", "level": 2, "holder": ""},
+    ]
 
 
 def test_strict_target_resolution_propagates_crown_read_fault(monkeypatch):
