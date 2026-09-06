@@ -368,7 +368,12 @@ def format_violations(violations: list[Violation]) -> str:
             ]
         )
     lines.append("add a style-exception line with a reason, or pass --style-exception.")
-    lines.append('run "fno doctor lint style --stdin" to check a rewrite before you send it.')
+    # Name the surface explicitly: --stdin defaults to mail, which checks the
+    # word cap only, so the bare command would pass a prose rewrite vacuously.
+    lines.append(
+        'run "fno doctor lint style --stdin --surface pr-body" to check a '
+        "rewrite before you send it."
+    )
     return "\n\n".join(lines)
 
 
