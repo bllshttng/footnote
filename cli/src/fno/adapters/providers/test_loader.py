@@ -1497,7 +1497,7 @@ class TestLoadAgents:
 
     def test_non_binding_agent_entries_skipped(self, tmp_path: Path):
         """config.agents is a shared namespace: provider pins live alongside
-        unrelated agent settings (max_live, spawn_permission_mode, a2a, codex,
+        unrelated agent settings (max_live, worker_qos, a2a, codex,
         defaults). The loader must skip the reserved keys and parse only real
         pins, instead of raising.
 
@@ -1513,7 +1513,7 @@ class TestLoadAgents:
         base = _valid_providers_block()
         base["agents"] = {
             "max_live": 15,
-            "spawn_permission_mode": "bypassPermissions",
+            "worker_qos": "off",
             "a2a": {"auto": True, "turn_ceiling": 6},
             "codex": {"headless_yolo": True},
             "defaults": {"provider": harness_default, "model": "opus"},

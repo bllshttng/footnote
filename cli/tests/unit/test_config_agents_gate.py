@@ -129,6 +129,25 @@ def test_spawn_permission_mode_field_no_longer_exists():
     assert "spawn_permission_mode" not in AgentsBlock.model_fields
 
 
+def test_legacy_empty_opt_out_migrates_with_a_distinct_loud_warning():
+    """An explicit legacy `spawn_permission_mode = ""` was an opt-out from
+    auto-approval; the surviving field has no equivalent, so the migration
+    warns distinctly (not the generic rename line) rather than silently
+    reproducing the value with no explanation of the behavior change."""
+    from fno.config import _DEPRECATED_WARNED, _LOG
+
+    _DEPRECATED_WARNED.discard("agents.spawn_permission_mode")
+    messages: list[str] = []
+    orig_warning = _LOG.warning
+    _LOG.warning = lambda msg, *a, **k: messages.append(msg)
+    try:
+        b = AgentsBlock.model_validate({"spawn_permission_mode": ""})
+    finally:
+        _LOG.warning = orig_warning
+    assert b.defaults.permission_mode == ""
+    assert any("no equivalent opt-out" in m for m in messages)
+
+
 def test_spawn_defaults_values_pass_through():
     b = AgentsBlock(defaults={"provider": "codex", "model": "gpt-5.6-sol", "effort": "high"})
     assert b.defaults.provider == "codex"
