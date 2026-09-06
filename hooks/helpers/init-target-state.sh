@@ -753,7 +753,10 @@ fi
 # The repair names the recovery primitive that already exists and is proven on
 # this exact case - archive the foreign manifest, re-init, and the node claim
 # is taken fresh.
-if [[ -f "$STATE_FILE" ]]; then
+# Scoped to a VALID manifest: only a parseable one names its run, so it is the
+# only file that can prove or refuse ownership. A corrupt file proves nothing
+# about ownership and keeps today's self-healing (the corrupt-archive below).
+if [[ -f "$STATE_FILE" ]] && is_valid_state_file; then
   _FM_FNO_ID="$(sed -n '/^fno_id:[[:space:]]*/{s/^fno_id:[[:space:]]*//p;q;}' "$STATE_FILE" | tr -d '"' | xargs 2>/dev/null || true)"
   _FM_CREATED_AT="$(sed -n '/^created_at:[[:space:]]*/{s/^created_at:[[:space:]]*//p;q;}' "$STATE_FILE" | tr -d '"' | xargs 2>/dev/null || true)"
   _FM_HSID="$(sed -n '/^harness_session_id:[[:space:]]*/{s/^harness_session_id:[[:space:]]*//p;q;}' "$STATE_FILE" | tr -d '"' | xargs 2>/dev/null || true)"

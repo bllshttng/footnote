@@ -203,4 +203,23 @@ RC_X="$(run_init "$TMP6" "$TMP6/init-stranger.out" CLAUDE_CODE_SESSION_ID="trans
 [[ "$RC_X" != "0" ]] || fail "T6b: a different transcript was waved through (exit 0)"
 pass "T6b: a different harness session is refused (exit $RC_X)"
 
+# ── T7: a CORRUPT manifest keeps today's self-healing ───────────────────
+# Only a parseable manifest can prove or refuse ownership. Garbage bytes
+# refuse nothing: the corrupt-archive path archives them and writes fresh.
+log "T7: corrupt manifest auto-archives and writes fresh (today's behavior)"
+
+make_repo TMP7
+STATE7="$(manifest_path "$TMP7")"
+mkdir -p "$(dirname "$STATE7")"
+printf 'not frontmatter at all\n' > "$STATE7"
+RC_G="$(run_init "$TMP7" "$TMP7/init-garbage.out" TARGET_SESSION_ID="runG-20260906T000000Z-cl777-ggggggg")"
+
+[[ "$RC_G" == "0" ]] || fail "T7: corrupt manifest exited $RC_G; wanted today's self-healing (0)"
+compgen -G "${STATE7%.md}.corrupt.*.md" >/dev/null \
+  || fail "T7: corrupt manifest was not archived to the corrupt path"
+GOT_G="$(sed -n 's/^fno_id:[[:space:]]*//p' "$STATE7" 2>/dev/null | head -1)"
+[[ "$GOT_G" == "runG-20260906T000000Z-cl777-ggggggg" ]] \
+  || fail "T7: fresh manifest fno_id is '$GOT_G'; wanted the new run's id"
+pass "T7: corrupt file self-heals; fresh manifest names the new run"
+
 log "All foreign-manifest scenarios passed"
