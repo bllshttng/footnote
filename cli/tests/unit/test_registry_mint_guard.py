@@ -1,8 +1,10 @@
 """The registry mint guard: production rows are born through mint_agent_entry.
 
 Replaces the retired check-session-identity-parity.sh and
-check-spawn-lineage-parity.sh sweeps. Rust enforces the same invariant at
-compile time via RegistryEntry::new; Python enforces it here and at the mint
+check-spawn-lineage-parity.sh sweeps. Rust enforces the same invariant with
+RegistryEntry::new plus a source-scan guard over crates/fno-agents/src
+(the mint_guard_tests module) that fails any non-test RegistryEntry literal
+built on ..Default::default(); Python enforces it here and at the mint
 constructor's signature.
 """
 

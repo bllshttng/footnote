@@ -1042,10 +1042,12 @@ impl Lineage {
 }
 
 impl RegistryEntry {
-    /// The one mint constructor. The canonical session identity and the
-    /// parent edge are positional, so no mint site can build the struct-update
-    /// base without naming both. This is the compile-time replacement for the
-    /// retired session-identity and spawn-lineage parity scripts.
+    /// The one mint constructor and the only sanctioned struct-update base.
+    /// The canonical session identity and the parent edge are positional
+    /// here; a literal on `..Default::default()` would still compile, so the
+    /// source-scan guard (`mint_guard_tests`) fails any non-test literal not
+    /// built on this constructor. That guard is the mechanical replacement
+    /// for the retired session-identity and spawn-lineage parity scripts.
     pub fn new(harness_session_id: Option<String>, spawned_by: Lineage) -> Self {
         Self {
             harness_session_id,
