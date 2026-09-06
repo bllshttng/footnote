@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 import typer
 
+from fno.agents import launch_provenance
 from fno.agents.rust_runtime import make_agents_group_cls
 
 agents_app = typer.Typer(
@@ -751,47 +752,19 @@ def _worker_rpc(
 ) -> "dict | None":
     """One length-prefixed JSON RPC to a worker socket (NEVER raises).
 
-    Same 4-byte-LE-u32 + JSON framing as dispatch._daemon_rpc, but to an
-    arbitrary worker socket (the stream worker serves ``stream.*`` directly).
-    Returns the ``result`` dict, or None on any transport/error response.
+    The shared dispatch.rpc_roundtrip framing, to an arbitrary worker socket
+    (the stream worker serves ``stream.*`` directly). Returns the ``result``
+    dict, or None on any transport/error response.
     """
-    import socket
-    import struct
+    from fno.agents.dispatch import rpc_roundtrip
 
-    payload = json.dumps({"id": 1, "method": method, "params": params}).encode("utf-8")
-    frame = struct.pack("<I", len(payload)) + payload
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        sock.settimeout(connect_timeout)
-        try:
-            sock.connect(str(sock_path))
-        except (FileNotFoundError, ConnectionRefusedError, OSError):
-            return None
-        sock.settimeout(read_timeout)
-        sock.sendall(frame)
-        header = b""
-        while len(header) < 4:
-            chunk = sock.recv(4 - len(header))
-            if not chunk:
-                return None
-            header += chunk
-        (length,) = struct.unpack_from("<I", header)
-        if length > 16 * 1024 * 1024:
-            return None
-        data = b""
-        while len(data) < length:
-            chunk = sock.recv(length - len(data))
-            if not chunk:
-                return None
-            data += chunk
-        resp = json.loads(data.decode("utf-8"))
-        if not isinstance(resp, dict) or "error" in resp:
-            return None
-        return resp.get("result")
-    except (OSError, ValueError):
-        return None
-    finally:
-        sock.close()
+    return rpc_roundtrip(
+        sock_path,
+        method,
+        params,
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+    )
 
 
 def _render_stream_frame(frame: dict) -> "str | None":
@@ -2575,8 +2548,14 @@ def cmd_spawn(
                 receipt_obj["permission_mode_requested"] = permission_mode
             # x-d012: name the pinned account so a mis-pin is visible at spawn
             # time, not at billing time. Only when set (receipt byte-stable else).
-            if account is not None:
-                receipt_obj["account"] = account
+            # x-04ce: the account fact carries WHO chose it.
+            _account, _source = launch_provenance.receipt_account_fields(
+                pane_result.launch_account, pane_result.launch_account_source, account
+            )
+            if _account is not None:
+                receipt_obj["account"] = _account
+                if _source is not None:
+                    receipt_obj["account_source"] = _source
             if dispatch_account is not None:
                 receipt_obj["dispatch_account"] = dispatch_account
                 # Name the credential provenance and the env keys actually
@@ -2784,7 +2763,7 @@ def cmd_spawn(
         # x-d012: name the pinned account. Only when set, so a non-account bg
         # receipt stays byte-identical to the Rust client's (which never emits
         # it - an --account spawn always re-execs into this Python path).
-        account_field = f', "account": {json.dumps(account)}' if account else ""
+        account_field = launch_provenance.bg_account_field(result, account)
         # x-8552: the composed spawn's live credential and payer, from the
         # composed env (see the pane branch); composed-only so an account-only
         # bg receipt stays byte-identical (AC3).
@@ -4547,31 +4526,39 @@ def cmd_watchdog(
             (wd.Verdict(**data), row)
             for data, row in zip(payload["verdicts"], rows)
         ]
+
+        def _print_verdicts():
+            for verdict, row in pairs:
+                typer.echo(
+                    f"{verdict.verdict:11} {verdict.row_id} "
+                    f"handle={verdict.name} cwd={row.cwd}"
+                )
+
+        def _apply_and_emit():
+            # One move shared by both lanes: apply, then the JSON emit.
+            results = wd.apply_recoverable(scan, scope_cwd=scope_cwd)
+            if json_out:
+                sys.stdout.write(
+                    json.dumps(
+                        {
+                            **payload,
+                            "results": results,
+                            "result_counts": wd.recovery_result_counts(results),
+                        }
+                    )
+                    + "\n"
+                )
+            return results
+
         if not scan.complete:
             if apply or apply_all:
-                results = wd.apply_recoverable(scan, scope_cwd=scope_cwd)
-                if json_out:
-                    sys.stdout.write(
-                        json.dumps(
-                            {
-                                **payload,
-                                "results": results,
-                                "result_counts": wd.recovery_result_counts(results),
-                            }
-                        )
-                        + "\n"
-                    )
-                else:
-                    print(results[0]["detail"], file=sys.stderr)
+                results = _apply_and_emit()
+                print(results[0]["detail"], file=sys.stderr)
                 raise typer.Exit(code=3)
             if json_out:
                 sys.stdout.write(json.dumps(payload) + "\n")
             else:
-                for verdict, row in pairs:
-                    typer.echo(
-                        f"{verdict.verdict:11} {verdict.row_id} "
-                        f"handle={verdict.name} cwd={row.cwd}"
-                    )
+                _print_verdicts()
                 for warning in payload["warnings"]:
                     print(f"warning: {warning}", file=sys.stderr)
                 typer.echo(
@@ -4617,11 +4604,7 @@ def cmd_watchdog(
             if json_out:
                 sys.stdout.write(json.dumps(payload) + "\n")
             else:
-                for verdict, row in pairs:
-                    typer.echo(
-                        f"{verdict.verdict:11} {verdict.row_id} "
-                        f"handle={verdict.name} cwd={row.cwd}"
-                    )
+                _print_verdicts()
                 typer.echo(
                     f"recoverable={payload['recoverable_count']} "
                     f"usable={payload['usable_recoverable_count']} "
@@ -4630,19 +4613,8 @@ def cmd_watchdog(
                 )
             return
 
-        results = wd.apply_recoverable(scan, scope_cwd=scope_cwd)
-        if json_out:
-            sys.stdout.write(
-                json.dumps(
-                    {
-                        **payload,
-                        "results": results,
-                        "result_counts": wd.recovery_result_counts(results),
-                    }
-                )
-                + "\n"
-            )
-        else:
+        results = _apply_and_emit()
+        if not json_out:
             for result in results:
                 line = f"{result['outcome']:9} {result['detail']}"
                 print(line, file=sys.stderr if result["outcome"] != "applied" else sys.stdout)

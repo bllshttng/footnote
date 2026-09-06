@@ -267,8 +267,16 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # forward-compat rationale as v11-v24.
 # v26: additive served facts (liveness + its stamp, harness_title): a pre-v26
 # reader degrades (drops the keys, refuses writes) instead of TypeError at v25.
-# Read from the single-owner TOML that build.rs projects from
-# crates/fno-agents/src/registry_schema.toml; bump there, not here.
+# v27 (x-04ce): additive `launch_account_source` - WHO chose the row's
+# `launch_account`: "caller" or "config", vocabulary defined once in
+# `fno.agents.spawn_flag_owners`. None on every other row: "default" already
+# says nobody chose, a revive inherits the source row's stamp, legacy rows
+# predate the column. Before it, a config injection read as a caller decision.
+# Same additive-optional writer-protection rationale as v11-v25: asdict emits
+# the key on every written row, so a pre-v27 reader must reject the store on
+# version rather than TypeError on the unknown kwarg.
+# The version NUMBER is read from the single-owner TOML that build.rs projects
+# from crates/fno-agents/src/registry_schema.toml; bump there, not here.
 def _read_schema_version() -> int:
     raw = resources.files("fno.agents").joinpath("registry_schema.toml").read_text(encoding="utf-8")
     return int(tomllib.loads(raw)["version"])
@@ -621,6 +629,12 @@ class AgentEntry:
     liveness: Optional[str] = None
     liveness_measured_at: Optional[str] = None
     harness_title: Optional[str] = None
+
+    # v27 (x-04ce): WHO chose `launch_account`, vocabulary from
+    # spawn_flag_owners. None on "default", inherited, and unattributable
+    # rows. ABSENCE MEANS UNKNOWN, the `origin` discipline; Rust mirrors it
+    # as additive-optional passthrough.
+    launch_account_source: Optional[str] = None
 
     @property
     def session_id(self) -> Optional[str]:

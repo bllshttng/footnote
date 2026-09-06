@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Collection, Literal, Optional, TypedDict, Union
+from typing import Collection, Iterator, Literal, Optional, TypedDict, Union
 
 from fno.graph._constants import (
     LEDGER_JSON, PRIORITY_ORDER, is_wellformed_node_id, mint_node_id, _rank_band,
@@ -590,6 +590,49 @@ def _settings_candidate_paths() -> list[Path]:
     return out
 
 
+def _iter_settings_projects() -> "Iterator[tuple[object, object]]":
+    """Yield ``(name, raw_path)`` for every ``work`` project entry, in file
+    then declaration order: multi-workspace first, then legacy flat.
+
+    The single schema walk behind the work-map readers (detection, reverse
+    lookup, known-names, the maintain workspace map) so all four consume one
+    shape and cannot drift. Values are yielded untyped; each consumer applies
+    its own guards. Best-effort: a missing or unparseable file contributes
+    nothing.
+    """
+    # Function-local: keep graph-module load free of config_io's pydantic/yaml.
+    from fno.config_io import read_config_flat
+
+    for path in _settings_candidate_paths():
+        if not path.exists():
+            continue
+        # read_config_flat parses config.toml (or a legacy settings.yaml) and
+        # returns the FLAT dict; work is top-level.
+        work = read_config_flat(path).get("work")
+        if not isinstance(work, dict):
+            continue
+
+        workspaces = work.get("workspaces")
+        if isinstance(workspaces, dict):
+            for ws in workspaces.values():
+                if not isinstance(ws, dict):
+                    continue
+                projects = ws.get("projects")
+                if not isinstance(projects, list):
+                    continue
+                for proj in projects:
+                    if not isinstance(proj, dict):
+                        continue
+                    yield proj.get("name"), proj.get("path")
+
+        flat_projects = work.get("projects")
+        if isinstance(flat_projects, dict):
+            for name, cfg in flat_projects.items():
+                if not isinstance(cfg, dict):
+                    continue
+                yield name, cfg.get("path")
+
+
 def detect_project_from_settings(cwd_path: str | None = None) -> str | None:
     """Auto-detect project name from settings.yaml work config.
 
@@ -622,49 +665,12 @@ def detect_project_from_settings(cwd_path: str | None = None) -> str | None:
     # stored as ~ / absolute, so a relative target would never match.
     target = os.path.abspath(os.path.expanduser(cwd_path)) if cwd_path else os.getcwd()
 
-    # Function-local: keep graph-module load free of config_io's pydantic/yaml.
-    from fno.config_io import read_config_flat
-
-    for path in _settings_candidate_paths():
-        if not path.exists():
+    for name, raw_path in _iter_settings_projects():
+        if not name or not raw_path:
             continue
-        # read_config_flat parses config.toml (or a legacy settings.yaml) and
-        # returns the FLAT dict; work is top-level. A missing/unparseable file
-        # contributes nothing (best-effort, per the silent-failure contract).
-        work = read_config_flat(path).get("work")
-        if not isinstance(work, dict):
-            continue
-
-        workspaces = work.get("workspaces")
-        if isinstance(workspaces, dict):
-            for ws in workspaces.values():
-                if not isinstance(ws, dict):
-                    continue
-                projects = ws.get("projects")
-                if not isinstance(projects, list):
-                    continue
-                for p in projects:
-                    if not isinstance(p, dict):
-                        continue
-                    raw_path = p.get("path")
-                    name = p.get("name")
-                    if not raw_path or not name:
-                        continue
-                    proj_path = os.path.normpath(os.path.expanduser(str(raw_path)))
-                    if proj_path == target:
-                        return str(name)
-
-        flat_projects = work.get("projects")
-        if isinstance(flat_projects, dict):
-            for name, cfg in flat_projects.items():
-                if not isinstance(cfg, dict):
-                    continue
-                raw_path = cfg.get("path")
-                if not raw_path:
-                    continue
-                proj_path = os.path.normpath(os.path.expanduser(str(raw_path)))
-                if proj_path == target:
-                    return str(name)
+        proj_path = os.path.normpath(os.path.expanduser(str(raw_path)))
+        if proj_path == target:
+            return str(name)
 
     return None
 
@@ -705,47 +711,11 @@ def project_root_from_settings(project: str | None) -> str | None:
     if not project:
         return None
 
-    # Function-local: keep graph-module load free of config_io's pydantic/yaml.
-    from fno.config_io import read_config_flat
-
-    for path in _settings_candidate_paths():
-        if not path.exists():
+    for name, raw_path in _iter_settings_projects():
+        if not name or not raw_path:
             continue
-        # read_config_flat parses config.toml (or a legacy settings.yaml) and
-        # returns the FLAT dict; work is top-level. A missing/unparseable file
-        # contributes nothing (best-effort, same as the forward reader).
-        work = read_config_flat(path).get("work")
-        if not isinstance(work, dict):
-            continue
-
-        workspaces = work.get("workspaces")
-        if isinstance(workspaces, dict):
-            for ws in workspaces.values():
-                if not isinstance(ws, dict):
-                    continue
-                projects = ws.get("projects")
-                if not isinstance(projects, list):
-                    continue
-                for p in projects:
-                    if not isinstance(p, dict):
-                        continue
-                    name = p.get("name")
-                    raw_path = p.get("path")
-                    if not name or not raw_path:
-                        continue
-                    if name == project:
-                        return os.path.abspath(os.path.expanduser(str(raw_path)))
-
-        flat_projects = work.get("projects")
-        if isinstance(flat_projects, dict):
-            for name, cfg in flat_projects.items():
-                if not isinstance(cfg, dict):
-                    continue
-                raw_path = cfg.get("path")
-                if not raw_path:
-                    continue
-                if name == project:
-                    return os.path.abspath(os.path.expanduser(str(raw_path)))
+        if name == project:
+            return os.path.abspath(os.path.expanduser(str(raw_path)))
 
     return None
 
@@ -870,33 +840,9 @@ def _list_known_projects() -> set[str]:
     """
 
     known: set[str] = set()
-    # Function-local: keep graph-module load free of config_io's pydantic/yaml.
-    from fno.config_io import read_config_flat
-
-    for path in _settings_candidate_paths():
-        if not path.exists():
-            continue
-        # config.toml (or legacy settings.yaml) -> flat dict; work is top-level.
-        work = read_config_flat(path).get("work")
-        if not isinstance(work, dict):
-            continue
-
-        workspaces = work.get("workspaces")
-        if isinstance(workspaces, dict):
-            for ws in workspaces.values():
-                if not isinstance(ws, dict):
-                    continue
-                projects = ws.get("projects")
-                if isinstance(projects, list):
-                    for proj in projects:
-                        if isinstance(proj, dict) and isinstance(proj.get("name"), str):
-                            known.add(proj["name"])
-
-        flat_projects = work.get("projects")
-        if isinstance(flat_projects, dict):
-            for name in flat_projects.keys():
-                if isinstance(name, str):
-                    known.add(name)
+    for name, _raw in _iter_settings_projects():
+        if isinstance(name, str):
+            known.add(name)
 
     return known
 

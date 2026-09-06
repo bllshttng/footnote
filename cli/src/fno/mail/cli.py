@@ -50,7 +50,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import NoReturn, Optional, TypedDict
 
 import typer
 
@@ -1774,6 +1774,40 @@ class UnavailableTokenError(Exception):
         super().__init__("session token resolution unavailable")
         self.failed = failed
         self.candidates = candidates
+
+
+def _ambiguous_token_exit(name: str, amb: AmbiguousTokenError) -> NoReturn:
+    print(
+        f"ambiguous session token {name!r}: matches "
+        f"{', '.join(amb.candidates)}. Send to a full session id.",
+        file=sys.stderr,
+    )
+    raise typer.Exit(code=2) from amb
+
+
+def _unreachable_token_exit(
+    name: str, candidates: list[str], code: int, cause: BaseException
+) -> NoReturn:
+    hint = (
+        f" Closest live sessions: {', '.join(candidates)}." if candidates else ""
+    )
+    print(f"unknown agent or live-session handle: {name!r}.{hint}", file=sys.stderr)
+    raise typer.Exit(code=code) from cause
+
+
+def _unavailable_token_exit(name: str, unavailable: UnavailableTokenError) -> NoReturn:
+    stores = ", ".join(unavailable.failed)
+    visible = (
+        f" Visible candidates: {', '.join(unavailable.candidates)}."
+        if unavailable.candidates
+        else ""
+    )
+    print(
+        f"cannot resolve short session token {name!r}: unreadable stores: "
+        f"{stores}.{visible} Send to a full session id.",
+        file=sys.stderr,
+    )
+    raise typer.Exit(code=2) from unavailable
 
 
 _RAW_SELF_TOKEN = object()
@@ -4432,36 +4466,11 @@ def cmd_send(
             # --force exists for. These three refusals belong here for the same
             # reason they belong on the ordinary lane below: without them the
             # verb exits non-zero with an empty terminal and a raw traceback.
-            print(
-                f"ambiguous session token {name!r}: matches "
-                f"{', '.join(amb.candidates)}. Send to a full session id.",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2) from amb
-        except UnreachableTokenError:
-            hint = (
-                f" Closest live sessions: {', '.join(forced_suggestions)}."
-                if forced_suggestions
-                else ""
-            )
-            print(
-                f"unknown agent or live-session handle: {name!r}.{hint}",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=UNKNOWN_AGENT_EXIT_CODE)
+            _ambiguous_token_exit(name, amb)
+        except UnreachableTokenError as unreachable:
+            _unreachable_token_exit(name, forced_suggestions, UNKNOWN_AGENT_EXIT_CODE, unreachable)
         except UnavailableTokenError as unavailable:
-            stores = ", ".join(unavailable.failed)
-            visible = (
-                f" Visible candidates: {', '.join(unavailable.candidates)}."
-                if unavailable.candidates
-                else ""
-            )
-            print(
-                f"cannot resolve short session token {name!r}: unreadable stores: "
-                f"{stores}.{visible} Send to a full session id.",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2) from unavailable
+            _unavailable_token_exit(name, unavailable)
         return
 
     try:
@@ -4543,36 +4552,13 @@ def cmd_send(
                 origin=mail_origin,
             )
         except AmbiguousTokenError as amb:
-            print(
-                f"ambiguous session token {name!r}: matches "
-                f"{', '.join(amb.candidates)}. Send to a full session id.",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2) from amb
-        except UnreachableTokenError:
+            _ambiguous_token_exit(name, amb)
+        except UnreachableTokenError as unreachable:
             # AC2-ERR: not a registered agent, not discoverable, and no durable
             # store knows it. Error with the closest live handles, sending nothing.
-            hint = ""
-            if suggestions:
-                hint = f" Closest live sessions: {', '.join(suggestions)}."
-            print(
-                f"unknown agent or live-session handle: {name!r}.{hint}",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=exc.exit_code) from exc
+            _unreachable_token_exit(name, suggestions, exc.exit_code, unreachable)
         except UnavailableTokenError as unavailable:
-            stores = ", ".join(unavailable.failed)
-            visible = (
-                f" Visible candidates: {', '.join(unavailable.candidates)}."
-                if unavailable.candidates
-                else ""
-            )
-            print(
-                f"cannot resolve short session token {name!r}: unreadable stores: "
-                f"{stores}.{visible} Send to a full session id.",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2) from unavailable
+            _unavailable_token_exit(name, unavailable)
         return
 
     # AC3-UI: distinguish delivered vs queued on stdout. A durable demotion

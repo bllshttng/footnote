@@ -46,6 +46,21 @@ HOLDER_A = "target-session:sid-a"
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _real_reap_for_verb_tests(monkeypatch):
+    """These tests drive the REAL reap against tmp roots, so the conftest's
+    hermetic reap stub must not reach them.
+
+    It never could while the CLI verbs captured core callables at import; the
+    CLI now resolves them at call time, which is what makes the stub visible
+    here. Restore the function from this file's own collection-time binding -
+    the same reference the conftest fixture already documents as unaffected.
+    """
+    import fno.claims.core as claims_core
+
+    monkeypatch.setattr(claims_core, "reap_dead_claims", reap_dead_claims)
+
+
 def _dead_pid() -> int:
     dead = 999_999
     while psutil.pid_exists(dead):

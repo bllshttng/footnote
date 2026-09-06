@@ -172,6 +172,18 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // bump is what makes a pre-v26 reader degrade (drop the keys, refuse the
 // write) instead of TypeError on the unknown AgentEntry kwargs at an equal
 // version number. Accepted set widens to 1..=26.
+//
+// v27 (x-04ce) adds `launch_account_source` - WHO chose the row's
+// `launch_account`: "caller" (a flag on this spawn's argv) or "config"
+// (accounts.quota.pick_on_launch picked it). None on every other row:
+// launch_account "default" already says nobody chose, a revive inherits the
+// source row's stamp, and mints that cannot attribute stay silent. The
+// provenance vocabulary is shared with the spawn receipt (`account_source`)
+// and defined once in Python's `spawn_flag_owners`. Before it, a config
+// injection read as a caller decision - the exact misread this column ends.
+// Same writer-protection rationale as v22-v25: a pre-v27 writer accepts the
+// unknown keys and erases them on its next read-modify-write. Accepted set
+// widens to 1..=27.
 // Rendered by build.rs from src/registry_schema.toml (the version's single
 // owner); see that file for the bump protocol.
 include!(concat!(env!("OUT_DIR"), "/registry_schema.rs"));
@@ -722,6 +734,17 @@ pub struct RegistryEntry {
     /// drops a Python-stamped account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_account: Option<String>,
+    /// WHO chose `launch_account` (x-04ce, v26): `"caller"` (a flag on this
+    /// spawn's argv) or `"config"` (`accounts.quota.pick_on_launch` picked
+    /// it). `None` when launch_account is `"default"` (nobody chose - the
+    /// value already says so), when a revive inherited the account, and on
+    /// rows whose mint cannot attribute the choice. Mirrors Python's
+    /// `AgentEntry.launch_account_source`; same X3 passthrough so a daemon
+    /// write-back preserves the stamp. The vocabulary is shared with the
+    /// spawn receipt's `account_source` and defined once in Python's
+    /// `spawn_flag_owners`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_account_source: Option<String>,
     /// The SECOND valid session id an additive fork/background minted on this
     /// row (x-d285, v20). Both ids stay valid forever and resolve to the same
     /// row and launch binding; neither replaces the other, and at most ONE
@@ -1063,6 +1086,37 @@ pub fn launch_account_from_env() -> Option<String> {
         return None;
     }
     Some("default".to_string())
+}
+
+/// The carrier for launch-account PROVENANCE across the exec seam. The
+/// Python seam that injects a headroom-picked `--account`
+/// (`_pick_account_at_seam`) sets it to `"config"` in the same breath, so
+/// the Rust mint can tell an injected pick from a flag the operator typed.
+/// An id-adjacent adjective, never a credential.
+pub const LAUNCH_ACCOUNT_SOURCE_ENV_KEY: &str = "FNO_LAUNCH_ACCOUNT_SOURCE";
+
+/// WHO chose the row's launch account (x-04ce). A source rides a concrete
+/// account: only when `launch_account_from_env()` named a specific id (not
+/// `"default"`, not unknown) does a source exist, and the carrier must then
+/// speak the vocabulary (`"caller"` / `"config"`); anything else reads as the
+/// flag (`"caller"`). A source over `"default"` or an unknown id is the
+/// contradiction this pairing forbids - nobody config-picked the fallback.
+pub fn launch_account_source_from_env() -> Option<String> {
+    let id = launch_account_from_env()?;
+    if id == "default" {
+        return None;
+    }
+    match std::env::var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY) {
+        Ok(src) if src == "caller" || src == "config" => Some(src),
+        _ => Some("caller".to_string()),
+    }
+}
+
+/// The launch-account pair a mint seam stamps (x-04ce): the row's
+/// `launch_account` fact plus WHO chose it. One read so a seam cannot take
+/// the two env reads at different moments.
+pub fn launch_provenance_from_env() -> (Option<String>, Option<String>) {
+    (launch_account_from_env(), launch_account_source_from_env())
 }
 /// `host_mode` value for an ADOPTED `claude --bg` session footnote holds live via
 /// a daemon `control.sock` attach (G1 held-attach substrate, x-26df). Distinct
@@ -2378,6 +2432,10 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), StateEr
 mod tests {
     use super::*;
 
+    /// Tests that mutate process-wide env vars hold this so parallel test
+    /// threads never interleave mid-arm snapshots of the same keys.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn enters_fires_once_per_episode() {
         use InsideLegState::{Blocked, Done, Working};
@@ -3375,7 +3433,10 @@ mod tests {
         // x-d285: the Rust mint's account fact. An explicit seam id wins; an
         // ambient config dir the mint cannot attribute is unknown; neither
         // present proves the default slot. Environment mutation is process-
-        // wide, so the test snapshots and restores both keys around its arms.
+        // wide, so the test snapshots and restores both keys around its arms,
+        // under the shared env-mutation lock (a sibling test mutating the same
+        // keys on another thread would interleave mid-arm snapshots).
+        let _guard = ENV_LOCK.lock().unwrap();
         fn restore(launch: Option<std::ffi::OsString>, dir: Option<std::ffi::OsString>) {
             match launch {
                 Some(v) => std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, v),
@@ -3407,6 +3468,61 @@ mod tests {
             c.as_deref(),
             Some("default"),
             "neither present proves default"
+        );
+    }
+
+    #[test]
+    fn launch_account_source_rides_a_concrete_account() {
+        // x-04ce P2: a source over "default" or an unknown id is the
+        // contradiction "config picked the fallback". The carrier counts only
+        // when the value read names a real account, and only caller/config
+        // speak the vocabulary. Environment mutation is process-wide, so the
+        // test snapshots and restores both keys around its arms, under the
+        // same env-mutation lock the three-valued test holds.
+        let _guard = ENV_LOCK.lock().unwrap();
+        fn restore(launch: Option<std::ffi::OsString>, src: Option<std::ffi::OsString>) {
+            match launch {
+                Some(v) => std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, v),
+                None => std::env::remove_var(LAUNCH_ACCOUNT_ENV_KEY),
+            }
+            match src {
+                Some(v) => std::env::set_var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY, v),
+                None => std::env::remove_var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY),
+            }
+        }
+        let saved_launch = std::env::var_os(LAUNCH_ACCOUNT_ENV_KEY);
+        let saved_src = std::env::var_os(LAUNCH_ACCOUNT_SOURCE_ENV_KEY);
+
+        std::env::remove_var(LAUNCH_ACCOUNT_ENV_KEY);
+        std::env::set_var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY, "config");
+        let no_id = launch_account_source_from_env();
+
+        std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, "default");
+        let default_id = launch_account_source_from_env();
+
+        std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, "makers");
+        let picked = launch_account_source_from_env();
+
+        std::env::remove_var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY);
+        let flag_only = launch_account_source_from_env();
+
+        std::env::set_var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY, "bogus");
+        let off_vocabulary = launch_account_source_from_env();
+
+        restore(saved_launch, saved_src);
+
+        assert_eq!(no_id, None, "a carrier without an account proves nothing");
+        assert_eq!(default_id, None, "nobody config-picked the fallback slot");
+        assert_eq!(picked.as_deref(), Some("config"), "the pick names itself");
+        assert_eq!(
+            flag_only.as_deref(),
+            Some("caller"),
+            "an id without a carrier was on the argv"
+        );
+        assert_eq!(
+            off_vocabulary.as_deref(),
+            Some("caller"),
+            "a word outside the vocabulary reads as the flag"
         );
     }
 

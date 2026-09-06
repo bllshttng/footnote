@@ -2907,7 +2907,7 @@ fn create(
     // CLIENT process, which inherited the spawning session's env, so the
     // markers read here name this row's true parent.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
-    let launch_account = crate::state::launch_account_from_env();
+    let (launch_account, launch_account_source) = crate::state::launch_provenance_from_env();
     let new_entry = RegistryEntry {
         // x-98ab: client-side mint - this process inherited the spawning
         // session's env, so the exported FNO_NODE names the node THIS spawn
@@ -2923,6 +2923,7 @@ fn create(
         // v9: the claude jobId is the unified transport key (was claude_short_id);
         // follow-up/logs read it via `transport_short()`.
         short_id: short_id.clone(),
+        launch_account_source,
         legacy_provider: String::new(),
         provider: Some("anthropic".to_string()),
         // (x-d401) The model the worker was launched with, and the basis
@@ -2947,8 +2948,7 @@ fn create(
         harness_session_id: session_uuid.clone(),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
-        // x-d285: this client inherited the spawn seam's env verbatim, so the
-        // three-valued env read is the honest account fact for the row.
+        // x-d285: the client env is the spawn seam's verbatim, so the three-valued read is honest.
         launch_account: launch_account.clone(),
         related_session_id: None,
         // v25: the route axes this lane actually used, stamped so the
@@ -2957,7 +2957,7 @@ fn create(
         // launch read (unknown stays unknown, never a guess).
         route_provider_id: Some("anthropic".to_string()),
         model_name: model.filter(|m| !m.is_empty()).map(str::to_string),
-        account_record_id: launch_account.clone(),
+        account_record_id: launch_account,
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,

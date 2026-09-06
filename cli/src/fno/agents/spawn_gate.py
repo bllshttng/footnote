@@ -586,27 +586,34 @@ def provider_live_count(provider: str, counted: Optional[set[str]] = None) -> in
 
     count = 0
     counted_names: set[str] = set()
+
+    def _pane_state(row) -> "bool | None":
+        """Pane liveness via the mux probe. Raises ProviderCountUnavailable
+        when the probe crashes; None when the row carries no pane ref."""
+        if not isinstance(row.mux, dict):
+            return None
+        try:
+            from fno.agents.mux_spawn import _mux_pane_alive
+
+            return _mux_pane_alive(row.mux)
+        except Exception as exc:
+            raise ProviderCountUnavailable(
+                f"pane liveness unreadable for {row.name}: {exc}"
+            ) from exc
+
     for row in candidates:
         if row.pid is not None:
             if row.pid_start_time is None:
                 state = _pid_alive(row.pid, None)
                 if state is False:
                     continue
-                if isinstance(row.mux, dict):
-                    try:
-                        from fno.agents.mux_spawn import _mux_pane_alive
-
-                        pane_state = _mux_pane_alive(row.mux)
-                    except Exception as exc:
-                        raise ProviderCountUnavailable(
-                            f"pane liveness unreadable for {row.name}: {exc}"
-                        ) from exc
-                    if pane_state is True:
-                        count += 1
-                        counted_names.add(row.name)
-                        continue
-                    if pane_state is False:
-                        continue
+                pane = _pane_state(row)
+                if pane is True:
+                    count += 1
+                    counted_names.add(row.name)
+                    continue
+                if pane is False:
+                    continue
                 raise ProviderCountUnavailable(
                     f"process incarnation token missing for {row.name}"
                 )
@@ -619,21 +626,15 @@ def provider_live_count(provider: str, counted: Optional[set[str]] = None) -> in
                 count += 1
                 counted_names.add(row.name)
             continue
+        pane = _pane_state(row)
+        if pane is True:
+            count += 1
+            counted_names.add(row.name)
+            continue
+        if pane is False:
+            continue
         if isinstance(row.mux, dict):
-            try:
-                from fno.agents.mux_spawn import _mux_pane_alive
-
-                pane_state = _mux_pane_alive(row.mux)
-            except Exception as exc:
-                raise ProviderCountUnavailable(
-                    f"pane liveness unreadable for {row.name}: {exc}"
-                ) from exc
-            if pane_state is True:
-                count += 1
-                counted_names.add(row.name)
-                continue
-            if pane_state is False:
-                continue
+            # Unreadable is not absent: the cap refuses before the bg fallback.
             raise ProviderCountUnavailable(
                 f"pane liveness unreadable for {row.name}"
             )
@@ -1439,6 +1440,22 @@ def _king_share(cap: int, king_counts: dict[Optional[str], int], caller: str) ->
     return max(1, cap // len(kings))
 
 
+def _take_headless_slot(
+    guard, name, holder, route_provider, provider_cap
+) -> None:
+    """The headless arm: bind the worker slot now. pane/bg keep the gate mutex
+    until dispatch returns (the caller releases via guard.release())."""
+    try:
+        _acquire_worker_slot(
+            guard, name, holder, route_provider,
+            fail_closed=provider_cap is not None,
+        )
+    except ProviderCountUnavailable as exc:
+        guard.release()
+        _refuse_provider_cap(route_provider or "unknown", provider_cap or 0, error=exc)
+    guard.release_gate_mutex()
+
+
 def _check_king_share(
     census_obj: "LiveCensus", cap: int, *, caller_session: Optional[str]
 ) -> None:
@@ -1698,20 +1715,7 @@ def run_gate(
                     "(--force); provider cap remains enforced"
                 )
                 if substrate == "headless":
-                    try:
-                        _acquire_worker_slot(
-                            guard,
-                            name,
-                            holder,
-                            route_provider,
-                            fail_closed=provider_cap is not None,
-                        )
-                    except ProviderCountUnavailable as exc:
-                        guard.release()
-                        _refuse_provider_cap(
-                            route_provider or "unknown", provider_cap or 0, error=exc
-                        )
-                    guard.release_gate_mutex()
+                    _take_headless_slot(guard, name, holder, route_provider, provider_cap)
                 return guard
             c = census()
             for w in c.warnings:
@@ -1761,20 +1765,7 @@ def run_gate(
                     guard.release()
                     raise
                 if substrate == "headless":
-                    try:
-                        _acquire_worker_slot(
-                            guard,
-                            name,
-                            holder,
-                            route_provider,
-                            fail_closed=provider_cap is not None,
-                        )
-                    except ProviderCountUnavailable as exc:
-                        guard.release()
-                        _refuse_provider_cap(
-                            route_provider or "unknown", provider_cap or 0, error=exc
-                        )
-                    guard.release_gate_mutex()
+                    _take_headless_slot(guard, name, holder, route_provider, provider_cap)
                 # pane/bg: keep the mutex until dispatch returns (the row
                 # exists by then); the caller releases via guard.release().
                 return guard

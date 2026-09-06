@@ -101,7 +101,7 @@ class TestPickAtLaunch:
         # surprise; the receipt is the whole mitigation.
         dispatch_mod._pick_account_env()
         err = capsys.readouterr().err
-        assert "account: makers (picked," in err
+        assert "account: makers (picked by accounts.quota.pick_on_launch," in err
         assert "32%" in err
 
     def test_off_by_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
