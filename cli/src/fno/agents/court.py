@@ -1,22 +1,17 @@
-"""``fno agents court`` (x-8cee): one read of every crown, its scope, its
-holder, and whether the registry and the graph agree.
+"""``fno agents court``: one read of every crown, its scope, its holder, and
+whether the registry and the graph agree - the read that would have prevented
+the 2026-08-20 incident, when a three-crown re-scope took five attempts
+because no single command showed the rows still reading the old scope.
 
-The read that would have prevented the 2026-08-20 incident. A three-crown
-re-scope took five attempts because no single command answered "did the
-coronations work" - the grant was recorded as a decision and relayed by mail
-while the registry rows kept reading the old scope, and nobody could see the
-disagreement.
-
-Agreement is a POSITIVE marker on purpose. A screen that shows no
-disagreements because the graph could not be read looks exactly like a
-healthy fleet, which is the state that let the incident run five times
-instead of once. So ``agree`` is ``True`` only when the graph was actually
-read and the scope checked out; an unreadable graph or an external tracker
-backend answers ``None`` with a stated reason, and the summary line counts
-unknowns separately from disagreements.
+Agreement is a POSITIVE marker: ``agree`` is ``True`` only when the graph was
+read and the scope checked out; an unreadable graph answers ``None`` with a
+stated reason, and the summary counts unknowns separately. Each crown also
+names its manifest limb (path, session, ``crown_source``) - the manifest is
+the durable crown record, the row its cache.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional
 
 from fno.agents.crown import (
@@ -34,18 +29,12 @@ def _agreement(
 ) -> tuple[Optional[bool], Optional[str]]:
     """Does the graph corroborate this crown? ``(agree, reason)``.
 
-    A crown the graph cannot adjudicate answers ``(None, reason)`` - never
-    ``True`` and never ``False`` - so an unreadable graph can never render as
-    either agreement or disagreement. That bail is scoped to the rung that
-    actually needs the graph: the epic rung reads it, while the project and
-    portfolio rungs resolve entirely from config, so an external tracker
-    backend must not blank out an answer that is fully determinate.
+    An unadjudicable crown answers ``(None, reason)``, never ``True`` or
+    ``False``; only the epic rung needs the graph.
     """
     members = split_scope(scope)
-    # A row carrying a level but no scope is half a crown: crown_label renders
-    # it "L1 ?", so it reaches this view. It rules no territory, so it can
-    # never agree - and it must not fall through to the emptiness-blind
-    # checks below, where an empty member list reads as "nothing unresolved".
+    # A scope-less level is half a crown: it rules no territory and must not
+    # fall through to the emptiness-blind checks below.
     if not members:
         return False, "the row carries a crown level but no scope (half a crown)"
     if level == 2:
@@ -65,9 +54,8 @@ def _agreement(
             if status in PLAN_TERMINAL_STATUSES:
                 return False, f"{node_id!r} status is {status!r} (terminal)"
         return True, None
-    # Level 0/1: a portfolio or single-project crown agrees when every member
-    # resolves to a configured project - the same check `resolve_crown` makes
-    # when the crown was first granted.
+    # Level 0/1: agrees when every member resolves to a configured project,
+    # the same check `resolve_crown` made at grant time.
     unresolved = [m for m in members if _canonical_project(m) is None]
     if unresolved:
         return False, (
@@ -81,18 +69,10 @@ def _agreement(
 def _conflicts(rows: list) -> list[dict[str, Any]]:
     """Territory two live crowned rows hold at once, one entry per scope.
 
-    Groups on :func:`_territory_key`, the normalized key used by crown's
-    territory checks, so a conflict here and the succession check at grant time
-    can never disagree about what "same territory" means.
+    Groups on :func:`_territory_key`, the key crown's own checks use.
     """
-    # Joined on crown_scope, NOT on a full crown_reading. crown_reading gates on
-    # crown_label, which is None whenever crown_level is None, so a corrupted
-    # scope-without-level row would be skipped here while gather_court above
-    # deliberately surfaces it. The two halves of one read would then disagree:
-    # the row shows as a disagreement and its scope shows as unconflicted, so a
-    # caller gating on `conflicts` reads "no territorial overlap" while two live
-    # rows claim the same territory. A scope is a claim on territory whether or
-    # not a level was recorded beside it.
+    # Joined on crown_scope, not a full crown_reading: a scope claims territory
+    # with or without a level, and gather_court surfaces those rows too.
     claims: list[tuple[Any, str]] = []
     for row in rows:
         scope = getattr(row, "crown_scope", None)
@@ -115,18 +95,78 @@ def _conflicts(rows: list) -> list[dict[str, Any]]:
     ]
 
 
+def _manifest_limb(scope: Any, row: Any) -> dict[str, Any]:
+    """The manifest side of one crown; ``reign_state`` is the single comparator."""
+    from fno.king.state import king_state_root, reign_state
+
+    limb: dict[str, Any] = {"manifest_path": None, "manifest_session": None, "crown_source": "row"}
+    cwd = getattr(row, "cwd", None)
+    if not (isinstance(scope, str) and scope.strip() and isinstance(cwd, str) and cwd.strip()):
+        return limb
+    try:
+        state = reign_state(scope, state_root=king_state_root(Path(cwd)))
+    except (OSError, ValueError):
+        return limb
+    limb["manifest_session"], limb["manifest_path"] = state.manifest_session, state.manifest_path
+    if state.split is True:
+        limb["crown_source"] = "split"
+    elif state.crown_on_manifest is True:
+        limb["crown_source"] = "both"
+    return limb
+
+
+def _manifest_only_crowns(held: list[str]) -> tuple[list[dict[str, Any]], bool]:
+    """Crowns whose row is gone but whose manifest holds them: the Rust sweep
+    (`fno-agents court-orphans`) walks the spaces ROOT because a vanished row
+    names no cwd. Returns ``(entries, ran)``: ``ran`` False means the sweep
+    could not answer, so an empty list is an ABSENCE, never zero orphans."""
+    import json
+    import subprocess
+
+    from fno.paths import spaces_root
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        return [], False
+    try:
+        proc = subprocess.run(
+            [str(binary), "court-orphans", "--root", str(spaces_root())]
+            + [part for scope in held for part in ("--held", scope)],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        if proc.returncode != 0:
+            return [], False
+        orphans = json.loads(proc.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return [], False
+    entries = [
+        {
+            "holder": o.get("manifest_session") or o.get("scope"),
+            "level": o.get("level"),
+            "scope": o["scope"],
+            "grantor": o.get("grantor") or "human",
+            "status": "manifest-only",
+            "agree": None,
+            "reason": "crown lives on the manifest; no live registry row holds it",
+            "manifest_path": o.get("manifest_path"),
+            "manifest_session": o.get("manifest_session"),
+            "crown_source": "manifest",
+        }
+        for o in orphans
+        if o.get("scope")
+    ]
+    return entries, True
+
+
 def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     """The whole court: every crown, its verdict, and any territorial conflict.
 
     ``rows`` overrides the live registry read for callers that already hold
-    it (tests); the default reads the registry once here.
-
-    An unreadable REGISTRY nulls ``crowns`` and every summary count rather
-    than reporting an empty court. Degrading to ``[]`` here would reproduce,
-    one layer below the agreement verdict, exactly the absence-lie this
-    module exists to prevent: a caller gating on ``summary.disagreements ==
-    0`` would read a healthy fleet from a read that saw nothing at all. A
-    null fails that gate instead of passing it.
+    it (tests). An unreadable REGISTRY nulls ``crowns`` and every summary
+    count rather than reporting an empty court: a caller gating on
+    ``summary.disagreements == 0`` must not read a healthy fleet from a read
+    that saw nothing.
     """
     from fno.agents.registry import TERMINAL_STATUSES, load_registry
 
@@ -143,27 +183,25 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
                     "total": None,
                     "disagreements": None,
                     "unknowns": None,
+                    "splits": None,
                     "reason": f"registry unreadable: {exc}",
                 },
             }
     live_rows = [r for r in rows if r.status not in TERMINAL_STATUSES]
 
-    # One graph parse for every rung below. ``None`` is a distinct answer from
-    # an empty graph: "unreadable" and "nothing here" are not the same fact for
-    # a caller deciding whether to trust the absence of a disagreement.
+    # One graph parse for every rung; ``None`` (unreadable) is not "nothing here".
     by_id = _graph_index()
     entries: list[dict[str, Any]] = []
+    held_scopes: list[str] = []
     for row in live_rows:
         reading = crown_reading(row)
         if reading is None:
-            # crown_reading gates on crown_label, which registry.py returns
-            # None whenever crown_level is None - REGARDLESS of crown_scope.
-            # A corrupted row carrying a scope with no level would otherwise
-            # vanish here: not counted, not flagged unknown, not flagged
-            # disagreeing. That absence-lie is the exact defect this module
-            # exists to prevent, so surface the anomaly instead of skipping a
-            # row that plainly has SOME crown data.
+            # crown_reading returns None whenever crown_level is None,
+            # regardless of crown_scope; surface the anomaly, never skip it.
             if getattr(row, "crown_scope", None):
+                # The half crown still HOLDS its territory; _conflicts counts it as a claim.
+                if isinstance(row.crown_scope, str) and row.crown_scope.strip():
+                    held_scopes.append(row.crown_scope)
                 entries.append(
                     {
                         "holder": row.name,
@@ -173,6 +211,7 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
                         "status": row.status,
                         "agree": False,
                         "reason": "half a crown: scope is set but level is missing",
+                        **_manifest_limb(row.crown_scope, row),
                     }
                 )
             continue
@@ -186,20 +225,31 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
                 "status": row.status,
                 "agree": agree,
                 "reason": reason,
+                **_manifest_limb(reading["scope"], row),
             }
         )
+        if isinstance(reading["scope"], str) and reading["scope"].strip():
+            held_scopes.append(reading["scope"])
+
+    orphans, sweep_ran = _manifest_only_crowns(held_scopes)
+    entries.extend(orphans)
 
     disagreements = sum(1 for e in entries if e["agree"] is False)
     unknowns = sum(1 for e in entries if e["agree"] is None)
+    splits = sum(1 for e in entries if e["crown_source"] == "split")
     return {
         "crowns": entries,
         "conflicts": _conflicts(live_rows),
         "registry_readable": True,
         "graph_readable": by_id is not None,
         "summary": {
-            "total": len(entries),
+            # total counts ROW crowns only: the census computes workers from it.
+            "total": len(entries) - len(orphans),
+            "manifest_only": len(orphans),
+            "sweep_ran": sweep_ran,
             "disagreements": disagreements,
             "unknowns": unknowns,
+            "splits": splits,
         },
     }
 
@@ -207,13 +257,11 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
 def _fmt_row(e: dict[str, Any]) -> str:
     agree = "?" if e["agree"] is None else ("yes" if e["agree"] else "no")
     reason = f"   {e['reason']}" if e["reason"] else ""
-    # Every cell goes through str() before padding: a half-crown row carries a
-    # null scope (crown_label still renders it "L1 ?"), and formatting None
-    # with a width raises TypeError - which would crash the one read meant to
-    # SURFACE that corruption, on exactly the input it exists to show.
+    # str() every cell: a null scope must not crash the render that surfaces it.
     return (
         f"{str(e['scope']):<16} {str(e['level']):<5} {str(e['holder']):<20} "
-        f"{str(e['grantor']):<16} {str(e['status']):<7} {agree:<4}{reason}"
+        f"{str(e['grantor']):<16} {str(e['status']):<14} {agree:<4} "
+        f"{str(e.get('crown_source')):<8}{reason}"
     )
 
 
@@ -230,7 +278,7 @@ def render_court(as_json: bool) -> str:
     if not court["crowns"]:
         return "court: no live crowns"
 
-    header = f"{'SCOPE':<16} {'LEVEL':<5} {'HOLDER':<20} {'GRANTOR':<16} {'STATUS':<7} AGREE"
+    header = f"{'SCOPE':<16} {'LEVEL':<5} {'HOLDER':<20} {'GRANTOR':<16} {'STATUS':<14} AGREE SOURCE"
     lines = [header] + [_fmt_row(e) for e in court["crowns"]]
     for c in court["conflicts"]:
         holders = ", ".join(c["holders"])
@@ -240,6 +288,10 @@ def render_court(as_json: bool) -> str:
         f"\ncourt: {s['total']} crown{'s' if s['total'] != 1 else ''}, "
         f"{s['disagreements']} disagreement"
         f"{'s' if s['disagreements'] != 1 else ''}, {s['unknowns']} unknown"
-        f"{'s' if s['unknowns'] != 1 else ''}"
+        f"{'s' if s['unknowns'] != 1 else ''}, {s['splits']} split"
+        f"{'s' if s['splits'] != 1 else ''}"
+        + (f", {s['manifest_only']} manifest-only" if s.get("manifest_only") else "")
     )
+    if s.get("sweep_ran") is False:
+        lines.append("orphan sweep did not run (stale or missing binary): zero manifest-only entries is an absence, not a finding")
     return "\n".join(lines)

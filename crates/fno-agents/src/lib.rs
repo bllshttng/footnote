@@ -869,6 +869,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // `agent_row_reaped` (the GC door's own event); this fires for every
     // door, including ones nobody has enumerated yet.
     "registry_row_removed",
+    // One lossy save, grouped (x-f0d2): the writer, pid, verb, and every
+    // lost id in one event, beside the per-row receipts above, so a save
+    // that drops rows can never vanish without a door being named.
+    "registry_rows_lost",
     // Orphan process sweep (daemon-emitted): the row GC beside it reaps
     // registry ROWS, this reaps the `fno-py` children that init inherited and
     // nobody was waiting on. Emitted on EVERY run including the ones that reap

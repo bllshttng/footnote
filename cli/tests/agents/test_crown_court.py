@@ -21,8 +21,9 @@ def _entry(name: str, **kw):
     from fno.agents.registry import AgentEntry
 
     harness = kw.pop("harness", "claude")
+    kw.setdefault("cwd", "/w")
     kw.setdefault("harness_session_id", f"{name}-session")
-    return AgentEntry(name=name, cwd="/w", log_path="", harness=harness, **kw)
+    return AgentEntry(name=name, log_path="", harness=harness, **kw)
 
 
 def _prepare(monkeypatch, tmp_path, rows, graph_entries=None) -> None:
@@ -77,9 +78,14 @@ def test_a_crown_over_a_real_live_epic_agrees(tmp_path: Path, monkeypatch) -> No
             "status": "busy",
             "agree": True,
             "reason": None,
+            "manifest_path": None,
+            "manifest_session": None,
+            "crown_source": "row",
         }
     ]
-    assert court["summary"] == {"total": 1, "disagreements": 0, "unknowns": 0}
+    s = court["summary"]
+    assert (s["total"], s["disagreements"], s["unknowns"], s["splits"]) == (1, 0, 0, 0)
+    assert s["manifest_only"] == 0
 
 
 def test_a_crown_over_an_id_the_graph_does_not_hold_disagrees(
@@ -107,7 +113,9 @@ def test_a_crown_over_an_id_the_graph_does_not_hold_disagrees(
     row = court["crowns"][0]
     assert row["agree"] is False
     assert "ghost-epic" in row["reason"]
-    assert court["summary"] == {"total": 1, "disagreements": 1, "unknowns": 0}
+    s = court["summary"]
+    assert (s["total"], s["disagreements"], s["unknowns"], s["splits"]) == (1, 1, 0, 0)
+    assert s["manifest_only"] == 0
 
 
 def test_a_crown_over_a_wrongly_typed_node_disagrees(
@@ -189,7 +197,9 @@ def test_unreadable_graph_answers_null_never_true_or_false(
     assert row["agree"] is None
     assert row["reason"] is not None
     assert court["graph_readable"] is False
-    assert court["summary"] == {"total": 1, "disagreements": 0, "unknowns": 1}
+    s = court["summary"]
+    assert (s["total"], s["disagreements"], s["unknowns"], s["splits"]) == (1, 0, 1, 0)
+    assert s["manifest_only"] == 0
 
 
 def test_a_crown_over_a_set_of_epics_agrees_only_if_every_member_is_a_live_epic(
@@ -297,7 +307,9 @@ def test_terminal_rows_are_excluded_from_the_court(
     court = gather_court()
 
     assert court["crowns"] == []
-    assert court["summary"] == {"total": 0, "disagreements": 0, "unknowns": 0}
+    s = court["summary"]
+    assert (s["total"], s["disagreements"], s["unknowns"], s["splits"]) == (0, 0, 0, 0)
+    assert s["manifest_only"] == 0
 
 
 def test_two_live_rows_holding_the_same_territory_is_a_conflict(
@@ -398,6 +410,303 @@ def test_render_court_table_names_scope_holder_and_agreement(
     assert "alpha" in text
     assert "king" in text
     assert "court: 1 crown, 0 disagreements, 0 unknowns" in text
+
+
+# --- the manifest limb (x-f0d2): manifest is the durable record, row the cache
+
+
+def _stub_reign_reader(monkeypatch, tmp_path: Path, payload: dict, orphans=None, sweep_fail=False) -> None:
+    """Answer reign-state with a canned payload and court-orphans with a
+    canned array (test_crown_court pins the RENDER, not the reader;
+    loop_reign.rs pins the comparison and the sweep). The sweep answer honors
+    --held like the real binary (a held scope is filtered out) and can be
+    made to fail, pinning the ran-marker."""
+    import stat
+
+    script = tmp_path / "fno-agents"
+    body = (
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"REIGN = {json.dumps(json.dumps(payload))}\n"
+        f"FAIL = {repr(bool(sweep_fail))}\n"
+        f"ORPHANS = {json.dumps(orphans or [])}\n"
+        "if 'court-orphans' not in sys.argv:\n"
+        "    print(REIGN, end='')\n"
+        "    sys.exit(0)\n"
+        "if FAIL:\n"
+        "    sys.exit(1)\n"
+        "held = {v for i, v in enumerate(sys.argv) if i and sys.argv[i-1] == '--held'}\n"
+        "print(json.dumps([o for o in ORPHANS if o.get('scope') not in held]), end='')\n"
+    )
+    script.write_text(body, encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: script)
+
+
+def _agreeing_reader(scope: str, session: str) -> dict:
+    return {
+        "crowned": True,
+        "scope": scope,
+        "shape": "pass",
+        "manifest_session": session,
+        "registry_session": session,
+        "live": True,
+        "split": False,
+        "unknown_reason": None,
+    }
+
+
+def test_court_names_the_manifest_and_crown_source_per_scope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A crowned row with a matching crowned manifest renders source `both`."""
+    import fno.king.state as king_state
+    from fno.agents.court import gather_court
+    from fno.paths import space_dir
+
+    row = _entry(
+        "king",
+        cwd=str(tmp_path),
+        status="busy",
+        crown_level=2,
+        crown_scope="e-1",
+        crown_grantor="human",
+    )
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [row],
+        graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
+    )
+    manifest = space_dir(tmp_path) / "kings" / "e-1.md"
+    king_state.write_manifest(
+        manifest,
+        scope="e-1",
+        harness_session_id="king-session",
+        owner_cwd=str(tmp_path),
+        crown_level=2,
+        crown_scope="e-1",
+        crown_grantor="human",
+    )
+    payload = _agreeing_reader("e-1", "king-session")
+    payload.update(crown_on_manifest=True, manifest_path=str(manifest))
+    _stub_reign_reader(monkeypatch, tmp_path, payload)
+
+    court = gather_court()
+
+    entry = court["crowns"][0]
+    assert entry["crown_source"] == "both"
+    assert entry["manifest_session"] == "king-session"
+    assert entry["manifest_path"] == str(manifest)
+    assert court["summary"]["splits"] == 0
+
+
+def test_a_split_crown_counts_apart_from_disagreements_and_unknowns(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two stores naming different holders is a SPLIT, not a graph
+    disagreement and not an unknown: the summary counts it separately."""
+    from fno.agents.court import gather_court
+    from fno.paths import space_dir
+    import fno.king.state as king_state
+
+    row = _entry(
+        "king",
+        cwd=str(tmp_path),
+        status="busy",
+        crown_level=2,
+        crown_scope="e-1",
+        crown_grantor="human",
+    )
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [row],
+        graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": "ready"}],
+    )
+    king_state.write_manifest(
+        space_dir(tmp_path) / "kings" / "e-1.md",
+        scope="e-1",
+        harness_session_id="someone-else",
+        owner_cwd=str(tmp_path),
+        crown_level=2,
+        crown_scope="e-1",
+        crown_grantor="human",
+    )
+    payload = _agreeing_reader("e-1", "king-session")
+    payload.update(manifest_session="someone-else", split=True)
+    _stub_reign_reader(monkeypatch, tmp_path, payload)
+
+    court = gather_court()
+
+    entry = court["crowns"][0]
+    assert entry["crown_source"] == "split"
+    # The graph limb still answers its own question; the split is not folded in.
+    assert entry["agree"] is True
+    assert court["summary"]["disagreements"] == 0
+    assert court["summary"]["unknowns"] == 0
+    assert court["summary"]["splits"] == 1
+
+
+def test_a_crown_on_only_the_manifest_is_surfaced_crownless_in_the_registry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A scope whose row vanished keeps its crown on the manifest; court must
+    show it with the manifest named, not as an empty court."""
+    import fno.king.state as king_state
+    from fno.agents.court import gather_court
+    from fno.paths import space_dir
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("plain-worker", cwd=str(tmp_path), status="busy")],
+        graph_entries=[],
+    )
+    manifest = space_dir(tmp_path) / "kings" / "x-dede.md"
+    king_state.write_manifest(
+        manifest,
+        scope="x-dede",
+        harness_session_id="gone-king",
+        owner_cwd=str(tmp_path),
+        crown_level=2,
+        crown_scope="x-dede",
+        crown_grantor="operator",
+    )
+    _stub_reign_reader(
+        monkeypatch, tmp_path, _agreeing_reader("x-dede", "gone-king"),
+        orphans=[{
+            "scope": "x-dede", "level": 2, "grantor": "operator",
+            "manifest_session": "gone-king", "manifest_path": str(manifest),
+        }],
+    )
+
+    court = gather_court()
+
+    orphan = next(e for e in court["crowns"] if e["scope"] == "x-dede")
+    assert orphan["crown_source"] == "manifest"
+    assert orphan["manifest_path"] == str(manifest)
+    assert orphan["manifest_session"] == "gone-king"
+    assert orphan["agree"] is None
+    assert "no live registry row" in orphan["reason"]
+
+
+def test_a_manifest_crown_survives_its_project_having_no_rows_at_all(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The vanished-row case this read exists for: the row is GONE, so no row
+    names the project and no cwd can be derived. The sweep must key on the
+    spaces root, not on rows, or the orphan crown is invisible exactly when
+    the fleet lost it."""
+    import fno.king.state as king_state
+    from fno.agents.court import gather_court
+    from fno.paths import space_dir
+
+    _prepare(monkeypatch, tmp_path, [], graph_entries=[])
+    manifest = space_dir(tmp_path) / "kings" / "x-dede.md"
+    king_state.write_manifest(
+        manifest,
+        scope="x-dede",
+        harness_session_id="gone-king",
+        owner_cwd=str(tmp_path),
+        crown_level=2,
+        crown_scope="x-dede",
+        crown_grantor="operator",
+    )
+    _stub_reign_reader(
+        monkeypatch, tmp_path, _agreeing_reader("x-dede", "gone-king"),
+        orphans=[{
+            "scope": "x-dede", "level": 2, "grantor": "operator",
+            "manifest_session": "gone-king", "manifest_path": str(manifest),
+        }],
+    )
+
+    court = gather_court()
+
+    orphan = next(e for e in court["crowns"] if e["scope"] == "x-dede")
+    assert orphan["crown_source"] == "manifest"
+    assert orphan["manifest_path"] == str(manifest)
+
+
+def test_total_counts_row_crowns_only_so_the_census_keeps_its_arithmetic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """doctor_lanes._census reads summary.total as a ROW count and computes
+    workers = len(rows) - total; an orphan inside total subtracts a worker
+    that still exists. manifest-only crowns count in their own field."""
+    import fno.king.state as king_state
+    from fno.agents.court import gather_court
+    from fno.paths import space_dir
+
+    _prepare(
+        monkeypatch, tmp_path, [_entry("plain-worker", cwd=str(tmp_path), status="busy")]
+    )
+    manifest = space_dir(tmp_path) / "kings" / "x-dede.md"
+    king_state.write_manifest(
+        manifest, scope="x-dede", harness_session_id="gone-king",
+        owner_cwd=str(tmp_path), crown_level=2, crown_scope="x-dede",
+    )
+    _stub_reign_reader(
+        monkeypatch, tmp_path, _agreeing_reader("x-dede", "gone-king"),
+        orphans=[{"scope": "x-dede", "level": 2, "manifest_session": "gone-king"}],
+    )
+
+    s = gather_court()["summary"]
+    assert s["total"] == 0
+    assert s["manifest_only"] == 1
+    assert s["sweep_ran"] is True
+
+
+def test_a_sweep_that_cannot_run_is_an_absence_never_zero_orphans(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A stale binary without the court-orphans verb exits non-zero; reading
+    that as [] would print a clean court. The ran marker must say it never ran."""
+    from fno.agents.court import gather_court, render_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("king", cwd=str(tmp_path), status="busy", crown_level=1,
+                crown_scope="alpha", crown_grantor="human")],
+    )
+    _stub_reign_reader(
+        monkeypatch, tmp_path, _agreeing_reader("alpha", "king-session"),
+        orphans=[{"scope": "x-dede", "level": 2}], sweep_fail=True,
+    )
+
+    court = gather_court()
+    assert court["summary"]["sweep_ran"] is False
+    assert court["summary"]["manifest_only"] == 0
+    text = render_court(as_json=False)
+    assert "orphan sweep did not run" in text
+
+
+def test_a_half_crown_holds_its_territory_against_the_orphan_sweep(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A scope-without-level row is a claim (the conflicts join counts it), so
+    the sweep must see its scope as held; otherwise a manifest for it renders
+    as an orphan beside the live row that holds it."""
+    import fno.agents.court as court_mod
+    from fno.agents.court import gather_court
+
+    _prepare(monkeypatch, tmp_path, [])
+    _stub_reign_reader(
+        monkeypatch, tmp_path, _agreeing_reader("half", "half-session"),
+        orphans=[{"scope": "half", "level": 1, "manifest_session": "half-session"}],
+    )
+    half = _entry("half-king", cwd=str(tmp_path), status="busy", crown_scope="half")
+
+    def _none_reading(row):
+        return None  # level stays None: the half-crown shape
+
+    monkeypatch.setattr(court_mod, "crown_reading", _none_reading)
+    gathered = gather_court([half])
+
+    scopes = [e["scope"] for e in gathered["crowns"]]
+    assert scopes.count("half") == 1  # the half-crown row, not row + orphan
+    assert gathered["summary"]["manifest_only"] == 0
 
 
 def test_unreadable_registry_nulls_the_court_rather_than_reporting_it_empty(

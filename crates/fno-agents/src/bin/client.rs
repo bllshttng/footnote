@@ -29,6 +29,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "board",
     "claim",
     "codex-loaded-threads",
+    "court-orphans",
     "detect",
     "digest",
     "drive",
@@ -278,6 +279,12 @@ async fn run(args: Vec<String>) -> i32 {
     // `graph-get`/`bash-census`/`session-start-bytes` (x-997a): daemon-free reads, not routable `fno agents` verbs (same reasoning as kill-check).
     if verb == "graph-get" {
         return fno_agents::graph_get::run_graph_get(&args[1..]);
+    }
+    // `court-orphans` (x-f0d2): the orphan-crown sweep for `fno agents court`,
+    // daemon-free read; `==` dispatch like graph-get, and registered in
+    // ALL_CLIENT_ACTIONS like every direct dispatch the ratchet counts.
+    if verb == "court-orphans" {
+        return fno_agents::loop_reign::run_court_orphans(&args[1..]);
     }
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);

@@ -1507,6 +1507,26 @@ event_types:
           description: "Process id of the remover, when the emitter knows it."
     consumers: [operator]
 
+  - name: registry_rows_lost
+    description: "One lossy registry save, grouped: the writer, its pid and verb, and every harness_session_id the save dropped with its row name. The per-row registry_row_removed events carry recovery receipts; this one names the writer, so rows can no longer vanish without a door being named."
+    sources: [daemon, agents]
+    data:
+      required: [writer, pid, verb, lost]
+      properties:
+        writer:
+          type: string
+          description: "Which writer dropped the rows: rust or python."
+        pid:
+          type: [integer, "null"]
+          description: "Process id of the writer."
+        verb:
+          type: string
+          description: "The command line that ran the lossy write (argv0 plus the leading arguments), so the door is named, not just the binary."
+        lost:
+          type: array
+          description: "One {harness_session_id, name} entry per dropped row."
+    consumers: [operator]
+
   - name: claim_reap_swept
     description: "One `fno agents claim reap --apply` run completed, including a run that reaped nothing. A silent sweep and a dead sweep must not look the same. Never fires for a dry-run: dry-run's own no-writes promise covers this event too."
     sources: [fno-loop]

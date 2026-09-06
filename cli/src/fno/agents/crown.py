@@ -649,6 +649,12 @@ def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
                 f"holds overlapping territory ({other.crown_scope!r})"
             )
 
+        returned_by = (
+            getattr(holder, "harness_session_id", None)
+            or getattr(holder, "cc_session_id", None)
+            or getattr(holder, "short_id", None)
+            or holder.name
+        )
         armed = False
         unarmed_reason = ""
         try:
@@ -660,18 +666,14 @@ def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
                     getattr(target, "harness_session_id", None) or "",
                     owner_pid=getattr(target, "pid", None),
                     owner_cwd=getattr(target, "cwd", None),
+                    crown_level=level,
+                    crown_scope=scope,
+                    crown_grantor=returned_by,
                 )
                 is not None
             )
         except (OSError, ValueError) as exc:
             unarmed_reason = str(exc)
-
-        returned_by = (
-            getattr(holder, "harness_session_id", None)
-            or getattr(holder, "cc_session_id", None)
-            or getattr(holder, "short_id", None)
-            or holder.name
-        )
         for index, row in enumerate(rows):
             if row.name == holder_name:
                 rows[index] = replace(
@@ -892,6 +894,9 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 target.harness_session_id or target.cc_session_id or target.short_id or "",
                 owner_pid=target.pid,
                 owner_cwd=target.cwd,
+                crown_level=level,
+                crown_scope=scope,
+                crown_grantor=grantor,
             )
         except (OSError, ValueError) as exc:
             raise CrownPromotionError(

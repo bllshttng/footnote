@@ -349,6 +349,7 @@ collisions = python_types & rust_kinds
 # port) both emit it at the same scheduled-tick boundary.
 dual_owner_kinds = {
     "registry_row_removed",
+    "registry_rows_lost",
     "agent_removed",
     "merge_cleanup_requested",
     "merge_cleanup_completed",

@@ -3,11 +3,11 @@
 A separate file, not a ``driver: king`` field on the target manifest: a king
 runs in the canonical checkout where a target manifest may also exist, and one
 manifest naming both is how two sessions share a discriminator. Each crown
-scope owns ``.fno/kings/<scope>.md``; the registry row is authority, so a
-leftover file is inert while a resumed session finds the same file through its
-current row. ``last_run_is_fresh`` is the second done-probe: a file test would
-pass the moment the manifest existed, so it reads the events journal for the
-newest king termination inside a window instead.
+scope owns ``<space>/kings/<scope>.md``; the manifest is the durable crown
+record and a registry row its cache, so a leftover file is never inert: it is
+the record heal restores a lost row from. ``last_run_is_fresh`` is the second
+done-probe: a file test would pass the moment the manifest existed, so it
+reads the events journal for the newest king termination inside a window.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 #: Iteration ceiling before a walk terminates on Budget: a non-converging
 #: king should cost a ceiling, not a night.
@@ -60,10 +60,7 @@ class KingManifestExists(RuntimeError):
 def king_state_root(cwd: Path | None = None) -> Path:
     """The canonical-keyed coordination root for king manifests: the repo's
     space, so a crown never lands in a disposable linked worktree.
-
-    King manifests survive worktree changes and are shared coordination state,
-    so ambient cwd must not move a crown into a per-worktree slice. ``space_dir``
-    keys on the CANONICAL root for either spelling of ``cwd``.
+    ``space_dir`` keys on the CANONICAL root for either spelling of ``cwd``.
     """
     from fno.paths import space_dir
 
@@ -73,10 +70,9 @@ def king_state_root(cwd: Path | None = None) -> Path:
 def king_manifest_path(scope: str, *, state_root: Optional[Path] = None) -> Path:
     """Return the manifest path for one canonical crown scope.
 
-    Scope is registry data, but it becomes a filename here. Refuse path syntax
-    instead of normalizing it: two spellings of one scope must never select two
-    files, and no scope may escape the state root. The default root is the
-    repo's space; a caller may pin one explicitly.
+    Scope becomes a filename here, so path syntax is refused, never
+    normalized: two spellings must not select two files, and no scope may
+    escape the state root.
     """
     scope = scope.strip()
     if not scope or ".." in scope or "/" in scope or "\\" in scope or "\0" in scope:
@@ -118,11 +114,9 @@ def resolve_king_manifest_path(
 
 
 def _transcript_matchable_session_id(value: str) -> bool:
-    """Whether the stop hook's owner guard can ever match this id: it compares
-    the manifest id against the transcript basename, and every harness names
-    transcripts with a full canonical uuid. A short_id or row name matches NO
-    transcript, so arming with it silently disarms the gate. uuid.UUID() alone
-    accepts 8-hex short forms, so the 36-char round-trip is the test."""
+    """Whether the stop hook's owner guard can ever match this id: every
+    harness names transcripts with a full canonical uuid, and uuid.UUID()
+    alone accepts 8-hex short forms, so the 36-char round-trip is the test."""
     try:
         return len(value) == 36 and str(uuid.UUID(value)) == value.lower()
     except (ValueError, AttributeError):
@@ -136,8 +130,18 @@ def arm_king_manifest(
     state_root: Optional[Path] = None,
     owner_pid: Optional[int] = None,
     owner_cwd: Optional[str] = None,
+    crown_level: Optional[int] = None,
+    crown_scope: Optional[str] = None,
+    crown_grantor: Optional[str] = None,
+    row: Any = None,
 ) -> Optional[Path]:
     """Refresh loop state at the moment a crown becomes authoritative."""
+    if row is not None:
+        owner_pid = owner_pid or getattr(row, "pid", None)
+        owner_cwd = owner_cwd or getattr(row, "cwd", None)
+        crown_level = crown_level if crown_level is not None else getattr(row, "crown_level", None)
+        crown_scope = crown_scope if crown_scope is not None else getattr(row, "crown_scope", None)
+        crown_grantor = crown_grantor if crown_grantor is not None else getattr(row, "crown_grantor", None)
     if state_root is None:
         state_root = _owner_state_root(owner_cwd)
     if not king_loop_enabled():
@@ -162,6 +166,9 @@ def arm_king_manifest(
             force=True,
             owner_pid=owner_pid,
             owner_cwd=owner_cwd,
+            crown_level=crown_level,
+            crown_scope=crown_scope,
+            crown_grantor=crown_grantor,
         )
         path.with_suffix(".cancelled").unlink(missing_ok=True)
     return path
@@ -228,13 +235,17 @@ def write_manifest(
     owner_pid: Optional[int] = None,
     owner_cwd: Optional[str] = None,
     shape: str = "pass",
+    crown_level: Optional[int] = None,
+    crown_scope: Optional[str] = None,
+    crown_grantor: Optional[str] = None,
 ) -> dict[str, str]:
     """Write the manifest once. Raises :class:`KingManifestExists` if it is there.
 
     ``respawn_count`` starts at 0 on every write (a successor coronation is a
     new reign generation and must not inherit the respawn bill); so does
     ``wake_times``. ``shape`` rides from birth so every reader sees one and no
-    reader treats absence as a third state.
+    reader treats absence as a third state. The crown triple rides only when
+    the caller stamps one in the same call; a bare ``king init`` writes none.
     """
     path = Path(path)
     if path.exists() and not force:
@@ -256,6 +267,12 @@ def write_manifest(
         "respawn_ceiling": str(respawn_ceiling),
         "wake_times": "",
     }
+    if crown_scope:
+        fields.update(
+            crown_level=str(crown_level),
+            crown_scope=crown_scope,
+            crown_grantor=crown_grantor or "human",
+        )
     body = "---\n" + "".join(f"{k}: {_dump(v)}\n" for k, v in fields.items()) + "---\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -301,6 +318,8 @@ class ReignState:
     scope: Optional[str] = None
     shape: Optional[str] = None
     manifest_session: Optional[str] = None
+    manifest_path: Optional[str] = None
+    crown_on_manifest: Optional[bool] = None
     registry_session: Optional[str] = None
     live: Optional[bool] = None
     split: Optional[bool] = None
@@ -335,8 +354,7 @@ def reign_state(
         harness = ident.harness or None
 
     root = state_root if state_root is not None else _owner_state_root(None)
-    repo_root = root.parent if root.name == ".fno" else root
-
+    # The Rust reader joins <root>/kings itself; a suffixed root is a phantom path.
     binary = resolve_binary()
     if binary is None:
         return _unknown_state(
@@ -344,7 +362,7 @@ def reign_state(
             "fno-agents binary not found: the reign reader lives in Rust. "
             "Reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN.",
         )
-    argv = [str(binary), "reign-state", "--root", str(repo_root)]
+    argv = [str(binary), "reign-state", "--root", str(root)]
     if scope:
         argv += ["--scope", scope]
     if session_id:
@@ -367,15 +385,13 @@ def reign_state(
         payload = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         return _unknown_state(scope, f"reign reader emitted no JSON: {exc}")
+    keys = (
+        "crowned", "shape", "manifest_session", "manifest_path",
+        "crown_on_manifest", "registry_session", "live", "split", "unknown_reason",
+    )
     return ReignState(
-        crowned=payload.get("crowned"),
+        **{k: payload.get(k) for k in keys},
         scope=payload.get("scope") or scope,
-        shape=payload.get("shape"),
-        manifest_session=payload.get("manifest_session"),
-        registry_session=payload.get("registry_session"),
-        live=payload.get("live"),
-        split=payload.get("split"),
-        unknown_reason=payload.get("unknown_reason"),
     )
 
 

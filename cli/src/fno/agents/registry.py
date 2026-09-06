@@ -2698,6 +2698,30 @@ def _account_for_removed_rows(
             append_event(event, events_path=events_path)
         except Exception:  # noqa: BLE001 - an audit gap must not fail the write
             pass
+    _journal_rows_lost(events_path, removed)
+
+
+def _journal_rows_lost(events_path: Path, removed: list) -> None:
+    """One grouped ``registry_rows_lost`` per lossy save; best-effort like above."""
+    from fno.events import append_event
+
+    argv = [a if i else Path(a).name for i, a in enumerate(sys.argv[:6])]
+    event = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "type": "registry_rows_lost",
+        "source": "agents",
+        "data": {
+            "writer": "python",
+            "pid": os.getpid(),
+            "verb": " ".join(argv)[:200],
+            "lost": [{"harness_session_id": (e.harness_session_id or "").strip(), "name": e.name}
+                     for e in removed],
+        },
+    }
+    try:
+        append_event(event, events_path=events_path)
+    except Exception:  # noqa: BLE001 - an audit gap must not fail the write
+        pass
 
 
 def update_registry(
