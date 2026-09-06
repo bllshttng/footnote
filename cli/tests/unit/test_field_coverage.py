@@ -75,9 +75,11 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     # The reign parent-edge change adds required spawned_by_session on top:
     # 41 -> 43 required, declared unchanged at 54 (it was already a declared
     # v26 leaf). v27 added launch_account_source, storage_only: 54 -> 55.
-    assert payload["declared_count"] == 55
+    # v28 added adopted_by_session (the adoption voucher, x-5283),
+    # storage_only: 55 -> 56.
+    assert payload["declared_count"] == 56
     assert payload["required_count"] == 43
-    assert payload["accounted_count"] == 55
+    assert payload["accounted_count"] == 56
     assert payload["known_gaps"] == {}
 
 
