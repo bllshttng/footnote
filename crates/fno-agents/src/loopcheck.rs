@@ -12814,15 +12814,13 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         // but unshipped is a quiet beat, never a finish line. An unreadable
         // drain read must not certify the scope drained, so it skips this
         // exit and the dry-fire ceiling below bounds the wait.
-        let drained = manifest.scope.is_empty()
-            || crate::loop_king::scope_undelivered_count(
-                &parsed.fno_bin,
-                &parsed.cwd,
-                &manifest.scope,
-            )
-            .unwrap_or(i64::MAX)
-                == 0;
-        if drained {
+        let undelivered = if manifest.scope.is_empty() {
+            0
+        } else {
+            crate::loop_king::scope_undelivered_count(&parsed.fno_bin, &parsed.cwd, &manifest.scope)
+                .unwrap_or(i64::MAX)
+        };
+        if undelivered == 0 {
             let message = if board.unreadable > 0 {
                 "board clean on every readable queue; exiting NoWork"
             } else {
@@ -12830,6 +12828,22 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             };
             return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
         }
+        let message = if undelivered == i64::MAX {
+            "board quiet but scope delivery is unreadable; blocking completion".to_string()
+        } else {
+            format!("board quiet; {undelivered} scope nodes still undelivered")
+        };
+        emit(
+            "king_loop_check",
+            serde_json::json!({
+                "session_id": session_id,
+                "actionable": 0,
+                "undelivered": undelivered,
+                "actionable_ids": [],
+                "cleared": false,
+            }),
+        );
+        return (0, king_output("block", None, &message, 0, dry + 1));
     }
 
     // The ceiling `fno agents king init --max-iterations` advertises. Before this it
@@ -13723,6 +13737,118 @@ fn probe_run_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn set_env(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> EnvGuard {
+        let guard = EnvGuard {
+            key,
+            prior: std::env::var_os(key),
+        };
+        std::env::set_var(key, value);
+        guard
+    }
+
+    #[test]
+    fn a_quiet_board_with_undelivered_scope_stays_in_flight() {
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            home.join("graph.json"),
+            r#"{"entries":[{"id":"x-epic","type":"epic","priority":"p1","status":"done"}]}"#,
+        )
+        .unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[work.workspaces.test]\nprojects = [{name = \"fno\"}]\n",
+        )
+        .unwrap();
+        let fno_py = write_exec(&bin, "fno-py", "#!/bin/sh\nprintf '[]\\n'");
+        let gh = write_exec(&bin, "gh", "#!/bin/sh\nprintf '[]\\n'");
+        let fno = write_exec(
+            dir.path(),
+            "fno-drain",
+            "#!/bin/sh\nprintf '{\"scope\":\"x-epic\",\"undelivered\":4}\\n'",
+        );
+        let state = dir.path().join("king.md");
+        std::fs::write(
+            &state,
+            "---\nfno_id: k-1\nscope: x-epic\ncreated_at: 2026-09-06T00:00:00Z\n---\n",
+        )
+        .unwrap();
+        let events = dir.path().join("events.jsonl");
+        std::fs::write(&events, "").unwrap();
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(bin.clone().into_os_string())
+                .chain(std::env::split_paths(&old_path).map(PathBuf::into_os_string)),
+        )
+        .unwrap();
+        let _env = [
+            set_env("FNO_HOME", &home),
+            set_env("FNO_CONFIG", &config),
+            set_env("FNO_AGENTS_HOME", dir.path().join("agents")),
+            set_env("FNO_CLAIMS_ROOT", dir.path().join("claims")),
+            set_env("PATH", path),
+        ];
+        assert!(fno_py.exists());
+        assert!(gh.exists());
+
+        let parsed = LoopCheckArgs {
+            state_path: state,
+            transcript_path: dir.path().join("transcript"),
+            cwd: dir.path().to_path_buf(),
+            global_settings_path: Some(config.clone()),
+            events_path: Some(events.clone()),
+            global_events_path: Some(events),
+            settings_path: Some(config.clone()),
+            ledger_path: Some(dir.path().join("ledger.json")),
+            now_override: None,
+            gh_bin: gh.to_string_lossy().into_owned(),
+            git_bin: "git".to_string(),
+            author_harness_override: Some("none".to_string()),
+            hook_input_stdin: false,
+            driver: "king".to_string(),
+            fno_bin: fno.to_string_lossy().into_owned(),
+            read_timeout_ms: Some(2_000),
+        };
+
+        for fire in 0..KING_DRY_FIRE_CEILING {
+            let (code, output) = king_decide(&parsed);
+            let payload: Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(code, 0, "fire {fire}: {output}");
+            assert_eq!(payload["decision"], "block", "fire {fire}: {output}");
+            assert!(
+                payload["termination_reason"].is_null(),
+                "fire {fire}: {output}"
+            );
+            assert!(
+                payload["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("undelivered")),
+                "fire {fire}: {output}"
+            );
+        }
+    }
 
     // ── plan fidelity stop gate (x-cbab) ──────────────────────────────────────
     //

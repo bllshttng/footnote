@@ -28,11 +28,13 @@
 //!
 //! ## What this arm is for
 //!
-//! The in-session arm (`loop-check --driver king`) holds an awake king working
-//! until its board is clean. It cannot help a king that is already gone: a
-//! stop hook does not fire in a session that exited or is rate-limited. This
-//! arm is the outside half. It respawns a king while the board is non-empty
-//! and terminates `NoWork` when it is not.
+//! The in-session arm (`loop-check --driver king`) holds an awake king while
+//! its crown scope has undelivered nodes. It uses actionable board rows to
+//! choose work, but an empty board is a quiet beat while delivery is in flight,
+//! not completion. It cannot help a king that is already gone: a stop hook does
+//! not fire in a session that exited or is rate-limited. This arm is the outside
+//! half. It respawns a king while the scoped delivery count is nonzero and
+//! terminates `NoWork` only when that count reaches zero.
 //!
 //! It does NOT cover the other edge, a king that correctly exited on an empty
 //! board and now needs waking because the board refilled. Nothing in this
@@ -593,6 +595,17 @@ impl Queue for KingQueue {
 mod tests {
     use super::*;
 
+    struct SpacesDirGuard(Option<std::ffi::OsString>);
+
+    impl Drop for SpacesDirGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => std::env::set_var("FNO_SPACES_DIR", value),
+                None => std::env::remove_var("FNO_SPACES_DIR"),
+            }
+        }
+    }
+
     #[test]
     fn mints_a_key_that_names_the_crown_and_never_repeats() {
         let a = mint_walk_key("k-1");
@@ -690,17 +703,23 @@ mod tests {
     fn termination_reads_the_scope_drain_not_the_actionable_board() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!("kingdrain-{}", std::process::id()));
-        let kings = dir.join(".fno").join("kings");
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _spaces_dir = SpacesDirGuard(std::env::var_os("FNO_SPACES_DIR"));
+        let dir = tempfile::tempdir().unwrap();
+        let spaces = dir.path().join("spaces");
+        std::env::set_var("FNO_SPACES_DIR", &spaces);
+        let kings = crate::paths::space_dir(dir.path()).join("kings");
         fs::create_dir_all(&kings).unwrap();
         fs::write(
             kings.join("k.md"),
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_ceiling: 0\n---\n",
         )
         .unwrap();
-        let registry = dir.join("no-registry.json");
+        let registry = dir.path().join("no-registry.json");
         let stub = |body: &str, name: &str| -> String {
-            let path = dir.join(name);
+            let path = dir.path().join(name);
             fs::write(&path, format!("#!/bin/sh\necho '{body}'\n")).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
             path.to_string_lossy().to_string()
@@ -710,7 +729,7 @@ mod tests {
         // inbox-board read answers zero here; the drain read must not.
         let undelivered = stub(r#"{"scope":"epic-x","undelivered":4}"#, "fno-drain-some");
         let mut q = KingQueue::from_manifest_with_registry(
-            &dir,
+            dir.path(),
             "k",
             undelivered,
             false,
@@ -726,15 +745,19 @@ mod tests {
 
         let drained = stub(r#"{"scope":"epic-x","undelivered":0}"#, "fno-drain-none");
         let mut q0 = KingQueue::from_manifest_with_registry(
-            &dir, "k", drained, false, None, false, &registry,
+            dir.path(),
+            "k",
+            drained,
+            false,
+            None,
+            false,
+            &registry,
         )
         .unwrap();
         assert!(
             q0.next().unwrap().is_none(),
             "a drained scope terminates NoWork"
         );
-
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
