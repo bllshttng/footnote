@@ -88,15 +88,12 @@ All eight are shared-vocabulary. None is a port candidate. The reasons differ en
 | `check-coverage-context-parity.sh` | two commit-status context strings and one label, across the Python publisher, the operator ruleset data, the Rust publisher, and the refresher workflow | shared-vocabulary |
 | `check-harness-roster-parity.py` | `KNOWN_HARNESSES` against three evidence surfaces: `docs/SETUP-<name>.md` filenames, the `for_name()` match arms in `provider.rs`, and the `_register()` calls in the Python adapter registry | shared-vocabulary |
 | `check-provider-vocabulary-parity.sh` | provider vocabulary across four Rust files and two Python files | shared-vocabulary |
-| `check-registry-schema-parity.sh` | `REGISTRY_SCHEMA_VERSION` in `state.rs` against `SCHEMA_VERSION` in `registry.py` | shared-vocabulary |
 | `check-review-app-parity.sh` | review-App logins across `BOT_PROFILES` in Rust and two Python declarations, plus a `usage_markers` field per profile | shared-vocabulary |
 | `check-reviewer-descriptor-parity.sh` | `_RESOLVABLE_REVIEWERS` against `REVIEWER_INVOCATIONS`: invocation string, self-cert flag, per-harness verb overrides | shared-vocabulary |
 | `check-session-identity-parity.sh` | the identity-writing surfaces in two Rust files and the Python registry | shared-vocabulary |
 | `check-spawn-lineage-parity.sh` | that every registry mint site stamps the `spawned_by_*` parent edge, across eight Rust files and four Python files | shared-vocabulary |
 
-Three of these need a note. A reader in a hurry can mistake them for port candidates.
-
-`check-registry-schema-parity.sh` compares a version constant, not logic. Two implementations read and write one on-disk store. They must agree on the write-version. The guard is about the STORE's contract. It survives any port that leaves two readers.
+Two of these need a note. A reader in a hurry can mistake them for port candidates.
 
 `check-spawn-lineage-parity.sh` is an invariant gate, not a parity gate, despite its name. It asserts that twelve separate mint sites each stamp a field. Collapse the four Python sites into Rust and eight sites remain, under the same gate. The thing that drifts is a site forgetting the stamp, not two languages disagreeing.
 

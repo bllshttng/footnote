@@ -1,0 +1,6 @@
+# Single owner of the per-agent registry schema version. build.rs renders the
+# Rust constant (state.rs include!s $OUT_DIR/registry_schema.rs) and projects
+# this file byte-for-byte to cli/src/fno/agents/registry_schema.toml, which
+# registry.py reads as package data. Bump `version` here and rebuild: both
+# languages move together, so there is no second constant to drift.
+version = 26

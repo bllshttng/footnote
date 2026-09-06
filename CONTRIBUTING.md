@@ -80,7 +80,7 @@ Run these locally before pushing:
   bash scripts/generate-skill-bundles.sh
   fno doctor bundle check          # must report "skill bundles fresh"
   ```
-- **Static checks** in `scripts/ci/`: `check-no-hardcoded-paths.sh`, `check-no-stale-skill-refs.sh`, `check-registry-schema-parity.sh`. Run the one that covers your area.
+- **Static checks** in `scripts/ci/`: `check-no-hardcoded-paths.sh`, `check-no-stale-skill-refs.sh`. Run the one that covers your area.
 
 ## Skill self-containment
 
