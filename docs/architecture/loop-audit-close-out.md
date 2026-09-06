@@ -24,7 +24,7 @@ Both surfaces are now built from the same shell variables (`$no_external`, `$no_
 
 ### Reload trigger
 
-At the top of every walker tick (after the resume / pause-sentinel / budget checks), the walker stats `graph.json`. If `st_mtime_ns` differs from the cached baseline, `load_graph` is called. The new entry list replaces the cached one and the baseline advances. Id-based comparisons mean the existing `completed_ids` / `blocked_ids` overlay sets continue to match correctly against the fresh dicts. (The sha256 sidecar this section once tracked alongside the graph is retired; the store keeper's gated read is what publishes consistent bytes.)
+At the top of every walker tick (after the resume / pause-sentinel / budget checks), the walker stats `graph.json`. If `st_mtime_ns` differs from the cached baseline, `load_graph` is called. The new entry list replaces the cached one and the baseline advances. Id-based comparisons mean the existing `completed_ids` / `blocked_ids` overlay sets continue to match correctly against the fresh dicts. (The sha256 sidecar this section once tracked is retired. The store keeper's gated read publishes consistent bytes.)
 
 ### Failure handling
 
@@ -40,7 +40,7 @@ The reload `try` catches both. On any failure the walker:
 2. Keeps the cached `graph_entries` for this tick.
 3. **Advances `_graph_mtime_ns` (and `_sidecar_mtime_ns`, kept as a nullable field) to the failed values.**
 
-Step 3 is the no-retry-storm contract: a slow concurrent writer (an `fno backlog intake` taking 3-4s on a 1s poll loop) would otherwise re-trigger `load_graph` and emit `graph_reload_failed` every tick until the writer finished. Advancing the baseline means the next reload attempt waits for a fresh mtime mutation rather than hammering the same broken read.
+Step 3 is the no-retry-storm contract. A slow concurrent writer (say an `fno backlog intake` taking 3-4s on a 1s poll loop) otherwise re-triggers `load_graph` every tick until the writer finishes. Advancing the baseline means the next reload attempt waits for a fresh mtime mutation rather than hammering the same broken read.
 
 The seed-time `os.stat` is also wrapped in `except OSError` (per [memory note on FileNotFoundError ⊂ OSError](../../README.md)) so a permission flap or NFS hiccup at startup falls through to `_graph_mtime_ns = None` rather than crashing the walker.
 
