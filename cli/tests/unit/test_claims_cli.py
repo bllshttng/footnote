@@ -227,6 +227,59 @@ def test_release_strict_mismatch_exits_4(cwd_tmp):
     assert result.exit_code == 4
 
 
+def test_release_no_claim_reports_no_op(cwd_tmp):
+    """No file for the key means release_claim returns None: nothing was
+    unlinked. The old receipt printed 'released: <key>' anyway; that false
+    positive is the exact gap x-2146 traces 386 unclosed do rows to. The
+    verb stays idempotent (exit 0), only the words change."""
+    result = runner.invoke(cli, ["release", "node:never-acquired", "--holder", "h"])
+    assert result.exit_code == 0
+    assert "no-op" in result.output
+    assert "released:" not in result.output
+
+
+def test_release_no_claim_json_reports_released_false(cwd_tmp):
+    result = runner.invoke(cli, ["release", "node:never-acquired", "--holder", "h", "--json"])
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    assert parsed == {"key": "node:never-acquired", "released": False}
+
+
+def test_release_stamp_do_skipped_on_no_op_names_the_key(cwd_tmp):
+    """--stamp-do on a release that unlinked nothing must not write a do row
+    silently omitting one: the skip is named, and exit stays 0."""
+    result = runner.invoke(
+        cli, ["release", "node:never-acquired", "--holder", "h", "--stamp-do"]
+    )
+    assert result.exit_code == 0
+    assert "do stamp skipped" in result.output
+    assert "node:never-acquired" in result.output
+
+
+def test_release_stamp_do_no_op_on_non_node_key_is_silent(cwd_tmp):
+    """A do row was never in play for a non-node: key (the success branch at
+    line 536 only stamps node: keys), so the no-op skip message must not
+    fire either - it would falsely imply a do row existed for this key."""
+    result = runner.invoke(
+        cli, ["release", "dispatch:never-acquired", "--holder", "h", "--stamp-do"]
+    )
+    assert result.exit_code == 0
+    assert "do stamp skipped" not in result.output
+
+
+def test_release_rollback_do_skipped_on_no_op_names_the_key(cwd_tmp):
+    """The rollback_do sibling of the stamp_do no-op skip above: a release
+    that unlinked nothing must not silently drop the rollback message
+    either, the same false-positive-by-omission class the stamp_do skip
+    fixes."""
+    result = runner.invoke(
+        cli, ["release", "node:never-acquired", "--holder", "h", "--rollback-do"]
+    )
+    assert result.exit_code == 0
+    assert "do rollback skipped" in result.output
+    assert "node:never-acquired" in result.output
+
+
 def test_status_free(cwd_tmp):
     result = runner.invoke(cli, ["status", "nothing", "--json"])
     assert result.exit_code == 0

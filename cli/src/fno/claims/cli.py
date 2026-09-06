@@ -538,9 +538,38 @@ def release(
             _stamp_do_on_release(key, released, holder)
         elif rollback_do:
             _rollback_do_on_release(key, released, holder)
+    elif released is None and key.startswith("node:"):
+        # release_claim's own docstring names four ways it returns None (the
+        # file is already gone, the holder does not match, the file is
+        # corrupted, the recovery mutex timed out) - in all four nothing was
+        # unlinked, so the do row this call would have touched stays as it
+        # was. Named here rather than silent, for both flags: a do row was
+        # never in play for any key type outside node: (the success branch
+        # above shares the same gate).
+        if stamp_do:
+            typer.echo(
+                f"do stamp skipped for {key}: release was a no-op "
+                "(nothing was unlinked, so no do row was closed)",
+                err=True,
+            )
+        elif rollback_do:
+            typer.echo(
+                f"do rollback skipped for {key}: release was a no-op "
+                "(nothing was unlinked, so no do row was dropped)",
+                err=True,
+            )
 
+    # released is None means nothing was unlinked - a false "released: true"
+    # here is the receipt that let the missing do-row close go unnoticed.
+    # None covers four causes (already gone, holder mismatch, corrupted
+    # file, recovery-mutex timeout) that this return value cannot tell
+    # apart, so the message names the fact (nothing was unlinked) rather
+    # than guessing a cause - "was not held by {holder}" was wrong for
+    # three of the four.
     if json_output:
-        typer.echo(json.dumps({"key": key, "released": True}))
+        typer.echo(json.dumps({"key": key, "released": released is not None}))
+    elif released is None:
+        typer.echo(f"no-op: {key} was not released (nothing was unlinked)")
     else:
         typer.echo(f"released: {key}")
 
