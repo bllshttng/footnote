@@ -1167,7 +1167,7 @@ def is_in_cooldown(
     raw = _read_disk_payload(state_path)
     if raw is None:
         return False
-    health_map = _parse_state_payload(raw)
+    health_map, _dropped = _drop_stale(_parse_state_payload(raw), now)
     health = health_map.get(provider_id)
     if health is None:
         return False

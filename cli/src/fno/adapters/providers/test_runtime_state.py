@@ -362,6 +362,16 @@ class TestIsInCooldown:
         state_path.write_text(json.dumps(payload), encoding="utf-8")
         assert is_in_cooldown("X") is False
 
+    def test_stale_future_lock_is_not_in_cooldown(self, state_path: Path) -> None:
+        now = time.time()
+        update_provider_health(
+            "X", ErrorRule(status=429, backoff=True),
+            now=now - PROVIDER_HEALTH_TTL_SECONDS - 1,
+            resets_at=now + 3600,
+        )
+
+        assert is_in_cooldown("X", now=now) is False
+
 
 def _race_worker(state_path_str: str) -> None:
     # Run inside a separate process - import module fresh and override
