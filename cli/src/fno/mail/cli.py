@@ -4341,9 +4341,12 @@ def cmd_send(
                 # agent-lock timeout, which says nothing about the recipient,
                 # and stamped [live-miss] when no live attempt ever ran.
                 _warn_deferred(result.recipient, reason=result.reason)
+                reason_tok = result.reason or "live-miss"
+                if reason_tok == "live-miss":
+                    reason_tok += _live_miss_age_suffix(result.recipient)
                 print(
                     f"{result.msg_id} queued (durable) for {result.recipient} "
-                    f"[project {to_project}] [{result.reason or 'live-miss'}]"
+                    f"[project {to_project}] [{reason_tok}]"
                 )
         else:
             _warn_deferred(to_project, project=True)
