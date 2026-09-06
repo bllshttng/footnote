@@ -236,23 +236,18 @@ class LiveCensus:
     #: :attr:`slot_count`.
     fno_slot_workers: int = 0
     #: False when the registry read failed: every share count is then unknown
-    #: (None), never zero - a read that saw nothing is not a healthy fleet
-    #: (x-5283 AC9, the gather_court rule).
+    #: (None), never zero (x-5283 AC9, the gather_court rule).
     registry_readable: bool = True
-    #: The crowned sessions among the live rows, read through
-    #: court.crowned_sessions - the same field, the same rows, the same
-    #: answer the court prints (x-5283 LD1). This set divides ``max_live``.
+    #: Crowned sessions, read through court.crowned_sessions - the same
+    #: field the court reads (x-5283 LD1). This set divides ``max_live``.
     crowned_sessions: set[str] = field(default_factory=set)
-    #: Worker rows (rows with no crown of their own) per ``spawned_by_session``.
-    #: None keys the rows nobody is attributable to; they still consume
-    #: ``max_live`` but land in the reading's one named bucket instead of
-    #: shrinking any king's share (x-5283 LD4).
+    #: Worker rows per ``spawned_by_session``; None keys the unattributed
+    #: bucket, which consumes ``max_live`` but divides nothing (x-5283 LD4).
     worker_rows: dict[Optional[str], list[str]] = field(default_factory=dict)
 
     @property
     def worker_counts(self) -> dict[Optional[str], int]:
-        """Live worker rows per spawner session, derived from
-        :attr:`worker_rows` so a count and the names behind it cannot drift."""
+        """Live worker rows per spawner, derived from :attr:`worker_rows`."""
         return {k: len(v) for k, v in self.worker_rows.items()}
 
     @property
@@ -420,10 +415,7 @@ def census() -> LiveCensus:
         # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
         out.fno_slot_workers += 1
-        # The share accounting (x-5283): a crowned row is a king, not a worker
-        # - it divides the cap and pays no per-king tax. Everything else is a
-        # worker row charged to its spawner, None names the unattributed
-        # bucket.
+        # x-5283: a crowned row divides the cap and pays no per-king tax.
         if row.crown_level is None:
             out.worker_rows.setdefault(row.spawned_by_session, []).append(row.name)
         live_registry_names.add(row.name)
@@ -499,11 +491,8 @@ def census() -> LiveCensus:
 
     out.slot_claims = _live_worker_slot_claims(out.warnings, live_registry_names)
 
-    # The divisor reads crowns through the court's own primitive, over the
-    # full non-terminal row list: the same field, the same rows, the same
-    # integer `fno agents court` prints (x-5283 LD1 / AC3). An unreadable
-    # registry leaves the set empty; share_reading keys the unknown off
-    # registry_readable, never off the empty set.
+    # The divisor reads crowns through the court's own primitive (x-5283
+    # LD1/AC3); share_reading keys unknown off registry_readable.
     if out.registry_readable:
         from fno.agents.court import crowned_sessions
 
@@ -1453,19 +1442,16 @@ def _check_load_ceiling(
 
 
 def _king_share(cap: int, crowned: set[str], caller: str) -> int:
-    """One king's fair share of the ceiling: a DIVISOR, never a second record.
+    """One king's fair share of the ceiling: ``cap // crowns`` (x-5283 LD1).
 
-    ``max_live`` stays the one ceiling; the share is ``cap // crowns`` where
-    crowns are the crowned sessions among live rows (x-5283 LD1: the divisor
-    counts CROWNS, read from the same ``crown_level`` field the court reads -
-    an ordinary worker that spawned once never shrinks a king's share). The
-    caller folds in only when it is itself crowned (LD2: an uncrowned caller
-    stays share-checked but never enters the divisor). The floor of 1 keeps a
-    crowded fleet able to start one worker per king. A fleet with NO crowns
-    at all divides by nothing, so every uncrowned caller's share floors at 1:
-    a session holds one worker until someone is crowned. That is the
-    crownless fleet refusing to be ungoverned, not a malfunction, and the
-    refusal's "across 0 kings" names it.
+    The divisor counts CROWNS from the court's own ``crown_level`` field; the
+    caller folds in only when itself crowned (LD2: still share-checked, never
+    in the divisor). The floor of 1 keeps a crowded fleet able to start one
+    worker per king. A fleet with NO crowns divides by nothing, so every
+    uncrowned caller's share floors at 1: a session holds one worker until
+    someone is crowned. That is the crownless fleet refusing to be
+    ungoverned, not a malfunction, and the refusal's "across 0 kings" names
+    it.
     """
     divisor = len(crowned | ({caller} if caller in crowned else set()))
     return max(1, cap // divisor) if divisor else 1
@@ -1474,13 +1460,10 @@ def _king_share(cap: int, crowned: set[str], caller: str) -> int:
 def share_reading(census_obj: "LiveCensus", cap: int, caller: Optional[str]) -> dict:
     """One share reading, printed by every surface that answers the question.
 
-    Returns ``kings`` (the crown count and the divisor), ``king_sessions``,
-    ``share``, ``held`` (the caller's worker rows), ``held_rows`` (those rows
-    by name, so a disagreement is checkable by name rather than by number),
-    and ``unattributed`` (the LD4 bucket: the live rows that name nobody,
-    count plus names - they divide nothing and pay no king's tax). An
-    unreadable registry returns None for every count, never zero: unknown is
-    not a healthy fleet (x-5283 AC9).
+    ``kings``/``king_sessions``/``share``/``held``/``held_rows`` (the
+    caller's worker rows, by name) and ``unattributed`` (the LD4 bucket:
+    live rows that name nobody, count plus names). An unreadable registry
+    returns None for every count, never zero (x-5283 AC9).
     """
     if not census_obj.registry_readable:
         return {
@@ -1528,16 +1511,13 @@ def _check_king_share(
 ) -> None:
     """Refuse (never queue) when the calling king holds its full share (x-3f84 W4).
 
-    Six kings dispatching into one undivided ``max_live`` converge on the cap
-    by construction, however reasonable each king is alone. The share divides
-    THAT ceiling by CROWNS (x-5283 LD1), and ``held`` counts the caller's
-    worker rows only - a crowned peer is a king, never the crowner's worker.
-    Only a caller whose session identity resolved is checked: an operator
-    terminal or cron job has no lineage and is not competing for the commons.
-    Waiting cannot help - only the caller's own workers dying frees its share
-    - so this refuses like the provider cap rather than queueing. Every number
-    in the refusal comes from :func:`share_reading`, so the count the gate
-    refuses on and the count any readout prints are one value.
+    The share divides ``max_live`` by CROWNS (x-5283 LD1) and ``held`` counts
+    the caller's worker rows only. Only a caller whose session identity
+    resolved is checked: an operator terminal or cron job is not competing
+    for the commons. Waiting cannot help - only the caller's own workers
+    dying frees its share - so this refuses like the provider cap. Every
+    number comes from :func:`share_reading`: the count the gate refuses on
+    and the count any readout prints are one value.
     """
     if not caller_session:
         return

@@ -532,10 +532,9 @@ def adopt_store_hit(
             f"could not register it ({exc}); the row will appear on a later "
             "resolution.\n"
         )
-        # The adopting session VOUCHED for this row (x-5283 LD3): vouching is
-        # not spawning, so the captured session lands on adopted_by_session.
-        # This fallback copy reaches the caller without passing
-        # register_session's stamping, so it states the same split itself.
+        # The adopting session VOUCHED for this row (x-5283 LD3), and this
+        # fallback copy skips register_session's stamping, so it states the
+        # same split itself: captured session -> adopted_by_session.
         from fno.agents.dispatch import _capture_parent_edge
 
         _sb_session, _sb_harness, _sb_cwd = _capture_parent_edge()

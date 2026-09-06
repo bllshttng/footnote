@@ -343,9 +343,8 @@ def _census(
         # view; a dark footprint leaves them None rather than fabricating a
         # list.
         "top_consumers": None,
-        # The calling session's own share reading (x-5283), from the ONE
-        # function the spawn gate refuses on - this number and the gate's
-        # number cannot drift. None when it cannot be read.
+        # The caller's own share reading (x-5283), from the ONE function the
+        # spawn gate refuses on. None when it cannot be read.
         "share": _share_reading(),
         # An unread count NAMES why, the rule every arm follows: without it
         # "unknown rows" cannot be told from an incomplete registry.
@@ -375,11 +374,9 @@ def _census(
 
 
 def _share_reading() -> Optional[dict[str, Any]]:
-    """The calling session's share reading, from spawn_gate.share_reading.
-
-    The gate's divisor arithmetic and this panel's number are one function
-    (x-5283 AC3). None on any failure: the panel renders unknown, never a
-    fabricated zero.
+    """The caller's share reading, from spawn_gate.share_reading (x-5283
+    AC3): the gate's arithmetic and this number are one function. None on
+    any failure - unknown, never a fabricated zero.
     """
     try:
         from fno.agents.spawn_gate import census as gate_census, share_reading

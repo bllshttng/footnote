@@ -276,11 +276,8 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # the key on every written row, so a pre-v27 reader must reject the store on
 # version rather than TypeError on the unknown kwarg.
 # v28 (x-5283): additive `adopted_by_session` - the session that VOUCHED for
-# an adopted row. `spawned_by_session` keeps one meaning (who spawned this
-# row, whose share pays for it); the adoption grantor lives here instead, so
-# crowning cannot re-attribute a row's cost. Same writer-protection rationale
-# as v27: asdict emits the key on every written row, so a pre-v28 reader must
-# reject the store on version rather than TypeError on the unknown kwarg.
+# an adopted row; `spawned_by_session` keeps one meaning, so crowning cannot
+# re-attribute a row's cost. Same writer-protection rationale as v27.
 # The version NUMBER is read from the single-owner TOML that build.rs projects
 # from crates/fno-agents/src/registry_schema.toml; bump there, not here.
 def _read_schema_version() -> int:
@@ -422,9 +419,8 @@ class AgentEntry:
     spawned_by_cwd: Optional[str] = None
     # x-5283 LD3: adoption is VOUCHING, not spawning. ``spawned_by_*`` keeps
     # one meaning - who spawned this row, whose share pays for it - so the
-    # grantor of an adopted row lives here instead, and crowning can never
-    # move a row's cost into the grantor's account. Additive-optional, the
-    # same shape and reason as the triple above.
+    # grantor of an adopted row lives here. Additive-optional like the triple
+    # above (schema v28).
     adopted_by_session: Optional[str] = None
     # x-42c5: the CAUSE of the spawn, distinct from spawned_by_* above (which
     # identify WHO called `fno agents spawn`, not WHY). An automated dispatcher
@@ -2075,14 +2071,9 @@ def register_existing_session(
         # the operator's own session env would record a self-edge. ADOPTED
         # rows are different (x-5283 LD3): adoption is vouching, not
         # spawning, so the captured session lands on adopted_by_session and
-        # the spawned_by_* edge stays empty - the share is charged on the
-        # spawn edge, and crowning must not move a row's cost to the
-        # grantor. The identity guard below covers every OTHER
-        # self-registration caller (e.g. a mail hold registering the session
-        # it runs in): a row whose captured parent IS its own session id
-        # never stamps itself as its own parent, whatever origin the caller
-        # passed. Lazy import: dispatch owns the capture helper and imports
-        # this module at load time.
+        # the spawned_by_* edge stays empty. The identity guard below covers
+        # every OTHER self-registration caller: a row whose captured parent
+        # IS its own session id never stamps itself as its own parent.
         _sb_session = _sb_harness = _sb_cwd = None
         _adopted_by = None
         if origin != "operator":
