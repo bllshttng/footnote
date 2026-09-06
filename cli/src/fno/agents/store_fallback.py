@@ -493,7 +493,6 @@ def adopt_store_hit(
     address the real harness session.
     """
     from fno.agents.registry import (
-        AgentEntry,
         AgentResolutionError,
         mint_agent_entry,
         register_existing_session,
