@@ -480,6 +480,8 @@ FIELD_META: dict[str, Meta] = {
     "restart.enabled": Meta("never", "Enable crash-recovery worker revival after `fno agents restart --mux` kills a server. Defaults true."),
     # --- config.evals.* ---
     "evals.enabled": Meta("never", "Enable the headless eval-suite grading-worker spawn. Defaults true."),
+    "evals.schedule_days": Meta("never", "Days between scheduled regression-tier runs on the pr-watch tick (0 disables)."),
+    "evals.stale_days": Meta("never", "Age in days at which the newest regression-tier run reads STALE in doctor and triage health."),
     # --- config.recovery.* ---
     "recovery.enabled": Meta("advanced", "Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.defaults.permission_mode built-in for autonomous dispatch); a non-bypass worker cannot run autonomously and is not resumed."),
     "recovery.idle_threshold_seconds": Meta("never", "How stale a bg session must be (seconds) before recovery acts on it."),

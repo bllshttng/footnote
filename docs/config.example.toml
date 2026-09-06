@@ -463,6 +463,10 @@ enabled = true
 [evals]
 # Enable the headless eval-suite grading-worker spawn. Defaults true.
 enabled = true
+# Days between scheduled regression-tier runs on the pr-watch tick (0 disables).
+schedule_days = 7
+# Age in days at which the newest regression-tier run reads STALE in doctor and triage health.
+stale_days = 7
 
 [recovery]
 # Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.defaults.permission_mode built-in for autonomous dispatch); a non-bypass worker cannot run autonomously and is not resumed.
