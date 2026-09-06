@@ -73,12 +73,41 @@ pub struct Census {
     /// CPU reading and is never folded into the counts above.
     #[serde(default)]
     pub attribution_gap: Option<String>,
+    /// The caller's own share reading, from the one function the spawn gate
+    /// refuses on (x-5283 AC3). `None` when the census could not read it.
+    #[serde(default)]
+    pub share: Option<ShareReading>,
     /// Top fleet consumers by program name, aggregated from the ps read the
     /// lanes fold already performs. `None` when the footprint went dark.
     #[serde(default)]
     pub top_consumers: Option<Vec<TopConsumer>>,
     #[serde(default)]
     pub read_ms: Option<u64>,
+}
+
+/// The caller's own share reading (x-5283), produced by the same Python
+/// function the spawn gate refuses on. `None` counts are a failed read and
+/// render `unknown`, never zero.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct ShareReading {
+    #[serde(default)]
+    pub kings: Option<u32>,
+    #[serde(default)]
+    pub share: Option<u32>,
+    #[serde(default)]
+    pub held: Option<u32>,
+    #[serde(default)]
+    pub unattributed: Option<Unattributed>,
+}
+
+/// The live rows that name nobody (x-5283 LD4): one named bucket, count plus
+/// row names. They divide nothing and pay no king's tax.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct Unattributed {
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub rows: Vec<String>,
 }
 
 /// One program in the expanded panel's `top` block: name, process count,
@@ -474,6 +503,28 @@ impl Panel {
                 label = "warn"
             ));
         }
+        // x-5283: the caller's own share, from the one function the spawn
+        // gate refuses on. The unattributed bucket renders only when it
+        // holds someone - a count that sees nobody says so by being absent.
+        if let Some(share) = &census.share {
+            let mut line = format!(
+                "  {label:<8} held {} of share {} across {} kings",
+                count_or_unknown(share.held),
+                count_or_unknown(share.share),
+                count_or_unknown(share.kings),
+                label = "share"
+            );
+            if let Some(unattributed) = share.unattributed.as_ref().filter(|u| u.count > 0) {
+                let names: Vec<&str> = unattributed.rows.iter().map(String::as_str).collect();
+                let shown = if names.len() > 3 {
+                    format!("{}…", names[..3].join(", "))
+                } else {
+                    names.join(", ")
+                };
+                line.push_str(&format!(" · {} unattributed ({shown})", unattributed.count));
+            }
+            lines.push(line);
+        }
 
         // what is saturating the box, from the ps read the fold already
         // performed - never a second instrument.
@@ -610,6 +661,8 @@ mod tests {
       "refused_reason": "",
       "census": {"kings": 5, "king_conflicts": 0, "workers": 45, "tests": 2,
                  "roster_rows": 50, "read_ms": 597, "attribution_gap": null,
+                 "share": {"kings": 4, "share": 7, "held": 2,
+                           "unattributed": {"count": 2, "rows": ["ghost-a", "ghost-b"]}},
                  "top_consumers": [
                    {"name": "fno-py", "procs": 23, "cpu_pct": 41.2,
                     "worktree": ".fno/worktrees/x-b1ee", "worktree_procs": 22},
@@ -698,6 +751,31 @@ mod tests {
         let court = parse(br#"{"lane_count": 7, "arms": []}"#).expect("parses");
         assert_eq!(court.lane_count, Some(7));
         assert_eq!(court.census, Census::default());
+    }
+
+    #[test]
+    fn ac5_hp_the_share_line_names_held_share_and_the_unattributed_bucket() {
+        let text = opened(live()).expanded_lines(&AC6_AGES).join("\n");
+
+        assert!(
+            text.contains("share    held 2 of share 7 across 4 kings"),
+            "{text}"
+        );
+        assert!(text.contains("2 unattributed (ghost-a, ghost-b)"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_unattributed_bucket_renders_nothing() {
+        // Nobody in the bucket: the line stays clean rather than printing a
+        // zero that reads as a fact about liveness.
+        let mut court = live();
+        if let Some(share) = court.census.share.as_mut() {
+            share.unattributed = None;
+        }
+        let text = opened(court).expanded_lines(&AC6_AGES).join("\n");
+
+        assert!(text.contains("share    held 2 of share 7"), "{text}");
+        assert!(!text.contains("unattributed"), "{text}");
     }
 
     #[test]

@@ -269,3 +269,68 @@ def test_cap_refusal_wins_over_share_verdict(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         spawn_gate.run_gate("w-new", "bg", no_wait=True)
     assert exc.value.code == spawn_gate.EXIT_NO_WAIT
+
+
+def test_one_reading_feeds_the_gate_and_the_lanes_census(monkeypatch):
+    """AC3-HP (x-5283): the gate's refusal numbers and the lanes census share
+    key come from ONE share_reading call on ONE census, including with a
+    roster-only claude row carrying pid null in the union - such a row has no
+    lineage and no crown, so it must move no count."""
+    import json as _json
+    import os as _os
+
+    from fno import doctor_lanes
+
+    alive = os.getpid()
+    rows = _crowned_rows([KING_A, KING_B, KING_C, KING_D], alive)
+    rows += [_row(f"w{i}", alive, spawned_by=KING_A) for i in range(2)]
+    c = _census(monkeypatch, rows)
+
+    # A roster-only claude row with pid null: display-only, never counted.
+    roster = _os.path.join(_os.environ["FNO_CLAUDE_DAEMON_DIR"], "roster.json")
+    with open(roster, "w", encoding="utf-8") as fh:
+        _json.dump(
+            {"workers": {"w": {"sessionId": "s-roster", "pid": None}}}, fh
+        )
+    c = spawn_gate.census()
+
+    monkeypatch.setattr("fno.agents.spawn_gate.census", lambda: c)
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda: type("I", (), {"session_id": KING_A, "harness": "claude"})(),
+    )
+
+    def fake_settings():
+        class _A:
+            max_live = 30
+
+        class _S:
+            agents = _A()
+
+        return _S()
+
+    monkeypatch.setattr("fno.config.load_settings", fake_settings)
+
+    expected = spawn_gate.share_reading(c, 30, KING_A)
+    assert expected["share"] == 7 and expected["held"] == 2
+    lanes = doctor_lanes._census(None, rows, None, 0)
+    assert lanes["share"] == expected
+
+
+def test_refusal_prints_the_unattributed_bucket(monkeypatch, capsys):
+    """AC5-HP: a refusal fired beside unattributed rows prints the bucket by
+    name, so the tax a king pays for nobody's rows is visible in the refusal
+    itself."""
+    alive = os.getpid()
+    rows = _crowned_rows([KING_A, KING_B], alive)
+    rows += [_row(f"w{i}", alive, spawned_by=KING_A) for i in range(15)]
+    rows += [_row(f"ghost{i}", alive) for i in range(3)]
+    c = _census(monkeypatch, rows)
+    with pytest.raises(spawn_gate.GateRefused) as exc:
+        spawn_gate._check_king_share(c, 30, caller_session=KING_A)
+    assert exc.value.code == spawn_gate.EXIT_KING_SHARE
+    err = capsys.readouterr().err
+    assert (
+        "3 live row(s) name nobody and sit in the unattributed bucket "
+        "(ghost0, ghost1, ghost2)" in err
+    )

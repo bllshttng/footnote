@@ -999,6 +999,13 @@ pub struct RegistryEntry {
     pub spawned_by_harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by_cwd: Option<String>,
+    /// x-5283 LD3: adoption is VOUCHING, not spawning. Mirrors Python's
+    /// `adopted_by_session` - the grantor of an adopted row - with the same
+    /// X3 passthrough as `spawned_by_*`: a field this struct does not know
+    /// is dropped on daemon write-back, so an unmirrored voucher would be
+    /// erased the first time the daemon touched the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_by_session: Option<String>,
     /// v9 backfill-only (x-1b1e): the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into

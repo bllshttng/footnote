@@ -343,6 +343,10 @@ def _census(
         # view; a dark footprint leaves them None rather than fabricating a
         # list.
         "top_consumers": None,
+        # The calling session's own share reading (x-5283), from the ONE
+        # function the spawn gate refuses on - this number and the gate's
+        # number cannot drift. None when it cannot be read.
+        "share": _share_reading(),
         # An unread count NAMES why, the rule every arm follows: without it
         # "unknown rows" cannot be told from an incomplete registry.
         "roster_error": rows_error,
@@ -368,6 +372,25 @@ def _census(
     census["king_conflicts"] = len(conflicts) if isinstance(conflicts, list) else None
     census["workers"] = len(rows or ()) - kings
     return census
+
+
+def _share_reading() -> Optional[dict[str, Any]]:
+    """The calling session's share reading, from spawn_gate.share_reading.
+
+    The gate's divisor arithmetic and this panel's number are one function
+    (x-5283 AC3). None on any failure: the panel renders unknown, never a
+    fabricated zero.
+    """
+    try:
+        from fno.agents.spawn_gate import census as gate_census, share_reading
+        from fno.claims.self_identity import resolve_self_identity
+        from fno.config import load_settings
+
+        caller = resolve_self_identity().session_id
+        cap = int(load_settings().agents.max_live)
+        return share_reading(gate_census(), cap, caller)
+    except Exception:
+        return None
 
 
 def read_lanes(
