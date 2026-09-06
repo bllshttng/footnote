@@ -302,6 +302,7 @@ fn record(c: &Case) -> ClaimRecord {
         expires_at: c.expires_at,
         reason: None,
         harness: c.harness.map(str::to_string),
+        session_id: None,
         pid_provenance: c.pid_provenance.map(str::to_string),
         machine_id: c.machine_id.clone(),
         metadata: Default::default(),

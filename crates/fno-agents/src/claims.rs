@@ -136,6 +136,15 @@ pub struct ClaimRecord {
     /// a foreign-harness owner from a native one without parsing the holder id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    /// Harness session id of the acquiring process, resolved from the same
+    /// ambient identity walk that resolves `harness` (they come from one call,
+    /// so a record can never name a session of a different harness than it
+    /// names). Additive: absent on pre-change records (reads as `None`, never a
+    /// parse error). Readers resolve identity through the registry row keyed by
+    /// this id; the `holder` string is a published credential and is never
+    /// parsed for identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// How `pid` was resolved at write time (mirrors `types.Claim.pid_provenance`):
     /// "session-prover" = provably the acquiring session's own process (the
     /// process-tree prover's answer, or the claimant itself when the pid
@@ -1868,6 +1877,15 @@ pub fn resolve_harness() -> Option<String> {
     resolve_harness_from(|k| std::env::var(k).ok())
 }
 
+/// Resolve `(session_id, harness)` from the ambient process environment in one
+/// call, so a caller that needs both never risks two separate walks
+/// disagreeing with each other. `resolve_harness` stays as its own function
+/// (public API; other call sites use it) and returns the same second element
+/// this does.
+pub fn resolve_identity() -> (Option<String>, Option<String>) {
+    resolve_identity_from(|k| std::env::var(k).ok())
+}
+
 /// Testable core of [`resolve_harness`]: `get` supplies each marker's value so
 /// the resolution contract is exercised without mutating process-global env.
 /// A set-but-blank marker is UNSET (matches the Python `.strip()` check), so a
@@ -1927,10 +1945,10 @@ pub fn ambient_parent_edge_from(
 fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
     let acquired = now_ms();
     let pid_unavailable = opts.pid_unavailable;
-    // Resolved ONCE and used for both the `harness` field and the provenance
-    // stamp below, so a record can never disagree with itself about which
-    // harness wrote it.
-    let harness = resolve_harness();
+    // Resolved ONCE and used for the `harness` field, the `session_id` field,
+    // and the provenance stamp below, so a record can never disagree with
+    // itself about which harness (or session) wrote it.
+    let (session_id, harness) = resolve_identity();
     ClaimRecord {
         schema_version: if pid_unavailable {
             PID_UNAVAILABLE_SCHEMA_VERSION
@@ -1973,6 +1991,7 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
             .to_string(),
         ),
         harness,
+        session_id: session_id.filter(|s| !s.trim().is_empty()),
         metadata: opts.metadata.clone().unwrap_or_default(),
     }
 }
@@ -2621,6 +2640,16 @@ fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> 
         // No resolvable durable pid (plain-shell ancestry, or the verb is
         // missing) means no better anchor exists, so the deadline moves alone -
         // byte-for-byte the pre-change behavior rather than a worse guess.
+    }
+    // Backfill only: a pre-change record (or one a peer wrote without a
+    // resolvable identity) has no session_id. This renewer is the claim's own
+    // holder proving it is still alive, so if it can resolve one now, stamp
+    // it - but never overwrite a session_id already present, which would let
+    // a later, no-more-certain resolve silently replace an earlier one.
+    if existing.session_id.is_none() {
+        if let Some(session_id) = resolve_identity().0 {
+            existing.session_id = Some(session_id);
+        }
     }
     existing.expires_at = Some(now + ttl_ms);
     let payload = serialize_claim(&existing)?;
@@ -3276,6 +3305,7 @@ mod tests {
             expires_at: None,
             reason: Some("why".into()),
             harness: Some("codex".into()),
+            session_id: Some("ses_abc".into()),
             pid_provenance: Some("session-prover".into()),
             machine_id: Some("mid".into()),
             metadata: meta,
@@ -3308,6 +3338,47 @@ mod tests {
             ..rec.clone()
         };
         assert!(!serialize_claim(&none).unwrap().contains("harness"));
+    }
+
+    // ---- session_id tag ----------------------------------------------------
+
+    // AC2: a claim record written before this change (no `session_id` key)
+    // parses with `session_id: None` and does not crash.
+    #[test]
+    fn claim_without_session_id_key_reads_none() {
+        let yaml = "schema_version: 1\nkey: node:x\nholder: h\nacquired_at: 1\npid: 2\nhost: hh\n";
+        let rec = parse_claim_str(yaml).expect("legacy record must parse");
+        assert_eq!(rec.session_id, None);
+    }
+
+    // A record WITH a session_id key round-trips it back, and None omits the
+    // key entirely (not serialized as null).
+    #[test]
+    fn claim_with_session_id_key_round_trips() {
+        let yaml = "schema_version: 1\nkey: node:x\nholder: h\nacquired_at: 1\npid: 2\nhost: hh\nsession_id: abc123\n";
+        let rec = parse_claim_str(yaml).expect("record must parse");
+        assert_eq!(rec.session_id.as_deref(), Some("abc123"));
+        let none = ClaimRecord {
+            session_id: None,
+            ..rec.clone()
+        };
+        assert!(!serialize_claim(&none).unwrap().contains("session_id"));
+    }
+
+    // AC1: resolve_identity resolves session_id and harness from one call, so
+    // make_claim can never stamp a record naming a session of a different
+    // harness than the one it names.
+    #[test]
+    fn resolve_identity_resolves_session_and_harness_together() {
+        let get = |key: &str| match key {
+            "FNO_HARNESS_NAME" => Some("claude".to_string()),
+            "FNO_HARNESS_SESSION_ID" => Some("abc123".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            resolve_identity_from(get),
+            (Some("abc123".to_string()), Some("claude".to_string()))
+        );
     }
 
     #[test]
@@ -3517,6 +3588,7 @@ mod tests {
             expires_at,
             reason: None,
             harness: None,
+            session_id: None,
             pid_provenance: None,
             // None on purpose: these fixtures pass a HOST, so they exercise the
             // pre-change fallback arm. The machine-id arm has its own tests.

@@ -106,6 +106,42 @@ def test_yaml_omits_machine_id_when_absent(tmp_path):
     assert read_claim_file(path).machine_id is None
 
 
+def test_yaml_round_trip_session_id(tmp_path):
+    """session_id must reach DISK, not just the model, the same as harness and
+    machine_id: readers resolve identity through the registry row keyed by
+    this field, never by parsing holder."""
+    claim = _make_claim(session_id="abc123")
+    text = serialize_claim(claim)
+    assert "session_id: abc123" in text
+
+    path = tmp_path / "sid.lock"
+    path.write_text(text)
+    assert read_claim_file(path).session_id == "abc123"
+
+
+def test_yaml_omits_session_id_when_absent(tmp_path):
+    """A pre-change claim has no session_id; the writer must not invent one as
+    null, matching the absent-not-null discipline the other optional fields
+    follow."""
+    text = serialize_claim(_make_claim(session_id=None))
+    assert "session_id" not in text
+
+    path = tmp_path / "nosid.lock"
+    path.write_text(text)
+    assert read_claim_file(path).session_id is None
+
+
+def test_yaml_without_session_id_key_reads_none(tmp_path):
+    """AC2: a claim record written before this change (no session_id key)
+    parses with session_id=None and does not crash."""
+    path = tmp_path / "legacy.lock"
+    path.write_text(
+        "schema_version: 1\nkey: node:x\nholder: h\nacquired_at: 1\npid: 2\nhost: hh\n"
+    )
+    parsed = read_claim_file(path)
+    assert parsed.session_id is None
+
+
 def test_yaml_round_trip_ttl_serializes_expires_at(tmp_path):
     claim = _make_claim(expires_at=1747641660000)
     text = serialize_claim(claim)

@@ -269,6 +269,8 @@ def _make_claim(
     harness: Optional[str] = None,
     pid_provenance: Optional[str] = None,
     pid_unavailable: bool = False,
+    *,
+    session_id: Optional[str] = None,
 ) -> Claim:
     acquired = now_ms()
     return Claim(
@@ -299,6 +301,7 @@ def _make_claim(
         # here: the owned path walks the process tree, and this function runs
         # inside the critical section every other acquirer waits on (x-20f1).
         harness=harness,
+        session_id=session_id,
         metadata=metadata or {},
     )
 
@@ -315,6 +318,7 @@ def acquire_claim(
     host: Optional[str] = None,
     harness: Optional[str] = None,
     pid_provenance: Optional[str] = None,
+    harness_session_id: Optional[str] = None,
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Claim:
@@ -367,6 +371,7 @@ def acquire_claim(
             host=host,
             harness=harness,
             pid_provenance=pid_provenance,
+            harness_session_id=harness_session_id,
             root=root,
             _attempt=_attempt + 1,
         )
@@ -392,9 +397,15 @@ def acquire_claim(
     # recovery critical section that other acquirers are polling on: doing it
     # there put a process walk in every waiter's path. Resolving up front also
     # makes the first write and any refresh agree on one value rather than
-    # re-resolving under contention (x-20f1).
+    # re-resolving under contention (x-20f1). ONE walk for both halves: the
+    # session_id stamp and the harness tag come from the same identity answer,
+    # so a record can never name a session of a different harness than it
+    # names - the lockstep rule the Rust make_claim resolver follows.
+    identity = resolve_self_identity()
     if harness is None:
-        harness = resolve_self_identity().harness
+        harness = identity.harness
+    if harness_session_id is None:
+        harness_session_id = identity.session_id
 
     # Provenance resolves ONCE, here, beside the harness and outside every
     # mutex below, for the same reason (x-20f1): the earning path walks the
@@ -407,7 +418,7 @@ def acquire_claim(
 
     new_claim = _make_claim(
         key, holder, ttl_ms, reason, metadata, pid, host, harness,
-        pid_provenance, pid_unavailable,
+        pid_provenance, pid_unavailable, session_id=harness_session_id,
     )
     payload = serialize_claim(new_claim)
 
@@ -474,7 +485,7 @@ def acquire_claim(
 
             refreshed = _make_claim(
                 key, holder, ttl_ms, reason, metadata, pid, host, harness,
-                pid_provenance, pid_unavailable,
+                pid_provenance, pid_unavailable, session_id=harness_session_id,
             )
             _atomic_replace(path, serialize_claim(refreshed))
             emit_claim_idempotent_reacquired(refreshed, previous=fresh_existing)
@@ -532,7 +543,7 @@ def acquire_claim(
                 # Raced into the idempotent path while we were grabbing the lock.
                 refreshed = _make_claim(
                     key, holder, ttl_ms, reason, metadata, pid, host, harness,
-                    pid_provenance, pid_unavailable,
+                    pid_provenance, pid_unavailable, session_id=harness_session_id,
                 )
                 _atomic_replace(path, serialize_claim(refreshed))
                 emit_claim_idempotent_reacquired(refreshed, previous=existing)
@@ -590,6 +601,7 @@ def _rebound_claim(
     new_pid_provenance: Optional[str] = None,
     keep_acquired_at: bool = False,
     new_pid_unavailable: bool = False,
+    new_session_id: Optional[str] = None,
 ) -> Claim:
     """A rebound claim: identity fields preserved, process anchor + lease fresh.
 
@@ -662,6 +674,11 @@ def _rebound_claim(
         # earns its own stamp from the caller (the reanchor path's pid IS the
         # prover's answer) or resets to ambient - never silently inherits.
         pid_provenance=new_pid_provenance,
+        # The session id is identity like the holder, not process state like the
+        # pid: a same-holder rebind preserves it (backfill is the CALLER's call,
+        # passed explicitly as new_session_id) and only a handover - which
+        # changes WHO owns the claim - re-stamps it to the successor's session.
+        session_id=new_session_id if new_session_id is not None else existing.session_id,
         metadata=new_metadata if new_metadata else existing.metadata,
     )
 
@@ -735,7 +752,13 @@ def compare_and_rebind(
     # Resolved BEFORE the recovery mutex below, for the same reason as
     # `acquire_claim`: the owned path walks the process tree, and everything
     # after the lock runs while other callers poll on it (x-20f1).
-    resolved_harness = new_harness if new_harness is not None else resolve_self_identity().harness
+    # ONE walk for both halves (see acquire_claim): the rebind stamps the
+    # session id beside the harness it was resolved with.
+    identity = resolve_self_identity()
+    resolved_harness = new_harness if new_harness is not None else identity.harness
+    resolved_session_id = (
+        harness_session_id if harness_session_id is not None else identity.session_id
+    )
     # Same placement, same reason: the rebind rewrites the pid, so its
     # provenance is earned here against the prover or it resets to ambient.
     resolved_provenance = _resolve_pid_provenance(new_pid, ttl_ms, resolved_harness)
@@ -851,6 +874,9 @@ def compare_and_rebind(
                 new_metadata=effective_new_metadata,
                 new_pid_provenance=resolved_provenance,
                 new_pid_unavailable=npid_unavailable,
+                # A handover changes WHO owns the claim, so the successor's
+                # session id replaces the spawner's, exactly as the harness does.
+                new_session_id=resolved_session_id,
             )
             _atomic_replace(path, serialize_claim(rebound))
             if emit:
@@ -873,6 +899,7 @@ def compare_and_rebind(
                     new_metadata=effective_new_metadata,
                     new_pid_unavailable=npid_unavailable,
                     new_pid_provenance=resolved_provenance,
+                    new_session_id=existing.session_id or resolved_session_id,
                 )
                 _atomic_replace(path, serialize_claim(rebound))
                 if emit:
@@ -913,6 +940,7 @@ def compare_and_rebind(
             new_metadata=effective_new_metadata,
             new_pid_provenance=resolved_provenance,
             new_pid_unavailable=npid_unavailable,
+            new_session_id=existing.session_id or resolved_session_id,
         )
         _atomic_replace(path, serialize_claim(rebound))
         if emit:

@@ -94,6 +94,12 @@ class Claim(BaseModel):
             foreign process can never make a lease permanent. Additive: absent
             on pre-change records (reads as None), which classify treats as
             ambient - a legacy claim cannot prove its pid, and the TTL wins.
+        session_id: harness session id of the acquiring process, resolved from
+            the same ambient identity walk that resolves ``harness``. Additive:
+            absent on pre-change records (reads as None, never a parse error).
+            Readers resolve identity through the registry row keyed by this
+            id; ``holder`` is a published credential and is never parsed for
+            identity.
         metadata: optional dict; treated opaquely.
 
     Bool-vs-string traps are not in play here because no field is a Literal.
@@ -115,6 +121,7 @@ class Claim(BaseModel):
     machine_id: Optional[str] = None
     reason: Optional[str] = None
     harness: Optional[str] = None
+    session_id: Optional[str] = None
     pid_provenance: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -191,6 +198,8 @@ class Claim(BaseModel):
             out["reason"] = self.reason
         if self.harness is not None:
             out["harness"] = self.harness
+        if self.session_id is not None:
+            out["session_id"] = self.session_id
         if self.pid_provenance is not None:
             out["pid_provenance"] = self.pid_provenance
         if self.metadata:
