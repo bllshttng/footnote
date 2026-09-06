@@ -2868,14 +2868,14 @@ event_types:
     consumers: [operator]
 
   - name: control_plane_tick
-    description: "One tick of one control-plane arm (king_wake, watchdog, pr_watch_merge, active_backlog, auto_continue, stop_hook, notify_watch): what it did, or why it did nothing. The arms readout (`fno agents status`, `fno doctor`) folds these into one row per arm, newest first, red when the newest tick is older than 2x interval_s. Shape owned by crates/fno-agents/src/tick_ledger.rs; Python arms emit through fno.control_plane."
+    description: "One tick of one control-plane arm (king_wake, watchdog, pr_watch_merge, active_backlog, auto_continue, stop_hook): what it did, or why it did nothing. The arms readout (`fno agents status`, `fno doctor`) folds these into one row per arm, newest first, red when the newest tick is older than 2x interval_s. Shape owned by crates/fno-agents/src/tick_ledger.rs; Python arms emit through fno.control_plane."
     sources: [daemon, loop, hook, test]
     data:
       required: [arm, scheduler, acted, interval_s]
       properties:
         arm:
           type: string
-          description: "Stable arm name: king_wake, watchdog, pr_watch_merge, active_backlog, auto_continue, stop_hook, notify_watch."
+          description: "Stable arm name: king_wake, watchdog, pr_watch_merge, active_backlog, auto_continue, stop_hook."
         scheduler:
           type: string
           description: "What schedules the arm: daemon, launchd:<label>, hook:<name>, or session (an in-process caller)."

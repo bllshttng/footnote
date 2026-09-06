@@ -61,10 +61,6 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         arm: "stop_hook",
         default_interval_s: 0,
     },
-    ArmSpec {
-        arm: "notify_watch",
-        default_interval_s: 300,
-    },
 ];
 
 /// Build the `data` object of one tick row. `skip_reason` is a single token
@@ -491,15 +487,6 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn notify_watch_is_a_known_timed_arm() {
-        let spec = KNOWN_ARMS
-            .iter()
-            .find(|s| s.arm == "notify_watch")
-            .expect("notify_watch must be a known arm");
-        assert_eq!(spec.default_interval_s, 300);
     }
 
     #[test]

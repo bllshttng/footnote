@@ -58,7 +58,7 @@ Put the value in `~/.fno/.env` (`FNO_STATUS_DISCORD=https://...`) for unattended
 
 ## Reaching a remote operator (`operator_notice`)
 
-`fno inbox notify TITLE BODY` (and every automatic caller behind `send_notification`) now also appends an `operator_notice` event to the project journal. A sink that routes that type carries the notice off the host, so an operator who is not at the machine still sees it:
+`fno inbox notify TITLE BODY` (and every automatic caller behind `send_notification`) also appends an `operator_notice` event to the project journal. A sink that routes that type carries the notice off the host, so an operator who is not at the machine still sees it:
 
 ```toml
 [[status_sinks]]
@@ -69,13 +69,8 @@ field = "content"
 events = ["operator_notice"]
 template = "fno [{project}] {data.title} - {data.body} ({data.pointer})"
 enabled = true
-
-[notify]
-min_interval_s = 300
-signals = ["operator_question", "mergeable_pr", "undriven_pr", "crown_set", "main_ci"]
 ```
 
-Two facts about the notices themselves:
+A notice is a pointer, never a second inbox. `data.pointer` names the verb that shows the durable state (`fno inbox outstanding`, `fno inbox board`). `data.body` carries counts, never queue rows. With no sink configured, nothing leaves the host.
 
-- A notice is a pointer, never a second inbox. `data.pointer` names the verb that shows the durable state (`fno inbox outstanding`, `fno inbox board`). `data.body` carries counts, never queue rows.
-- Subscribed signals notify on a state change only. The `notify_watch` arm samples the king board, the court and main CI every pass. The same state answers `deduped`. A changed state inside `min_interval_s` is held for the next pass. Signal state lives in `~/.fno/notify-signals.json`. An empty `signals` list (the default) disables the arm. With no sink configured, nothing leaves the host.
+Automatic sampling of the king board, the court and main CI is a planned follow-up; today the notice fires from the existing `notify` callers.
