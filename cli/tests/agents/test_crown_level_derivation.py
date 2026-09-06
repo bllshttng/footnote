@@ -286,3 +286,23 @@ def test_one_graph_parse_serves_every_member_of_a_set(territory, monkeypatch) ->
         resolve_crown(["e-1", "n-1", "e-2"])
 
     assert calls["n"] == 1
+
+
+def test_one_graph_parse_serves_a_grant_over_a_set(territory, monkeypatch) -> None:
+    """The grant path pays the same one-parse cost: scope_contains resolves the
+    index once for the whole set instead of once per member. The portfolio
+    covers both fixture epics, so every member resolves through that one read."""
+    import fno.agents.crown as crown_mod
+    from fno.agents.crown import scope_contains
+
+    calls = {"n": 0}
+    real = crown_mod._graph_index
+
+    def counting() -> object:
+        calls["n"] += 1
+        return real()
+
+    monkeypatch.setattr(crown_mod, "_graph_index", counting)
+
+    assert scope_contains("alpha,beta", "e-1,e-2") is True
+    assert calls["n"] == 1

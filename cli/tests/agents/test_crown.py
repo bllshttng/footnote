@@ -72,14 +72,19 @@ def test_scope_contains_canonicalizes_an_alias_project(monkeypatch, tmp_path) ->
     from fno.agents import crown
 
     # An epic filed under the alias 'a' (the raw spelling intake stores).
+    # The containment resolves the index once, so the stub sits there.
     monkeypatch.setattr(
-        crown, "_graph_entry", lambda nid: {"id": nid, "type": "epic", "project": "a"}
+        crown,
+        "_graph_index",
+        lambda: {"epic-1": {"id": "epic-1", "type": "epic", "project": "a"}},
     )
     assert crown.scope_contains("alpha", "epic-1") is True
 
     # A genuinely different project is still not contained.
     monkeypatch.setattr(
-        crown, "_graph_entry", lambda nid: {"id": nid, "type": "epic", "project": "beta"}
+        crown,
+        "_graph_index",
+        lambda: {"epic-1": {"id": "epic-1", "type": "epic", "project": "beta"}},
     )
     assert crown.scope_contains("alpha", "epic-1") is False
 
@@ -106,8 +111,67 @@ def test_the_store_gate_rejects_unstampable_pairs(level, scope) -> None:
     assert crown_validation_error(level, scope) is not None
 
 
-def test_the_store_gate_passes_the_two_legal_shapes() -> None:
+def test_a_mislabeled_level_cannot_switch_off_rivalry(monkeypatch, tmp_path) -> None:
+    """The rung is a fact about the SCOPE, not the stored number: a row stamped
+    level 0 over an epic set must not read as a different rung and slip the
+    cross-rung exemption while a rung-2 crown takes one member."""
+    import fno.agents.crown as crown_mod
+    from fno.agents.crown import _crown_rivals
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(
+        crown_mod,
+        "_graph_index",
+        lambda: {
+            nid: {"id": nid, "type": "epic", "project": "alpha"}
+            for nid in ("e-1", "e-2")
+        },
+    )
+
+    # Stored (0, "e-1,e-2") vs a real rung-2 crown over one member: derived
+    # rungs both 2, so overlap decides. Trusting stored levels answered False.
+    assert _crown_rivals("e-1,e-2", 0, "e-1", 2) is True
+    # A mislabeled portfolio (stored 2 over two projects) still courts its
+    # project king: derivation reads 0 vs 1, equality decides, not rivals.
+    assert _crown_rivals("alpha,beta", 2, "alpha", 1) is False
+
+
+def test_the_store_gate_refuses_a_level_that_names_a_different_rung(
+    monkeypatch, tmp_path
+) -> None:
+    """A stored level that contradicts its members is a stamp no resolver
+    produces; the gate refuses on positive evidence only, so a machine where
+    nothing resolves stays with the runtime guards."""
     from fno.agents.crown import crown_validation_error
+    from fno.projects import resolve as proj_resolve
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[work.workspaces.ws1]\nprojects = [{ name = "alpha" }, { name = "beta" }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
+    proj_resolve._clear_cache()
+
+    assert crown_validation_error(2, "alpha,beta") is not None
+    assert crown_validation_error(0, "e-1,e-2") is not None
+    assert crown_validation_error(0, "alpha,beta") is None
+    assert crown_validation_error(2, "e-1,e-2") is None
+
+
+def test_the_store_gate_passes_the_two_legal_shapes(monkeypatch, tmp_path) -> None:
+    from fno.agents.crown import crown_validation_error
+    from fno.projects import resolve as proj_resolve
+
+    # Level 0 needs its members to RESOLVE as projects, so the config declares
+    # the two names this test stamps a portfolio over.
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[work.workspaces.ws1]\nprojects = [{ name = "etl" }, { name = "web" }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
+    proj_resolve._clear_cache()
 
     assert crown_validation_error(None, None) is None      # an uncrowned spawn
     assert crown_validation_error(2, "epic-x") is None     # a Director
@@ -1461,10 +1525,11 @@ def test_a_project_kings_grant_covers_an_epic_set_under_it(
     _prepare_crown_cli(monkeypatch, tmp_path, [])
     monkeypatch.setattr(
         crown_mod,
-        "_graph_entry",
-        lambda nid: {"id": nid, "type": "epic", "project": "alpha"}
-        if nid in ("e-1", "e-2")
-        else None,
+        "_graph_index",
+        lambda: {
+            nid: {"id": nid, "type": "epic", "project": "alpha"}
+            for nid in ("e-1", "e-2")
+        },
     )
     king = _entry(
         "king",

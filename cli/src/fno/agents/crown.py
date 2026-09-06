@@ -345,8 +345,14 @@ def scope_contains(
 
     ``graph_entry`` overrides the per-call graph read (an ``id -> entry``
     callable), so a caller scanning many rows pays one graph parse instead of
-    one per row.
+    one per row. Omitted, the FIRST call resolves ``_graph_index`` once and
+    hands it down through the set-membership recursion: a five-member set
+    must not cost five full graph parses on the grant path.
     """
+    if graph_entry is None:
+        by_id = _graph_index()
+        if by_id is not None:
+            graph_entry = by_id.get
     outer_members = _canonical_members(outer)
     inner_members = _canonical_members(inner)
     if not outer_members or not inner_members:
@@ -524,6 +530,25 @@ def _territories_overlap(a: Optional[str], b: Optional[str]) -> bool:
     return bool(left) and bool(right) and bool(left & right)
 
 
+def _derived_level(scope: Optional[str]) -> Optional[int]:
+    """The rung the SCOPE sits on, read off its members - never a stored number.
+
+    The rung is a fact about the territory: every member a configured project
+    is the project rungs (1 one, 0 several), none is an epic set (2), and a
+    mix names no legal crown. ``None`` marks the undecidable cases (blank
+    scope, mixed members) the rivalry guard must fail closed on.
+    """
+    members = _canonical_members(scope)
+    if not members:
+        return None
+    project_members = {m for m in members if _canonical_project(m)}
+    if project_members and len(project_members) == len(members):
+        return 1 if len(members) == 1 else 0
+    if not project_members:
+        return 2
+    return None
+
+
 def _crown_rivals(
     a_scope: Optional[str],
     a_level: Optional[int],
@@ -538,10 +563,22 @@ def _crown_rivals(
     are two legitimate crowns. Rivalry is therefore rung-scoped: crowns on the
     SAME rung double-rule when their territories overlap (a set-holder rules
     each member), and crowns on DIFFERENT rungs double-rule only when they
-    name the same territory outright. A row missing its level is half a crown
-    no legal writer produces; any overlap it shows is surfaced, not excused.
+    name the same territory outright.
+
+    The rungs are DERIVED from the members, never read from the stored level:
+    a row stamped ``level=0`` over ``e-1,e-2`` is exactly how a bypass used to
+    switch this guard off (0 != 2 fell to equality, two rows ruled ``e-1``).
+    A stored level is accepted only as a tie-breaker of last resort, when
+    derivation cannot classify either side - the corruption shapes the store
+    gate refuses and the half crowns no legal writer produces. Their overlap
+    is surfaced, not excused.
     """
-    if a_level is not None and b_level is not None and a_level != b_level:
+    a_rung = _derived_level(a_scope)
+    b_rung = _derived_level(b_scope)
+    if a_rung is None and b_rung is None:
+        if a_level is not None and b_level is not None and a_level != b_level:
+            return _same_territory(a_scope, b_scope)
+    elif a_rung is not None and b_rung is not None and a_rung != b_rung:
         return _same_territory(a_scope, b_scope)
     return _territories_overlap(a_scope, b_scope)
 
@@ -1120,5 +1157,22 @@ def crown_validation_error(level: Any, scope: Any) -> Optional[str]:
         return (
             f"a scope naming {len(members)} members is level 0 (a portfolio of "
             f"projects) or 2 (a set of epics), not {level}"
+        )
+    # The pairing check the message above promises. The rivalry guard derives
+    # the rung from members, so a stored level that names a DIFFERENT rung is
+    # not cosmetic: it is a stamp no resolver produces. Positive evidence
+    # only - on a machine where no member resolves (no readable config) the
+    # kinds are unknowable and the pairing stays with the runtime guards,
+    # which fail closed.
+    resolved = [_canonical_project(m) for m in members]
+    if level == 0 and len(members) > 1 and not any(resolved):
+        return (
+            f"level 0 is a portfolio of PROJECTS, but no member of {scope!r} "
+            "resolves to a configured project"
+        )
+    if level == 2 and any(resolved):
+        return (
+            f"level 2 is a SET OF EPICS, but {', '.join(m for m, r in zip(members, resolved) if r)} "
+            "resolve(s) to a configured project"
         )
     return None

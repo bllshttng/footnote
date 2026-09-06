@@ -350,8 +350,10 @@ fn derived_scope_level(scope: &str, projects: &HashMap<String, String>) -> Optio
 /// walk reviving a king over `alpha` are two legitimate crowns. Rivalry is
 /// rung-scoped: same rung double-rules on any shared member (a set-holder
 /// rules each member), different rungs only on the same territory outright.
-/// A missing level on either side is a half crown no legal writer produces;
-/// any overlap it shows is surfaced, not excused.
+/// Both rungs are DERIVED from the members, never read from stored levels: a
+/// row stamped `level=0` over epic members is exactly how a stored number
+/// switches this guard off. The stored levels remain only as a tie-breaker
+/// when derivation cannot classify either side; their overlap surfaces.
 fn crown_rivals(
     held: &str,
     held_level: Option<u32>,
@@ -364,8 +366,14 @@ fn crown_rivals(
     if left.is_empty() || right.is_empty() {
         return false;
     }
-    match (held_level, requested_level) {
+    let held_rung = derived_scope_level(held, projects);
+    let requested_rung = derived_scope_level(requested, projects);
+    match (held_rung, requested_rung) {
         (Some(a), Some(b)) if a != b => left == right,
+        (None, None) => match (held_level, requested_level) {
+            (Some(a), Some(b)) if a != b => left == right,
+            _ => left.intersection(&right).next().is_some(),
+        },
         _ => left.intersection(&right).next().is_some(),
     }
 }
@@ -386,6 +394,23 @@ pub(crate) fn scopes_overlap(
             .intersection(&left)
             .next()
             .is_some()
+}
+
+/// Territory equality, aliases normalized (`_same_territory`'s Rust twin).
+pub(crate) fn same_territory(a: &str, b: &str, projects: &HashMap<String, String>) -> bool {
+    let left = canonical_members(a, projects);
+    !left.is_empty() && left == canonical_members(b, projects)
+}
+
+/// `crown_rivals` for sibling modules (`reign`'s multiple-holders warning).
+pub(crate) fn crown_rivals_pub(
+    held: &str,
+    held_level: Option<u32>,
+    requested: &str,
+    requested_level: Option<u32>,
+    projects: &HashMap<String, String>,
+) -> bool {
+    crown_rivals(held, held_level, requested, requested_level, projects)
 }
 
 /// The name of any live registry row double-ruling `scope`, if the registry is
@@ -906,6 +931,23 @@ mod tests {
 
         assert_eq!(
             live_crown_holder_in(&registry, "epic-a", &dir),
+            Some("reigning-king".to_string())
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_mislabeled_row_still_blocks_the_walk() {
+        // A row stamped level 0 over epic members: derivation reads rung 2 on
+        // BOTH sides, so overlap decides and the stored number cannot switch
+        // the guard off.
+        let dir = std::env::temp_dir().join(format!("kingmislab-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let registry = write_registry_with_level(&dir, "busy", Some("epic-a,epic-b"), 0);
+        let projects: Result<HashMap<String, String>, String> = Ok(HashMap::new());
+
+        assert_eq!(
+            live_crown_holder_in_with_projects(&registry, "epic-a", &projects),
             Some("reigning-king".to_string())
         );
         fs::remove_dir_all(&dir).ok();

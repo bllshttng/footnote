@@ -68,13 +68,19 @@ def _agreement(
 
 
 def _conflicts(rows: list) -> list[dict[str, Any]]:
-    """Territory two live crowned rows double-rule, one entry per rivalry.
+    """Territory two live crowned rows double-rule, one entry per rival PAIR.
 
     Keys on :func:`_crown_rivals`, the same ladder-aware rule the grant-time
     holder scan uses, so a conflict here and the refusal at grant time can
     never disagree about what "double rule" means: a set-holder rivals a
     holder over one member, while a portfolio and the project kings of its
     court are two legitimate crowns.
+
+    One entry PER PAIR, not per merged group: rivalry is pairwise and not
+    transitive (A over e-1 and B over e-1,e-2 rival; C over e-2 rivals B but
+    not A), so a union-find group would claim three rows hold e-1,e-2 when
+    no pair does. Each entry names exactly the two rows and the members they
+    actually share.
     """
     # Joined on crown_scope, not a full crown_reading: a scope claims territory
     # with or without a level, and gather_court surfaces those rows too.
@@ -85,18 +91,7 @@ def _conflicts(rows: list) -> list[dict[str, Any]]:
             key = _territory_key(scope)
             if key:
                 claims.append((row, scope, key))
-    # Rivals group together: pairwise comparison over live crowned rows (a
-    # handful at fleet scale), with each group reporting the union of the
-    # territories its pairs actually share - never a member only one row holds.
-    parent = list(range(len(claims)))
-
-    def _root(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    pair_shared: list[tuple[int, int, set[str]]] = []
+    conflicts: list[dict[str, Any]] = []
     for i in range(len(claims)):
         for j in range(i + 1, len(claims)):
             row_i, scope_i, key_i = claims[i]
@@ -108,21 +103,13 @@ def _conflicts(rows: list) -> list[dict[str, Any]]:
                 getattr(row_j, "crown_level", None),
             ):
                 continue
-            parent[_root(i)] = _root(j)
-            pair_shared.append((i, j, set(key_i & key_j)))
-    # Shared members fold under the FINAL roots: a set keyed at pair time can
-    # sit under a root a later pair merged away.
-    shared: dict[int, set[str]] = {}
-    for i, _j, members in pair_shared:
-        shared.setdefault(_root(i), set()).update(members)
-    groups: dict[int, list[str]] = {}
-    for i, (row, _scope, _key) in enumerate(claims):
-        groups.setdefault(_root(i), []).append(row.name)
-    return [
-        {"scope": ",".join(sorted(shared.get(root, set()))), "holders": holders}
-        for root, holders in groups.items()
-        if len(holders) > 1
-    ]
+            conflicts.append(
+                {
+                    "scope": ",".join(sorted(key_i & key_j)),
+                    "holders": [row_i.name, row_j.name],
+                }
+            )
+    return conflicts
 
 
 def _manifest_limb(scope: Any, row: Any) -> dict[str, Any]:

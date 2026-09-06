@@ -399,6 +399,31 @@ def test_a_set_holder_conflicts_with_a_holder_over_one_member(
     ]
 
 
+def test_rivalry_is_reported_per_pair_never_per_merged_group(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A rivals B over e-1, B rivals C over e-2, A and C share nothing. A
+    merged group would claim three rows hold e-1,e-2; the truth is two
+    rivalries, each naming its own pair and the members that pair shares."""
+    from fno.agents.court import gather_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry("king-a", status="busy", crown_level=2, crown_scope="e-1"),
+            _entry("king-b", status="busy", crown_level=2, crown_scope="e-1,e-2"),
+            _entry("king-c", status="busy", crown_level=2, crown_scope="e-2"),
+        ],
+        graph_entries=[],
+    )
+
+    assert gather_court()["conflicts"] == [
+        {"scope": "e-1", "holders": ["king-a", "king-b"]},
+        {"scope": "e-2", "holders": ["king-b", "king-c"]},
+    ]
+
+
 def test_a_portfolio_and_its_project_king_are_a_court_not_a_conflict(
     tmp_path: Path, monkeypatch
 ) -> None:
