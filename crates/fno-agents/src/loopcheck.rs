@@ -1737,9 +1737,14 @@ pub use crate::review_freshness::{
 };
 
 // Child modules named by their question (the file budget's remedy): the
-// coverage row's state deriver and the receipt line live there, not here.
+// coverage row's state deriver, the receipt line, and attestation authorship
+// live there, not here.
+mod authorship;
 mod coverage_receipt;
 mod review_state;
+use authorship::carry_author_session_forward;
+pub use authorship::AttestationOrigin;
+use authorship::{classify_attestation_origin, default_attestation_origin};
 pub use coverage_receipt::coverage_receipt_line;
 
 /// Whether a `review_attestation` line is about the PR under evaluation.
@@ -2877,6 +2882,15 @@ fn read_pr_info(
     // a missing file is empty (the local axis then contributes nothing, which
     // is correct - no evidence of a local review).
     let events_text = std::fs::read_to_string(events_path).unwrap_or_default();
+    // Authorship carry-forward: when this process resolved no manifest
+    // session, the previous coverage row's recorded author FOR THIS PR (the
+    // scan filters on the number; the events file is project-wide) stands
+    // in, so a re-read from a manifest-less cwd classifies against the
+    // historical author instead of landing every local verdict Unmeasured.
+    let carried_author = author_session
+        .map(str::to_string)
+        .or_else(|| carry_author_session_forward(&events_text, number));
+    let author_session = carried_author.as_deref();
     let (
         latest_review_ts,
         reviewed,
@@ -5744,26 +5758,9 @@ impl Coverage {
     }
 }
 
-/// Authorship of a local attestation: did the authoring session emit it, did a
-/// different session, or is that unknowable. Computed from the attestation's
-/// `attester_session_id` against the manifest's `harness_session_id`.
+/// Authorship of a local attestation lives in [`authorship`]: the enum, its
+/// classifier, and the manifest fallback all answer one question.
 ///
-/// Recorded, never gating. `coverage_count` does not read this field: every
-/// `Reviewed` verdict counts regardless of origin, `SelfAttested` included.
-///
-/// The middle state is deliberately not `Independent`. The manifest names the
-/// session that ran `fno do target init` in the worktree, so a self-handoff
-/// successor or a second agent in a shared worktree is a different session and
-/// is still not independent. A match is strong evidence of self-attestation; a
-/// mismatch is weak evidence of anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttestationOrigin {
-    SelfAttested,
-    OtherSession,
-    Unknown,
-}
-
 /// How a local attestation was scoped to this PR: it is scopeable while
 /// scope lasts (`attested_branch`: it named this PR's head branch, or it pins
 /// this PR's exact head sha), or it predates the `branch` field and was
@@ -5953,24 +5950,6 @@ fn is_true(b: &bool) -> bool {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_attestation_origin() -> AttestationOrigin {
-    AttestationOrigin::Unknown
-}
-
-/// Label a local attestation's authorship from its emitting session vs the
-/// worktree's authoring session. A match is `SelfAttested`; a non-empty
-/// mismatch is `OtherSession` (NOT "independent" - a self-handoff successor or
-/// a shared-worktree sibling is a different session and still not independent);
-/// an empty/absent attester, or an unknown author, is `Unknown`. Failing open
-/// on unknown authorship keeps the pre-change verdict set byte-identical.
-fn classify_attestation_origin(attester: Option<&str>, author: Option<&str>) -> AttestationOrigin {
-    match (attester, author) {
-        (Some(a), Some(auth)) if a == auth => AttestationOrigin::SelfAttested,
-        (Some(_), Some(_)) => AttestationOrigin::OtherSession,
-        _ => AttestationOrigin::Unknown,
-    }
 }
 
 /// One reviewer's latest attestation, the commit it pinned, and whether that
@@ -7371,13 +7350,17 @@ fn coverage_event_data_full(
         // `independent_count`: the schema is explicit that `other_session` is
         // not independence, and this must not launder that.
         //
-        // Emitted ONLY when authorship was measured. classify_attestation_origin
-        // labels every verdict Unknown when `author_session` is None, so
-        // `self_attested_count()` would read 0 while the truth is unmeasured -
-        // a measured-zero shape (x-62a1: an aggregate reporting a state its
-        // inputs do not support). The field is omitted instead, never 0, so
-        // the day a gate enforces it, absence reads unmeasured rather than
-        // "no self-attest" and cannot serve as the bypass.
+        // Emitted only when an author session was established. With none,
+        // classify_attestation_origin labels a present-attester verdict
+        // Unmeasured (or Unknown when the attester is absent too), so
+        // `self_attested_count()` would read 0 while the truth is unmeasured
+        // - a measured-zero shape (x-62a1: an aggregate reporting a state
+        // its inputs do not support). The field is omitted instead, never 0,
+        // so the day a gate enforces it, absence reads unmeasured rather
+        // than "no self-attest" and cannot serve as the bypass. After a
+        // carry-forward the session may be the HISTORICAL author's, so the
+        // count is telemetry about the carried identity, not a proof this
+        // process measured anything.
         if author_session.is_some() {
             data["self_attested_count"] = serde_json::json!(rep.self_attested_count());
         }
@@ -13282,18 +13265,12 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         author_harness_override.as_deref(),
     );
 
-    // Authorship: --session-id, else the manifest's harness_session_id when one
-    // exists, else None. Resolve it before the PR-head read so even an unknown
-    // row from that read failure keeps the established event shape.
-    let author_session = session_id.or_else(|| {
-        // The manifest moved into the worktree slice of the space; the legacy
-        // checkout path is the read fallback for one release.
-        std::fs::read_to_string(crate::paths::worktree_space_dir(&cwd).join("target-state.md"))
-            .or_else(|_| std::fs::read_to_string(cwd.join(".fno/target-state.md")))
-            .ok()
-            .and_then(|content| scan_manifest_field(&content, "harness_session_id"))
-            .filter(|s| s != "null")
-    });
+    // Authorship: --session-id, else the manifest's harness_session_id
+    // (authorship::resolve_manifest_author). The historical carry-forward
+    // happens inside read_pr_info, where the PR number is known: the events
+    // file is project-wide, so a carry computed before the number resolves
+    // cannot be filtered and would hand this PR a foreign PR's author.
+    let author_session = session_id.or_else(|| authorship::resolve_manifest_author(&cwd));
 
     // Head precedence is explicit --head, then the named PR's head, then the
     // local checkout for the branch-inference path. A failed named-PR read
@@ -13473,7 +13450,23 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     &pr_info.coverage,
                     &head_sha,
                     &inputs.repo_slug,
-                    author_session.as_deref(),
+                    // The same author read_pr_info classified with: the
+                    // measured session, else the PR-filtered carry-forward.
+                    // Recomputed rather than threaded back so PrInfo keeps its
+                    // shape; deterministic, and idempotent across the row
+                    // read_pr_info just wrote (its own author_session_id now
+                    // answers the scan).
+                    author_session
+                        .as_deref()
+                        .map(str::to_string)
+                        .or_else(|| {
+                            carry_author_session_forward(
+                                &std::fs::read_to_string(&inputs.project_events)
+                                    .unwrap_or_default(),
+                                pr_info.number,
+                            )
+                        })
+                        .as_deref(),
                     Some(&pr_info.range_tiling),
                     pr_info.posture.as_ref(),
                 )
@@ -14931,11 +14924,12 @@ mod tests {
 
     #[test]
     fn coverage_event_omits_self_attested_count_when_authorship_unmeasured() {
-        // The manifest-less recompute shape: no author session, so every
-        // attestation classifies Unknown and self_attested_count() would read
-        // 0 while the truth is UNMEASURED. A measured zero and an unmeasured
-        // one must not serialize identically - the field is omitted, never 0,
-        // so a future gate on it cannot read absence-of-measurement as
+        // The manifest-less recompute shape: no author session, so an
+        // attested line classifies Unmeasured (a concrete attester, no
+        // comparison possible) and self_attested_count() reads 0 while the
+        // truth is UNMEASURED. A measured zero and an unmeasured one must
+        // not serialize identically - the field is omitted, never 0, so a
+        // future gate on it cannot read absence-of-measurement as
         // absence-of-self-attestation (the x-62a1 aggregate shape).
         let events = attestation_line("code-review", "h", "pass");
         let rep = classify_coverage(
@@ -14950,11 +14944,12 @@ mod tests {
             "h",
         );
         assert_eq!(rep.coverage, Coverage::Covered(1));
-        // Every origin is Unknown - the direct statement of "unmeasured".
+        // No verdict carries a MEASURED classification - the direct statement
+        // of "unmeasured" authorship.
         assert!(rep
             .verdicts
             .iter()
-            .all(|v| v.attestation_origin == AttestationOrigin::Unknown));
+            .all(|v| v.attestation_origin == AttestationOrigin::Unmeasured));
         let data = coverage_event_data(826, &rep, "h", "", None);
         assert_eq!(data["reviewed_count"], serde_json::json!(1));
         assert!(
