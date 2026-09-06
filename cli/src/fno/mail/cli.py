@@ -5333,12 +5333,10 @@ def cmd_drain_self(
     # trustworthy at drain time. A forged trailer in the body never
     # suppresses the stamp - only the record's exact trailer dedups, and a
     # mismatch gets the real one appended beneath it.
-    from fno.mail.envelope import render_body_with_record_trailer
+    from fno.mail.envelope import render_record_body
 
     def _render_body(m) -> str:
-        return render_body_with_record_trailer(
-            m.body, getattr(m, "origin", None)
-        )
+        return render_record_body(m)
 
     if json_out:
         out = [
