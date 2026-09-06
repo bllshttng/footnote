@@ -4132,12 +4132,13 @@ fn build_codex_thread_entry(
     model: Option<&str>,
     effort: Option<&str>,
     yolo: bool,
+    node: Option<&str>,
 ) -> RegistryEntry {
     let cwd_s = cwd.to_string_lossy().into_owned();
     let session_id = driver.thread_id().to_string();
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     RegistryEntry {
-        node: None,
+        node: node.filter(|node| !node.is_empty()).map(str::to_string),
         // v25: the route axes this lane actually used. Codex's ambient auth
         // is the account it positively pinned nothing past, so "default".
         route_provider_id: Some("openai".into()),
@@ -4258,6 +4259,7 @@ async fn spawn_codex_thread_lane(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let effort = req.params.get("effort").and_then(Value::as_str);
+    let node = req.params.get("node").and_then(Value::as_str);
     // Hop 2 of the state-root grant (x-f22f). Read the roots from the REQUEST,
     // never from this process's environment. This daemon is long-lived and
     // shared across every thread on the machine, so its own env is not the
@@ -4301,7 +4303,7 @@ async fn spawn_codex_thread_lane(
             return Response::err(req.id, ErrorCode::SpawnFailed, error.to_string());
         }
     };
-    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort, yolo);
+    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort, yolo, node);
     let session_id = entry.harness_session_id.clone().unwrap_or_default();
     let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
         if registry
@@ -12514,14 +12516,15 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                     .await
                     .expect("yolo thread starts")
             });
-        let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true);
+        let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true, None);
         assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
         assert!(
             entry_posture_is_full_access(&yolo)
                 && yolo.fno_id.as_deref() == Some("thread-p")
                 && yolo.mux.is_none()
         );
-        let bounded = build_codex_thread_entry("t", worktree.path(), &start, None, None, false);
+        let bounded =
+            build_codex_thread_entry("t", worktree.path(), &start, None, None, false, None);
         assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
         assert!(!entry_posture_is_full_access(&bounded));
         // A requested model stamps its basis on the row; an absent one
@@ -12533,6 +12536,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             Some("gpt-5.6-sol"),
             None,
             false,
+            None,
         );
         assert_eq!(modeled.model.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(modeled.model_basis.as_deref(), Some("requested"));
@@ -12544,6 +12548,34 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert_eq!(modeled.route_provider_id.as_deref(), Some("openai"));
         assert_eq!(modeled.model_name.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(modeled.account_record_id.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn build_codex_thread_entry_stamps_the_request_node() {
+        let worktree = tempfile::tempdir().unwrap();
+        let _guard = crate::path_test_guard();
+        let start = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+                    crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-node"),
+                );
+                crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
+                    .await
+                    .expect("yolo thread starts")
+            });
+        let entry = build_codex_thread_entry(
+            "t",
+            worktree.path(),
+            &start,
+            None,
+            None,
+            true,
+            Some("x-535c"),
+        );
+        assert_eq!(entry.node.as_deref(), Some("x-535c"));
     }
 
     /// AC12: a PRE-v19 row (no posture key) still parses and reads the safe

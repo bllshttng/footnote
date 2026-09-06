@@ -1029,6 +1029,7 @@ def _codex_thread_spawn(
     from_name: str,
     model: Optional[str],
     yolo: bool,
+    node: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
     route_env: Optional[Mapping[str, str]] = None,
 ) -> str:
@@ -1075,6 +1076,8 @@ def _codex_thread_spawn(
         argv += [f"--model={model}"]
     if yolo:
         argv += ["--yolo"]
+    if node:
+        argv += ["--node", node]
     argv += ["--", message]
     env = dict(os.environ)
     for overlay in (route_env, account_env):
@@ -2892,6 +2895,7 @@ def dispatch_spawn(
             from_name=from_name,
             model=model,
             yolo=yolo,
+            node=node,
             account_env=account_env,
             route_env=route_env,
         )

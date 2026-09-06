@@ -26,6 +26,7 @@ Plan ACs covered:
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -507,3 +508,35 @@ def test_assign_codex_project_detached_fails_open(workdir, monkeypatch):
     assign_project_detached(workdir, "thread-1")  # binary None -> no exec
 
     assert popen.call_count == 0
+
+
+def test_codex_thread_spawn_forwards_node_to_rust_client(monkeypatch, tmp_path):
+    from fno import rust_binary
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/fake/fno-agents"))
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout='{"harness_session_id":"thread-node"}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", fake_run)
+    session_id = dispatch_mod._codex_thread_spawn(
+        name="worker-X",
+        message="msg",
+        cwd=tmp_path,
+        from_name="fno",
+        model=None,
+        yolo=False,
+        node="x-535c",
+    )
+
+    assert session_id == "thread-node"
+    assert "--node" in seen["argv"]
+    assert seen["argv"][seen["argv"].index("--node") + 1] == "x-535c"

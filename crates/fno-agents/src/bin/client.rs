@@ -2187,6 +2187,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--cwd",
         "--message",
         "--name",
+        "--node",
         "--session-id",
         "--status",
         "--progress",
@@ -2328,6 +2329,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             // fallback below keeps a direct `fno-agents spawn <name>` working.
             "--name" => {
                 params.insert("name".into(), str_arg(&mut it, "--name")?);
+            }
+            "--node" => {
+                params.insert("node".into(), str_arg(&mut it, "--node")?);
             }
             "--session-id" => {
                 params.insert("session_id".into(), str_arg(&mut it, "--session-id")?);
