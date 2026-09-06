@@ -3100,7 +3100,8 @@ def cmd_intake(
         None,
         "--claims",
         help=(
-            "ab-XXXXXXXX of an existing idea-state node this plan implements. "
+            "ab-XXXXXXXX of an existing node, in any state, that this plan "
+            "implements. "
             "Updates the node in place rather than creating a new one. "
             "Beats any frontmatter 'claims:' value."
         ),
@@ -14152,8 +14153,8 @@ def cmd_unarchive(
 
 
 def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, project: Optional[str]):
-    """Update a claimed idea node in place: attach the plan, merge the
-    doc-declared fields, promote idea -> ready.
+    """Bind a claimed node to the plan in place, in any state: attach the
+    plan, merge the doc-declared fields, promote idea -> ready.
 
     The single-plan claim lane's mutator body, shared with the multi lane so
     a claim lands identically from either surface. A second copy here would
@@ -14266,9 +14267,11 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
                 entry["project"] = resolved_project
             if entry.get("cwd") is None and resolved_cwd:
                 entry["cwd"] = resolved_cwd
-        # Promote idea -> ready by clearing any stale locked_at.
+        # Promote idea -> ready by clearing a stale idea lock; a node with a
+        # live work lock (locked_by set) keeps it.
         # status is recomputed by recompute_statuses on the next read.
-        entry["locked_at"] = None
+        if entry.get("locked_by") is None:
+            entry["locked_at"] = None
         break
     return es
 

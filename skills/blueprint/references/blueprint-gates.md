@@ -18,8 +18,8 @@ A node id never collides with file paths or raw descriptions, so this check is
 cheap and goes first.
 
 When the argument matches, the rendered plan MUST declare `claims: <node-id>`
-in its frontmatter so `fno backlog intake` updates the existing idea-state
-node in place rather than creating a duplicate (see
+in its frontmatter so `fno backlog intake` updates the existing node in
+place, in any state, rather than creating a duplicate (see
 `cli/src/fno/graph/_intake.py::_resolve_claim`). Without the claim,
 every adopted spec compounds the dangling-idea-node cleanup debt.
 
