@@ -1053,7 +1053,7 @@ class TestRunGate:
             # The identity and the parent edge ride the required mint
             # constructor; a site naming neither fails to compile.
             assert "RegistryEntry::new(" in body, label
-            assert "Lineage {" in body, label
+            assert "Lineage {" in body or "Lineage::captured(" in body, label
 
         state_rust = (root / "crates/fno-agents/src/state.rs").read_text()
         for field in ("spawned_by_session", "spawned_by_harness", "spawned_by_cwd"):

@@ -2457,5 +2457,5 @@ fn pty_state_collapses_inconsistent_legacy_shape() {
 
 // (x-4c87 raw-versus-decoded row count family) moved verbatim into its own module: this file is over the
 // shrink-only line, and test motion is the sanctioned shrink.
-#[path = "tests/x4c87_row_counts.rs"]
+#[path = "x4c87_row_counts.rs"]
 mod row_count_tests;
