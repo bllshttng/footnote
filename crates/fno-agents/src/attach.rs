@@ -126,14 +126,20 @@ fn attach_refusal_for_state(state: &str, harness: &str, name: &str) -> (String, 
         "capable" => "can hold a live session, but fno has wired no attach arm for it",
         _ => "has not had attach reachability measured",
     };
+    // A row with no harness recorded has no capability row to probe: the
+    // remedy is the registration, not a probe aimed at nothing.
+    let remedy = if harness.is_empty() {
+        "Re-register the row with its harness ('fno agents register')".to_string()
+    } else {
+        format!("Settle the row with 'fno agents harness probe {harness}'")
+    };
     (
         format!("features-attach-{state}"),
         13,
         format!(
             "attach to {} ({label}) is refused: its capability row records \
-             features.attach = {state:?} - it {capability}. Settle the row with \
-             'fno agents harness probe {label}'. 'fno agents logs {name} --follow' \
-             still shows live output.",
+             features.attach = {state:?} - it {capability}. {remedy}. \
+             'fno agents logs {name} --follow' still shows live output.",
             py_repr_str(name)
         ),
     )
@@ -667,6 +673,10 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
 mod tests {
     use super::*;
 
+    // The attach-refusal family (x-296f), a file of its own beside this verb.
+    #[path = "x296f_attach_refusals.rs"]
+    mod x296f_attach_refusals;
+
     #[test]
     fn mux_thread_fallthrough_exits_match_the_mux() {
         assert_eq!(MUX_THREAD_NO_SERVER, fno::mux_cli::EXIT_NO_SERVER);
@@ -710,5 +720,11 @@ mod tests {
             attach_table_refusal("gemini", "gm").0,
             "features-attach-unmeasured"
         );
+        // A row with no harness recorded is sent to register, never to a
+        // probe aimed at no harness.
+        let (_, code, msg) = attach_refusal_for_state("unmeasured", "", "x");
+        assert_eq!(code, 13);
+        assert!(msg.contains("fno agents register"), "{msg}");
+        assert!(!msg.contains("harness probe"), "{msg}");
     }
 }

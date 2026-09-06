@@ -1,5 +1,7 @@
-//! x-296f attach-refusal family: moved verbatim out of client_verbs.rs
-//! (file budget shrink). Parent helpers resolve through the glob.
+//! The attach-refusal family (x-296f), beside the attach verb it exercises.
+//! Parent helpers resolve through the glob.
+use serde_json::json;
+
 use super::*;
 
 /// AC11-ERR (x-296f): a codex thread row with NO session id on file

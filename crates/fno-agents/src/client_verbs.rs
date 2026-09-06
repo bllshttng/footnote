@@ -4210,11 +4210,6 @@ mod tests {
         assert!(is_codex_thread_row(&nulled));
     }
 
-    // (x-296f attach-refusal family) moved verbatim into its own module: this file is over the
-    // shrink-only line, and test motion is the sanctioned shrink.
-    #[path = "x296f_attach_refusals.rs"]
-    mod x296f_attach_refusals;
-
     // --- find_agent_entry (x-1b1e): parity with Python resolve_agent ----------
 
     const CLAUDE_UUID_FIXTURE: &str = "a1b2c3d4-1111-2222-3333-444455556666";

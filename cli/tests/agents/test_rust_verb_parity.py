@@ -558,6 +558,56 @@ def test_attach_refuses_gemini_verbatim(tmp_path) -> None:
     assert "one-shot" not in rust.stderr
 
 
+def _mux_thread_shim(tmp_path: Path, monkeypatch, script: str) -> None:
+    """Put a fake ``fno`` first on PATH whose ``mux thread`` arm runs ``script``.
+
+    The attach verb reaches the mux thread portal by shelling ``fno mux
+    thread <name>``; the shim stands in for a live server so the portal's
+    success and refusal arms are testable without one.
+    """
+    d = tmp_path / "shim"
+    d.mkdir()
+    shim = d / "fno"
+    shim.write_text('#!/bin/sh\nif [ "$1" = mux ] && [ "$2" = thread ]; then\n' + script + '\nfi\nexec fno-py "$@"\n')
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", str(d) + os.pathsep + os.environ.get("PATH", ""))
+
+
+@requires_rust
+def test_attach_lands_in_the_thread_pane_when_the_portal_answers(tmp_path, monkeypatch) -> None:
+    # A live mux server takes every harness through the daemon-kept lane
+    # first: the verb prints where it landed and exits 0 without touching
+    # the inline path (gemini, which the inline path refuses).
+    agents = tmp_path / "agents"
+    _seed_registry(
+        agents,
+        [{"name": "gm", "provider": "gemini", "cwd": "/tmp/x", "log_path": "/x/l",
+          "short_id": "", "project_root": "/x", "status": "live", "created_at": "t"}],
+    )
+    _mux_thread_shim(tmp_path, monkeypatch, 'echo "thread pane -> $3"; exit 0')
+    rust = _run_rust(["attach", "gm"], agents)
+    assert rust.returncode == 0, rust.stderr
+    assert rust.stdout == "thread pane -> gm\n"
+    assert "features.attach" not in rust.stderr
+
+
+@requires_rust
+def test_attach_surfaces_a_portal_refusal_instead_of_double_attaching(tmp_path, monkeypatch) -> None:
+    # Any exit the portal owns (not no-server, usage, or unanswered) is the
+    # server refusing: the verb repeats it verbatim and never falls through
+    # to an attach the server just refused.
+    agents = tmp_path / "agents"
+    _seed_registry(
+        agents,
+        [{"name": "gm", "provider": "gemini", "cwd": "/tmp/x", "log_path": "/x/l",
+          "short_id": "", "project_root": "/x", "status": "live", "created_at": "t"}],
+    )
+    _mux_thread_shim(tmp_path, monkeypatch, 'echo "fno mux thread: no such agent: $3" >&2; exit 1')
+    rust = _run_rust(["attach", "gm"], agents)
+    assert rust.returncode == 1, rust.stderr
+    assert rust.stderr == "fno mux thread: no such agent: gm\n"
+
+
 # --------------------------------------------------------------------------- #
 # logs (codex one-shot file read)
 # --------------------------------------------------------------------------- #
