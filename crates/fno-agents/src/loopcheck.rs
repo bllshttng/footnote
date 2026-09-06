@@ -8,12 +8,9 @@
 //! Module name starts with "loop" to match the LOC-ratchet glob `crates/fno-agents/src/loop*`.
 
 use crate::{
-    cancel_sentinel::check_cancel_sentinel,
-    check_supersession::latest_per_name,
-    completion_output::allow_output,
-    delivery_completion::pr_passes,
-    disposition_gate::disposition_blockers_on_chain,
-    king_termination::read_king_board,
+    cancel_sentinel::check_cancel_sentinel, check_supersession::latest_per_name,
+    completion_output::allow_output, delivery_completion::pr_passes,
+    disposition_gate::disposition_blockers_on_chain, king_termination::read_king_board,
 };
 // The integration tests reach the blocker predicates through loopcheck, the
 // facade they have always imported from; the predicates live in
