@@ -88,6 +88,25 @@ def test_agent_line_registry_fallback_when_env_unset(monkeypatch, tmp_path):
     assert "agent:    t-adopted-worker (registry)" in result.stdout
 
 
+def test_json_output_skips_the_registry_lookup(monkeypatch, tmp_path):
+    # Review finding (x-8bfb): the JSON payload never reads
+    # agent_registry_name, so a --json call must not pay for the registry
+    # fallback lookup at all - not just discard its result. `_mail_handle`
+    # already calls resolve_self_identity unconditionally for every
+    # invocation (unrelated to this change), so the boom is scoped to
+    # load_registry - the actual cost this fix guards.
+    project = _workspace(tmp_path)
+    monkeypatch.chdir(project)
+
+    def _boom(*a, **kw):
+        raise AssertionError("--json must not run the registry fallback lookup")
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", _boom)
+
+    result = CliRunner().invoke(app, ["whoami", "--json"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+
 def test_agent_line_absent_for_human_session(monkeypatch, tmp_path):
     # AC3-HP: no env, no matching registry row -> byte-for-byte unchanged,
     # no agent: line, exit 0.

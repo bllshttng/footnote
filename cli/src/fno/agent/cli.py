@@ -369,8 +369,12 @@ def whoami_command(
     # spawns no `claude` subprocess (AC4-FR), so it is safe on this hot
     # SessionStart path. Silent on every failure (AC3-HP): a human session or
     # a broken registry must render byte-for-byte as before.
+    #
+    # Only the non-JSON render below reads this: the JSON payload has no
+    # `agent:` line to fill, so a `--json` call must not pay for a lookup
+    # whose result it would discard (review finding, x-8bfb).
     agent_registry_name: Optional[str] = None
-    if not agent_self:
+    if not agent_self and not opts.json_output:
         try:
             from fno.agents import whoami as whoami_mod
             from fno.agents.registry import RegistryVersionError, load_registry
