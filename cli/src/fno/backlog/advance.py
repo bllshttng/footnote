@@ -3047,6 +3047,8 @@ def _observe_node_claim(
             holder=holder,
             truth_status=truth,
             action=action,
+            # Session witness basis, only when the classifier reported one.
+            **({"session_basis": info["session_basis"]} if info.get("session_basis") else {}),
         )
     if emit and claim_state in ("stale", "suspect"):
         message = (

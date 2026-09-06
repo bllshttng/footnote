@@ -572,7 +572,8 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
      'FAKE_BIN="$(mktemp -d)"\n'
      'for p in codex gemini opencode; do printf "%s\\n%s\\n" "#!/bin/sh" "exit 0" > "$FAKE_BIN/$p"; chmod +x "$FAKE_BIN/$p"; done\n'
      'PATH="$FAKE_BIN:$PATH" uv run pytest --tb=short -q '
-     "tests/agents/test_rust_verb_parity.py tests/agents/test_ask_e2e_dispatch.py"),
+     "tests/agents/test_rust_verb_parity.py tests/agents/test_ask_e2e_dispatch.py "
+     "tests/unit/test_claims_core.py::TestSessionWitnessVerdicts"),
     # Same shard contract as the parity suites above: the wrapper carries the
     # @requires_rust marker, so in the pytest shard (binary deleted) it skips,
     # and here, after the build step, it runs for real. Never inside the

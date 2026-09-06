@@ -3458,6 +3458,7 @@ mod tests {
             expires_at: Some(20),
             reason: None,
             harness: None,
+            session_id: None,
             pid_provenance: None,
             machine_id: None,
             metadata: serde_json::Map::new(),

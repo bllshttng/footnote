@@ -1073,7 +1073,12 @@ def status(
         # this command straight into jq without --json, and a trailing prose
         # line makes that read fail exactly when the claim has lapsed, which is
         # the case the operator most needs a truthful answer for.
-        typer.echo(_roster_verdict_line(info), err=True)
+        line = _roster_verdict_line(info)
+        # Witness named when one answered: a verdict from a failing probe
+        # stays auditable on the loud line.
+        if info.get("session_basis"):
+            line += f"; session witness: {info['session_basis']}"
+        typer.echo(line, err=True)
 
 
 def _merge_claims_across_roots(
