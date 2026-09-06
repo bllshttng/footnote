@@ -1,0 +1,82 @@
+{
+  "note": "AC9-HP (x-e221): the Rust gate (crates/fno-agents/src/spawn_gate.rs::check_territory_cap) and the Python gate (cli/src/fno/agents/spawn_gate.py::_check_territory_cap) must return the same territory verdict for each scenario. Both test suites read THIS file. Live registry rows carry 'node' (the backlog node the row works) and crown rows carry 'crown_scope'. 'graph' is the backlog graph; 'node' names the SPAWNING node; expect.verdict is 'territory_cap' (refuse), 'territory_unknown' (refuse), or 'ok' (admit).",
+  "scenarios": [
+    {
+      "name": "cap_refuses_fifth_in_scope_worker",
+      "crown_scope": "x-epic",
+      "graph": [
+        {"id": "x-epic", "type": "epic", "project": "fno"},
+        {"id": "x-1", "parent": "x-epic", "project": "fno"},
+        {"id": "x-2", "parent": "x-epic", "project": "fno"},
+        {"id": "x-3", "parent": "x-epic", "project": "fno"},
+        {"id": "x-4", "parent": "x-epic", "project": "fno"},
+        {"id": "x-5", "parent": "x-epic", "project": "fno"}
+      ],
+      "registry": [
+        {"name": "w1", "status": "busy", "pid": "self", "node": "x-1"},
+        {"name": "w2", "status": "busy", "pid": "self", "node": "x-2"},
+        {"name": "w3", "status": "busy", "pid": "self", "node": "x-3"},
+        {"name": "w4", "status": "busy", "pid": "self", "node": "x-4"},
+        {"name": "king", "status": "busy", "pid": "self", "crown_scope": "x-epic"}
+      ],
+      "node": "x-5",
+      "territory_cap": 4,
+      "expect": {"verdict": "territory_cap", "territory": "x-epic", "count": 4}
+    },
+    {
+      "name": "machinery_and_other_territory_rows_do_not_count",
+      "crown_scope": "x-epic",
+      "graph": [
+        {"id": "x-epic", "type": "epic", "project": "fno"},
+        {"id": "x-1", "parent": "x-epic", "project": "fno"},
+        {"id": "x-2", "parent": "x-epic", "project": "fno"},
+        {"id": "x-3", "parent": "x-epic", "project": "fno"},
+        {"id": "x-4", "parent": "x-epic", "project": "fno"},
+        {"id": "x-5", "parent": "x-epic", "project": "fno"},
+        {"id": "x-out", "project": "other"}
+      ],
+      "registry": [
+        {"name": "w1", "status": "busy", "pid": "self", "node": "x-1"},
+        {"name": "w2", "status": "busy", "pid": "self", "node": "x-2"},
+        {"name": "w3", "status": "busy", "pid": "self", "node": "x-3"},
+        {"name": "w4", "status": "busy", "pid": "self", "node": "x-out"},
+        {"name": "w5", "status": "busy", "pid": "self"},
+        {"name": "king", "status": "busy", "pid": "self", "crown_scope": "x-epic"}
+      ],
+      "node": "x-5",
+      "territory_cap": 4,
+      "expect": {"verdict": "ok"}
+    },
+    {
+      "name": "uncrowned_project_loose_territory_counts_project_nodes",
+      "crown_scope": null,
+      "graph": [
+        {"id": "p-1", "project": "fno"},
+        {"id": "p-2", "project": "fno"},
+        {"id": "p-3", "project": "fno"},
+        {"id": "p-4", "project": "fno"},
+        {"id": "p-5", "project": "fno"}
+      ],
+      "registry": [
+        {"name": "w1", "status": "busy", "pid": "self", "node": "p-1"},
+        {"name": "w2", "status": "busy", "pid": "self", "node": "p-2"},
+        {"name": "w3", "status": "busy", "pid": "self", "node": "p-3"},
+        {"name": "w4", "status": "busy", "pid": "self", "node": "p-4"}
+      ],
+      "node": "p-5",
+      "territory_cap": 4,
+      "expect": {"verdict": "territory_cap", "territory": "loose:fno", "count": 4}
+    },
+    {
+      "name": "absent_node_is_unknown_and_refuses",
+      "crown_scope": null,
+      "graph": [
+        {"id": "p-1", "project": "fno"}
+      ],
+      "registry": [],
+      "node": "x-ghost",
+      "territory_cap": 4,
+      "expect": {"verdict": "territory_unknown"}
+    }
+  ]
+}

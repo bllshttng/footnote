@@ -39,7 +39,7 @@ mod claims;
 mod classify;
 mod prs;
 mod queues;
-mod scope;
+pub(crate) mod scope;
 
 use crate::graph_store;
 use serde_json::{json, Map, Value};

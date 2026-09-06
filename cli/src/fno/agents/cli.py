@@ -2241,6 +2241,7 @@ def cmd_spawn(
     # than papered over.
     node_reservation: tuple[str, str] | None = None
     node_claim: tuple[str, str] | None = None
+    guarded_node: str | None = None
     if node is not None:
         guarded_node = prov_env.get("FNO_NODE")
         if not guarded_node:
@@ -2335,6 +2336,7 @@ def cmd_spawn(
             force=force,
             no_wait=no_wait,
             route_provider=route_provider,
+            node=guarded_node,
         )
     except GateRefused as exc:
         _release_dispatch_claims(node_reservation, node_claim)
