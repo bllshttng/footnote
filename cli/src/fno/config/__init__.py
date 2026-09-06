@@ -2385,22 +2385,15 @@ class AgentsBlock(SweepKeys):
     # slash-verb (`profiles.blueprint`, `profiles.target`, ...). Same block, one
     # rung above defaults in precedence. Resolved at the spawn seam.
     profiles: dict[str, SpawnProfileBlock] = Field(default_factory=dict)
-    # The operator's own simple-versus-complex split, written where a daemon can
-    # read it: an ordered fallback chain per node size, consulted only when a
-    # provider refuses and the account queue cannot answer. Keys are S, M, L and
-    # `default`; each value is an ordered list of partial axis bundles reusing
-    # `SpawnDefaultsBlock`, so no new axis vocabulary enters the codebase.
-    #
-    # Every size wants MORE THAN ONE link. A chain with one link is not a chain:
-    # a claude weekly cap and a z.ai five-hour cap are different meters with
-    # different periods, and either can be the one that is down.
-    # Held RAW, and typed loosely on purpose. The strict check lives in
-    # ``spawn_defaults.validate_fallback``, which the failover path calls.
-    # Raising in a field validator here would fail ``load_settings()`` for the
-    # whole process: one typo would make every ``fno`` command raise and kill
-    # the pr-watch tick at its settings phase, which is the opposite of the
-    # bounded stop Locked Decision 11 asks for. Refuse on the path that reads
-    # it, not on the path that loads it.
+    # The operator's per-size fallback chains (S, M, L, `default`): ordered
+    # lists of partial axis bundles reusing `SpawnDefaultsBlock`, consulted
+    # only when a provider refuses and the account queue cannot answer. Every
+    # size wants more than one link, because providers cap on different meters
+    # with different periods. Held RAW and typed loosely on purpose: the
+    # strict check lives in `spawn_defaults.validate_fallback`. A field
+    # validator here would fail `load_settings()` for the whole process, so
+    # one typo kills every `fno` command at its settings phase. Refuse on the
+    # path that reads it, not the path that loads it.
     fallback: dict[str, Any] = Field(default_factory=dict)
     # Seconds of transcript silence after which `fno agents sweep` reports a
     # worker as silent. A REPORT, never an action - nothing is stopped, spawned
@@ -2431,31 +2424,28 @@ class AgentsBlock(SweepKeys):
     reap_receipts: ReapReceiptsBlock = Field(default_factory=ReapReceiptsBlock)
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
-    # Spawn-gate knobs (x-c5cc). Scalar guards keep fail-open defaults;
-    # provider_limits keeps its safe default on invalid input (dropping zai's
-    # cap would fail open exactly when the fleet is busiest).
-    #   max_live    — cap on concurrent live worker processes (fno registry +
-    #                 claude roster union). Spawn queues at cap.
-    #   provider_limits — per-provider budget (:class:`ProviderBudget`):
-    #                 `lanes` = immediate-refusal spawn cap, `subagents` =
-    #                 in-session fan-out width. Unlisted providers uncapped;
-    #                 built-in zai budget lanes 5, subagents 1; a bare integer
-    #                 coerces to `lanes`. Renamed from `max_lanes` (x-3f84 W5).
-    #   min_free_gb — available-RAM floor for spawn preflight; <= 0 disables.
-    #   max_load_per_cpu — the load (factor x cpu count on 1-min loadavg) at
-    #                 which the gate stops trusting load and consults fleet
-    #                 attribution. A TRIGGER, not a refusal (until x-7c0f it
-    #                 refused twice on load the fleet did not cause - loadavg
-    #                 counts blocked processes and measures nobody's share).
-    #                 <= 0 disables the whole check.
-    #   max_fleet_cpu_share — the GOVERNOR: above the trigger, refuse when the
-    #                 fleet holds more than this share of CPU capacity.
-    #                 Unreadable attribution refuses (an unknown share is not
-    #                 evidence of headroom, x-e040).
-    #   hard_max_load_per_cpu — absolute backstop: refuse above factor x cpu
+    # Spawn-gate knobs (x-c5cc). Scalar guards keep fail-open defaults.
+    # provider_limits keeps its safe default on invalid input, because
+    # dropping zai's cap would fail open exactly when the fleet is busiest.
+    #   max_live    : cap on concurrent live worker processes (fno registry +
+    #                 claude roster union). Spawn queues at the cap.
+    #   provider_limits : per-provider budget (:class:`ProviderBudget`).
+    #                 `lanes` is the immediate-refusal spawn cap.
+    #                 `subagents` is the in-session fan-out width. Unlisted
+    #                 providers uncapped. A bare integer coerces to `lanes`.
+    #   min_free_gb : available-RAM floor for spawn preflight. <= 0 disables.
+    #   max_load_per_cpu : TRIGGER, not refusal. Above it the gate consults
+    #                 fleet attribution, because loadavg counts blocked
+    #                 processes and measures nobody's share. <= 0 disables
+    #                 the whole check.
+    #   max_fleet_cpu_share : the GOVERNOR. Above the trigger, refuse when
+    #                 the fleet holds more than this share of CPU capacity.
+    #                 Unreadable attribution refuses. An unknown share is
+    #                 not evidence of headroom.
+    #   hard_max_load_per_cpu : absolute backstop. Refuse above factor x cpu
     #                 count no matter whose load. Machine dimensions, so
     #                 scalars on agents.*, never ProviderBudget fields.
-    #   worker_qos  — utility (demote workers to background QoS) | off.
+    #   worker_qos  : utility (demote workers to background QoS) or off.
     max_live: int = 3
     provider_limits: dict[str, ProviderBudget] = Field(
         default_factory=lambda: {
@@ -4088,17 +4078,16 @@ class MuxBlock(BaseModel):
 
     shell_integration: str = "mux-panes"
     restore: MuxRestoreBlock = Field(default_factory=MuxRestoreBlock)
-    # Which projects the backlog board renders (x-20f1). The graph is ONE store
-    # tagged by project, so an unscoped board shows every project's work to
-    # someone sitting in one checkout. `repo` (the default) scopes to this
-    # checkout's `project.id`, which resolves through git and so answers the
-    # same for every worktree layout; `all` is the historical board;
-    # `workspace:<name>` takes the project set `work.workspaces.<name>` already
-    # declares rather than inventing a second place to list projects. Read by
-    # the Rust mux CLIENT at server birth and passed in on the env, never by the
-    # server itself (a subprocess on its startup path wedged shutdown). A scope
-    # that cannot resolve falls back to every project; `fno mux doctor` is where
-    # that is visible.
+    # Which projects the backlog board renders (x-20f1). The graph is ONE
+    # store tagged by project, so an unscoped board shows every project's
+    # work. `repo` (the default) scopes to this checkout's `project.id`,
+    # resolved through git so every worktree layout agrees. `all` is the
+    # historical board. `workspace:<name>` reuses the set
+    # `work.workspaces.<name>` already declares. Read by the Rust mux CLIENT
+    # at server birth and passed in on the env, never by the server itself
+    # (a subprocess on its startup path wedged shutdown). A scope that
+    # cannot resolve falls back to every project. `fno mux doctor` shows
+    # that.
     board_scope: str = "repo"
     # The prefix key, as a spec the Rust client parses (`C-a`, `Ctrl-a`, `^a`, or
     # a bare printable char). None keeps the built-in Ctrl-b.
@@ -4507,16 +4496,11 @@ class ConfigBlock(BaseModel):
     approvals: ApprovalsBlock = Field(default_factory=ApprovalsBlock)
     context: ContextBlock = Field(default_factory=ContextBlock)
     # The repo-wide ship-gate probe list, TOP-LEVEL because the file is flat.
-    # ENFORCED by the Rust loop-check gate (crates/fno-agents/src/loopcheck.rs),
-    # which runs it alongside a plan's own `done_probes` and refuses DonePRGreen
-    # unless both pass. Declared here so the Python side is not blind to a key
-    # the gate enforces - `fno config doctor` reports it, and a wrong-typed
-    # value raises here just as it blocks there.
-    #
-    # A probe is an OBSERVATION. It runs `sh -c` in the session cwd, so the
-    # source must stay a gitignored, operator-authored file: a tracked probe
-    # list would make cloning a repo remote code execution on the next
-    # loop-check fire.
+    # ENFORCED by the Rust loop-check gate (crates/fno-agents/src/loopcheck.rs)
+    # alongside a plan's own `done_probes`; it refuses DonePRGreen unless both
+    # pass. A probe is an OBSERVATION. It runs `sh -c` in the session cwd, so
+    # the source must stay a gitignored, operator-authored file: a tracked
+    # probe list would make cloning a repo remote code execution.
     done_probes: list[str] = Field(default_factory=list)
     target: TargetConfig = Field(default_factory=TargetConfig)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
@@ -5407,17 +5391,15 @@ def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
         )
 
     # --- dispatch.auto_merge -> auto_merge.grant (x-4be1) -------------------
-    # Same concept, one table: the actor-scope grant moves into the [auto_merge]
-    # block. Runs PER LAYER (the caller merges after), so precedence between a
-    # legacy and a canonical spelling across files is file-ordered, not
-    # last-merged. Canonical wins silently. Deliberately NO warning here, unlike
-    # the arms above: this key sits in real config files on real machines, and
-    # the warning fires from every settings load - including subprocesses whose
-    # single-line stdout other tools parse (dispatch-node.sh's agent-name
-    # bridge rejects any stderr noise). The operator-facing deprecation surface
-    # is `fno config doctor`, which names the file and the migration command.
-    # Both shapes carry the tables: flat config.toml at top level, a
-    # settings.yaml-era file wrapped under `config:` (flattened after this pass).
+    # Same concept, one table: the actor-scope grant moves into the
+    # [auto_merge] block. Runs PER LAYER (the caller merges after), so
+    # legacy-vs-canonical precedence across files is file-ordered, not
+    # last-merged. Canonical wins silently. Deliberately NO warning here,
+    # unlike the arms above: the warning fires from every settings load,
+    # including subprocesses whose single-line stdout other tools parse.
+    # `fno config doctor` is the deprecation surface. Both shapes carry the
+    # tables: flat config.toml at top level, or a settings.yaml-era file
+    # wrapped under `config:` (flattened after this pass).
     if _alias_am_grant(raw) or (had_config and _alias_am_grant(config)):
         if had_config:
             raw["config"] = config
