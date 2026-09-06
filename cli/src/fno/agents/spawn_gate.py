@@ -1452,9 +1452,8 @@ def share_reading(census_obj: "LiveCensus", cap: int, caller: Optional[str]) -> 
     """One share reading, printed by every surface that answers the question.
 
     ``kings``/``share``/``held``/``held_rows`` (the caller's worker rows, by
-    name) and ``unattributed`` (the LD4 bucket: live rows that name nobody,
-    count plus names). An unreadable registry returns None for every count,
-    never zero (x-5283 AC9).
+    name) and ``unattributed`` (the LD4 bucket: live rows that name nobody).
+    An unreadable registry returns None for every count (x-5283 AC9).
     """
     if not census_obj.registry_readable:
         return {"kings": None, "share": None, "held": None,

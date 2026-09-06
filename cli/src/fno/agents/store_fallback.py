@@ -533,8 +533,7 @@ def adopt_store_hit(
             "resolution.\n"
         )
         # The adopting session VOUCHED for this row (x-5283 LD3); this
-        # fallback copy skips register_session's stamping, so it states the
-        # same split itself.
+        # fallback copy skips register_session, stating the same split itself.
         from fno.agents.dispatch import _capture_parent_edge
 
         _sb_session = _capture_parent_edge()[0]
