@@ -44,10 +44,10 @@ def _rows_token(rows: list) -> str:
     return _token(ids)
 
 
-def _run(cmd: list[str], timeout: int = 60) -> Optional[str]:
+def _run(cmd: list[str], timeout: int = 60, cwd: Optional[str] = None) -> Optional[str]:
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, check=False, timeout=timeout
+            cmd, capture_output=True, text=True, check=False, timeout=timeout, cwd=cwd
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         _log.warning("notify_watch: %s failed: %s", cmd[0], exc)
@@ -84,10 +84,24 @@ def _crown_token() -> tuple[Optional[str], int]:
 
 def _default_branch(repo_dir: Path) -> str:
     out = _run(
-        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short"], timeout=10
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
+        timeout=10,
+        cwd=str(repo_dir),
     )
     branch = (out or "").strip()
     return branch.split("/", 1)[1] if "/" in branch else "main"
+
+
+def _slug_from_remote(url: str) -> str:
+    """owner/repo from an https or scp-form git remote url, "" when unclear."""
+    u = (url or "").strip().removesuffix(".git")
+    if "://" in u:
+        u = u.split("://", 1)[1]  # drop the scheme
+        u = u.split("/", 1)[1] if "/" in u else ""  # drop the host
+    else:
+        u = u.split(":", 1)[1] if ":" in u else ""  # scp-form host:path
+    u = u.strip("/")
+    return u if u.count("/") == 1 else ""
 
 
 def _main_ci_sample(repo_dir: Path) -> Optional[dict]:
@@ -96,16 +110,12 @@ def _main_ci_sample(repo_dir: Path) -> Optional[dict]:
     A sample with no terminal verdict yet (runs still pending) is also None:
     an in-flight run is not a state, and notifying on it would spam.
     """
-    out = _run(["git", "remote", "get-url", "origin"], cwd=str(repo_dir), timeout=10)
-    url = (out or "").strip()
-    if ":" in url:
-        slug = url.split(":", 1)[1].removesuffix(".git")
-    else:
-        slug = url.removesuffix(".git").rsplit("/", 1)[-1] if url else ""
-    slug = slug.strip("/")
-    if "/" not in slug:
+    out = _run(
+        ["git", "remote", "get-url", "origin"], cwd=str(repo_dir), timeout=10
+    )
+    owner_repo = _slug_from_remote(out or "")
+    if not owner_repo:
         return None
-    owner_repo = slug
     branch = _default_branch(repo_dir)
     out = _run(
         [

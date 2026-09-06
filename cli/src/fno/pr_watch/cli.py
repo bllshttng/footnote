@@ -934,7 +934,9 @@ def tick() -> None:
                 from fno.pr_watch._notify_watch import run_notify_watch
 
                 acted_n, nw_skip, nw_detail = run_notify_watch(
-                    settings, _nw_signals, roots=_catchup_roots()
+                    settings,
+                    _nw_signals,
+                    roots=_catchup_roots() if "main_ci" in _nw_signals else None,
                 )
                 _emit_tick_row("notify_watch", interval_s=_nw_i, acted=acted_n,
                                skip_reason=nw_skip, detail=nw_detail)

@@ -219,3 +219,37 @@ def test_main_ci_pending_run_is_not_a_state(monkeypatch, _fake_send):
     assert acted == 0
     assert "unreadable" in detail
     assert _fake_send == []
+
+
+def test_slug_from_remote_handles_both_url_forms():
+    f = _notify_watch._slug_from_remote
+    assert f("git@github.com:owner/repo.git") == "owner/repo"
+    assert f("https://github.com/owner/repo.git") == "owner/repo"
+    assert f("ssh://git@github.com/owner/repo.git") == "owner/repo"
+    assert f("https://github.com/owner") == ""
+    assert f("") == ""
+
+
+def test_main_ci_https_remote_and_git_cwd_pinned(monkeypatch, _fake_send):
+    """The https slug drops the host, and every git call runs inside the repo."""
+    root = Path("/some/worktree-of-repo")
+    monkeypatch.setattr(_notify_watch.shutil, "which", lambda _n: "/usr/bin/gh")
+
+    def fake_run(cmd, timeout=60, cwd=None):
+        if cmd[:2] == ["git", "remote"]:
+            assert cwd == str(root)
+            return "https://github.com/owner/repo.git\n"
+        if cmd[:2] == ["git", "symbolic-ref"]:
+            assert cwd == str(root)
+            return "origin/main\n"
+        if cmd[0] == "gh":
+            assert "repos/owner/repo/commits/main/check-runs" in cmd[2]
+            return json.dumps({"check_runs": [{"conclusion": "failure"}]})
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(_notify_watch, "_run", fake_run)
+    acted, _, _ = _notify_watch.run_notify_watch(
+        _settings(), ["main_ci"], roots=[root]
+    )
+    assert acted == 1
+    assert _fake_send[0]["body"] == "main CI on owner/repo: failure."

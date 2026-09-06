@@ -30,7 +30,7 @@ def _load(path) -> dict:
 
 
 def _write(path, state: dict) -> None:
-    tmp = f"{path}.tmp"
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(state, fh)
     os.replace(tmp, path)
