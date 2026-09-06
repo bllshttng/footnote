@@ -2663,8 +2663,14 @@ fn registry_session_pid(session_id: Option<&str>) -> Option<i32> {
     if session.is_empty() {
         return None;
     }
-    let registry =
-        crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json()).ok()?;
+    // LOCK-FREE by necessity: this runs inside the per-claim recovery mutex,
+    // and load_registry's shared flock has no bound - the same shape
+    // SESSION_PID_TIMEOUT exists to bound on this very critical section. The
+    // registry file is replaced by atomic rename, so an unlocked open reads a
+    // consistent snapshot; a parse failure degrades to None and the legacy
+    // anchor path, never to a wedged renewal.
+    let bytes = std::fs::read(crate::paths::AgentsHome::from_env().registry_json()).ok()?;
+    let registry: crate::state::Registry = serde_json::from_slice(&bytes).ok()?;
     let pid = registry.entries.iter().find_map(|e| {
         match (e.harness_session_id.as_deref(), e.pid, e.pid_start_time) {
             (Some(sid), Some(pid), Some(start)) if sid == session => Some((pid, start)),

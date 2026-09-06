@@ -406,11 +406,18 @@ pub(crate) fn default_session_witness() -> (
 ) {
     let index: std::cell::RefCell<Option<std::collections::HashMap<String, (u32, u64)>>> =
         std::cell::RefCell::new(None);
+    // One answer per session per invocation: a sweep consults the witness for
+    // the same record twice (classify, then classify_for_sweep) and several
+    // records can share one session, so the memo bounds the witness traffic
+    // to one resolution per session per invocation.
+    let memo: std::cell::RefCell<
+        std::collections::HashMap<String, crate::claims::SessionLiveness>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
     let last_answer: std::rc::Rc<std::cell::RefCell<Option<&'static str>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     let cell = last_answer.clone();
     let witness = move |rec: &crate::claims::ClaimRecord| -> crate::claims::SessionLiveness {
-        let answer = session_liveness_answer(rec, &index);
+        let answer = session_liveness_answer(rec, &index, &memo);
         *last_answer.borrow_mut() = Some(match &answer {
             crate::claims::SessionLiveness::Live(basis) => *basis,
             crate::claims::SessionLiveness::Unresolved => "unresolved",
@@ -421,13 +428,29 @@ pub(crate) fn default_session_witness() -> (
 }
 
 /// The witness's answer for one record: registry row first, then transcript.
+/// Memoized per session id for the invoking process's lifetime.
 fn session_liveness_answer(
     rec: &crate::claims::ClaimRecord,
     index: &std::cell::RefCell<Option<std::collections::HashMap<String, (u32, u64)>>>,
+    memo: &std::cell::RefCell<std::collections::HashMap<String, crate::claims::SessionLiveness>>,
 ) -> crate::claims::SessionLiveness {
     let Some(session) = rec.session_id.as_deref().filter(|s| !s.is_empty()) else {
         return crate::claims::SessionLiveness::Unresolved;
     };
+    if let Some(answer) = memo.borrow().get(session) {
+        return answer.clone();
+    }
+    let answer = session_liveness_answer_uncached(session, index);
+    memo.borrow_mut()
+        .insert(session.to_string(), answer.clone());
+    answer
+}
+
+/// The uncached resolution: registry row first, then transcript.
+fn session_liveness_answer_uncached(
+    session: &str,
+    index: &std::cell::RefCell<Option<std::collections::HashMap<String, (u32, u64)>>>,
+) -> crate::claims::SessionLiveness {
     {
         let mut cache = index.borrow_mut();
         if cache.is_none() {
