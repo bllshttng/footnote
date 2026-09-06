@@ -1069,7 +1069,11 @@ class TestRunGate:
         assert 'origin == "operator"' in register
         assert "spawned_by_session=_sb_session" in register
         fallback_python = (root / "cli/src/fno/agents/store_fallback.py").read_text()
-        assert "spawned_by_session=_sb_session" in fallback_python
+        # x-5283 LD3: the adoption mint site stamps the VOUCHER, never a
+        # spawn edge - its spawned_by_* stays None by design, so crowning
+        # cannot move a row's cost into the grantor's account.
+        assert "spawned_by_session=None" in fallback_python
+        assert "adopted_by_session=_sb_session" in fallback_python
 
     def test_force_does_not_bypass_provider_cap(self, monkeypatch):
         _settings(monkeypatch, max_live=99, max_lanes={"zai": 1})
