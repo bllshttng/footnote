@@ -96,6 +96,41 @@ thread_local! {
 /// above anything a real incident's retry cadence would hit by accident.
 const MAX_TIMEOUTS_BEFORE_GIVING_UP: usize = 200;
 
+/// Owns a TEST child so it is killed and waited on every path. The inline
+/// `let _ = child.kill(); let _ = child.wait();` pairs ran only on the happy
+/// path: a panic or early return between spawn and cleanup left a live child,
+/// and once the test binary wedged, its corpse had no reaper. `Drop` does the
+/// kill+wait; `wait_now` reaps early when a test must observe the death.
+#[cfg(test)]
+pub(crate) struct ChildGuard(Option<std::process::Child>);
+
+#[cfg(test)]
+impl ChildGuard {
+    pub(crate) fn spawn(cmd: &mut std::process::Command) -> Self {
+        Self(Some(cmd.spawn().expect("test child spawns")))
+    }
+
+    pub(crate) fn id(&self) -> u32 {
+        self.0.as_ref().expect("child present").id()
+    }
+
+    pub(crate) fn wait_now(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 #[cfg(test)]
 struct TestHome(PathBuf);
 
@@ -1870,6 +1905,19 @@ fn spawn_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Kills and reaps a spawned pane on every exit path, panic and
+    /// early-return included. The echo-probe tests used to drop the
+    /// `PtyShell` un-killed on their success return: the shell child died
+    /// against the closed pty and sat unreaped, a zombie of this test
+    /// binary, for the rest of the run.
+    struct ShellGuard(PtyShell);
+
+    impl Drop for ShellGuard {
+        fn drop(&mut self) {
+            self.0.kill();
+        }
+    }
     use std::os::fd::AsRawFd;
 
     /// Serializes every test in this module that reaches `open_pty`. The
@@ -2286,12 +2334,14 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
         let candidates = shell_candidates(Some(OsStr::new("/nonexistent/definitely-not-a-shell")));
-        let shell = PtyShell::spawn(&candidates, 24, 80, None, "main", 7, tx, exit_tx)
-            .expect("fallback must spawn");
-        assert!(shell.is_child_alive());
+        let shell = ShellGuard(
+            PtyShell::spawn(&candidates, 24, 80, None, "main", 7, tx, exit_tx)
+                .expect("fallback must spawn"),
+        );
+        assert!(shell.0.is_child_alive());
         // Prove the fallback shell is real: round-trip a command, and assert
         // every chunk carries this pane's tag.
-        shell.write_input(b"echo fallback-ok\r").unwrap();
+        shell.0.write_input(b"echo fallback-ok\r").unwrap();
         let mut seen = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
@@ -2318,18 +2368,20 @@ mod tests {
         let _gate = pty_gate_async().await;
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
         let (exit_tx, mut exit_rx) = tokio::sync::mpsc::channel(4);
-        let shell = PtyShell::spawn(
-            &shell_candidates(Some(OsStr::new("/bin/sh"))),
-            24,
-            80,
-            None,
-            "main",
-            42,
-            tx,
-            exit_tx,
-        )
-        .expect("spawns");
-        shell.write_input(b"exit\r").unwrap();
+        let shell = ShellGuard(
+            PtyShell::spawn(
+                &shell_candidates(Some(OsStr::new("/bin/sh"))),
+                24,
+                80,
+                None,
+                "main",
+                42,
+                tx,
+                exit_tx,
+            )
+            .expect("spawns"),
+        );
+        shell.0.write_input(b"exit\r").unwrap();
         let pid = tokio::time::timeout(std::time::Duration::from_secs(10), exit_rx.recv())
             .await
             .expect("exit must be signaled")
@@ -2346,20 +2398,23 @@ mod tests {
         let _gate = pty_gate_async().await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
-        let shell = PtyShell::spawn(
-            &shell_candidates(Some(OsStr::new("/bin/sh"))),
-            24,
-            80,
-            None,
-            "envtest",
-            31,
-            tx,
-            exit_tx,
-        )
-        .expect("spawns");
+        let shell = ShellGuard(
+            PtyShell::spawn(
+                &shell_candidates(Some(OsStr::new("/bin/sh"))),
+                24,
+                80,
+                None,
+                "envtest",
+                31,
+                tx,
+                exit_tx,
+            )
+            .expect("spawns"),
+        );
         // A non-empty epoch prints as `epoch-<digits>-epochend`; an unset one
         // would collapse to `epoch--epochend`, which the assertion rejects.
         shell
+            .0
             .write_input(b"echo mark-$FNO_SESSION-$FNO_PANE-end epoch-$FNO_PANE_EPOCH-epochend\r")
             .unwrap();
         let mut seen = Vec::new();
@@ -2600,17 +2655,19 @@ mod tests {
         set_hang_injection(std::time::Duration::ZERO);
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
         let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
-        PtyShell::spawn(
-            &shell_candidates(Some(OsStr::new("/bin/sh"))),
-            24,
-            80,
-            None,
-            "main",
-            0,
-            tx,
-            exit_tx,
-        )
-        .expect("a healthy host must still spawn one attempt below the threshold");
+        let _shell = ShellGuard(
+            PtyShell::spawn(
+                &shell_candidates(Some(OsStr::new("/bin/sh"))),
+                24,
+                80,
+                None,
+                "main",
+                0,
+                tx,
+                exit_tx,
+            )
+            .expect("a healthy host must still spawn one attempt below the threshold"),
+        );
 
         // Two fresh wedge attempts. Without the reset, the pre-success
         // count (one below the threshold) survives the success, so the
@@ -2646,17 +2703,19 @@ mod tests {
         let _gate = pty_gate_async().await;
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
         let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
-        let shell = PtyShell::spawn(
-            &shell_candidates(Some(OsStr::new("/bin/sh"))),
-            24,
-            80,
-            None,
-            "main",
-            0,
-            tx,
-            exit_tx,
-        )
-        .expect("a healthy host must spawn exactly as before the offload");
-        assert!(shell.is_child_alive());
+        let shell = ShellGuard(
+            PtyShell::spawn(
+                &shell_candidates(Some(OsStr::new("/bin/sh"))),
+                24,
+                80,
+                None,
+                "main",
+                0,
+                tx,
+                exit_tx,
+            )
+            .expect("a healthy host must spawn exactly as before the offload"),
+        );
+        assert!(shell.0.is_child_alive());
     }
 }

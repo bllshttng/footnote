@@ -16573,6 +16573,7 @@ async fn client_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pty::ChildGuard;
 
     #[path = "../server_thread_viewer_tests.rs"]
     mod thread_viewer_tests;
@@ -28147,14 +28148,10 @@ mod tests {
 
     #[test]
     fn emergency_roster_kills_plain_child_and_spares_keeper_child() {
-        let mut plain = std::process::Command::new("/bin/sh")
-            .args(["-c", "exec sleep 30"])
-            .spawn()
-            .unwrap();
-        let mut keeper = std::process::Command::new("/bin/sh")
-            .args(["-c", "exec sleep 30"])
-            .spawn()
-            .unwrap();
+        let mut plain =
+            ChildGuard::spawn(std::process::Command::new("/bin/sh").args(["-c", "exec sleep 30"]));
+        let mut keeper =
+            ChildGuard::spawn(std::process::Command::new("/bin/sh").args(["-c", "exec sleep 30"]));
         let plain_pid = plain.id();
         let keeper_pid = keeper.id();
         let roster = HashSet::from([
@@ -28179,11 +28176,8 @@ mod tests {
             "keeper roster child must survive"
         );
 
-        unsafe { libc::kill(keeper_pid as libc::pid_t, libc::SIGKILL) };
-        keeper.wait().unwrap();
-        // Reap the killed plain child too, so the test leaves no zombie
-        // behind. After the assertions, so what they read is unchanged.
-        let _ = plain.wait();
+        // The guards kill and reap at scope end, after the assertions, so
+        // what they read is unchanged and the test leaves no zombie.
     }
 
     #[test]
