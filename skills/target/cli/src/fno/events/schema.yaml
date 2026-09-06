@@ -441,14 +441,17 @@ event_types:
         coverage:
           type: string
           enum: [covered, uncovered, unknown]
-          description: "`covered` (count > 0) carries a count in reviewed_count; `uncovered` is a real, known zero; `unknown` means the review read failed and no local evidence confirmed a review (fail closed for autonomy, honest in the receipt). `uncovered` was added in x-5b99: a zero count previously serialized as the string `covered`, so `coverage: covered` and `reviewed_count: 0` co-occurred on three PRs in flight and the reassuring WORD sat beside the honest NUMBER. Additive for every reader, all of which already test `covered AND count > 0`, so a historical `covered` event with a zero count keeps reading as not-covered."
+          description: "The WORD is the gate: `covered` means the review obligation is satisfied (the chain tiles with no open finding, or the configured rounds are spent), and every consumer keys on this string, never on the count beside it. `uncovered` is a real, known zero below the cap; `unknown` means the review read failed and no local evidence confirmed a review (fail closed for autonomy, honest in the receipt). A covered row CAN carry passed_count 0: a spent budget discharges the obligation whatever the rounds concluded."
         review_state:
           type: string
           enum: [reviewed, unreviewed, reviewer_refused]
           description: "Known review outcome when the evidence read succeeded. reviewed wins when any current non-human verdict counts; otherwise reviewer_refused wins when a configured reviewer refused; otherwise unreviewed. Omitted when coverage is unknown so transport failure never becomes a known review outcome."
         reviewed_count:
           type: integer
-          description: "Count of reviewed verdicts EXCLUDING human approvals (whether a human approval counts is the operator's deferred call; lean exclude). A verdict counts only while its freshness is not `stale`. Present whenever coverage is covered or uncovered (omitted only on unknown)."
+          description: "Count of reviewed verdicts EXCLUDING human approvals (whether a human approval counts is the operator's deferred call; lean exclude). A verdict counts only while its freshness is not `stale`. A review that concluded FAIL counts here too: the reviewer read the head, and the round-cap ruling counts the round whatever it concluded. Present on every row, unknown included - the coverage word can be unmeasured while the review count is not."
+        passed_count:
+          type: integer
+          description: "The pass subset of reviewed_count: verdicts whose review concluded PASS (a local attestation with verdict pass, or a GitHub approval). At a discharged round budget the two counts can differ by design - rounds spent on fails read reviewed without passing. Present on every row beside reviewed_count."
         self_attested_count:
           type: integer
           description: "How many of reviewed_count are the AUTHOR attesting its own diff (attestation_origin == self_attested). Recorded, never gating, and deliberately not named `independent_count` - the schema is explicit below that other_session is not independence, and this must not launder that. A self-attested pass counts, because self-review is the DEFAULT path (config.review.self_review_required floors the harness review verb onto the author's own head), so refusing one would wedge every single-session PR. What x-62a1 asked for is that the answer be visible in the verdict rather than asserted in prose: a gate that wants to demand a second reader is now one predicate over this number, not a redesign. Present alongside reviewed_count."
@@ -524,13 +527,7 @@ event_types:
           description: "Review rounds across the whole life of the PR (a round is one reviewed HEAD, so two verdicts at one unchanged head are one round; CI failures, lint failures and rebases are not rounds; a pass is one round like any verdict and refunds nothing). Computed by the Rust producer from the same chain, same scoping as the tiling walk, as the max of BOTH axes where both were read (attestation rounds and distinct GitHub-App reviewed commits); a healthy covered PR may carry the events axis alone, because the reviews read is paid only where it can change the answer. Re-derived by every gate surface before it refuses or blocks - never trusted off this row for a gate decision."
         rounds_exhausted:
           type: boolean
-          description: "Whether rounds_used exceeds the resolved config.review.max_rounds (default 2), on both axes. The raw budget fact: at the cap the PR merges with its remaining findings filed as nodes, unless the events axis is also spent and a hard finding remains (see impossible)."
-        events_rounds_exhausted:
-          type: boolean
-          description: "Whether the EVENTS axis alone (attestation rounds, never the GitHub-App reviewed-commit axis) exhausted config.review.max_rounds. Only an attestation can carry the fixed disposition that clears a hard finding, so the IMPOSSIBLE conjunct reads this axis, not rounds_exhausted: a bot-heavy PR whose local lane still has rounds is never impossible. Mirrors cap_verdict in the Python gate; held equal by the shared corpus."
-        impossible:
-          type: boolean
-          description: "events_rounds_exhausted AND a hard non-terminal finding remains: a CONFIRMED correctness or security finding, or a truncated remainder. Only this shape keeps the IMPOSSIBLE verdict (exit 5) at the cap; every other non-terminal finding is filed by the merge gate and the PR merges. Advisory on the row - every gate surface re-derives before answering (the merge gate through coverage_verdict, fno do pr status through cap_verdict) - so this flag is an audit trail, never a gate input."
+          description: "rounds_used >= config.review.max_rounds: the review obligation is satisfied. At the cap the review phase is complete and the PR merges on green CI; open findings stay in the PR conversation. Re-derived by every gate surface before it refuses or blocks - never trusted off this row for a gate decision."
         review_posture:
           type: object
           description: "The authoritative resolved review-posture verdict , computed by the Rust producer against the same verdicts coverage used and carried verbatim by every Python reader (AC6-HP: Python never reclassifies). Resolved from config.review.posture - explicit, or inferred from the legacy settings with the source naming which - and satisfied only when every component the rung names is evidenced at the evaluated head. OPTIONAL: absent on rows produced before this field existed and on unknown/failure rows, where absence reads 'no posture resolved here', never 'unsatisfied'."
