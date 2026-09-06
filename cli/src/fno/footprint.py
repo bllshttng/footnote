@@ -21,6 +21,21 @@ _FNO_BINARIES = frozenset(
 )
 
 
+class OrphanTestBinary(NamedTuple):
+    """One orphaned cargo test binary: alive at ppid 1, a deps/ binary argv[0].
+
+    A test binary whose parent runner died without reaping it reparents to
+    init and, wedged, holds its dead children as zombies forever. Confirmation
+    (a CACHEDIR.TAG in the owning target dir) is the caller's job: this parser
+    never touches the filesystem.
+    """
+
+    pid: int
+    command: str
+    zombies: int
+    elapsed_seconds: int
+
+
 class Footprint(NamedTuple):
     """One snapshot split into sustained and startup-cost buckets."""
 
@@ -43,10 +58,27 @@ class Footprint(NamedTuple):
     # Whole-machine on purpose: a test a person started competes for the same
     # box as a lane.
     test_process_count: int = 0
+    # Orphaned cargo test binaries, worst zombie count first. ppid == 1 plus a
+    # deps-binary argv[0] is the candidate shape; always wrong when confirmed.
+    orphan_test_binaries: tuple[OrphanTestBinary, ...] = ()
 
 
 #: argv[0] basenames that are a test runner on their own.
 _TEST_RUNNER_NAMES = frozenset({"pytest", "py.test"})
+
+#: argv[0] of a compiled cargo test binary: `<...>/target/<profile>/deps/<crate>-<16 hex>`.
+#: This PATH SHAPE alone is a name match - the confirmer in doctor_footprint
+#: demands a CACHEDIR.TAG in the owning target dir before anything is named.
+_DEPS_BINARY_RE = re.compile(r"/target/(?:debug|release)/deps/[A-Za-z0-9_]+-[0-9a-f]{16}$")
+
+#: macOS renders a dead-unreaped child as exactly this command.
+_DEFUNCT_COMMAND = "<defunct>"
+
+
+def _is_deps_test_binary(command: str) -> bool:
+    """True when argv[0] is a compiled cargo test binary path."""
+    argv = command.split()
+    return bool(argv) and _DEPS_BINARY_RE.search(argv[0]) is not None
 
 
 def is_test_runner(command: str) -> bool:
@@ -315,6 +347,25 @@ def parse_footprint(
             sustained.append((process.cpu_percent, process.command))
 
     sustained.sort(key=lambda item: (-item[0], item[1]))
+    # Orphan candidates, from the same snapshot: a live row at ppid 1 whose
+    # argv[0] is a deps test binary, with its dead children counted.
+    defunct_by_ppid: dict[int, int] = {}
+    for process in processes.values():
+        if process.command == _DEFUNCT_COMMAND and process.ppid is not None:
+            defunct_by_ppid[process.ppid] = defunct_by_ppid.get(process.ppid, 0) + 1
+    orphans = sorted(
+        (
+            OrphanTestBinary(
+                pid=process.pid,
+                command=process.command,
+                zombies=defunct_by_ppid.get(process.pid, 0),
+                elapsed_seconds=process.elapsed_seconds,
+            )
+            for process in processes.values()
+            if process.ppid == 1 and _is_deps_test_binary(process.command)
+        ),
+        key=lambda orphan: (-orphan.zombies, orphan.pid),
+    )
     return Footprint(
         sustained_cpu_cores=sustained_cpu_percent / 100,
         descendant_cpu_cores=descendant_cpu_percent / 100,
@@ -328,4 +379,5 @@ def parse_footprint(
         top=sustained,
         unparsed_lines=unparsed_lines,
         test_process_count=test_process_count,
+        orphan_test_binaries=tuple(orphans),
     )

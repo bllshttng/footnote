@@ -1584,3 +1584,163 @@ def test_capacity_verdict_names_its_axis_and_deciding_numbers(monkeypatch):
     shown = runner.invoke(app, ["doctor", "footprint", "--cause-only"])
     assert "verdict: over on load_1m (110.4 against 96.0)" in shown.output
     assert "a separate axis - it did not decide the verdict" in shown.output
+
+
+# ---------------------------------------------------------------------------
+# Orphaned cargo test binaries: ppid 1 + a deps/ binary argv[0], confirmed by
+# a CACHEDIR.TAG in the owning target dir, and the --reap-orphans lever.
+# ---------------------------------------------------------------------------
+
+_CACHEDIR_TAG = "Signature: 8a477f597d28d172789f06886806bc55\n"
+
+
+def _pid_alive(pid: int) -> bool:
+    import errno
+
+    try:
+        os.kill(pid, 0)
+    except OSError as exc:
+        return exc.errno != errno.ESRCH
+    return True
+
+
+@pytest.fixture
+def planted_orphan(tmp_path):
+    """A real double-forked sleeper whose argv[0] is a deps-binary path shape,
+    under a target dir carrying a CACHEDIR.TAG. Yields the pid; kills it at
+    teardown. The double-fork is the measured leak shape: the sleeper's
+    parent shell exits and the sleeper reparents to init (ppid 1)."""
+    import signal
+    import time
+
+    target = tmp_path / "crates" / "x" / "target"
+    deps = target / "debug" / "deps"
+    deps.mkdir(parents=True)
+    (target / "CACHEDIR.TAG").write_text(_CACHEDIR_TAG)
+    probe = deps / "probe-0123456789abcdef"
+    # A symlink, never a copied binary: macOS kills an exec of a copied
+    # signed system binary (signature invalid), and ps would then never see
+    # the plant. Through the symlink the image is still signed /bin/sleep.
+    os.symlink("/bin/sleep", probe)
+    holder = subprocess.Popen(
+        ["/bin/sh", "-c", f"'{probe}' 300 >/dev/null 2>&1 & echo $!"],
+        stdout=subprocess.PIPE,
+    )
+    pid = int(holder.communicate()[0].split()[0])
+    holder.wait()
+    # The reparent is not instantaneous; wait until ps sees ppid 1.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        out = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout.strip()
+        if out == "1":
+            break
+        time.sleep(0.05)
+    yield pid
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def test_orphan_confirmation_demands_a_cachedir_tag(tmp_path):
+    """Path shape is a NAME match; CACHEDIR.TAG is the cargo-target proof. The
+    source-tree shape (cli/src/fno/target) has no tag and is never named."""
+    from fno import doctor_footprint
+    from fno.footprint import parse_footprint
+
+    target = tmp_path / "crates" / "x" / "target"
+    probe = target / "debug" / "deps" / "probe-0123456789abcdef"
+    reading = parse_footprint(
+        "PID PPID ELAPSED %CPU RSS COMMAND\n"
+        f"100 1 04:00:00 0.0 1024 {probe}\n"
+    )
+    # No CACHEDIR.TAG yet: the shape alone must not confirm.
+    assert doctor_footprint._confirmed_orphans(reading) == []
+    target.mkdir(parents=True)
+    (target / "CACHEDIR.TAG").write_text(_CACHEDIR_TAG)
+    confirmed = doctor_footprint._confirmed_orphans(reading)
+    assert [o.pid for o in confirmed] == [100]
+
+
+def test_reap_orphans_dry_run_names_and_spares(planted_orphan, monkeypatch):
+    pid = planted_orphan
+    monkeypatch.setenv("FNO_TEST_ORPHAN_MIN_ELAPSED_SECONDS", "0")
+    result = runner.invoke(app, ["doctor", "footprint", "--reap-orphans", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    rows = [r for r in payload["orphan_test_binaries"] if r["pid"] == pid]
+    assert len(rows) == 1, payload["orphan_test_binaries"]
+    assert rows[0]["reaped"] is False
+    assert "dry-run" in rows[0]["reason"]
+    assert _pid_alive(pid), "a dry run must never signal"
+
+
+def test_reap_orphans_apply_kills_the_planted_orphan(planted_orphan, monkeypatch):
+    pid = planted_orphan
+    monkeypatch.setenv("FNO_TEST_ORPHAN_MIN_ELAPSED_SECONDS", "0")
+    result = runner.invoke(
+        app, ["doctor", "footprint", "--reap-orphans", "--apply", "--json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    rows = [r for r in payload["orphan_test_binaries"] if r["pid"] == pid]
+    assert len(rows) == 1, payload["orphan_test_binaries"]
+    assert rows[0]["reaped"] is True
+    # Dead for real, not just on paper.
+    import time
+
+    deadline = time.monotonic() + 5
+    while _pid_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not _pid_alive(pid), "the planted orphan must be dead after --apply"
+
+
+def test_reap_orphans_holds_a_fresh_orphan_below_the_guard(planted_orphan):
+    pid = planted_orphan
+    # No env override: the 900s default guard keeps a seconds-old plant alive.
+    result = runner.invoke(
+        app, ["doctor", "footprint", "--reap-orphans", "--apply", "--json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    rows = [r for r in payload["orphan_test_binaries"] if r["pid"] == pid]
+    assert len(rows) == 1, payload["orphan_test_binaries"]
+    assert rows[0]["reaped"] is False
+    assert "guard" in rows[0]["reason"]
+    assert _pid_alive(pid), "a below-guard orphan must be reported, never killed"
+
+
+def test_orphan_binaries_reach_the_normal_json_payload(monkeypatch, tmp_path, no_worker_roots):
+    """The ordinary footprint reading names confirmed orphans too, so the
+    alarm fires even when nobody asked for the reap lever."""
+    from fno import doctor_footprint
+
+    target = tmp_path / "crates" / "x" / "target"
+    probe = target / "debug" / "deps" / "probe-0123456789abcdef"
+    target.mkdir(parents=True)
+    (target / "CACHEDIR.TAG").write_text(_CACHEDIR_TAG)
+    _pin_load(monkeypatch, status="within")
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(
+            monkeypatch,
+            "PID PPID ELAPSED %CPU RSS COMMAND\n"
+            f"100 1 04:00:00 0.0 1024 {probe}\n"
+            "200 1 01:00:00 20.0 1024 fno-agents-worker --run\n",
+            [{"name": "worker-a"}],
+            [],
+        ),
+    )
+
+    result = runner.invoke(app, ["doctor", "footprint", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert [o["pid"] for o in payload["orphan_test_binaries"]] == [100]
+    assert payload["orphan_test_binaries"][0]["zombies"] == 0

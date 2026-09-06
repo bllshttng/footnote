@@ -294,3 +294,74 @@ def test_ac9_edge_top_consumers_carry_no_worktree_when_argv_names_none() -> None
     assert top[0]["name"] == "cfprefsd"
     assert top[0]["worktree"] is None
     assert top[0]["worktree_procs"] == 0
+
+
+#: The measured 2026-09-05 specimen: one wedged deps binary at ppid 1, its
+#: dead children stacked as `<defunct>` rows against it.
+_ORPHAN = "/Users/bb16/code/footnote/footnote/.claude/worktrees/preflight/crates/fno/target/debug/deps/fno-aa7282e99eecb046"
+
+
+def _orphan_snapshot(orphan_ppid: int, orphan_path: str) -> str:
+    """One orphan row + 227 defunct children + two live innocents."""
+    header = "PID PPID ELAPSED %CPU RSS COMMAND"
+    rows = [f"59929 {orphan_ppid} 03:07:00 0.0 4096 {orphan_path} portal"]
+    rows += [f"{70000 + i} 59929 00:00:10 0.0 0 <defunct>" for i in range(227)]
+    rows += [
+        "900 1 01:00:00 0.1 1024 fno-agents-daemon --serve",
+        "901 900 01:00:00 0.0 1024 cargo test -p fno",
+    ]
+    return "\n".join([header, *rows])
+
+
+def test_orphan_test_binary_parser_names_the_pid_and_counts_its_zombies() -> None:
+    from fno.footprint import parse_footprint
+
+    reading = parse_footprint(_orphan_snapshot(1, _ORPHAN))
+
+    assert len(reading.orphan_test_binaries) == 1
+    orphan = reading.orphan_test_binaries[0]
+    assert orphan.pid == 59929
+    assert orphan.zombies == 227
+    assert orphan.elapsed_seconds == 3 * 3600 + 7 * 60
+    assert orphan.command == f"{_ORPHAN} portal"
+
+
+def test_orphan_test_binary_parser_rejects_non_orphan_ppid() -> None:
+    """The same argv whose parent is still alive is NOT the orphan shape: a
+    wedged binary whose cargo parent lives has another remedy (its parent can
+    still reap it), and naming it would misfire on a live lane."""
+    from fno.footprint import parse_footprint
+
+    reading = parse_footprint(_orphan_snapshot(4321, _ORPHAN))
+
+    assert reading.orphan_test_binaries == ()
+
+
+def test_orphan_test_binary_parser_rejects_source_target_dir_shape() -> None:
+    """`cli/src/fno/target` is a SOURCE dir: the path shape alone matched it,
+    a sweep that trusted shapes alone deleted 66 real target dirs. The parser
+    still passes the shape through (it cannot stat); the CONFIRMER is what
+    rejects it - see the verb test with the same name."""
+    from fno.footprint import parse_footprint
+
+    source_shape = (
+        "/Users/bb16/code/footnote/footnote/cli/src/fno/target/debug/deps/"
+        "fno-aa7282e99eecb046"
+    )
+    reading = parse_footprint(_orphan_snapshot(1, source_shape))
+
+    assert len(reading.orphan_test_binaries) == 1  # shape candidate only
+    from fno import doctor_footprint
+
+    assert doctor_footprint._confirmed_orphans(reading) == []
+
+
+def test_orphan_test_binary_parser_counts_no_zombies_without_defunct_rows() -> None:
+    from fno.footprint import parse_footprint
+
+    reading = parse_footprint(
+        "PID PPID ELAPSED %CPU RSS COMMAND\n"
+        f"59929 1 03:07:00 0.0 4096 {_ORPHAN}\n"
+    )
+
+    assert reading.orphan_test_binaries[0].zombies == 0

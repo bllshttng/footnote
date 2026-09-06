@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import signal
 import subprocess
 import tempfile
 import time
@@ -15,7 +16,7 @@ from typing import Any, NoReturn
 
 import typer
 
-from fno.footprint import Footprint, parse_footprint
+from fno.footprint import Footprint, OrphanTestBinary, _WORKTREE_RE, parse_footprint
 
 
 #: The sustained-CPU threshold derives from measured capacity at this fraction
@@ -630,6 +631,104 @@ def leak_verdict(direct_processes: int, threshold: int | None) -> str:
     return "unexplained" if direct_processes > threshold else "clean"
 
 
+def _confirmed_orphans(reading: Footprint) -> list[OrphanTestBinary]:
+    """The parser's orphan candidates whose target dir proves it is cargo's.
+
+    A path-shape match alone is a NAME match: ``cli/src/fno/target`` is a
+    source tree, and a sweep that trusted shapes deleted 66 real cargo target
+    dirs across 26 worktrees. Only a genuine cargo target dir carries
+    ``CACHEDIR.TAG``, so that file - never the directory's name - decides.
+    """
+    confirmed: list[OrphanTestBinary] = []
+    for orphan in reading.orphan_test_binaries:
+        argv = orphan.command.split()
+        if not argv:
+            continue
+        target_dir = Path(argv[0]).parent.parent.parent  # deps -> profile -> target
+        if target_dir.name != "target" or not (target_dir / "CACHEDIR.TAG").is_file():
+            continue
+        confirmed.append(orphan)
+    return confirmed
+
+
+def _orphan_min_elapsed_seconds() -> int:
+    """``config.test.orphan_min_elapsed_seconds``, default 900.
+
+    Every measured specimen was over three hours old, so a younger orphan may
+    be a live run and is reported, never killed. The env override exists so a
+    positive control can plant a fresh orphan and still exercise the kill."""
+    raw = os.environ.get("FNO_TEST_ORPHAN_MIN_ELAPSED_SECONDS")
+    if raw is not None:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    try:
+        from fno.config import load_settings
+
+        return int(load_settings().test.orphan_min_elapsed_seconds)
+    except Exception:  # noqa: BLE001 - a broken settings value degrades, not dies
+        return 900
+
+
+def _fmt_elapsed(seconds: int) -> str:
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}"
+
+
+def _orphan_rows(reading: Footprint, *, apply: bool) -> list[dict[str, Any]]:
+    """One row per confirmed orphan: named, and killed only when asked."""
+    guard = _orphan_min_elapsed_seconds()
+    rows: list[dict[str, Any]] = []
+    for orphan in _confirmed_orphans(reading):
+        row: dict[str, Any] = {
+            "pid": orphan.pid,
+            "elapsed_seconds": orphan.elapsed_seconds,
+            "zombies": orphan.zombies,
+            "command": orphan.command,
+            "reaped": False,
+            "reason": "",
+        }
+        if orphan.elapsed_seconds < guard:
+            row["reason"] = (
+                f"held: elapsed {orphan.elapsed_seconds}s is under the {guard}s guard"
+                " (may be a live run)"
+            )
+        elif not apply:
+            row["reason"] = "dry-run: pass --apply to kill"
+        else:
+            try:
+                os.kill(orphan.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                row["reason"] = "already gone"
+            except OSError as exc:
+                row["reason"] = f"kill failed: {exc}"
+            else:
+                row["reaped"] = True
+                row["reason"] = "SIGKILL sent"
+        rows.append(row)
+    return rows
+
+
+def _emit_reap_result(reading: Footprint, *, apply: bool, json_output: bool) -> NoReturn:
+    """The ``--reap-orphans`` report: dry-run by default, a kill receipt with --apply."""
+    rows = _orphan_rows(reading, apply=apply)
+    if json_output:
+        typer.echo(json.dumps({"orphan_test_binaries": rows, "exit_code": 0}, sort_keys=True))
+    else:
+        if not rows:
+            typer.echo("no orphaned cargo test binaries")
+        for row in rows:
+            typer.echo(
+                f"orphaned test binary: pid {row['pid']},"
+                f" elapsed {_fmt_elapsed(row['elapsed_seconds'])},"
+                f" zombies {row['zombies']}: {row['command']}"
+            )
+            typer.echo(f"  {row['reason']}")
+    raise typer.Exit(code=0)
+
+
 def _payload(
     reading: Footprint,
     *,
@@ -688,6 +787,15 @@ def _payload(
             )
         ],
         "unparsed_lines": reading.unparsed_lines,
+        "orphan_test_binaries": [
+            {
+                "pid": orphan.pid,
+                "elapsed_seconds": orphan.elapsed_seconds,
+                "zombies": orphan.zombies,
+                "command": orphan.command,
+            }
+            for orphan in _confirmed_orphans(reading)
+        ],
         "exit_code": exit_code,
     }
     if reading.attribution_gap is not None:
@@ -803,6 +911,16 @@ def _emit_result(
                 f"({reading.direct_process_count} direct, roster unavailable)"
             )
         typer.echo(f"transient calls: {reading.transient_call_count}")
+        confirmed = _confirmed_orphans(reading)
+        if confirmed:
+            typer.echo(f"orphaned test binaries: {len(confirmed)}")
+            for orphan in confirmed:
+                worktree = _WORKTREE_RE.search(orphan.command)
+                typer.echo(
+                    f"  pid {orphan.pid}, elapsed {_fmt_elapsed(orphan.elapsed_seconds)},"
+                    f" worktree {worktree.group(0) if worktree else '?'},"
+                    f" zombies {orphan.zombies}"
+                )
         if reading.attribution_gap is not None:
             typer.echo(
                 f"attribution gap: {reading.attribution_gap} "
@@ -858,8 +976,31 @@ def footprint_command(
         hidden=True,
         help="Emit a bounded CPU-only reading for spawn-gate diagnosis.",
     ),
+    reap_orphans: bool = typer.Option(
+        False,
+        "--reap-orphans",
+        help="Report orphaned cargo test binaries (ppid 1 + a deps/ binary path).",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="With --reap-orphans: SIGKILL the confirmed orphans past the min-elapsed guard.",
+    ),
 ) -> None:
     """Measure fno CPU and process cost without using load average."""
+    if reap_orphans:
+        # The reap lane skips worker-root discovery on purpose: the box this
+        # matters on is the one whose fleet reading may be unavailable.
+        ps_output, ps_error = _read_ps()
+        if ps_error is not None or ps_output is None:
+            _emit_failure(
+                ps_error or "footprint unavailable: ps returned no output",
+                json_output=json_output,
+            )
+            raise typer.Exit(code=4)
+        reading = parse_footprint(ps_output, excluded_root_pids={os.getpid()})
+        _emit_reap_result(reading, apply=apply, json_output=json_output)
+
     reading, cause_error = cause_reading()
     if cause_error is not None or reading is None:
         _emit_failure(cause_error or "footprint unavailable", json_output=json_output)
