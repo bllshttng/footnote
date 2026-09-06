@@ -54,6 +54,39 @@ fn king_board_bin(dir: &Path, payload: &str, _exit: i32) -> PathBuf {
     path
 }
 
+/// The spec's undispatched row ids, or None when the spec never parsed.
+fn king_spec_rows(spec: &str) -> Option<Vec<String>> {
+    let parsed: serde_json::Value = serde_json::from_str(spec).ok()?;
+    let rows = parsed["queues"]
+        .as_array()?
+        .iter()
+        .find(|q| q["name"] == "undispatched")?["rows"]
+        .as_array()?
+        .clone();
+    Some(
+        rows.iter()
+            .filter_map(|r| r["id"].as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+/// The drain answer the fixture's fno stub owes: the epic plus every spec row
+/// reads undelivered, and a clean spec writes the epic itself done, so the
+/// graph and the stub answer the same question. An unparseable spec is the
+/// blind case and must refuse, never claim drained.
+fn king_drain_reply(spec: &str) -> String {
+    match king_spec_rows(spec) {
+        None => "exit 1".to_string(),
+        Some(rows) if rows.is_empty() => {
+            "echo '{\"scope\":\"drain\",\"undelivered\":0}'".to_string()
+        }
+        Some(rows) => format!(
+            "echo '{{\"scope\":\"drain\",\"undelivered\":{}}}'",
+            rows.len() + 1
+        ),
+    }
+}
+
 /// Write the fixture graph for `board_spec` and pin config + lane at `cwd`.
 /// The epic `drain` matches the manifest scope; every spec row becomes one
 /// undispatchable planned node.
@@ -62,40 +95,36 @@ fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
     fs::create_dir_all(&fno_dir).unwrap();
     let graph = cwd.join("graph.json");
     let spec = fs::read_to_string(board_spec).unwrap_or_default();
-    let parsed: Option<serde_json::Value> = serde_json::from_str(&spec).ok();
-    let ids: Vec<String> = parsed
-        .as_ref()
-        .and_then(|v| {
-            let rows = v["queues"]
-                .as_array()?
-                .iter()
-                .find(|q| q["name"] == "undispatched")?["rows"]
-                .as_array()
-                .cloned()?;
-            Some(
-                rows.iter()
-                    .filter_map(|r| r["id"].as_str().map(str::to_string))
-                    .collect(),
-            )
-        })
-        .unwrap_or_default();
-    if parsed.is_none() {
+    let ids = king_spec_rows(&spec);
+    if ids.is_none() {
         // Blind: the spec never parsed, so the graph source goes dark and the
         // collector answers with unreadable queues instead of a payload that
         // was never possible to fake here.
         let _ = fs::remove_file(&graph);
     } else {
-        let nodes: Vec<serde_json::Value> = std::iter::once(serde_json::json!(
-            {"id": "drain", "type": "epic", "status": "ready", "priority": "p1"}
-        ))
-        .chain(ids.into_iter().map(|id| {
-            // parent: the manifest scope compiles to the epic plus its
-            // descendants, so a workable row is a child of `drain`.
-            serde_json::json!({"id": id, "type": "feature", "status": "ready",
-                               "priority": "p0", "plan_path": "/plans/p.md",
-                               "parent": "drain"})
-        }))
-        .collect();
+        let ids = ids.unwrap_or_default();
+        // A clean spec writes the epic itself done: the reign's terminations
+        // key on the crown draining, so a fixture board with no rows must
+        // read as a drained crown, not an eternally open one.
+        let epic = if ids.is_empty() {
+            serde_json::json!(
+                {"id": "drain", "type": "epic", "status": "done",
+                 "completed_at": "2026-08-18T00:00:00Z", "priority": "p1"}
+            )
+        } else {
+            serde_json::json!(
+                {"id": "drain", "type": "epic", "status": "ready", "priority": "p1"}
+            )
+        };
+        let nodes: Vec<serde_json::Value> = std::iter::once(epic)
+            .chain(ids.into_iter().map(|id| {
+                // parent: the manifest scope compiles to the epic plus its
+                // descendants, so a workable row is a child of `drain`.
+                serde_json::json!({"id": id, "type": "feature", "status": "ready",
+                                   "priority": "p0", "plan_path": "/plans/p.md",
+                                   "parent": "drain"})
+            }))
+            .collect();
         fs::write(
             &graph,
             serde_json::to_string(&serde_json::json!({ "entries": nodes })).unwrap(),
@@ -134,11 +163,19 @@ fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
         make_script(
             home,
             "escalate-mock",
-            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"escalate\" ]; then\n\
-             \x20 echo q-mock\n\
-             \x20 exit 0\n\
-             fi\n\
-             exit 0",
+            &format!(
+                "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; \
+                 then\n\
+                 \x20 {}\n\
+                 \x20 exit 0\n\
+                 fi\n\
+                 if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"escalate\" ]; then\n\
+                 \x20 echo q-mock\n\
+                 \x20 exit 0\n\
+                 fi\n\
+                 exit 0",
+                king_drain_reply(&spec)
+            ),
         );
     };
     #[cfg(unix)]
@@ -745,12 +782,17 @@ fn king_escalate_bin(dir: &Path, payload: &str, log: &Path) -> PathBuf {
         dir,
         "escalate-mock",
         &format!(
-            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"escalate\" ]; then\n\
+            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; then\n\
+             \x20 {}\n\
+             \x20 exit 0\n\
+             fi\n\
+             if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"escalate\" ]; then\n\
              \x20 echo \"$*\" >> {log}\n\
              \x20 echo q-mock\n\
              \x20 exit 0\n\
              fi\n\
              exit 0",
+            king_drain_reply(payload),
             log = log.display()
         ),
     );
