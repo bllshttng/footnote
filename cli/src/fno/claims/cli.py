@@ -1093,6 +1093,12 @@ def status(
     crosschecked = roster and bool(node_id) and info.get("state") in _UNHELD_STATES
     if crosschecked:
         info.update(_roster_crosscheck(node_id))
+        if info.get("roster_rows_unresolved", 0):
+            # A scanned row with no node join is an unanswered ownership read,
+            # not proof that this claim is free. Keep the raw claim fields, but
+            # make the composite verdict fail closed for dispatch consumers.
+            info["state"] = "unknown"
+            info["basis"] = "unresolved-roster-row"
     if json_output:
         typer.echo(json.dumps(info))
         return

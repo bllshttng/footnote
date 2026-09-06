@@ -892,7 +892,8 @@ def test_free_node_reports_unresolved_roster_rows(cwd_tmp, fake_roster):
     r = runner.invoke(cli, ["status", "node:x-76d1", "--json"])
     assert r.exit_code == 0
     info = json.loads(r.output)
-    assert info["state"] == "free"
+    assert info["state"] == "unknown"
+    assert info["basis"] == "unresolved-roster-row"
     assert info["roster_rows_scanned"] == 1
     assert info["roster_rows_unresolved"] == 1
     assert info["roster_unresolved_candidates"] == ["t-x76d1-near-miss"]

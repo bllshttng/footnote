@@ -1431,7 +1431,7 @@ def test_ac7_edge_json_contains_thresholds_and_exit_meaning(
     assert payload["exit_code"] == 0
 
 
-def _pidless_row(harness: str, *, name: str = "w1"):
+def _pidless_row(harness: str, *, name: str = "w1", node: str | None = None):
     from types import SimpleNamespace
 
     return SimpleNamespace(
@@ -1441,6 +1441,7 @@ def _pidless_row(harness: str, *, name: str = "w1"):
         harness=harness,
         short_id=None,
         name=name,
+        node=node,
     )
 
 
@@ -1457,6 +1458,7 @@ def test_pidless_nonclaude_row_is_a_named_gap_not_a_dead_reading(monkeypatch):
     assert roots == set()
     assert isinstance(error, doctor_footprint.AttributionGap)
     assert "codex" in error.text
+    assert "w1 (node=unknown)" in error.text
 
 
 def test_pidless_unknown_harness_row_is_the_same_named_gap(monkeypatch):
