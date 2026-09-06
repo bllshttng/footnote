@@ -533,6 +533,8 @@ def post_dispositions(
     if not dispositions:
         typer.echo("post-dispositions: no dispositions in the record; nothing posted")
         return
+    if not isinstance(pr, int):
+        pr = None
 
     # Slug, PR number, and PR head all resolve through the pr REST module -
     # one implementation, not a review-side twin.
