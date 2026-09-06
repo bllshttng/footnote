@@ -6,10 +6,14 @@ under the SAME env markers as the pass, so undoing an impersonation required
 performing it a second time. Once the binding refused that, a forged pass
 became permanently irretractable. The verb names the revoked pair explicitly
 and records the RETRACTING session's own identity.
+
+Also home to the `classify --attest` writer: the review verb records its own
+round, verdict measured from the classified findings, never typed.
 """
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -227,3 +231,167 @@ def test_retract_reaches_a_pass_that_lives_only_in_the_global_log(
     capsys.readouterr()
     assert rc == 0, "a mirrored-only pass must be retractable, not refused"
     assert "retracts_attester" in project.read_text(encoding="utf-8")
+
+
+# --- classify --attest: the review verb records its own round ----------------
+
+
+def _temp_repo(tmp_path: Path) -> Path:
+    """A throwaway git repo with a real one-file diff over origin/main."""
+    sub = tmp_path / "repo"
+    sub.mkdir()
+    for args in (
+        ["git", "init", "-q", "-b", "feature/attest-lane"],
+        ["git", "config", "user.email", "t@t.t"],
+        ["git", "config", "user.name", "t"],
+        ["git", "commit", "-q", "--allow-empty", "-m", "init"],
+    ):
+        subprocess.run(args, cwd=sub, check=True)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=sub, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", base], cwd=sub, check=True
+    )
+    (sub / "a.py").write_text("x = 1\n")
+    subprocess.run(["git", "add", "a.py"], cwd=sub, check=True)
+    subprocess.run(["git", "commit", "-qm", "feature"], cwd=sub, check=True)
+    return sub
+
+
+def _findings_payload(blocking: int) -> str:
+    entries = [
+        {
+            "category": "correctness",
+            "file": f"b{idx}.py",
+            "line": idx + 1,
+            "summary": f"bug {idx}",
+            "failure_scenario": "wrong result",
+        }
+        for idx in range(blocking)
+    ]
+    entries.append(
+        {
+            "category": "nit",
+            "file": "n.py",
+            "line": 1,
+            "summary": "name",
+            "failure_scenario": "none",
+        }
+    )
+    return json.dumps(entries)
+
+
+def _invoke_classify(runner: CliRunner, repo: Path, findings: Path, *extra: str):
+    from fno.review.cli import review_app
+
+    return runner.invoke(
+        review_app,
+        ["classify", "--findings-file", str(findings), *extra],
+    )
+
+
+@pytest.fixture
+def attest_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A hermetic attest environment: identity resolved, global log pointed
+    into the fixture, claims read quiet, FNO_HOME inside tmp."""
+    import fno.harness_identity as hi
+
+    repo = _temp_repo(tmp_path)
+    monkeypatch.setattr(hi, "resolve_attester_identity", lambda: ("sess-lane", "process"))
+    monkeypatch.setattr(
+        "fno.paths.global_events_json", lambda: tmp_path / "global-events.jsonl"
+    )
+    monkeypatch.setattr(
+        "fno.claims.core.claim_status", lambda key, root=None: {}
+    )
+    monkeypatch.setenv("FNO_HOME", str(tmp_path / "fno-home"))
+    monkeypatch.chdir(repo)
+    return repo
+
+
+def test_attest_measures_fail_on_blocking_findings(
+    runner: CliRunner, attest_env: Path, tmp_path: Path
+) -> None:
+    """Two blocking findings -> ONE row with verdict fail on the PR head, the
+    classified record riding on it, and the reviewed ranges measured so the
+    row contributes a tile to the coverage chain."""
+    findings = tmp_path / "findings.json"
+    findings.write_text(_findings_payload(blocking=2), encoding="utf-8")
+    result = _invoke_classify(runner, attest_env, findings, "--emit-record", "--attest", "code-review")
+    assert result.exit_code == 0, result.stderr
+
+    from fno.paths import project_log
+
+    journal = project_log("events.jsonl", project_root=attest_env)
+    lines = [ln for ln in journal.read_text().splitlines() if ln.strip()]
+    assert len(lines) == 1, "the classify call is the whole emit; no second command"
+    event = json.loads(lines[0])
+    assert event["type"] == "review_attestation"
+    data = event["data"]
+    assert data["verdict"] == "fail"
+    assert data["findings_blocking"] == 2
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=attest_env, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    assert data["head_sha"] == head
+    base = subprocess.run(
+        ["git", "merge-base", "HEAD", "origin/main"],
+        cwd=attest_env, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert data["reviewed_base_sha"] == base
+    assert data["reviewed_head_sha"] == head
+    assert data["branch"] == "feature/attest-lane"
+    assert data["attester_session_id"] == "sess-lane"
+    assert data["reviewer_context"] == "unknown"
+    assert event["source"] == "test"  # no manifest bound in the fixture
+
+
+def test_attest_measures_pass_on_zero_blocking_findings(
+    runner: CliRunner, attest_env: Path, tmp_path: Path
+) -> None:
+    """Zero blocking findings -> verdict pass, and a leading-slash reviewer
+    name lands stripped, byte-equal to the shell producer's output."""
+    findings = tmp_path / "findings.json"
+    findings.write_text(_findings_payload(blocking=0), encoding="utf-8")
+    result = _invoke_classify(runner, attest_env, findings, "--attest", "/code-review")
+    assert result.exit_code == 0, result.stderr
+
+    from fno.paths import project_log
+
+    journal = project_log("events.jsonl", project_root=attest_env)
+    data = json.loads(journal.read_text().splitlines()[-1])["data"]
+    assert data["verdict"] == "pass"
+    assert data["reviewer"] == "code-review"
+    assert data["findings_blocking"] == 0
+
+
+def test_attest_without_the_flag_emits_nothing(
+    runner: CliRunner, attest_env: Path, tmp_path: Path
+) -> None:
+    """Plain classify stays a classification: no row, no journal."""
+    findings = tmp_path / "findings.json"
+    findings.write_text(_findings_payload(blocking=0), encoding="utf-8")
+    result = _invoke_classify(runner, attest_env, findings, "--emit-record")
+    assert result.exit_code == 0, result.stderr
+
+    from fno.paths import project_log
+
+    journal = project_log("events.jsonl", project_root=attest_env)
+    assert not journal.exists() or journal.read_text().strip() == ""
+
+
+def test_attest_refuses_off_a_git_repo(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No readable head to pin -> exit 3, nothing emitted: a row that pins no
+    commit is the one shape downstream can never scope."""
+    import fno.harness_identity as hi
+
+    monkeypatch.setattr(hi, "resolve_attester_identity", lambda: ("sess-lane", "process"))
+    monkeypatch.chdir(tmp_path)  # not a git repo
+    findings = tmp_path / "findings.json"
+    findings.write_text(_findings_payload(blocking=0), encoding="utf-8")
+    result = _invoke_classify(runner, tmp_path, findings, "--attest", "code-review")
+    assert result.exit_code == 3
+    assert "no readable head" in result.stderr

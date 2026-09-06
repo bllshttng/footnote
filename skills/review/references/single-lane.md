@@ -192,16 +192,10 @@ The findings payload is a fenced JSON array, at most the level's cap, ranked mos
 
 `short_summary` is the claim alone, no rationale or consequence clause. `category` is a short kebab-case slug for the angle that produced it (`correctness`, `simplification`, `efficiency`, `reuse`, `altitude`, `conventions`, or a more specific slug like `test-coverage`). `verdict` is CONFIRMED or PLAUSIBLE; a REFUTED candidate never enters the array. A carried finding enters the array with the verdict its re-validation produced.
 
-Write the array to a temp file, classify it, and emit through the shared producer surface. The lane never counts its own findings for the emit decision - the classifier's blocking count decides:
+Write the array to a temp file, classify it, and attest in the same command. The verb writes the `review_attestation` row with the verdict it measured from the classified findings (pass only on zero blocking), so the lane never types a verdict and no separate pass step exists:
 
 ```bash
-CLASSIFIED=$(fno do review classify --findings-file "$FINDINGS" --emit-record)
-BLOCKING=$(jq -r '.findings_blocking' <<<"$CLASSIFIED")
-if [ "$BLOCKING" = "0" ]; then
-  bash "${SKILL_DIR}/scripts/emit-attestation.sh" code-review pass --findings-file "$FINDINGS"
-else
-  bash "${SKILL_DIR}/scripts/emit-attestation.sh" code-review fail --findings-file "$FINDINGS"
-fi
+fno do review classify --findings-file "$FINDINGS" --emit-record --attest code-review
 ```
 
 ## Flags
