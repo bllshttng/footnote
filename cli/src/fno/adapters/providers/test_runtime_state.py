@@ -204,6 +204,26 @@ class TestResetProviderHealth:
         assert state.provider_health.get("Y", ProviderHealth(
             provider_id="Y")).backoff_level == 1
 
+    def test_ac3_edge_reset_does_not_drop_another_locked_provider(
+        self, state_path: Path
+    ) -> None:
+        now = time.time()
+        update_provider_health(
+            "A", ErrorRule(status=429, backoff=True), now=now,
+            resets_at=now + 60,
+        )
+        update_provider_health(
+            "B", ErrorRule(status=429, backoff=True),
+            now=now - PROVIDER_HEALTH_TTL_SECONDS - 1,
+            resets_at=now + 9 * 3600,
+        )
+        before = json.loads(state_path.read_text(encoding="utf-8"))["provider_health"]["B"]
+
+        reset_provider_health("A", now=now)
+
+        after = json.loads(state_path.read_text(encoding="utf-8"))["provider_health"]["B"]
+        assert after == before
+
     def test_reset_unknown_provider_is_noop(self, state_path: Path) -> None:
         # No prior entry; reset must not crash, must not corrupt the file.
         reset_provider_health("UNKNOWN")
@@ -1233,15 +1253,10 @@ class TestHarvestedStampDoesNotClobberTheWarnFlag:
         assert set(raw["windows_opened"]["zai"]) == {"weekly", rs.WINDOW_LABEL}
 
 
-class TestALiveLockOutlivesTheHealthTTL:
-    """The TTL was written when every lock was a seconds-scale backoff.
+class TestHealthTTLBoundsReactiveLocks:
+    """A future lock cannot outlive the health observation that created it."""
 
-    A harvested reset breaks that assumption: a nine-hour lock is still binding
-    an hour after the error, and dropping the record there turns EXHAUSTED back
-    into UNKNOWN for the remaining eight hours.
-    """
-
-    def test_a_nine_hour_lock_survives_an_unrelated_write_an_hour_later(
+    def test_a_nine_hour_lock_ages_out_on_an_unrelated_write_an_hour_later(
         self, state_path: Path
     ) -> None:
         from fno.adapters.providers.runtime_state import HeadroomState, headroom
@@ -1254,7 +1269,7 @@ class TestALiveLockOutlivesTheHealthTTL:
             resets_at=now + 9 * 3600,
         )
         # Any later writer runs _drop_stale. An hour on, the record's
-        # last_error_at is past the TTL while its lock is still binding.
+        # last_error_at is past the TTL even though its lock is still future.
         later = now + PROVIDER_HEALTH_TTL_SECONDS + 60
         write_usage_snapshot(
             UsageSnapshot(
@@ -1265,7 +1280,7 @@ class TestALiveLockOutlivesTheHealthTTL:
             ),
             now=later,
         )
-        assert headroom("zai", now=later).state is HeadroomState.EXHAUSTED
+        assert headroom("zai", now=later).state is HeadroomState.UNKNOWN
 
     def test_an_expired_lock_still_ages_out(self, state_path: Path) -> None:
         # The reprieve is for a LIVE lock only; the TTL still garbage-collects
@@ -1443,3 +1458,41 @@ class TestLockAuthoritativeHeadroom:
         self._write(state_path, usage=(now, []))
         verdict = headroom("acct")
         assert verdict.state is HeadroomState.UNKNOWN
+
+    def test_ac1_hp_fresh_usage_beats_a_future_lock(self, state_path: Path) -> None:
+        """A live usage read is stronger than a stale reactive lock."""
+        from fno.adapters.providers.runtime_state import write_usage_snapshot
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        now = time.time()
+        update_provider_health(
+            "acct", ErrorRule(status=429, backoff=True), now=now,
+            resets_at=now + 9 * 3600,
+        )
+        write_usage_snapshot(
+            UsageSnapshot(
+                provider_id="acct",
+                windows=(UsageWindow("5h", 9.0, now + 3600),),
+                probed_at=now + 1,
+                source="quota-endpoint",
+            ),
+            now=now + 1,
+        )
+
+        verdict = headroom("acct", now=now + 1)
+
+        assert verdict.state is HeadroomState.OK
+
+    def test_ac2_edge_ttl_drops_a_stale_entry_even_when_its_lock_is_future(
+        self, state_path: Path
+    ) -> None:
+        """A long-lived lock cannot keep old account health alive forever."""
+        now = time.time()
+        old = now - PROVIDER_HEALTH_TTL_SECONDS - 1
+        update_provider_health(
+            "stale-acct", ErrorRule(status=429, backoff=True), now=old,
+            resets_at=now + 9 * 3600,
+        )
+
+        assert "stale-acct" not in read_state(now=now).provider_health
+        assert headroom("stale-acct", now=now).state is HeadroomState.UNKNOWN
