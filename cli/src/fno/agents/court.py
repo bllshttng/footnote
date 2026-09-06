@@ -112,10 +112,12 @@ def _manifest_limb(scope: Any, row: Any) -> dict[str, Any]:
     return limb
 
 
-def _manifest_only_crowns(held: list[str]) -> list[dict[str, Any]]:
+def _manifest_only_crowns(held: list[str]) -> tuple[list[dict[str, Any]], bool]:
     """Crowns whose row is gone but whose manifest holds them: the Rust sweep
     (`fno-agents court-orphans`) walks the spaces ROOT, because a vanished
-    row names no cwd."""
+    row names no cwd. Returns ``(entries, ran)``; ``ran`` False means the sweep
+    could not run (no binary, non-zero exit - a stale binary lacks the verb -
+    timeout, bad JSON) and an empty list there is an ABSENCE, not zero orphans."""
     import json
     import subprocess
 
@@ -124,17 +126,19 @@ def _manifest_only_crowns(held: list[str]) -> list[dict[str, Any]]:
 
     binary = resolve_binary()
     if binary is None:
-        return []
+        return [], False
     try:
         proc = subprocess.run(
             [str(binary), "court-orphans", "--root", str(spaces_root())]
             + [part for scope in held for part in ("--held", scope)],
             capture_output=True, text=True, check=False, timeout=30,
         )
-        orphans = json.loads(proc.stdout) if proc.returncode == 0 else []
+        orphans = json.loads(proc.stdout) if proc.returncode == 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):
-        return []
-    return [
+        return [], False
+    if orphans is None:
+        return [], False
+    entries = [
         {
             "holder": o.get("manifest_session") or o.get("scope"),
             "level": o.get("level"),
@@ -150,6 +154,7 @@ def _manifest_only_crowns(held: list[str]) -> list[dict[str, Any]]:
         for o in orphans
         if o.get("scope")
     ]
+    return entries, True
 
 
 def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
@@ -192,6 +197,11 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
             # crown_reading returns None whenever crown_level is None,
             # regardless of crown_scope; surface the anomaly, never skip it.
             if getattr(row, "crown_scope", None):
+                # The half crown still HOLDS its territory: _conflicts counts
+                # it as a claim, so the orphan sweep must see the scope too,
+                # or a manifest for it renders beside the live row holding it.
+                if isinstance(row.crown_scope, str) and row.crown_scope.strip():
+                    held_scopes.append(row.crown_scope)
                 entries.append(
                     {
                         "holder": row.name,
@@ -221,7 +231,8 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
         if isinstance(reading["scope"], str) and reading["scope"].strip():
             held_scopes.append(reading["scope"])
 
-    entries.extend(_manifest_only_crowns(held_scopes))
+    orphans, sweep_ran = _manifest_only_crowns(held_scopes)
+    entries.extend(orphans)
 
     disagreements = sum(1 for e in entries if e["agree"] is False)
     unknowns = sum(1 for e in entries if e["agree"] is None)
@@ -232,7 +243,12 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
         "registry_readable": True,
         "graph_readable": by_id is not None,
         "summary": {
-            "total": len(entries),
+            # total counts ROW crowns only: the census reads it as a row count
+            # and computes workers from it, so a manifest-only entry would
+            # subtract a worker that still exists.
+            "total": len(entries) - len(orphans),
+            "manifest_only": len(orphans),
+            "sweep_ran": sweep_ran,
             "disagreements": disagreements,
             "unknowns": unknowns,
             "splits": splits,
@@ -270,11 +286,15 @@ def render_court(as_json: bool) -> str:
         holders = ", ".join(c["holders"])
         lines.append(f"\nconflicts: scope {c['scope']!r} held by {len(c['holders'])} live rows ({holders})")
     s = court["summary"]
+    manifest_only = s.get("manifest_only") or 0
     lines.append(
         f"\ncourt: {s['total']} crown{'s' if s['total'] != 1 else ''}, "
         f"{s['disagreements']} disagreement"
         f"{'s' if s['disagreements'] != 1 else ''}, {s['unknowns']} unknown"
         f"{'s' if s['unknowns'] != 1 else ''}, {s['splits']} split"
         f"{'s' if s['splits'] != 1 else ''}"
+        + (f", {manifest_only} manifest-only" if manifest_only else "")
     )
+    if s.get("sweep_ran") is False:
+        lines.append("orphan sweep did not run (stale or missing binary): zero manifest-only entries is an absence, not a finding")
     return "\n".join(lines)

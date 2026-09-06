@@ -152,10 +152,14 @@ pub(crate) fn manifest_field(content: &str, key: &str) -> Option<String> {
 /// cache, so when a row vanishes and the healer mints its replacement, the
 /// crown comes back from the file, keyed by harness session id, never by
 /// name. Scans `<space>/kings/*.md` for the project the row belongs to (the
-/// same space every king writer uses). A manifest naming this session
-/// supplies its crown only while the holder's transcript still moves
-/// (`transcript_activity`): a crown whose holder is gone stays with the file
-/// and mints nothing, so the scope reads crownless until a live king re-arms.
+/// same space every king writer uses), in sorted order: two manifests naming
+/// one session (a stale vacated scope beside the live one) must pick the same
+/// winner run to run, for the same reason `court_orphans` sorts its walk.
+/// The transcript check is EXISTENCE, not freshness - `transcript_activity`
+/// returns Some for any readable transcript and its age is not compared here.
+/// What actually bounds the restore to a live holder is the caller: adoption
+/// runs only for roster sessions, so the session being re-rowed is live. A
+/// future caller without that bound must add the age-window check itself.
 pub fn crown_from_king_manifests(
     session_id: &str,
     cwd: &Path,
@@ -164,9 +168,13 @@ pub fn crown_from_king_manifests(
         return None;
     }
     let kings = crate::paths::space_dir(cwd).join("kings");
-    let dir = std::fs::read_dir(kings).ok()?;
-    for entry in dir.flatten() {
-        let path = entry.path();
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(kings)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    paths.sort();
+    for path in paths {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
@@ -719,6 +727,52 @@ mod tests {
         assert_eq!(e.crown_level, Some(2));
         assert_eq!(e.crown_scope.as_deref(), Some("x-dede"));
         assert_eq!(e.crown_grantor.as_deref(), Some("operator"));
+
+        std::env::remove_var("FNO_SPACES_DIR");
+        std::fs::remove_dir_all(&spaces).ok();
+        std::fs::remove_dir_all(&projects).ok();
+    }
+
+    #[test]
+    fn the_restore_picks_one_manifest_deterministically_when_two_name_a_session() {
+        // Two manifests naming one session (a stale vacated scope beside the
+        // live one) must pick the same winner run to run: the walk is sorted,
+        // so the path-first manifest wins regardless of directory order.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
+        let projects = seed_transcript("crown-two", uuid, &[transcript_line("glm-5.3")]);
+        let spaces = std::env::temp_dir().join(format!(
+            "fno-adopt-crowntwo-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let kings = spaces.join("-Users-x-code-proj").join("kings");
+        std::fs::create_dir_all(&kings).unwrap();
+        // Written later but sorted first: the sort, not write order, decides.
+        std::fs::write(
+            kings.join("zzz-scope.md"),
+            format!(
+                "---\nscope: zzz-scope\nharness_session_id: {uuid}\ncrown_level: 2\ncrown_scope: zzz-scope\n---\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            kings.join("aaa-scope.md"),
+            format!(
+                "---\nscope: aaa-scope\nharness_session_id: {uuid}\ncrown_level: 1\ncrown_scope: aaa-scope\n---\n"
+            ),
+        )
+        .unwrap();
+        std::env::set_var("FNO_SPACES_DIR", &spaces);
+
+        let e = mint_adopted_entry(&worker(), "2026-09-05T00:00:00Z");
+        assert_eq!(e.crown_level, Some(1));
+        assert_eq!(e.crown_scope.as_deref(), Some("aaa-scope"));
 
         std::env::remove_var("FNO_SPACES_DIR");
         std::fs::remove_dir_all(&spaces).ok();
