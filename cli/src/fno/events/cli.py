@@ -676,9 +676,11 @@ def gc(
     """Delete expired explicit-ephemeral rows while preserving all other rows."""
     from fno.events import RETENTION_MINIMUM_TTL_HOURS, SchemaUnavailableError
     from fno.events.gc import gc_events
-    from fno.paths import resolve_repo_root
+    from fno.paths import project_events_json
 
-    resolved = events_path or (resolve_repo_root() / ".fno" / "events.jsonl")
+    # The space journal, not a hand-built checkout path: gc on the retired
+    # file compacts rows nobody reads while the live journal grows.
+    resolved = events_path or project_events_json()
     horizon = ttl_hours if ttl_hours is not None else RETENTION_MINIMUM_TTL_HOURS
     try:
         result = gc_events(resolved, ttl_hours=horizon, dry_run=dry_run)

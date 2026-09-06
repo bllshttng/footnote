@@ -18,6 +18,11 @@ REPO="$(cd "$HERE/../.." && pwd)"
 WORK="$(mktemp -d /tmp/fno-cap-gate.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
+# The journal lives in the space now, and the migration that once ferried a
+# seeded checkout file there refuses foreign destinations by design, so the
+# fixture pins ONE spaces root and seeds the path the resolver answers.
+export FNO_SPACES_DIR="$WORK/spaces"
+
 CLI_DIR="$REPO/cli"
 cat > "$WORK/fno-wrapper" <<WRAPPER
 #!/usr/bin/env bash
@@ -52,9 +57,16 @@ sys.exit(0 if denied else 1)
 
 append_attestation() { # <repo> <head> <base> <branch>
   mkdir -p "$1/.fno"
-  python3 - "$1" "$2" "$3" "$4" <<'PYEOF'
+  local journal
+  journal="$(uv run --quiet --project "$CLI_DIR" python3 -c "
+import sys
+from pathlib import Path
+from fno.paths import project_log
+print(project_log('events.jsonl', project_root=Path(sys.argv[1]).resolve()))
+" "$1")"
+  python3 - "$journal" "$2" "$3" "$4" <<'PYEOF'
 import json, sys, pathlib
-repo, head, base, branch = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+journal, head, base, branch = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 row = {"ts": "2026-09-04T12:00:00Z", "type": "review_attestation", "source": "hook",
        "data": {"reviewer": "code-review", "head_sha": head, "verdict": "fail",
                 "branch": branch, "reviewed_base_sha": base,
@@ -62,7 +74,9 @@ row = {"ts": "2026-09-04T12:00:00Z", "type": "review_attestation", "source": "ho
                 "reviewed_line_count": 10, "findings_blocking": 0,
                 "findings_nonblocking": 0, "findings": [], "findings_truncated": False,
                 "dispositions": []}}
-with pathlib.Path(repo, ".fno", "events.jsonl").open("a") as fh:
+path = pathlib.Path(journal)
+path.parent.mkdir(parents=True, exist_ok=True)
+with path.open("a") as fh:
     fh.write(json.dumps(row) + "\n")
 PYEOF
 }
