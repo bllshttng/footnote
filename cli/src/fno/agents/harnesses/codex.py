@@ -829,7 +829,7 @@ def create(
         "--",
         full_prompt,
     ]
-    return _run_codex(
+    result = _run_codex(
         argv=argv,
         output_path=output_path,
         timeout=timeout,
@@ -838,6 +838,12 @@ def create(
         agent_self=agent_self,
         route_env=route_env or None,
     )
+    # The spawn is fully real by here, so a slow or refusing assignment can
+    # never delay or fail it (fire-and-forget; see codex_project).
+    from fno.agents.codex_project import assign_project_detached
+
+    assign_project_detached(cwd, result.session_id)
+    return result
 
 
 # ---------------------------------------------------------------------------

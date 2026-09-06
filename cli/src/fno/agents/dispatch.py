@@ -649,37 +649,6 @@ def _codex_output_path(name: str) -> Path:
     return paths.state_dir() / "agents" / name / "output.jsonl"
 
 
-def _assign_codex_project_detached(cwd: Path, session_id: str) -> None:
-    """Assign a bound headless codex thread to its repo's codex project (x-dc97).
-
-    codex derives no project from cwd, so an unassigned thread reads in the
-    ChatGPT apps as its own Project keyed on the worktree path. The assignment
-    rides the fno-agents binary's hidden `codex-assign-project` verb, which
-    resolves or creates the repo's project and patches the thread; the verb is
-    fail-open by contract. This helper only decides whether to exec it, never
-    waits for it, and never raises: a missing binary or a refused spawn leaves
-    the worker unassigned, which is today's behavior.
-    """
-    if not session_id:
-        return
-    try:
-        from fno.rust_binary import resolve_binary
-
-        binary = resolve_binary()
-        if binary is None:
-            return
-        subprocess.Popen(
-            [str(binary), "codex-assign-project", "--cwd", str(cwd), "--thread-id", session_id],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except Exception:
-        # Fail-open is the contract (see docstring); this never blocks a spawn.
-        pass
-
-
 def _codex_create_path(
     *,
     name: str,
@@ -696,11 +665,6 @@ def _codex_create_path(
     node: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new codex agent under the per-agent flock.
-
-    The bound thread is assigned to its repo's codex project (x-dc97) by a
-    fire-and-forget `codex-assign-project` call after the registry row lands:
-    the spawn is already real by then, and the helper contract is to never
-    delay or fail it.
 
     Mirrors the claude create path's contract: invokes the provider
     adapter, persists the new registry row, emits structured events.
@@ -835,12 +799,6 @@ def _codex_create_path(
             f"clean up via 'codex sessions rm {session_id}' if desired",
             exit_code=12,
         ) from exc
-
-    # Project assignment (x-dc97): the spawn is fully real (row landed), so a
-    # slow, absent, or refusing helper can never delay or fail it. Silent by
-    # contract; the verb itself is fail-open. Detached so the assignment
-    # survives this process.
-    _assign_codex_project_detached(cwd, session_id)
 
     # Spawn birth (x-8cd5 Wave 6): the codex create path is the third spawn
     # seam after _claude_create_path and mux_spawn, and was the one a death
