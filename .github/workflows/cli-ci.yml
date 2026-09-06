@@ -15,6 +15,11 @@ on:
     branches: [main]
     paths:
       - cli/**
+      # The python suite reads claim verdicts through the native batch door,
+      # so a crates-only change reaches these tests. Without this a rust-only
+      # PR merges without ever running them, and the breakage surfaces on the
+      # next PR that happens to touch cli/**, stamped with the wrong author.
+      - crates/**
       - .claude-plugin/**
       - agents/**
       - skills/**
@@ -36,6 +41,7 @@ on:
   pull_request:
     paths:
       - cli/**
+      - crates/**
       - .claude-plugin/**
       - agents/**
       - skills/**
