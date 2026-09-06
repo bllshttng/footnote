@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 
-def assign_project_detached(cwd: Path, session_id: str) -> None:
+def assign_project_detached(cwd: Path, session_id: Optional[str]) -> None:
     """Assign a bound headless codex thread to its repo's codex project.
 
     Fire-and-forget by contract: this execs the verb detached and never
