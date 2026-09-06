@@ -87,6 +87,11 @@ def test_all_autonomous_entry_points_reach_an_owned_routing_seam() -> None:
     # dispatcher. The retired launch-on-write hook must stay gone.
     assert "fno backlog advance --epic <parent>" in blueprint
     assert "autolaunch-on-ready" not in blueprint
+    # The retired hook's native-plan-mode park survives at the skill layer: a
+    # plan stamped source: claude-plan-mode skips the nudge (the front door's
+    # confirm may still be pending).
+    assert "source: claude-plan-mode" in blueprint
+    assert "skip the nudge entirely" in blueprint
     assert '"backlog",\n                "advance",' in active_backlog
     assert "harness_map.resolve_dispatch(**resolve_kwargs)" in advance
     assert "resolved = resolve_dispatch(" in context_think

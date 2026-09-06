@@ -80,7 +80,9 @@ That capture-hook fix is in. The hook dispatch it was waiting for is closed unbu
 
 **The native path inherits the ordered nudge for free.** The front door calls `/blueprint` on the enriched doc. `/blueprint` issues the advance nudge as its last action in every mode. An approved native plan reaches the same ordered dispatch the blueprint path uses, with no hook involvement.
 
-**That inheritance has one residual: the front-door confirm window.** `/blueprint` is called at front-door step 5, before the human is asked "Execute autonomously? [y/N]" at step 6. During that window the node is `ready` and unclaimed. Anything that dispatches a ready node can still start work the human has not approved. That includes the advance nudge itself, the active-backlog drain, a direct `dispatch-node.sh`, and another session's `/target`. Closing that properly means not leaving the node ready-and-unclaimed while the front door is still asking. That is a change to the front door, not to the nudge.
+**That inheritance needed one guard, carried into the nudge.** `/blueprint` is called at front-door step 5, before the human is asked "Execute autonomously? [y/N]" at step 6. The retired hook parked a `source: claude-plan-mode` plan for exactly that reason. The nudge keeps that guard at the skill layer. When the plan frontmatter carries `source: claude-plan-mode`, blueprint completion skips the advance nudge. The front door owns the dispatch decision.
+
+**Known residual: the confirm window is still open to other dispatchers.** During that window the node is `ready` and unclaimed. Anything that dispatches a ready node can still start work the human has not approved: the active-backlog drain, a direct `dispatch-node.sh`, another session's `/target`. Closing that properly means not leaving the node ready-and-unclaimed while the front door is still asking. That is a change to the front door, not to the nudge.
 
 ## Components
 

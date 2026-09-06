@@ -543,6 +543,9 @@ After a plan is written AND its claimed backlog node is intaked (the final step 
 
 - **live epic parent** → `fno backlog advance --epic <parent>`
 - **no parent** → `fno backlog advance`
+- **plan stamped `source: claude-plan-mode`** → skip the nudge entirely
+
+When the plan is stamped `source: claude-plan-mode`, the front door owns the dispatch decision: its "Execute autonomously?" confirm may still be pending, and nudging then can start a worker the human is about to decline. The stamp is read from the plan frontmatter only, never the body.
 
 `fno backlog advance` is the sole launcher. It applies the graph's order (epic rank, parent-scoped child rank, `blocked_by`, join width) and the fleet's limits (spawn-gate headroom, live claims, the auto-continue and autonomy gates), so the node it starts is the top-ranked unblocked child - which may be a different sibling than the plan just written, and that is correct. A disabled gate, no ready child, or zero spawn headroom holds, never spawns, and the receipt names the measured reason (`skipped reason=disabled`, `lane-cap`, `already-claimed`, ...).
 
