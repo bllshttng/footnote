@@ -5291,9 +5291,7 @@ fn tab_location_lines(
     out
 }
 
-/// The session-id shape rule lives in `server/lifecycle_target.rs` next to
-/// the resolver that now consumes it; re-exported here so the public
-/// `fno::mux_cli::session_id_shaped` path keeps resolving.
+/// The shape rule lives in `server/lifecycle_target.rs`; re-exported for the public path.
 pub use crate::server::lifecycle_target::session_id_shaped;
 
 /// (x-b029) The `fno_id` column for one pane: `(state, cell)`. Three states
