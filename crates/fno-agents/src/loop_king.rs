@@ -709,18 +709,26 @@ mod tests {
         // The 2026-09-06 incident state: every row driven, nothing shipped. An
         // inbox-board read answers zero here; the drain read must not.
         let undelivered = stub(r#"{"scope":"epic-x","undelivered":4}"#, "fno-drain-some");
-        let mut q =
-            KingQueue::from_manifest_with_registry(&dir, "k", undelivered, false, None, &registry)
-                .unwrap();
+        let mut q = KingQueue::from_manifest_with_registry(
+            &dir,
+            "k",
+            undelivered,
+            false,
+            None,
+            false,
+            &registry,
+        )
+        .unwrap();
         assert!(
             q.next().unwrap().is_some(),
             "an undelivered scope re-derives the unit"
         );
 
         let drained = stub(r#"{"scope":"epic-x","undelivered":0}"#, "fno-drain-none");
-        let mut q0 =
-            KingQueue::from_manifest_with_registry(&dir, "k", drained, false, None, &registry)
-                .unwrap();
+        let mut q0 = KingQueue::from_manifest_with_registry(
+            &dir, "k", drained, false, None, false, &registry,
+        )
+        .unwrap();
         assert!(
             q0.next().unwrap().is_none(),
             "a drained scope terminates NoWork"
