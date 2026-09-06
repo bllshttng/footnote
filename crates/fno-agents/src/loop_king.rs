@@ -595,17 +595,6 @@ impl Queue for KingQueue {
 mod tests {
     use super::*;
 
-    struct SpacesDirGuard(Option<std::ffi::OsString>);
-
-    impl Drop for SpacesDirGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(value) => std::env::set_var("FNO_SPACES_DIR", value),
-                None => std::env::remove_var("FNO_SPACES_DIR"),
-            }
-        }
-    }
-
     #[test]
     fn mints_a_key_that_names_the_crown_and_never_repeats() {
         let a = mint_walk_key("k-1");
@@ -703,23 +692,17 @@ mod tests {
     fn termination_reads_the_scope_drain_not_the_actionable_board() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _env_lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let _spaces_dir = SpacesDirGuard(std::env::var_os("FNO_SPACES_DIR"));
-        let dir = tempfile::tempdir().unwrap();
-        let spaces = dir.path().join("spaces");
-        std::env::set_var("FNO_SPACES_DIR", &spaces);
-        let kings = crate::paths::space_dir(dir.path()).join("kings");
+        let dir = std::env::temp_dir().join(format!("kingdrain-{}", std::process::id()));
+        let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         fs::write(
             kings.join("k.md"),
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_ceiling: 0\n---\n",
         )
         .unwrap();
-        let registry = dir.path().join("no-registry.json");
+        let registry = dir.join("no-registry.json");
         let stub = |body: &str, name: &str| -> String {
-            let path = dir.path().join(name);
+            let path = dir.join(name);
             fs::write(&path, format!("#!/bin/sh\necho '{body}'\n")).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
             path.to_string_lossy().to_string()
@@ -729,7 +712,7 @@ mod tests {
         // inbox-board read answers zero here; the drain read must not.
         let undelivered = stub(r#"{"scope":"epic-x","undelivered":4}"#, "fno-drain-some");
         let mut q = KingQueue::from_manifest_with_registry(
-            dir.path(),
+            &dir,
             "k",
             undelivered,
             false,
@@ -745,19 +728,14 @@ mod tests {
 
         let drained = stub(r#"{"scope":"epic-x","undelivered":0}"#, "fno-drain-none");
         let mut q0 = KingQueue::from_manifest_with_registry(
-            dir.path(),
-            "k",
-            drained,
-            false,
-            None,
-            false,
-            &registry,
+            &dir, "k", drained, false, None, false, &registry,
         )
         .unwrap();
         assert!(
             q0.next().unwrap().is_none(),
             "a drained scope terminates NoWork"
         );
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
     }
 
     #[test]
