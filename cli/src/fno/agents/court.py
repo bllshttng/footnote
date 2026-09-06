@@ -254,6 +254,33 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     }
 
 
+def crowned_sessions(rows: Optional[list] = None) -> set[str]:
+    """The sessions that hold a crown, read the way ``gather_court`` reads.
+
+    Both answers walk the same non-terminal rows and key on the same
+    ``crown_level`` field, so a row is a king here iff it is a king in the
+    court: one crown reading, never a second census (x-5283 LD1). The spawn
+    gate divides ``max_live`` by this set. An unreadable registry yields an
+    empty set - callers that must tell "no kings" from "the read failed"
+    guard readability themselves (``gather_court`` nulls its summary for
+    exactly that reason).
+    """
+    from fno.agents.registry import TERMINAL_STATUSES, load_registry
+
+    if rows is None:
+        try:
+            rows = load_registry()
+        except Exception:
+            return set()
+    return {
+        row.harness_session_id
+        for row in rows
+        if row.status not in TERMINAL_STATUSES
+        and row.crown_level is not None
+        and row.harness_session_id
+    }
+
+
 def _fmt_row(e: dict[str, Any]) -> str:
     agree = "?" if e["agree"] is None else ("yes" if e["agree"] else "no")
     reason = f"   {e['reason']}" if e["reason"] else ""
