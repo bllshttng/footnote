@@ -234,7 +234,9 @@ fi
 # the staleness verdict, and a mismatch is reported. The search is scoped to
 # the corpus file so a title string echoing elsewhere in history cannot forge
 # an older date, and a target with no git history (a fixture, or a repo where
-# the file is newer than the clone) simply keeps its prose date.
+# the file is newer than the clone) simply keeps its prose date. A shallow
+# clone is that same case: it holds one commit, so every title reads as first
+# appearing there. Prose dates stand, and the staleness test is inert.
 GIT_DATES=""
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GIT_TARGET="$TARGET"
@@ -242,7 +244,7 @@ case "$GIT_TARGET" in
   "$REPO_ROOT"/*) GIT_TARGET="${GIT_TARGET#"$REPO_ROOT"/}" ;;
   /*) GIT_TARGET="" ;;
 esac
-if [[ -n "$GIT_TARGET" ]] && git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+if [[ -n "$GIT_TARGET" ]] && git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [[ "$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository 2>/dev/null)" == "false" ]]; then
   while IFS= read -r title; do
     [[ -z "$title" ]] && continue
     gdate="$(git -C "$REPO_ROOT" log --format=%cs -S"$title" -- "$GIT_TARGET" 2>/dev/null | tail -1)"
