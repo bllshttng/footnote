@@ -24,6 +24,9 @@ fno project|fno config project|d-344fe242
 fno yard|fno agents yard|x-6233
 fno runtime|fno agents workspace (retired outright, tombstoned)|d-cf2d6fe1
 --model-tier|fno backlog update --difficulty <band> - the work-difficulty axis (low, medium, high)|x-baef
+# The launch-on-write hook retired with the ordered advance nudge: blueprint
+# completion nudges fno backlog advance; the hook must stay unrunnable.
+autolaunch-on-ready.sh|fno backlog advance (the ordered drain start)|x-4628
 # d-e1eec854 collapses /fno:law to one user-invoked step. The staged-proposal
 # ceremony is gone: one `fno inbox law set` call records and returns a d- id.
 inbox law prepare|fno inbox law set (one call, no staged proposal)|d-e1eec854

@@ -158,6 +158,66 @@ def test_poisoned_rank_degrades_to_unranked():
         assert _ids_sorted(entries, [poisoned, loose])[0] == "l"
 
 
+# -- Child rank is scoped to its live epic (x-4628) -------------------------
+# The epic's own rank band leads a child's key; the child's rank orders it
+# only among its live-epic siblings and never floats its epic group.
+
+def test_child_rank_orders_only_within_its_epic_group():
+    # AC1-HP: epicA is ranked (band 0), epicB is not. A ranked child of
+    # epicB must not jump epicA's group - the EPIC's band decides position.
+    epic_a = {"id": "epicA", "type": "epic", "priority": "p2",
+              "created_at": "2026-01-01", "rank": 1.0}
+    epic_b = {"id": "epicB", "type": "epic", "priority": "p2",
+              "created_at": "2026-01-01"}
+    child_a = {"id": "ca", "parent": "epicA", "priority": "p3",
+               "created_at": "2026-02-01"}
+    ranked_child_b = {"id": "rb", "parent": "epicB", "priority": "p3",
+                      "created_at": "2026-03-01", "rank": -50.0}
+    entries = [epic_a, epic_b, child_a, ranked_child_b]
+    assert _ids_sorted(entries, [ranked_child_b, child_a]) == ["ca", "rb"]
+
+
+def test_child_rank_does_not_float_group_above_ranked_loose_node():
+    # A ranked loose node still overrides the epics-first heuristic; a
+    # ranked child no longer does (it only orders within its epic).
+    epic = {"id": "epic", "type": "epic", "priority": "p0", "created_at": "2026-01-01"}
+    ranked_child = {"id": "rc", "parent": "epic", "priority": "p2",
+                    "created_at": "2026-02-01", "rank": -99.0}
+    ranked_loose = {"id": "rl", "priority": "p3", "created_at": "2026-03-01",
+                    "rank": 5.0}
+    entries = [epic, ranked_child, ranked_loose]
+    assert _ids_sorted(entries, [ranked_child, ranked_loose]) == ["rl", "rc"]
+
+
+def test_child_rank_orders_siblings_within_one_epic():
+    # Within one epic the ranked sibling comes first even at lower priority
+    # and later created_at - the child rank term sits before child priority.
+    epic = {"id": "epic", "type": "epic", "priority": "p2", "created_at": "2026-01-01"}
+    ranked_child = {"id": "rc", "parent": "epic", "priority": "p3",
+                    "created_at": "2026-03-01", "rank": 1.0}
+    plain_child = {"id": "pc", "parent": "epic", "priority": "p0",
+                   "created_at": "2026-02-01"}
+    entries = [epic, ranked_child, plain_child]
+    assert _ids_sorted(entries, [plain_child, ranked_child]) == ["rc", "pc"]
+
+
+def test_child_rank_stays_scoped_between_two_live_epics():
+    # AC1-HP: two live epics, ranked children under each. Epic priority
+    # picks the group; each child rank only reorders inside its own group.
+    epic_a = {"id": "epicA", "type": "epic", "priority": "p1", "created_at": "2026-01-01"}
+    epic_b = {"id": "epicB", "type": "epic", "priority": "p2", "created_at": "2026-01-01"}
+    a_late_ranked = {"id": "a2", "parent": "epicA", "priority": "p2",
+                     "created_at": "2026-03-01", "rank": 1.0}
+    a_plain = {"id": "a1", "parent": "epicA", "priority": "p2",
+               "created_at": "2026-02-01"}
+    b_top_ranked = {"id": "b1", "parent": "epicB", "priority": "p2",
+                    "created_at": "2026-02-01", "rank": -7.0}
+    entries = [epic_a, epic_b, a_late_ranked, a_plain, b_top_ranked]
+    assert _ids_sorted(entries, [b_top_ranked, a_late_ranked, a_plain]) == [
+        "a2", "a1", "b1",
+    ]
+
+
 def test_rank_band_is_single_source():
     # Locked Decision 4: board and selection MUST share one `_rank_band`
     # helper so they can never drift. Both import the same object.

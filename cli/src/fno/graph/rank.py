@@ -59,6 +59,11 @@ def cmd_rank(
     clear: bool = typer.Option(
         False, "--clear", help="Clear the rank (rejoin the unranked priority flow)"
     ),
+    within_epic: bool = typer.Option(
+        False,
+        "--within-epic",
+        help="Rank within the node's live epic (child default; refused without one)",
+    ),
 ) -> None:
     """Curate a node's position within its (column, project) board lane.
 
@@ -66,9 +71,14 @@ def cmd_rank(
     suffix within a lane; it never changes a node's column. ``--before`` /
     ``--after`` require a *ranked* anchor in the same lane - seed one with
     ``--top`` first. Float midpoints mean inserts never renumber siblings.
+    A node with a live epic parent ranks WITHIN that epic (peers and anchor
+    are its live-epic siblings, whole graph): the child's rank orders it only
+    among its siblings and never moves its epic group. ``--within-epic``
+    spells that scope out loud and is refused for a node with no live epic
+    parent. Loose nodes and epic containers keep the lane scope.
     """
     from fno.graph._constants import has_node_id_prefix
-    from fno.graph._intake import _find_node
+    from fno.graph._intake import _find_node, _live_epic_for, _epics_with_child_progress
     from fno.graph.render import _project_key, make_kanban_column
     from fno.graph.store import locked_mutate_graph
     from fno.graph.cli import _graph_path, _project_plans_from_graph
@@ -145,15 +155,53 @@ def cmd_rank(
         # own peer set and the self-anchor guard fires for partial input.
         tid = node.get("id") or task_id
 
+        # Whole-graph live-epic scope, resolved by the SAME helper the
+        # selection key uses, so the peers a rank orders among are exactly
+        # the siblings the work order compares it against.
+        id_to_entry = {
+            e["id"]: e
+            for e in entries
+            if isinstance(e, dict) and isinstance(e.get("id"), str)
+        }
+        child_progress = _epics_with_child_progress(id_to_entry)
+
+        def _epic_of(e: object) -> str | None:
+            parent = _live_epic_for(e, id_to_entry, child_progress)
+            return parent["id"] if parent is not None else None
+
+        epic_id = _epic_of(node)
+        if within_epic and epic_id is None:
+            typer.echo(
+                f"Error: --within-epic refused: {tid} has no live epic parent. "
+                "Child ranking needs a live epic; loose nodes and epic "
+                "containers keep the (column, project) lane scope.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
         if clear:
             node["rank"] = None
             result.update(action="--clear", rank=None, lane=_lane_label(node), id=tid)
             return entries
 
-        target_lane = _lane(node)
-        # Lane peers exclude the target; ranked peers (anchor included) sorted
+        if epic_id is not None:
+            # Child scope: the whole graph's children of the same live epic.
+            # The child's rank orders only within its epic group, so peers
+            # and anchors come from that set, not the board lane.
+            scope_label = f"epic {epic_id}"
+            peers = [
+                e for e in entries
+                if isinstance(e, dict) and e.get("id") != tid and _epic_of(e) == epic_id
+            ]
+        else:
+            scope_label = _lane_label(node)
+            target_lane = _lane(node)
+            peers = [
+                e for e in entries
+                if isinstance(e, dict) and e.get("id") != tid and _lane(e) == target_lane
+            ]
+        # Peers exclude the target; ranked peers (anchor included) sorted
         # ascending give us the band to insert into.
-        peers = [e for e in entries if e.get("id") != tid and _lane(e) == target_lane]
         ranked = sorted((e for e in peers if _is_ranked(e)), key=lambda e: e["rank"])
 
         if top:
@@ -170,7 +218,18 @@ def cmd_rank(
             if anchor.get("id") == tid:
                 typer.echo("Error: cannot rank a node relative to itself", err=True)
                 raise typer.Exit(code=1)
-            if _lane(anchor) != target_lane:
+            if epic_id is not None:
+                anchor_epic = _epic_of(anchor)
+                if anchor_epic != epic_id:
+                    typer.echo(
+                        f"Error: cross-epic rank rejected: {task_id} is a child of "
+                        f"{epic_id} but anchor {anchor_id} is "
+                        f"{'loose' if anchor_epic is None else f'a child of {anchor_epic}'}. "
+                        "Child rank is scoped to its live epic.",
+                        err=True,
+                    )
+                    raise typer.Exit(code=1)
+            elif _lane(anchor) != target_lane:
                 typer.echo(
                     f"Error: cross-lane rank rejected: {task_id} is in "
                     f"{_lane_label(node)} but anchor {anchor_id} is in "
@@ -198,7 +257,7 @@ def cmd_rank(
                 action = f"--after {anchor_id}"
 
         node["rank"] = new_rank
-        result.update(action=action, rank=new_rank, lane=_lane_label(node), id=tid)
+        result.update(action=action, rank=new_rank, lane=scope_label, id=tid)
         return entries
 
     graph_path = _graph_path()

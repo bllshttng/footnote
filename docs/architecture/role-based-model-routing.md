@@ -92,7 +92,7 @@ The key (secret) never lives in `config.toml`: it is read from the process env v
 
 ## The `build` delivery lane
 
-The auxiliary roles above are coordination work. `build` extends the same mechanism to *delivery* spawns (`/target bg` + blueprint autolaunch), so a whole feature build can run on GLM.
+The auxiliary roles above are coordination work. `build` extends the same mechanism to *delivery* spawns (`/target bg` + the ordered advance drain), so a whole feature build can run on GLM.
 
 `build` is **opt-in by config presence**: it ships unconfigured and routes nothing (fail-safe `None`, byte-identical to today). Writing the roles line IS the consent:
 

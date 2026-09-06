@@ -312,8 +312,8 @@ def test_select_destination_no_active_combo_defers(monkeypatch):
 class TestAutonomousResolveRung:
     """`fno agents dispatch resolve --autonomous`: the seam the shell dispatcher uses.
 
-    dispatch-node.sh reached only the pure resolver, so /target bg and blueprint
-    auto-launch never saw a quota verdict. These pin the folded tuple.
+    dispatch-node.sh reached only the pure resolver, so /target bg and the
+    ordered advance drain never saw a quota verdict. These pin the folded tuple.
     """
 
     def _resolve(self, monkeypatch, route, *, harness=None, node="ab-1111aaaa"):

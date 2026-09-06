@@ -9,3 +9,4 @@
 # review.github_apps|deleted|use one-shot review evidence
 recovery.watchdog_mail_to|deleted|use recovery.watchdog.mail_to
 recovery.watchdog_reap|deleted|use recovery.watchdog.reap
+target.auto_launch_on_blueprint|deleted|use fno backlog advance [--epic <parent>] (the ordered drain start; blueprint completion nudges it)

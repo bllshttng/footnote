@@ -101,7 +101,7 @@ The `--driver megawalk` arm and `loop_megawalk.rs` were removed on 2026-08-03; `
 | 5b | Shell resolver legacy grep fallback | `scripts/lib/graph-resolve.sh` `_resolve_arg_legacy` | KEEP; the no-`fno` escape hatch, reachable only when the package will not import | — |
 | 6a | `init-target-state.sh` grep presence checks | `init-target-state.sh:672,1118` | CLOSED; `fno backlog get --strict`, and the second check deleted as redundant | this PR |
 | 6b | `autocorrect-pack.sh` blocked-state read | `autocorrect-pack.sh:183` | CLOSED; read `.entries`, not `.nodes` | this PR |
-| 6c | plan_path -> node lookup heredocs | `autolaunch-on-ready.sh:108`, `init-target-state.sh:921` | OPEN, deliberately parked | OPEN |
+| 6c | plan_path -> node lookup heredocs | `init-target-state.sh:921` (the `autolaunch-on-ready.sh:108` half was deleted with the script) | OPEN, deliberately parked | OPEN |
 
 Row 4 deviates from the original disposition.
 A version stamp needs a writer change plus an integer someone must remember to bump, and the only sane failure action for a display surface is to keep rendering, which it already does.

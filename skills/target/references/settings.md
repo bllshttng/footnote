@@ -27,22 +27,6 @@ config:
   autonomous_max_turns: 15     # Max turns per session
   autonomous_budget: 25        # Budget per session in USD
 
-  # Target / background-dispatch (Phase 2)
-  target:
-    auto_launch_on_blueprint: false  # opt-in, DEFAULT OFF. When true, finishing
-                                     # /blueprint on a `ready`, non-deferred node
-                                     # auto-dispatches it as a fresh `claude --bg`
-                                     # /target worker (no-merge by default).
-                                     # blocked/deferred/idea nodes are parked
-                                     # (pre-planned future work, never launched).
-                                     # Absent key reads as off (back-compatible).
-                                     # Manual dispatch is always available via
-                                     # `/target bg <node...>` regardless of this flag.
-                                     # NOTE: this is a nested (dotted) key, so the
-                                     # auto-launch gate reads it via `yq`. Without yq
-                                     # installed it reads as off (fails closed/safe) -
-                                     # the manual `/target bg` path has no yq dependency.
-
   # External review
   external_reviewer: gemini    # gemini | coderabbit | claude | codex | none
 

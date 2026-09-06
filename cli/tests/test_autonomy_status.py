@@ -68,8 +68,9 @@ def test_ac1_hp_every_known_spawner_appears(
 
     # master switch + 9 known spawners + groom/restart/evals (wave 2 gated
     # these) + recovery sweep (found while building the wave-3 registry ratchet)
-    # + the king loop.
-    assert len(rows) == 15
+    # + the king loop. The blueprint auto-launch row is gone with its config
+    # leaf, so 15 - 1 = 14.
+    assert len(rows) == 14
     for r in rows:
         assert r.trigger
         assert r.gate_key
@@ -181,11 +182,14 @@ def test_master_switch_off_vetoes_every_other_row(
         "post-merge ritual", "pr_watch (headless PR poll)",
         "recovery sweep (crash respawn)",
         "groom (_spawn_groom_worker)", "restart (_revive_orphans)",
-        "evals runner", "blueprint auto-launch",
+        "evals runner",
         "keep_going (autonomous follow-up)",
     ):
         assert by_name[name].armed is False, name
         assert by_name[name].rank == "autonomy", name
+    # The retired blueprint auto-launch row must never come back: a config
+    # carrying no such leaf renders no phantom spawner.
+    assert "blueprint auto-launch" not in by_name
     for name in (
         "advance (node-walk)", "spawn_think (context /think)",
     ):

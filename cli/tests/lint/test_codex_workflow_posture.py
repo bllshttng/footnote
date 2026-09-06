@@ -7,7 +7,7 @@ POSTURES = {
     "target": "codex posture: target uses the native Stop loop on the main thread; delegated work uses spawn_agent; bg dispatch runs on claude and opencode.",
     "execute": "codex posture: execute uses spawn_agent for wave tasks when available, with main-thread sequential fallback.",
     "think": "codex posture: think researches inline by default. The bg token dispatches a background worker and subagent a subagent.",
-    "blueprint": "codex posture: blueprint plans natively in this thread; auto-launch is Claude bg only, otherwise the node is visibly parked.",
+    "blueprint": "codex posture: blueprint plans natively in this thread; the completion nudge is fno backlog advance (the dispatch resolver picks the harness); a held advance parks the node visibly.",
 }
 
 
