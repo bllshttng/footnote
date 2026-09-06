@@ -17,6 +17,7 @@ use crate::events::EventEmitter;
 // point (`state::update_registry`) can stage the same recovery record for a
 // row removed through ANY door; re-exported so the reap path's references
 // are unchanged.
+use crate::codex_thread_entry::build_codex_thread_entry;
 pub use crate::gc::{gc_sweep, gc_sweep_dry_run};
 use crate::identity::canonical_handle;
 use crate::paths::{self, AgentsHome};
@@ -24,7 +25,6 @@ use crate::protocol::{
     read_request, write_request, write_response, ErrorCode, Namespace, Request, Response,
 };
 pub use crate::receipt::{build_reap_receipt, write_reap_receipt, ReapReceipt};
-use crate::codex_thread_entry::build_codex_thread_entry;
 use crate::state::{self, RegistryEntry};
 use crate::AgentStatus;
 use serde_json::{json, Map, Value};
@@ -4122,7 +4122,6 @@ async fn spawn_claude_stream_lane(
         json!({"short_id": short_id, "harness": "claude", "status": "live", "lane": "stream"}),
     )
 }
-
 
 /// Start and register one Codex app-server thread. The seed turn is detached
 /// after registration so spawn returns a live row immediately while the held
