@@ -10,7 +10,7 @@
 use crate::{
     cancel_sentinel::check_cancel_sentinel, check_supersession::latest_per_name,
     completion_output::allow_output, delivery_completion::pr_passes,
-    disposition_gate::disposition_blockers_on_chain,
+    disposition_gate::disposition_blockers_on_chain, king_termination::read_king_board,
 };
 // The integration tests reach the blocker predicates through loopcheck, the
 // facade they have always imported from; the predicates live in
@@ -11009,7 +11009,7 @@ thread_local! {
 /// Effective bound for one stop-gate read: the configured ceiling (flag or
 /// production default) clamped to whatever remains of this fire's aggregate
 /// budget, floored so the answer is always a positive killable bound.
-fn stopgate_read_timeout() -> std::time::Duration {
+pub(crate) fn stopgate_read_timeout() -> std::time::Duration {
     STOPGATE_READS.with(|cell| {
         let (override_ms, _) = *cell.borrow();
         let configured = if override_ms > 0 {
@@ -11120,7 +11120,7 @@ impl GhReadError {
         }
     }
 
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         match self.kind {
             ReadErrorKind::TimedOut => format!(
                 "external read '{}' timed out after {:.1}s and was killed; retrying next fire",
@@ -12517,115 +12517,6 @@ pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
     }
 }
 
-/// What `fno inbox board --json` answered, or why it could not be read.
-pub(crate) struct KingBoard {
-    pub(crate) actionable: i64,
-    /// The first row of the first actionable non-empty queue, for the block
-    /// reason. A block that only says "work remains" tells the king nothing
-    /// about what to do next.
-    pub(crate) top_row: Option<String>,
-    pub(crate) unreadable: i64,
-    /// Every actionable row identity on this board, `queue:id`.
-    ///
-    /// This is the progress signal. A row present on the previous fire and
-    /// absent now is something the king actually cleared, which is a positive
-    /// marker read from external truth rather than a self-report. The first cut
-    /// keyed progress solely on a `king_action` event, and nothing anywhere
-    /// emitted one, so the dry-fire counter climbed monotonically and every
-    /// king terminated NoProgress on its third fire no matter what it had
-    /// dispatched. A consumer with no producer is the corpus trap inverted.
-    ///
-    /// Note this is NOT board size. The board refills while the king works, so
-    /// the count can rise on the same fire that a row leaves, and that fire is
-    /// still progress.
-    pub(crate) actionable_ids: Vec<String>,
-}
-
-fn row_identity(queue: &str, row: &Value) -> String {
-    let id = row
-        .get("id")
-        .or_else(|| row.get("key"))
-        .or_else(|| row.get("number"))
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| row.to_string());
-    format!("{queue}:{}", id.trim_matches('"'))
-}
-
-/// The value-level parser: the in-process collector hands its payload over as
-/// a `Value`, so the stop gate reads the board without a serialize/parse
-/// round trip.
-pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
-    let actionable = value.get("actionable")?.as_i64()?;
-    let unreadable = value
-        .get("unreadable")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let mut top_row = None;
-    let mut actionable_ids: Vec<String> = Vec::new();
-    if let Some(queues) = value.get("queues").and_then(|q| q.as_array()) {
-        for queue in queues {
-            let name = queue.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-            if queue.get("status").and_then(|v| v.as_str()) == Some("unreadable") {
-                if top_row.is_none() {
-                    let err = queue.get("error").and_then(|v| v.as_str()).unwrap_or("");
-                    top_row = Some(format!("{name} is unreadable: {err}"));
-                }
-                continue;
-            }
-            if queue.get("actionable").and_then(|v| v.as_bool()) != Some(true) {
-                continue;
-            }
-            for row in queue
-                .get("rows")
-                .and_then(|v| v.as_array())
-                .unwrap_or(&vec![])
-            {
-                let identity = row_identity(name, row);
-                if top_row.is_none() {
-                    top_row = Some(identity.clone());
-                }
-                actionable_ids.push(identity);
-            }
-        }
-    }
-    Some(KingBoard {
-        actionable,
-        top_row,
-        unreadable,
-        actionable_ids,
-    })
-}
-
-pub(crate) fn read_king_board(
-    fno_bin: &str,
-    cwd: &Path,
-    state_path: &Path,
-) -> Result<KingBoard, String> {
-    // The board is now read IN PROCESS (x-25b8): the collector is this same
-    // binary's library, so the stop gate passes its own 30s bound in as the
-    // whole-board budget and parses the returned payload directly. No
-    // subprocess, no transport timeout: a timeout of the old shellout read as
-    // "a slow source" when it was the board's own deadline enforcement; that
-    // failure class is gone. The board still self-enforces (every source gets
-    // a slice of the budget and names what it could not read), so an
-    // unreadable queue still blocks - a king that cannot see its board must
-    // not certify itself finished.
-    let _ = fno_bin;
-    let opts = crate::king_board::BoardOpts {
-        budget_ms: stopgate_read_timeout().as_millis() as u64,
-        max_pr_reads: 20,
-        state_path: Some(state_path.to_path_buf()),
-        // The old subprocess board ran with this cwd; config-tier, claims-root
-        // and project-journal resolution anchor on the same directory now.
-        cwd: Some(cwd.to_path_buf()),
-    };
-    let payload = crate::king_board::read_board(&opts);
-    parse_king_board_value(&payload).ok_or_else(|| {
-        "unparseable board payload: the collector returned a shape parse_king_board_value cannot read"
-            .to_string()
-    })
-}
-
 fn king_output(
     decision: &str,
     reason: Option<TerminationReason>,
@@ -12662,24 +12553,18 @@ pub(crate) struct KingFireHistory {
 
 /// Count how many king loop-check fires have landed with no NEW work done.
 ///
-/// Progress is a positive marker, never board size: the board refills while the
-/// king works, because dispatching and merging both create future work, so the
-/// actionable COUNT can rise on the very fire that clears a row.
+/// Progress is a positive marker, never board size: the board refills while
+/// the king works, so the actionable count can rise on the very fire that
+/// clears a row. Two things count, and the first is the one that fires.
 ///
-/// Two things count as progress, and the first is the one that actually fires.
-///
-/// 1. A row identity present on the previous fire and absent now. That is
-///    external truth, read back off the board, and it needs no producer. The
-///    first cut had only rule 2, and NOTHING in this repo emitted the event it
-///    keyed on, so `dry` climbed monotonically and every king terminated
-///    NoProgress on its third fire regardless of how much it had dispatched.
-///    A consumer with zero producers is the corpus's path-uniqueness trap
-///    inverted, and it made the loop useless.
+/// 1. A row identity present on the previous fire and absent now: external
+///    truth off the board, needing no producer. The first cut had only rule
+///    2, nothing emitted the event it keyed on, and every king terminated
+///    NoProgress on its third fire no matter how much it dispatched.
 /// 2. A `king_action` naming a target id this run has not acted on before.
-///    Kept so a real producer works the day one lands. Re-acting on the same id
-///    is deliberately NOT progress: `stalled_holder` rows can survive the only
-///    action a king has for them, and a counter that reset on a repeat would
-///    never converge.
+///    Re-acting on the same id is NOT progress: `stalled_holder` rows can
+///    outlive the only action a king has for them, and a reset-on-repeat
+///    counter would never converge.
 pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFireHistory {
     let Ok(content) = std::fs::read_to_string(events_path) else {
         return KingFireHistory {
@@ -12896,12 +12781,69 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     };
 
     if board.actionable == 0 {
-        let message = if board.unreadable > 0 {
-            "board clean on every readable queue; exiting NoWork"
+        if board.operator_questions_unreadable {
+            return (
+                0,
+                king_output(
+                    "block",
+                    None,
+                    "board clean but outstanding operator questions are unreadable; blocking completion",
+                    0,
+                    dry,
+                ),
+            );
+        }
+        let open_question = board
+            .operator_question_sessions
+            .iter()
+            .any(|owner| owner == &session_id);
+        if open_question {
+            return (
+                0,
+                king_output(
+                    "block",
+                    None,
+                    "board clean but an operator question raised by this reign remains open",
+                    0,
+                    dry,
+                ),
+            );
+        }
+        // The goal keys completion on the crown draining, not on any queue
+        // (2026-09-06 ruling): a board reading clean while nodes sit driven
+        // but unshipped is a quiet beat, never a finish line. An unreadable
+        // drain read must not certify the scope drained, so it skips this
+        // exit and the dry-fire ceiling below bounds the wait.
+        let undelivered = if manifest.scope.is_empty() {
+            0
         } else {
-            "board clean; exiting NoWork"
+            crate::loop_king::scope_undelivered_count(&parsed.fno_bin, &parsed.cwd, &manifest.scope)
+                .unwrap_or(i64::MAX)
         };
-        return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
+        if undelivered == 0 {
+            let message = if board.unreadable > 0 {
+                "board clean on every readable queue; exiting NoWork"
+            } else {
+                "board clean; exiting NoWork"
+            };
+            return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
+        }
+        let message = if undelivered == i64::MAX {
+            "board quiet but scope delivery is unreadable; blocking completion".to_string()
+        } else {
+            format!("board quiet; {undelivered} scope nodes still undelivered")
+        };
+        emit(
+            "king_loop_check",
+            serde_json::json!({
+                "session_id": session_id,
+                "actionable": 0,
+                "undelivered": undelivered,
+                "actionable_ids": [],
+                "cleared": false,
+            }),
+        );
+        return (0, king_output("block", None, &message, 0, dry + 1));
     }
 
     // The ceiling `fno agents king init --max-iterations` advertises. Before this it
@@ -13076,26 +13018,17 @@ pub fn run_loop_check_capture(args: &[String]) -> (i32, String) {
 }
 
 /// `fno-agents review-coverage --cwd <dir> [--pr <n>] [--head <sha>] ...`
-/// (x-3a3f). The standalone review_coverage producer.
+/// (x-3a3f). The standalone review_coverage producer. The only writer of the
+/// event used to be `read_pr_info` past a streak counter inside `decide()`,
+/// so a session with no target manifest could never produce the row the
+/// merge gate demands. This verb exposes the SAME computation through the
+/// SAME resolver and emitter to every path that can reach the gate.
 ///
-/// The only thing that could WRITE a `review_coverage` event used to be
-/// `read_pr_info` under `run_done`, which `decide()` reaches only past a streak
-/// counter - so a session with no target manifest (no stop hook at all) could
-/// never produce the row the merge gate demands, making that gate unsatisfiable
-/// for a shape that can still open a PR. This verb exposes the SAME computation
-/// with the SAME resolver (`resolve_review_inputs`) and the SAME emitter
-/// (`read_pr_info` itself, untouched) to every path that can reach the gate.
-///
-/// Read-only against GitHub (nudge posting lives outside `read_pr_info`),
-/// append-only against the two event logs. It has NO way to assert coverage
-/// without performing the reads: there is no --force, no --assume-covered, and
-/// no config key that skips the coverage guard. A caller wanting a green gate
-/// must cause a review to exist.
-///
-/// Exit contract: 0 = a `review_coverage` row was emitted (covered or
-/// uncovered, the number says which); 3 = no PR for the selector (nothing to
-/// cover); 4 = the gh read failed and the emitted row is `unknown`; 2 = bad
-/// arguments. stdout is always one JSON object.
+/// Read-only against GitHub, append-only against the two event logs. There
+/// is no --force and no key that skips the guard: a caller wanting green
+/// must cause a review to exist. Exit contract: 0 = row emitted, covered or
+/// not, the number says which; 3 = no PR; 4 = gh read failed, the row is
+/// `unknown`; 2 = bad arguments. stdout is one JSON object.
 pub fn run_review_coverage(args: &[String]) -> i32 {
     let (code, json) = decide_review_coverage(args);
     if code != 0 {

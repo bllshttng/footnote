@@ -45,10 +45,17 @@ Every arm emits on **probe failure** as well as on the watched condition. A moni
 
 Not monitored, because each has an owner: individual worker transcripts (court-mode watching, the machinery's job), per-PR CI (the merge arm and the heal driver), and the raw load average (item 5 names why).
 
-Then inject the two native commands, typing them as the operator would:
+Then inject the two native commands, typing them as the operator would. **Send them in two separate turns, never in one breath.** `/goal` is a one-way door: the moment it lands, the stop hook holds the session open and it never idles again, so anything still queued behind it is never delivered. Sending both together leaves the loop waiting forever and the operator has to interrupt the session by hand to get it in. Writing `/loop` first in the same turn does NOT avoid this, because both land in the same input queue and the goal closes the door on whatever has not been read yet.
+
+Inject the loop, end the turn so the harness actually delivers it, then confirm a cron exists before going on:
 
 ```
 fno agents mail send "/loop ${king.checkin_interval} ${king.checkin_text}" --to-self --raw
+```
+
+`CronList` must now name the job. An empty list means the loop never landed, so re-send it and stop: a reign with a goal and no loop has no beat, and only the operator can restart one. Once the cron is there, inject the goal:
+
+```
 fno agents mail send "/goal ${king.goal_text}" --to-self --raw
 ```
 
@@ -56,11 +63,13 @@ Read both texts with `fno config get`. The defaults, verbatim, so a fresh instal
 
 ```
 king.checkin_interval = 30m
-king.checkin_text = reign check-in: run the check-in body of the reign skill (skills/reign/SKILL.md); journal reign_checkin; if nothing changed since the last check-in, print 'no change' and stop
-king.goal_text = reign goal: fno inbox board --json reports no actionable rows for the crown scope, fno agents court --json shows no split, and the operator has not ordered a stand-down; until then keep reigning and never /goal clear on NoProgress
+king.checkin_text = reign check-in. Run the check-in body of the reign skill (skills/reign/SKILL.md). Journal reign_checkin. When nothing changed since the last check-in, print 'no change' and stop.
+king.goal_text = reign goal. When every node in the crown scope reads done or superseded, the goal is met. An open operator question blocks completion. An empty actionable queue is a quiet beat, never a finish line. A stand-down order from the operator ends the reign. Until then keep reigning. Never /goal clear on NoProgress.
 ```
 
-Confirm the goal with `/hooks` and the loop with its receipt. Journal `reign_armed` (`fno doctor event emit`) with every receipt.
+These defaults pass `fno doctor lint style`, and that is load-bearing rather than cosmetic. The mail bus lints the body it sends, so a default carrying a semicolon or a 26-word sentence refuses its own injection. A fresh install running this skill hit that on its first command and had to pass `--style-exception` to arm at all.
+
+Confirm the goal with `/hooks`. The loop was already confirmed by `CronList` above. Journal `reign_armed` (`fno doctor event emit`) with every receipt.
 
 ## The check-in body
 

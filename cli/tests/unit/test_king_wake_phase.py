@@ -6,6 +6,7 @@ ever asserted beside a same-run positive that proves the phase actually ran.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -762,9 +763,17 @@ _BOARD_A = [
         "priority": "p1",
     }
 ]
-#: Same row at p2: hash-visible but below the king's priorities, so these
-#: fixtures isolate the board lane without the timer backstop firing on them.
-_BOARD_A_QUIET = [dict(_BOARD_A[0], priority="p2")]
+#: Same row closed done: hash-visible but drained, so these fixtures isolate
+#: the board lane without the timer backstop firing on them. Priority no
+#: longer quiets a scope - a p2 row is undelivered until it ships.
+_BOARD_A_QUIET = [
+    dict(
+        _BOARD_A[0],
+        priority="p2",
+        status="done",
+        completed_at="2026-09-06T00:00:00Z",
+    )
+]
 #: Same row, priority moved: a change the hash must see.
 _BOARD_A_REPRIORITIZED = [dict(_BOARD_A[0], priority="p0")]
 #: One row added: the refill case this trigger exists for.
@@ -909,7 +918,14 @@ def test_a_sidecar_from_before_rows_were_stored_is_a_first_observation(tmp_path)
     # nothing rather than naming every row "added". The rows sit at p2 so the
     # backstop lane stays out of the case (quiet priority, no fresh terminal).
     quiet_b = _BOARD_A_QUIET + [
-        {"id": "x-2", "project": "proj", "status": "ready", "_kanban_column": "ready", "priority": "p2"}
+        {
+            "id": "x-2",
+            "project": "proj",
+            "status": "done",
+            "completed_at": "2026-09-06T00:00:00Z",
+            "_kanban_column": "done",
+            "priority": "p2",
+        }
     ]
 
     def prime(manifest):
@@ -931,7 +947,16 @@ def test_a_sidecar_from_before_rows_were_stored_is_a_first_observation(tmp_path)
         extra={"entries_fn": lambda: quiet_b, "scope_resolver": _PROJECT_RESOLVER},
     )
 
-    assert rec.dispatches == [], "no honest diff, no board wake"
+    sidecar = _sidecar(manifest)
+    sidecar_contents = sidecar.read_text(encoding="utf-8") if sidecar.is_file() else "<missing>"
+    assert rec.dispatches == [], (
+        "no honest diff, no board wake; "
+        f"cwd={Path.cwd()} FNO_SPACES_DIR={os.environ.get('FNO_SPACES_DIR', '<unset>')} "
+        f"FNO_REPO_ROOT={os.environ.get('FNO_REPO_ROOT', '<unset>')} "
+        f"FNO_CONFIG={os.environ.get('FNO_CONFIG', '<unset>')} "
+        f"manifest={manifest} sidecar={sidecar} sidecar_contents={sidecar_contents!r} "
+        f"events={rec.events!r}"
+    )
     import json as json_mod
 
     payload = json_mod.loads(_sidecar(manifest).read_text(encoding="utf-8"))
@@ -1374,3 +1399,28 @@ def test_the_wake_fires_on_a_real_bus_row_and_drains_by_cursor(tmp_path, monkeyp
 
     assert rec2.dispatches == [], "a drained inbox must not wake again"
     assert rec2.events == []
+
+
+def test_backstop_fires_when_every_row_is_driven_but_unshipped(tmp_path):
+    # The 2026-09-06 incident: the actionable board read empty because every
+    # row had a driver, while nothing had shipped. Assignment is not
+    # delivery, so the backstop still fires.
+    from fno.pr_watch._king_wake import CrownTarget, _backstop_due
+
+    entries = [
+        {"id": "x-root", "type": "epic"},
+        {"id": "x-a", "parent": "x-root", "status": "in_progress", "pr": 1497},
+    ]
+    target = CrownTarget(
+        holder="holder-1",
+        scope="x-root",
+        root=tmp_path,
+        manifest=tmp_path / "k.md",
+    )
+    assert _backstop_due(
+        target,
+        entries,
+        now=datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc),
+        backstop_s=1800,
+        resolver=lambda _: (2, "x-root"),
+    )

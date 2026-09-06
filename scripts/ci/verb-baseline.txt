@@ -96,6 +96,7 @@ inbox outstanding reindex
 king board
 king cancel
 king done
+king drain
 king escalate
 king init
 king manifest-path

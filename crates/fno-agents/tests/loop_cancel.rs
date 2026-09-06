@@ -123,7 +123,11 @@ fn king_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
     fs::create_dir_all(&bin_dir).unwrap();
     write_executable(
         &dir.path().join("fake-fno"),
-        "printf '%s\\n' '{\"actionable\":1,\"queues\":[{\"name\":\"ready\",\"actionable\":true,\"rows\":[{\"id\":\"row-1\"}]}]}'",
+        "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; then\n\
+         \x20 printf '%s\\n' '{\"scope\":\"k\",\"undelivered\":1}'\n\
+         \x20 exit 0\n\
+         fi\n\
+         printf '%s\\n' '{\"actionable\":1,\"queues\":[{\"name\":\"ready\",\"actionable\":true,\"rows\":[{\"id\":\"row-1\"}]}]}'",
     );
     write_executable(&bin_dir.join("claude"), "exit 0");
     write_executable(

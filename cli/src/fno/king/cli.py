@@ -630,6 +630,36 @@ def escalate_cmd(
     typer.echo(qid)
 
 
+@king_app.command("drain")
+def drain_cmd(
+    scope: str = typer.Argument(..., help="The crown scope to count."),
+) -> None:
+    """Is the crown drained: how many scope nodes are not done or superseded.
+
+    The walk's termination reads this, never a queue: a row with a driver
+    leaves the actionable board while its work is unshipped, so the board
+    answers assignment and this answers delivery. An unreadable graph exits
+    nonzero on purpose - a walk that cannot see the scope must not read the
+    failure as drained.
+    """
+    from fno.graph.store import GraphUnreadableError, StoreUnavailable
+    from fno.king.scope import scope_undelivered
+    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
+
+    try:
+        entries = read_entries("king drain", strict=True)
+        undelivered = scope_undelivered(scope, entries)
+    except (
+        ExternalMetadataUnavailable,
+        GraphUnreadableError,
+        StoreUnavailable,
+        ValueError,
+    ) as exc:
+        typer.echo(f"king: drain for {scope!r} unreadable: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps({"scope": scope, "undelivered": undelivered}))
+
+
 def _render(board: dict, max_rows: int) -> None:
     typer.echo(f"actionable: {board['actionable']}")
     for q in board["queues"]:
@@ -659,6 +689,7 @@ agents_king_app.command("init")(init_cmd)
 agents_king_app.command("done")(done_cmd)
 agents_king_app.command("cancel")(cancel_cmd)
 agents_king_app.command("escalate")(escalate_cmd)
+agents_king_app.command("drain")(drain_cmd)
 agents_king_app.command("shape")(shape_cmd)
 # The stop hooks resolve the crown manifest through this hidden verb: the
 # deprecated `fno king` spelling once missed the verb_moves fold and burned

@@ -312,16 +312,29 @@ def _store_board_hash(target: CrownTarget, digest: str, rows: Iterable) -> None:
     _update_sidecar(target, board_hash=digest, board_rows=[list(row) for row in rows])
 
 
-#: Undispatched columns (row[2]) the backstop counts as actionable - a wrong
-#: positive costs one debounced NoWork wake.
-_ACTIONABLE_COLUMNS = frozenset({"ready", "next"})
+def _scope_undelivered(scope: str, entries: list, resolver: Optional[Callable] = None) -> int:
+    """Crown nodes not closed for good; 0 when the scope cannot compile."""
+    from fno.king.scope import scope_undelivered
+
+    try:
+        return scope_undelivered(scope, entries, resolver)
+    except Exception:  # noqa: BLE001 - an uncompilable scope has nothing to re-check
+        return 0
 
 
-def _backstop_due(target: CrownTarget, rows: list, *, now: datetime, backstop_s: int) -> bool:
+def _backstop_due(
+    target: CrownTarget,
+    entries: list,
+    *,
+    now: datetime,
+    backstop_s: int,
+    resolver: Optional[Callable] = None,
+) -> bool:
     """Whether the timer backstop fires: an approximation of the event
     triggers so a missed event cannot strand a scope; a billed wake or king
-    terminal inside the window suppresses it."""
-    from fno.king.scope import KING_PRIORITIES
+    terminal inside the window suppresses it. The count below is the goal's
+    own predicate, done or superseded, so a driven-but-unshipped row keeps
+    the scope wakeable."""
     from fno.king.state import last_run_is_fresh
     from fno.king.wake import read_wakes
     from fno.outstanding.core import events_path
@@ -329,8 +342,7 @@ def _backstop_due(target: CrownTarget, rows: list, *, now: datetime, backstop_s:
     now_iso = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if last_run_is_fresh(events_path(target.root), since_s=backstop_s, now_iso=now_iso):
         return False
-    # rows are (id, status, column, priority): column 2, priority 3.
-    if not any(r[2] in _ACTIONABLE_COLUMNS and r[3] in KING_PRIORITIES for r in rows):
+    if _scope_undelivered(target.scope, entries, resolver) <= 0:
         return False
     stamps = read_wakes(target.manifest, now=now)
     if stamps and (now - stamps[-1]).total_seconds() < backstop_s:
@@ -559,7 +571,9 @@ def run_king_wake(
             changed, fresh_board_hash, fresh_board_rows, wake_detail = _board_trigger(target, rows)
             if changed:
                 reason = "board"
-            elif rows is not None and _backstop_due(target, rows, now=now, backstop_s=backstop_s):
+            elif rows is not None and _backstop_due(
+                target, entries, now=now, backstop_s=backstop_s, resolver=scope_resolver
+            ):
                 reason = "backstop"
         if reason is None:
             continue

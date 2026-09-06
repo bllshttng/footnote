@@ -21,18 +21,20 @@
 //! per invocation (`{fno_id}-w{nanos}`), so no prior king terminal can close
 //! it, and bounds dispatch-bearing walk invocations with an explicit manifest
 //! counter rather than by key collision. What `bill_one_respawn` charges is a
-//! walk that found an actionable board and dispatched a king - at most once
+//! walk that found an undelivered scope and dispatched a king - at most once
 //! per invocation, billed only after the NoWork return - so the counter is a
 //! dispatch budget, never a failure-retry count. At the ceiling the walk
 //! terminates on Budget before dispatching.
 //!
 //! ## What this arm is for
 //!
-//! The in-session arm (`loop-check --driver king`) holds an awake king working
-//! until its board is clean. It cannot help a king that is already gone: a
-//! stop hook does not fire in a session that exited or is rate-limited. This
-//! arm is the outside half. It respawns a king while the board is non-empty
-//! and terminates `NoWork` when it is not.
+//! The in-session arm (`loop-check --driver king`) holds an awake king while
+//! its crown scope has undelivered nodes. It uses actionable board rows to
+//! choose work, but an empty board is a quiet beat while delivery is in flight,
+//! not completion. It cannot help a king that is already gone: a stop hook does
+//! not fire in a session that exited or is rate-limited. This arm is the outside
+//! half. It respawns a king while the scoped delivery count is nonzero and
+//! terminates `NoWork` only when that count reaches zero.
 //!
 //! It does NOT cover the other edge, a king that correctly exited on an empty
 //! board and now needs waking because the board refilled. Nothing in this
@@ -82,7 +84,7 @@ pub struct KingQueue {
     respawn_count: u64,
     respawn_ceiling: u64,
     /// One walk invocation bills exactly one respawn, even though `next()`
-    /// re-derives the unit while the board holds actionable rows.
+    /// re-derives the unit while the scope holds undelivered nodes.
     billed: bool,
     /// Wake mode (`--wake`): the walk is executing a wake the caller already
     /// gated, so it neither spends nor is refused by the failure budget above.
@@ -259,12 +261,72 @@ impl KingQueue {
         self.respawn_ceiling
     }
 
-    fn board_actionable(&self) -> Result<i64, LoopError> {
-        let board =
-            crate::loopcheck::read_king_board(&self.fno_bin, &self.cwd, &self.manifest_path)
-                .map_err(LoopError::Queue)?;
-        Ok(board.actionable)
+    /// The reign's work test for this crown: see `scope_undelivered_count`.
+    fn scope_undelivered(&self) -> Result<i64, LoopError> {
+        scope_undelivered_count(&self.fno_bin, &self.cwd, &self.scope)
     }
+}
+
+/// The reign's work test as a free read: crown nodes not done and not
+/// superseded, answered by the one Python seam that compiles a scope. The
+/// goal text keys completion on that count, so every termination decision
+/// reads it and no queue: a row with a driver leaves the actionable board
+/// while its work is unshipped. An unreadable answer is an error, never
+/// zero - a caller that cannot see the scope must not certify it drained.
+pub(crate) fn scope_undelivered_count(
+    fno_bin: &str,
+    cwd: &Path,
+    scope: &str,
+) -> Result<i64, LoopError> {
+    scope_undelivered_count_with_timeout(
+        fno_bin,
+        cwd,
+        scope,
+        crate::loopcheck::stopgate_read_timeout(),
+    )
+}
+
+fn scope_undelivered_count_with_timeout(
+    fno_bin: &str,
+    cwd: &Path,
+    scope: &str,
+    timeout: std::time::Duration,
+) -> Result<i64, LoopError> {
+    let out = crate::loopcheck::bounded_read(
+        std::ffi::OsStr::new(fno_bin),
+        &["agents", "king", "drain", scope],
+        cwd,
+        "king drain",
+        timeout,
+    )
+    .map_err(|error| {
+        LoopError::Queue(format!("king drain for {scope} failed: {}", error.render()))
+    })?;
+    if !out.status.success() {
+        let detail = String::from_utf8_lossy(&out.stderr_tail);
+        return Err(LoopError::Queue(format!(
+            "king drain for {scope} failed ({}): {}",
+            out.status,
+            detail.trim().chars().take(200).collect::<String>()
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let trimmed = stdout.trim();
+    let payload: serde_json::Value = serde_json::from_str(trimmed).map_err(|_| {
+        LoopError::Queue(format!(
+            "king drain for {scope} returned no JSON (exit {}): {}",
+            out.status,
+            trimmed.chars().take(200).collect::<String>()
+        ))
+    })?;
+    payload
+        .get("undelivered")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            LoopError::Queue(format!(
+                "king drain payload for {scope} carries no undelivered count"
+            ))
+        })
 }
 
 /// `{fno_id}-w{nanos}`: unique per invocation by the nanosecond clock, and
@@ -493,10 +555,10 @@ impl Queue for KingQueue {
         if self.respawn_accounted() && self.at_respawn_ceiling() {
             return Ok(None);
         }
-        // Stays in wake mode too: a spurious trigger over an empty board must
+        // Stays in wake mode too: a spurious trigger over a drained scope must
         // still terminate NoWork, or a missed mail flag spawns a king with
         // nothing to do.
-        if self.board_actionable()? == 0 {
+        if self.scope_undelivered()? == 0 {
             return Ok(None);
         }
         if self.respawn_accounted() && !self.bill_one_respawn()? {
@@ -520,7 +582,7 @@ impl Queue for KingQueue {
     /// Wake mode drops the ceiling term for the same reason `next()` does.
     fn has_pending(&mut self) -> Result<bool, LoopError> {
         Ok((!self.respawn_accounted() || !self.at_respawn_ceiling())
-            && self.board_actionable()? > 0)
+            && self.scope_undelivered()? > 0)
     }
 
     /// Inert close: see the module doc for why this does nothing.
@@ -624,6 +686,106 @@ mod tests {
         .err()
         .expect("escape scope must refuse");
         assert!(err.to_string().contains("unsafe king scope"));
+    }
+
+    #[test]
+    fn termination_reads_the_scope_drain_not_the_actionable_board() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("kingdrain-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let kings = crate::paths::space_dir(&dir).join("kings");
+        fs::create_dir_all(&kings).unwrap();
+        fs::write(
+            kings.join("k.md"),
+            "---\nfno_id: k-1\nscope: epic-x\nrespawn_ceiling: 0\n---\n",
+        )
+        .unwrap();
+        let registry = dir.join("no-registry.json");
+        let stub = |body: &str, name: &str| -> String {
+            let path = dir.join(name);
+            fs::write(&path, format!("#!/bin/sh\necho '{body}'\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_string_lossy().to_string()
+        };
+
+        // The 2026-09-06 incident state: every row driven, nothing shipped. An
+        // inbox-board read answers zero here; the drain read must not.
+        let undelivered = stub(r#"{"scope":"epic-x","undelivered":4}"#, "fno-drain-some");
+        let mut q = KingQueue::from_manifest_with_registry(
+            &dir,
+            "k",
+            undelivered,
+            false,
+            None,
+            false,
+            &registry,
+        )
+        .unwrap();
+        assert!(
+            q.next().unwrap().is_some(),
+            "an undelivered scope re-derives the unit"
+        );
+
+        let drained = stub(r#"{"scope":"epic-x","undelivered":0}"#, "fno-drain-none");
+        let mut q0 = KingQueue::from_manifest_with_registry(
+            &dir, "k", drained, false, None, false, &registry,
+        )
+        .unwrap();
+        assert!(
+            q0.next().unwrap().is_none(),
+            "a drained scope terminates NoWork"
+        );
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
+    }
+
+    #[test]
+    fn drain_rejects_json_from_a_failed_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("kingdrain-failed-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fno-drain-failed");
+        fs::write(
+            &path,
+            "#!/bin/sh\necho '{\"scope\":\"epic-x\",\"undelivered\":0}'\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = scope_undelivered_count(path.to_str().unwrap(), &dir, "epic-x");
+
+        assert!(
+            result.is_err(),
+            "a failed drain must not certify a clean scope"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drain_kills_a_hung_command_inside_its_read_bound() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fno-drain-hung");
+        fs::write(&path, "#!/bin/sh\nsleep 1\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let started = std::time::Instant::now();
+        let result = scope_undelivered_count_with_timeout(
+            path.to_str().unwrap(),
+            dir.path(),
+            "epic-x",
+            std::time::Duration::from_millis(100),
+        );
+
+        let error = result.expect_err("a hung drain must not certify a scope");
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "drain exceeded its wall-clock bound: {:?}",
+            started.elapsed()
+        );
     }
 
     fn write_registry(dir: &Path, status: &str, scope: Option<&str>) -> PathBuf {

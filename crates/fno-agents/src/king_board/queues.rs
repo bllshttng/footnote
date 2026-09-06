@@ -516,7 +516,12 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .map(|qs| {
             qs.iter()
                 .map(|r| {
-                    json!({"id": r.get("id"), "question": r.get("question"), "ts": r.get("ts")})
+                    json!({
+                        "id": r.get("id"),
+                        "question": r.get("question"),
+                        "ts": r.get("ts"),
+                        "session_id": r.get("session_id")
+                    })
                 })
                 .collect()
         })

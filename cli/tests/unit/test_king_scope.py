@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from typer.testing import CliRunner
 
-from fno.king.scope import compile_scope_ids
+from fno.king.scope import compile_scope_ids, scope_undelivered
 
 
 def test_epic_scope_compiles_to_the_root_and_descendants():
@@ -58,6 +59,62 @@ def test_a_non_epic_root_is_refused():
     entries = [{"id": "x-root", "type": "feature"}]
     with pytest.raises(ValueError):
         compile_scope_ids("x-root", entries, resolve=lambda _: (2, "x-root"))
+
+
+# --- the drain read (the reign goal's own count) -------------------------------
+
+
+def test_scope_undelivered_counts_only_nodes_not_done_or_superseded():
+    entries = [
+        {"id": "x-root", "type": "epic"},
+        {
+            "id": "x-done",
+            "parent": "x-root",
+            "status": "done",
+            "completed_at": "2026-09-06T00:00:00Z",
+        },
+        {"id": "x-sup", "parent": "x-root", "superseded_by": "x-done"},
+        {"id": "x-driven", "parent": "x-root", "status": "in_review", "pr": 1497},
+        {"id": "x-blocked", "parent": "x-root", "status": "blocked"},
+        {"id": "x-deferred", "parent": "x-root", "status": "deferred"},
+        {"id": "x-outside", "status": "in_progress"},
+    ]
+    assert scope_undelivered("x-root", entries, resolver=lambda _: (2, "x-root")) == 4
+
+
+def test_a_fully_driven_scope_still_counts_as_undelivered():
+    # The 2026-09-06 incident shape: every row had a driver, the actionable
+    # board read empty, nothing had shipped. Assignment is not delivery.
+    entries = [
+        {"id": "x-root", "type": "epic"},
+        {"id": "x-a", "parent": "x-root", "status": "in_progress", "pr": 1497},
+    ]
+    assert (
+        scope_undelivered("x-root", entries, resolver=lambda _: (2, "x-root")) == 2
+    )
+
+
+def test_scope_undelivered_raises_on_an_uncompilable_scope():
+    # A reader that would END a reign on zero must see the failure, not read
+    # it as drained; the wake caller catches this itself.
+    entries = [{"id": "x-root", "type": "feature"}]
+    with pytest.raises(ValueError):
+        scope_undelivered("x-root", entries, resolver=lambda _: (2, "x-root"))
+
+
+def test_drain_refuses_graph_scope_reads_under_an_external_tracker(
+    tmp_path, monkeypatch
+):
+    from fno.king.cli import agents_king_app
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+
+    result = CliRunner().invoke(agents_king_app, ["drain", "x-root"])
+
+    assert result.exit_code == 1, result.output
+    assert "unavailable under an external tracker backend" in result.output
 
 
 # --- the human board renderer ------------------------------------------------

@@ -106,8 +106,10 @@ def test_map_covers_current_surface_once():
     # ruling deleted this branch's `agents reseat` Python surface: net zero.
     # The crown-durability branch allocated the directly invoked
     # `agents court-orphans` sweep its row. Counted from the merged file,
-    # never taken from either side: 570.
-    assert len(mapped) == 570, (
+    # never taken from either side: 570. This branch also adds
+    # `agents king drain`, the scope drain read the reign terminations key on:
+    # 570 -> 571.
+    assert len(mapped) == 571, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

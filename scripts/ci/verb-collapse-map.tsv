@@ -30,6 +30,7 @@ agents history	T1	agents history	3
 agents kill-check	T1	agents kill-check	4
 agents king cancel	T1	agents king cancel	0
 agents king done	T1	agents king done	5
+agents king drain	T1	agents king drain	1
 agents king escalate	T1	agents king escalate	1
 agents king init	T1	agents king init	7
 agents king manifest-path	T1	agents king manifest-path	3
