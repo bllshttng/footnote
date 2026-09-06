@@ -609,6 +609,12 @@ _PROFILE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # Keep the old spelling on the canonical profile key for one release.
 _VERB_ALIASES = {"do": "execute"}
 
+# The one built-in answer to "what permission mode does an unattended worker
+# get". Formerly config.agents.spawn_permission_mode's default; a constant now,
+# because a second config key answering the same question is what let a bare
+# mesh spawn land in auto while three other paths were pinned (x-7198).
+SPAWN_PERMISSION_BUILTIN = "bypassPermissions"
+
 
 def _seed_of(toks: Sequence[str]) -> Optional[str]:
     """The MESSAGE seed: the ``--message`` value, else the sole positional (the
@@ -665,30 +671,45 @@ def _role_resolves(role: str, settings: object, env: Optional[Mapping[str, str]]
         return False
 
 
+def is_verb_seed(seed: Optional[str]) -> bool:
+    """Whether ``seed``'s first token is a leading slash-verb, by a pure
+    string rule: must start with ``/`` and contain no further ``/`` (an
+    absolute path never matches); strip the ``/`` and an optional ``fno:``
+    namespace; the remainder must be lowercase ``^[a-z0-9][a-z0-9_-]*$``.
+
+    Shared by ``_profile_key`` (which profile row a spawn's seed selects) and
+    the permission-mode built-in rung (x-7198): a slash-verb seed is
+    fire-and-forget work, a seedless or prose seed is a conversation. The
+    attended/unattended axis is DECLARED, never inferred (the response-time
+    instrument was retracted: fno mail is injected as user-shaped text, so no
+    measurement can tell operator chatter from fleet chatter)."""
+    if not seed:
+        return False
+    parts = seed.split()
+    if not parts:
+        return False
+    tok = parts[0]
+    if not tok.startswith("/") or "/" in tok[1:]:
+        return False
+    rest = tok[1:]
+    if rest.startswith("fno:"):
+        rest = rest[len("fno:"):]
+    return bool(_PROFILE_KEY_RE.match(rest))
+
+
 def _profile_key(seed: Optional[str]) -> Optional[str]:
-    """Derive the profile key from a seed's first token by a pure string rule:
-    must start with ``/`` and contain no further ``/`` (an absolute path never
-    matches); strip the ``/`` and an optional ``fno:`` namespace; the remainder
-    must be lowercase ``^[a-z0-9][a-z0-9_-]*$``.
+    """Derive the profile key from a seed's first token (see ``is_verb_seed``).
 
     A seed with no leading slash-verb - every king seed, and a seedless spawn -
     resolves to the literal key ``crown`` instead of None, so
     ``[agents.profiles.crown]`` reaches a crown spawn exactly like every other
-    stage row. The attended/unattended axis is DECLARED, never inferred (the
-    response-time instrument was retracted: fno mail is injected as user-shaped
-    text, so no measurement can tell operator chatter from fleet chatter)."""
-    if not seed:
+    stage row."""
+    if not is_verb_seed(seed):
         return "crown"
-    parts = seed.split()
-    if not parts:
-        return "crown"
-    tok = parts[0]
-    if not tok.startswith("/") or "/" in tok[1:]:
-        return "crown"
-    rest = tok[1:]
+    rest = seed.split()[0][1:]  # type: ignore[union-attr]
     if rest.startswith("fno:"):
         rest = rest[len("fno:"):]
-    return _VERB_ALIASES.get(rest, rest) if _PROFILE_KEY_RE.match(rest) else "crown"
+    return _VERB_ALIASES.get(rest, rest)
 
 
 def _has_permission_mode(toks: Sequence[str]) -> bool:
@@ -1174,7 +1195,8 @@ def inject_spawn_defaults(
     # layered OVER defaults, resolved field-wise into one effective view BEFORE
     # the injection below - so the provider-scoped model rule, effort degrade, and
     # unknown-provider refusal all run once, on the merged fields.
-    verb = _profile_key(_seed_of(out[1:]))
+    seed = _seed_of(out[1:])
+    verb = _profile_key(seed)
     profiles = getattr(agents, "profiles", None) or {}
     profile_verb = verb
     profile = profiles.get(verb) if verb else None
@@ -1238,6 +1260,8 @@ def inject_spawn_defaults(
     cfg_effort, effort_rung = field("effort")
     cfg_substrate, substrate_rung = field("substrate")
     cfg_permission, permission_rung = field("permission_mode")
+    if not cfg_permission and is_verb_seed(seed):
+        cfg_permission, permission_rung = SPAWN_PERMISSION_BUILTIN, "builtin.autonomous"
     cfg_route, route_rung = field("route")
     cfg_account, account_rung = field("account")
     cfg_pane_group, pane_group_rung = field("pane_group")

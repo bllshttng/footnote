@@ -276,7 +276,6 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "silence_deadline_seconds",
         "single_flight_join_budget_seconds",
         "single_flight_ttl_seconds",
-        "spawn_permission_mode",
         "worker_qos",
     }
 )

@@ -2005,9 +2005,9 @@ class SpawnDefaultsBlock(BaseModel):
     The bottom-most operator rung of the spawn precedence chain: an explicit
     CLI flag > these defaults > the built-in (provider: harness-inference then
     claude). Every bare `fno agents spawn` / `/agent spawn` inherits any field
-    set here, injected field-by-field at the Python dispatch seam. Empty string
-    = unset (the `spawn_permission_mode` convention); an unset field falls
-    through to the built-in exactly as today.
+    set here, injected field-by-field at the Python dispatch seam. Empty
+    string = unset; an unset field falls through to the built-in exactly as
+    today.
 
     These defaults reach every spawn that has not pinned a field, including
     autonomous dispatch (`/target`, think dispatch, backlog advance); an explicit
@@ -2473,14 +2473,6 @@ class AgentsBlock(SweepKeys):
     # capacity (a fraction per core) instead of the old hardcoded 1.0, which
     # asked a 12-core machine's fleet to idle at 8% utilisation.
     footprint_sustained_cpu_cores: Optional[float] = None
-    # Default permission/approval mode for AUTONOMOUS dispatchers only
-    # (dispatch-node.sh / `fno backlog advance` / `/think dispatch`). Defaults to
-    # bypass so a fire-and-forget worker enters its worktree without a prompt
-    # nobody attends. An explicit --permission-mode flag wins. Opt out with an
-    # explicit "" (forward nothing -> claude's normal prompting) or "default"
-    # (prompting, expressed positively). Interactive `fno agents spawn` does NOT
-    # read this. Claude-native value, fail-closed at the spawn seam, never here.
-    spawn_permission_mode: str = "bypassPermissions"
 
     @field_validator("profiles", mode="before")
     @classmethod
@@ -2576,6 +2568,46 @@ class AgentsBlock(SweepKeys):
             )
             data = {**data, "provider_limits": data["max_lanes"]}
             data.pop("max_lanes")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_spawn_permission_mode(cls, data: object) -> object:
+        """Migrate a retired `agents.spawn_permission_mode` onto `defaults.permission_mode`.
+
+        Two config keys used to answer "what permission mode does an
+        unattended worker get" (x-7198): this legacy top-level scalar, read by
+        the three autonomous dispatchers, and `defaults.permission_mode`,
+        read by every other spawn. A deleted key must migrate, never be
+        ignored - an operator who set the legacy value must not silently get
+        the built-in instead. Copy it onto the surviving key when that is
+        unset; when both are set, keep the surviving key's value and say so;
+        either way drop the legacy field so the model no longer carries it.
+        """
+        if not isinstance(data, dict) or "spawn_permission_mode" not in data:
+            return data
+        legacy_val = data["spawn_permission_mode"]
+        defaults_raw = data.get("defaults")
+        defaults_dict = dict(defaults_raw) if isinstance(defaults_raw, dict) else {}
+        modern_val = defaults_dict.get("permission_mode")
+        if modern_val:
+            _warn_legacy_once(
+                "agents.spawn_permission_mode",
+                "fno config: agents.spawn_permission_mode is retired; "
+                f"agents.defaults.permission_mode is already set to "
+                f"{modern_val!r} and wins, the legacy value {legacy_val!r} "
+                "is dropped",
+            )
+        else:
+            defaults_dict["permission_mode"] = legacy_val
+            _warn_legacy_once(
+                "agents.spawn_permission_mode",
+                "fno config: agents.spawn_permission_mode is renamed "
+                "agents.defaults.permission_mode; the legacy spelling still "
+                "parses (x-7198)",
+            )
+        data = {k: v for k, v in data.items() if k != "spawn_permission_mode"}
+        data["defaults"] = defaults_dict
         return data
 
     @field_validator("provider_limits", mode="before")
