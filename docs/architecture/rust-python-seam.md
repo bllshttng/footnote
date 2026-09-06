@@ -10,7 +10,7 @@ The measured evidence: the tree contains zero FFI. No `pyo3`, no `maturin`, no `
 
 The reasoning. A `maturin` build step couples the Python wheel to a compiled artifact on every platform. The install contract of a pure-Python package becomes a build matrix. The repo already ships one generated cross-language artifact, `harness_capabilities.toml`, and its freshness needs its own CI tripwire. Adding an ABI to that surface buys fine-grained ownership at the price of a per-platform build. The seam's traffic does not pay for it: the crossing sites are low-frequency verb shells and bounded reads, not hot in-process calls.
 
-The socket of the store keeper does not weaken this ruling. It is a process boundary. A separate `fno-agents-worker` process serves one graph file over a local AF_UNIX socket. This is the pane-keeper model applied to the graph store. No library link, no shared address space, and no ABI exist between the sides. The socket is the one transport that does not spawn a command. The dependency direction requires it: `fno-agents` depends on `fno`, never the reverse. A consumer that lives in `fno` cannot link the store, so it must speak the socket protocol.
+The socket of the store keeper does not weaken this ruling. It is a process boundary. A separate `fno-agents-worker` process serves one graph file over a local AF_UNIX socket. This is the pane-keeper model applied to the graph store. No library link, no shared address space, and no ABI exist between the sides. The socket is the one transport that does not spawn a command. The dependency direction requires it: `fno-agents` depends on `fno`, never the reverse. A consumer that lives in `fno` cannot link the store, so it must speak the socket protocol. That dependency is a dev-dependency only. Production code in `fno-agents` reaches the mux through the `fno` binary, never by linking the crate. That is why the attach verb's portal reach is a crossing and not a call.
 
 The consequence, and it is arithmetic, not preference. A subprocess has no cheap call, so a port must carry a decision's whole fact set or it adds a spawn. Moving half a decision across a process boundary trades one crossing for another and splits the fact set in two. Every later port proposal that splits a decision from its facts is refused by this paragraph, without re-arguing the build matrix.
 
@@ -47,6 +47,7 @@ The table classifies the crossing sites, one line of reason each. The pass that 
 | `client_verbs.rs:3087` | conforming | resume delegation by exec, exit code and signals carried by the child |
 | `client_verbs.rs:3155` | conforming | pane launch through the one front door to the mux server |
 | `client_verbs.rs:3463` | conforming | recovery relaunch through the same single door |
+| `attach.rs:28` | conforming | attach reaches the mux thread portal through the same door; the server owns the thread pane, and the fno crate is a dev-only dependency here |
 | `daemon.rs:1468` | conforming | reapable predicate read from its one implementation, shared by three callers |
 | `daemon.rs:3486` | conforming | the cleanup sweep executes through the verb that owns the buckets and guards |
 | `daemon.rs:3530` | conforming | stale-question reconcile routed through the verb that owns it, no apply form |

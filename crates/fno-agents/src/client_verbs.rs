@@ -285,7 +285,7 @@ const ORPHAN_MARKER: &str = "                                          no _done 
 /// `paths.state_dir() / "events.jsonl"`. The Rust agents home is
 /// `state_dir/agents`, so the events log is the agents-home parent's
 /// `events.jsonl`.
-fn trace_events_path(home: &AgentsHome) -> PathBuf {
+pub(crate) fn trace_events_path(home: &AgentsHome) -> PathBuf {
     home.root()
         .parent()
         .map(|p| p.join("events.jsonl"))
@@ -2416,7 +2416,11 @@ fn acquire_named_session_claim(
 /// (fall through to a normal attach) or carries no revivable uuid (nothing to
 /// point at - never print an unusable command). Probes reality (locate_session +
 /// socket), never the registry `status` field, matching the resume smart verb.
-fn claude_attach_pointer(claude_home: &ClaudeHome, entry: &Value, name: &str) -> Option<String> {
+pub(crate) fn claude_attach_pointer(
+    claude_home: &ClaudeHome,
+    entry: &Value,
+    name: &str,
+) -> Option<String> {
     claude_attach_pointer_with_truth(claude_home, entry, name, family1_truth_state)
 }
 
@@ -2480,7 +2484,7 @@ fn shlex_quote(s: &str) -> String {
 /// printable non-ASCII (e.g. accented letters) stays literal, which is correct
 /// for every realistic agent name / cwd / short-id input. The rare divergence is
 /// non-ASCII code points that are non-printable above the C1 range (cv-b6bd4bf4).
-fn py_repr_str(s: &str) -> String {
+pub(crate) fn py_repr_str(s: &str) -> String {
     let has_single = s.contains('\'');
     let has_double = s.contains('"');
     let quote = if has_single && !has_double { '"' } else { '\'' };
@@ -2515,7 +2519,7 @@ fn py_repr_str(s: &str) -> String {
 /// `shutil.which`-style PATH lookup: true iff `name` resolves to an executable
 /// regular file (an absolute/relative path with a separator is checked directly;
 /// otherwise each `$PATH` entry is probed).
-fn which_on_path(name: &str) -> bool {
+pub(crate) fn which_on_path(name: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let is_exec = |p: &Path| -> bool {
         match fs::metadata(p) {
@@ -2544,7 +2548,7 @@ fn which_on_path(name: &str) -> bool {
 /// Deliberately a free function (not a `.emit()` method) so the crate's
 /// production-emit-kind scanner (which keys on `.emit(`/`.emit_fields(`) does
 /// not treat these Python-side audit kinds as Rust daemon event kinds.
-fn append_agents_event(events_path: &Path, kind: &str, fields: &[(&str, Value)]) {
+pub(crate) fn append_agents_event(events_path: &Path, kind: &str, fields: &[(&str, Value)]) {
     let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut parts: Vec<String> = fields
         .iter()
@@ -2588,7 +2592,7 @@ fn append_agents_event(events_path: &Path, kind: &str, fields: &[(&str, Value)])
 /// Read the registry rows for the subprocess-exec verbs. Thin alias over
 /// [`load_registry_entries`] (the validation + `"agents"`/`"entries"` key
 /// handling lives there) so resume/attach/logs and trace share one reader.
-fn read_registry_entries(path: &Path) -> Result<Vec<Value>, String> {
+pub(crate) fn read_registry_entries(path: &Path) -> Result<Vec<Value>, String> {
     load_registry_entries(path)
 }
 
@@ -3642,7 +3646,7 @@ pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
 
 /// Reproduce `_validate_lifecycle_name`: returns `Err((exit, message))` on a
 /// rejected name (the message is printed to stderr with a trailing newline).
-fn validate_lifecycle_name(name: &str) -> Result<(), (i32, String)> {
+pub(crate) fn validate_lifecycle_name(name: &str) -> Result<(), (i32, String)> {
     if name.is_empty() {
         return Err((2, "agent name must not be empty".to_string()));
     }
@@ -3674,7 +3678,7 @@ fn validate_lifecycle_name(name: &str) -> Result<(), (i32, String)> {
 /// (session, pane_id) pair, which is the same rule `agents_view::derive_rows`
 /// applies. A half-written field must not decide that one door drives the row
 /// and the other refuses it.
-fn is_codex_thread_row(entry: &Value) -> bool {
+pub(crate) fn is_codex_thread_row(entry: &Value) -> bool {
     entry
         .get("host_mode")
         .and_then(Value::as_str)
@@ -3686,526 +3690,6 @@ fn is_codex_thread_row(entry: &Value) -> bool {
             .unwrap_or("")
             .is_empty()
         && entry.get("mux").is_none_or(Value::is_null)
-}
-
-/// (x-296f) Attach through the harness's OWN declared `interactive_attach`
-/// form, or `None` when it declares none (the caller then keeps its refusal).
-///
-/// EXEC, never proxy: this replaces the process, so the terminal's child is
-/// the harness's own TUI and fno renders nothing. The argv is the same one the
-/// mux viewport renders from the declaration - one declaration, two doors,
-/// pinned byte-identical by `attach_argv_matches_the_mux_renderer`.
-///
-/// The row-shape predicate (`is_codex_thread_row`) is load-bearing: a declared
-/// form widens WHICH harnesses can attach, never which row shapes. Cursor
-/// Agent is not exempted - its row declares interactive_attach unsupported
-/// (a second --resume is a rival TUI, not a join), so the probe below reads
-/// "declares none" and the row keeps the generic arms.
-fn attach_via_declared_form(
-    harness: &str,
-    entry: &Value,
-    name: &str,
-    events_path: &Path,
-) -> Option<i32> {
-    if !is_codex_thread_row(entry) {
-        return None;
-    }
-    let render = |session: Option<&str>, short: Option<&str>| {
-        crate::harness_capabilities::render_session_argv_with_ids(
-            harness,
-            "interactive_attach",
-            session,
-            short,
-        )
-    };
-    // A form takes EXACTLY ONE id, and the renderer refuses the other spelling
-    // rather than ignoring it - so probe with a placeholder to learn whether
-    // this harness declares a form at all, before the row's real (possibly
-    // empty) ids can turn "declares none" and "declares one I cannot fill"
-    // into the same answer.
-    let declares =
-        render(Some("probe-session"), None).is_ok() || render(None, Some("probeid")).is_ok();
-    if !declares {
-        return None;
-    }
-    let session_id = entry
-        .get("harness_session_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let short_id = entry
-        .get("short_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let argv = match render(Some(session_id), None).or_else(|_| render(None, Some(short_id))) {
-        Ok(argv) => argv,
-        Err(_) => {
-            // A thread with no turns yet has no session id recorded, and the
-            // harness resolves a session BY the rollout its first turn writes.
-            // Name that rather than handing the operator the vendor's "no
-            // rollout found for thread id" (measured 2026-08-28,
-            // codex-cli 0.149.1).
-            eprintln!(
-                "{harness} worker {} has no session id on file yet; nothing to attach to. \
-                 Follow it instead: fno agents peek {} --follow",
-                py_repr_str(name),
-                name
-            );
-            append_agents_event(
-                events_path,
-                "agent_attach_refused",
-                &[
-                    ("name", Value::String(name.to_string())),
-                    ("provider", Value::String(harness.to_string())),
-                    ("reason", Value::String("no-session-id-yet".to_string())),
-                ],
-            );
-            return Some(13);
-        }
-    };
-    if !which_on_path(&argv[0]) {
-        eprintln!("{} not on PATH", argv[0]);
-        return Some(14);
-    }
-    // A TUI needs a terminal. Without this the exec still happens and the
-    // operator gets the vendor's bare "stdin is not a terminal" with no clue
-    // which command produced it or what to do instead.
-    // SAFETY: isatty performs no I/O and only reads the descriptor's mode.
-    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
-        eprintln!(
-            "attach needs a terminal ({harness} draws its own interface, and fno never renders \
-             one). From a script, read instead: fno agents peek {name} --follow"
-        );
-        append_agents_event(
-            events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.to_string())),
-                ("provider", Value::String(harness.to_string())),
-                ("reason", Value::String("no-tty".to_string())),
-            ],
-        );
-        return Some(13);
-    }
-    append_agents_event(
-        events_path,
-        "agent_attach_exec",
-        &[
-            ("name", Value::String(name.to_string())),
-            ("provider", Value::String(harness.to_string())),
-            ("session_id", Value::String(session_id.to_string())),
-        ],
-    );
-    // Replace this process: the terminal's child is the harness itself. A
-    // failed pre-exec inside the composed script still runs the attach, which
-    // produces the more specific of the two errors in the terminal the
-    // operator is already looking at.
-    use std::os::unix::process::CommandExt;
-    let mut command = std::process::Command::new(&argv[0]);
-    command.args(&argv[1..]);
-    if let Some(cwd) = entry
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
-        command.current_dir(cwd);
-    }
-    let err = command.exec();
-    eprintln!("fno agents attach: failed to exec {}: {err}", argv[0]);
-    Some(1)
-}
-
-/// (x-c198) Attach to a pi session by EXEC'ing pi's own TUI on the same
-/// session id, in the row's own cwd.
-///
-/// `None` means this is not a pi thread row and the caller should fall through
-/// to its refusal. `Some(code)` means this function owned the outcome.
-///
-/// One argv builder, two doors: the mux viewport's `Reach::Drive` arm runs the
-/// same command. Neither renders anything.
-///
-/// **This is a JOIN, and the cwd is what makes it one.** pi's session store is
-/// cwd-scoped, so the TUI finds the rpc lane's live session only when it runs
-/// in the same directory. Run elsewhere, the same argv CREATES a second
-/// session under one id and says nothing, which is the silent half of this
-/// harness. So the cwd is read off the row and the child is placed in it; a
-/// row with no cwd recorded is refused rather than defaulting to this
-/// process's own directory.
-fn attach_pi_session(entry: &Value, name: &str, events_path: &Path) -> Option<i32> {
-    // NOT `is_codex_thread_row`, and the difference is load-bearing. That
-    // predicate excludes a pane-hosted row, which is right for codex (its
-    // thread lives in a daemon, and a pane row's process already has a place)
-    // and wrong for every pi row fno can produce today: the pi spawn lane IS
-    // the pane lane, so gating on it refused every real row with "pi agents
-    // are one-shot", contradicting the docs shipped in the same change.
-    //
-    // pi needs neither exclusion, because a second pi on one session id is a
-    // measured-safe JOIN rather than a rival launch. What it does need is the
-    // PAIR: a session id, and the cwd that scopes it.
-    let session_id = entry
-        .get("harness_session_id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())?;
-    let cwd = entry
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|c| !c.is_empty());
-    let Some(cwd) = cwd else {
-        eprintln!(
-            "fno agents attach: registry row {name:?} records no cwd, and a pi session is \
-the pair (cwd, session id). Attaching from the wrong directory would CREATE a second session \
-under this id rather than joining the live one, so this is refused."
-        );
-        append_agents_event(
-            events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.to_string())),
-                ("provider", Value::String("pi".to_string())),
-                ("reason", Value::String("pi-row-has-no-cwd".to_string())),
-            ],
-        );
-        return Some(13);
-    };
-    if !which_on_path("pi") {
-        eprintln!("pi CLI not on PATH");
-        return Some(14);
-    }
-    // The cwd has to EXIST, and checking it here is what lets the NotFound arm
-    // below mean the binary and only the binary. A pruned worktree is this
-    // fleet's normal lifecycle, and `Command::current_dir` on a missing
-    // directory fails with ErrorKind::NotFound, which that arm would report as
-    // "pi CLI not on PATH" - sending an operator to reinstall pi over a stale
-    // registry row.
-    let cwd_path = Path::new(cwd);
-    if !cwd_path.is_dir() {
-        eprintln!(
-            "fno agents attach: the cwd recorded for {name:?} is gone: {cwd}. A pi session is \
-the pair (cwd, session id), so there is nothing here to attach to."
-        );
-        append_agents_event(
-            events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.to_string())),
-                ("provider", Value::String("pi".to_string())),
-                ("reason", Value::String("pi-row-cwd-missing".to_string())),
-                ("detail", Value::String(cwd.to_string())),
-            ],
-        );
-        return Some(13);
-    }
-
-    // The duplicate refusal, fired at the door where a human reads it. pi's own
-    // behaviour on an ambiguous id is to pick the OLDEST file and print
-    // nothing, which is how three sessions of real work became unreachable.
-    // An `Unknown` reading is NOT a duplicate and never blocks an attach: it
-    // means the store could not be read, and an unreadable store is evidence
-    // of nothing.
-    let lookup = crate::pi::lookup_sessions(cwd_path, session_id);
-    if let Some(refusal) = crate::pi::duplicate_resume_refusal(cwd_path, session_id, &lookup) {
-        eprintln!("fno agents attach: {refusal}");
-        append_agents_event(
-            events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.to_string())),
-                ("provider", Value::String("pi".to_string())),
-                (
-                    "reason",
-                    Value::String("pi-session-id-ambiguous".to_string()),
-                ),
-                ("session_id", Value::String(session_id.to_string())),
-            ],
-        );
-        return Some(13);
-    }
-
-    // An attach during a live CREATE is a second create, not a join, and the
-    // store cannot say so: a session's file appears at the first turn ATTEMPT,
-    // so for the first seconds of a spawn the lookup above reads `None` for a
-    // session that is being made right now. Joining is safe; creating twice is
-    // the silent race this whole lane exists to close, and the only instrument
-    // that sees the window is the claim the spawn holds across it.
-    //
-    // So this reads that claim and refuses while it is held. `Live` and
-    // `Suspect` both mean held: `Suspect` is an unexpired TTL whose holder is
-    // not provably alive, and the acquire path already declines to steal it.
-    // `Free`, `Stale` and `Corrupted` are not evidence of a create in flight
-    // and never block an attach - a refusal on an unreadable claim would fail
-    // closed against the operator over a file that proves nothing.
-    let create_key = crate::pi::create_claim_key(cwd_path, session_id);
-    let (claim_state, claim_record) = crate::claims::status(&create_key, None);
-    if crate::pi::attach_blocked_by_create(claim_state) {
-        let holder = claim_record
-            .as_ref()
-            .map(|r| r.holder.clone())
-            .unwrap_or_else(|| "an unnamed holder".to_string());
-        eprintln!(
-            "fno agents attach: a pi session CREATE is in flight for {session_id:?} in {cwd}, \
-held by {holder}. pi writes its session file at the first turn ATTEMPT, so the store cannot \
-tell a session being made right now from one that is absent, and attaching into that window \
-CREATES a second session under this id rather than joining. Wait for the holder to finish, \
-then attach again."
-        );
-        append_agents_event(
-            events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.to_string())),
-                ("provider", Value::String("pi".to_string())),
-                ("reason", Value::String("pi-create-in-flight".to_string())),
-                ("session_id", Value::String(session_id.to_string())),
-                ("detail", Value::String(holder)),
-            ],
-        );
-        return Some(13);
-    }
-
-    let argv = crate::pi::pi_attach_argv(session_id);
-    let mut command = std::process::Command::new(&argv[0]);
-    command.args(&argv[1..]);
-    command.current_dir(cwd);
-    // Inherit stdio so pi's TUI takes over this terminal; mirror its exit code.
-    match command.status() {
-        Ok(status) => {
-            let exit_code = status.code().unwrap_or(1);
-            append_agents_event(
-                events_path,
-                "agent_attached",
-                &[
-                    ("name", Value::String(name.to_string())),
-                    ("provider", Value::String("pi".to_string())),
-                    ("session_id", Value::String(session_id.to_string())),
-                    ("pi_exit", Value::from(exit_code)),
-                ],
-            );
-            Some(exit_code)
-        }
-        Err(exc) if exc.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("pi CLI not on PATH");
-            Some(14)
-        }
-        Err(exc) => {
-            eprintln!("fno agents attach: pi session attach failed: {exc}");
-            Some(1)
-        }
-    }
-}
-
-/// `fno-agents attach <name>` -- interactive attach to a running claude agent,
-/// a codex thread, or a pi session (every other harness is refused). Mirrors
-/// Python `dispatch.attach_agent` + the `cmd_attach` Typer wrapper.
-pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
-    let mut name: Option<String> = None;
-    for a in rest {
-        match a.as_str() {
-            other if other.starts_with("--") => {
-                eprintln!("fno-agents: unknown attach flag: {other}");
-                return 2;
-            }
-            other => {
-                if name.is_some() {
-                    eprintln!(
-                        "fno-agents: attach takes one NAME (got extra: {}).",
-                        echo_extra(other)
-                    );
-                    return 2;
-                }
-                name = Some(other.to_string());
-            }
-        }
-    }
-    let name = match name {
-        Some(n) => n,
-        None => {
-            eprintln!("fno-agents: attach needs a <name>");
-            return 2;
-        }
-    };
-
-    if let Err((code, msg)) = validate_lifecycle_name(&name) {
-        eprintln!("{msg}");
-        return code;
-    }
-
-    let entries = match read_registry_entries(&home.registry_json()) {
-        Ok(e) => e,
-        Err(exc) => {
-            eprintln!("registry read failed: {exc}");
-            return 12;
-        }
-    };
-    let entry = match resolve_entry_with_heal(&entries, &name, &home.registry_json()) {
-        Ok(e) => e,
-        Err(err) => {
-            eprintln!("{}", err.message());
-            return 2;
-        }
-    };
-    let entry = &entry;
-
-    let harness = entry
-        .get("harness")
-        .and_then(Value::as_str)
-        .or_else(|| entry.get("provider").and_then(Value::as_str))
-        .unwrap_or("");
-    let events_path = trace_events_path(home);
-
-    // (x-296f) A harness whose contract row DECLARES an interactive_attach
-    // form execs it - codex today, whatever a harness declares tomorrow -
-    // still gated on the thread-row shape. One mechanism replaces the old
-    // two: the declared `pre_exec` starts the harness's own service (codex's
-    // `app-server daemon start`) where a separate `ensure_codex_daemon`
-    // pre-flight used to refuse, and its `codex-daemon-unavailable` refusal
-    // event is gone with it. A failed daemon start still runs the attach and
-    // surfaces codex's own more specific error.
-    if harness != "claude" {
-        if let Some(code) = attach_via_declared_form(harness, entry, &name, &events_path) {
-            return code;
-        }
-    }
-
-    // (x-c198) A pi row execs pi's own TUI on the same session id, which JOINS
-    // the session its rpc lane is driving. pi declares no form (its argv
-    // carries env-dependent provider/model), so it keeps its own builder.
-    if harness == "pi" {
-        if let Some(code) = attach_pi_session(entry, &name, &events_path) {
-            return code;
-        }
-    }
-
-    // Every other non-claude harness refuses attach (claude and a declared
-    // thread are the only rows with a persistent session to attach to).
-    // `!= "claude"` instead of an allowlist so a provider added to the roster
-    // inherits the refusal rather than falling through to a claude-shaped
-    // attach (x-51f6 US1).
-    if harness != "claude" {
-        eprintln!(
-            "{harness} agents are one-shot; no persistent session to attach to. Use 'fno agents logs {name} --follow' for live output."
-        );
-        append_agents_event(
-            &events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.clone())),
-                ("provider", Value::String(harness.to_string())),
-                (
-                    "reason",
-                    Value::String("one-shot-provider-no-persistent-session".to_string()),
-                ),
-            ],
-        );
-        return 13;
-    }
-
-    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
-    if short_id.is_empty() {
-        eprintln!(
-            "registry entry {} has no short id on file; cannot attach.",
-            py_repr_str(&name)
-        );
-        return 12;
-    }
-
-    // Attach stays live-only, but a dead claude row (supervisor gone) with a
-    // recorded session uuid refuses with the exact revival commands instead of
-    // dead-ending in claude's own "session not found" (US3). The decision is a
-    // pure helper so it is testable without the exec path.
-    if let Some(msg) = claude_attach_pointer(&ClaudeHome::from_env(), entry, &name) {
-        eprintln!("{msg}");
-        append_agents_event(
-            &events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.clone())),
-                ("provider", Value::String("claude".to_string())),
-                (
-                    "reason",
-                    Value::String("exited-revivable-pointer".to_string()),
-                ),
-            ],
-        );
-        return 13;
-    }
-
-    if !which_on_path("claude") {
-        eprintln!("claude CLI not on PATH");
-        return 14;
-    }
-
-    // x-d285: the inline attach consumes the canonical re-entry plan. A fresh
-    // claude process re-resolves its account namespace from ambient env, so a
-    // bare `claude attach` from the wrong shell lands in the wrong config
-    // namespace (the falsified "attach has nothing to do" premise). The plan
-    // restores the recorded account namespace and route settings together, or
-    // refuses before anything launches. A proven default row keeps the
-    // historical bare invocation: the plan carries no env and no --settings.
-    let plan = match crate::reentry::resolve_reentry(
-        &home.registry_json(),
-        &name,
-        crate::reentry::ReentryTransition::Attach,
-        None,
-        None,
-    ) {
-        Ok(p) => p,
-        Err(reason) => {
-            eprintln!("fno agents attach: refused: {reason}");
-            append_agents_event(
-                &events_path,
-                "agent_attach_refused",
-                &[
-                    ("name", Value::String(name.clone())),
-                    ("provider", Value::String("claude".to_string())),
-                    ("reason", Value::String("reentry-plan-refused".to_string())),
-                    ("detail", Value::String(reason)),
-                ],
-            );
-            return crate::reentry::REENTRY_REFUSED_EXIT;
-        }
-    };
-    let mut command = std::process::Command::new(&plan.argv[0]);
-    command.args(&plan.argv[1..]);
-    for (key, value) in &plan.env {
-        command.env(key, value);
-    }
-
-    // Inherit stdio so the claude TUI takes over; mirror its exit code.
-    match command.status() {
-        Ok(status) => {
-            let exit_code = status.code().unwrap_or(1);
-            append_agents_event(
-                &events_path,
-                "agent_attached",
-                &[
-                    ("name", Value::String(name.clone())),
-                    ("provider", Value::String("claude".to_string())),
-                    ("short_id", Value::String(short_id.to_string())),
-                    ("claude_exit", Value::from(exit_code)),
-                ],
-            );
-            exit_code
-        }
-        Err(exc) if exc.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("claude CLI not on PATH");
-            14
-        }
-        Err(exc) => {
-            append_agents_event(
-                &events_path,
-                "agent_attached",
-                &[
-                    ("name", Value::String(name.clone())),
-                    ("provider", Value::String("claude".to_string())),
-                    ("short_id", Value::String(short_id.to_string())),
-                    ("claude_exit", Value::Null),
-                    ("error", Value::String(exc.to_string())),
-                    ("error_type", Value::String("OSError".to_string())),
-                ],
-            );
-            eprintln!("claude attach failed: {exc}");
-            1
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -132,6 +132,10 @@ def _run_rust(args: list[str], home: Path) -> subprocess.CompletedProcess:
         "FNO_CLAUDE_PROJECTS_DIR": home.parent / "empty-claude-projects",
         "FNO_CODEX_SESSIONS_DIR": home.parent / "empty-codex-sessions",
         "FNO_OPENCODE_STORAGE_DIR": home.parent / "empty-opencode" / "storage",
+        # attach tries the mux thread portal first; an empty mux dir means
+        # no socket, so the verb falls through to the path under test
+        # instead of driving the operator's live server.
+        "FNO_MUX_DIR": home.parent / "empty-mux",
     }
     for key, path in isolated_stores.items():
         if key not in env:
@@ -485,15 +489,16 @@ def test_attach_refuses_codex_parity(tmp_path) -> None:
         [{"name": "cx", "provider": "codex", "cwd": "/tmp/x", "log_path": "/x/l", "short_id": "cx", "project_root": "/x", "status": "live", "created_at": "t"}],
     )
     rust = _run_rust(["attach", "cx"], agents)
-    # Mirrors dispatch.attach_agent's one-shot refusal message + exit 13.
-    # The seeded row carries a short_id and no interactive host mode, so it is
-    # not a codex THREAD (x-6678) and keeps the refusal.
-    expected = (
-        "codex agents are one-shot; no persistent session to attach to. "
-        "Use 'fno agents logs cx --follow' for live output.\n"
-    )
-    assert rust.stderr == expected
-    assert rust.returncode == 13
+    # Characterization: there is no Python attach leg to mirror. The seeded
+    # row carries a short_id and no interactive host mode, so it is not a
+    # codex THREAD (x-6678) and no declared form fires. codex reads
+    # features.attach = native, so the refusal names the daemon-kept lane
+    # the row needs and takes the portal's own no-server exit.
+    assert rust.returncode == 24, rust.stderr
+    assert 'features.attach = "native"' in rust.stderr
+    assert "fno mux serve" in rust.stderr
+    assert "fno agents logs cx --follow" in rust.stderr
+    assert "one-shot" not in rust.stderr
 
 
 @requires_rust
@@ -544,12 +549,13 @@ def test_attach_refuses_gemini_verbatim(tmp_path) -> None:
           "short_id": "", "project_root": "/x", "status": "live", "created_at": "t"}],
     )
     rust = _run_rust(["attach", "gm"], agents)
-    expected = (
-        "gemini agents are one-shot; no persistent session to attach to. "
-        "Use 'fno agents logs gm --follow' for live output.\n"
-    )
-    assert rust.stderr == expected
-    assert rust.returncode == 13
+    # gemini declares no attach claim, so the row reads unmeasured and the
+    # refusal names the key, the state and the probe that settles it.
+    assert rust.returncode == 13, rust.stderr
+    assert 'features.attach = "unmeasured"' in rust.stderr
+    assert "fno agents harness probe gemini" in rust.stderr
+    assert "fno agents logs gm --follow" in rust.stderr
+    assert "one-shot" not in rust.stderr
 
 
 # --------------------------------------------------------------------------- #
@@ -708,7 +714,9 @@ def test_rust_reads_real_python_written_registry(tmp_path) -> None:
     # id is the LAST token: codex's globals (-c, --cd) all sit before the
     # subcommand, so nothing trails the positional.
     assert rust.stdout.strip().endswith(" resume uuid-9")
-    # attach refuses codex (agent FOUND -> the refusal message, not "not found").
+    # attach found the agent: a codex row with no thread shape reads the
+    # native features.attach claim and names the daemon-kept lane (exit 24),
+    # never "not found" (exit 2).
     att = _run_rust(["attach", "cx"], agents)
-    assert att.returncode == 13
-    assert "one-shot" in att.stderr
+    assert att.returncode == 24, att.stderr
+    assert 'features.attach = "native"' in att.stderr

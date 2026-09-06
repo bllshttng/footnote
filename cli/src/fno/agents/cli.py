@@ -3111,14 +3111,13 @@ def cmd_ask(
     """
     from fno import rust_binary
     from fno._flag_aliases import refuse_retired_provider
-    from fno.agents import rust_runtime
     from fno.agents.dispatch import (
         AMBIGUOUS_PROJECT_EXIT_CODE,
         UNKNOWN_AGENT_EXIT_CODE,
         DispatchAskError,
         resolve_to_project,
     )
-    from fno.agents.rust_runtime import BIN_NOT_FOUND_EXIT, route_to_rust, runtime_mode
+    from fno.agents.rust_runtime import refuse_without_binary, route_to_rust, runtime_mode
 
     refuse_retired_provider(_provider_tombstone)
 
@@ -3171,22 +3170,7 @@ def cmd_ask(
     if runtime_mode() == "python" or binary is None:
         # There is no Python ask implementation to fall back to: the legs
         # were ported and deleted in the same change that moved this caller.
-        forced = (
-            f"{rust_runtime.RUNTIME_ENV}=python is set, and there is no Python "
-            "ask left to force; unset it with the binary installed. "
-            if runtime_mode() == "python"
-            else ""
-        )
-        print(
-            "fno agents ask: the Python ask runtime was ported to the Rust "
-            f"runtime, so ask requires the '{rust_binary.BINARY_NAME}' binary, "
-            f"which was not found. {forced}"
-            "Get it via `pip install fno` (bundled wheel), `cargo install "
-            "fno-agents`, or `cargo build --release -p fno-agents` plus "
-            f"`export {rust_binary.BINARY_ENV}=<path>`.",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=BIN_NOT_FOUND_EXIT)
+        refuse_without_binary("ask")
 
     args = ["ask"]
     if harness:
@@ -5166,33 +5150,22 @@ def cmd_attach(
 ) -> None:
     """Attach to a running agent session interactively.
 
-    With a live mux server: drives the one dedicated thread pane, which
-    routes every harness by capability (claude and a codex thread drive,
-    a codex pane navigates to its tab, gemini locates).
+    The Rust client verb owns attach; with an installed binary the runtime
+    router execs it before this function runs. With a live mux server it
+    drives the one dedicated thread pane, which routes every harness by
+    capability. With no mux server: claude execs ``claude attach
+    <short_id>``, a codex thread execs its declared attach form, pi joins
+    its own session, and every other row is asked of the capability table.
+    A row whose harness reads ``features.attach = native`` names the
+    daemon-kept lane it needs (exit 24); any other state refuses by name
+    with the key, the state and the probe that settles it (exit 13).
 
-    With no mux server, claude path: shells out to ``claude attach
-    <short_id>`` with inherited stdin/stdout/stderr - the claude TUI
-    takes over until you detach. fno's exit code mirrors claude's on
-    detach.
-
-    With no mux server, codex thread path: shells out to ``codex resume
-    <thread-id> --remote unix://<control-socket>``, which opens codex's
-    own TUI on the thread the shared app-server daemon owns. fno draws
-    nothing either way; each harness renders its own interface.
-
-    Every other harness: refused with exit 13, because it has no
-    persistent session to attach to.
+    There is no Python attach left: a missing binary is refused here.
     """
-    from fno.agents.dispatch import DispatchAskError, attach_agent
+    from fno.agents.rust_runtime import refuse_without_binary
 
-    try:
-        result = attach_agent(name)
-    except DispatchAskError as exc:
-        print(str(exc), file=sys.stderr)
-        raise typer.Exit(code=exc.exit_code) from exc
-
-    if result.exit_code != 0:
-        raise typer.Exit(code=result.exit_code)
+    _ = name
+    refuse_without_binary("attach")
 
 
 # ---------------------------------------------------------------------------

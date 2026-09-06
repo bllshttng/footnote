@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
 
 import pytest
 from typer.testing import CliRunner
@@ -247,57 +246,40 @@ def test_cli_reconcile_surfaces_dispatch_error(
 # ---------------------------------------------------------------------------
 
 
-def test_cli_attach_claude_propagates_exit(
-    monkeypatch, runner: CliRunner
-) -> None:
-    """cmd_attach exits with claude's exit code on detach."""
-    from fno.agents import dispatch
-    from fno.agents.cli import agents_app
+def test_cli_attach_without_installed_binary_refuses(monkeypatch) -> None:
+    """The Rust client owns attach; with no installed binary the Python
+    verb refuses legibly instead of running a leg that no longer exists."""
+    from fno import rust_binary
+    from fno.agents import rust_runtime as rr
+    from fno.cli import app
 
-    def fake_attach(name: str):
-        return dispatch.AttachResult(
-            name=name, provider="claude", exit_code=0
-        )
+    called: list = []
+    monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
 
-    monkeypatch.setattr(dispatch, "attach_agent", fake_attach)
-
-    result = runner.invoke(agents_app, ["attach", "worker-claude"])
-    assert result.exit_code == 0
-
-
-def test_cli_attach_codex_exits_13(monkeypatch, runner: CliRunner) -> None:
-    """codex attach surfaces exit 13 from AttachResult."""
-    from fno.agents import dispatch
-    from fno.agents.cli import agents_app
-
-    def fake_attach(name: str):
-        return dispatch.AttachResult(
-            name=name, provider="codex", exit_code=13
-        )
-
-    monkeypatch.setattr(dispatch, "attach_agent", fake_attach)
-
-    result = runner.invoke(agents_app, ["attach", "worker-codex"])
-    assert result.exit_code == 13
+    result = CliRunner().invoke(app, ["agents", "attach", "worker-claude"])
+    assert called == []
+    assert result.exit_code == rr.BIN_NOT_FOUND_EXIT
+    assert "ported" in result.stderr
 
 
-def test_cli_attach_propagates_dispatch_error(
-    monkeypatch, runner: CliRunner
-) -> None:
-    """DispatchAskError-raising attach surfaces exit code 2."""
-    from fno.agents import dispatch
-    from fno.agents.cli import agents_app
+def test_cli_attach_python_mode_refuses(monkeypatch, tmp_path: Path) -> None:
+    """``FNO_AGENTS_RUNTIME=python`` cannot force attach onto Python: the
+    refusal names the flag so the operator learns the contract changed."""
+    from fno import rust_binary
+    from fno.agents import rust_runtime as rr
+    from fno.cli import app
 
-    def fake_attach(name: str):
-        raise dispatch.DispatchAskError(
-            f"agent {name!r} not found in registry", exit_code=2
-        )
+    called: list = []
+    monkeypatch.setenv(rr.RUNTIME_ENV, "python")
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: tmp_path / "bin")
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
 
-    monkeypatch.setattr(dispatch, "attach_agent", fake_attach)
-
-    result = runner.invoke(agents_app, ["attach", "ghost"])
-    assert result.exit_code == 2
-    assert "not found" in result.output
+    result = CliRunner().invoke(app, ["agents", "attach", "worker-claude"])
+    assert called == []
+    assert result.exit_code == rr.BIN_NOT_FOUND_EXIT
+    assert rr.RUNTIME_ENV in result.stderr
 
 
 # ---------------------------------------------------------------------------
