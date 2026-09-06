@@ -737,6 +737,7 @@ def _payload(
     top_limit: int | None = None,
     command_limit: int | None = None,
     load_snapshot: Any = _NO_LOAD_SNAPSHOT,
+    confirmed_orphans: list[OrphanTestBinary] | None = None,
 ) -> dict[str, Any]:
     cpu_capacity = _cpu_capacity_cores()
     if load_snapshot is _NO_LOAD_SNAPSHOT:
@@ -794,7 +795,9 @@ def _payload(
                 "zombies": orphan.zombies,
                 "command": orphan.command,
             }
-            for orphan in _confirmed_orphans(reading)
+            for orphan in (
+                _confirmed_orphans(reading) if confirmed_orphans is None else confirmed_orphans
+            )
         ],
         "exit_code": exit_code,
     }
@@ -841,6 +844,7 @@ def _emit_result(
         exit_code = 4
     top_limit = 5 if cause_only else None
     command_limit = 1024 if cause_only else None
+    confirmed = _confirmed_orphans(reading)  # computed once; json + human share it
     payload = _payload(
         reading,
         process_threshold=process_threshold,
@@ -848,6 +852,7 @@ def _emit_result(
         top_limit=top_limit,
         command_limit=command_limit,
         load_snapshot=load_snapshot,
+        confirmed_orphans=confirmed,
     )
     if note is not None:
         payload["degraded"] = note
@@ -911,7 +916,6 @@ def _emit_result(
                 f"({reading.direct_process_count} direct, roster unavailable)"
             )
         typer.echo(f"transient calls: {reading.transient_call_count}")
-        confirmed = _confirmed_orphans(reading)
         if confirmed:
             typer.echo(f"orphaned test binaries: {len(confirmed)}")
             for orphan in confirmed:

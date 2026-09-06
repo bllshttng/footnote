@@ -319,12 +319,35 @@ def _test_timeout_seconds() -> int:
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
-    """SIGKILL the run's whole process group, then reap the leader."""
+    """SIGKILL the run's whole process group, then reap the leader.
+
+    ProcessLookupError is the TOCTOU window where the child exited between
+    the timeout and getpgid; wait() reaps it. PermissionError is NOT caught:
+    start_new_session makes us own the group so it is near-impossible, and
+    if it ever surfaces a loud crash beats a wedged proc.wait() with no kill.
+    """
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         pass  # the group is already gone; nothing to kill
     proc.wait()
+
+
+def _wait_or_kill_group(proc: subprocess.Popen, timeout: int) -> tuple[int, bool]:
+    """Wait up to ``timeout``; past it, kill the GROUP and reap.
+
+    Returns ``(rc, killed)``. On any other exception (Ctrl-C included: the
+    child runs in its own session and would otherwise outlive the SIGINT
+    with all its grandchildren) the group is killed before re-raising.
+    """
+    try:
+        return proc.wait(timeout=timeout), False
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        return (proc.returncode if proc.returncode is not None else 124), True
+    except BaseException:
+        _kill_group(proc)
+        raise
 
 
 def _run_suite_bounded(cmd: Sequence[str], env: Mapping[str, str], timeout: int, **kw) -> int:
@@ -336,17 +359,13 @@ def _run_suite_bounded(cmd: Sequence[str], env: Mapping[str, str], timeout: int,
     ``_run_bounded`` below is the same discipline with a DEVNULL contract.)
     """
     proc = subprocess.Popen(cmd, env=env, start_new_session=True, **kw)
-    try:
-        return proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)
+    rc, killed = _wait_or_kill_group(proc, timeout)
+    if killed:
         sys.stderr.write(
             f"fno doctor test: TIMEOUT after {timeout}s; process group killed\n"
         )
         return 124
-    except BaseException:
-        _kill_group(proc)
-        raise
+    return rc
 
 
 def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
@@ -2076,7 +2095,8 @@ def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) ->
     + os.killpg, never the `timeout` binary: that is absent on macOS (a recorded
     trap) and exits 127, measuring nothing. start_new_session makes the child a
     group leader so killpg reaches its grandchildren too, since a shell harness
-    spawns subprocesses a direct SIGKILL would orphan.
+    spawns subprocesses a direct SIGKILL would orphan. The wait/kill ladder is
+    shared with the suite runner (`_wait_or_kill_group`).
     """
     start = time.monotonic()
     proc = subprocess.Popen(
@@ -2084,31 +2104,7 @@ def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) ->
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    try:
-        rc = proc.wait(timeout=kill_bound_s)
-        killed = False
-    except subprocess.TimeoutExpired:
-        # ProcessLookupError is the TOCTOU window where the child exited between
-        # the timeout and getpgid; wait() reaps it. PermissionError is NOT caught:
-        # start_new_session makes us own the group so it is near-impossible, and
-        # if it ever surfaces a loud crash beats a wedged proc.wait() with no kill.
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
-        rc = proc.returncode if proc.returncode is not None else 124
-        killed = True
-    except KeyboardInterrupt:
-        # The harness runs in its own session (start_new_session), so it does not
-        # share the terminal's SIGINT and would outlive a Ctrl-C with all its
-        # grandchildren. Kill the group before re-raising so nothing is orphaned.
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
-        raise
+    rc, killed = _wait_or_kill_group(proc, kill_bound_s)
     return rc, time.monotonic() - start, killed
 
 

@@ -28148,9 +28148,9 @@ mod tests {
 
     #[test]
     fn emergency_roster_kills_plain_child_and_spares_keeper_child() {
-        let mut plain =
+        let plain =
             ChildGuard::spawn(std::process::Command::new("/bin/sh").args(["-c", "exec sleep 30"]));
-        let mut keeper =
+        let keeper =
             ChildGuard::spawn(std::process::Command::new("/bin/sh").args(["-c", "exec sleep 30"]));
         let plain_pid = plain.id();
         let keeper_pid = keeper.id();
