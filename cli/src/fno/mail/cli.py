@@ -341,15 +341,11 @@ def _refuse_forged_envelope(body: str) -> None:
 
 
 def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
-    """Refuse a body over the relay word cap.
-
-    Mail enforces the relay compression contract (80 words or fewer with
-    outcome, reason, next action); the word cap is the part a machine decides,
-    so the sentence-shape rules do not run here. Fail-open: an empty body, the
-    kill switch (``FNO_STYLE_ENFORCE=0``), a ``style-exception:`` line, or a
-    non-empty ``--style-exception`` reason skips the check. The refusal prints
-    both word counts. It is stderr, not a mail body, so it is exempt from the
-    cap itself.
+    """Refuse a body over the relay word cap (rules 1 to 6 do not run on
+    mail: the cap is the part a machine decides). Fail-open: an empty body,
+    the kill switch, a ``style-exception:`` line, or a non-empty
+    ``--style-exception`` reason skips the check. The refusal prints both
+    word counts; stderr is not a mail body, so it is exempt from the cap.
     """
     if os.environ.get("FNO_STYLE_ENFORCE") == "0" or not body:
         return
