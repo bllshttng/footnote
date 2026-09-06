@@ -297,8 +297,6 @@ hard_max_load_per_cpu = 40.0
 worker_qos = "utility"
 # Absolute override for the doctor footprint sustained-CPU threshold, in cores. Unset, the threshold derives from measured CPU capacity (a fraction per core) instead of an absolute constant that asked a 12-core machine's fleet to idle at 8%.
 # footprint_sustained_cpu_cores = <unset>   # optional; no default
-# Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); defaults to bypassPermissions so fire-and-forget workers skip the worktree-entry prompt. An explicit flag wins; opt out with an explicit "" (forward nothing) or "default" (prompt positively). Claude-native, fail-closed at the spawn seam.
-spawn_permission_mode = "bypassPermissions"
 
 [agents.a2a]
 # Allow agents to auto-open agent-to-agent threads.
@@ -469,7 +467,7 @@ enabled = true
 enabled = true
 
 [recovery]
-# Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.spawn_permission_mode default); a non-bypass worker cannot run autonomously and is not resumed.
+# Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.defaults.permission_mode built-in for autonomous dispatch); a non-bypass worker cannot run autonomously and is not resumed.
 enabled = true
 # How stale a bg session must be (seconds) before recovery acts on it.
 idle_threshold_seconds = 900
