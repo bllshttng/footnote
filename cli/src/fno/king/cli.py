@@ -119,6 +119,13 @@ def init_cmd(
 
     try:
         manifest_path = king_manifest_path(scope)
+    except ValueError as exc:
+        # A path-unsafe scope member ('..' or a '/') is a refusal, not a
+        # traceback: the safety check lives in king_manifest_path.
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+
+    try:
         fields = write_manifest(
             manifest_path,
             scope=scope,

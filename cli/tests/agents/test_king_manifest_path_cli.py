@@ -141,3 +141,25 @@ def test_king_init_canonicalizes_a_set_scope_into_one_manifest(
     assert str(canonical) in result.output
     stray = king_manifest_path("e-2,e-1,e-2", state_root=court / ".fno")
     assert not stray.exists(), "a non-canonical spelling armed a second manifest"
+
+
+def test_king_init_refuses_a_path_unsafe_scope_without_a_traceback(
+    court, monkeypatch
+) -> None:
+    """The path-safety refusal in king_manifest_path is an operator typo
+    ('a/b'), so it must surface as a named refusal at exit 2, not as a
+    ValueError traceback."""
+    import fno.king.state as king_state
+    from fno.cli import app
+
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+    monkeypatch.setattr(king_state, "king_state_root", lambda: court / ".fno")
+
+    result = CliRunner().invoke(
+        app,
+        ["king", "init", "--scope", "a/b", "--harness-session-id", CALLER_SESSION],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "unsafe king scope" in result.output
+    assert not isinstance(result.exception, ValueError)
