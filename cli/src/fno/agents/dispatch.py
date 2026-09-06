@@ -954,6 +954,7 @@ def _opencode_serve_spawn(
     cwd: Path,
     from_name: str,
     model: Optional[str],
+    node: Optional[str] = None,
 ) -> str:
     """Delegate an opencode bg spawn to the Rust serve lane; return short_id.
 
@@ -990,6 +991,8 @@ def _opencode_serve_spawn(
         argv += [f"--from-name={from_name}"]
     if model:
         argv += [f"--model={model}"]
+    if node:
+        argv += ["--node", node]
     # The seed rides as the fenced positional tail, never a bare flag value:
     # with --name set the whole tail is the message, and a hyphen-leading
     # message as the value of `--message <msg>` would die as an unknown flag
@@ -3236,10 +3239,9 @@ def dispatch_spawn(
 
                 # 4b2. opencode bg: delegate to the Rust serve lane. This arm
                 # exists because node dispatch (x-84a8) forces spawn onto the
-                # Python parser (--node is Python-only), and without the arm an
-                # opencode bg spawn died on the retired-gemini fallthrough.
-                # Provenance flags are inert on bg (they ride the pane wrapper
-                # only), so delegation drops nothing; role, resume, and crown
+                # Python parser, and without the arm an opencode bg spawn died
+                # on the retired-gemini fallthrough. The resolved node is
+                # carried explicitly into the Rust serve lane; role, resume, and crown
                 # have no carrier on the serve row yet, so they are refused
                 # here rather than silently lost.
                 if harness == "opencode":
@@ -3268,6 +3270,7 @@ def dispatch_spawn(
                         cwd=cwd,
                         from_name=from_name,
                         model=model,
+                        node=node,
                     )
                     _emit_ev(
                         "agent_ask_done",

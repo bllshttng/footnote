@@ -1684,7 +1684,14 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // on the serve IS the worker (steering/mail over the API is a filed
         // follow-up).
         ("opencode", "bg") => emit!(fno_agents::opencode_serve::dispatch_opencode_serve(
-            home, name, &message, from_name, &cwd, model, effort,
+            home,
+            name,
+            &message,
+            from_name,
+            &cwd,
+            model,
+            effort,
+            params.get("node").and_then(|v| v.as_str()),
         )),
 
         ("agy", "headless") => {
