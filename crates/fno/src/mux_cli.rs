@@ -7138,6 +7138,10 @@ mod tests {
     #[path = "paneless_hint_tests.rs"]
     mod paneless_hint_tests;
 
+    // The reseat registry-half tests, same reason.
+    #[path = "reseat_verb_tests.rs"]
+    mod reseat_verb_tests;
+
     #[test]
     fn workspace_prune_classifies_pristine_running_and_named_tabs() {
         let tabs = vec![

@@ -428,8 +428,9 @@ def test_python_agent_verbs_match_registered_commands() -> None:
     # left ``registered_commands`` when they moved out of cli.py, so the
     # RUST_CLIENT_VERBS intersection below cannot see them. Naming them here
     # keeps the guard's teeth: a new folded leaf must be added to
-    # PYTHON_AGENT_VERBS and named here, or the assert fires.
-    folded_python_leaves = {"reseat"}
+    # PYTHON_AGENT_VERBS and named here, or the assert fires. (`reseat` left
+    # when the whole verb moved to the native `fno mux thread reseat`.)
+    folded_python_leaves: set[str] = set()
     lazy_python_owned = (
         set(rr.FOLDED_AGENT_SUBCOMMANDS) & set(rr.RUST_CLIENT_VERBS)
     ) | folded_python_leaves

@@ -83,9 +83,11 @@ enum Role {
     /// naming 0 and 1 put two threads in two panes for the tab menu's Join
     /// actions to tile.
     MuxThread(Vec<OsString>),
-    /// (v70) `mux thread reseat <pane-id> [--portal N]`: move a live
-    /// pane-hosted worker into a portal seat, keeping its PTY. The registry
-    /// `mux` flip is the Python front door's half (`fno agents reseat`).
+    /// (v70) `mux thread reseat <agent-name | pane-id> [--portal N]`: move a
+    /// live pane-hosted worker into a portal seat, keeping its PTY, and clear
+    /// the row's registry `mux` ref on the receipt. One process owns the
+    /// whole move (operator ruling, 2026-09-06); the former Python front
+    /// door is deleted.
     MuxThreadReseat(Vec<OsString>),
     /// (x-b80d) `mux view <selector> [--url] [--fzf] [--json]`: point the
     /// operator's view at the pane hosting an agent, selected by node id,
