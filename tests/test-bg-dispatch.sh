@@ -836,6 +836,16 @@ echo "$out" | grep -q -- "--permission-mode acceptEdits" \
   && pass "x-a5e4 P2: claude spawn still forwards --permission-mode" \
   || fail "x-a5e4 P2: claude should forward --permission-mode: $out"
 
+# ---- x-7198: neither --permission-mode NOR agents.defaults.permission_mode
+#      is set - the claude leg must still fall back to the built-in
+#      bypassPermissions, not drop the flag (the mock's "config get" returns
+#      empty for this key, matching a real unset config) ----
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
+echo "$out" | grep -q -- "--permission-mode bypassPermissions" \
+  && pass "x-7198: claude spawn falls back to bypassPermissions when unset" \
+  || fail "x-7198: claude spawn should fall back to bypassPermissions: $out"
+
 # ---- x-567d AC2-ERR: no autonomous substrate (resolve fails) -> hard-fail
 #      naming config.dispatch.harness, node NOT launched ----
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
