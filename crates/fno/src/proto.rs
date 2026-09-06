@@ -321,7 +321,7 @@ fn default_true() -> bool {
 /// where the slot lookup knows occupancy. Additive, so the compatibility
 /// floor does not move; a repoint keeps owning its geometry and says so.
 /// v68 (x-5baf): `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
-pub const PROTO_VERSION: u32 = 69;
+pub const PROTO_VERSION: u32 = 70;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -4210,8 +4210,9 @@ mod tests {
         // The registry-keyed identity pair (StopAgent/RemoveAgent carry
         // `harness_session_id`; AgentRow carries `liveness_age_s`) bumps it
         // 66 -> 67. `LayoutSlot.cwd` (x-5baf) bumps it 67 -> 68. The
-        // ThreadReseat control verb bumps it 68 -> 69.
-        assert_eq!(PROTO_VERSION, 69);
+        // SquadReload verb (x-0fd8) bumps it 68 -> 69 (PR 1499, queued
+        // ahead); the ThreadReseat control verb (x-867b) takes 70.
+        assert_eq!(PROTO_VERSION, 70);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
