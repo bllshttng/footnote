@@ -75,7 +75,7 @@ fn thread_pane_placement_field_is_additive() {
 
 #[test]
 fn thread_reseat_verb_decodes_both_portal_forms() {
-    // (v69) A pre-v69 client never sends ThreadReseat; the verb is NEW, so
+    // (v70) A pre-v70 client never sends ThreadReseat; the verb is NEW, so
     // the pin is its wire shape: the bare pane form (portal defaults) and
     // the explicit index form must both decode and round-trip.
     let bare: ControlVerb = serde_json::from_str(r#"{"ThreadReseat":{"pane":42}}"#).unwrap();
