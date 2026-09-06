@@ -1106,8 +1106,10 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             f"rows and refuses. Raise ROSTER_TIMEOUT_S",
         ]
     by_sid: dict[str, Any] = {}
+    registry_rows: list[Any] = []
     try:
-        for entry in load_registry():
+        registry_rows = list(load_registry())
+        for entry in registry_rows:
             if getattr(entry, "harness", None) != "claude":
                 continue
             sid = (
@@ -1162,6 +1164,36 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             node=node,
             cwd=cwd,
         ))
+    # The Claude roster is a harness-specific instrument. Registry rows are
+    # the authoritative fallback for other harnesses, especially Codex thread
+    # workers whose app-server has no row in `claude agents --json --all`.
+    from fno.agents.spawn_gate import LIVE_STATUSES
+
+    seen_row_ids = {row.row_id for row in out}
+    for entry in registry_rows:
+        if getattr(entry, "harness", None) == "claude":
+            continue
+        if getattr(entry, "status", None) not in LIVE_STATUSES:
+            continue
+        row_id = (
+            getattr(entry, "harness_session_id", None)
+            or getattr(entry, "session_id", None)
+            or getattr(entry, "short_id", None)
+            or getattr(entry, "name", None)
+        )
+        if not row_id or str(row_id) in seen_row_ids:
+            continue
+        row_id = str(row_id)
+        out.append(
+            Row(
+                row_id=row_id,
+                name=str(getattr(entry, "name", None) or row_id),
+                state=str(getattr(entry, "status", "unknown")),
+                node=getattr(entry, "node", None),
+                cwd=str(getattr(entry, "cwd", "") or ""),
+            )
+        )
+        seen_row_ids.add(row_id)
     if skipped_no_sid:
         warnings = [
             *warnings,
