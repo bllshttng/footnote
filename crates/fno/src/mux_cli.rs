@@ -5134,7 +5134,7 @@ pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
 // file shrink-only.
 mod thread_verb;
 pub use thread_verb::thread;
-// (v70) The `fno mux thread reseat` verb, same child-module pattern.
+// (v72) The `fno mux thread reseat` verb, same child-module pattern.
 mod reseat_verb;
 pub use reseat_verb::reseat;
 /// `fno mux where <fno_id>` (x-d865): resolve an fno session id to its live

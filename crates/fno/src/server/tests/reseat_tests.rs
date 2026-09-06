@@ -1,4 +1,4 @@
-//! The (v70) re-seat tests: a live pane worker moves into a portal seat
+//! The (v72) re-seat tests: a live pane worker moves into a portal seat
 //! without restarting. Its own module beside portal_tests, so the parent
 //! stays shrink-only under the file-budget gate.
 use super::portal_tests::{portal_reach_cmd, thread_core};
