@@ -787,6 +787,39 @@ mod tests {
     }
 
     #[test]
+    fn unheld_progress_omits_a_crowned_epic_but_keeps_a_dead_leaf() {
+        // x-26e5: a king holds a crown, never a claim, so the epic it reigns
+        // over read claim-free and held the stop hook open on a row no verb
+        // could clear. The crown is that epic's driver. An in-scope leaf with
+        // no claim is still a dead handoff the king must redispatch.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.entries = Some(vec![
+            json!({"id": "x-epic", "priority": "p1", "status": "in_progress", "type": "epic"}),
+            json!({"id": "x-leaf", "priority": "p1", "status": "in_progress", "parent": "x-epic"}),
+        ]);
+        inputs.scope_ids = Some(
+            ["x-epic", "x-leaf"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+        inputs.crown_scope = Some("x-epic".to_string());
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let unheld = queues
+            .iter()
+            .find(|q| q["name"] == "unheld_progress")
+            .unwrap();
+        let ids: Vec<&str> = unheld["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["x-leaf"], "{unheld}");
+    }
+
+    #[test]
     fn mergeable_pr_is_scoped_by_the_binding_node() {
         // A scoped board returned PRs 1494 and 1490 outside the crown; the
         // undriven_pr sibling already filtered, mergeable_pr did not.
