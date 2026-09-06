@@ -22,6 +22,8 @@ from unittest.mock import patch
 import psutil
 import pytest
 
+from fno.rust_binary import find_dev_binary
+
 from fno.claims.core import (
     ClaimContended,
     ClaimGoneAway,
@@ -1050,6 +1052,13 @@ class TestSessionIdStamping:
         assert rebound.session_id == "successor-sid"
 
 
+RUST_BIN = find_dev_binary()
+requires_rust = pytest.mark.skipif(
+    RUST_BIN is None,
+    reason="compiled fno-agents binary not present (the smoke pytest shard deletes it)",
+)
+
+
 class TestSessionWitnessVerdicts:
     """The witness heals a live session's verdict and bounds the unknown.
     These shell the NATIVE classifier, pinned to the worktree build."""
@@ -1101,6 +1110,7 @@ class TestSessionWitnessVerdicts:
         )
         return home
 
+    @requires_rust
     def test_status_live_session_never_reads_stale(self, tmp_path, monkeypatch):
         """AC3 + x-0c29: an EXPIRED claim whose session's registry row is live
         reads LIVE with the registry basis - a session that wrote seconds ago
@@ -1112,10 +1122,11 @@ class TestSessionWitnessVerdicts:
             "FNO_AGENTS_HOME", str(self._registry_home_with_live_row(tmp_path, "ses_live"))
         )
         status = claim_status("k", root=tmp_path)
-        assert status["state"] == "live"
+        assert status["state"] == "live", status
         assert status["basis"] == "registry-session-live"
         assert status["session_basis"] == "registry-session-live"
 
+    @requires_rust
     def test_status_unresolved_names_the_witness(self, tmp_path, monkeypatch):
         """AC5: expired, no registry row, no transcript -> the verdict is
         bounded (Suspect inside the grace) and the payload names the session
@@ -1127,10 +1138,11 @@ class TestSessionWitnessVerdicts:
         home.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
         status = claim_status("k", root=tmp_path)
-        assert status["state"] == "suspect"
+        assert status["state"] == "suspect", status
         assert status["basis"] == "ttl-expired-unresolved"
         assert status["session_basis"] == "unresolved"
 
+    @requires_rust
     def test_status_without_session_id_keeps_legacy_stale(self, tmp_path, monkeypatch):
         """AC4: a pre-change claim (no session id) reads Stale on expiry - the
         reaper behavior the 1511 revert restored, unchanged."""
@@ -1138,7 +1150,7 @@ class TestSessionWitnessVerdicts:
         dead_pid = _dead_pid_context()
         self._write_claim(tmp_path, "k", None, dead_pid, -60_000)
         status = claim_status("k", root=tmp_path)
-        assert status["state"] == "stale"
+        assert status["state"] == "stale", status
         assert "session_basis" not in status
 
     def test_refresh_never_reanchors_a_live_recorded_pid(self, tmp_path, monkeypatch):
