@@ -2437,6 +2437,11 @@ class AgentsBlock(SweepKeys):
     #                 scalars on agents.*, never ProviderBudget fields.
     #   worker_qos  : utility (demote workers to background QoS) or off.
     max_live: int = 3
+    # Per-territory team cap (x-e221): the max LIVE workers whose node is
+    # contained in ONE crown scope. max_live stays the machine ceiling every
+    # territory competes under; this is the team size. Rows that work no node
+    # (kings, blueprinters, ad-hoc panes) never count against it.
+    max_live_per_territory: int = 4
     provider_limits: dict[str, ProviderBudget] = Field(
         default_factory=lambda: {
             k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
@@ -2505,6 +2510,22 @@ class AgentsBlock(SweepKeys):
                 return 3
             return n if n >= 1 else 3
         return 3
+
+    @field_validator("max_live_per_territory", mode="before")
+    @classmethod
+    def _coerce_max_live_per_territory(cls, v: object) -> object:
+        """Drop a non-positive / non-int cap to the default (4); never raise."""
+        if isinstance(v, bool):
+            return 4
+        if isinstance(v, int) and v >= 1:
+            return v
+        if isinstance(v, str):
+            try:
+                n = int(v.strip())
+            except ValueError:
+                return 4
+            return n if n >= 1 else 4
+        return 4
 
     @field_validator("pane_group_max", mode="before")
     @classmethod

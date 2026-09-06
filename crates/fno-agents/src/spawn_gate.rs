@@ -21,17 +21,23 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::agents_config;
 use crate::claims;
 use crate::claude_roster::ClaudeRoster;
 use crate::daemon::pid_is_ours;
-use crate::state::{load_registry, Registry};
+use crate::state::{load_registry, Registry, RegistryEntry};
 use crate::AgentStatus;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// Exit codes, distinct from existing dispatch codes (2, 13, 14, 15, 18, 127).
 pub const EXIT_QUEUE_TIMEOUT: i32 = 75;
 pub const EXIT_NO_WAIT: i32 = 76;
+/// The per-territory team cap refused the spawn (x-e221), or its attribution
+/// was unreadable. Byte-twin of the Python gate's `EXIT_TERRITORY_CAP`.
+pub const EXIT_TERRITORY_CAP: i32 = 82;
 pub const EXIT_RAM_REFUSED: i32 = 77;
 /// The lane declares nothing about how it stands toward the fno state root
 /// (epic rule R3). NOT "declares no carrier": an unsandboxed lane needs none.
@@ -158,6 +164,61 @@ fn available_bytes() -> Option<u64> {
 // Layer 1: the worker-slot count
 // ---------------------------------------------------------------------------
 
+/// The node this spawn WORKS, from the calling process's `FNO_NODE` - the same
+/// provenance source the client-side ask lanes stamp onto the registry row, so
+/// the gate attributes a spawn exactly the way the row will be stamped.
+pub fn gate_node() -> Option<String> {
+    std::env::var("FNO_NODE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// The liveness-filtered registry rows behind [`slot_count`], exposed so the
+/// per-territory cap (x-e221) can read the rows' worked NODES without a second
+/// liveness implementation.
+fn live_rows(registry_path: &Path, warnings: &mut Vec<String>) -> Vec<RegistryEntry> {
+    let live_roster_short_ids: std::collections::HashSet<String> =
+        match ClaudeRoster::load_default() {
+            Ok(roster) => roster
+                .workers_deduped()
+                .iter()
+                .filter(|w| w.pid.map(|p| pid_is_ours(p, w.proc_start)).unwrap_or(false))
+                .map(|w| w.short_id().to_string())
+                .collect(),
+            Err(e) => {
+                warnings.push(format!(
+                    "spawn-gate: claude roster unreadable ({e}); pid-less bg rows uncounted"
+                ));
+                Default::default()
+            }
+        };
+    let mut rows = Vec::new();
+    match load_registry(registry_path) {
+        Ok(Registry { entries, .. }) => {
+            for e in entries {
+                if !status_is_liveish(&e.status) {
+                    continue;
+                }
+                let alive = match e.pid {
+                    Some(p) => pid_is_ours(p, e.pid_start_time),
+                    None => e
+                        .transport_short()
+                        .map(|sid| live_roster_short_ids.contains(sid))
+                        .unwrap_or(false),
+                };
+                if alive {
+                    rows.push(e);
+                }
+            }
+        }
+        Err(e) => warnings.push(format!(
+            "spawn-gate: fno registry unreadable ({e}); slot count degraded to 0"
+        )),
+    }
+    rows
+}
+
 /// Count fno WORKER SLOTS in use for the `max_live` cap: liveness-filtered fno
 /// registry rows + live `worker:<name>` headless slot claims.
 ///
@@ -183,54 +244,163 @@ fn available_bytes() -> Option<u64> {
 /// Read-only; a registry read failure degrades to a 0 contribution with one
 /// warning line pushed to `warnings` (LD5, fail open).
 pub fn slot_count(registry_path: &Path, warnings: &mut Vec<String>) -> usize {
-    // Live roster short_ids: the liveness oracle for pid-less fno bg rows only.
-    // A roster read failure degrades this to empty (bg rows then fall back to
-    // their local pid, i.e. uncounted) — fail open, never wedge.
-    let live_roster_short_ids: std::collections::HashSet<String> =
-        match ClaudeRoster::load_default() {
-            Ok(roster) => roster
-                .workers_deduped()
-                .iter()
-                .filter(|w| w.pid.map(|p| pid_is_ours(p, w.proc_start)).unwrap_or(false))
-                .map(|w| w.short_id().to_string())
-                .collect(),
-            Err(e) => {
-                warnings.push(format!(
-                    "spawn-gate: claude roster unreadable ({e}); pid-less bg rows uncounted"
-                ));
-                Default::default()
-            }
-        };
-    let mut count = 0usize;
+    live_rows(registry_path, warnings).len() + live_worker_slot_claims(warnings)
+}
+
+/// The territory (key, member node ids) a node belongs to, or `None` when the
+/// answer cannot be READ (unreadable graph, node absent, uncompilable live
+/// crown). Mirrors the Python `_territory_of_node`: membership is EXCLUSIVE
+/// and most-specific-first - a node under a live crown scope counts for that
+/// crown's territory; an uncrowned node counts for its project's loose
+/// territory (project nodes minus every crowned set), so one worker never
+/// consumes two territories' caps. AC9-HP parity: keep both sides agreeing.
+fn territory_of_node(
+    config_cwd: &Path,
+    registry_path: &Path,
+    node: &str,
+    warnings: &mut Vec<String>,
+) -> Option<(String, std::collections::HashSet<String>)> {
+    use crate::king_board::graph_json_path;
+    use crate::king_board::project_map;
+    use crate::king_board::scope::compile_territory;
+
+    let entries: Vec<Value> = {
+        let path = graph_json_path(config_cwd);
+        let raw = std::fs::read_to_string(&path).ok()?;
+        let parsed: Value = serde_json::from_str(&raw).ok()?;
+        if let Some(list) = parsed.get("entries").and_then(Value::as_array) {
+            list.clone()
+        } else if let Some(list) = parsed.as_array() {
+            list.clone()
+        } else {
+            return None;
+        }
+    };
+    let by_id: HashMap<String, &Value> = entries
+        .iter()
+        .filter_map(|e| {
+            let id = e.get("id").and_then(Value::as_str)?;
+            Some((id.to_string(), e))
+        })
+        .collect();
+    let row: Option<&Value> = by_id.get(node).copied();
+    if row.is_none() {
+        return None;
+    }
+
+    // Live crowns from the registry cache, canonical scope strings.
+    let mut crowns: Vec<String> = Vec::new();
     match load_registry(registry_path) {
-        Ok(Registry { entries, .. }) => {
-            for e in &entries {
-                if !status_is_liveish(&e.status) {
+        Ok(Registry { entries: rows, .. }) => {
+            for r in &rows {
+                let scope = r.crown_scope.as_deref().unwrap_or("").trim();
+                if scope.is_empty() || !status_is_liveish(&r.status) {
                     continue;
                 }
-                let alive = match e.pid {
-                    // Local pid: liveness by PID/start-time, same as claims.
-                    Some(p) => pid_is_ours(p, e.pid_start_time),
-                    // No local pid: a fno bg/adopted row whose process is the
-                    // claude daemon's — resolve liveness via the roster by its
-                    // jobId (in short_id since v9). (A row without either signal
-                    // is a disk-only ghost and stays uncounted.)
-                    None => e
-                        .transport_short()
-                        .map(|sid| live_roster_short_ids.contains(sid))
-                        .unwrap_or(false),
-                };
-                if alive {
-                    count += 1;
+                let mut members: Vec<String> = scope
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                members.sort();
+                members.dedup();
+                let canon = members.join(",");
+                if !canon.is_empty() && !crowns.contains(&canon) {
+                    crowns.push(canon);
                 }
             }
         }
-        Err(e) => warnings.push(format!(
-            "spawn-gate: fno registry unreadable ({e}); slot count degraded to 0"
-        )),
+        Err(e) => {
+            warnings.push(format!("territory: registry unreadable ({e}); refusing"));
+            return None;
+        }
     }
+    crowns.sort();
 
-    count + live_worker_slot_claims(warnings)
+    let projects = match project_map(config_cwd) {
+        Ok(m) => m,
+        Err(_) => HashMap::new(),
+    };
+    let mut crowned: HashSet<String> = HashSet::new();
+    for scope in &crowns {
+        let compiled = compile_territory(scope, &entries, &Ok(projects.clone()));
+        match compiled {
+            Ok((_, ids)) => {
+                if ids.contains(node) {
+                    return Some((scope.clone(), ids));
+                }
+                crowned.extend(ids);
+            }
+            Err(e) => {
+                warnings.push(format!("territory: crown {scope} uncompilable: {e}"));
+                return None;
+            }
+        }
+    }
+    let project = row
+        .and_then(|r| r.get("project").and_then(Value::as_str))
+        .unwrap_or("");
+    if project.is_empty() {
+        return None;
+    }
+    let mut loose: HashSet<String> = HashSet::new();
+    for e in &entries {
+        if let Some(id) = e.get("id").and_then(Value::as_str) {
+            let p = e.get("project").and_then(Value::as_str).unwrap_or("");
+            if p == project && !crowned.contains(id) {
+                loose.insert(id.to_string());
+            }
+        }
+    }
+    Some((format!("loose:{project}"), loose))
+}
+
+/// The per-territory team cap (x-e221). `Err` carries the refusal receipt the
+/// caller prints; `None` territory reads as UNKNOWN and refuses closed - the
+/// cap never counts an unknown as headroom. A spawn that works no node skips
+/// the check entirely: the team cap does not apply to it.
+fn check_territory_cap(
+    config_cwd: &Path,
+    registry_path: &Path,
+    node: &str,
+    live: &[RegistryEntry],
+    cap: u32,
+) -> Result<(), String> {
+    let mut warnings = Vec::new();
+    let state = territory_of_node(config_cwd, registry_path, node, &mut warnings);
+    for w in &warnings {
+        eprintln!("{w}");
+    }
+    let Some((scope, members)) = state else {
+        return Err(serde_json::json!({
+            "status": "refused",
+            "reason": "territory_unknown",
+            "node": node,
+            "max_live_per_territory": cap,
+        })
+        .to_string());
+    };
+    let count = live
+        .iter()
+        .filter(|r| {
+            r.node
+                .as_deref()
+                .map(|n| members.contains(n))
+                .unwrap_or(false)
+        })
+        .count();
+    if count as u32 >= cap {
+        return Err(serde_json::json!({
+            "status": "refused",
+            "reason": "territory_cap",
+            "territory": scope,
+            "count": count,
+            "current_count": count,
+            "max_live_per_territory": cap,
+        })
+        .to_string());
+    }
+    Ok(())
 }
 
 /// Live `worker:<name>` slot claims under the GLOBAL claims root. Headless
@@ -563,7 +733,8 @@ pub fn run_gate(
         if acquired_mutex {
             guard.gate_key = Some(("spawn-gate".to_string(), holder.clone()));
             let mut warnings = Vec::new();
-            let slots = slot_count(registry_path, &mut warnings);
+            let live = live_rows(registry_path, &mut warnings);
+            let slots = live.len() + live_worker_slot_claims(&mut warnings);
             last_slots = slots;
             for w in &warnings {
                 eprintln!("{w}");
@@ -597,6 +768,25 @@ pub fn run_gate(
                         );
                     }
                     return Err(code);
+                }
+                // The per-territory team cap (x-e221): beside the machine cap,
+                // never instead of it. Refuses (never queues) like the provider
+                // cap - waiting cannot help while the node's own territory is
+                // full, and other territories keep their headroom.
+                if let Some(node) = gate_node() {
+                    if let Err(receipt) = check_territory_cap(
+                        config_cwd,
+                        registry_path,
+                        &node,
+                        &live,
+                        agents_config::territory_max_live(config_cwd),
+                    ) {
+                        guard.release();
+                        eprintln!("{receipt}");
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
+                        return Err(EXIT_TERRITORY_CAP);
+                    }
                 }
                 if substrate == "headless" {
                     acquire_worker_slot(&mut guard, name, &holder);
@@ -1836,5 +2026,112 @@ MemAvailable:    8000000 kB\n";
         }
         std::env::remove_var("FNO_CLAIMS_ROOT");
         std::env::remove_var("FNO_CLAUDE_DAEMON_DIR");
+    }
+    // --- the per-territory team cap fixture (x-e221 AC9) -------------------
+
+    #[test]
+    fn territory_cap_agrees_with_python_gate_fixture() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cli/tests/agents/fixtures/spawn_gate_territory_agreement.json");
+        let raw = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("read fixture {}: {e}", fixture_path.display()));
+        let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let self_pid = std::process::id();
+        let resolve = |v: &serde_json::Value| -> Option<u32> {
+            match v.as_str() {
+                Some("self") => Some(self_pid),
+                _ => None,
+            }
+        };
+        let base = std::env::temp_dir().join(format!("fno-territory-agree-{self_pid}"));
+        let _ = std::fs::remove_dir_all(&base);
+        for (i, sc) in fixture["scenarios"].as_array().unwrap().iter().enumerate() {
+            let dir = base.join(format!("s{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+            let daemon = dir.join("daemon");
+            std::fs::create_dir_all(&daemon).unwrap();
+            std::env::set_var("FNO_CLAUDE_DAEMON_DIR", &daemon);
+            // The graph the territory read compiles, reachable via FNO_HOME.
+            std::fs::write(
+                dir.join("graph.json"),
+                serde_json::json!({ "entries": sc["graph"].clone() }).to_string(),
+            )
+            .unwrap();
+            std::env::set_var("FNO_HOME", &dir);
+            // The registry: live workers (+ the crown row when the scenario has one).
+            let mut entries: Vec<String> = Vec::new();
+            for row in sc["registry"].as_array().unwrap() {
+                let name = row["name"].as_str().unwrap();
+                let status = row["status"].as_str().unwrap();
+                let pidf = resolve(&row["pid"])
+                    .map(|p| format!(r#","pid":{p}"#))
+                    .unwrap_or_default();
+                let nodef = row["node"]
+                    .as_str()
+                    .map(|s| format!(r#","node":"{s}""#))
+                    .unwrap_or_default();
+                entries.push(format!(
+                    r#"{{"name":"{name}","provider":"claude","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z"{pidf}{nodef}}}"#
+                ));
+            }
+            if !sc["crown_scope"].is_null() {
+                entries.push(format!(
+                    r#"{{"name":"fixture-king","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":{}}}"#,
+                    sc["crown_scope"]
+                ));
+            }
+            let reg = dir.join("registry.json");
+            std::fs::write(
+                &reg,
+                format!(
+                    r#"{{"schema_version":1,"entries":[{}]}}"#,
+                    entries.join(",")
+                ),
+            )
+            .unwrap();
+
+            let cap = sc["territory_cap"].as_u64().unwrap_or(4) as u32;
+            let node = sc["node"].as_str().unwrap_or_default();
+            let mut warnings = Vec::new();
+            let live = live_rows(&reg, &mut warnings);
+            let got = match territory_of_node(&dir, &reg, node, &mut warnings) {
+                None => "territory_unknown".to_string(),
+                Some((scope, members)) => {
+                    let count = live
+                        .iter()
+                        .filter(|r| {
+                            r.node
+                                .as_deref()
+                                .map(|n| members.contains(n))
+                                .unwrap_or(false)
+                        })
+                        .count();
+                    let cap_hit = count >= cap as usize
+                        && sc["expect"]["verdict"].as_str() == Some("territory_cap")
+                        && sc["expect"]["territory"].as_str() == Some(scope.as_str())
+                        && sc["expect"]["count"].as_u64() == Some(count as u64);
+                    if cap_hit {
+                        "territory_cap".to_string()
+                    } else {
+                        format!("ok:{scope}:{count}")
+                    }
+                }
+            };
+            let want = sc["expect"]["verdict"].as_str().unwrap().to_string();
+            std::env::remove_var("FNO_CLAIMS_ROOT");
+            std::env::remove_var("FNO_CLAUDE_DAEMON_DIR");
+            std::env::remove_var("FNO_HOME");
+            assert_eq!(
+                got.split(':').next().unwrap(),
+                want,
+                "scenario {}: got {got}, want {want}",
+                sc["name"].as_str().unwrap_or("?")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
