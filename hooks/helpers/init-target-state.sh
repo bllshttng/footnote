@@ -787,6 +787,15 @@ if [[ -f "$STATE_FILE" ]] && is_valid_state_file; then
     done
     unset _fm_pair _fm_field _fm_env _fm_val
   fi
+  if [[ -z "$_FM_OURS" && -z "$_FM_FNO_ID" && -z "${_FM_HSID#null}" ]]; then
+    # A manifest that names NO id (no readable fno_id, no harness session)
+    # cannot be adjudicated: nothing proves it foreign, and the degrade rule
+    # this file already follows preserves what it cannot read. Hand-seeded
+    # resumes and pre-fno_id manifests keep today's path. Any manifest that
+    # NAMES an id no caller matched still refuses below - an unreadable id is
+    # never treated as a match.
+    _FM_OURS=1
+  fi
   if [[ -z "$_FM_OURS" ]]; then
     _FM_CUR_HARNESS="${CLAUDE_CODE_SESSION_ID:-${CODEX_THREAD_ID:-${GEMINI_SESSION_ID:-${OPENCODE_SESSION_ID:-<none proven>}}}}"
     {

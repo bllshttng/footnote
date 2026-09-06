@@ -30,10 +30,19 @@ fail() { printf '[foreign-manifest] FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf '[foreign-manifest] PASS: %s\n' "$*"; }
 skip() { printf '[foreign-manifest] SKIP: %s\n' "$*" >&2; exit 77; }
 
-command -v git     &>/dev/null || skip "git not on PATH"
-command -v python3 &>/dev/null || skip "python3 not on PATH"
-command -v fno     &>/dev/null || skip "fno not on PATH"
-[[ -f "$INIT" ]]     || fail "init script not found at $INIT"
+command -v git &>/dev/null || skip "git not on PATH"
+[[ -f "$INIT" ]] || fail "init script not found at $INIT"
+
+# The state CLI for the one verb the suite runs (T5's archive repair). The
+# binary's name differs by environment: a developer PATH has `fno`; the smoke
+# env pins cli/.venv/bin, which ships `fno-py`. Same command tree either way.
+if command -v fno &>/dev/null; then
+  STATE_CLI=fno
+elif command -v fno-py &>/dev/null; then
+  STATE_CLI=fno-py
+else
+  STATE_CLI=""
+fi
 
 bash -n "$INIT" || fail "bash -n rejected $INIT (syntax error)"
 pass "init script passes bash -n"
@@ -61,8 +70,11 @@ make_repo() {
   printf '# isolated global\n' > "${_dir}/home/.fno/config.toml"
 }
 
-manifest_path() { # $1 repo dir - the same resolver init itself uses
-  (cd "$1" && FNO_SPACES_DIR="$1/spaces" fno-agents state path target-state 2>/dev/null)
+manifest_path() { # $1 repo dir - the resolver init itself uses, with the same
+  # legacy fallback the init script uses when no binary resolves it
+  local p
+  p="$(cd "$1" && FNO_SPACES_DIR="$1/spaces" fno-agents state path target-state 2>/dev/null || true)"
+  printf '%s\n' "${p:-$1/.fno/target-state.md}"
 }
 
 run_init() { # $1 repo dir, $2 stdout capture file, rest: K=V env for this run
@@ -130,20 +142,20 @@ grep -q "leaving unchanged" "$TMP2/init-resume.out" \
 [[ "$BEFORE2" == "$AFTER2" ]] || fail "T2: resume rewrote the manifest"
 pass "T2: matching id resumes byte-for-byte as today"
 
-# ── T3 (AC4-EDGE): unreadable fno_id refuses by its own reason ──────────
-log "T3: manifest with no readable fno_id refuses; absence is never a match"
+# ── T3 (AC4-EDGE): a manifest with no readable fno_id but a NAMEABLE owner ──
+log "T3: id-less manifest naming an unmatched harness session refuses"
 
 make_repo TMP3
 STATE3="$(manifest_path "$TMP3")"
 mkdir -p "$(dirname "$STATE3")"
-printf -- '---\ninput: "legacy manifest predating fno_id"\ncreated_at: 2026-01-01T00:00:00Z\n---\n\nbody\n' > "$STATE3"
+printf -- '---\ninput: "legacy manifest predating fno_id"\ncreated_at: 2026-01-01T00:00:00Z\nharness_session_id: transcript-of-someone-else\n---\n\nbody\n' > "$STATE3"
 RC_L="$(run_init "$TMP3" "$TMP3/init-legacy.out" TARGET_SESSION_ID="runL-20260906T000000Z-cl444-dddddd")"
 OUT_L="$(cat "$TMP3/init-legacy.out" "$TMP3/init-legacy.out.err")"
 
-[[ "$RC_L" != "0" ]] || fail "T3: absent fno_id was treated as a match (exit 0)"
+[[ "$RC_L" != "0" ]] || fail "T3: unmatched named owner was treated as a match (exit 0)"
 echo "$OUT_L" | grep -qi "fno_id" \
   || fail "T3: refusal does not name the unreadable fno_id as its reason"
-pass "T3: absent fno_id refuses by its own reason (exit $RC_L)"
+pass "T3: id-less manifest with a named owner refuses (exit $RC_L)"
 
 # ── T4 (AC6-FR): fresh worktree behaves byte-for-byte as today ──────────
 log "T4: fresh worktree writes the manifest and exits 0"
@@ -170,7 +182,8 @@ RC_B5="$(run_init "$TMP5" "$TMP5/init-b.out" \
 [[ "$RC_B5" != "0" ]] \
   || fail "T5 precondition: expected the foreign-manifest refusal first (got exit 0; $(cat "$TMP5/init-b.out"))"
 
-ARCH_OUT="$(FNO_SPACES_DIR="$TMP5/spaces" fno do state archive --path "$STATE5" 2>&1)" \
+[[ -n "$STATE_CLI" ]] || fail "T5a: no fno/fno-py on PATH to run the state archive repair"
+ARCH_OUT="$(FNO_SPACES_DIR="$TMP5/spaces" "$STATE_CLI" do state archive --path "$STATE5" 2>&1)" \
   || fail "T5a: state archive failed: $ARCH_OUT"
 [[ -f "$STATE5" ]] || pass "T5a: archived manifest moved out of the way"
 compgen -G "${STATE5%.md}.archived.*.md" >/dev/null \
@@ -221,5 +234,21 @@ GOT_G="$(sed -n 's/^fno_id:[[:space:]]*//p' "$STATE7" 2>/dev/null | head -1)"
 [[ "$GOT_G" == "runG-20260906T000000Z-cl777-ggggggg" ]] \
   || fail "T7: fresh manifest fno_id is '$GOT_G'; wanted the new run's id"
 pass "T7: corrupt file self-heals; fresh manifest names the new run"
+
+# ── T8: anonymous manifest + anonymous caller keeps today's resume ──────
+# A manifest that names no id and a caller that carries none prove nothing in
+# either direction; that pair preserves (the standing resume contract), and a
+# caller WITH identity still refuses (T3).
+log "T8: anonymous manifest, anonymous caller -> resume"
+
+make_repo TMP8
+STATE8="$(manifest_path "$TMP8")"
+mkdir -p "$(dirname "$STATE8")"
+printf -- '---\nsession_id: preexisting\ninput: "anonymous manifest"\n---\n\nbody\n' > "$STATE8"
+RC_A="$(run_init "$TMP8" "$TMP8/init-anon.out")"
+[[ "$RC_A" == "0" ]] || fail "T8: anonymous pair exited $RC_A; wanted today's resume (0)"
+grep -q "leaving unchanged" "$TMP8/init-anon.out" \
+  || fail "T8: anonymous pair message changed; got: $(cat "$TMP8/init-anon.out")"
+pass "T8: anonymous manifest and caller preserve today's resume"
 
 log "All foreign-manifest scenarios passed"
