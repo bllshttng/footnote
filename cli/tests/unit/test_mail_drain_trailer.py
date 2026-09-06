@@ -22,9 +22,17 @@ class _Msg:
     kind: str
     ts: str
     body: str
+    from_session: str | None = None
 
 
-def _drain_output(monkeypatch, capsys, body: str, *, json_out: bool = False) -> str:
+def _drain_output(
+    monkeypatch,
+    capsys,
+    body: str,
+    *,
+    json_out: bool = False,
+    from_session: str | None = None,
+) -> str:
     from fno import harness_identity
     from fno.bus import cursor as cursor_mod
     from fno.mail import cli as mail_cli
@@ -36,6 +44,7 @@ def _drain_output(monkeypatch, capsys, body: str, *, json_out: bool = False) -> 
         kind="heads-up",
         ts="2026-08-15T00:00:00Z",
         body=body,
+        from_session=from_session,
     )
 
     class _Ident:
@@ -92,3 +101,19 @@ def test_the_json_render_path_stamps_the_trailer_too(monkeypatch, capsys) -> Non
     payload = json.loads(out)
     assert payload[0]["body"].count(FNO_MAIL_TRAILER) == 1
     assert payload[0]["body"].endswith(FNO_MAIL_TRAILER)
+
+
+def test_durable_mail_reports_the_sender_crown(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        "fno.mail.envelope.sender_crown_at",
+        lambda _path, session: "L1 fno" if session == "session-king" else None,
+    )
+
+    out = _drain_output(
+        monkeypatch,
+        capsys,
+        "write the plan",
+        from_session="session-king",
+    )
+
+    assert "verified sender crown L1 fno" in out

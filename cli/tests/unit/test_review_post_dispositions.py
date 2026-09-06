@@ -74,6 +74,30 @@ def test_no_dispositions_posts_nothing(tmp_path, monkeypatch):
     assert calls == [], "a disposition-free round must not touch the network"
 
 
+def test_direct_call_treats_the_typer_default_as_no_pr(tmp_path, monkeypatch, capsys):
+    findings = tmp_path / "f.json"
+    findings.write_text(json.dumps(_payload(_DISPOSED)), encoding="utf-8")
+    monkeypatch.setattr(
+        "fno.pr._rest._slug_or_reason", lambda *args, **kwargs: ("own/repo", "")
+    )
+    monkeypatch.setattr(
+        "fno.pr._rest.resolve_current_pr_number_rest",
+        lambda: (None, "no PR for branch"),
+    )
+    monkeypatch.setattr(
+        "fno.pr._rest.fetch_pr_info_rest",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must resolve omitted PR")),
+    )
+
+    review_cli.post_dispositions(
+        findings_file=findings,
+        head=HEAD,
+        reviewer="code-review",
+    )
+
+    assert "no PR for branch" in capsys.readouterr().out
+
+
 class _FakeResult:
     def __init__(self, stdout: str = "", returncode: int = 0) -> None:
         self.returncode = returncode
