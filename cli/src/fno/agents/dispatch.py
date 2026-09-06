@@ -4980,8 +4980,8 @@ def reconcile_agents(
         new_status: AgentStatus
         if entry.mux is not None and not mux_ref_names_a_pane(entry.mux):
             # Structurally impossible ref: queue the heal, then probe this row
-            # as the null-mux row it is about to become. Only an IMPOSSIBLE ref
-            # is cleared here -- a ref that names a real pane is never touched,
+            # as the null-mux row it is about to become. Only an unreconcilable
+            # ref is cleared here -- a ref that names a real pane is never touched,
             # alive or dead, and neither is one that merely could not be
             # probed (that distinction belongs to the pane falsifier's
             # False-vs-None split, not to validity).

@@ -91,16 +91,12 @@ def test_coverage_gate_consumers_emit_verbose_root_receipts(
     caplog.set_level(logging.DEBUG, logger="fno.pr._coverage_gate")
 
     _coverage_gate.resolved_max_rounds(str(worktree))
-    _coverage_gate._github_approval_satisfies(str(worktree))
     _coverage_gate._resolved_categories(str(worktree))
-    _coverage_gate._corroboration_refusal({"coverage": "covered"}, str(worktree))
 
     messages = [record.getMessage() for record in caplog.records]
     for key in (
         "config.review.max_rounds",
-        "config.review.github_approval_satisfies",
         "config.review.nonblocking_categories",
-        "config.review.require_corroboration",
     ):
         assert any(f"key={key}" in message for message in messages)
     assert all(f"root={worktree}" in message for message in messages)

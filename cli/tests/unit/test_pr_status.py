@@ -3260,7 +3260,8 @@ _HARD = {
 def test_payload_carries_the_budget_from_the_gate_row(monkeypatch, capsys, tmp_path):
     """The gate's row reads rounds_used 5 against a budget of 2: the payload
     carries the pair verbatim, with no second axis key - `rounds_axis` is
-    the deleted floor's vocabulary and must stay dead (x-027b)."""
+    the deleted floor's vocabulary and must stay dead (x-027b). The spent
+    budget is not a blocker: at the cap the review phase is complete."""
     text = "\n".join(
         [
             _rounds_event(0, "fail", [_HARD]),
@@ -3279,9 +3280,9 @@ def test_payload_carries_the_budget_from_the_gate_row(monkeypatch, capsys, tmp_p
     assert out["rounds_exhausted"] is True
     assert "rounds_axis" not in out
     assert "rounds_axis_note" not in out
-    # And the same chain holds ready back through the re-derived conjunct.
-    assert out["ready"] is False
-    assert "review_coverage_impossible" in out["ready_blockers"]
+    # A covered row holds ready back on nothing else, cap spent or not.
+    assert out["ready"] is True
+    assert not [b for b in out["ready_blockers"] if b.startswith("review_coverage_")]
 
 
 def test_payload_reports_the_gate_budget_on_a_bot_heavy_pr(
