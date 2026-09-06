@@ -3047,6 +3047,12 @@ def _observe_node_claim(
             holder=holder,
             truth_status=truth,
             action=action,
+            # Which session witness answered, straight from the native verdict
+            # row. "Dispatched on unknown" is now distinguishable from
+            # "dispatched on a live witness" in the event log - the gap the
+            # dispatch_claim_observed specimen measured (a confident free on a
+            # 64-percent-unresolved roster read).
+            session_basis=info.get("session_basis"),
         )
     if emit and claim_state in ("stale", "suspect"):
         message = (

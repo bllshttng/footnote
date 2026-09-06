@@ -940,7 +940,13 @@ def compare_and_rebind(
             new_metadata=effective_new_metadata,
             new_pid_provenance=resolved_provenance,
             new_pid_unavailable=npid_unavailable,
-            new_session_id=existing.session_id or resolved_session_id,
+            # A rename reaching THIS branch is still a handover: the
+            # successor's session id replaces the spawner's, never preserves it.
+            new_session_id=(
+                resolved_session_id
+                if handover_allowed
+                else (existing.session_id or resolved_session_id)
+            ),
         )
         _atomic_replace(path, serialize_claim(rebound))
         if emit:
@@ -1138,6 +1144,53 @@ def release_claim(
         release_dir_mutex(recovery_lock, token)
 
 
+def _registry_session_pid(session_id: str) -> Optional[int]:
+    """The live pid the fleet registry records for ``session_id``, or None.
+
+    The row keyed by ``harness_session_id`` is the IDENTITY proof that a pid
+    belongs to the claim's session, so no create-time filter is applied: the
+    resumed harness starts AFTER the claim was filed, and that filter is what
+    rejected every resumed session's only candidate anchor (x-ba96, x-5f06,
+    x-87fb). A dead row pid returns None and the caller falls through to the
+    durable-pid walk.
+
+    L1 reads the registry FILE directly (same door as
+    ``_roster_name_for_session`` in self_identity.py): ``fno.agents.registry``
+    is L5 runtime and the boundary gate refuses the import edge. The read
+    degrades to None on anything unexpected so liveness never crashes.
+    """
+    sid = (session_id or "").strip()
+    if not sid:
+        return None
+    try:
+        import json
+
+        from fno.paths import agents_registry_path
+
+        raw = json.loads(agents_registry_path().read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - liveness must degrade, never crash
+        return None
+    rows = raw.get("agents") if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("harness_session_id") or "").strip() != sid:
+            continue
+        pid = row.get("pid")
+        if not isinstance(pid, int) or pid <= 1:
+            continue
+        try:
+            import psutil
+
+            psutil.Process(pid)
+            return pid
+        except Exception:  # noqa: BLE001 - dead or unsignalable pid: next row
+            continue
+    return None
+
+
 def _reanchor_pid_for(
     existing: Claim, *, root: Optional[Path] = None, verdict: Optional[dict[str, Any]] = None
 ) -> Optional[int]:
@@ -1150,7 +1203,7 @@ def _reanchor_pid_for(
     every reader that must not steal from the first was forced to protect the
     second (x-05be).
 
-    Returns None - meaning leave the anchor alone - in three cases, each for its
+    Returns None - meaning leave the anchor alone - in four cases, each for its
     own reason:
 
       * The recorded pid is still LIVE. There is nothing to repair, and
@@ -1158,16 +1211,16 @@ def _reanchor_pid_for(
         over a running session's anchor.
       * The claim is off-machine. We cannot read another box's pid table, so a
         dead-looking pid there is unverified.
+      * The claim carries a session id but the registry row keyed by it has no
+        live pid (or there is no row). There is no session-keyed anchor.
       * No harness ancestor resolves. There is no better anchor to write, and a
         transient pid is a worse one: ``fno-agents loop-check`` exits about a
         second after it renews, so anchoring to the renewer would re-file the
         corpse under a fresh number and fix nothing.
 
-    PID-reuse detection survives because the anchor moves WITH the pid.
-    ``_rebound_claim`` rewrites ``acquired_at`` alongside ``pid``, and the
-    harness ancestor started before this renewal, so the claim reads live now
-    and a later recycle of that pid number reads ``create_time > acquired_at``
-    exactly as today.
+    PID-reuse detection survives because the anchor moves WITH the pid:
+    ``_rebound_claim`` holds ``acquired_at`` on renewal, so a later recycle of
+    the anchor pid still reads ``create_time > acquired_at``.
 
     THE TRUST BOUNDARY, stated rather than implied. The renewer is authenticated
     by its holder string and nothing else, and `fno agents claim status` publishes that
@@ -1176,10 +1229,10 @@ def _reanchor_pid_for(
     reads LIVE until that session ends instead of SUSPECT.
 
     That is the same credential `release_claim` and `refresh_claim` have always
-    accepted, not a new one, and no stronger check is available here: the
-    recorded pid is dead by precondition, so its ancestry cannot be walked to
-    prove the renewer shares its session. Closing it needs a session identity in
-    the claim record, which is its own change.
+    accepted. The session id in the record narrows it to the session the claim
+    was acquired under, and the registry row keyed by that id - read through
+    its ``harness_session_id`` binding, never by parsing the holder - is the
+    verifiable identity the record was missing.
     """
     # An EXPIRED claim is already reclaimable, and re-anchoring one resurrects it
     # as LIVE - taking a slot a peer is entitled to and racing whatever recovery
@@ -1191,6 +1244,22 @@ def _reanchor_pid_for(
         return None
     if verdict.get("bucket") == "offhost":
         return None
+
+    # Session-keyed re-anchor (x-a613), BEFORE the state gate: when the claim
+    # carries a session id and the registry row keyed by it carries a LIVE
+    # pid, that pid is the anchor REGARDLESS of create time versus
+    # acquired_at - the row's session binding is the proof the pid is the same
+    # logical session, and the create-time filter below is exactly what
+    # rejected every resumed harness. The witness may already have healed the
+    # verdict to LIVE (the in-window arm), but the recorded pid is still a
+    # corpse on disk, so the anchor is repaired while the row proves the
+    # session - the same is_live(recorded pid) gate `renew_locked` applies,
+    # which is why this sits beside it, not under the verdict's.
+    if existing.session_id:
+        registry_pid = _registry_session_pid(existing.session_id)
+        if registry_pid is not None:
+            return registry_pid
+
     if verdict.get("state") not in (ClaimState.STALE.value, ClaimState.SUSPECT.value):
         return None
     from .session_pid import resolve_session_pid
