@@ -17,6 +17,8 @@
 //! geometry does not.
 use super::*;
 
+const RESEAT_USAGE: &str = "usage: fno mux thread reseat <agent-name | pane-id> [--portal N] [--session S]\n  move a live pane-hosted worker into a portal seat, keeping its PTY.\n  trade: the row stops being a squad member, so restore never rebuilds it,\n  and `fno agents rm` removes the row without killing the pane child.";
+
 /// A typed refusal from the reseat move. Printed once at the verb's edge,
 /// each with its own exit code; nothing downstream matches message text.
 #[derive(Debug)]
@@ -197,6 +199,10 @@ pub fn reseat(args: &[OsString], env_session: Option<&str>) -> i32 {
     let mut it = rest.iter();
     while let Some(arg) = it.next() {
         let text = arg.as_str();
+        if text == "-h" || text == "--help" {
+            println!("{RESEAT_USAGE}");
+            return EXIT_OK;
+        }
         if text == "--portal" {
             let value = match it.next() {
                 Some(v) => v.as_str().to_string(),
@@ -232,6 +238,7 @@ pub fn reseat(args: &[OsString], env_session: Option<&str>) -> i32 {
     }
     if positionals.len() != 1 {
         eprintln!("fno mux thread reseat: takes exactly one agent name or pane id");
+        eprintln!("{RESEAT_USAGE}");
         return EXIT_USAGE;
     }
     let token = positionals[0].clone();

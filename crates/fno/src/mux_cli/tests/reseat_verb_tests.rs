@@ -94,3 +94,11 @@ fn the_flip_is_idempotent_and_matches_by_mux_pair() {
     assert_eq!(clear_mux_refs(&path, &pair).unwrap(), 0);
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
+
+#[test]
+fn help_answers_ok_and_bad_args_refuse_with_usage() {
+    assert_eq!(reseat(&[OsString::from("--help")], None), EXIT_OK);
+    assert_eq!(reseat(&[OsString::from("-h")], None), EXIT_OK);
+    assert_eq!(reseat(&[], None), EXIT_USAGE);
+    assert_eq!(reseat(&[OsString::from("--nope")], None), EXIT_USAGE);
+}

@@ -153,18 +153,24 @@ fn a_reach_for_a_reseated_row_focuses_the_seat_not_a_second_viewer() {
 #[test]
 fn reseat_refusals_mutate_nothing() {
     let (mut core, client_id, w, _worker_tab, mut rx) = reseat_core("pane-worker", "deadbee1");
-    let portals_before: Vec<(u8, u64, String)> = core
-        .portals
-        .iter()
-        .map(|(idx, p)| (*idx, p.seat, p.row_key.clone()))
-        .collect();
-    let tabs_before = core.session.squads[0].tabs.len();
+    let snapshot = |core: &Core| {
+        (
+            core.portals
+                .iter()
+                .map(|(idx, p)| (*idx, p.seat, p.row_key.clone()))
+                .collect::<Vec<_>>(),
+            core.attached.clone(),
+            core.session.squads[0].tabs.len(),
+        )
+    };
 
     // An unknown pane id.
+    let before = snapshot(&core);
     assert!(matches!(
         core.reseat_pane_into_portal(999_999, None),
         ServerMsg::Err { .. }
     ));
+    assert_eq!(snapshot(&core), before, "an unknown pane mutates nothing");
 
     // A live pane no unique row answers (the row's mux ref points elsewhere).
     core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee9"))];
@@ -173,6 +179,7 @@ fn reseat_refusals_mutate_nothing() {
         panic!("a pane with no unique row refuses, got {orphan:?}")
     };
     assert!(msg.contains("no unique live worker row"), "{msg}");
+    assert_eq!(snapshot(&core), before, "a rowless pane mutates nothing");
 
     // A named slot whose seat is live is never displaced.
     set_attach_program(&["/bin/cat"]);
@@ -189,13 +196,7 @@ fn reseat_refusals_mutate_nothing() {
     );
     // The refusal snapshot starts HERE, after the setup reach settled: what
     // follows must mutate nothing.
-    let portals_before: Vec<(u8, u64, String)> = core
-        .portals
-        .iter()
-        .map(|(idx, p)| (*idx, p.seat, p.row_key.clone()))
-        .collect();
-    let attached_before = core.attached.clone();
-    let tabs_before = core.session.squads[0].tabs.len();
+    let before = snapshot(&core);
     let displaced = core.reseat_pane_into_portal(w, Some(0));
     let ServerMsg::Err { msg, .. } = displaced else {
         panic!("a live slot must refuse, got {displaced:?}")
@@ -205,19 +206,9 @@ fn reseat_refusals_mutate_nothing() {
         core.portals.values().all(|p| p.seat != w),
         "the refused reseat seated nothing"
     );
-    assert_eq!(core.attached, attached_before);
-    let portals_after: Vec<(u8, u64, String)> = core
-        .portals
-        .iter()
-        .map(|(idx, p)| (*idx, p.seat, p.row_key.clone()))
-        .collect();
     assert_eq!(
-        portals_after, portals_before,
-        "the refusals never touched the portal map"
-    );
-    assert_eq!(
-        core.session.squads[0].tabs.len(),
-        tabs_before,
-        "the refusals never touched the tab tree"
+        snapshot(&core),
+        before,
+        "the refusals never touched portal, attach, or tab state"
     );
 }
