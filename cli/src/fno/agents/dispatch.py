@@ -890,11 +890,10 @@ def _reign_typed_message(
 def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
     """Name an unrecorded parent edge in the spawn output, and return the
     reason so the spawn event can carry it (x-5283): the event holds either
-    a session id or this reason, never both empty.
-
-    A null can be CORRECT (an inherited foreign marker would record a stranger
-    as parent); the defect was its silence. Say it with the identity
-    resolution's own reason, so the spawner reads WHY.
+    a session id or this reason, never both empty. A null can be CORRECT
+    (an inherited foreign marker would record a stranger as parent); the
+    defect was its silence, so say it with the identity resolution's own
+    reason, and the spawner reads WHY.
     """
     if session_id:
         return None
@@ -906,11 +905,8 @@ def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
         reason = f"identity disposition={identity.disposition}, markers={markers}"
     except Exception:  # noqa: BLE001 - the notice never breaks the spawn
         reason = "identity unreadable"
-    print(
-        f"spawn: parent edge NOT recorded ({reason}); this worker will not "
-        "appear in its spawner's orphan check",
-        file=sys.stderr,
-    )
+    print(f"spawn: parent edge NOT recorded ({reason}); this worker will not "
+          f"appear in its spawner's orphan check", file=sys.stderr)
     return reason
 
 

@@ -375,8 +375,7 @@ def _census(
 
 def _share_reading() -> Optional[dict[str, Any]]:
     """The caller's share reading, from spawn_gate.share_reading (x-5283
-    AC3): the gate's arithmetic and this number are one function. None on
-    any failure - unknown, never a fabricated zero.
+    AC3): one function with the gate. None on any failure.
     """
     try:
         from fno.agents.spawn_gate import census as gate_census, share_reading

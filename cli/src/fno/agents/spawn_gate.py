@@ -235,14 +235,11 @@ class LiveCensus:
     #: (dedup-independent) so the slot cap mirrors the Rust gate exactly — see
     #: :attr:`slot_count`.
     fno_slot_workers: int = 0
-    #: False when the registry read failed: every share count is then unknown
-    #: (None), never zero (x-5283 AC9, the gather_court rule).
+    #: False when the registry read failed: share counts unknown, never zero.
     registry_readable: bool = True
-    #: Crowned sessions, read through court.crowned_sessions - the same
-    #: field the court reads (x-5283 LD1). This set divides ``max_live``.
+    #: Crowned sessions via court.crowned_sessions (x-5283 LD1); the divisor.
     crowned_sessions: set[str] = field(default_factory=set)
-    #: Worker rows per ``spawned_by_session``; None keys the unattributed
-    #: bucket, which consumes ``max_live`` but divides nothing (x-5283 LD4).
+    #: Worker rows per ``spawned_by_session``; None = the LD4 bucket.
     worker_rows: dict[Optional[str], list[str]] = field(default_factory=dict)
 
     @property
@@ -491,8 +488,7 @@ def census() -> LiveCensus:
 
     out.slot_claims = _live_worker_slot_claims(out.warnings, live_registry_names)
 
-    # The divisor reads crowns through the court's own primitive (x-5283
-    # LD1/AC3); share_reading keys unknown off registry_readable.
+    # The divisor reads crowns through the court's own primitive (LD1/AC3).
     if out.registry_readable:
         from fno.agents.court import crowned_sessions
 
@@ -1511,13 +1507,12 @@ def _check_king_share(
 ) -> None:
     """Refuse (never queue) when the calling king holds its full share (x-3f84 W4).
 
-    The share divides ``max_live`` by CROWNS (x-5283 LD1) and ``held`` counts
-    the caller's worker rows only. Only a caller whose session identity
-    resolved is checked: an operator terminal or cron job is not competing
-    for the commons. Waiting cannot help - only the caller's own workers
-    dying frees its share - so this refuses like the provider cap. Every
-    number comes from :func:`share_reading`: the count the gate refuses on
-    and the count any readout prints are one value.
+    The share divides ``max_live`` by CROWNS (x-5283 LD1); ``held`` counts
+    the caller's worker rows only; only a caller whose session identity
+    resolved is checked; and waiting cannot help - only the caller's own
+    workers dying frees its share - so this refuses like the provider cap.
+    Every number comes from :func:`share_reading`: the count the gate
+    refuses on and the count any readout prints are one value.
     """
     if not caller_session:
         return
@@ -1537,10 +1532,8 @@ def _check_king_share(
         if unattributed.get("count"):
             shown = ", ".join(unattributed["rows"][:5])
             extra = "..." if unattributed["count"] > 5 else ""
-            msg += (
-                f"; {unattributed['count']} live row(s) name nobody and sit in "
-                f"the unattributed bucket ({shown}{extra})"
-            )
+            msg += f"; {unattributed['count']} live row(s) name nobody and sit " \
+                f"in the unattributed bucket ({shown}{extra})"
         _warn(msg)
         _refuse(
             EXIT_KING_SHARE,

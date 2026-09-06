@@ -4959,8 +4959,7 @@ def dispatch_spawn_pane(
                 substrate="pane",
                 spawned_by_session=spawned_by_session,
                 spawned_by_harness=spawned_by_harness,
-                spawned_by_cwd=spawned_by_cwd,
-                lineage_reason=lineage_reason,
+                spawned_by_cwd=spawned_by_cwd, lineage_reason=lineage_reason,
             )
         except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
             # No row was written, so the orphan's later death would join no

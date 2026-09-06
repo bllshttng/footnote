@@ -532,14 +532,12 @@ def adopt_store_hit(
             f"could not register it ({exc}); the row will appear on a later "
             "resolution.\n"
         )
-        # The adopting session VOUCHED for this row (x-5283 LD3), and this
+        # The adopting session VOUCHED for this row (x-5283 LD3); this
         # fallback copy skips register_session's stamping, so it states the
-        # same split itself: captured session -> adopted_by_session.
+        # same split itself.
         from fno.agents.dispatch import _capture_parent_edge
 
-        _sb_session, _sb_harness, _sb_cwd = _capture_parent_edge()
-        if _sb_session is not None and _sb_session == hit.session_id:
-            _sb_session = None
+        _sb_session = _capture_parent_edge()[0]
         return AgentEntry(
             name=_fallback_name(hit.session_id),
             cwd=hit.cwd,
