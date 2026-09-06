@@ -8,6 +8,8 @@ the retired per-project enable model.
 """
 from __future__ import annotations
 
+import pytest
+
 import fno.active_backlog as ab
 
 
@@ -23,7 +25,7 @@ def _patch(monkeypatch, *, enabled=True, interval="5m", failure_limit=3, mission
     class _Settings:
         active_backlog = cfg
 
-    monkeypatch.setattr(ab, "_workspace_paths", lambda: paths)
+    monkeypatch.setattr(ab, "_workspace_paths", lambda **_: paths)
     monkeypatch.setattr(ab, "_active_missions", lambda: missions)
     import fno.config as cfgmod
 
@@ -147,6 +149,17 @@ def test_active_missions_non_list_graph_yields_empty(monkeypatch):
 
     monkeypatch.setattr(store, "read_graph", lambda *_a, **_k: None)
     assert ab._active_missions() == []
+
+
+def test_strict_target_resolution_propagates_mission_read_fault(monkeypatch):
+    _patch(monkeypatch, missions=[], paths={"footnote": "/repo/footnote"})
+
+    def _boom(*, strict=False):
+        raise RuntimeError("mission read failed")
+
+    monkeypatch.setattr(ab, "_active_missions", _boom)
+    with pytest.raises(RuntimeError, match="mission read failed"):
+        ab.resolve_drain_targets(strict=True)
 
 
 def test_as_dicts_shape(monkeypatch):

@@ -918,7 +918,7 @@ def test_rank_top_names_when_no_live_dispatcher_reaches_node(tmp_graph, monkeypa
     monkeypatch.setattr(
         active_backlog,
         "resolve_drain_targets",
-        lambda: [SimpleNamespace(mission="x-beef")],
+        lambda **_: [SimpleNamespace(mission="x-beef")],
     )
     tmp_graph.write_text(json.dumps({
         "entries": [
@@ -942,7 +942,7 @@ def test_rank_top_keeps_normal_receipt_when_mission_reaches_node(tmp_graph, monk
     monkeypatch.setattr(
         active_backlog,
         "resolve_drain_targets",
-        lambda: [SimpleNamespace(mission="x-beef")],
+        lambda **_: [SimpleNamespace(mission="x-beef")],
     )
     tmp_graph.write_text(json.dumps({
         "entries": [

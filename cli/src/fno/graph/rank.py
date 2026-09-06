@@ -19,7 +19,7 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
         if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
             raise ValueError("graph read returned an unreadable shape")
         missions: list[str] = []
-        for target in resolve_drain_targets():
+        for target in resolve_drain_targets(strict=True):
             mission = getattr(target, "mission", None)
             if mission is None:
                 continue

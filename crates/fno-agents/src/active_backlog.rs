@@ -653,11 +653,15 @@ fn undispatched_count(cfg: &DrainConfig) -> Result<usize, String> {
         return Err(format!("exit {:?}", out.status.code()));
     }
     let receipt: Value = serde_json::from_slice(&out.stdout).map_err(|error| error.to_string())?;
+    if receipt.get("status").and_then(Value::as_str) != Some("ok") {
+        return Err("observer status was not ok".to_string());
+    }
     receipt
         .get("rows")
         .and_then(Value::as_array)
+        .filter(|rows| rows.iter().all(Value::is_object))
         .map(Vec::len)
-        .ok_or_else(|| "missing rows array".to_string())
+        .ok_or_else(|| "missing valid rows array".to_string())
 }
 
 fn facts_from_receipt(receipt: &AdvanceEpicReceipt) -> DispatchFacts {
@@ -2396,6 +2400,33 @@ mod tests {
             &tmp.path().join("bin"),
             r#"{"children":[],"dispatched":[]}"#,
             "not-json",
+            None,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let row = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .expect("one tick row");
+        let detail = row["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("stranded=unknown"), "detail was {detail}");
+        assert!(!detail.contains("stranded=0"), "detail was {detail}");
+    }
+
+    #[test]
+    fn mission_drain_tick_names_unknown_stranded_count_on_observer_error() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance_with_observer(
+            &tmp.path().join("bin"),
+            r#"{"children":[],"dispatched":[]}"#,
+            r#"{"status":"error","rows":[]}"#,
             None,
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
