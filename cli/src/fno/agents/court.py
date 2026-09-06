@@ -70,17 +70,13 @@ def _agreement(
 def _conflicts(rows: list) -> list[dict[str, Any]]:
     """Territory two live crowned rows double-rule, one entry per rival PAIR.
 
-    Keys on :func:`_crown_rivals`, the same ladder-aware rule the grant-time
-    holder scan uses, so a conflict here and the refusal at grant time can
-    never disagree about what "double rule" means: a set-holder rivals a
-    holder over one member, while a portfolio and the project kings of its
-    court are two legitimate crowns.
-
-    One entry PER PAIR, not per merged group: rivalry is pairwise and not
-    transitive (A over e-1 and B over e-1,e-2 rival; C over e-2 rivals B but
-    not A), so a union-find group would claim three rows hold e-1,e-2 when
-    no pair does. Each entry names exactly the two rows and the members they
-    actually share.
+    Keys on :func:`_crown_rivals`, the rule the grant-time holder scan uses,
+    so a conflict here and the refusal at grant time cannot disagree: a
+    set-holder rivals a holder over one member; a portfolio and the project
+    kings of its court are two legitimate crowns. One entry PER PAIR, never a
+    merged group: rivalry is not transitive (A/e-1, B/e-1,e-2, C/e-2 rivals
+    A-B and B-C only), so a group would claim three rows hold what no pair
+    does. Each entry names its two rows and the members they actually share.
     """
     # Joined on crown_scope, not a full crown_reading: a scope claims territory
     # with or without a level, and gather_court surfaces those rows too.

@@ -102,13 +102,11 @@ def init_cmd(
         )
         raise typer.Exit(2)
 
-    # The manifest is keyed by the scope name, so every spelling of one crown
-    # must arm the SAME file: canonicalize the set (sorted, deduped) and resolve
-    # project aliases before the path is derived. A raw `e-2,e-1` would arm a
-    # second manifest beside the canonical one, and an alias `a` would arm a
-    # manifest at a path no row-keyed reader resolves (they build the path from
-    # row.crown_scope, the canonical spelling) while the uncrowned-row warning
-    # stays silent: it compares through the same alias normalization.
+    # Every spelling of one crown must arm the SAME file: canonicalize the set
+    # AND resolve aliases, or `--scope a` arms kings/a.md while row-keyed
+    # readers resolve kings/alpha.md from row.crown_scope - and the
+    # uncrowned-row warning stays silent, comparing through the same
+    # normalization.
     from fno.agents.crown import _canonical_members, canonical_scope, split_scope
 
     members = split_scope(scope)

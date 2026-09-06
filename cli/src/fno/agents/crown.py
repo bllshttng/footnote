@@ -344,10 +344,9 @@ def scope_contains(
     to, so a grantor can no longer hand down authority it does not hold.
 
     ``graph_entry`` overrides the per-call graph read (an ``id -> entry``
-    callable), so a caller scanning many rows pays one graph parse instead of
-    one per row. Omitted, the FIRST call resolves ``_graph_index`` once and
-    hands it down through the set-membership recursion: a five-member set
-    must not cost five full graph parses on the grant path.
+    callable). Omitted, the FIRST call resolves ``_graph_index`` once and
+    hands it down the set-membership recursion: a five-member grant costs
+    one graph parse, not five.
     """
     if graph_entry is None:
         by_id = _graph_index()
@@ -531,12 +530,9 @@ def _territories_overlap(a: Optional[str], b: Optional[str]) -> bool:
 
 
 def _derived_level(scope: Optional[str]) -> Optional[int]:
-    """The rung the SCOPE sits on, read off its members - never a stored number.
-
-    The rung is a fact about the territory: every member a configured project
-    is the project rungs (1 one, 0 several), none is an epic set (2), and a
-    mix names no legal crown. ``None`` marks the undecidable cases (blank
-    scope, mixed members) the rivalry guard must fail closed on.
+    """The rung the SCOPE sits on, read off its members, never a stored number:
+    all projects is 1/0 by count, none is an epic set (2), a mix is ``None`` -
+    the undecidable case the rivalry guard fails closed on.
     """
     members = _canonical_members(scope)
     if not members:
@@ -557,21 +553,12 @@ def _crown_rivals(
 ) -> bool:
     """Do two live crowns double-rule territory, ladder-aware?
 
-    Bare overlap over-refuses: the ladder's documented shape is that a
-    portfolio king's court IS project kings and a project king's court IS
-    epic kings, so a live row over ``alpha,beta`` and a crown over ``alpha``
-    are two legitimate crowns. Rivalry is therefore rung-scoped: crowns on the
-    SAME rung double-rule when their territories overlap (a set-holder rules
-    each member), and crowns on DIFFERENT rungs double-rule only when they
-    name the same territory outright.
-
-    The rungs are DERIVED from the members, never read from the stored level:
-    a row stamped ``level=0`` over ``e-1,e-2`` is exactly how a bypass used to
-    switch this guard off (0 != 2 fell to equality, two rows ruled ``e-1``).
-    A stored level is accepted only as a tie-breaker of last resort, when
-    derivation cannot classify either side - the corruption shapes the store
-    gate refuses and the half crowns no legal writer produces. Their overlap
-    is surfaced, not excused.
+    The ladder's court is legitimate (a portfolio's court IS project kings),
+    so rivalry is rung-scoped: same rung double-rules on any shared member,
+    different rungs only on the same territory outright. Rungs derive from
+    the members - a row stamped ``level=0`` over ``e-1,e-2`` is exactly how a
+    bypass used to switch this guard off. Stored levels tie-break only when
+    derivation cannot classify either side; otherwise overlap surfaces.
     """
     a_rung = _derived_level(a_scope)
     b_rung = _derived_level(b_scope)
@@ -1158,12 +1145,8 @@ def crown_validation_error(level: Any, scope: Any) -> Optional[str]:
             f"a scope naming {len(members)} members is level 0 (a portfolio of "
             f"projects) or 2 (a set of epics), not {level}"
         )
-    # The pairing check the message above promises. The rivalry guard derives
-    # the rung from members, so a stored level that names a DIFFERENT rung is
-    # not cosmetic: it is a stamp no resolver produces. Positive evidence
-    # only - on a machine where no member resolves (no readable config) the
-    # kinds are unknowable and the pairing stays with the runtime guards,
-    # which fail closed.
+    # The pairing the message above promises, on positive evidence only: where
+    # nothing resolves (no readable config) the runtime guards fail closed.
     resolved = [_canonical_project(m) for m in members]
     if level == 0 and len(members) > 1 and not any(resolved):
         return (

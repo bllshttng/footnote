@@ -372,9 +372,8 @@ def reign_state(
             "Reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN.",
         )
     argv = [str(binary), "reign-state", "--root", str(root)]
-    # The alias map resolves from the CHECKOUT's config, not the space dir the
-    # manifests live under; without this the reader sees only the global
-    # config and a repo-declared short_name misses its own king.
+    # Alias map resolves from the checkout, not the space dir (no config.toml
+    # there); without this a repo-declared short_name misses its own king.
     argv += ["--cwd", str(Path.cwd())]
     if scope:
         argv += ["--scope", scope]
