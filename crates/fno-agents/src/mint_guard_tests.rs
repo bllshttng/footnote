@@ -310,8 +310,6 @@ fn scan_one(rel: &str, text: &str) -> (Vec<String>, usize) {
                 }
                 // `struct RegistryEntry {` and `impl RegistryEntry {` are the
                 // declaration and its impl block, not literals.
-                let mut back = i;
-                skip_ws_comments(&chars, &mut back, &mut line);
                 let ident_start = i - ident.chars().count();
                 let mut j = ident_start;
                 while j > 0 && chars[j - 1].is_whitespace() {
@@ -326,7 +324,6 @@ fn scan_one(rel: &str, text: &str) -> (Vec<String>, usize) {
                 }
                 let prev_word: String = chars[word_start..word_end].iter().collect();
                 if prev_word == "struct" || prev_word == "impl" || prev_word == "enum" {
-                    let _ = back;
                     continue;
                 }
                 skip_ws_comments(&chars, &mut i, &mut line);
@@ -335,7 +332,6 @@ fn scan_one(rel: &str, text: &str) -> (Vec<String>, usize) {
                 }
                 // Brace-track the literal span, comment/string aware.
                 let mut depth = 0usize;
-                let span_start = i;
                 let mut span = String::new();
                 loop {
                     if i >= chars.len() {
@@ -413,7 +409,6 @@ fn scan_one(rel: &str, text: &str) -> (Vec<String>, usize) {
                         .to_string();
                     offenders.push(format!("{rel}:{start_line}: {snippet}"));
                 }
-                let _ = span_start;
             }
             _ => {
                 i += 1;
@@ -492,6 +487,14 @@ fn scanner_detects_a_default_based_literal() {
     let (offenders, sites) = scan(&[("lib.rs".into(), fixture.into())]);
     assert_eq!(sites, 1);
     assert_eq!(offenders, vec!["lib.rs:3: let row = RegistryEntry {"]);
+}
+
+#[test]
+fn scanner_reports_the_literal_line_when_the_brace_moves_down() {
+    let fixture = "fn f() {\n    let row = RegistryEntry\n        .clone()\n        .into_owned()\n        .map(|r| RegistryEntry\n        {\n            name: \"x\".into(),\n            ..Default::default()\n        })\n        .unwrap();\n}\n";
+    let (offenders, sites) = scan(&[("lib.rs".into(), fixture.into())]);
+    assert_eq!(sites, 1);
+    assert_eq!(offenders, vec!["lib.rs:5: .map(|r| RegistryEntry"]);
 }
 
 #[test]
