@@ -8,6 +8,7 @@ is never touched.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -909,6 +910,77 @@ def test_ac1_hp_rank_top_pins_to_lane_front(tmp_graph):
     md = (tmp_graph.parent / "graph.md").read_text()
     now_body = md.split("## Now", 1)[1].split("\n## ", 1)[0]
     assert now_body.index("AlphaCard") < now_body.index("BetaCard")
+
+
+def test_rank_top_names_when_no_live_dispatcher_reaches_node(tmp_graph, monkeypatch):
+    import fno.active_backlog as active_backlog
+
+    monkeypatch.setattr(
+        active_backlog,
+        "resolve_drain_targets",
+        lambda: [SimpleNamespace(mission="x-beef")],
+    )
+    tmp_graph.write_text(json.dumps({
+        "entries": [
+            {"id": "x-beef", "title": "Mission", "type": "epic",
+             "status": "in_progress", "priority": "p1", "project": "fno"},
+            {"id": "x-0bad", "title": "Outside", "status": "ready",
+             "priority": "p1", "project": "fno"},
+        ]
+    }) + "\n")
+
+    result = _invoke("backlog", "rank", "x-0bad", "--top")
+
+    assert result.exit_code == 0, result.output
+    assert "no live dispatcher will take it" in result.output
+    assert "x-beef" in result.output
+
+
+def test_rank_top_keeps_normal_receipt_when_mission_reaches_node(tmp_graph, monkeypatch):
+    import fno.active_backlog as active_backlog
+
+    monkeypatch.setattr(
+        active_backlog,
+        "resolve_drain_targets",
+        lambda: [SimpleNamespace(mission="x-beef")],
+    )
+    tmp_graph.write_text(json.dumps({
+        "entries": [
+            {"id": "x-beef", "title": "Mission", "type": "epic",
+             "status": "in_progress", "priority": "p1", "project": "fno"},
+            {"id": "x-0cab", "title": "Inside", "status": "ready",
+             "priority": "p1", "project": "fno", "parent": "x-beef"},
+        ]
+    }) + "\n")
+
+    result = _invoke("backlog", "rank", "x-0cab", "--top")
+
+    assert result.exit_code == 0, result.output
+    assert "Ranked x-0cab --top" in result.output
+    assert "no live dispatcher will take it" not in result.output
+
+
+def test_rank_top_names_unavailable_dispatcher_scope_without_absence_claim(
+    tmp_graph, monkeypatch
+):
+    import fno.active_backlog as active_backlog
+
+    def _raise_scope_error():
+        raise RuntimeError("scope read failed")
+
+    monkeypatch.setattr(active_backlog, "resolve_drain_targets", _raise_scope_error)
+    tmp_graph.write_text(json.dumps({
+        "entries": [{
+            "id": "x-0abc", "title": "Unknown", "status": "ready",
+            "priority": "p1", "project": "fno",
+        }]
+    }) + "\n")
+
+    result = _invoke("backlog", "rank", "x-0abc", "--top")
+
+    assert result.exit_code == 0, result.output
+    assert "dispatcher scope unavailable" in result.output
+    assert "no live dispatcher will take it" not in result.output
 
 
 def test_ac1_ui_ranked_card_leads_lane_after_before(tmp_graph):
