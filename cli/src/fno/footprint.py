@@ -22,12 +22,13 @@ _FNO_BINARIES = frozenset(
 
 
 class OrphanTestBinary(NamedTuple):
-    """One orphaned cargo test binary: alive at ppid 1, a deps/ binary argv[0].
+    """One orphaned/wedged cargo test binary: a deps/ binary argv[0] that is
+    parentless (ppid 1) or holds a zombie pile at any ppid.
 
     A test binary whose parent runner died without reaping it reparents to
-    init and, wedged, holds its dead children as zombies forever. Confirmation
-    (a CACHEDIR.TAG in the owning target dir) is the caller's job: this parser
-    never touches the filesystem.
+    init; a wedged one holds its dead children as zombies even with its
+    parent alive. Confirmation (a CACHEDIR.TAG in the owning target dir) is
+    the caller's job: this parser never touches the filesystem.
     """
 
     pid: int
@@ -58,8 +59,9 @@ class Footprint(NamedTuple):
     # Whole-machine on purpose: a test a person started competes for the same
     # box as a lane.
     test_process_count: int = 0
-    # Orphaned cargo test binaries, worst zombie count first. ppid == 1 plus a
-    # deps-binary argv[0] is the candidate shape; always wrong when confirmed.
+    # Orphaned/wedged cargo test binaries, worst zombie count first. A
+    # deps-binary argv[0] at ppid 1 is the parentless shape; a deps binary
+    # holding ORPHAN_MIN_ZOMBIES dead children is the wedged-reaper shape.
     orphan_test_binaries: tuple[OrphanTestBinary, ...] = ()
 
 
@@ -73,6 +75,9 @@ _DEPS_BINARY_RE = re.compile(r"/target/(?:debug|release)/deps/[A-Za-z0-9_]+-[0-9
 
 #: macOS renders a dead-unreaped child as exactly this command.
 _DEFUNCT_COMMAND = "<defunct>"
+#: Zombie children at which a deps binary at ANY ppid reads as a wedged
+#: reaper, not a running suite. The reproduction sampler used the same bar.
+ORPHAN_MIN_ZOMBIES = 20
 
 
 def _is_deps_test_binary(command: str) -> bool:
@@ -347,8 +352,10 @@ def parse_footprint(
             sustained.append((process.cpu_percent, process.command))
 
     sustained.sort(key=lambda item: (-item[0], item[1]))
-    # Orphan candidates, from the same snapshot: a live row at ppid 1 whose
-    # argv[0] is a deps test binary, with its dead children counted.
+    # Orphan candidates, from the same snapshot: a deps test binary is named
+    # when it is parentless (ppid 1, always wrong) or when it holds a wedged
+    # reaper's pile of zombies at any ppid - the measured live case had a
+    # living, pipe-blocked cargo parent, so ppid 1 alone missed it.
     defunct_by_ppid: dict[int, int] = {}
     for process in processes.values():
         if process.command == _DEFUNCT_COMMAND and process.ppid is not None:
@@ -362,7 +369,11 @@ def parse_footprint(
                 elapsed_seconds=process.elapsed_seconds,
             )
             for process in processes.values()
-            if process.ppid == 1 and _is_deps_test_binary(process.command)
+            if _is_deps_test_binary(process.command)
+            and (
+                process.ppid == 1
+                or defunct_by_ppid.get(process.pid, 0) >= ORPHAN_MIN_ZOMBIES
+            )
         ),
         key=lambda orphan: (-orphan.zombies, orphan.pid),
     )

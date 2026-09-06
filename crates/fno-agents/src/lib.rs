@@ -851,6 +851,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_create_no_session",
     "agent_orphan_reaped",
     "agent_orphan_state_archived",
+    // Orphaned-test-binary reap sweep (daemon-emitted): one event per pid
+    // the footprint verb killed on the daemon's behalf.
+    "orphan_test_binary_reaped",
     // Late bind (daemon-emitted, x-9de7 task 2): a pane-hosted codex row whose
     // spawn-time bind window expired got its `harness_session_id` resolved on
     // a later reconcile tick, from the pane-tree rollout probe. Makes "the row

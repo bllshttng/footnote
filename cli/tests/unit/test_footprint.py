@@ -326,13 +326,43 @@ def test_orphan_test_binary_parser_names_the_pid_and_counts_its_zombies() -> Non
     assert orphan.command == f"{_ORPHAN} portal"
 
 
-def test_orphan_test_binary_parser_rejects_non_orphan_ppid() -> None:
-    """The same argv whose parent is still alive is NOT the orphan shape: a
-    wedged binary whose cargo parent lives has another remedy (its parent can
-    still reap it), and naming it would misfire on a live lane."""
+def test_orphan_test_binary_parser_names_a_wedged_reaper_at_any_ppid() -> None:
+    """The measured live case: a deps binary holding a zombie pile whose cargo
+    parent was ALIVE (pipe-blocked). Zombie-count plus age is the predicate
+    there, because ppid 1 alone misses exactly the one specimen observed."""
     from fno.footprint import parse_footprint
 
     reading = parse_footprint(_orphan_snapshot(4321, _ORPHAN))
+
+    assert len(reading.orphan_test_binaries) == 1
+    assert reading.orphan_test_binaries[0].pid == 59929
+    assert reading.orphan_test_binaries[0].zombies == 227
+
+
+def test_orphan_test_binary_parser_rejects_a_childless_deps_binary_with_a_parent() -> None:
+    """A deps binary with a parent and no zombie pile is a LIVE lane: cargo is
+    mid-run, the suite owns it, and naming it would misfire on healthy work."""
+    from fno.footprint import parse_footprint
+
+    header = "PID PPID ELAPSED %CPU RSS COMMAND"
+    rows = [
+        f"59929 4321 03:07:00 0.0 4096 {_ORPHAN} portal",
+        "900 1 01:00:00 0.1 1024 fno-agents-daemon --serve",
+    ]
+    reading = parse_footprint("\n".join([header, *rows]))
+
+    assert reading.orphan_test_binaries == ()
+
+
+def test_orphan_test_binary_parser_holds_the_zombie_threshold_below_the_bar() -> None:
+    """A handful of stragglers under a parented deps binary is not the wedge
+    shape: under the bar and parented, nothing is named."""
+    from fno.footprint import ORPHAN_MIN_ZOMBIES, parse_footprint
+
+    header = "PID PPID ELAPSED %CPU RSS COMMAND"
+    rows = [f"59929 4321 03:07:00 0.0 4096 {_ORPHAN} portal"]
+    rows += [f"{70000 + i} 59929 00:00:10 0.0 0 <defunct>" for i in range(ORPHAN_MIN_ZOMBIES - 1)]
+    reading = parse_footprint("\n".join([header, *rows]))
 
     assert reading.orphan_test_binaries == ()
 
