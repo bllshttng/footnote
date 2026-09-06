@@ -1522,10 +1522,9 @@ def cmd_spawn(
         "-k",
         help=(
             "Grant an orchestrator crown on the spawned worker, over the "
-            "territory named here. Repeatable: pass ONE epic id (a Director), "
-            "SEVERAL epic ids (one Director over the set), ONE project name "
-            "(a project king), or SEVERAL project names for a "
-            "portfolio (`-k etl -k web`). The ladder altitude is derived from "
+            "territory named here. Repeatable: pass epic id(s) (a Director; "
+            "several crown one over the set), ONE project name (a project "
+            "king), or SEVERAL projects for a portfolio. The altitude is derived from "
             "what you name - there is no --level, and a node that is not an epic "
             "is refused, since implementers get no crowns. Stamped with the "
             "grantor derived from THIS session, never self-declared. Works on "
