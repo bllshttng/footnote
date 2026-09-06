@@ -72,18 +72,21 @@ doctor_app.command("lanes", hidden=True)(lanes_command)
 doctor_app.command("harness", hidden=True)(harness_probe_command)
 
 
-# `doctor harness-matrix` renders the features matrix doc from the table
-# (x-a3e8). Hidden per the new-verb convention; the freshness gate is the
-# tripwire, this verb is the regenerator. The renderer is the diagnostics
-# script the gate also calls, so the render lives in one place outside the
-# runtime package.
+# `doctor harness-matrix` renders the two matrix docs from the table: the
+# features matrix (x-a3e8) and the verb x harness projection (x-b7a1).
+# Hidden per the new-verb convention; the freshness gate is the tripwire,
+# this verb is the regenerator. The renderer is the diagnostics script the
+# gate also calls, so the render lives in one place outside the runtime
+# package.
 @doctor_app.command("harness-matrix", hidden=True)
 def harness_matrix_command(
     write: bool = typer.Option(
-        False, "--write", help="Write docs/harnesses/capability-matrix.md from the table."
+        False,
+        "--write",
+        help="Write docs/harnesses/capability-matrix.md and verb-matrix.md from the table.",
     ),
 ) -> None:
-    """Render the features capability matrix from the capability table."""
+    """Render the features and verb matrices from the capability table."""
     import subprocess
     import sys
 
