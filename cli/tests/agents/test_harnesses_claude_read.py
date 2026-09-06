@@ -86,6 +86,11 @@ def test_claude_agents_json_prefers_state_over_status_on_live_rows(monkeypatch):
     working session to Idle, which read.py then replaced with a stale
     truth-status reading. That is the render-Idle-while-working bug, arrived at
     after the id/state aliases had already landed.
+
+    x-8bfb: the `working`/`idle` disagreement on row 2 is precedence working
+    exactly as documented - both sides individually resolve to a KNOWN live
+    status, `state` wins, and that is not drift - so it no longer warns
+    (AC6-HP). The resolved value is unchanged (AC9-FR): still `Working`.
     """
     payload = [
         {
@@ -131,17 +136,10 @@ def test_claude_agents_json_prefers_state_over_status_on_live_rows(monkeypatch):
         "6500bad9": {"live_status": "Working"},
     }
     # busy/working mean the same thing, so normalizing before the comparison
-    # keeps that row silent; idle/working genuinely disagree and still report.
-    assert not any("7f7d7627" in w or "row 0" in w for w in warnings), warnings
-    conflict = next(w for w in warnings if "conflicting values across aliases" in w)
-    # RAW wire spellings, not the normalized output vocabulary: an operator
-    # reading this is debugging drift against a real binary, and `state='Working'`
-    # is this parser's word, not anything claude emitted.
-    assert "state='working'" in conflict and "status='idle'" in conflict, conflict
-    assert "used 'Working'" in conflict, conflict
-    # The interactive row is not an agent: skipped silently, not warned about
-    # and not crashed on.
-    assert not any("short id" in w for w in warnings), warnings
+    # keeps that row silent; idle/working disagree on the wire but both sides
+    # are individually recognized, so `state`'s precedence answers it quietly
+    # too (x-8bfb AC6-HP) - no warning of either shape.
+    assert warnings == [], warnings
 
 
 def test_claude_agents_json_maps_every_observed_spelling(monkeypatch):
