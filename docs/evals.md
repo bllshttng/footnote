@@ -44,19 +44,21 @@ Success criteria must be **mechanical** (develop-tests discipline): a task with 
 | `fno doctor evals run [--task ID] [--tier T] [--repeat K] [--provider P]` | Run bank tasks in disposable worktrees, grade mechanically, append one history line per task-run. Confirms above 20 total runs (`--yes` skips). |
 | `fno doctor evals report [--since N] [--graduate] [--json]` | Fold history: per-tier pass rates, pass@1, pass^k, flake list, regression alarm (exit 4 on alarm). `--graduate` lists eligible capability tasks. |
 | `fno doctor evals graduate <id>` | Retag a capability task's YAML to regression. |
+| `fno doctor evals grade --brief B --golden G` | Grade a research brief against a golden doc (three mechanical assertions); exit 0 green. |
 
 Each run executes the task in a disposable worktree via the headless spawn substrate (`fno agents spawn --substrate headless` - never bare `claude -p`, keeping provider rotation and the spawn cap in play), then removes the worktree after grading. A bank task never runs in your working copy. History appends to `~/.fno/evals-history.jsonl` (override via `config.paths.evals_history`).
 
-## Run cadence
+## Run cadence and demand
 
-**Manual or explicitly scheduled - never auto-on-merge in v1.** Live execution spends real money (each run spawns a worker). Automation is a separate opt-in once the baseline cost per sweep is known. Run it:
+Without a forcing function an eval harness dies. The bank sat fully built while its history went quiet. A 40-day-old 100% rendered exactly like a fresh one. The demand is now built in: the tick runs the tier on a cadence, and the health surfaces go red past the window.
 
-- **By hand** during development: `fno doctor evals run --tier regression` before a risky change, or `--repeat 5` on a suspect flaky task.
-- **On a schedule** you own (cron / `fno schedule`) for a periodic regression sweep.
+- **The tick.** The pr-watch daemon's evals phase runs the regression tier on a schedule. Past the `evals.schedule_days` window (default 7, `0` disables the scheduled run) it fires `fno doctor evals run --tier regression -y`. With spawn-gate headroom the run proceeds. The run shares the tick's remaining wall budget. It journals `evals_scheduled_run` with the task count, passes, and duration. Past twice `evals.stale_days`, a plumbing failure journals `evals_stale` with the reason, plus one OS notice per schedule window. Graded fails are data: the run still journals as scheduled. Plumbing failures are could-not-fire: a refused gate, a timeout, a non-zero exit, an exit-0 run that appended no history rows.
+- **The red row.** `fno backlog triage health` renders the evals line with the newest regression run's age (`age 9d STALE`). `fno doctor` renders the same verdict in its staleness vocabulary. A stale bank prints STALE with the age and the run command. No history or no regression row prints UNKNOWN. Unknown never asserts staleness. A fresh bank prints nothing. A red evals row is an escalation, never a gate. Nothing refuses while the bank is stale. The row is what demands the run.
+- **By hand.** Run `fno doctor evals run --tier regression` before a risky change. Run `--repeat 5` on a suspect flaky task.
 
 The report has two wired consumers from day one, so the harness is not a write-only artifact:
 
-1. `fno backlog triage health` shows an `evals` line (regression pass rate + flake count) whenever history exists.
+1. With history, `fno backlog triage health` shows an `evals` line: regression pass rate, flake count, age, STALE.
 2. CI-flake suites live as regression tasks, making the flake ledger a graded artifact instead of memory notes.
 
 ## Context-to-outcome trace
