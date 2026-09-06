@@ -3047,9 +3047,7 @@ def _observe_node_claim(
             holder=holder,
             truth_status=truth,
             action=action,
-            # Which session witness answered: dispatched-on-unknown becomes
-            # distinguishable from dispatched-on-a-live-witness. Omitted when
-            # the classification source did not report one.
+            # Session witness basis, only when the classifier reported one.
             **({"session_basis": info["session_basis"]} if info.get("session_basis") else {}),
         )
     if emit and claim_state in ("stale", "suspect"):

@@ -392,11 +392,9 @@ def acquire_claim(
             acquired_lock = False
         return _retry()
 
-    # Resolve the harness ONCE, here, outside every mutex below (x-20f1: the
-    # owned path walks the process tree and `_make_claim` runs inside the
-    # critical section). ONE walk for both halves: the session_id stamp and
-    # the harness tag come from the same identity answer, the lockstep rule
-    # the Rust make_claim resolver follows.
+    # Resolve the harness ONCE, outside every mutex below (x-20f1: the owned
+    # path walks the process tree inside the critical section). ONE walk for
+    # both halves: session_id and harness tag share one identity answer.
     identity = resolve_self_identity()
     if harness is None:
         harness = identity.harness
@@ -1142,9 +1140,8 @@ def _registry_session_pid(session_id: str) -> Optional[int]:
 
     The ``harness_session_id`` row binding is the identity proof, so no
     create-time filter applies (it rejected every resumed session's anchor).
-    L1 reads the registry FILE directly, the same door
-    ``_roster_name_for_session`` uses, and degrades to None on anything
-    unexpected so liveness never crashes.
+    Reads the registry FILE directly (the L5 registry import is
+    boundary-refused) and degrades to None on anything unexpected.
     """
     sid = (session_id or "").strip()
     if not sid:
@@ -1244,11 +1241,9 @@ def _reanchor_pid_for(
             return None
 
     # Session-keyed re-anchor, BEFORE the state gate: the registry row keyed
-    # by the claim's session id is the identity proof, so its live pid anchors
-    # regardless of create time versus acquired_at - the create-time filter
-    # below is exactly what rejected every resumed harness. The verdict gate
-    # cannot order this first because the witness may already have healed the
-    # verdict to LIVE; this mirrors renew_locked's is_live(recorded pid) gate.
+    # by the session id is the identity proof, so its live pid anchors
+    # regardless of create time (the filter that rejected every resumed
+    # harness). Mirrors renew_locked's is_live(recorded pid) gate.
     if existing.session_id:
         registry_pid = _registry_session_pid(existing.session_id)
         if registry_pid is not None:

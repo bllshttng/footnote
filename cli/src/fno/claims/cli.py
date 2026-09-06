@@ -1074,8 +1074,8 @@ def status(
         # line makes that read fail exactly when the claim has lapsed, which is
         # the case the operator most needs a truthful answer for.
         line = _roster_verdict_line(info)
-        # Name the session witness when one answered, so a confident verdict
-        # a failing probe produced stays auditable on the loud line.
+        # Witness named when one answered: a verdict from a failing probe
+        # stays auditable on the loud line.
         if info.get("session_basis"):
             line += f"; session witness: {info['session_basis']}"
         typer.echo(line, err=True)
