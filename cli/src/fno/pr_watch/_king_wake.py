@@ -27,7 +27,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 #: Marker for the operator question a ceiling refusal raises, deduped through
 #: the shared already-asked fold so one stranded scope asks once, not per tick.
@@ -207,12 +207,14 @@ def _init_answered_cursor(target: CrownTarget, answered_fn: Callable) -> str:
 
     An absent cursor is a first observation, not "everything is new": without
     this, the first armed tick would replay every answer the holder ever
-    received as a fresh trigger.
+    received as a fresh trigger. An UNREADABLE journal seeds nothing - an
+    empty cursor written on a read failure would replay that same history
+    the moment the journal becomes readable, so the init retries next tick.
     """
     try:
         answered = answered_fn(target.root)
-    except Exception:  # noqa: BLE001 - an unreadable journal seeds an empty cursor
-        answered = []
+    except Exception:  # noqa: BLE001 - an unreadable journal is not a cursor
+        return ""
     newest = max((str(getattr(r, "closed_ts", "") or "") for r in answered), default="")
     _store_sidecar_field(target, "answered_cursor", newest)
     return newest
@@ -366,7 +368,7 @@ def _board_hash(scope: str, entries: list, resolver: Optional[Callable] = None) 
     return "" if rows is None else _hash_rows(rows)
 
 
-def _read_board_sidecar(target: CrownTarget) -> "tuple[str, list[tuple[str, str, str, str]] | None]":
+def _read_board_sidecar(target: CrownTarget) -> "tuple[str, list[tuple[str, ...]] | None]":
     """``(stored_hash, stored_rows)``; corrupt reads as first observation."""
     payload = _read_sidecar(target)
     stored_hash = str(payload.get("board_hash") or "")
@@ -413,7 +415,7 @@ def _board_trigger(
     return True, fresh, rows, render_board_diff(stored_rows, rows)
 
 
-def _store_board_hash(target: CrownTarget, digest: str, rows: list = ()) -> None:
+def _store_board_hash(target: CrownTarget, digest: str, rows: Iterable = ()) -> None:
     payload = _read_sidecar(target)
     payload["board_hash"] = digest
     payload["board_rows"] = [list(row) for row in rows]
