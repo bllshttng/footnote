@@ -409,10 +409,13 @@ def make_selection_sort_key(
     when its ``parent`` resolves to another node in ``entries``; such
     children always outrank loose nodes regardless of raw priority, so a
     walk stays focused on one epic before starting loose work. Among epic
-    children the order is: in-progress epics first (an epic with a done or
+    children the order is: the epic's own rank band (a ranked epic floats
+    its whole group), in-progress epics first (an epic with a done or
     claimed child), then higher-priority epics, then the epic's own
     ``created_at`` (keeps one epic's children grouped), then the child's
-    own priority and ``created_at``. Loose nodes fall back to flat
+    own rank (orders it only among its live-epic siblings - it can never
+    pull its epic group ahead of another epic or a loose node), then the
+    child's own priority and ``created_at``. Loose nodes fall back to flat
     priority then ``created_at`` (matching ``_graph_sort_key_fn``).
 
     The key is precomputed against ``entries`` once so sorting stays O(N
@@ -458,12 +461,15 @@ def make_selection_sort_key(
         return PRIORITY_ORDER[_priority_name(e)]
 
     def key(node: object) -> tuple:
-        # Curated rank leads: the SAME `_rank_band` the board uses,
-        # prepended so a `rank --top` node (band 0, ascending rank) is selected
-        # ahead of ALL unranked nodes (band 1) - including in-progress epic
-        # children, so an explicit rank overrides the epics-first heuristic
-        # (Locked Decision 1). Unranked nodes all share the `(1, 0.0)` band, so
-        # the existing epics-first key below decides their order byte-for-byte.
+        # Curated rank leads: the SAME `_rank_band` the board uses, prepended
+        # so a `rank --top` LOOSE node (band 0, ascending rank) is selected
+        # ahead of all unranked nodes (band 1), overriding the epics-first
+        # heuristic (Locked Decision 1). For a live-epic child the leading
+        # band is the EPIC's own: the group's position is decided by the
+        # epic, and the child's rank (the `band` term below) orders it only
+        # among its siblings under that epic - it can never float the group.
+        # Unranked nodes all share the `(1, 0.0)` band, so the epics-first
+        # key below decides their order byte-for-byte.
         if not isinstance(node, dict):
             node = {}
         lane = (_lane_order_key(_project_key(node)),) if swimlane else ()
@@ -477,11 +483,12 @@ def make_selection_sort_key(
         if epic is not None:
             in_progress_rank = 0 if pid in epic_in_progress else 1
             return lane + (
-                band,                    # curated rank band (ranked first)
+                _rank_band(epic),        # EPIC's rank band decides group position
                 0,                       # epic-children tier (before loose)
                 in_progress_rank,        # in-progress epics first
                 _prio(epic),             # highest-priority epic first
                 _sort_text(epic.get("created_at")),  # group one epic together
+                band,                    # child rank: orders only within its epic
                 child_prio,
                 _fanout(node_id),    # in-band: after priority, before orphan
                 child_orphan,

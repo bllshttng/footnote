@@ -996,22 +996,96 @@ def test_ac1_ui_ranked_card_leads_lane_after_before(tmp_graph):
     assert now_body.index("SecondCard") < now_body.index("FirstCard")
 
 
-def test_rank_uses_live_epic_promoted_board_lane(tmp_graph):
+def test_rank_child_defaults_to_within_epic_scope(tmp_graph):
+    """A live-epic child ranks among its epic siblings; the receipt names the epic.
+
+    The loose anchor's rank (1.0) must NOT enter the midpoint arithmetic: with
+    the sibling at 5.0 and no ranked lower sibling, `--before` lands at 4.0
+    exactly. A lane-scoped read would return (1.0 + 5.0) / 2 = 3.0.
+    """
     entries = [
         {"id": "ab-epic001", "title": "Epic", "type": "epic",
          "status": "ready", "priority": "p1", "project": "fno"},
+        {"id": "ab-sibl001", "title": "Ranked sibling", "status": "ready",
+         "priority": "p2", "project": "fno", "parent": "ab-epic001", "rank": 5.0},
         {"id": "ab-child01", "title": "Promoted child", "status": "ready",
          "priority": "p2", "project": "fno", "parent": "ab-epic001"},
         {"id": "ab-anchor1", "title": "Now anchor", "status": "ready",
-         "priority": "p1", "project": "fno", "rank": 5.0},
+         "priority": "p1", "project": "fno", "rank": 1.0},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
 
-    result = _invoke("backlog", "rank", "ab-child01", "--before", "ab-anchor1")
+    result = _invoke("backlog", "rank", "ab-child01", "--before", "ab-sibl001")
 
     assert result.exit_code == 0, result.output
-    assert "Now/fno" in result.output
-    assert _rank_of(tmp_graph, "ab-child01") < _rank_of(tmp_graph, "ab-anchor1")
+    assert "epic ab-epic001" in result.output
+    assert _rank_of(tmp_graph, "ab-child01") == 4.0
+    assert _rank_of(tmp_graph, "ab-child01") < _rank_of(tmp_graph, "ab-sibl001")
+
+
+def test_rank_child_anchor_outside_epic_refused(tmp_graph):
+    """AC1-EDGE: a child cannot anchor against a loose node or another epic's child."""
+    entries = [
+        {"id": "ab-epic001", "title": "Epic", "type": "epic",
+         "status": "ready", "priority": "p1", "project": "fno"},
+        {"id": "ab-child01", "title": "Child", "status": "ready",
+         "priority": "p2", "project": "fno", "parent": "ab-epic001"},
+        {"id": "ab-epic002", "title": "Other epic", "type": "epic",
+         "status": "ready", "priority": "p1", "project": "fno"},
+        {"id": "ab-other01", "title": "Other child", "status": "ready",
+         "priority": "p1", "project": "fno", "parent": "ab-epic002", "rank": 2.0},
+        {"id": "ab-anchor1", "title": "Now anchor", "status": "ready",
+         "priority": "p1", "project": "fno", "rank": 1.0},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    for anchor in ("ab-anchor1", "ab-other01"):
+        result = _invoke("backlog", "rank", "ab-child01", "--before", anchor)
+        assert result.exit_code == 1, result.output
+        assert "cross-epic rank rejected" in result.output
+        assert "scoped to its live epic" in result.output
+        # Refused before the locked write: no rank persisted.
+        assert _rank_of(tmp_graph, "ab-child01") is None
+
+
+def test_rank_within_epic_refused_without_live_epic_parent(tmp_graph):
+    """AC1-EDGE: explicit --within-epic needs a live epic; loose node and
+    terminal-parent child both refuse with no rank persisted."""
+    entries = [
+        {"id": "ab-epic003", "title": "Done epic", "type": "epic",
+         "status": "done", "priority": "p1", "project": "fno"},
+        {"id": "ab-child02", "title": "Terminal-parent child", "status": "ready",
+         "priority": "p2", "project": "fno", "parent": "ab-epic003"},
+        {"id": "ab-loose01", "title": "Loose", "status": "ready",
+         "priority": "p1", "project": "fno"},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    for target in ("ab-loose01", "ab-child02"):
+        result = _invoke("backlog", "rank", target, "--top", "--within-epic")
+        assert result.exit_code == 1, result.output
+        assert "--within-epic refused" in result.output
+        assert _rank_of(tmp_graph, target) is None
+
+
+def test_rank_within_epic_orders_children_on_board(tmp_graph):
+    """AC1-HP end to end: a child rank reorders cards inside its epic group."""
+    entries = [
+        {"id": "ab-epic004", "title": "Epic", "type": "epic",
+         "status": "ready", "priority": "p1", "project": "fno"},
+        {"id": "ab-later1", "title": "LaterCard", "status": "ready",
+         "priority": "p2", "project": "fno", "parent": "ab-epic004"},
+        {"id": "ab-first1", "title": "FirstCard", "status": "ready",
+         "priority": "p2", "project": "fno", "parent": "ab-epic004"},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    r = _invoke("backlog", "rank", "ab-first1", "--top", "--within-epic")
+    assert r.exit_code == 0, r.output
+    assert "epic ab-epic004" in r.output
+
+    md = (tmp_graph.parent / "graph.md").read_text()
+    assert md.index("FirstCard") < md.index("LaterCard")
 
 
 def test_rank_uses_in_progress_epic_board_lane(tmp_graph):
