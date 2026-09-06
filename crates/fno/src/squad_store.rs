@@ -166,9 +166,9 @@ pub fn mint_key() -> String {
     format!("t{:x}", now_secs())
 }
 
-/// FNV-1a over bytes: deterministic and dependency-free, the same hash server's
-/// `mission_sid` uses. File-local (this module does not import server.rs); kept
-/// in sync with `crates/fno/src/server.rs::fnv1a`.
+/// FNV-1a over bytes: deterministic and dependency-free, the same hash
+/// `mission_squad::mission_sid` uses. File-local (this module does not import
+/// mission_squad.rs); kept in sync with `crates/fno/src/mission_squad.rs::fnv1a`.
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for &b in bytes {
