@@ -10197,15 +10197,35 @@ impl Core {
         // Synthetic "mission squad" headers: one per active mission, done/total
         // baked into the name so no proto bump is needed. Renders even with
         // zero tagged workers - "nothing running" must stay visible, never
-        // vanish (empty-but-active).
-        squads.extend(self.missions.missions.iter().map(|m| SquadMeta {
-            id: mission_sid(&m.epic_id),
-            name: format!("{}  {}/{}", m.slug, m.done, m.total),
-            canonical_cwd: String::new(),
-            tabs: vec![],
-            active_tab: 0,
-            panes: 0,
-        }));
+        // vanish (empty-but-active). With several active missions each name
+        // also carries its rotation `(i of n)` (epic-id order, the drain's own
+        // order) so the band never reads as one mission; a lone mission keeps
+        // its bare name - `(1 of 1)` reads as a fault, not a count.
+        let rotation_total = self.missions.missions.len();
+        squads.extend(
+            self.missions
+                .missions
+                .iter()
+                .enumerate()
+                .map(|(i, m)| SquadMeta {
+                    id: mission_sid(&m.epic_id),
+                    name: format!(
+                        "{}  {}/{}{}",
+                        m.slug,
+                        m.done,
+                        m.total,
+                        if rotation_total > 1 {
+                            format!("  ({} of {})", i + 1, rotation_total)
+                        } else {
+                            String::new()
+                        }
+                    ),
+                    canonical_cwd: String::new(),
+                    tabs: vec![],
+                    active_tab: 0,
+                    panes: 0,
+                }),
+        );
         ServerMsg::Layout {
             squads,
             active_squad: view.0,
@@ -22440,6 +22460,46 @@ mod tests {
         let rows = core.agent_rows();
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.squad == Some(sid)));
+    }
+
+    #[test]
+    fn multi_mission_headers_name_the_rotation() {
+        // Two active missions: each header carries `(i of n)` (epic-id order)
+        // so one sample of the rotation cannot read as the whole population.
+        // The single-mission control half lives above: `mux-squad  1/2`, bare.
+        let mut core = empty_core();
+        core.missions = backlog_view::MissionMap {
+            missions: vec![
+                backlog_view::Mission {
+                    epic_id: "x-aaaa".into(),
+                    slug: "alpha".into(),
+                    done: 0,
+                    total: 2,
+                },
+                backlog_view::Mission {
+                    epic_id: "x-bbbb".into(),
+                    slug: "beta".into(),
+                    done: 1,
+                    total: 3,
+                },
+            ],
+            node_to_epic: HashMap::new(),
+        };
+        let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
+        let squads = match &msg {
+            ServerMsg::Layout { squads, .. } => squads,
+            _ => unreachable!(),
+        };
+        let a = squads
+            .iter()
+            .find(|s| s.id == mission_sid("x-aaaa"))
+            .expect("first mission header");
+        assert_eq!(a.name, "alpha  0/2  (1 of 2)");
+        let b = squads
+            .iter()
+            .find(|s| s.id == mission_sid("x-bbbb"))
+            .expect("second mission header");
+        assert_eq!(b.name, "beta  1/3  (2 of 2)");
     }
 
     #[test]

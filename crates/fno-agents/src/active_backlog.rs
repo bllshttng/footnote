@@ -137,6 +137,11 @@ pub struct DrainConfig {
     pub failure_limit: u32,
     /// The mission's poll interval, for the control-plane tick row's staleness.
     pub interval_seconds: u64,
+    /// 1-based position and population of this mission in the active rotation
+    /// (epic-id order), `None` when it is the only active mission. Readout-only:
+    /// the arms-table detail prints `mission=x (1 of 4)` so one row sampled from
+    /// a many-mission drain cannot read as the whole population.
+    pub rotation: Option<(usize, usize)>,
 }
 
 /// What one [`mission_drain_tick`]'s reconcile did, for tests. Dispatch itself
@@ -777,9 +782,14 @@ pub fn mission_drain_tick(
             }
         }
     };
+    let rotation = cfg
+        .rotation
+        .map(|(pos, total)| format!(" ({pos} of {total})"))
+        .unwrap_or_default();
     let detail = format!(
-        "mission={} ready={} closed={} dispatched={} pending={}",
+        "mission={}{} ready={} closed={} dispatched={} pending={}",
         cfg.mission,
+        rotation,
         facts.ready,
         closed,
         newly_dispatched,
@@ -954,7 +964,11 @@ fn journal_for(cwd: &Path) -> Journal {
 /// carries no mission id (a malformed receipt). No driver-lib preflight: the
 /// worker drivers are resolved per CHILD project inside `advance --epic`, not at
 /// the epic's cwd, so the epic project need not itself be drivable.
-fn drain_config_for(target: &ResolvedTarget, fno_bin: &str) -> Option<DrainConfig> {
+fn drain_config_for(
+    target: &ResolvedTarget,
+    fno_bin: &str,
+    rotation: Option<(usize, usize)>,
+) -> Option<DrainConfig> {
     let mission = target.mission.clone()?;
     Some(DrainConfig {
         cwd: PathBuf::from(&target.cwd),
@@ -962,6 +976,7 @@ fn drain_config_for(target: &ResolvedTarget, fno_bin: &str) -> Option<DrainConfi
         mission,
         failure_limit: target.failure_limit,
         interval_seconds: target.interval_seconds,
+        rotation,
     })
 }
 
@@ -1177,16 +1192,21 @@ async fn mission_drain_loop(
 
         // Re-resolve this mission's liveness. If its epic dropped out of the
         // target set (mission_active cleared externally), exit the loop (the
-        // supervisor will not respawn it).
-        let current = resolve_targets(&fno_bin)
-            .into_iter()
-            .find(|t| t.mission.as_deref() == Some(mission.as_str()));
-        let Some(t) = current else {
+        // supervisor will not respawn it). The position in this list (already
+        // epic-id ordered) names the rotation in the tick's detail row; a lone
+        // mission prints no `(1 of 1)` - that reads as a fault, not a count.
+        let all = resolve_targets(&fno_bin);
+        let Some(pos) = all
+            .iter()
+            .position(|t| t.mission.as_deref() == Some(mission.as_str()))
+        else {
             break;
         };
+        let t = &all[pos];
         let interval = Duration::from_secs(t.interval_seconds.max(1));
+        let rotation = (all.len() >= 2).then_some((pos + 1, all.len()));
 
-        let Some(cfg) = drain_config_for(&t, &fno_bin) else {
+        let Some(cfg) = drain_config_for(t, &fno_bin, rotation) else {
             // Malformed target (no mission id); back off and re-check.
             sleep_interruptible(interval, &shutdown).await;
             continue;
@@ -1413,6 +1433,7 @@ mod tests {
             mission: "x-epic".to_string(),
             failure_limit,
             interval_seconds: 300,
+            rotation: None,
         }
     }
 
@@ -2072,6 +2093,67 @@ mod tests {
         assert_eq!(data["interval_s"], 300);
         assert!(data["skip_reason"].is_null());
         assert!(data["detail"].as_str().unwrap().contains("dispatched=1"));
+    }
+
+    #[test]
+    fn tick_detail_names_the_rotation_when_many_missions() {
+        // The arms table shows ONE row per arm (newest tick wins), so a drain
+        // with several active missions must say which sample it is: `mission=x
+        // (1 of 4)`. Without it one mission's row reads as the whole rotation.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":[]}"#,
+        );
+        let mut cfg = test_cfg(tmp.path(), fno, 3);
+        cfg.rotation = Some((1, 4));
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let detail = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .map(|v| v["data"]["detail"].as_str().unwrap().to_string())
+            .expect("one tick row");
+        assert!(
+            detail.contains("mission=x-epic (1 of 4) "),
+            "rotation named in: {detail}"
+        );
+    }
+
+    #[test]
+    fn tick_detail_omits_rotation_when_single_mission() {
+        // Control half: a lone mission still names itself, and a bare `(1 of 1)`
+        // never prints - it reads as a fault, not a count.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":[]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let detail = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .map(|v| v["data"]["detail"].as_str().unwrap().to_string())
+            .expect("one tick row");
+        assert!(
+            detail.contains("mission=x-epic ready="),
+            "mission named bare in: {detail}"
+        );
+        assert!(!detail.contains("1 of 1"), "no bare (1 of 1) in: {detail}");
     }
 
     #[test]
