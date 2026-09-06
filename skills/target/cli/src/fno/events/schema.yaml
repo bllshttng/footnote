@@ -3917,6 +3917,8 @@ event_types:
         action:
           type: string
           enum: [blocked, redispatch, dispatch, auto-deferred, defer-failed, reaped-abandoned]
+        session_basis:
+          type: [string, "null"]
     consumers: [operator]
 
   - name: dispatch_dead_failure_limit
