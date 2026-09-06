@@ -246,9 +246,9 @@ def _attest_from_record(
     harness = ""
     harness_session_id = ""
     try:
-        from fno.paths import resolve_repo_root
+        from fno.paths import resolve_repo_root, target_state_path_or_legacy
 
-        manifest = resolve_repo_root() / ".fno" / "target-state.md"
+        manifest = target_state_path_or_legacy(resolve_repo_root())
         if manifest.is_file():
             for line in manifest.read_text(encoding="utf-8").splitlines():
                 stripped = line.strip()
