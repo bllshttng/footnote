@@ -492,7 +492,7 @@ def test_supersede_keeps_old_pending_until_verified(tmp_graph, tmp_path):
 
     entries = _read_entries(tmp_graph)
     by_id = {e["id"]: e for e in entries}
-    assert by_id["ab-old"]["deferred_at"] is None
+    assert by_id["ab-old"].get("deferred_at") is None
     assert by_id["ab-old"]["status"] == "blocked"
     assert "pending supersession" in by_id["ab-old"]["blocked_reason"]
 
@@ -554,10 +554,10 @@ def test_supersede_blank_reason_rejected(tmp_graph, tmp_path):
     assert "blank" in res.output.lower()
 
 
-def test_supersede_deferred_node_rejected(tmp_graph, tmp_path):
-    """A deferred node carries an independent park. Superseding would overwrite
-    it and unsupersede could not restore it, so refuse - same shape as the
-    done and already-superseded refusals."""
+def test_supersede_deferred_node_keeps_park(tmp_graph, tmp_path):
+    """A deferred node supersedes in one command. The park survives under the
+    supersession (status precedence reads superseded above deferred) and
+    resurfaces when the supersession is reversed."""
     entries = _read_entries(tmp_graph)
     old = _seed_node(entries, id_="ab-old", plan_path=str(_write_quick_plan(tmp_path / "old.md", ["x.py"])))
     old["deferred_at"] = "2026-07-01T00:00:00+00:00"
@@ -566,12 +566,18 @@ def test_supersede_deferred_node_rejected(tmp_graph, tmp_path):
     tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
 
     res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--cause", "fold", "--surface", "x.py")
-    assert res.exit_code != 0
-    assert "deferred" in res.output.lower()
-    # No mutation; the park is preserved.
+    assert res.exit_code == 0, res.output
     by_id = {e["id"]: e for e in _read_entries(tmp_graph)}
+    assert by_id["ab-old"]["superseded_by"] == "ab-new"
     assert by_id["ab-old"]["deferred_at"] == "2026-07-01T00:00:00+00:00"
+
+    res = _invoke("backlog", "unsupersede", "ab-old")
+    assert res.exit_code == 0, res.output
+    by_id = {e["id"]: e for e in _read_entries(tmp_graph)}
     assert by_id["ab-old"].get("superseded_by") is None
+    assert by_id["ab-old"]["deferred_at"] == "2026-07-01T00:00:00+00:00"
+    new_entry = by_id["ab-new"]
+    assert "ab-old" not in (new_entry.get("supersedes") or [])
 
 
 def test_supersede_live_children_rejected(tmp_graph, tmp_path):

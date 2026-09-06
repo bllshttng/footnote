@@ -15181,18 +15181,6 @@ def cmd_supersede(
                 err=True,
             )
             raise typer.Exit(code=1)
-        if old_node.get("deferred_at"):
-            # A pre-existing deferral is an independent park supersede would
-            # overwrite, and unsupersede cannot tell that park from its own, so
-            # the deferral would be lost on reversal. Resolve it first - same
-            # shape as the done/already-superseded refusals above.
-            typer.echo(
-                f"Error: cannot supersede {replaces}: it is deferred. Undefer it "
-                f"first (`fno backlog undefer {replaces}`); superseding would "
-                f"overwrite that pause and an unsupersede could not restore it.",
-                err=True,
-            )
-            raise typer.Exit(code=1)
 
         # Guard the death transition: a unit with live children cannot
         # be killed without orphaning them, and orphaning is a deliberate act.
@@ -15242,9 +15230,9 @@ def cmd_supersede(
             "evidence_pr": None,
             "matched_surfaces": [],
         }
-        old_node["deferred_at"] = None
-        old_node["deferred_reason"] = None
-        old_node.pop("deferred_kind", None)
+        # A pre-existing deferral stays: status precedence reads superseded
+        # above deferred, so the park resurfaces if the supersession is
+        # reversed.
         # Release anything that was shipping inside it (x-e957, sigma). Same
         # trap `cmd_remove` was fixed for, one step short of deletion: a
         # superseded unit will never merge, so `_strandable_contained_ids`
@@ -15304,13 +15292,11 @@ def cmd_unsupersede(
 ) -> None:
     """Reverse a supersede on ``node_id``. Idempotent in the safe direction.
 
-    Clears ``superseded_by``, ``deferred_at``, and ``deferred_reason`` (the
-    latter two were set by ``cmd_supersede`` and must go together, else the
-    status precedence drops the node from ``superseded`` straight into
-    ``deferred``) and removes ``node_id`` from the replacer's ``supersedes``
-    list. The status then recomputes to the node's underlying state, and the
-    plan doc is forced off terminal ``superseded`` (the forward-only projector
-    will not leave a terminal on its own).
+    Clears ``superseded_by`` and removes ``node_id`` from the replacer's
+    ``supersedes`` list; any ``deferred_at`` park the node carried before the
+    supersession survives, so the status recomputes back to ``deferred``
+    after the reversal. The plan doc is forced off terminal ``superseded``
+    (the forward-only projector will not leave a terminal on its own).
 
     A node that is merely deferred (no ``superseded_by``) is left untouched:
     reactivating parked work is ``undefer``'s job, and clearing a deferral here
@@ -15363,9 +15349,7 @@ def cmd_unsupersede(
             ]
         node["superseded_by"] = None
         node["supersession"] = None
-        node["deferred_at"] = None
-        node["deferred_reason"] = None
-        node.pop("deferred_kind", None)
+        # Any pre-supersession deferral survives the reversal on purpose.
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
