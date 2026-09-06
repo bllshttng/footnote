@@ -388,6 +388,11 @@ pub enum Event {
     /// visible; this only expands or collapses it, and the client's view
     /// layer interprets that, not here.
     OpenCourt,
+    /// Open the activity feed overlay (prefix+e, x-4433): questions,
+    /// decisions and node lifecycle, newest first. Overlay-mode keys (j/k
+    /// move, Enter deep-links the row's session, q/Esc close) are
+    /// interpreted by the client's view layer, not here (like OpenAnswers).
+    OpenFeed,
     /// Show/hide the sideline (prefix+b).
     TogglePanel,
     /// (x-b186) Cycle the sideline density slim -> regular -> extended
@@ -1108,6 +1113,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             "sideline row selector",
         ),
         b(b'a', "answers", OpenAnswers, Global, "answer queue"),
+        b(b'e', "feed", OpenFeed, Global, "activity feed"),
         b(
             b'm',
             "yard",
