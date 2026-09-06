@@ -278,11 +278,9 @@ def _attest_from_record(
     except Exception:  # noqa: BLE001 - claims-root resolution shells out and can fail
         invocation_id = ""
     if not invocation_id and harness_session_id:
-        sidecar = (
-            Path(os.environ.get("FNO_HOME", str(Path.home() / ".fno")))
-            / "review-invocations"
-            / f"{harness_session_id}.json"
-        )
+        from fno.review.invocation import pending_invocation_path
+
+        sidecar = pending_invocation_path(harness_session_id)
         try:
             invocation_id = str(
                 json.loads(sidecar.read_text(encoding="utf-8")).get("invocation_id")
