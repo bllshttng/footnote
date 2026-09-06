@@ -14,7 +14,10 @@ fn pane_worker_row(name: &str, attach: &str, pane: u64) -> RegistryAgent {
 /// One worker pane in its own tab of the fixture squad, bound to one row.
 /// Returns the live client (and its channel) so a test can drive commands the
 /// way a session does.
-fn reseat_core(worker_name: &str, attach: &str) -> (Core, u64, u64, TabId, mpsc::Receiver<ServerMsg>) {
+fn reseat_core(
+    worker_name: &str,
+    attach: &str,
+) -> (Core, u64, u64, TabId, mpsc::Receiver<ServerMsg>) {
     let (mut core, client_id, _p1, rx) = thread_core();
     let w = core.spawn_pane(24, 40, "/tmp/seen").expect("worker pane");
     let worker_tab = core.session.mint_tab_id();
@@ -122,7 +125,10 @@ fn a_reach_for_a_reseated_row_focuses_the_seat_not_a_second_viewer() {
             landed = true;
         }
     }
-    assert!(landed, "the reach focused the seated pane (no refusal notice path)");
+    assert!(
+        landed,
+        "the reach focused the seated pane (no refusal notice path)"
+    );
 
     assert_eq!(
         core.panes.len(),
@@ -176,7 +182,9 @@ fn reseat_refusals_mutate_nothing() {
     ];
     core.command(client_id, portal_reach_cmd("deadbee9", 0));
     assert!(
-        core.portals.get(&0).is_some_and(|p| core.panes.contains_key(&p.seat)),
+        core.portals
+            .get(&0)
+            .is_some_and(|p| core.panes.contains_key(&p.seat)),
         "the setup reach opened a LIVE seat at portal 0"
     );
     // The refusal snapshot starts HERE, after the setup reach settled: what

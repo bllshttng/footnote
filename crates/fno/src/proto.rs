@@ -542,9 +542,7 @@ pub enum MouseButton {
 
 #[path = "proto_placement.rs"]
 mod placement;
-pub use placement::{
-    PanePlacement, PaneTarget, PlacementFallback, ResolvedPlacement, TabSel,
-};
+pub use placement::{PanePlacement, PaneTarget, PlacementFallback, ResolvedPlacement, TabSel};
 
 /// (v60, x-7b5e) One member's line of a workspace-restore report. `outcome`
 /// is `resumed` | `focused` | `refused` | `planned`; `reason` is set exactly
