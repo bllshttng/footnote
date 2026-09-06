@@ -94,12 +94,9 @@ class Claim(BaseModel):
             foreign process can never make a lease permanent. Additive: absent
             on pre-change records (reads as None), which classify treats as
             ambient - a legacy claim cannot prove its pid, and the TTL wins.
-        session_id: harness session id of the acquiring process, resolved from
-            the same ambient identity walk that resolves ``harness``. Additive:
-            absent on pre-change records (reads as None, never a parse error).
-            Readers resolve identity through the registry row keyed by this
-            id; ``holder`` is a published credential and is never parsed for
-            identity.
+        session_id: harness session id of the acquiring process, resolved by
+            the same identity walk as ``harness``. Additive: absent on
+            pre-change records (reads as None). The liveness witness key.
         metadata: optional dict; treated opaquely.
 
     Bool-vs-string traps are not in play here because no field is a Literal.
