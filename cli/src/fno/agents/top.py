@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from fno.agents.discover import (
     _SUBAGENT_SCAN_WINDOW_S,
@@ -162,16 +162,32 @@ def _registry_handles() -> dict[str, str]:
         return {}
 
 
-def _progress_map(
-    workers: list[LiveWorker],
-) -> dict[str, tuple[Optional[str], Optional[str], Optional[float]]]:
-    """name -> (progress verdict, activity word, activity age), fno rows only.
+class RowTruth(NamedTuple):
+    """What one transcript read says about a census row (x-6d89).
+
+    ``reach`` is the verdict the old ``_progress_map`` computed and threw
+    away; rendering it is the whole node. ``progress`` is None exactly when
+    the row has no registry entry (a foreign claude row): judging a refusal
+    needs ``harness`` / ``route_settings_path`` context the row does not
+    carry, while the age and the reachability verdict need only the handle.
+    """
+
+    progress: Optional[str]
+    activity: str
+    age_s: Optional[float]
+    reach: Optional[str]
+    reach_basis: Optional[str]
+
+
+def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
+    """name -> :class:`RowTruth`, one transcript read per row, every row.
 
     This is the surface that showed 8513 MB across 31 live pids with no way
     to see which of them were parked (specimen 1), so it must show progress
-    beside RSS on the same line. Foreign claude rows (``source == "claude"``,
-    no fno registry entry) are out of scope: there is no ``harness`` /
-    ``route_settings_path`` context here to judge a refusal against.
+    beside RSS on the same line -- and the surface that showed a king a
+    process-alive row it read as an owned, drivable session while the
+    transcript had stood down two hours before (x-6d89), so the row must
+    carry the reachability verdict beside it.
 
     One transcript read per row (``resolve_session_truth``), reused for the
     reachability verdict, the progress verdict and the activity word -- the
@@ -190,22 +206,26 @@ def _progress_map(
     try:
         entries = {e.name: e for e in load_registry()}
     except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
-        return {}
+        entries = {}
 
-    out: dict[str, tuple[Optional[str], Optional[str], Optional[float]]] = {}
+    out: dict[str, RowTruth] = {}
     for w in workers:
-        if w.source != "fno":
-            continue
         entry = entries.get(w.name)
-        if entry is None:
-            continue
         truth = resolve_session_truth(w.name)
         truth_state = truth.get("state")
         reach = classify_reachability(
             truth_state=truth_state,
             age_s=truth.get("last_activity_age_s"),
-            falsifier=registry_falsifier(entry),
+            falsifier=registry_falsifier(entry) if entry is not None else None,
         )
+        activity = rendered_activity(
+            truth_state=truth_state,
+            age_s=reach.age_s,
+            reachability=reach.verdict,
+        )
+        if entry is None:
+            out[w.name] = RowTruth(None, activity, reach.age_s, reach.verdict, reach.basis)
+            continue
         prog = classify_progress(
             truth_state=truth_state,
             reachability=reach.verdict,
@@ -214,29 +234,23 @@ def _progress_map(
             route_settings_path=entry.route_settings_path,
             last_activity_age_s=truth.get("last_activity_age_s"),
         )
-        out[w.name] = (
-            prog.verdict,
-            rendered_activity(
-                truth_state=truth_state,
-                age_s=reach.age_s,
-                reachability=reach.verdict,
-            ),
-            reach.age_s,
+        out[w.name] = RowTruth(
+            prog.verdict, activity, reach.age_s, reach.verdict, reach.basis
         )
     return out
 
 
 def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     handles = _registry_handles()
-    progress = _progress_map(workers)
+    truth_map = _row_truth(workers)
     rows = []
     for w in workers:
-        # The activity triple for fno rows; a foreign claude row has no
-        # registry entry to read, so it keeps the roster token it arrived
-        # with and no age.
-        progress_triple = progress.get(w.name)
-        activity = progress_triple[1] if progress_triple else w.status
-        age = progress_triple[2] if progress_triple else None
+        # The served truth for the row; a foreign claude row still gets the
+        # age and the reachability verdict (the handle is enough), it only
+        # misses the PROGRESS verdict.
+        row_truth = truth_map.get(w.name)
+        activity = row_truth.activity if row_truth else w.status
+        age = row_truth.age_s if row_truth else None
         # Null when this session has no registry row (a foreign claude session
         # that fno never adopted), which is a real answer, not a lookup miss.
         handle = handles.get(w.session_id or "")
@@ -277,7 +291,11 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 "status_basis": w.status_basis,
                 # The orthogonal axis beside `status`: null for a foreign
                 # claude row this view has no harness/route context to judge.
-                "progress": progress_triple[0] if progress_triple else None,
+                "progress": row_truth.progress if row_truth else None,
+                # x-6d89: the verdict the row always computed and never
+                # showed, with the basis that says which question it answered.
+                "reach": row_truth.reach if row_truth else None,
+                "reach_basis": row_truth.reach_basis if row_truth else None,
                 "crown": crowns.get(reg_name),  # US9: null when uncrowned
             }
         )
@@ -577,7 +595,8 @@ def render_top(
         out.append("")
     header = (
         f"{'SOURCE':<7} {'NAME':<24} {'HARNESS':<9} {'SUBSTRATE':<10} "
-        f"{'KING':<9} {'PID':>7} {'RSS_MB':>7} {'PROGRESS':<17} STATUS"
+        f"{'KING':<9} {'PID':>7} {'RSS_MB':>7} {'PROGRESS':<17} "
+        f"{'REACH':<11} STATUS"
     )
     out.append(header)
     if not rows:
@@ -596,14 +615,14 @@ def render_top(
             f"{r['source']:<7} {name_cell:<24} {r['harness']:<9} "
             f"{r['substrate']:<10} {r['king'] or '-':<9} {r['pid'] or '-':>7} "
             f"{r['rss_mb'] if r['rss_mb'] is not None else '-':>7} "
-            f"{r['progress'] or '-':<17} {activity}"
+            f"{r['progress'] or '-':<17} {r['reach'] or '-':<11} {activity}"
             + (f" ({r['status_basis']})" if r.get("status_basis") else "")
         )
     if c.slot_claims:
         out.append(f"(+{c.slot_claims} queued headless slot claim(s))")
     out.append(
-        "census: rows are processes present at scan time; for a liveness "
-        "verdict use fno agents truth"
+        "census: PID/RSS are the process at scan time; REACH reads the "
+        "transcript (fno agents truth for the full evidence)"
     )
     if subagents is not None:
         out.append("")

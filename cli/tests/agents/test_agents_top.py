@@ -641,8 +641,9 @@ def test_census_caption_points_at_the_transcript_verdict(runner):
     result = runner.invoke(agents_app, ["top"])
     out = result.output
     assert result.exit_code == 0, out
-    assert "census: rows are processes present at scan time" in out, out
-    assert "for a liveness verdict use fno agents truth" in out, out
+    assert "census: PID/RSS are the process at scan time" in out, out
+    assert "REACH reads the transcript" in out, out
+    assert "fno agents truth" in out, out
 
 
 def test_status_column_renders_served_activity_with_age(tmp_path, monkeypatch, runner):

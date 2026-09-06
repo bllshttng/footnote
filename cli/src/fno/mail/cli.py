@@ -59,6 +59,10 @@ from fno.mail.codex_review_target import (
     explicit_review_pr_number,
     resolve_codex_review_target as _codex_review_target,
 )
+from fno.mail.receipts import (
+    _live_miss_age_suffix,
+    _warn_deferred,
+)
 from fno.inbox.store import (
     DEPRECATED_KINDS,
     ProjectIdentificationError,
@@ -1745,111 +1749,6 @@ def _print_thread_summary(h: ThreadHandle) -> None:
 # send/inbox/ack and inbox unread/ack verbs (the one messaging namespace).
 
 
-# Live-lane failures where the recipient WAS live and reachable but the inject
-# did not confirm (node x-1904). For these the durable preamble must NOT say
-# "is not live" -- the recipient was live, so that wording read as a liveness
-# lie and cost a wrong hypothesis on measured evidence. The receipt names the
-# real cause instead.
-_LIVE_LANE_FAILURE_REASONS = frozenset(
-    {"not-confirmed", "attach-failed", "io-error", "mux-send-failed", "unsafe-text"}
-)
-
-
-def _is_live_lane_failure(reason: Optional[str]) -> bool:
-    if not reason:
-        return False
-    return any(
-        token in _LIVE_LANE_FAILURE_REASONS or token.startswith("mux-send-failed-")
-        for token in reason.split(";")
-    )
-
-
-def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] = None) -> None:
-    """Fail loud on a dead-letter miss: the envelope hit only the durable floor
-    with no live inject path, so the sender learns delivery deferred instead of
-    the message vanishing silently until the recipient's next SessionStart drain.
-
-    The durable copy is RECOVERY, not delivery - it waits on a drain the
-    recipient may never run. So this names the recovery ladder rather than
-    leaving the sender to wait: a session that is merely idle can be brought
-    back and re-sent to immediately, which beats waiting on a drain every time.
-
-    It leads with `peek`, not `resume`, because the fallback fires on an
-    UNCONFIRMED live inject, not a proven failure: a busy recipient can record
-    the injected turn past the confirm budget and receive it anyway, so a blind
-    re-send is the documented double-delivery edge rather than a fix.
-
-    ``reason`` is the live lane's own cause (node x-1904). When it names a
-    live-lane failure (see :data:`_LIVE_LANE_FAILURE_REASONS`) the recipient WAS
-    live and reachable, so the preamble says so and names the cause rather than
-    claiming "is not live" -- a receipt naming the wrong cause is worse than one
-    naming none, because it sends the reader to diagnose a recipient that was
-    never the problem. A None or unreachable reason repeats a transcript verdict.
-
-    A lock timeout gets its own arm for the same reason. The per-agent flock is
-    shared by every verb that touches the agent (send, ask, spawn, stop, rm), so
-    a timeout says nothing about the recipient's liveness in EITHER direction.
-    The not-live copy would send the reader to resurrect a session that is
-    working fine; naming the holder a peer sender would tell the reader a
-    just-stopped session is fine. The arm names neither and points at `peek`.
-
-    Warning only - the durable enqueue succeeded, so exit stays 0."""
-    from fno.agents.dispatch import LOCK_TIMEOUT_REASON
-
-    if project:
-        msg = (
-            f"mail: project inbox {target} has no live drain; queued durably as "
-            "recovery only - a session must drain the project inbox to read this, "
-            "and may never do so\n"
-            "  this is NOT delivery. Address a live session instead: "
-            "`fno agents top` to find one, then `fno agents mail send <short-id>`"
-        )
-    elif reason == LOCK_TIMEOUT_REASON:
-        msg = (
-            f"mail: live delivery to {target} was not attempted (another verb "
-            f"held {target}'s agent lock past the wait); queued durably. That "
-            "holder is any verb on this agent - a send, an ask, a spawn, a "
-            "stop, an rm - so the token proves nothing about the recipient in "
-            "either direction. Do not resurrect it on this evidence, and do "
-            "not read it as healthy either: check it.\n"
-            "  a busy peer may not drain soon, so the rungs that stay open,\n"
-            "  in this order - a bare re-send DOUBLE-DELIVERS, since the queued\n"
-            "  copy still lands at the recipient's next drain:\n"
-            f"    fno agents peek {target}     # still taking turns, or just stopped?\n"
-            "    fno agents mail withdraw <id>      # retract the queued copy FIRST\n"
-            f"    fno agents mail send {target} '<message>'  # then retry live\n"
-            "  a withdraw that refuses because the recipient already claimed\n"
-            "  the message is telling you it LANDED. Stop there: re-sending on\n"
-            "  top of that is the double delivery this ladder exists to avoid."
-        )
-    elif _is_live_lane_failure(reason):
-        msg = (
-            f"mail: live delivery to {target} not confirmed ({reason}); queued "
-            "durably as recovery only - the recipient was live and reachable, so "
-            "the message may still land past the confirm window or sit until the "
-            "recipient drains its inbox\n"
-            "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
-            f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
-            f"    fno agents resume {target}   # wakes it (claude) or resumes it (other harnesses), then re-send\n"
-            f"    fno agents attach {target}   # drive it yourself (claude)\n"
-            # The rung that was missing. Every option above tries to reach the
-            # recipient; when none of them can, the sender was left holding a
-            # message that nagged every turn and could not be taken back.
-            "    fno agents mail withdraw <id>      # none of the above? retract it"
-        )
-    else:
-        from fno.mail.deferred_liveness import deferred_liveness_head
-        msg = deferred_liveness_head(target) + (
-            "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
-            f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
-            f"    fno agents resume {target}   # wakes it (claude) or resumes it (other harnesses), then re-send\n"
-            f"    fno agents attach {target}   # drive it yourself (claude)\n"
-            # The rung that was missing. Every option above tries to reach the
-            # recipient; when none of them can, the sender was left holding a
-            # message that nagged every turn and could not be taken back.
-            "    fno agents mail withdraw <id>      # none of the above? retract it"
-        )
-    print(msg, file=sys.stderr)
 
 
 class AmbiguousTokenError(Exception):
@@ -2716,6 +2615,8 @@ def _name_lane_send(
         reason = hold_note or "DND (bus-only): recipient polls the bus at each turn boundary"
     else:
         reason = "self-send" if self_send else (live_reason or "live-miss")
+        if reason == "live-miss":
+            reason = f"live-miss{_live_miss_age_suffix(recipient)}"
     hint = ""
     if hold_note:
         hint = f" `fno agents mail withdraw {msg_id}` retracts it."
@@ -2923,11 +2824,9 @@ def _job_lane_send(
         )
         raise typer.Exit(code=12) from exc
     # One stdout line (the receipt contract) + an advisory on stderr naming the
-    # recovery: the message waits for the holder's next drain, not a reply window.
-    # A bus-only holder skipped the inject by policy (x-e21e), so the receipt
-    # says the policy, not a miss. A node:<id> thread is NOT surfaced by the
-    # holder's turn-boundary notify-self (that scan reads only the session's
-    # own handle): it drains at a holder's SessionStart scan, so the receipt
+    # recovery: the message waits for the holder's next drain, not a reply
+    # window. A node:<id> thread drains at a holder's SessionStart scan (the
+    # notify-self scan reads only the session's own handle), so the receipt
     # must not promise turn-boundary visibility.
     if bus_only:
         print(
@@ -2942,7 +2841,8 @@ def _job_lane_send(
         return
     print(f"mail: {recipient} live-inject missed; durable until a holder drains",
           file=sys.stderr)
-    print(f"{th.thread_id} queued (durable) for {recipient} [job-live-miss]{holder_tag}")
+    suffix = _live_miss_age_suffix(recipient)
+    print(f"{th.thread_id} queued (durable) for {recipient} [job-live-miss{suffix}]{holder_tag}")
 
 
 # Send-time human escalation for a question, per (sender, recipient). A burst
@@ -4441,9 +4341,12 @@ def cmd_send(
                 # agent-lock timeout, which says nothing about the recipient,
                 # and stamped [live-miss] when no live attempt ever ran.
                 _warn_deferred(result.recipient, reason=result.reason)
+                reason_tok = result.reason or "live-miss"
+                if reason_tok == "live-miss":
+                    reason_tok += _live_miss_age_suffix(result.recipient)
                 print(
                     f"{result.msg_id} queued (durable) for {result.recipient} "
-                    f"[project {to_project}] [{result.reason or 'live-miss'}]"
+                    f"[project {to_project}] [{reason_tok}]"
                 )
         else:
             _warn_deferred(to_project, project=True)
@@ -4696,6 +4599,8 @@ def cmd_send(
         )
     else:
         reason_tok = result.reason or "live-miss"
+        if reason_tok == "live-miss":
+            reason_tok += _live_miss_age_suffix(name)
         _warn_deferred(name, reason=result.reason)
         print(f"{result.msg_id} queued (durable) [{reason_tok}]")
 
