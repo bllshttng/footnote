@@ -99,19 +99,25 @@ def _last_stale_journal_ts(events_path: Optional[Path]) -> Optional[datetime]:
     return newest
 
 
-def _regression_delta(
-    history_path: Path, before: int
-) -> tuple[int, list[dict[str, object]]]:
-    """Rows appended since *before*, as (count, rows). A failed read is a
-    zero delta, never a crash."""
-    try:
-        from fno.evals.report import load_rows
+def _rows_since(
+    history_path: Path, cutoff: datetime
+) -> list[dict[str, object]]:
+    """Regression rows appended after *cutoff*.
 
-        rows = [r for r in load_rows(history_path) if r.get("tier") == "regression"]
+    Attribution is by each row's own timestamp, not a count delta: a
+    concurrent evals writer's rows carry their own ts and stay out of this
+    run's receipt. A failed read is an empty list, never a crash.
+    """
+    try:
+        from fno.evals.report import _parse_ts, load_rows
+
+        return [
+            r for r in load_rows(history_path)
+            if r.get("tier") == "regression"
+            and (dt := _parse_ts(r.get("ts"))) is not None and dt >= cutoff
+        ]
     except Exception:  # noqa: BLE001
-        return 0, []
-    added = max(0, len(rows) - before)
-    return added, rows[len(rows) - added:]
+        return []
 
 
 def _run_subprocess(
@@ -207,17 +213,22 @@ def run_evals_phase(
         # Read the rate bound BEFORE emitting: this very row would otherwise
         # read back as the newest prior notice and swallow the mail forever.
         last = _last_stale_journal_ts(events_path)
+        emitted = False
         try:
-            emit(EVALS_STALE, {
+            emitted = bool(emit(EVALS_STALE, {
                 "reason": reason,
                 "detail": detail[:200],
                 "age_days": age_days,
                 "never_ran": never_ran,
                 "window_days": schedule_days,
-            })
+            }))
         except Exception:  # noqa: BLE001 - a journal failure never breaks the tick
             pass
         if last is not None and (now - last).total_seconds() < schedule_days * 86400:
+            return
+        if not emitted:
+            # The journal IS the rate bound: a notice without its receipt row
+            # is unverifiable state. The next tick re-journals and notifies.
             return
         notify(
             "fno evals stale",
@@ -238,7 +249,9 @@ def run_evals_phase(
                 "detail": f"{int(budget_left_s)}s of tick budget left, "
                           f"under the {_MIN_RUN_BUDGET_S}s a regression run costs"}
 
-    before, _ = _regression_delta(history_path, 0)
+    # The run window opens at the phase's own clock so tests can pin it; the
+    # child's rows are written after this instant in real time.
+    started_wall = now
     started = time.monotonic()
     cmd = [fno_bin, "doctor", "evals", "run", "--tier", "regression", "-y"]
     try:
@@ -261,8 +274,8 @@ def run_evals_phase(
         return {"acted": 0, "skip_reason": "run_failed",
                 "detail": f"exit {proc.returncode}: {tail[0]}"}
 
-    added, added_rows = _regression_delta(history_path, before)
-    if added == 0:
+    added_rows = _rows_since(history_path, started_wall)
+    if not added_rows:
         # Exit 0 with no appended rows is the trap: a clean-looking run that
         # inspected nothing. A could-not-fire, never a success.
         if _escalates():
@@ -282,5 +295,5 @@ def run_evals_phase(
     except Exception:  # noqa: BLE001 - a journal failure never breaks the tick
         pass
     return {"acted": 1, "skip_reason": None,
-            "detail": f"{task_count} task(s), {passes}/{added} pass, "
+            "detail": f"{task_count} task(s), {passes}/{len(added_rows)} pass, "
                       f"{duration_s:.0f}s"}

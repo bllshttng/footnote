@@ -112,12 +112,13 @@ def test_skips_on_refusing_gate_and_journals_stale(
     notices: list[str] = []
     events_file = tmp_path / "events.jsonl"
 
-    def _emit(kind: str, data: dict) -> None:
-        # Mirror production: the emit appends its envelope to the journal.
+    def _emit(kind: str, data: dict) -> bool:
+        # Mirror production: _emit_event appends its envelope and returns True.
         emitted.append((kind, data))
         envelope = {"ts": _ts(0.0), "type": kind, "source": "daemon", "data": data}
         with open(events_file, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(envelope) + "\n")
+        return True
 
     def _notify(title: str, message: str) -> None:
         notices.append(message)
@@ -170,6 +171,46 @@ def test_exit_zero_without_rows_is_not_a_success(
     assert row["acted"] == 0 and row["skip_reason"] == "no_rows"
     assert emitted[0][0] == ep.EVALS_STALE
     assert emitted[0][1]["reason"] == "no_rows"
+
+
+def test_no_notice_when_the_journal_emit_fails(
+    tmp_path, monkeypatch, autonomy_on
+) -> None:
+    # The journal is the rate bound: a notice without its receipt row is
+    # unverifiable state, so a failed emit sends nothing this tick.
+    monkeypatch.setattr(ep, "_gate_open", lambda: (False, "load"))
+    history = _write_history(tmp_path, _reg_row("regression-cli-help-smoke", _ts(15)))
+    notices: list[str] = []
+    events_file = tmp_path / "events.jsonl"
+
+    def _emit_fail(kind: str, data: dict) -> bool:
+        raise RuntimeError("journal unwritable")
+
+    row = _run(_Settings(), tmp_path, history, emit_rows=[],
+               events_path=events_file,
+               notify=lambda t, m: notices.append(m), emit=_emit_fail)
+
+    assert row["skip_reason"] == "load"
+    assert notices == []
+
+
+def test_run_receipt_attributes_rows_by_timestamp_not_count(
+    tmp_path, monkeypatch, autonomy_on
+) -> None:
+    # A row landing during the run window with an EARLIER timestamp (a late
+    # write, another writer's backfill) must not be attributed to this run.
+    monkeypatch.setattr(ep, "_gate_open", lambda: (True, ""))
+    history = _write_history(tmp_path, _reg_row("regression-cli-help-smoke", _ts(15)))
+    emitted: list[tuple[str, dict]] = []
+
+    def runner(cmd: list[str], timeout_s: int) -> subprocess.CompletedProcess:
+        _history.append_row(history, _reg_row("foreign-late-row", _ts(1.0)))
+        return subprocess.CompletedProcess(cmd, 0, stdout="done.", stderr="")
+
+    row = _run(_Settings(), tmp_path, history, emit_rows=emitted, runner=runner)
+
+    assert row["acted"] == 0 and row["skip_reason"] == "no_rows"
+    assert all(kind != ep.EVALS_SCHEDULED_RUN for kind, _ in emitted)
 
 
 def test_schedule_zero_disables(tmp_path, autonomy_on) -> None:
