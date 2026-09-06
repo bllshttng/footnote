@@ -642,6 +642,7 @@ def _payload(
         if reading.measured_cpu_cores > 0
         else 0.0
     )
+    payload_capacity = capacity_verdict(load_snapshot)
     payload: dict[str, object] = {
         "sustained_cpu_cores": reading.sustained_cpu_cores,
         "descendant_cpu_cores": reading.descendant_cpu_cores,
@@ -658,14 +659,14 @@ def _payload(
         "fleet_percent_capacity": reading.fleet_cpu_cores / cpu_capacity * 100,
         "fleet_percent_measured_cpu": measured_share,
         "leak_verdict": leak_verdict(reading.direct_process_count, process_threshold),
-        "capacity_verdict": capacity_verdict(load_snapshot),
+        "capacity_verdict": payload_capacity,
         # x-5283 AC7: a verdict names the axis it was derived from and prints
         # the numbers that decided it. This verdict reads the LOAD snapshot -
         # the sustained-CPU line two rows below is a different axis, on
         # purpose, and must never be mistaken for the thing that decided.
         "capacity_verdict_axis": (
             "load_1m"
-            if capacity_verdict(load_snapshot) != "unknown"
+            if payload_capacity != "unknown"
             else "unknown"
         ),
         "capacity_verdict_value": getattr(load_snapshot, "load_1m", None),
