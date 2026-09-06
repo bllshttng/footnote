@@ -102,11 +102,12 @@ def test_map_covers_current_surface_once():
     # as one new row (first allocated under a retired alias, renamed in
     # place before merge): 568 -> 569.
     # This branch adds `agents feed`, the activity feed projection: counted
-    # from the merged file, 569 -> 570.
-    # The reseat branch adds `agents reseat`, the registry half of the v70
-    # pane-into-portal move, on the same base: counted from the merged
-    # file, never either side, both rows together: 570 -> 571.
-    assert len(mapped) == 571, (
+    # from the merged file, 569 -> 570. The reseat branch added
+    # `agents reseat` on the same base (571 together), then the
+    # rust-conversion ruling deleted that surface: the whole move is the
+    # native `fno mux thread reseat`. Counted from the merged file at the
+    # post-1508 rebase: 571 - 1 = 570.
+    assert len(mapped) == 570, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
