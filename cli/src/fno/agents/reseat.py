@@ -12,9 +12,12 @@ rebuilt by restore, and ``agents rm`` drops it without killing the pane.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from typing import Callable, Optional
+
+import typer
 
 from fno.agents.registry import AgentResolutionError, resolve_agent, update_registry
 
@@ -72,3 +75,21 @@ def run_reseat(
             f"not cleared; re-run fno agents reseat {token} ({exc})"
         ) from exc
     return {"status": "reseated", "row": entry.name, "pane_id": pane_id, "landing": landing}
+
+
+def reseat_command(
+    token: str = typer.Argument(..., help="Pane-hosted worker name or session id."),
+    portal: Optional[int] = typer.Option(None, "--portal", help="Portal index; default next free."),
+    json_out: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Re-seat a live pane worker into a portal, keeping its PTY.
+
+    The row becomes a thread row: not rebuilt by restore, and rm drops it
+    without killing the pane. The work survives; the geometry does not.
+    """
+    try:
+        receipt = run_reseat(token, portal=portal)
+    except ReseatError as exc:
+        typer.echo(f"agents reseat: {exc}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(json.dumps(receipt) if json_out else receipt.get("landing") or json.dumps(receipt, sort_keys=True))
