@@ -113,8 +113,13 @@ section "$MUX_PY" 'def dispatch_spawn_pane(' '__END_OF_FILE__' \
   'Python pane spawn' 'spawned_by_session=spawned_by_session'
 section "$REGISTRY_PY" 'def register_existing_session(' 'def restamp_harness_session_id(' \
   'Python register' 'origin == "operator"' 'spawned_by_session=_sb_session'
-if ! grep -q 'spawned_by_session=_sb_session' "$FALLBACK_PY"; then
-  echo "ERROR: Python store fallback no longer stamps the parent edge" >&2
+# x-5283 LD3: the adoption fallback stamps the VOUCHER, never a spawn edge.
+if grep -q 'spawned_by_session=_sb_session' "$FALLBACK_PY"; then
+  echo "ERROR: Python store fallback stamps a spawn edge; adoption vouches via adopted_by_session" >&2
+  failed=1
+fi
+if ! grep -q 'adopted_by_session=_sb_session' "$FALLBACK_PY"; then
+  echo "ERROR: Python store fallback no longer stamps the voucher" >&2
   failed=1
 fi
 
@@ -122,4 +127,4 @@ if [[ "$failed" -ne 0 ]]; then
   exit 1
 fi
 
-echo "spawn lineage parity OK: 6 Rust + 5 Python mint sites stamp the parent edge"
+echo "spawn lineage parity OK: 6 Rust + 5 Python mint sites stamp the parent edge (adoption stamps the voucher)"
