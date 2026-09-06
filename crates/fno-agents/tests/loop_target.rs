@@ -1266,12 +1266,13 @@ fn write_king_manifest(dir: &Path, scope: &str, fno_id: &str, count: u64, ceilin
     fs::write(kings.join(format!("{scope}.md")), content).unwrap();
 }
 
-/// Pin a CLEAN board at `dir`: the graph carries only the scope epic and the
-/// config makes the in-process collector resolve it on a bare machine (no
-/// global config, no `~/.fno`). Every shelled source (gh, fno-py) is stubbed
-/// in `dir/bin` so no read degrades into an unreadable row the loop would
-/// treat as work. The board is read in process since the port, so a stub
-/// `fno` can no longer serve it.
+/// Pin a CLEAN board at `dir`: the graph carries only the scope epic, closed
+/// done so the crown reads drained, and the config makes the in-process
+/// collector resolve it on a bare machine (no global config, no `~/.fno`).
+/// Every shelled source (gh, fno-py) is stubbed in `dir/bin` so no read
+/// degrades into an unreadable row the loop would treat as work. The board
+/// is read in process since the port, so a stub `fno` can no longer serve
+/// it - except the drain read, which the walk shells and the stub answers.
 fn pin_clean_board(dir: &Path, scope: &str) {
     let fno_dir = dir.join(".fno");
     fs::create_dir_all(&fno_dir).unwrap();
@@ -1279,7 +1280,7 @@ fn pin_clean_board(dir: &Path, scope: &str) {
     fs::write(
         &graph,
         format!(
-            "{{\"entries\":[{{\"id\":\"{scope}\",\"type\":\"epic\",\"status\":\"ready\",\"priority\":\"p1\"}}]}}"
+            "{{\"entries\":[{{\"id\":\"{scope}\",\"type\":\"epic\",\"status\":\"done\",\"completed_at\":\"2026-08-18T00:00:00Z\",\"priority\":\"p1\"}}]}}"
         ),
     )
     .unwrap();
@@ -1301,7 +1302,14 @@ fn pin_clean_board(dir: &Path, scope: &str) {
         "#!/bin/sh\ncase \"$*\" in\n  *\"backlog ready\"*) echo '[]';;\n  *) echo '{}';;\nesac\n",
     )
     .unwrap();
-    fs::write(bin_dir.join("fno"), "#!/bin/sh\necho '{}'\n").unwrap();
+    fs::write(
+        bin_dir.join("fno"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; \
+             then echo '{{\"scope\":\"{scope}\",\"undelivered\":0}}'; exit 0; fi\necho '{{}}'\n"
+        ),
+    )
+    .unwrap();
     #[cfg(unix)]
     for stub in ["gh", "fno-py", "fno"] {
         use std::os::unix::fs::PermissionsExt;
@@ -1311,13 +1319,17 @@ fn pin_clean_board(dir: &Path, scope: &str) {
 
 /// A stub `fno` binary whose `inbox board` prints the given actionable count.
 /// The board read went in process, so its board half is inert; the dispatch
-/// tests that call it pass on the scope queue's own unreadable row.
+/// tests that call it pass on the scope queue's own unreadable row. The
+/// drain read the king walk shells answers with the same count, so a
+/// workable stub board stays a workable stub scope.
 fn write_stub_fno_board(dir: &Path, actionable: u64) {
     write_stub_binary(
         dir,
         "fno",
         &format!(
-            "if [ \"$1\" = \"inbox\" ]; then echo '{{\"actionable\": {actionable}, \"unreadable\": 0, \"queues\": []}}'; exit 0; fi\nexit 1"
+            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; then \
+             echo '{{\"scope\":\"epic-x\",\"undelivered\": {actionable}}}'; exit 0; fi\n\
+             if [ \"$1\" = \"inbox\" ]; then echo '{{\"actionable\": {actionable}, \"unreadable\": 0, \"queues\": []}}'; exit 0; fi\nexit 1"
         ),
     );
 }
