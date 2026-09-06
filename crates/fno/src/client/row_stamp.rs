@@ -320,6 +320,7 @@ mod tests {
         view.arm_row_stamp(&ConfirmKind::StopAgent {
             sid: None,
             name: "corpse".into(),
+            pane_id: None,
         });
         assert!(view.row_arm.is_some(), "a row-scoped commit arms the stamp");
         view.resolve_row_stamp("reaping exited agents…");
@@ -345,6 +346,7 @@ mod tests {
         view.arm_row_stamp(&ConfirmKind::RemoveAgent {
             sid: None,
             name: "corpse".into(),
+            pane_id: None,
         });
         view.resolve_row_stamp("removed corpse");
         let row = corpse_row();
@@ -361,6 +363,7 @@ mod tests {
         view.arm_row_stamp(&ConfirmKind::StopAgent {
             sid: None,
             name: "corpse".into(),
+            pane_id: None,
         });
         view.row_arm.as_mut().unwrap().expires = Instant::now();
         view.resolve_row_stamp("some later notice naming corpse");

@@ -190,6 +190,33 @@ struct StoreFile {
     /// are unchanged until their first drag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     width: Option<serde_json::Value>,
+    /// (x-e763) Ask before stop/remove. Default absent = false: the operator
+    /// said the stop-then-confirm two-step costs too many taps, so the confirm
+    /// is opt-in, and the next lifecycle gesture persists a clean value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    confirm_lifecycle: Option<serde_json::Value>,
+}
+
+/// (x-e763) Read the operator's stop/remove confirm pref. Absent, corrupt, or
+/// non-bool reads as `false` - a stop means stop, a remove means remove - and
+/// the next toggle persists a clean value.
+pub fn load_confirm_lifecycle() -> bool {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return false;
+    }
+    read_raw()
+        .confirm_lifecycle
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// (x-e763) Persist the operator's stop/remove confirm pref. Best-effort like
+/// every other write here.
+pub fn save_confirm_lifecycle(confirm: bool) {
+    mutate(|file| {
+        file.confirm_lifecycle = serde_json::to_value(confirm).ok();
+    });
 }
 
 /// How much of each sideline row renders (x-b186). Orthogonal to the panel's

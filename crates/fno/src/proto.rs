@@ -1657,30 +1657,30 @@ pub enum Command {
         squad: u64,
         attach_id: String,
     },
-    /// (v26, x-76ea) Stop a live agent row from the sideline: the server shells
-    /// `fno-agents stop <name>` (idempotent - already-exited is a clean no-op).
-    /// `name` is validated against the current agents catalog server-side; a
-    /// stale name is refused fail-closed with a notice, like `FocusPane`. An
-    /// `external: true` roster row is refused (the claude daemon owns it, not the
-    /// fno registry). The row's exited flag flips on the next registry poll.
-    /// (v67) The row's harness session id rides beside the label so resolution
-    /// prefers identity over it; `None` keeps the label-only
-    /// fallback for older clients and bare-identity rows.
+    /// (v26, x-76ea) Stop a live agent row from the sideline. Resolution is
+    /// fail-closed: identity first, then label, then the pane the row was
+    /// drawn from (`pane_id`, x-e763 - see `server/lifecycle_target.rs` for
+    /// the full rules, which also cover the refusal texts). An external row
+    /// refuses; a pane target signals the pane's child and leaves the pane.
+    /// The resolution-rules prose that lived here moved to that module.
     StopAgent {
         name: String,
         #[serde(default)]
         harness_session_id: Option<String>,
+        #[serde(default)]
+        pane_id: Option<u64>,
     },
-    /// (v26, x-76ea) Remove an EXITED agent row: the server shells `fno-agents
-    /// rm <name>`. Refused with a notice when the named row is still live
-    /// (stop-then-rm ordering, mirrored by the CLI's live-row refusal) or
-    /// `external`. Same catalog validation as `StopAgent`; the row vanishes on
-    /// the next registry poll. (v67) `harness_session_id` rides beside the
-    /// label, same identity-first resolution as `StopAgent`.
+    /// (v26, x-76ea) Remove an agent row in one gesture. Registry targets
+    /// stop-then-rm through the fno-agents verbs; a pane target (x-e763)
+    /// kills the child, releases the claim, and drops the pane. Same
+    /// fail-closed resolution as `StopAgent`; the prose lives in
+    /// `server/lifecycle_target.rs`.
     RemoveAgent {
         name: String,
         #[serde(default)]
         harness_session_id: Option<String>,
+        #[serde(default)]
+        pane_id: Option<u64>,
     },
     /// Rename a sideline row's LABEL. Grammar-checked server-side before any
     /// subprocess; unknown/external/ambiguous rows refuse. Live rows too.

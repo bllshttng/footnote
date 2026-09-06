@@ -35,6 +35,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::server::lifecycle_target;
+use crate::server::lifecycle_target::pane_table_host;
+
 use crate::proto::{
     self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, LayoutScope,
     PanePlacement, PaneTarget, PlacementFallback, ServerMsg, SquadLayout, TabPaneOccupant, TabSel,
@@ -44,7 +47,7 @@ use crate::tree::Dir;
 
 /// Bound every probe: a wedged server counts as alive-but-unqueryable, never
 /// a hang. Generous next to a socket round-trip, tight next to a human.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Resolve the target session: explicit flag/arg > `FNO_SESSION` (set in
 /// every pane the server spawns) > the default. Pure, so precedence is
@@ -2367,6 +2370,10 @@ pub const EXIT_NO_SERVER: i32 = 24; // thread: no live mux server to drive (x-07
 /// it is the right place to say what does reach the row.
 fn paneless_route_hint(verb: &str, row: &crate::agents_view::RegistryAgent) -> String {
     let name = &row.name;
+    // (x-e763) The state rides in the line: unresolved and absent no longer
+    // collapse into one string, which is what kept the pane-table
+    // contradiction invisible.
+    let state = lifecycle_target::row_identity_state(row);
     // Ask the same function the server ships in AgentRow.reach, so the CLI
     // hint and the TUI's actual reach behavior can never drift apart.
     let tier = crate::agents_view::thread_reach(row.harness.as_deref(), row.attach_id.as_deref());
@@ -2377,16 +2384,16 @@ fn paneless_route_hint(verb: &str, row: &crate::agents_view::RegistryAgent) -> S
         // its own (agents_view.rs's own doc comment on attach_id) - an
         // exited Drive-tier row falls through to the plain follow hint.
         crate::proto::Reach::Drive if !row.exited => format!(
-            "{verb}: {name} hosts no live pane; follow it with: fno agents peek {name} --follow, or drive it: fno agents attach {name}"
+            "{verb}: {name} hosts no live pane (fno_id_state: {state}); follow it with: fno agents peek {name} --follow, or drive it: fno agents attach {name}"
         ),
         // Locate never has a transcript reader (that's the whole reason it's
         // Locate, not Follow) - a peek --follow hint here is a route
         // guaranteed to fail. Point at the one route that actually works.
         crate::proto::Reach::Locate => format!(
-            "{verb}: {name} hosts no live pane; open it with: fno agents attach {name}"
+            "{verb}: {name} hosts no live pane (fno_id_state: {state}); open it with: fno agents attach {name}"
         ),
         _ => format!(
-            "{verb}: {name} hosts no live pane; follow it with: fno agents peek {name} --follow"
+            "{verb}: {name} hosts no live pane (fno_id_state: {state}); follow it with: fno agents peek {name} --follow"
         ),
     }
 }
@@ -2427,7 +2434,7 @@ const DEFAULT_WAIT_TIMEOUT_S: u64 = 30;
 /// How long to wait for a non-`wait` reply. A `wait` reply gets its own
 /// deadline (`timeout_ms` + slack) so the bounded server wait is never cut
 /// short by the client's read timeout.
-const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Total time a control caller keeps reading a reply that has not arrived.
 /// The per-read bound (CONTROL_TIMEOUT) says when the socket goes quiet; this
@@ -2435,7 +2442,7 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 /// consumed nothing leaves the frame boundary intact (proto::read_fill), so
 /// polling again is safe - it is the ONE thing that is safe here, because the
 /// verb has already reached the server and must never be sent twice.
-const CONTROL_REPLY_DEADLINE: Duration = Duration::from_secs(30);
+pub(crate) const CONTROL_REPLY_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The reply deadline for `dispatch()`'s own `send_control` call. `pane
 /// wait`'s read timeout is the CALLER's stated patience (`--timeout` plus
@@ -4184,7 +4191,14 @@ fn focus_by_selector(verb: &str, selector: &str, session_flag: Option<&str>, jso
         Ok(r) => r,
         Err(code) => return code,
     };
-    let Some((host_session, pane)) = row.mux.clone() else {
+    // (x-e763) Registry mux field first, then the caller's pane table: a
+    // resolved pane whose registry mux field is stale is no longer reported
+    // as paneless.
+    let hosted = row
+        .mux
+        .clone()
+        .or_else(|| pane_table_host(&row, &resolve_session(session_flag, None)));
+    let Some((host_session, pane)) = hosted else {
         eprintln!("{}", paneless_route_hint(verb, &row));
         return EXIT_NOT_PANE_HOSTED;
     };
@@ -4709,7 +4723,14 @@ pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
         Ok(r) => r,
         Err(code) => return code,
     };
-    let Some((host_session, pane)) = row.mux.clone() else {
+    // (x-e763) Registry mux field first, then the caller's pane table: a
+    // resolved pane whose registry mux field is stale is no longer reported
+    // as paneless.
+    let hosted = row
+        .mux
+        .clone()
+        .or_else(|| pane_table_host(&row, &resolve_session(session_flag.as_deref(), env_session)));
+    let Some((host_session, pane)) = hosted else {
         eprintln!("{}", paneless_route_hint(verb, &row));
         return EXIT_NOT_PANE_HOSTED;
     };
@@ -4803,8 +4824,16 @@ pub fn where_(args: &[OsString], env_session: Option<&str>) -> i32 {
         .effective_identity()
         .map(str::to_string)
         .unwrap_or_else(|| fno_id.clone());
-    // The hosting mux session name.
-    let Some(host_session) = row.mux.as_ref().map(|(s, _)| s.clone()) else {
+    // The hosting mux session name: the registry mux field, else the caller's
+    // pane table (x-e763) - the specimen is a live pane the registry mux
+    // field never named, so the pane table is asked before saying paneless.
+    let probe_session = resolve_session(session_flag.as_deref(), env_session);
+    let Some(host_session) = row
+        .mux
+        .as_ref()
+        .map(|(s, _)| s.clone())
+        .or_else(|| pane_table_host(&row, &probe_session).map(|(host, _)| host))
+    else {
         eprintln!("{}", paneless_route_hint("fno mux where", &row));
         return EXIT_NOT_PANE_HOSTED;
     };
@@ -5113,7 +5142,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
 
 /// The outcome of a control exchange that did not return a reply.
 #[derive(Debug)]
-enum ControlError {
+pub(crate) enum ControlError {
     /// The exchange failed and nothing is running because of it.
     Fatal(String),
     /// The server refused with an actionable protocol error code.
@@ -5138,7 +5167,7 @@ impl std::fmt::Display for ControlError {
 /// read that times out with nothing consumed is polled again up to
 /// `reply_deadline`: the verb has already reached the server, so re-sending it
 /// (rather than continuing to read) would risk a second pane (LD1).
-fn send_control(
+pub(crate) fn send_control(
     stream: std::os::unix::net::UnixStream,
     verb: ControlVerb,
     read_timeout: Duration,
@@ -5262,32 +5291,10 @@ fn tab_location_lines(
     out
 }
 
-/// (x-b029) True for the session-id shapes harnesses mint: the hyphenated
-/// 36-char hex form (claude UUIDv4, codex UUIDv7) and opencode's
-/// `ses_` + alphanumerics (`harnesses/opencode.py:is_session_id` is the
-/// Python twin). A populated `fno_id` of any other shape is a worker NAME
-/// the registry's identity slot holds, never an id.
-pub fn session_id_shaped(value: &str) -> bool {
-    if let Some(tail) = value.strip_prefix("ses_") {
-        return !tail.is_empty() && tail.bytes().all(|c| c.is_ascii_alphanumeric());
-    }
-    let b = value.as_bytes();
-    if b.len() != 36 {
-        return false;
-    }
-    for (i, c) in b.iter().enumerate() {
-        let ok = match i {
-            8 | 13 | 18 | 23 => *c == b'-',
-            _ => c.is_ascii_hexdigit(),
-        };
-        if !ok {
-            return false;
-        }
-    }
-    true
-}
-
 /// (x-b029) The `fno_id` column for one pane: `(state, cell)`. Three states
+/// where two lived before. The shape rule and the state names live in
+/// `server/lifecycle_target.rs` next to the resolver that now consumes them.
+pub use crate::server::lifecycle_target::session_id_shaped;
 /// where two lived before. A RESOLVED session id. UNRESOLVED with the reason
 /// named, for a pane carrying fno evidence but no resolvable id:
 /// `spawned-name` (the spawn captured a worker `name`, so the pane is fno's
@@ -5297,14 +5304,7 @@ pub fn session_id_shaped(value: &str) -> bool {
 /// self-contradicting row (a worker name beside `-`) is unit-testable without
 /// a socket.
 pub fn pane_identity_cell(p: &proto::PaneInfo) -> (&'static str, String) {
-    match p.fno_id.as_deref() {
-        Some(id) if session_id_shaped(id) => ("resolved", id.to_string()),
-        Some(_) => ("unresolved:name-as-id", "unresolved:name-as-id".into()),
-        None => match p.name.as_deref() {
-            Some(_) => ("unresolved:spawned-name", "unresolved:spawned-name".into()),
-            None => ("untracked", "-".into()),
-        },
-    }
+    lifecycle_target::identity_cell(p.fno_id.as_deref(), p.name.as_deref())
 }
 
 fn render_reply(
