@@ -1,4 +1,4 @@
-//! Per-pane worker identity: the `fno_id` join and the orphan verdict (v69).
+//! Per-pane worker identity: the `fno_id` join and the orphan verdict (v71).
 
 use super::*;
 
@@ -44,7 +44,7 @@ impl Core {
         (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
     }
 
-    /// (v69) True when a stored member is bound to `pid` (`member_pane`) and
+    /// (v71) True when a stored member is bound to `pid` (`member_pane`) and
     /// the evidence built from `agents` and the reap journal judges it Dead,
     /// and no registry row is live on this pane. A refused restore placeholder
     /// reads `true` too: the same category with an earlier marker. The default

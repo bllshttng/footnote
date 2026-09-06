@@ -859,7 +859,7 @@ impl FakeClient {
             // (v60, x-7b5e) Bulk restore answers a one-shot control
             // connection, never an attached client.
             | ServerMsg::WorkspaceRestored { .. }
-            // (v69) Prune reload: same one-shot control connection shape.
+            // (v71) Prune reload: same one-shot control connection shape.
             | ServerMsg::SquadReloaded { .. } => {}
             // (x-c376) Peek transcript body: a client-interactive reply covered
             // by client unit tests, not the e2e absorber - ignore here.

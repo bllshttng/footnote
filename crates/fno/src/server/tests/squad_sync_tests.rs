@@ -1,4 +1,4 @@
-//! Squad-store sync (v69): a prune that only writes `squads.json` is undone
+//! Squad-store sync (v71): a prune that only writes `squads.json` is undone
 //! by the next `persist_squad`, because the server's in-memory member list is
 //! authoritative and rewrites the file on every pane event. These tests pin
 //! the fix (`reload_members_from_store` between the file pass and the next

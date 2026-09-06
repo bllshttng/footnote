@@ -3863,7 +3863,7 @@ impl Core {
     /// is stable and machine-readable. A pane mid-teardown (not in the tree)
     /// is still listed with what is known rather than dropped silently.
     fn pane_infos_with_agents(&self, agents: &[RegistryAgent]) -> Vec<PaneInfo> {
-        // (v69) One evidence read feeds every pane row's orphan verdict.
+        // (v71) One evidence read feeds every pane row's orphan verdict.
         let evidence = self.member_evidence();
         let mut out: Vec<PaneInfo> = self
             .panes

@@ -1,4 +1,4 @@
-//! The live-tab fold of `fno mux workspace prune` (v69): collect one
+//! The live-tab fold of `fno mux workspace prune` (v71): collect one
 //! `LiveTab` per (session, squad, tab), then close the surplus ones. An
 //! orphaned worker tab - its stored member judged Dead by the server - closes
 //! under the default flags; pristine stays the test for tabs that never
@@ -23,7 +23,7 @@ pub(super) struct LiveTab {
     /// narrower than `!pristine` - it can only ever hold for bare shells,
     /// never for an agent or a running command.
     pub(super) used_shell_only: bool,
-    /// (v69) Some pane here hosts a stored member the server judges Dead, and
+    /// (v71) Some pane here hosts a stored member the server judges Dead, and
     /// every pane is disposable (orphaned, pristine, or a spent shell). The
     /// default fold closes such a tab: a reaped worker leaves scrollback, so
     /// `pristine` alone never fires for it.
@@ -55,7 +55,7 @@ pub(super) fn live_tabs() -> (Vec<LiveTab>, Vec<String>, Vec<String>, Vec<String
     };
     let mut groups: std::collections::BTreeMap<(String, u64, u64), LiveTab> =
         std::collections::BTreeMap::new();
-    // (v69) Per-tab fold state for the orphan verdict: (any pane orphaned,
+    // (v71) Per-tab fold state for the orphan verdict: (any pane orphaned,
     // every pane disposable). Side map because a tab's panes interleave with
     // other tabs' in the pane list.
     let mut orphan_fold: std::collections::BTreeMap<(String, u64, u64), (bool, bool)> =
@@ -75,7 +75,7 @@ pub(super) fn live_tabs() -> (Vec<LiveTab>, Vec<String>, Vec<String>, Vec<String
                     cwds.push(pane.cwd.clone());
                     let key = (name.clone(), pane.squad_id, pane.tab_id);
                     let fold = orphan_fold.entry(key.clone()).or_insert((false, true));
-                    // (v69) The orphan verdict is per-pane from the server:
+                    // (v71) The orphan verdict is per-pane from the server:
                     // `any.0` some pane orphaned, `any.1` every pane
                     // disposable (orphaned, pristine, or a spent shell - a
                     // live agent pane beside a dead one keeps the tab).
@@ -140,7 +140,7 @@ pub(super) struct TabPruneOutcome {
     /// The used-shell subset of `closed`/`would_close`.
     pub(super) closed_used: usize,
     pub(super) would_close_used: usize,
-    /// The orphaned-worker subset of `closed`/`would_close` (v69).
+    /// The orphaned-worker subset of `closed`/`would_close` (v71).
     pub(super) closed_orphaned: usize,
     pub(super) would_close_orphaned: usize,
     /// One label per tab this pass would close (or closed) - nineteen is past
@@ -214,7 +214,7 @@ pub(super) fn prune_live_tabs(
             out.kept += 1;
             continue;
         }
-        // (v69) An orphaned worker tab closes under the DEFAULT flags, ahead
+        // (v71) An orphaned worker tab closes under the DEFAULT flags, ahead
         // of the pristine test: the worker is positively Dead and nothing live
         // sits in the tab, so its scrollback is not a reason to keep it.
         if tab.orphaned {

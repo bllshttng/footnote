@@ -2090,7 +2090,7 @@ fn unreachable_notice(unreachable: &[String]) -> String {
 /// the choice before making it. The receipt names each tab it would close
 /// (dry-run) or closed (apply) in `tabs_close_named`.
 ///
-/// An orphaned worker tab (v69) - its stored member judged Dead by the
+/// An orphaned worker tab (v71) - its stored member judged Dead by the
 /// server - closes under the DEFAULT flags, ahead of the pristine test;
 /// `--include-used-shells` stays the opt-in for shells with no worker
 /// history.
@@ -2260,7 +2260,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
         eprintln!("fno mux workspace prune: {notice}");
     }
 
-    // (v69) After a real store pass, every answering session re-reads the
+    // (v71) After a real store pass, every answering session re-reads the
     // file just written, so the next persist cannot undo the pass.
     let reload = prune_sync::reload_live_sessions(scope.sweep_store && !dry_run, &answered_names);
     let probed = answered + unreachable.len();
@@ -4725,9 +4725,9 @@ pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
 // file shrink-only.
 mod thread_verb;
 pub use thread_verb::thread;
-// (v69) The prune aftermath (reload live servers + the receipt), same rule.
+// (v71) The prune aftermath (reload live servers + the receipt), same rule.
 mod prune_sync;
-// (v69) The live-tab fold, same rule; its tests moved with it.
+// (v71) The live-tab fold, same rule; its tests moved with it.
 mod tab_prune;
 use tab_prune::{live_tabs, prune_live_tabs, LiveTab, TabPruneOutcome};
 /// `fno mux where <fno_id>` (x-d865): resolve an fno session id to its live

@@ -1,4 +1,4 @@
-//! The prune aftermath (v69): after an applied store pass, tell every live
+//! The prune aftermath (v71): after an applied store pass, tell every live
 //! server to re-read `squads.json` (`ControlVerb::SquadReload`), then report
 //! the run. Extracted from mux_cli.rs under the file-budget gate - the code
 //! the change touched moves with it.
@@ -119,7 +119,7 @@ pub(super) fn print_prune_summary(
             tabs.used_shells
         ));
     }
-    // (v69) The orphan category names itself only when it fired: zero lines
+    // (v71) The orphan category names itself only when it fired: zero lines
     // read as "nothing matched", the same rule as every other part.
     let orphan_total = tabs.closed_orphaned + tabs.would_close_orphaned;
     if orphan_total > 0 {
@@ -235,7 +235,7 @@ pub(super) fn render_prune_json(
         "sessions_unreachable": unreachable,
         "notice": notice,
     });
-    // (v69) The reload keys exist only on a run that sent SquadReload - a
+    // (v71) The reload keys exist only on a run that sent SquadReload - a
     // dry-run or tabs-only pass sends nothing, so its receipt carries no key
     // rather than an empty list that reads as "zero sessions refreshed".
     if reload.ran {

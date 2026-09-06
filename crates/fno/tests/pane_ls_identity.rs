@@ -34,7 +34,7 @@ fn pane(fno_id: Option<&str>, name: Option<&str>) -> PaneInfo {
 
 #[test]
 fn orphaned_worker_roundtrips_and_defaults_false() {
-    // (v69) The field is additive: present it round-trips, absent it decodes
+    // (v71) The field is additive: present it round-trips, absent it decodes
     // to false, so a v68 payload still reads.
     let mut p = pane(None, None);
     p.orphaned_worker = true;

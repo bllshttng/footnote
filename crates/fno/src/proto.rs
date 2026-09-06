@@ -2491,7 +2491,7 @@ pub struct PaneInfo {
     /// and the reverse direction of `where` (Locked Decision 6).
     #[serde(default)]
     pub fno_id: Option<String>,
-    /// (v69) Hosts a stored member judged Dead; the default prune closes its
+    /// (v71) Hosts a stored member judged Dead; the default prune closes its
     /// tab. `#[serde(default)]`: a v68 payload reads false.
     #[serde(default)]
     pub orphaned_worker: bool,

@@ -1,4 +1,4 @@
-//! The per-pane orphan verdict (v69): a pane whose stored member the evidence
+//! The per-pane orphan verdict (v71): a pane whose stored member the evidence
 //! judges Dead, with no live registry row on it, is orphaned and its tab
 //! closes under the default prune. Mounted as a child of server.rs's
 //! `mod tests` (use super::*).
