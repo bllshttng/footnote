@@ -238,3 +238,71 @@ def test_a_rung_2_set_is_a_union_for_containment(territory) -> None:
     assert scope_contains("e-2,e-1", "e-1") is True      # stored order-free
     assert scope_contains("e-1,e-2", "e-1,e-2") is False  # a peer, not below
     assert scope_contains("e-1", "e-1,e-2") is False       # narrower holds less
+
+
+def test_an_epic_set_falls_under_the_crown_holding_every_member(territory) -> None:
+    """A set of epics is below whatever crown holds EVERY member, not below a
+    set of project names. The subset shortcut read epic ids against project
+    names and always fell through, so no king could grant two epics at once."""
+    from fno import paths
+
+    paths.graph_json().write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {"id": "e-1", "type": "epic", "project": "alpha"},
+                    {"id": "e-2", "type": "epic", "project": "alpha"},
+                    {"id": "e-3", "type": "epic", "project": "beta"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    from fno.agents.crown import scope_contains
+
+    assert scope_contains("alpha", "e-1,e-2") is True     # both members of alpha
+    assert scope_contains("alpha", "e-1,e-3") is False    # spans two projects
+    assert scope_contains("alpha,beta", "e-1,e-3") is True
+    assert scope_contains("e-1,e-2", "e-1,e-2,e-3") is False  # peer sets
+
+
+def test_one_graph_parse_serves_every_member_of_a_set(territory, monkeypatch) -> None:
+    """A mixed or invalid set resolves through ONE graph read, not one full
+    parse per member: _graph_index exists so refusal messages do not pay a
+    graph parse apiece."""
+    import fno.agents.crown as crown_mod
+    from fno.agents.crown import CrownScopeError, resolve_crown
+
+    calls = {"n": 0}
+    real = crown_mod._graph_index
+
+    def counting() -> object:
+        calls["n"] += 1
+        return real()
+
+    monkeypatch.setattr(crown_mod, "_graph_index", counting)
+
+    with pytest.raises(CrownScopeError):
+        resolve_crown(["e-1", "n-1", "e-2"])
+
+    assert calls["n"] == 1
+
+
+def test_one_graph_parse_serves_a_grant_over_a_set(territory, monkeypatch) -> None:
+    """The grant path pays the same one-parse cost: scope_contains resolves the
+    index once for the whole set instead of once per member. The portfolio
+    covers both fixture epics, so every member resolves through that one read."""
+    import fno.agents.crown as crown_mod
+    from fno.agents.crown import scope_contains
+
+    calls = {"n": 0}
+    real = crown_mod._graph_index
+
+    def counting() -> object:
+        calls["n"] += 1
+        return real()
+
+    monkeypatch.setattr(crown_mod, "_graph_index", counting)
+
+    assert scope_contains("alpha,beta", "e-1,e-2") is True
+    assert calls["n"] == 1

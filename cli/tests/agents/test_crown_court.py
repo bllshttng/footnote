@@ -364,6 +364,88 @@ def test_aliases_and_ordered_scopes_share_one_conflict_group(
     ]
 
 
+def test_a_set_holder_conflicts_with_a_holder_over_one_member(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A rung-2 set-holder rules each member, so a live row over 'e-1,e-2'
+    beside a live row over 'e-1' is a double rule. Keying conflicts on exact
+    territory equality reported none of it."""
+    from fno.agents.court import gather_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "set-king",
+                status="busy",
+                crown_level=2,
+                crown_scope="e-1,e-2",
+                crown_grantor="human",
+            ),
+            _entry(
+                "member-king",
+                status="idle",
+                crown_level=2,
+                crown_scope="e-1",
+                crown_grantor="human",
+            ),
+        ],
+        graph_entries=[],
+    )
+
+    assert gather_court()["conflicts"] == [
+        {"scope": "e-1", "holders": ["set-king", "member-king"]}
+    ]
+
+
+def test_rivalry_is_reported_per_pair_never_per_merged_group(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A rivals B over e-1, B rivals C over e-2, A and C share nothing. A
+    merged group would claim three rows hold e-1,e-2; the truth is two
+    rivalries, each naming its own pair and the members that pair shares."""
+    from fno.agents.court import gather_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry("king-a", status="busy", crown_level=2, crown_scope="e-1"),
+            _entry("king-b", status="busy", crown_level=2, crown_scope="e-1,e-2"),
+            _entry("king-c", status="busy", crown_level=2, crown_scope="e-2"),
+        ],
+        graph_entries=[],
+    )
+
+    assert gather_court()["conflicts"] == [
+        {"scope": "e-1", "holders": ["king-a", "king-b"]},
+        {"scope": "e-2", "holders": ["king-b", "king-c"]},
+    ]
+
+
+def test_a_portfolio_and_its_project_king_are_a_court_not_a_conflict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The ladder's documented shape: a portfolio king's court IS project
+    kings. Overlap-keyed conflicts would cry double-rule on every legitimate
+    court, so rivalry is rung-aware - same rung overlaps, cross rung only
+    names the same territory outright."""
+    from fno.agents.court import gather_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry("portfolio-king", status="busy", crown_level=0, crown_scope="alpha,beta"),
+            _entry("project-king", status="idle", crown_level=1, crown_scope="alpha"),
+        ],
+        graph_entries=[],
+    )
+
+    assert gather_court()["conflicts"] == []
+
+
 def test_render_court_json_matches_gather_court(tmp_path: Path, monkeypatch) -> None:
     from fno.agents.court import gather_court, render_court
 

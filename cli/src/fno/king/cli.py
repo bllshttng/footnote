@@ -102,11 +102,12 @@ def init_cmd(
         )
         raise typer.Exit(2)
 
-    # The manifest is keyed by the scope name, so every spelling of one crown
-    # must arm the SAME file: canonicalize the set (sorted, deduped) before the
-    # path is derived. A raw `e-2,e-1` would arm a second manifest beside the
-    # canonical one the scope-keyed readers resolve.
-    from fno.agents.crown import canonical_scope, split_scope
+    # Every spelling of one crown must arm the SAME file: canonicalize the set
+    # AND resolve aliases, or `--scope a` arms kings/a.md while row-keyed
+    # readers resolve kings/alpha.md from row.crown_scope - and the
+    # uncrowned-row warning stays silent, comparing through the same
+    # normalization.
+    from fno.agents.crown import _canonical_members, canonical_scope, split_scope
 
     members = split_scope(scope)
     if not members:
@@ -115,7 +116,7 @@ def init_cmd(
             err=True,
         )
         raise typer.Exit(2)
-    scope = canonical_scope(members)
+    scope = canonical_scope(list(_canonical_members(scope)))
 
     try:
         manifest_path = king_manifest_path(scope)

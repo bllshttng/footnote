@@ -55,6 +55,7 @@
 //! close to do.
 
 use crate::loop_runtime::{CloseOutcome, Evidence, LoopError, Queue, Unit};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
@@ -195,7 +196,7 @@ impl KingQueue {
         // the one row the guard must not outvote. Any OTHER live holder - or
         // a hand-run --wake that names nobody - still refuses, so the flag
         // can never double a reigning king.
-        if let Some(live_holder) = live_crown_holder_in(registry_path, &scope) {
+        if let Some(live_holder) = live_crown_holder_in(registry_path, &scope, repo_root) {
             let caller_named_this_row = wake && wake_holder == Some(live_holder.as_str());
             if !caller_named_this_row {
                 return Err(LoopError::Queue(format!(
@@ -365,34 +366,147 @@ pub(crate) fn mint_walk_key(fno_id: &str) -> String {
 /// verdict instead of parking it at the dispatch cap.
 pub(crate) const WALK_SESSION_KEY_ENV: &str = "FNO_KING_WALK_SESSION_KEY";
 
-/// Do two stored crown scopes share a member? A rung-2 crown is stored as the
-/// canonical comma-joined set, and a set-holder already reigns over each
-/// member, so the one-live-crown guard must answer set membership - never
-/// string equality, which would let a second king over one member double-rule
-/// the set-holder.
-fn scopes_overlap(held: &str, requested: &str) -> bool {
-    let members: Vec<&str> = held
+/// The alias-normalized member set of one stored crown scope, through the
+/// same {alias: canonical} project map the Python guard canonicalizes with -
+/// a row stored as `alpha` and a walk for the short name `a` are one
+/// territory, not two.
+fn canonical_members(scope: &str, projects: &HashMap<String, String>) -> HashSet<String> {
+    scope
         .split(',')
         .map(str::trim)
         .filter(|m| !m.is_empty())
-        .collect();
-    if members.is_empty() {
-        return false;
-    }
-    requested
-        .split(',')
-        .map(str::trim)
-        .any(|r| !r.is_empty() && members.contains(&r))
+        .map(|m| projects.get(m).cloned().unwrap_or_else(|| m.to_string()))
+        .collect()
 }
 
-/// The name of any live registry row holding a crown over `scope`, if the
-/// registry is readable and such a row exists. An unreadable registry answers
-/// `None` (fail-open to the recovery path): the walk's whole job is reviving
-/// scopes whose registry state is suspect, and refusing on a read error would
-/// strand exactly those, while the live-holder refusal above catches the
-/// double-rule case whenever the registry CAN be read.
-fn live_crown_holder_in(registry_path: &Path, scope: &str) -> Option<String> {
+/// The rung a scope sits on, derived from its members the way resolve_crown
+/// derives it: 2+ projects is a portfolio (0), one project is 1, and epics
+/// are 2. `None` marks a mixed scope no legal writer produces; the caller
+/// treats it as fail-closed.
+fn derived_scope_level(scope: &str, projects: &HashMap<String, String>) -> Option<u32> {
+    let members: Vec<String> = scope
+        .split(',')
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(|m| projects.get(m).cloned().unwrap_or_else(|| m.to_string()))
+        .collect();
+    let is_project = |m: &String| projects.contains_key(m.as_str());
+    match members.len() {
+        0 => None,
+        1 => Some(if is_project(&members[0]) { 1 } else { 2 }),
+        _ => {
+            if members.iter().all(is_project) {
+                Some(0)
+            } else if members.iter().all(|m| !is_project(m)) {
+                Some(2)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Do two live crowns double-rule territory, ladder-aware? The ladder's
+/// documented shape is that a portfolio king's court IS project kings and a
+/// project king's court IS epic kings, so a live row over `alpha,beta` and a
+/// walk reviving a king over `alpha` are two legitimate crowns. Rivalry is
+/// rung-scoped: same rung double-rules on any shared member (a set-holder
+/// rules each member), different rungs only on the same territory outright.
+/// Both rungs are DERIVED from the members, never read from stored levels: a
+/// row stamped `level=0` over epic members is exactly how a stored number
+/// switches this guard off. The stored levels remain only as a tie-breaker
+/// when derivation cannot classify either side; their overlap surfaces.
+fn crown_rivals(
+    held: &str,
+    held_level: Option<u32>,
+    requested: &str,
+    requested_level: Option<u32>,
+    projects: &HashMap<String, String>,
+) -> bool {
+    let left = canonical_members(held, projects);
+    let right = canonical_members(requested, projects);
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    let held_rung = derived_scope_level(held, projects);
+    let requested_rung = derived_scope_level(requested, projects);
+    match (held_rung, requested_rung) {
+        (Some(a), Some(b)) if a != b => left == right,
+        (None, None) => match (held_level, requested_level) {
+            (Some(a), Some(b)) if a != b => left == right,
+            _ => left.intersection(&right).next().is_some(),
+        },
+        _ => left.intersection(&right).next().is_some(),
+    }
+}
+
+/// Do two stored crown scopes share a member, aliases normalized? A
+/// set-holder reigns over each member, so a holder scan after one member
+/// must still find it (`reign`'s scope form). Rung-agnostic on purpose: the
+/// question is "who reigns here", and a portfolio king reigns over each of
+/// its projects too.
+pub(crate) fn scopes_overlap(
+    held: &str,
+    requested: &str,
+    projects: &HashMap<String, String>,
+) -> bool {
+    let left = canonical_members(held, projects);
+    !left.is_empty()
+        && canonical_members(requested, projects)
+            .intersection(&left)
+            .next()
+            .is_some()
+}
+
+/// Territory equality, aliases normalized (`_same_territory`'s Rust twin).
+pub(crate) fn same_territory(a: &str, b: &str, projects: &HashMap<String, String>) -> bool {
+    let left = canonical_members(a, projects);
+    !left.is_empty() && left == canonical_members(b, projects)
+}
+
+/// `crown_rivals` for sibling modules (`reign`'s multiple-holders warning).
+pub(crate) fn crown_rivals_pub(
+    held: &str,
+    held_level: Option<u32>,
+    requested: &str,
+    requested_level: Option<u32>,
+    projects: &HashMap<String, String>,
+) -> bool {
+    crown_rivals(held, held_level, requested, requested_level, projects)
+}
+
+/// The name of any live registry row double-ruling `scope`, if the registry is
+/// readable and such a row exists. An unreadable registry answers `None`
+/// (fail-open to the recovery path): the walk's whole job is reviving scopes
+/// whose registry state is suspect, and refusing on a read error would strand
+/// exactly those, while the live-holder refusal above catches the double-rule
+/// case whenever the registry CAN be read.
+///
+/// The PROJECT MAP is the other axis, and it fails the other way. Rung
+/// derivation reads it; an `Err` swallowed to an empty map derives every
+/// member as non-project (rung 2), the stored row keeps its true level, and
+/// the cross-rung exemption then compares a corrupted rung against a real one
+/// - a live portfolio reads as a court rather than a rival, and the walk
+/// crowns a second king on one member. So an unreadable map downgrades the
+/// check to raw-member overlap: any shared member blocks the walk, the same
+/// rule as the same-rung case. An unrelated scope still recovers.
+fn live_crown_holder_in(registry_path: &Path, scope: &str, repo_root: &Path) -> Option<String> {
+    live_crown_holder_in_with_projects(
+        registry_path,
+        scope,
+        &crate::king_board::project_map(repo_root),
+    )
+}
+
+fn live_crown_holder_in_with_projects(
+    registry_path: &Path,
+    scope: &str,
+    projects: &Result<HashMap<String, String>, String>,
+) -> Option<String> {
     let registry = crate::state::load_registry(registry_path).ok()?;
+    let config_unreadable = projects.is_err();
+    let projects = projects.clone().unwrap_or_default();
+    let scope_level = derived_scope_level(scope, &projects);
     let is_terminal = |row: &crate::state::RegistryEntry| {
         matches!(
             row.status,
@@ -407,9 +521,13 @@ fn live_crown_holder_in(registry_path: &Path, scope: &str) -> Option<String> {
         .iter()
         .filter(|row| !is_terminal(row))
         .find(|row| {
-            row.crown_scope
-                .as_deref()
-                .is_some_and(|held| scopes_overlap(held, scope))
+            row.crown_scope.as_deref().is_some_and(|held| {
+                if config_unreadable {
+                    scopes_overlap(held, scope, &projects)
+                } else {
+                    crown_rivals(held, row.crown_level, scope, scope_level, &projects)
+                }
+            })
         })
         .map(|row| row.name.clone())
 }
@@ -817,7 +935,7 @@ mod tests {
         let registry = write_registry(&dir, "busy", Some("epic-x"));
 
         assert_eq!(
-            live_crown_holder_in(&registry, "epic-x"),
+            live_crown_holder_in(&registry, "epic-x", &dir),
             Some("reigning-king".to_string())
         );
         // The same registry through the walk: an ordinary walk refuses, and a
@@ -890,18 +1008,18 @@ mod tests {
         let registry = write_registry(&dir, "busy", Some("epic-a,epic-b"));
 
         assert_eq!(
-            live_crown_holder_in(&registry, "epic-a"),
+            live_crown_holder_in(&registry, "epic-a", &dir),
             Some("reigning-king".to_string())
         );
         assert_eq!(
-            live_crown_holder_in(&registry, "epic-b"),
+            live_crown_holder_in(&registry, "epic-b", &dir),
             Some("reigning-king".to_string())
         );
         assert_eq!(
-            live_crown_holder_in(&registry, "epic-a,epic-b"),
+            live_crown_holder_in(&registry, "epic-a,epic-b", &dir),
             Some("reigning-king".to_string())
         );
-        assert_eq!(live_crown_holder_in(&registry, "epic-c"), None);
+        assert_eq!(live_crown_holder_in(&registry, "epic-c", &dir), None);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -910,13 +1028,162 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kingdead-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let exited = write_registry(&dir, "exited", Some("epic-x"));
-        assert_eq!(live_crown_holder_in(&exited, "epic-x"), None);
+        assert_eq!(live_crown_holder_in(&exited, "epic-x", &dir), None);
         let uncrowned = write_registry(&dir, "busy", None);
-        assert_eq!(live_crown_holder_in(&uncrowned, "epic-x"), None);
+        assert_eq!(live_crown_holder_in(&uncrowned, "epic-x", &dir), None);
         assert_eq!(
-            live_crown_holder_in(&dir.join("no-such-registry.json"), "epic-x"),
+            live_crown_holder_in(&dir.join("no-such-registry.json"), "epic-x", &dir),
             None,
             "an unreadable registry fails open to the recovery path"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    fn write_registry_with_level(
+        dir: &Path,
+        status: &str,
+        scope: Option<&str>,
+        level: u32,
+    ) -> PathBuf {
+        let row = serde_json::json!({
+            "name": "reigning-king",
+            "cwd": "/tmp",
+            "status": status,
+            "created_at": "2026-08-23T00:00:00Z",
+            "crown_level": scope.map(|_| level),
+            "crown_scope": scope,
+            "crown_grantor": scope.map(|_| "human"),
+        });
+        let path = dir.join("registry.json");
+        fs::write(
+            &path,
+            serde_json::json!({"schema_version": 11, "agents": [row]}).to_string(),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn a_live_portfolio_king_does_not_block_a_project_kings_walk() {
+        // The ladder's shape: a portfolio king's court IS project kings, so a
+        // live row over {alpha,beta} must not stop the walk from reviving an
+        // orphaned king over alpha. Bare member overlap refused exactly that
+        // recovery. The map is injected Ok: rung derivation needs real
+        // projects, and an env without a readable config must not decide this
+        // test.
+        let dir = std::env::temp_dir().join(format!("kingcourt-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let registry = write_registry_with_level(&dir, "busy", Some("alpha,beta"), 0);
+
+        let mut map = HashMap::new();
+        map.insert("alpha".to_string(), "alpha".to_string());
+        map.insert("beta".to_string(), "beta".to_string());
+        assert_eq!(
+            live_crown_holder_in_with_projects(&registry, "alpha", &Ok(map)),
+            None
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_set_holder_still_blocks_a_walk_over_one_member() {
+        let dir = std::env::temp_dir().join(format!("kingset2-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let registry = write_registry_with_level(&dir, "busy", Some("epic-a,epic-b"), 2);
+
+        assert_eq!(
+            live_crown_holder_in(&registry, "epic-a", &dir),
+            Some("reigning-king".to_string())
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_mislabeled_row_still_blocks_the_walk() {
+        // A row stamped level 0 over epic members: derivation reads rung 2 on
+        // BOTH sides, so overlap decides and the stored number cannot switch
+        // the guard off.
+        let dir = std::env::temp_dir().join(format!("kingmislab-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let registry = write_registry_with_level(&dir, "busy", Some("epic-a,epic-b"), 0);
+        let projects: Result<HashMap<String, String>, String> = Ok(HashMap::new());
+
+        assert_eq!(
+            live_crown_holder_in_with_projects(&registry, "epic-a", &projects),
+            Some("reigning-king".to_string())
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_project_map_fails_closed_not_silent() {
+        // An Err map swallowed to empty derives the walk scope as rung 2 while
+        // the stored row keeps rung 0; the cross-rung exemption then reads a
+        // live portfolio as a court and crowns a second king on one member.
+        // Unreadable config must downgrade to raw overlap, which blocks.
+        let dir = std::env::temp_dir().join(format!("kingnomap-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let registry = write_registry_with_level(&dir, "busy", Some("alpha,beta"), 0);
+
+        let projects: Result<HashMap<String, String>, String> =
+            Err("no work.workspaces in any candidate config.toml".to_string());
+        assert_eq!(
+            live_crown_holder_in_with_projects(&registry, "alpha", &projects),
+            Some("reigning-king".to_string())
+        );
+        // An unrelated scope still recovers: raw overlap answers, not a blanket
+        // refusal.
+        assert_eq!(
+            live_crown_holder_in_with_projects(&registry, "gamma", &projects),
+            None
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn alias_spellings_share_one_territory_in_the_walk_guard() {
+        // Python normalizes every member through the project map before
+        // comparing; a raw trim let a row stored as 'alpha' and a walk for
+        // the short name 'a' miss each other - the double-rule the guard
+        // exists to stop.
+        let dir = std::env::temp_dir().join(format!("kingalias-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let config = dir.join(".fno").join("config.toml");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(
+            &config,
+            "[work.workspaces.ws1]\nprojects = [{ name = \"alpha\", short_name = \"a\" }]\n",
+        )
+        .unwrap();
+        // project_map reads `<cwd>/.fno/config.toml`, so the registry dir's
+        // own .fno carries the map.
+        let registry = write_registry_with_level(&dir, "busy", Some("alpha"), 1);
+
+        assert_eq!(
+            live_crown_holder_in(&registry, "a", &dir),
+            Some("reigning-king".to_string())
+        );
+        let aliased_row = {
+            let mut rows = serde_json::json!({"schema_version": 11, "agents": []});
+            rows["agents"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "name": "reigning-king",
+                    "cwd": "/tmp",
+                    "status": "busy",
+                    "created_at": "2026-08-23T00:00:00Z",
+                    "crown_level": 1,
+                    "crown_scope": "a",
+                    "crown_grantor": "human",
+                }));
+            let path = dir.join("registry2.json");
+            fs::write(&path, rows.to_string()).unwrap();
+            path
+        };
+        assert_eq!(
+            live_crown_holder_in(&aliased_row, "alpha", &dir),
+            Some("reigning-king".to_string())
         );
         fs::remove_dir_all(&dir).ok();
     }

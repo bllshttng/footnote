@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from fno.agents.crown import (
     _canonical_project,
+    _crown_rivals,
     _graph_index,
     _territory_key,
     crown_reading,
@@ -67,32 +68,44 @@ def _agreement(
 
 
 def _conflicts(rows: list) -> list[dict[str, Any]]:
-    """Territory two live crowned rows hold at once, one entry per scope.
+    """Territory two live crowned rows double-rule, one entry per rival PAIR.
 
-    Groups on :func:`_territory_key`, the key crown's own checks use.
+    Keys on :func:`_crown_rivals`, the rule the grant-time holder scan uses,
+    so a conflict here and the refusal at grant time cannot disagree: a
+    set-holder rivals a holder over one member; a portfolio and the project
+    kings of its court are two legitimate crowns. One entry PER PAIR, never a
+    merged group: rivalry is not transitive (A/e-1, B/e-1,e-2, C/e-2 rivals
+    A-B and B-C only), so a group would claim three rows hold what no pair
+    does. Each entry names its two rows and the members they actually share.
     """
     # Joined on crown_scope, not a full crown_reading: a scope claims territory
     # with or without a level, and gather_court surfaces those rows too.
-    claims: list[tuple[Any, str]] = []
+    claims: list[tuple[Any, str, frozenset[str]]] = []
     for row in rows:
         scope = getattr(row, "crown_scope", None)
         if isinstance(scope, str) and scope.strip():
-            claims.append((row, scope))
-    seen: dict[frozenset[str], tuple[str, list[str]]] = {}
-    for row, scope in claims:
-        key = _territory_key(scope)
-        if not key:
-            continue
-        existing = seen.get(key)
-        if existing is None:
-            seen[key] = (scope, [row.name])
-        else:
-            existing[1].append(row.name)
-    return [
-        {"scope": scope, "holders": holders}
-        for scope, holders in seen.values()
-        if len(holders) > 1
-    ]
+            key = _territory_key(scope)
+            if key:
+                claims.append((row, scope, key))
+    conflicts: list[dict[str, Any]] = []
+    for i in range(len(claims)):
+        for j in range(i + 1, len(claims)):
+            row_i, scope_i, key_i = claims[i]
+            row_j, scope_j, key_j = claims[j]
+            if not _crown_rivals(
+                scope_i,
+                getattr(row_i, "crown_level", None),
+                scope_j,
+                getattr(row_j, "crown_level", None),
+            ):
+                continue
+            conflicts.append(
+                {
+                    "scope": ",".join(sorted(key_i & key_j)),
+                    "holders": [row_i.name, row_j.name],
+                }
+            )
+    return conflicts
 
 
 def _manifest_limb(scope: Any, row: Any) -> dict[str, Any]:

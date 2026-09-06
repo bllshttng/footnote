@@ -25,8 +25,10 @@
 //!     rewrites `shape` on the scope's manifest under the manifest lock;
 //!     exit 0 prints the shape now on the file, exit 1 carries the refusal.
 
+use crate::loop_king::{same_territory, scopes_overlap};
 use crate::state::{load_registry, RegistryEntry};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
@@ -216,6 +218,37 @@ pub fn reign_state(
     harness: Option<&str>,
     registry_path: &Path,
 ) -> ReignState {
+    reign_state_in_repo(root, root, scope, session, harness, registry_path)
+}
+
+/// `repo_cwd` is the CHECKOUT the alias map resolves from; `root` is the
+/// space dir the manifests live under. One path each, on purpose.
+fn reign_state_in_repo(
+    root: &Path,
+    repo_cwd: &Path,
+    scope: Option<&str>,
+    session: Option<&str>,
+    harness: Option<&str>,
+    registry_path: &Path,
+) -> ReignState {
+    reign_state_with_projects(
+        root,
+        scope,
+        session,
+        harness,
+        registry_path,
+        &crate::king_board::project_map(repo_cwd),
+    )
+}
+
+fn reign_state_with_projects(
+    root: &Path,
+    scope: Option<&str>,
+    session: Option<&str>,
+    harness: Option<&str>,
+    registry_path: &Path,
+    projects_result: &Result<HashMap<String, String>, String>,
+) -> ReignState {
     let rows = match load_rows(registry_path) {
         Ok(rows) => rows,
         Err(e) => {
@@ -313,12 +346,49 @@ pub fn reign_state(
         }
     };
 
-    // Scope form: live holders over the named territory.
+    // Scope form: live holders over the named territory. A rung-2 crown is
+    // stored as the joined set and a set-holder reigns over each member, so
+    // the scan answers shared membership through the same alias-aware helper
+    // the walk guard uses - never string equality, which reads a live king
+    // over e-1,e-2 as "no crown over e-1".
+    let projects = projects_result.clone().unwrap_or_default();
     let holders: Vec<&RegistryEntry> = rows
         .iter()
-        .filter(|r| !is_terminal(r) && r.crown_scope.as_deref() == Some(scope.as_str()))
+        .filter(|r| {
+            !is_terminal(r)
+                && r.crown_scope
+                    .as_deref()
+                    .is_some_and(|held| scopes_overlap(held, &scope, &projects))
+        })
         .collect();
     if holders.is_empty() {
+        // An unreadable project map degrades alias matching to raw spellings,
+        // so an empty answer can be a MISS. But only when live crowned rows
+        // exist for a miss to hide: an empty (or all-terminal) registry is
+        // decisive on its own, whatever the map read.
+        let live_crowned = rows
+            .iter()
+            .filter(|r| {
+                !is_terminal(r)
+                    && r.crown_scope
+                        .as_deref()
+                        .is_some_and(|s| !s.trim().is_empty())
+            })
+            .count();
+        if live_crowned > 0 && projects_result.is_err() {
+            let reason = format!(
+                "project map unreadable ({}), so alias members may hide a live \
+                 holder; no raw-spelled holder over {scope}",
+                projects_result.as_ref().err().cloned().unwrap_or_default()
+            );
+            return ReignState {
+                crowned: None,
+                scope: Some(scope),
+                live: None,
+                unknown_reason: Some(reason),
+                ..Default::default()
+            };
+        }
         let reason = format!("no live crowned row over {scope}");
         return ReignState {
             crowned: Some(false),
@@ -328,7 +398,18 @@ pub fn reign_state(
             ..Default::default()
         };
     }
-    let registry_session = row_session(holders[0]);
+    // Overlap finds courts as well as rivals (a portfolio over alpha,beta
+    // overlaps a question about alpha), so the row to describe is the one
+    // whose territory IS the asked scope, with a set-holder as the fallback.
+    let primary = holders
+        .iter()
+        .find(|r| {
+            r.crown_scope
+                .as_deref()
+                .is_some_and(|held| same_territory(held, &scope, &projects))
+        })
+        .unwrap_or(&holders[0]);
+    let registry_session = row_session(primary);
     let mut state = ReignState {
         crowned: Some(true),
         scope: Some(scope.clone()),
@@ -336,12 +417,31 @@ pub fn reign_state(
         live: Some(true),
         ..Default::default()
     };
-    if holders.len() > 1 {
+    // A court is legal: only RIVALS of the primary (same derived rung, shared
+    // territory) count toward the multiple-holders warning, never a mere
+    // overlap this ladder declares legitimate.
+    let rival_count = holders
+        .iter()
+        .filter(|r| {
+            crate::loop_king::crown_rivals_pub(
+                primary.crown_scope.as_deref().unwrap_or(""),
+                primary.crown_level,
+                r.crown_scope.as_deref().unwrap_or(""),
+                r.crown_level,
+                &projects,
+            )
+        })
+        .count();
+    if rival_count > 1 {
         state.unknown_reason = Some(format!(
-            "multiple live rows hold {scope}; court conflicts names them all"
+            "multiple rival rows hold {scope}; fno agents court shows every crown"
         ));
     }
-    with_manifest(state, &scope, root)
+    // The manifest keys on the HOLDER's own scope: a holder found through one
+    // member of its set arms the set's manifest, and a manifest named for the
+    // member alone does not exist.
+    let holder_scope = primary.crown_scope.clone().unwrap_or_else(|| scope.clone());
+    with_manifest(state, &holder_scope, root)
 }
 
 /// Rewrite `shape` in place on one scope's existing manifest, under the same
@@ -572,6 +672,7 @@ pub fn run_reign_state(args: &[String]) -> i32 {
     let mut session: Option<String> = None;
     let mut harness: Option<String> = None;
     let mut root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut repo_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut registry: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
@@ -592,6 +693,14 @@ pub fn run_reign_state(args: &[String]) -> i32 {
                 root = PathBuf::from(&args[i + 1]);
                 i += 2;
             }
+            // The checkout the ALIAS map resolves from. Distinct from --root
+            // on purpose: root is the SPACE dir the manifests live under,
+            // and probing it for config.toml finds nothing, so a project
+            // alias declared in the repo config would miss its own king.
+            "--cwd" if i + 1 < args.len() => {
+                repo_cwd = PathBuf::from(&args[i + 1]);
+                i += 2;
+            }
             "--registry" if i + 1 < args.len() => {
                 registry = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
@@ -610,8 +719,9 @@ pub fn run_reign_state(args: &[String]) -> i32 {
     }
     let registry_path =
         registry.unwrap_or_else(|| crate::paths::AgentsHome::from_env().registry_json());
-    let state = reign_state(
+    let state = reign_state_in_repo(
         &root,
+        &repo_cwd,
         scope.as_deref(),
         session.as_deref(),
         harness.as_deref(),
@@ -818,6 +928,134 @@ mod tests {
     }
 
     #[test]
+    fn scope_form_finds_a_set_holder_through_any_member() {
+        // A rung-2 crown is stored as the joined set; asking after one member
+        // must still find the king that holds it, and the manifest read keys
+        // on the HOLDER's own scope, not the member the caller named.
+        let root = tmp("setholder");
+        let sid = "aaaa1111-0000-4000-8000-00000000000a";
+        let reg = registry_file(
+            &root,
+            &[row(
+                "set-king",
+                sid,
+                Some("epic-a,epic-b"),
+                AgentStatus::Busy,
+            )],
+        );
+        write_manifest(&root, "epic-a,epic-b", sid, "pass");
+
+        let state = reign_state(&root, Some("epic-a"), None, None, &reg);
+        assert_eq!(state.crowned, Some(true));
+        assert_eq!(state.live, Some(true));
+        assert_eq!(state.shape.as_deref(), Some("pass"));
+        assert_eq!(
+            state.manifest_session.as_deref(),
+            Some(sid),
+            "the manifest read keys on the holder's own scope"
+        );
+    }
+
+    #[test]
+    fn scope_form_describes_the_exact_holder_not_the_court() {
+        // Portfolio over {alpha,beta} and project king over alpha are both
+        // live and both legitimate; the question "who reigns over alpha" is
+        // about the project king, so the exact-territory row wins and the
+        // court draws no rivalry warning.
+        let root = tmp("exact");
+        let reg = registry_file(
+            &root,
+            &[
+                row(
+                    "portfolio-king",
+                    "dddd4444-0000-4000-8000-000000000004",
+                    Some("alpha,beta"),
+                    AgentStatus::Busy,
+                ),
+                row(
+                    "project-king",
+                    "eeee5555-0000-4000-8000-000000000005",
+                    Some("alpha"),
+                    AgentStatus::Busy,
+                ),
+            ],
+        );
+        write_manifest(
+            &root,
+            "alpha",
+            "eeee5555-0000-4000-8000-000000000005",
+            "pass",
+        );
+        let mut map = HashMap::new();
+        map.insert("alpha".to_string(), "alpha".to_string());
+        map.insert("beta".to_string(), "beta".to_string());
+        let state = reign_state_with_projects(&root, Some("alpha"), None, None, &reg, &Ok(map));
+        assert_eq!(
+            state.registry_session.as_deref(),
+            Some("eeee5555-0000-4000-8000-000000000005"),
+            "the exact-territory holder is described, not the portfolio"
+        );
+        assert_eq!(state.unknown_reason, None, "a court is not a rivalry");
+        assert_eq!(
+            state.manifest_session.as_deref(),
+            Some("eeee5555-0000-4000-8000-000000000005")
+        );
+    }
+
+    #[test]
+    fn two_true_rivals_still_warn() {
+        let root = tmp("rivals");
+        let reg = registry_file(
+            &root,
+            &[
+                row(
+                    "set-king",
+                    "ffff6666-0000-4000-8000-000000000006",
+                    Some("e-1,e-2"),
+                    AgentStatus::Busy,
+                ),
+                row(
+                    "member-king",
+                    "aaaa7777-0000-4000-8000-000000000007",
+                    Some("e-1"),
+                    AgentStatus::Busy,
+                ),
+            ],
+        );
+        let state = reign_state(&root, Some("e-1"), None, None, &reg);
+        assert_eq!(state.crowned, Some(true));
+        let reason = state.unknown_reason.unwrap();
+        assert!(reason.contains("rival"), "reason was {reason}");
+    }
+
+    #[test]
+    fn unreadable_project_map_answers_unknown_not_no_crown() {
+        // The scan degrades to raw spellings when the map errs, so an empty
+        // answer can be an alias miss. That must read as unknown, never as a
+        // clean "no live crowned row".
+        let root = tmp("nomap");
+        let reg = registry_file(
+            &root,
+            &[row(
+                "other-king",
+                "cccc3333-0000-4000-8000-000000000003",
+                Some("gamma"),
+                AgentStatus::Busy,
+            )],
+        );
+        let projects: Result<std::collections::HashMap<String, String>, String> =
+            Err("no work.workspaces in any candidate config.toml".to_string());
+        let state = reign_state_with_projects(&root, Some("alpha"), None, None, &reg, &projects);
+        assert_eq!(state.crowned, None);
+        assert_eq!(state.live, None);
+        let reason = state.unknown_reason.unwrap();
+        assert!(
+            reason.contains("project map unreadable"),
+            "reason was {reason}"
+        );
+    }
+
+    #[test]
     fn unreadable_registry_answers_unknown_never_clean_false() {
         let root = tmp("unreadable");
         let bad = root.join("not-a-registry.json");
@@ -954,7 +1192,13 @@ mod tests {
         );
         let state = reign_state(&root, Some("alpha"), None, None, &reg);
         assert_eq!(state.crowned, Some(true));
-        assert!(state.unknown_reason.unwrap().contains("multiple live rows"));
+        assert!(
+            state
+                .unknown_reason
+                .unwrap()
+                .contains("multiple rival rows"),
+            "two rows over one territory are rivals, not a court"
+        );
         assert_eq!(state.shape.as_deref(), Some("court"));
     }
 
