@@ -434,6 +434,7 @@ def test_sender_crown_is_read_from_the_live_matching_registry_row(tmp_path):
         '{"schema_version":19,"agents":['
         '{"name":"king","cwd":"/tmp","log_path":"/tmp/log",'
         '"harness":"codex","harness_session_id":"session-king",'
+        '"related_session_id":"session-king-related",'
         '"status":"live","created_at":"2026-01-01T00:00:00Z",'
         '"crown_level":1,"crown_scope":"fno"},'
         '{"name":"former-king","cwd":"/tmp","log_path":"/tmp/log",'
@@ -444,6 +445,7 @@ def test_sender_crown_is_read_from_the_live_matching_registry_row(tmp_path):
     )
 
     assert sender_crown_at(registry_path, "session-king") == "L1 fno"
+    assert sender_crown_at(registry_path, "session-king-related") == "L1 fno"
     assert sender_crown_at(registry_path, "session-former") is None
     assert sender_crown_at(registry_path, "session-stranger") is None
     assert sender_crown_at(registry_path, None) is None
@@ -478,6 +480,7 @@ def test_crowned_sender_trailer_reports_standing_without_content_warrant(
     assert "not operator authority or proof the content is warranted" in rendered
     assert "internal reversible work within that scope" in rendered
     assert "outward or irreversible action" in rendered
+    assert "may be directed" not in rendered
     assert "L9" not in rendered
     assert "operator-authored mail" not in rendered
 
@@ -513,6 +516,7 @@ def test_peer_trailer_names_the_action_boundary_and_the_door(monkeypatch):
     assert "write a plan or adopt a node" in trailer
     assert "merge a PR or send email" in trailer
     assert "needs operator authority or standing law" in trailer
+    assert "is allowed" not in trailer
     assert trailer.count(".") == 1
 
 
