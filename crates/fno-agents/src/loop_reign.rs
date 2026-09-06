@@ -61,6 +61,13 @@ pub struct ReignState {
     /// sessions. `None` when either side is unknown - a vacated crown and an
     /// unreadable manifest are not disagreements, and must never render as one.
     pub split: Option<bool>,
+    /// The manifest file's path, when it exists (x-f0d2): the manifest is the
+    /// durable crown record, and court names where the record lives.
+    pub manifest_path: Option<String>,
+    /// The manifest carries `crown_scope` equal to the scope: a durable crown
+    /// copy exists, not just identity (a pre-fields manifest holds the holder
+    /// id but no crown to restore). `None` when the manifest side is unreadable.
+    pub crown_on_manifest: Option<bool>,
     pub unknown_reason: Option<String>,
 }
 
@@ -120,16 +127,18 @@ fn find_by_session<'a>(
     }
 }
 
-/// `(manifest_session, shape)` from the fenced parser; `(None, None)` when the
-/// file cannot read. A manifest from before `shape` existed reads as its
-/// writer's default, not as a third unknown shape.
-fn read_manifest_identity(path: &Path) -> (Option<String>, Option<String>) {
+/// `(manifest_session, shape, crown_on_manifest)` from one content read;
+/// `(None, None, None)` when the file cannot read. A manifest from before
+/// `shape` existed reads as its writer's default, not as a third unknown
+/// shape. `crown_on_manifest` answers durability, not identity: a manifest
+/// written before crown fields existed holds no crown copy to restore.
+fn read_manifest_identity(path: &Path) -> (Option<String>, Option<String>, Option<bool>) {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return (None, None),
+        Err(_) => return (None, None, None),
     };
     let Some(m) = crate::loopcheck::parse_king_manifest(&content) else {
-        return (None, None);
+        return (None, None, None);
     };
     let session = m.harness_session_id.filter(|s| !s.is_empty());
     // An empty shape is a manifest from before the field existed: its writer's
@@ -139,7 +148,8 @@ fn read_manifest_identity(path: &Path) -> (Option<String>, Option<String>) {
     } else {
         m.shape
     };
-    (session, Some(shape))
+    let crown = Some(crate::claude_adopt::manifest_field(&content, "crown_scope").is_some());
+    (session, Some(shape), crown)
 }
 
 /// Fill the manifest limb of an otherwise-answered state, in place
@@ -160,9 +170,11 @@ fn with_manifest(mut state: ReignState, scope: &str, root: &Path) -> ReignState 
         }
         return state;
     }
-    let (session, shape) = read_manifest_identity(&path);
+    state.manifest_path = Some(path.display().to_string());
+    let (session, shape, crown) = read_manifest_identity(&path);
     state.manifest_session = session;
     state.shape = shape;
+    state.crown_on_manifest = crown;
     if state.manifest_session.is_none() {
         // Unreadable, or readable with no session to compare; shape may still
         // have read, and each gap names itself.
@@ -216,12 +228,18 @@ pub fn reign_state(
             let mut reason = e.clone();
             let mut manifest_session = None;
             let mut shape = None;
+            let mut manifest_path_field = None;
+            let mut crown_on_manifest = None;
             if let Some(s) = scope {
                 match manifest_path(root, s) {
                     Ok(path) => {
-                        let (m, sh) = read_manifest_identity(&path);
+                        if path.is_file() {
+                            manifest_path_field = Some(path.display().to_string());
+                        }
+                        let (m, sh, cr) = read_manifest_identity(&path);
                         manifest_session = m;
                         shape = sh;
+                        crown_on_manifest = cr;
                     }
                     Err(_) => reason = format!("{e}; unsafe scope {s:?}"),
                 }
@@ -231,6 +249,8 @@ pub fn reign_state(
                 scope: scope.map(str::to_string),
                 shape,
                 manifest_session,
+                manifest_path: manifest_path_field,
+                crown_on_manifest,
                 registry_session: None,
                 live: None,
                 split: None,
@@ -422,6 +442,130 @@ fn usage(verb: &str) -> String {
     format!("fno-agents {verb}: [--scope S | --session ID] [--root PATH] [--registry PATH]")
 }
 
+/// One orphan crown for the court sweep: a manifest that carries a crown no
+/// live crowned row holds. Field names are the Python renderer's row keys.
+#[derive(Debug, Default, Serialize)]
+pub struct OrphanCrown {
+    pub scope: String,
+    pub level: Option<u32>,
+    pub grantor: Option<String>,
+    /// The holder session the manifest names; the file stem when it names none.
+    pub manifest_session: Option<String>,
+    pub manifest_path: String,
+}
+
+/// Normalized territory key for held matching: comma-split members, trimmed,
+/// sorted - "a, b" and "b,a" are one territory, mirroring crown's
+/// `_territory_key` so the sweep and the grant-time checks cannot disagree.
+fn territory_key(scope: &str) -> String {
+    let mut members: Vec<String> = scope
+        .split(',')
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+        .collect();
+    members.sort();
+    members.join(",")
+}
+
+/// Crowns whose registry row is gone but whose manifest still holds them
+/// (x-f0d2): scan every project space's `kings/` under `root`, keep manifests
+/// carrying `crown_scope` not among `held`. The sweep walks the spaces ROOT,
+/// not the rows' own projects - a vanished row names no cwd, and the
+/// vanished-row scope is exactly the case this read exists to surface.
+pub fn court_orphans(root: &Path, held: &[String]) -> Vec<OrphanCrown> {
+    let held_keys: std::collections::BTreeSet<String> =
+        held.iter().map(|h| territory_key(h)).collect();
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut out = Vec::new();
+    // Sorted walk, like the Python sweep this replaces: read_dir order is
+    // arbitrary, and which spelling of a duplicated territory wins the dedup
+    // must not vary run to run.
+    let mut spaces: Vec<_> = match fs::read_dir(root) {
+        Ok(rd) => rd.flatten().collect(),
+        Err(_) => return out,
+    };
+    spaces.sort_by_key(|e| e.path());
+    for space in spaces {
+        let kings = space.path().join("kings");
+        let mut files: Vec<_> = match fs::read_dir(&kings) {
+            Ok(rd) => rd.flatten().collect(),
+            Err(_) => continue,
+        };
+        files.sort_by_key(|e| e.path());
+        for file in files {
+            let path = file.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(scope) = crate::claude_adopt::manifest_field(&content, "crown_scope") else {
+                continue;
+            };
+            let key = territory_key(&scope);
+            if held_keys.contains(&key) || !seen.insert(key) {
+                continue;
+            }
+            let level = crate::claude_adopt::manifest_field(&content, "crown_level")
+                .and_then(|v| v.parse().ok());
+            out.push(OrphanCrown {
+                scope,
+                level,
+                grantor: crate::claude_adopt::manifest_field(&content, "crown_grantor"),
+                manifest_session: crate::claude_adopt::manifest_field(
+                    &content,
+                    "harness_session_id",
+                )
+                .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned())),
+                manifest_path: path.display().to_string(),
+            });
+        }
+    }
+    out
+}
+
+/// `fno-agents court-orphans`: print the orphan crowns as JSON, exit 0.
+pub fn run_court_orphans(args: &[String]) -> i32 {
+    let mut root = None;
+    let mut held: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--root" if i + 1 < args.len() => {
+                root = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--held" if i + 1 < args.len() => {
+                // One flag per scope: a multi-project scope itself contains
+                // commas, so a CSV value could not carry it.
+                held.push(args[i + 1].clone());
+                i += 2;
+            }
+            other => {
+                eprintln!("fno-agents court-orphans: unknown flag {other}");
+                eprintln!("fno-agents court-orphans: --root PATH [--held SCOPE]...");
+                return 2;
+            }
+        }
+    }
+    let Some(root) = root else {
+        eprintln!("fno-agents court-orphans: --root is required");
+        return 2;
+    };
+    match serde_json::to_string(&court_orphans(&root, &held)) {
+        Ok(json) => {
+            println!("{json}");
+            0
+        }
+        Err(e) => {
+            eprintln!("fno-agents court-orphans: cannot serialize: {e}");
+            1
+        }
+    }
+}
+
 /// `fno-agents reign-state`: print one ReignState as JSON, exit 0.
 pub fn run_reign_state(args: &[String]) -> i32 {
     let mut scope: Option<String> = None;
@@ -584,6 +728,49 @@ mod tests {
         )
         .unwrap();
         path
+    }
+
+    #[test]
+    fn court_orphans_matches_territory_and_dedups() {
+        let root = tmp("orphans");
+        let kings = root.join("space-a").join("kings");
+        fs::create_dir_all(&kings).unwrap();
+        let crown = |scope: &str, level: &str, file: &str| {
+            let body = format!(
+                "---\nscope: x\nshape: pass\nharness: claude\n\
+                 harness_session_id: sess-{file}\ncrown_scope: {scope}\n\
+                 crown_level: {level}\ncrown_grantor: operator\n---\n"
+            );
+            fs::write(kings.join(file), body).unwrap();
+        };
+        crown("alpha", "2", "alpha.md");
+        crown("beta,gamma", "1", "multi.md");
+        crown("gamma, beta", "1", "dup.md");
+
+        // Held as a differently-spelled member list: no orphan, and the two
+        // spellings of one territory do not double-report.
+        let held = vec!["alpha".to_string(), "beta, gamma".to_string()];
+        assert!(court_orphans(&root, &held).is_empty());
+
+        // Not held: the first spelling in sorted order surfaces, parsed, with
+        // its session; dup.md sorts before multi.md.
+        let out = court_orphans(&root, &["alpha".to_string()]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].scope, "gamma, beta");
+        assert_eq!(out[0].level, Some(1));
+        assert_eq!(out[0].grantor.as_deref(), Some("operator"));
+        assert_eq!(out[0].manifest_session.as_deref(), Some("sess-dup.md"));
+
+        // A manifest naming no session falls back to the file stem.
+        fs::write(
+            kings.join("stem.md"),
+            "---\ncrown_scope: delta\ncrown_level: 0\n---\n",
+        )
+        .unwrap();
+        let out = court_orphans(&root, &[]);
+        let delta = out.iter().find(|o| o.scope == "delta").unwrap();
+        assert_eq!(delta.manifest_session.as_deref(), Some("stem"));
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

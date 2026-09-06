@@ -138,7 +138,7 @@ pub fn provider_from_route_settings(model: Option<&str>) -> Option<String> {
 /// One frontmatter scalar from a king manifest: `key: value`, quotes stripped,
 /// empty reads as absent. The line-scan idiom `cleanup_king_manifest` uses; a
 /// full parser lives in loopcheck (shrink-only) and carries no crown fields.
-fn manifest_field(content: &str, key: &str) -> Option<String> {
+pub(crate) fn manifest_field(content: &str, key: &str) -> Option<String> {
     let prefix = format!("{key}:");
     content
         .lines()

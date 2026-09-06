@@ -279,6 +279,12 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "graph-get" {
         return fno_agents::graph_get::run_graph_get(&args[1..]);
     }
+    // `court-orphans` (x-f0d2): the orphan-crown sweep for `fno agents court`,
+    // daemon-free read; same `==` treatment as graph-get so no advertised fno
+    // verb is added.
+    if verb == "court-orphans" {
+        return fno_agents::loop_reign::run_court_orphans(&args[1..]);
+    }
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
     }
