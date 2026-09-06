@@ -2105,6 +2105,9 @@ def _claude_create_path(
                     entry.harness_session_id or "",
                     owner_pid=entry.pid,
                     owner_cwd=entry.cwd,
+                    crown_level=entry.crown_level,
+                    crown_scope=entry.crown_scope,
+                    crown_grantor=entry.crown_grantor,
                 ) is not None
             except ValueError as exc:
                 # Arming with a short_id/row-name fallback would write a

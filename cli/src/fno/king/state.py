@@ -136,8 +136,17 @@ def arm_king_manifest(
     state_root: Optional[Path] = None,
     owner_pid: Optional[int] = None,
     owner_cwd: Optional[str] = None,
+    crown_level: Optional[int] = None,
+    crown_scope: Optional[str] = None,
+    crown_grantor: Optional[str] = None,
 ) -> Optional[Path]:
-    """Refresh loop state at the moment a crown becomes authoritative."""
+    """Refresh loop state at the moment a crown becomes authoritative.
+
+    The crown triple rides along when the caller stamps one in the same
+    breath (``fno agents crown``, a crowned spawn): the manifest is the
+    durable crown record and the row its cache, so the two must never be
+    written by different calls.
+    """
     if state_root is None:
         state_root = _owner_state_root(owner_cwd)
     if not king_loop_enabled():
@@ -162,6 +171,9 @@ def arm_king_manifest(
             force=True,
             owner_pid=owner_pid,
             owner_cwd=owner_cwd,
+            crown_level=crown_level,
+            crown_scope=crown_scope,
+            crown_grantor=crown_grantor,
         )
         path.with_suffix(".cancelled").unlink(missing_ok=True)
     return path
@@ -228,13 +240,19 @@ def write_manifest(
     owner_pid: Optional[int] = None,
     owner_cwd: Optional[str] = None,
     shape: str = "pass",
+    crown_level: Optional[int] = None,
+    crown_scope: Optional[str] = None,
+    crown_grantor: Optional[str] = None,
 ) -> dict[str, str]:
     """Write the manifest once. Raises :class:`KingManifestExists` if it is there.
 
     ``respawn_count`` starts at 0 on every write (a successor coronation is a
     new reign generation and must not inherit the respawn bill); so does
     ``wake_times``. ``shape`` rides from birth so every reader sees one and no
-    reader treats absence as a third state.
+    reader treats absence as a third state. The crown triple rides only when
+    the caller stamps one in the same call: the manifest is the durable crown
+    record (x-f0d2), and a bare ``king init`` writes none because only the
+    crown verbs stamp authority.
     """
     path = Path(path)
     if path.exists() and not force:
@@ -256,6 +274,12 @@ def write_manifest(
         "respawn_ceiling": str(respawn_ceiling),
         "wake_times": "",
     }
+    if crown_scope:
+        fields.update(
+            crown_level=str(crown_level),
+            crown_scope=crown_scope,
+            crown_grantor=crown_grantor or "human",
+        )
     body = "---\n" + "".join(f"{k}: {_dump(v)}\n" for k, v in fields.items()) + "---\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")

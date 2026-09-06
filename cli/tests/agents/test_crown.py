@@ -512,6 +512,40 @@ def test_in_place_crown_receipt_names_a_disabled_king_loop(
     assert json.loads(result.stdout)["king_loop_armed"] is False
 
 
+def test_crown_and_manifest_are_written_in_one_call(tmp_path: Path, monkeypatch) -> None:
+    """x-f0d2: the manifest is the durable crown record, the row its cache.
+
+    `fno agents crown` stamps the row and writes the same crown triple onto
+    the manifest in the one call, so a row the registry loses can heal its
+    crown back from the file.
+    """
+    import fno.king.state as king_state
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness_session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                status="idle",
+            )
+        ],
+    )
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    row = load_registry()[0]
+    manifest = king_state.parse_manifest(_space_manifest(tmp_path, "alpha"))
+    assert manifest["harness_session_id"] == row.harness_session_id
+    assert manifest["crown_scope"] == row.crown_scope == "alpha"
+    assert manifest["crown_grantor"] == row.crown_grantor == "human"
+    assert int(manifest["crown_level"]) == row.crown_level == 1
+
+
 def test_in_place_crown_aborts_before_registry_publish_when_manifest_write_fails(
     tmp_path: Path, monkeypatch
 ) -> None:
