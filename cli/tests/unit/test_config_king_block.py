@@ -16,10 +16,12 @@ def test_ac19_defaults_with_no_config() -> None:
     assert block.checkin_interval == "30m"
     assert block.checkin_text == KING_CHECKIN_TEXT
     assert block.goal_text == KING_GOAL_TEXT
-    # The defaults are the skill's own texts: they name the check-in body and
-    # the never-clear rule, so a fresh install runs with no config.
+    # The defaults are the skill's own texts: they name the check-in body,
+    # the never-clear rule, and the done-or-superseded drain rule, so a fresh
+    # install runs with no config.
     assert "reign check-in" in block.checkin_text
     assert "NoProgress" in block.goal_text
+    assert "done or superseded" in block.goal_text
 
 
 def test_ac19_registry_answers_config_get(tmp_path: Path, monkeypatch) -> None:

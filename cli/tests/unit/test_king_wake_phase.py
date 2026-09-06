@@ -762,9 +762,17 @@ _BOARD_A = [
         "priority": "p1",
     }
 ]
-#: Same row at p2: hash-visible but below the king's priorities, so these
-#: fixtures isolate the board lane without the timer backstop firing on them.
-_BOARD_A_QUIET = [dict(_BOARD_A[0], priority="p2")]
+#: Same row closed done: hash-visible but drained, so these fixtures isolate
+#: the board lane without the timer backstop firing on them. Priority no
+#: longer quiets a scope - a p2 row is undelivered until it ships.
+_BOARD_A_QUIET = [
+    dict(
+        _BOARD_A[0],
+        priority="p2",
+        status="done",
+        completed_at="2026-09-06T00:00:00Z",
+    )
+]
 #: Same row, priority moved: a change the hash must see.
 _BOARD_A_REPRIORITIZED = [dict(_BOARD_A[0], priority="p0")]
 #: One row added: the refill case this trigger exists for.
@@ -1374,3 +1382,28 @@ def test_the_wake_fires_on_a_real_bus_row_and_drains_by_cursor(tmp_path, monkeyp
 
     assert rec2.dispatches == [], "a drained inbox must not wake again"
     assert rec2.events == []
+
+
+def test_backstop_fires_when_every_row_is_driven_but_unshipped(tmp_path):
+    # The 2026-09-06 incident: the actionable board read empty because every
+    # row had a driver, while nothing had shipped. Assignment is not
+    # delivery, so the backstop still fires.
+    from fno.pr_watch._king_wake import CrownTarget, _backstop_due
+
+    entries = [
+        {"id": "x-root", "type": "epic"},
+        {"id": "x-a", "parent": "x-root", "status": "in_progress", "pr": 1497},
+    ]
+    target = CrownTarget(
+        holder="holder-1",
+        scope="x-root",
+        root=tmp_path,
+        manifest=tmp_path / "k.md",
+    )
+    assert _backstop_due(
+        target,
+        entries,
+        now=datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc),
+        backstop_s=1800,
+        resolver=lambda _: (2, "x-root"),
+    )

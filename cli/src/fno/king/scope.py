@@ -1,16 +1,14 @@
 """Crown-scope compilation helpers, split out of the retired board module.
 
 `fno.king.board` was retired into the Rust collector (x-25b8, d-450caaeb).
-`compile_scope_ids` and `KING_PRIORITIES` outlived it: `fno.pr_watch` reads
-scope-compiled rows on every wake tick, which is why they live here instead of
-dying with the board.
+`compile_scope_ids` and `scope_undelivered` outlived it: `fno.pr_watch` reads
+scope-compiled rows on every wake tick, and the walk's termination reads the
+drain count, which is why they live here instead of dying with the board.
 """
 
 from __future__ import annotations
 
-#: Priorities a king treats as its own work. Lower bands are the operator's to
-#: rank up; a king that dispatched p2 would spend the fleet on the wrong thing.
-KING_PRIORITIES = frozenset({"p0", "p1"})
+from typing import Callable, Optional
 
 
 def compile_scope_ids(scope: str, entries: list[dict], *, resolve=None) -> set[str]:
@@ -45,3 +43,29 @@ def compile_scope_ids(scope: str, entries: list[dict], *, resolve=None) -> set[s
         and (_canonical_project(str(row.get("project") or "")) or row.get("project"))
         in projects
     }
+
+
+def scope_undelivered(scope: str, entries: list, resolver: Optional[Callable] = None) -> int:
+    """Crown-scope nodes not closed for good: the reign goal's own count.
+
+    The goal keys completion on every node reading done or superseded, so
+    termination decisions read this number and no queue. A row with a driver
+    leaves the actionable board while its work is unshipped, which is why an
+    empty board is a quiet beat and never this count. Closure is
+    `is_terminal_entry`, the shared predicate, never a bare completed_at test.
+    Deferred stays undelivered: the goal names only done and superseded.
+    Raises whatever `compile_scope_ids` raises on an uncompilable scope, so a
+    reader that would END a reign on zero must catch and refuse, never read
+    the failure as drained.
+    """
+    from fno.graph.statuses import is_terminal_entry
+
+    kwargs = {"resolve": resolver} if resolver is not None else {}
+    ids = compile_scope_ids(scope, entries, **kwargs)
+    return sum(
+        1
+        for row in entries
+        if isinstance(row, dict)
+        and str(row.get("id") or "") in ids
+        and not is_terminal_entry(row)
+    )
