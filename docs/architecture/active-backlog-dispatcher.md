@@ -146,6 +146,12 @@ consolidates is the trigger layer: `/megawalk`, `fno backlog advance`, headless
 `loop run`, and now the resident daemon all spin up the same engine and all grab
 the same `walker:<cwd>` singleton, so they are mutually exclusive.
 
+## Operator receipts
+
+An exhausted mission tick keeps the stable `skip_reason=no_work` token and adds `stranded=N` to its detail. `N` is the board-wide count from `fno backlog undispatched --json`, which names finalized ready leaf plans with no execution claim outside the mission that just returned no ready children. A failed or malformed observer read reports `stranded=unknown`; it never fabricates zero. The mission remains pinned, so this receipt improves visibility without releasing the drain to the general queue.
+
+`fno backlog rank <id> --top` still changes only the node's board rank. After a successful mutation, its receipt names `no live dispatcher will take it` when the node is outside every resolved active mission scope, and names `dispatcher scope unavailable` when that scope cannot be read. A node inside a mission keeps the normal rank receipt; ranking never broadens mission membership.
+
 ## Events
 
 All transitions are emitted through the loop `Journal` (project journal fatal,
@@ -170,6 +176,7 @@ from `events.jsonl` alone:
 | One mission converges slowly | each active mission has its own independent loop, so other missions keep dispatching concurrently |
 | Backlog mutated many times quickly | the nudge is coalesced to one pending drain |
 | Operator `--stop` between ticks | `--continuation` never reactivates; the tick returns `deactivated` and the loop retires (no zombie ticks) |
+| Mission has no ready child while other planned work exists | the tick keeps `no_work` and names the mission plus board-wide `stranded=N` count; an unavailable observer reads `stranded=unknown` |
 | Empty / all-done mission | `advance --epic` reports `all_done`; the loop emits `active_backlog_mission_retired` and exits |
 | Invalid `interval` | config fails closed: the feature disables (no 0-sleep loop) |
 
