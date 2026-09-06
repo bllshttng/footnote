@@ -720,11 +720,7 @@ fn dispatch_member(
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
 ) -> (MissionDispatch, DispatchFacts) {
-    let mut args = vec![
-        "backlog".to_string(),
-        "advance".to_string(),
-        "--json".to_string(),
-    ];
+    let mut args = vec!["backlog".to_string(), "advance".to_string()];
     if member.epic {
         // --continuation: never reactivate the mission and retire an inactive
         // one, so an operator `--stop` between drain ticks is not undone.
@@ -736,6 +732,7 @@ fn dispatch_member(
         args.push("--project".to_string());
         args.push(member.id.clone());
     }
+    args.push("--json".to_string());
     let out = match retry_etxtbsy(|| {
         fno_cmd(&cfg.fno_bin)
             .args(&args)
@@ -842,6 +839,172 @@ fn dispatch_mission(
         MissionDispatch::Continue
     };
     (outcome, merged)
+}
+
+/// The seed prompt for a machinery-spawned territory blueprinter (x-e221): a
+/// worker holds no crown, dispatches nothing, and self-reports nothing - it
+/// designs the mailed idea nodes and waits for the next one.
+fn blueprinter_prompt(scope: &str) -> String {
+    format!(
+        "You are the territory blueprinter for scope {scope}. \
+When mail arrives carrying /fno:blueprint <node-id>, run the fno:blueprint \
+skill for that node. You hold no crown, dispatch nothing, and report \
+nothing: finish each blueprint and wait."
+    )
+}
+
+/// The `blueprint-feed --json` status receipt (x-e221). `ideas` stays raw
+/// JSON: the tick only journals ids, it never interprets rungs.
+#[derive(Debug, Clone, Deserialize, Default)]
+struct BlueprinterStatus {
+    #[serde(default)]
+    worker: Option<BlueprinterWorker>,
+    #[serde(default)]
+    worker_name_next: String,
+    #[serde(default)]
+    ideas: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct BlueprinterWorker {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    live: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct BlueprinterDelivery {
+    #[serde(default)]
+    delivered: Vec<String>,
+    #[serde(default)]
+    failed: Vec<serde_json::Value>,
+}
+
+/// One `agents worker blueprint-feed` call: the Python verb owns the policy
+/// (membership, feed windows, the record store, mail transport); the
+/// supervisor only decides when to spawn and when to deliver.
+fn run_blueprint_feed(cfg: &DrainConfig, extra: &[String]) -> Option<serde_json::Value> {
+    let mut args = vec![
+        "agents".to_string(),
+        "worker".to_string(),
+        "blueprint-feed".to_string(),
+        "--scope".to_string(),
+        cfg.scope.clone(),
+        "--json".to_string(),
+    ];
+    args.extend(extra.iter().cloned());
+    let out = retry_etxtbsy(|| {
+        fno_cmd(&cfg.fno_bin)
+            .args(&args)
+            .current_dir(&cfg.cwd)
+            .output()
+    })
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+/// One territory's blueprinter tick (x-e221 AC5/AC6): with unfed triaged
+/// ideas and no live standing worker, spawn AT MOST ONE replacement through
+/// the standard `fno agents spawn` gates; then deliver. A refused spawn is
+/// recorded as a repair and the ideas stay preserved for the next tick.
+fn blueprinter_tick(cfg: &DrainConfig, journal: &Journal) {
+    if cfg.scope.is_empty() {
+        return; // legacy receipt: no territory, no blueprinter
+    }
+    let Some(raw) = run_blueprint_feed(cfg, &[]) else {
+        let _ = journal.append(
+            "blueprinter_status_skip",
+            json!({"scope": cfg.scope, "reason": "feed verb failed or unparseable"}),
+        );
+        return;
+    };
+    let status: BlueprinterStatus = serde_json::from_value(raw).unwrap_or_default();
+    if status.ideas.is_empty() {
+        return; // nothing to feed: never spawn a worker without work
+    }
+    let needs_worker = status.worker.as_ref().map(|w| !w.live).unwrap_or(true);
+    if needs_worker {
+        if status.worker_name_next.is_empty() {
+            let _ = journal.append(
+                "blueprinter_spawn_refused",
+                json!({"scope": cfg.scope, "reason": "receipt named no worker to spawn"}),
+            );
+            return;
+        }
+        let prompt = blueprinter_prompt(&cfg.scope);
+        let args = vec![
+            "agents".to_string(),
+            "spawn".to_string(),
+            "--substrate".to_string(),
+            "thread".to_string(),
+            "--name".to_string(),
+            status.worker_name_next.clone(),
+            prompt,
+        ];
+        let spawn = retry_etxtbsy(|| {
+            fno_cmd(&cfg.fno_bin)
+                .args(&args)
+                .current_dir(&cfg.cwd)
+                .output()
+        });
+        match spawn {
+            Ok(o) if o.status.success() => {
+                let _ = journal.append(
+                    "blueprinter_spawned",
+                    json!({"scope": cfg.scope, "worker": status.worker_name_next}),
+                );
+            }
+            Ok(o) => {
+                let detail = String::from_utf8_lossy(&o.stderr);
+                let reason = format!("spawn refused: {}", detail.lines().next().unwrap_or(""));
+                run_blueprint_feed(cfg, &["--repair".to_string(), reason.clone()]);
+                let _ = journal.append(
+                    "blueprinter_spawn_refused",
+                    json!({"scope": cfg.scope, "reason": reason}),
+                );
+                return;
+            }
+            Err(e) => {
+                let reason = format!("spawn failed: {e}");
+                run_blueprint_feed(cfg, &["--repair".to_string(), reason.clone()]);
+                let _ = journal.append(
+                    "blueprinter_spawn_refused",
+                    json!({"scope": cfg.scope, "reason": reason}),
+                );
+                return;
+            }
+        }
+    }
+    let Some(raw) = run_blueprint_feed(cfg, &["--deliver".to_string()]) else {
+        let _ = journal.append(
+            "blueprinter_deliver_skip",
+            json!({"scope": cfg.scope, "reason": "deliver verb failed or unparseable"}),
+        );
+        return;
+    };
+    let delivery: BlueprinterDelivery = serde_json::from_value(raw).unwrap_or_default();
+    if delivery.delivered.is_empty() && delivery.failed.is_empty() {
+        return; // blocked receipt or nothing due: the verb recorded its own state
+    }
+    let worker_name = status
+        .worker
+        .as_ref()
+        .map(|w| w.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| status.worker_name_next.clone());
+    let _ = journal.append(
+        "blueprinter_delivered",
+        json!({
+            "scope": cfg.scope,
+            "worker": worker_name,
+            "delivered": delivery.delivered,
+            "failed": delivery.failed.len(),
+        }),
+    );
 }
 
 /// One mission drain tick: reconcile prior dispatches (feeding the breaker), then
@@ -1377,10 +1540,13 @@ async fn mission_drain_loop(
 
         // The tick is synchronous; offload so the async runtime is never stalled.
         // Move the breaker AND pending set in and hand them back so the streak
-        // and in-flight tracking survive the tick.
+        // and in-flight tracking survive the tick. The blueprinter tick rides
+        // the same blocking task, BEFORE the drain: a plan designed this tick
+        // can dispatch on it the same tick.
         let taken_b = std::mem::take(&mut breaker);
         let taken_p = std::mem::take(&mut pending);
         let handle = tokio::task::spawn_blocking(move || {
+            blueprinter_tick(&cfg, &journal);
             let mut b = taken_b;
             let mut p = taken_p;
             let outcome = mission_drain_tick(&cfg, &mut b, &mut p, &journal);
@@ -2591,5 +2757,182 @@ mod tests {
             .filter(|v| v["type"] == "control_plane_tick")
             .collect();
         assert_eq!(rows[0]["data"]["skip_reason"], "gate:disabled");
+    }
+
+    /// A stub `fno` that records every argv, answers `agents worker
+    /// blueprint-feed` with `status_json`, and (optionally) fails
+    /// `agents spawn` so the repair path is reachable.
+    fn stub_fno_blueprint_feed(
+        dir: &std::path::Path,
+        record: &std::path::Path,
+        status_json: &str,
+        spawn_fails: bool,
+    ) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        let spawn_arm = if spawn_fails {
+            "if [ \"$2\" = \"spawn\" ]; then echo 'gate: refused' >&2; exit 1; fi\n"
+        } else {
+            ""
+        };
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\n\
+                 echo \"$@\" >> \"{}\"\n\
+                 if [ \"$2\" = \"worker\" ]; then\n\
+                 case \"$*\" in\n\
+                 *--deliver*) printf '%s' '{{\"action\":\"deliver\",\"delivered\":[\"x-1\",\"x-2\"],\"failed\":[]}}';;\n\
+                 *) printf '%s' '{}';;\n\
+                 esac\n\
+                 exit 0\n\
+                 fi\n\
+                 {}\
+                 exit 0\n",
+                record.display(),
+                status_json,
+                spawn_arm
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
+    fn territory_cfg(tmp: &std::path::Path, fno_bin: String) -> DrainConfig {
+        let mut cfg = test_cfg(tmp, fno_bin, 3);
+        cfg.scope = "x-a792".to_string();
+        cfg
+    }
+
+    fn journal_rows(p: &std::path::Path, event: &str) -> Vec<serde_json::Value> {
+        journal_lines(p)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == event)
+            .collect()
+    }
+
+    #[test]
+    fn blueprinter_tick_spawns_one_worker_then_delivers() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("argv.log");
+        let status = r#"{"action":"status","scope":"x-a792","worker":null,
+            "worker_name_next":"blueprinter-x-a792-abc123",
+            "ideas":[{"id":"x-1","rung":"idea"},{"id":"x-2","rung":"design"}]}"#;
+        let fno = stub_fno_blueprint_feed(&tmp.path().join("bin"), &record, status, false);
+        let cfg = territory_cfg(tmp.path(), fno);
+        let (journal, project_journal) = test_journal(tmp.path());
+
+        blueprinter_tick(&cfg, &journal);
+
+        let argv = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(argv.matches("agents spawn").count(), 1);
+        assert!(argv.contains("--substrate thread"));
+        assert!(argv.contains("--name blueprinter-x-a792-abc123"));
+        assert!(argv.contains("territory blueprinter for scope x-a792"));
+        assert_eq!(argv.matches("--deliver").count(), 1);
+        eprintln!(
+            "JOURNAL RAW: {:?}",
+            std::fs::read_to_string(&project_journal).unwrap_or_default()
+        );
+        eprintln!(
+            "JOURNAL ROWS: {:?}",
+            journal_rows(&project_journal, "blueprinter_spawned")
+        );
+        eprintln!("JOURNAL LINES: {:?}", journal_lines(&project_journal));
+        assert_eq!(
+            journal_rows(&project_journal, "blueprinter_spawned").len(),
+            1
+        );
+        let delivered = journal_rows(&project_journal, "blueprinter_delivered");
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0]["data"]["worker"], "blueprinter-x-a792-abc123");
+    }
+
+    #[test]
+    fn blueprinter_tick_reuses_a_live_worker() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("argv.log");
+        let status = r#"{"action":"status","scope":"x-a792",
+            "worker":{"name":"blueprinter-x-a792-abc123","live":true},
+            "worker_name_next":"blueprinter-x-a792-abc123",
+            "ideas":[{"id":"x-1","rung":"idea"}]}"#;
+        let fno = stub_fno_blueprint_feed(&tmp.path().join("bin"), &record, status, false);
+        let cfg = territory_cfg(tmp.path(), fno);
+        let (journal, project_journal) = test_journal(tmp.path());
+
+        blueprinter_tick(&cfg, &journal);
+
+        let argv = std::fs::read_to_string(&record).unwrap();
+        assert!(!argv.contains(" agents spawn "));
+        assert_eq!(argv.matches("--deliver").count(), 1);
+        assert!(journal_rows(&project_journal, "blueprinter_spawned").is_empty());
+    }
+
+    #[test]
+    fn blueprinter_tick_records_repair_when_spawn_refused() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("argv.log");
+        let status = r#"{"action":"status","scope":"x-a792","worker":null,
+            "worker_name_next":"blueprinter-x-a792-abc123",
+            "ideas":[{"id":"x-1","rung":"idea"}]}"#;
+        let fno = stub_fno_blueprint_feed(&tmp.path().join("bin"), &record, status, true);
+        let cfg = territory_cfg(tmp.path(), fno);
+        let (journal, project_journal) = test_journal(tmp.path());
+
+        blueprinter_tick(&cfg, &journal);
+
+        let argv = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(argv.matches("agents spawn").count(), 1);
+        assert!(argv.contains("--repair"));
+        assert!(!argv.contains("--deliver"));
+        let repairs = journal_rows(&project_journal, "blueprinter_spawn_refused");
+        assert_eq!(repairs.len(), 1);
+        assert!(repairs[0]["data"]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("spawn refused"));
+    }
+
+    #[test]
+    fn blueprinter_tick_idles_without_ideas_or_scope() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("argv.log");
+        let fno = stub_fno_blueprint_feed(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"action":"status","ideas":[]}"#,
+            false,
+        );
+        let cfg = territory_cfg(tmp.path(), fno);
+        let (journal, project_journal) = test_journal(tmp.path());
+        blueprinter_tick(&cfg, &journal);
+        assert!(journal_rows(&project_journal, "blueprinter_spawned").is_empty());
+
+        // A legacy receipt (empty scope) never calls the feed verb at all.
+        let record2 = tmp.path().join("argv2.log");
+        let fno2 = stub_fno_blueprint_feed(
+            &tmp.path().join("bin2"),
+            &record2,
+            r#"{"action":"status","ideas":[{"id":"x-1"}]}"#,
+            false,
+        );
+        let mut legacy = test_cfg(tmp.path(), fno2, 3);
+        legacy.scope = String::new();
+        blueprinter_tick(&legacy, &journal);
+        assert!(journal_lines(&record2).is_empty());
+    }
+
+    #[test]
+    fn blueprinter_status_defaults_on_partial_json() {
+        let status: BlueprinterStatus = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(status.worker.is_none());
+        assert!(status.worker_name_next.is_empty());
+        assert!(status.ideas.is_empty());
     }
 }

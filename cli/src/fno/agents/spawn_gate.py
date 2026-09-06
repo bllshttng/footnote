@@ -251,6 +251,10 @@ class LiveCensus:
     #: rows (kings, blueprinters, ad-hoc panes): they consume the machine cap
     #: but never the per-territory team cap.
     live_row_nodes: list[Optional[str]] = field(default_factory=list)
+    #: Names of the live fno registry rows (x-e221): the same liveness oracles
+    #: the slot count rides, exposed so the blueprinter feed can answer "is my
+    #: territory's standing worker alive" without a second implementation.
+    live_registry_names: set[str] = field(default_factory=set)
 
     @property
     def count(self) -> int:
@@ -493,6 +497,7 @@ def census() -> LiveCensus:
         )
 
     out.slot_claims = _live_worker_slot_claims(out.warnings, live_registry_names)
+    out.live_registry_names = live_registry_names
 
     # The divisor reads crowns through the court's own primitive (LD1/AC3).
     if out.registry_readable:
