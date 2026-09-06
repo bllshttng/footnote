@@ -131,7 +131,9 @@ def arm_king_manifest(
         owner_cwd = owner_cwd or getattr(row, "cwd", None)
         crown_level = crown_level if crown_level is not None else getattr(row, "crown_level", None)
         crown_scope = crown_scope if crown_scope is not None else getattr(row, "crown_scope", None)
-        crown_grantor = crown_grantor if crown_grantor is not None else getattr(row, "crown_grantor", None)
+        crown_grantor = (
+            crown_grantor if crown_grantor is not None else getattr(row, "crown_grantor", None)
+        )
     if state_root is None:
         state_root = _owner_state_root(owner_cwd)
     if not king_loop_enabled():
@@ -387,8 +389,15 @@ def reign_state(
     except json.JSONDecodeError as exc:
         return _unknown_state(scope, f"reign reader emitted no JSON: {exc}")
     keys = (
-        "crowned", "shape", "manifest_session", "manifest_path",
-        "crown_on_manifest", "registry_session", "live", "split", "unknown_reason",
+        "crowned",
+        "shape",
+        "manifest_session",
+        "manifest_path",
+        "crown_on_manifest",
+        "registry_session",
+        "live",
+        "split",
+        "unknown_reason",
     )
     return ReignState(
         **{k: payload.get(k) for k in keys},

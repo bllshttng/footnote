@@ -285,16 +285,11 @@ def _read_board_sidecar(target: CrownTarget) -> "tuple[str, list[tuple[str, ...]
 
 
 def _board_trigger(
-    target: CrownTarget,
-    entries: list,
-    resolver: Optional[Callable] = None,
+    target: CrownTarget, rows
 ) -> tuple[bool, Optional[str], Optional[list], Optional[str]]:
     """``(wake?, hash+rows_to_store_after_a_dispatch, diff)``. An absent hash
     or row-less sidecar is a first observation; a changed hash stores only
-    after a dispatch; an unreadable graph is no signal."""
-    if not entries:
-        return False, None, None, None
-    rows = _board_rows(target.scope, entries, resolver)
+    after a dispatch; no rows is no signal."""
     if rows is None:
         return False, None, None, None
     fresh = _hash_rows(rows)
@@ -311,41 +306,16 @@ def _store_board_hash(target: CrownTarget, digest: str, rows: Iterable) -> None:
     _update_sidecar(target, board_hash=digest, board_rows=[list(row) for row in rows])
 
 
-#: Undispatched columns the backstop counts as actionable - not the board's
-#: full count: a wrong positive costs one debounced NoWork wake.
+#: Undispatched columns (row[2]) the backstop counts as actionable - a wrong
+#: positive costs one debounced NoWork wake.
 _ACTIONABLE_COLUMNS = frozenset({"ready", "next"})
 
 
-def _scope_actionable(scope: str, entries: list, resolver: Optional[Callable] = None) -> int:
-    """Scope rows in an undispatched column at a king-worked priority."""
-    from fno.king.scope import KING_PRIORITIES, compile_scope_ids
-
-    kwargs = {"resolve": resolver} if resolver is not None else {}
-    try:
-        ids = compile_scope_ids(scope, entries, **kwargs)
-    except Exception:  # noqa: BLE001 - an uncompilable scope has nothing to re-check
-        return 0
-    return sum(
-        1
-        for row in entries
-        if isinstance(row, dict)
-        and str(row.get("id") or "") in ids
-        and str(row.get("_kanban_column") or "") in _ACTIONABLE_COLUMNS
-        and str(row.get("priority") or "") in KING_PRIORITIES
-    )
-
-
-def _backstop_due(
-    target: CrownTarget,
-    entries: list,
-    *,
-    now: datetime,
-    backstop_s: int,
-    resolver: Optional[Callable] = None,
-) -> bool:
+def _backstop_due(target: CrownTarget, rows: list, *, now: datetime, backstop_s: int) -> bool:
     """Whether the timer backstop fires: an approximation of the event
     triggers so a missed event cannot strand a scope; a billed wake or king
     terminal inside the window suppresses it."""
+    from fno.king.scope import KING_PRIORITIES
     from fno.king.state import last_run_is_fresh
     from fno.king.wake import read_wakes
     from fno.outstanding.core import events_path
@@ -353,7 +323,8 @@ def _backstop_due(
     now_iso = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if last_run_is_fresh(events_path(target.root), since_s=backstop_s, now_iso=now_iso):
         return False
-    if _scope_actionable(target.scope, entries, resolver) <= 0:
+    # rows are (id, status, column, priority): column 2, priority 3.
+    if not any(r[2] in _ACTIONABLE_COLUMNS and r[3] in KING_PRIORITIES for r in rows):
         return False
     stamps = read_wakes(target.manifest, now=now)
     if stamps and (now - stamps[-1]).total_seconds() < backstop_s:
@@ -576,18 +547,13 @@ def run_king_wake(
         if reason is None:
             if entries is None:
                 entries = entries_fn()
-            changed, fresh_board_hash, fresh_board_rows, wake_detail = _board_trigger(
-                target, entries, scope_resolver
-            )
+            # One compile feeds both lanes; None rows (empty or uncompilable
+            # scope) is no signal for either.
+            rows = _board_rows(target.scope, entries, scope_resolver) if entries else None
+            changed, fresh_board_hash, fresh_board_rows, wake_detail = _board_trigger(target, rows)
             if changed:
                 reason = "board"
-            elif _backstop_due(
-                target,
-                entries,
-                now=now,
-                backstop_s=backstop_s,
-                resolver=scope_resolver,
-            ):
+            elif rows is not None and _backstop_due(target, rows, now=now, backstop_s=backstop_s):
                 reason = "backstop"
         if reason is None:
             continue
