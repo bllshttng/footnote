@@ -275,6 +275,12 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # Same additive-optional writer-protection rationale as v11-v25: asdict emits
 # the key on every written row, so a pre-v27 reader must reject the store on
 # version rather than TypeError on the unknown kwarg.
+# v28 (x-5283): additive `adopted_by_session` - the session that VOUCHED for
+# an adopted row. `spawned_by_session` keeps one meaning (who spawned this
+# row, whose share pays for it); the adoption grantor lives here instead, so
+# crowning cannot re-attribute a row's cost. Same writer-protection rationale
+# as v27: asdict emits the key on every written row, so a pre-v28 reader must
+# reject the store on version rather than TypeError on the unknown kwarg.
 # The version NUMBER is read from the single-owner TOML that build.rs projects
 # from crates/fno-agents/src/registry_schema.toml; bump there, not here.
 def _read_schema_version() -> int:
