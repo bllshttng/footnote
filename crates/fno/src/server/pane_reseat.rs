@@ -179,7 +179,7 @@ impl Core {
         }
     }
 
-    /// (v70) Re-seat a live pane-hosted worker into a portal seat: the ONE
+    /// (v72) Re-seat a live pane-hosted worker into a portal seat: the ONE
     /// existing viewer moves, none is minted. The pane keeps its PTY and child
     /// (the harness process never restarts); it stops being persisted as a
     /// squad member, so restore never rebuilds it - being a thread means the

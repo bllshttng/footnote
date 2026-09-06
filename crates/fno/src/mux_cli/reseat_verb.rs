@@ -178,7 +178,7 @@ pub(crate) fn clear_mux_refs(
 }
 
 /// `fno mux thread reseat <agent-name | pane-id> [--portal N] [--session S]`
-/// (v70): the whole re-seat move in one process. A name resolves the
+/// (v72): the whole re-seat move in one process. A name resolves the
 /// registry row first (the row names the server session hosting the pane, so
 /// `--session` is refused alongside a name); a bare pane id keeps the old
 /// spelling and its explicit session resolution. Idempotent: an already
