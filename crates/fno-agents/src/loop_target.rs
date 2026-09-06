@@ -357,8 +357,10 @@ fn king_wake_clause(reason: Option<&str>, address: Option<&str>) -> String {
 fn king_wake_detail_clause(detail: Option<&str>) -> String {
     match detail {
         Some(detail) if !detail.is_empty() => {
-            format!("\nThe trigger's payload - the board diff since the last wake, or the \
-                 operator's answer you were woken on:\n{detail}")
+            format!(
+                "\nThe trigger's payload - the board diff since the last wake, or the \
+                 operator's answer you were woken on:\n{detail}"
+            )
         }
         _ => String::new(),
     }
@@ -518,7 +520,10 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             );
             return Ok(2);
         }
-        if !matches!(reason, "mail" | "board" | "backstop" | "escalation_answered") {
+        if !matches!(
+            reason,
+            "mail" | "board" | "backstop" | "escalation_answered"
+        ) {
             eprintln!(
                 "fno-agents loop run: --wake-reason must be \
                  mail|board|backstop|escalation_answered, got '{reason}'"
@@ -547,9 +552,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         );
         return Ok(2);
     }
-    if king_wake_successor
-        && (!king_wake || king_wake_holder.is_none())
-    {
+    if king_wake_successor && (!king_wake || king_wake_holder.is_none()) {
         // A successor spawn is the respawn of a scope whose holder transcript
         // truth resolved gone. It needs the wake caller to have named that
         // holder (the guard skip is what lets the walk respawn over the dead
@@ -571,7 +574,10 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         return Ok(2);
     }
     if king_wake_detail.is_some()
-        && !matches!(king_wake_reason.as_deref(), Some("board") | Some("escalation_answered"))
+        && !matches!(
+            king_wake_reason.as_deref(),
+            Some("board") | Some("escalation_answered")
+        )
     {
         // Only the board trigger computes a diff and only the answer trigger
         // quotes one; a mail wake carries its address, a backstop wake has
