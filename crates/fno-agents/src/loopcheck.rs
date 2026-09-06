@@ -12539,6 +12539,8 @@ pub(crate) struct KingBoard {
     /// the count can rise on the same fire that a row leaves, and that fire is
     /// still progress.
     pub(crate) actionable_ids: Vec<String>,
+    /// Session ids that own open operator questions on this board.
+    pub(crate) operator_question_sessions: Vec<String>,
 }
 
 fn row_identity(queue: &str, row: &Value) -> String {
@@ -12562,6 +12564,7 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
         .unwrap_or(0);
     let mut top_row = None;
     let mut actionable_ids: Vec<String> = Vec::new();
+    let mut operator_question_sessions: Vec<String> = Vec::new();
     if let Some(queues) = value.get("queues").and_then(|q| q.as_array()) {
         for queue in queues {
             let name = queue.get("name").and_then(|v| v.as_str()).unwrap_or("?");
@@ -12571,6 +12574,17 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
                     top_row = Some(format!("{name} is unreadable: {err}"));
                 }
                 continue;
+            }
+            if name == "operator_question" {
+                operator_question_sessions.extend(
+                    queue
+                        .get("rows")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|row| row.get("session_id").and_then(|v| v.as_str()))
+                        .map(str::to_owned),
+                );
             }
             if queue.get("actionable").and_then(|v| v.as_bool()) != Some(true) {
                 continue;
@@ -12593,6 +12607,7 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
         top_row,
         unreadable,
         actionable_ids,
+        operator_question_sessions,
     })
 }
 
@@ -12890,6 +12905,22 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     };
 
     if board.actionable == 0 {
+        let open_question = board
+            .operator_question_sessions
+            .iter()
+            .any(|owner| owner == &session_id);
+        if open_question {
+            return (
+                0,
+                king_output(
+                    "block",
+                    None,
+                    "board clean but an operator question raised by this reign remains open",
+                    0,
+                    dry,
+                ),
+            );
+        }
         // The goal keys completion on the crown draining, not on any queue
         // (2026-09-06 ruling): a board reading clean while nodes sit driven
         // but unshipped is a quiet beat, never a finish line. An unreadable

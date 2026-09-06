@@ -283,6 +283,14 @@ pub(crate) fn scope_undelivered_count(
         .output();
     let out = output
         .map_err(|e| LoopError::Queue(format!("cannot run {fno_bin} agents king drain: {e}")))?;
+    if !out.status.success() {
+        let detail = String::from_utf8_lossy(&out.stderr);
+        return Err(LoopError::Queue(format!(
+            "king drain for {scope} failed ({}): {}",
+            out.status,
+            detail.trim().chars().take(200).collect::<String>()
+        )));
+    }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let trimmed = stdout.trim();
     let payload: serde_json::Value = serde_json::from_str(trimmed).map_err(|_| {
@@ -701,6 +709,29 @@ mod tests {
             "a drained scope terminates NoWork"
         );
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drain_rejects_json_from_a_failed_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("kingdrain-failed-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fno-drain-failed");
+        fs::write(
+            &path,
+            "#!/bin/sh\necho '{\"scope\":\"epic-x\",\"undelivered\":0}'\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = scope_undelivered_count(path.to_str().unwrap(), &dir, "epic-x");
+
+        assert!(
+            result.is_err(),
+            "a failed drain must not certify a clean scope"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

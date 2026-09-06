@@ -151,9 +151,16 @@ fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
     // this stub every fire pays a real installed-CLI cold start and probes the
     // operator's live sessions - slow AND non-hermetic.
     fs::write(stubs.join("fno"), "#!/bin/sh\necho '{}'\n").unwrap();
+    let outstanding = if home.join("questions.jsonl").is_file() {
+        r#"{"questions":[{"id":"q-k-question","question":"choose","ts":"2026-09-06T00:00:00Z","session_id":"k-question"}]}"#
+    } else {
+        "{}"
+    };
     fs::write(
         stubs.join("fno-py"),
-        "#!/bin/sh\ncase \"$*\" in\n  *\"backlog ready\"*) echo '[]';;\n  *) echo '{}';;\nesac\n",
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *\"backlog ready\"*) echo '[]';;\n  *\"inbox outstanding\"*) echo '{outstanding}';;\n  *) echo '{{}}';;\nesac\n"
+        ),
     )
     .unwrap();
     // Stage the default mock only when absent: king_escalate_bin stages its
@@ -226,6 +233,7 @@ fn king_spawn_with(
     let out = cmd
         .env("FNO_CLAIMS_ROOT", home)
         .env("FNO_HOME", home)
+        .env("FNO_AGENTS_HOME", home.join("agents"))
         .env("PATH", format!("{}:{}", stubs.display(), real_path))
         .output()
         .unwrap();
@@ -329,6 +337,33 @@ fn king_nowork_is_the_clean_terminal_for_an_empty_board() {
         "the event must carry the king session id so the journal reader matches it"
     );
     assert_eq!(row["data"]["driver"], "king");
+}
+
+#[test]
+fn an_open_question_from_this_king_blocks_a_clean_board() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-question");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
+    let questions = bin_dir.path().join("questions.jsonl");
+    fs::write(
+        questions,
+        r#"{"ts":"2026-09-06T00:00:00Z","type":"operator_question","data":{"question_id":"q-k-question","question":"choose","session_id":"k-question"}}
+"#,
+    )
+    .unwrap();
+
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+
+    assert_eq!(code, 0);
+    assert_eq!(d["decision"], "block", "decision: {d}");
+    assert_eq!(d["termination_reason"], serde_json::Value::Null);
+    assert!(
+        d["reason"].as_str().unwrap().contains("operator question"),
+        "the block must name the open question: {d}"
+    );
 }
 
 #[test]
