@@ -17,6 +17,7 @@ pub mod clipboard;
 pub mod connections_view;
 pub mod court_overlay;
 pub mod digest_overlay;
+pub mod feed_overlay;
 #[cfg(test)]
 pub mod frame_html;
 pub mod keys;

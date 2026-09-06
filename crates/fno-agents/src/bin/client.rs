@@ -47,6 +47,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "manifest-eval",
     "manifest-for-session",
     "needs",
+    "feed",
     "ping",
     "pr-heal",
     "probe-run",
@@ -384,6 +385,15 @@ async fn run(args: Vec<String>) -> i32 {
     // this off-loop when the prefix+a overlay opens.
     if verb == "needs" {
         return fno_agents::needs::run_needs(&args[1..], &AgentsHome::from_env()).await;
+    }
+
+    // `feed` (x-4433): one projection joining questions.jsonl + graph.json
+    // into an ordered feed whose rows carry the node id + session id the mux
+    // deep link resolves. Read-only, daemon-free like `needs`: it dispatches
+    // here before build_request. events.jsonl is deliberately NOT a source
+    // (72% ticks; lifecycle derives from the graph, never copied).
+    if verb == "feed" {
+        return fno_agents::feed::run_feed(&args[1..], &AgentsHome::from_env()).await;
     }
 
     // `status` reports on a *running* daemon: it must NOT lazy-start one just to

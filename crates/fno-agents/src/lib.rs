@@ -79,6 +79,7 @@ pub mod drift;
 pub mod envelope;
 pub mod events;
 pub mod events_limits;
+pub mod feed;
 pub mod finalize;
 pub mod gc;
 pub mod gc_sweep;

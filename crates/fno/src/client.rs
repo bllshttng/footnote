@@ -1062,6 +1062,11 @@ struct View {
     /// Pending escape bytes in answer-overlay mode (same split-arrow safety as
     /// [`View::sel_esc`]).
     ans_esc: Vec<u8>,
+    /// (x-4433) The activity feed overlay, prefix+e: the fold's rows newest
+    /// first, its cursor, and the needs-fold generation/single-flight
+    /// discipline. `None` closed.
+    feed: Option<feed_view::FeedOverlay>,
+    feed_esc: Vec<u8>,
     /// (x-feec) The event-derived needs-me leg: the last `fno-agents needs` fold
     /// result while the overlay is open (`None` = live-only, not yet fetched
     /// this open). Merged with the live badge leg by [`View::needs_queue`].
@@ -1500,6 +1505,14 @@ fn parse_macmon_sample(raw: &[u8]) -> Option<String> {
 mod confirm;
 
 pub(crate) use confirm::{ConfirmAction, ConfirmKind};
+
+// The needs overlay's projection + render, moved out of this file (file
+// budget); the feed overlay answers its own question from its own module and
+// reuses join_fold_row's join keys for its deep link (x-4433).
+mod feed_view;
+mod needs_view;
+use feed_view::{feed_hit, feed_overlay_lines, feed_selected_line, FeedOverlay};
+pub(crate) use needs_view::{needs_overlay_lines, NeedsProjection};
 
 /// The move-tab / move-pane destination picker's state (x-96e8, cursored by
 /// x-3e17). Was a bare `(MoveSrc, Vec<u64>)` tuple, which had nowhere to keep a
@@ -2848,6 +2861,8 @@ impl View {
             sideline_offset: 0,
             answers: None,
             ans_esc: Vec::new(),
+            feed: None,
+            feed_esc: Vec::new(),
             needs_fold: None,
             mine_fold: None,
             needs_fold_at: None,
@@ -3117,69 +3132,6 @@ impl View {
             .into_iter()
             .filter(|r| !matches!(r.kind, NeedKind::MailQuestion | NeedKind::Question))
             .collect()
-    }
-
-    /// The roster row a fold item joins to: a name / node / session-id match
-    /// against a layout row's name or its cwd basename (`cwd_base`, now carried
-    /// on every row since x-6851 US3, not only orphans).
-    fn join_fold_row(&self, item: &crate::needs_overlay::FoldItem) -> Option<&AgentRow> {
-        let keys: Vec<&str> = [
-            item.name.as_deref(),
-            item.node.as_deref(),
-            Some(item.session_id.as_str()),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        self.layout.agents.iter().find(|a| {
-            keys.iter().any(|k| a.name == *k)
-                || a.cwd_base.as_deref().is_some_and(|c| keys.contains(&c))
-        })
-    }
-
-    /// The two-lane overlay projection: MINE first (open before done, file
-    /// order preserved within each group - the operator wrote that order),
-    /// then the operator-filtered needs queue (already worst-first). Each
-    /// lane is capped independently at ten so a noisy lane never crowds the
-    /// other out; `*_total` carries the true count for the footer.
-    fn needs_projection(&self) -> NeedsProjection {
-        let mut mine: Vec<crate::needs_overlay::MineItem> =
-            self.mine_fold.clone().unwrap_or_default();
-        mine.sort_by_key(|m| m.done);
-        let mine_total = mine.len();
-        let mine_shown = mine.len().min(MINE_CAP);
-        let mut rows: Vec<NeedsOverlayRow> = mine
-            .into_iter()
-            .take(MINE_CAP)
-            .map(NeedsOverlayRow::Mine)
-            .collect();
-
-        // Questions lead the NEED section (x-f730 task 2.3): a real operator
-        // question, with an asker to answer back to, outranks a bare
-        // carveout/claims pile. Ranked by the record's own `rank` (x-7979
-        // already orders these); an unranked row sorts last within the group
-        // rather than floating to the front on a missing field.
-        let mut questions: Vec<crate::needs_overlay::QuestionItem> =
-            self.questions_fold.clone().unwrap_or_default();
-        questions.sort_by_key(|q| q.rank.unwrap_or(u32::MAX));
-        let need = self.needs_operator_queue();
-        let need_total = questions.len() + need.len();
-        let need_shown = need_total.min(NEEDS_CAP);
-        rows.extend(
-            questions
-                .into_iter()
-                .map(NeedsOverlayRow::Question)
-                .chain(need.into_iter().map(NeedsOverlayRow::Need))
-                .take(NEEDS_CAP),
-        );
-
-        NeedsProjection {
-            rows,
-            mine_shown,
-            mine_total,
-            need_shown,
-            need_total,
-        }
     }
 
     /// The THEY NEED YOU footer state: a failed fold degrades loudly
@@ -6768,6 +6720,23 @@ impl View {
                 // two lanes, which a flat `sel + 1` no longer can.
                 Some(projection.selected_line(sel)),
             );
+        } else if let Some(f) = &self.feed {
+            // x-4433: the activity feed, newest first, cursor-followed. Same
+            // chrome + viewport as the needs overlay beside it.
+            let lines = feed_overlay_lines(f);
+            let chrome =
+                chrome::Chrome::new("activity feed", Anchor::Center).footer("⏎ goto · q close");
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &lines,
+                &self.theme,
+                Some(feed_selected_line(f.sel)),
+            );
         } else if let Some(yv) = &self.yard {
             // (x-b2bf) The yard: the fleet as f[no]nimals. The
             // crowd is one eye glyph per roster citizen (each glyph computed
@@ -9474,26 +9443,6 @@ enum NeedsOverlayId {
     Need(NeedKind, String),
 }
 
-struct NeedsProjection {
-    rows: Vec<NeedsOverlayRow>,
-    mine_shown: usize,
-    mine_total: usize,
-    need_shown: usize,
-    need_total: usize,
-}
-
-impl NeedsProjection {
-    fn selected_line(&self, sel: usize) -> usize {
-        if sel < self.mine_shown {
-            // instruction + MINE heading
-            2 + sel
-        } else {
-            // instruction + MINE heading/rows/footer + THEY NEED YOU heading
-            4 + self.mine_shown + sel.saturating_sub(self.mine_shown)
-        }
-    }
-}
-
 /// Cap on rendered rows (worst-first, so the cap drops only the least severe);
 /// the footer states the drop count. Matches the sideline card cap.
 const NEEDS_CAP: usize = 10;
@@ -9959,151 +9908,6 @@ pub(crate) enum NeedsFooter {
     Folding,
     Degraded,
     AsOf,
-}
-
-/// Build the needs-me overlay lines (x-feec, two-laned by x-f730): MINE (the
-/// operator's own priorities) above THEY NEED YOU (the severity-ranked union
-/// + the selected row's answer options), each with its own state footer, on
-/// the shared inverse-video chrome. `sel` is pre-clamped by the caller and
-/// indexes `projection.rows` (MINE rows first, then need rows) - a `▸` marks
-/// the selected row wherever it falls. An answerable row lists its numbered
-/// options only when it is the selected NEED row; a focus-only row is tagged.
-/// Always renders both headings - an empty NEED lane shows "nothing needs
-/// you", so the overlay never opens blank. Layout is pinned 1:1 with
-/// [`NeedsProjection::selected_line`]: MINE rows occupy exactly
-/// `mine_shown` lines and need rows exactly `need_shown` (or one "nothing
-/// needs you" line), with no extra divider row between them.
-fn needs_overlay_lines(
-    projection: &NeedsProjection,
-    sel: usize,
-    mine_footer: NeedsFooter,
-    need_footer: NeedsFooter,
-) -> Vec<String> {
-    let mine_rows = &projection.rows[..projection.mine_shown];
-    let need_rows = &projection.rows[projection.mine_shown..];
-
-    let mut lines = vec![pad_to(
-        " needs me · digit answers · n/N cycle · ⏎ goto · q close",
-        ANSWER_OVERLAY_W,
-    )];
-
-    lines.push(pad_to(" MINE", ANSWER_OVERLAY_W));
-    for (i, row) in mine_rows.iter().enumerate() {
-        let NeedsOverlayRow::Mine(item) = row else {
-            continue;
-        };
-        let marker = if i == sel { '▸' } else { ' ' };
-        let check = if item.done { '✓' } else { ' ' };
-        lines.push(pad_to(
-            &format!(" {marker} [{check}] {}", item.text),
-            ANSWER_OVERLAY_W,
-        ));
-    }
-    let mine_footer_line = match mine_footer {
-        NeedsFooter::Folding => "   folding...".to_string(),
-        NeedsFooter::Degraded => "   MINE unavailable".to_string(),
-        NeedsFooter::AsOf if projection.mine_total > projection.mine_shown => format!(
-            "   {} of {} shown",
-            projection.mine_shown, projection.mine_total
-        ),
-        NeedsFooter::AsOf => String::new(),
-    };
-    lines.push(pad_to(&mine_footer_line, ANSWER_OVERLAY_W));
-
-    lines.push(pad_to(" THEY NEED YOU", ANSWER_OVERLAY_W));
-    if need_rows.is_empty() {
-        lines.push(pad_to("   nothing needs you", ANSWER_OVERLAY_W));
-    } else {
-        for (i, row) in need_rows.iter().enumerate() {
-            let idx = projection.mine_shown + i;
-            let marker = if idx == sel { '▸' } else { ' ' };
-            match row {
-                NeedsOverlayRow::Question(q) => {
-                    // Render `ask` as the headline (falls back to the prose
-                    // question when the asker gave no one-liner); the prose
-                    // itself appears only when selected, below.
-                    let stale = if q.live == Some(false) { "  STALE" } else { "" };
-                    lines.push(pad_to(
-                        &format!(
-                            " {marker} {} {}{stale}",
-                            need_glyph(NeedKind::Question),
-                            q.ask.as_deref().unwrap_or(&q.question)
-                        ),
-                        ANSWER_OVERLAY_W,
-                    ));
-                }
-                NeedsOverlayRow::Need(r) => {
-                    let tag = match r.kind {
-                        NeedKind::BlockedFocusOnly => "  ⚠ focus",
-                        _ => "",
-                    };
-                    lines.push(pad_to(
-                        &format!(
-                            " {marker} {} {}  {}{tag}",
-                            need_glyph(r.kind),
-                            r.name,
-                            r.reason
-                        ),
-                        ANSWER_OVERLAY_W,
-                    ));
-                }
-                NeedsOverlayRow::Mine(_) => {}
-            }
-        }
-        let selected_need = sel
-            .checked_sub(projection.mine_shown)
-            .and_then(|i| need_rows.get(i));
-        match selected_need {
-            Some(NeedsOverlayRow::Need(r)) => {
-                if let Some(ans) = r.answerable.as_ref() {
-                    if !ans.prompt.is_empty() {
-                        lines.push(pad_to(
-                            &format!("   {}", ans.prompt.replace('\n', " ")),
-                            ANSWER_OVERLAY_W,
-                        ));
-                    }
-                    for o in &ans.options {
-                        lines.push(pad_to(
-                            &format!("     {}. {}", o.idx, o.label),
-                            ANSWER_OVERLAY_W,
-                        ));
-                    }
-                }
-            }
-            Some(NeedsOverlayRow::Question(q)) => {
-                // The prose beneath the headline - only when `ask` was used
-                // as the headline above; if there was no `ask`, the headline
-                // already IS the question and repeating it would be noise.
-                if q.ask.is_some() && !q.question.is_empty() {
-                    lines.push(pad_to(
-                        &format!("   {}", q.question.replace('\n', " ")),
-                        ANSWER_OVERLAY_W,
-                    ));
-                }
-                for (i, opt) in q.options.iter().enumerate() {
-                    lines.push(pad_to(&format!("     {}. {opt}", i + 1), ANSWER_OVERLAY_W));
-                }
-                if q.live == Some(false) {
-                    lines.push(pad_to(
-                        "   the answer is recorded but reaches no session",
-                        ANSWER_OVERLAY_W,
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
-    let need_footer_line = match need_footer {
-        NeedsFooter::Folding => "   folding events...".to_string(),
-        NeedsFooter::Degraded => "   events fold unavailable - live badges only".to_string(),
-        NeedsFooter::AsOf if projection.need_total > projection.need_shown => format!(
-            "   {} of {} shown",
-            projection.need_shown, projection.need_total
-        ),
-        NeedsFooter::AsOf => "   as of now".to_string(),
-    };
-    lines.push(pad_to(&need_footer_line, ANSWER_OVERLAY_W));
-    lines
 }
 
 /// (x-b2bf) The yard overlay's open state: the crowd cursor plus the open
@@ -11069,6 +10873,12 @@ async fn attach_and_run(
     let (needs_tx, mut needs_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::needs_overlay::FoldOutcome)>();
 
+    // x-4433: the activity feed leg, the needs fold's exact shape - off the UI
+    // loop, gen-tagged, one fold in flight; a result for a closed/superseded
+    // overlay is discarded.
+    let (feed_tx, mut feed_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::feed_overlay::FeedItem>>)>();
+
     // x-f730 task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
     // generation - a mutation always applies wherever the overlay currently
@@ -11178,6 +10988,22 @@ async fn attach_and_run(
                 let result = crate::needs_overlay::fold_both(&since).await;
                 let _ = tx.send((gen, result));
             });
+        }
+        // x-4433: kick a wanted feed fold off the UI loop, same discipline.
+        if let Some(f) = view.feed.as_mut() {
+            if f.want && !f.inflight {
+                f.want = false;
+                f.inflight = true;
+                let tx = feed_tx.clone();
+                let gen = f.gen;
+                let since = crate::digest_overlay::now_secs()
+                    .saturating_sub(NEEDS_WINDOW_SECS)
+                    .to_string();
+                tokio::spawn(async move {
+                    let result = crate::feed_overlay::feed_now(&since).await;
+                    let _ = tx.send((gen, result));
+                });
+            }
         }
         // x-f730 task 2.2: kick a queued MINE mutation off the UI loop.
         // `mine_acting` is already set by the stdin handler at enqueue time
@@ -11730,6 +11556,29 @@ async fn attach_and_run(
                     // A superseded fold returned while the current overlay still
                     // needs one (re-opened past the cache): kick a fresh fold.
                     view.needs_want = true;
+                }
+            }
+            Some((gen, outcome)) = feed_rx.recv() => {
+                // x-4433: a feed fold landed; apply only to the still-open,
+                // same-generation overlay - a result for a closed/superseded
+                // open is discarded (the needs arm's contract, one consumer).
+                if let Some(f) = view.feed.as_mut() {
+                    if gen == f.gen {
+                        f.inflight = false;
+                        match outcome {
+                            Some(items) => {
+                                f.items = items;
+                                f.sel = 0;
+                                f.degraded = false;
+                            }
+                            // Fold failed/timed out: keep prior rows visible,
+                            // flip the loud degraded notice.
+                            None => f.degraded = true,
+                        }
+                        if let Err(e) = compositor.draw(&view.compose()) {
+                            break Err(format!("draw: {e}"));
+                        }
+                    }
                 }
             }
             Some(result) = mine_act_rx.recv() => {
@@ -12844,6 +12693,9 @@ async fn handle_stdin(
     if view.yard.is_some() {
         return yard_keys(view, &passthrough, sock_w).await;
     }
+    if view.feed.is_some() {
+        return feed_view::feed_keys(view, &passthrough, sock_w).await;
+    }
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
     }
@@ -13030,6 +12882,17 @@ async fn dispatch_event(
                 view.yard_degraded = false;
                 view.yard_want = true;
             }
+        }
+        Event::OpenFeed => {
+            // x-4433: open the activity feed. Prior rows render instantly; a
+            // fresh fold is always armed and merges in when it lands - the
+            // overlay never blocks on it, and a failed fold degrades loudly.
+            let gen = view
+                .feed
+                .as_ref()
+                .map(|f| f.gen.wrapping_add(1))
+                .unwrap_or(0);
+            view.feed = Some(feed_view::open_overlay(view.feed.take(), gen));
         }
         Event::OpenCourt => view.court.toggle(),
         Event::TogglePanel => {
@@ -17095,6 +16958,10 @@ mod tests;
 #[cfg(test)]
 #[path = "client_tests/court_block_tests.rs"]
 mod court_block_tests;
+
+#[cfg(test)]
+#[path = "client_tests/feed_view_tests.rs"]
+mod feed_view_tests;
 
 #[path = "client/court_block.rs"]
 mod court_block;
