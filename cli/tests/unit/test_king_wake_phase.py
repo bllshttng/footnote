@@ -210,6 +210,160 @@ def test_king_wake_permission_mode_the_woken_session_argv_carries_bypass():
     assert "--dangerously-skip-permissions" in invoke
 
 
+# ── the escalation-answer trigger ──────────────────────────────────────────
+
+
+def _answered(asker, answer="ship it", closed_ts="2026-08-29T11:00:00Z", qid="q-ab12cd34"):
+    from types import SimpleNamespace as _NS
+
+    return _NS(
+        id=qid,
+        asker=asker,
+        question="what does the operator want for epic-x?",
+        answer=answer,
+        closed_ts=closed_ts,
+    )
+
+
+def _seed_cursor(manifest, cursor="2026-08-29T10:00:00Z"):
+    import json as _json
+
+    _sidecar(manifest).write_text(
+        _json.dumps({"answered_cursor": cursor}), encoding="utf-8"
+    )
+
+
+def test_an_answered_king_escalation_wakes_with_the_answer_as_the_prompt(tmp_path):
+    # The acceptance: a parked crowned holder that asked q-X, cleared with an
+    # answer, wakes on the next tick with the answer as the prompt body.
+    rec, _summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=_seed_cursor,
+        extra={
+            "answered_fn": lambda root: [
+                _answered(asker=None, qid="q-old"),  # unattributable: never a trigger
+                _answered(asker="aa11bb22"),
+            ]
+        },
+    )
+
+    assert rec.dispatches and rec.dispatches[0][:3] == ("epic-x", "escalation_answered", None)
+    detail = rec.dispatches[0][3]
+    assert "q-ab12cd34" in detail and "ship it" in detail, detail
+    woken = [e for e in rec.events if e[0] == "king_woken"]
+    assert woken and woken[0][1]["reason"] == "escalation_answered"
+    import json as _json
+
+    payload = _json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert payload["answered_cursor"] == "2026-08-29T11:00:00Z"
+
+
+def test_the_answer_delivery_address_is_invisible_to_the_mail_trigger(tmp_path):
+    # Why this trigger exists: the answer's mail delivery addresses the
+    # holder's FULL session id (outstanding/deliver.py), and the mail scan
+    # covers name, short id, and scope projects only - so the mail trigger
+    # reads a permanent zero on an answer while the question journal fires.
+    full_id = "11111111-2222-3333-4444-555555555555"
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda address: [object()] if address == full_id else [],
+        pre=_seed_cursor,
+        extra={"answered_fn": lambda root: []},
+    )
+
+    assert full_id not in rec.unread_calls, "the full id is not a scanned address"
+    assert rec.dispatches == [], "no mail spelling matched, nothing wakes"
+
+
+def test_the_answer_trigger_fires_despite_the_debounce(tmp_path):
+    # "Ahead of the debounce, since the king asked for it": a wake billed two
+    # minutes ago still refuses mail, board, and backstop, but not an answer.
+    def prime(manifest):
+        _seed_cursor(manifest)
+        bill_wake(manifest, now=NOW - timedelta(minutes=2))
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [object()],
+        pre=prime,
+        extra={"answered_fn": lambda root: [_answered(asker="king-x")]},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "escalation_answered"
+    assert rec.dispatches[0][1] != "mail", "mail must stay debounced"
+
+
+def test_a_fresh_arm_seeds_the_answer_cursor_without_waking(tmp_path):
+    rec, _summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        extra={"answered_fn": lambda root: [_answered(asker="king-x")]},
+    )
+
+    assert rec.dispatches == [], "a first observation is not a trigger"
+    import json as _json
+
+    payload = _json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert payload["answered_cursor"] == "2026-08-29T11:00:00Z"
+
+
+def test_an_answer_to_another_asker_wakes_nothing(tmp_path):
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=_seed_cursor,
+        extra={"answered_fn": lambda root: [_answered(asker="somebody-else")]},
+    )
+
+    assert rec.dispatches == []
+    assert [e for e in rec.events if e[0] == "king_woken"] == []
+
+
+def test_a_ceiling_refused_answer_keeps_the_cursor_so_it_stays_a_trigger(tmp_path):
+    # The debounce cannot refuse an answer (the king asked for it), so the
+    # one refusal left is the ceiling - and it must not consume the answer.
+    def prime(manifest):
+        _seed_cursor(manifest)
+        for _ in range(32):
+            bill_wake(manifest, now=NOW - timedelta(hours=1))
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=prime,
+        extra={"answered_fn": lambda root: [_answered(asker="king-x")]},
+    )
+
+    assert rec.dispatches == [], "the ceiling refuses the 33rd wake"
+    refused = [e for e in rec.events if e[0] == "king_wake_refused"]
+    assert refused and refused[0][1]["reason"] == "escalation_answered"
+    import json as _json
+
+    payload = _json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert payload["answered_cursor"] == "2026-08-29T10:00:00Z", (
+        "a refused answer must stay a trigger"
+    )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        extra={
+            "answered_fn": lambda root: [_answered(asker="king-x")],
+            "now": NOW + timedelta(hours=25),  # the window rolled; the answer waits
+        },
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "escalation_answered"
+
+
 def test_working_stalled_and_broken_instrument_holders_never_wake(tmp_path):
     for n, truth in enumerate(
         (
