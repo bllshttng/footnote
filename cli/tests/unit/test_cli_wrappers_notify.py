@@ -34,9 +34,10 @@ def test_notify_runs_in_package_no_repo_path(monkeypatch):
     """
     captured = {}
 
-    def _stub(title, message):
+    def _stub(title, message, pointer=""):
         captured["title"] = title
         captured["message"] = message
+        captured["pointer"] = pointer
         return 0, ""
 
     monkeypatch.setattr("fno.notify.cli.send_notification", _stub)
