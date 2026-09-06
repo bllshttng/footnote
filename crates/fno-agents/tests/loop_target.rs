@@ -1253,9 +1253,12 @@ fn driver_persist_history_called_per_iteration() {
 
 // ── king walk arm ─────────────────────────────────────────────────────────────
 
-/// Write a per-scope king manifest under `<dir>/.fno/kings/<scope>.md`.
+/// Write a per-scope king manifest under the test's resolved project space.
 fn write_king_manifest(dir: &Path, scope: &str, fno_id: &str, count: u64, ceiling: u64) {
-    let kings = dir.join(".fno").join("kings");
+    let kings = dir
+        .join("spaces")
+        .join(fno_agents::paths::space_slug(dir))
+        .join("kings");
     fs::create_dir_all(&kings).unwrap();
     let content = format!(
         "---\nfno_id: {fno_id}\nscope: {scope}\nharness: claude\nharness_session_id: k-sess\nbudget_max_iterations: 40\nrespawn_count: {count}\nrespawn_ceiling: {ceiling}\n---\n"
@@ -1519,8 +1522,14 @@ fn king_walk_dispatches_past_a_prior_reign_terminal_and_bills_one_respawn() {
         Some(1),
         "board still actionable burns to Budget\nstdout={stdout}\nstderr={stderr}"
     );
-    let manifest =
-        fs::read_to_string(dir.path().join(".fno").join("kings").join("epic-x.md")).unwrap();
+    let manifest = fs::read_to_string(
+        dir.path()
+            .join("spaces")
+            .join(fno_agents::paths::space_slug(dir.path()))
+            .join("kings")
+            .join("epic-x.md"),
+    )
+    .unwrap();
     assert!(
         manifest.contains("respawn_count: 1"),
         "one walk invocation bills exactly one respawn: {manifest}"
@@ -1590,8 +1599,14 @@ fn king_wake_mode_dispatches_past_a_spent_ceiling_without_billing_it() {
         env_dump.contains("BEFORE your first board read"),
         "the drain instruction must order itself before the board read: {env_dump}"
     );
-    let manifest =
-        fs::read_to_string(dir.path().join(".fno").join("kings").join("epic-x.md")).unwrap();
+    let manifest = fs::read_to_string(
+        dir.path()
+            .join("spaces")
+            .join(fno_agents::paths::space_slug(dir.path()))
+            .join("kings")
+            .join("epic-x.md"),
+    )
+    .unwrap();
     assert!(
         manifest.contains("respawn_count: 4"),
         "a wake must not spend the failure-retry budget: {manifest}"

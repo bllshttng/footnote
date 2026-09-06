@@ -14,8 +14,11 @@ from fno.king.state import write_manifest
 from fno.king.wake import bill_wake
 from fno.pr_watch._king_wake import (
     CrownTarget,
+    _board_digest,
+    _board_rows,
     _holder_absent,
-    _raise_ceiling_question,
+    _ask_wake_ceiling,
+    _store_board_hash,
     run_king_wake,
 )
 
@@ -36,15 +39,24 @@ def _settings(*, armed: bool = True) -> SimpleNamespace:
 class _Recorder:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict]] = []
-        self.dispatches: list[tuple[str, str]] = []
+        self.dispatches: list[tuple[str, str, str | None, str | None]] = []
+        self.successor_flags: list[bool] = []
         self.asks: list[tuple[str, int, int]] = []
         self.unread_calls: list[str] = []
 
     def emit(self, event_type: str, data: dict) -> None:
         self.events.append((event_type, data))
 
-    def dispatch(self, target: CrownTarget, reason: str, address: str | None) -> None:
-        self.dispatches.append((target.scope, reason, address))
+    def dispatch(
+        self,
+        target: CrownTarget,
+        reason: str,
+        address: str | None,
+        detail: str | None = None,
+        successor: bool = False,
+    ) -> None:
+        self.dispatches.append((target.scope, reason, address, detail))
+        self.successor_flags.append(successor)
 
 def _king_manifest(root):
     """The manifest path as the wake phase resolves it: the repo's space,
@@ -75,17 +87,20 @@ def _run(
     armed=True,
     pre=None,
     extra=None,
+    fresh_manifest=True,
+    manifest_session_id="11111111-2222-3333-4444-555555555555",
 ):
     rec = _Recorder()
     root = tmp_path / "proj"
     root.mkdir(exist_ok=True)
     manifest = _king_manifest(root)
-    write_manifest(
-        manifest,
-        scope="epic-x",
-        harness_session_id="11111111-2222-3333-4444-555555555555",
-        force=True,
-    )
+    if fresh_manifest or not manifest.is_file():
+        write_manifest(
+            manifest,
+            scope="epic-x",
+            harness_session_id=manifest_session_id,
+            force=True,
+        )
     if pre is not None:
         pre(manifest)
     crowns = [{"holder": "king-x", "scope": "epic-x", "status": "live"}]
@@ -117,7 +132,7 @@ def test_absent_holder_with_undrained_mail_wakes_and_bills(tmp_path):
         unread=lambda address: [object()] if address == "king-x" else [],
     )
 
-    assert rec.dispatches == [("epic-x", "mail", "king-x")], f"woke: {rec.dispatches}"
+    assert rec.dispatches == [("epic-x", "mail", "king-x", None)], f"woke: {rec.dispatches}"
     woken = [e for e in rec.events if e[0] == "king_woken"]
     assert woken and woken[0][1]["reason"] == "mail"
     assert woken[0][1]["address"] == "king-x"
@@ -136,7 +151,7 @@ def test_mail_addressed_to_the_reply_handle_short_id_wakes(tmp_path):
         unread=lambda address: [object()] if address == "aa11bb22" else [],
     )
 
-    assert rec.dispatches == [("epic-x", "mail", "aa11bb22")], (
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22", None)], (
         f"addresses: {rec.unread_calls}"
     )
 
@@ -150,7 +165,7 @@ def test_project_broadcast_address_wakes_an_absent_holder(tmp_path):
         unread=lambda address: [object()] if address == "epic-x" else [],
     )
 
-    assert rec.dispatches == [("epic-x", "mail", "epic-x")]
+    assert rec.dispatches == [("epic-x", "mail", "epic-x", None)]
 
 
 def test_the_spawned_walk_argv_carries_the_matched_address(monkeypatch, tmp_path):
@@ -189,6 +204,387 @@ def test_the_spawned_walk_argv_carries_the_matched_address(monkeypatch, tmp_path
     assert argv[argv.index("--wake-holder") + 1] == "king-x"
 
 
+def test_king_wake_permission_mode_the_woken_session_argv_carries_bypass():
+    # The operator's 2026-08-23 report (wakes landing on an approve prompt)
+    # named a resume that repeated no permission mode. Measured 2026-09-05:
+    # the wake path holds no resume to fix - it dispatches the walk, and the
+    # session the walk launches runs THIS driver's argv, which hardcodes full
+    # bypass (a mode every spawn recording subsumes). The pin is the one edit
+    # that could bring the report back: dropping the flag from driver_invoke.
+    repo = Path(__file__).resolve().parents[3]
+    driver = repo / "scripts" / "lib" / "driver-claude-code.sh"
+    invoke = driver.read_text(encoding="utf-8").split("driver_invoke()", 1)[1]
+    assert "--dangerously-skip-permissions" in invoke
+
+
+# ── the escalation-answer trigger ──────────────────────────────────────────
+
+
+def _answered(asker, answer="ship it", closed_ts="2026-08-29T11:00:00Z", qid="q-ab12cd34"):
+    return {
+        "id": qid,
+        "asker": asker,
+        "question": "what does the operator want for epic-x?",
+        "answer": answer,
+        "closed_ts": closed_ts,
+    }
+
+
+def _seed_cursor(manifest, cursor="2026-08-29T10:00:00Z"):
+    import json as _json
+
+    _sidecar(manifest).write_text(
+        _json.dumps({"answered_cursor": cursor}), encoding="utf-8"
+    )
+
+
+def test_an_answered_king_escalation_wakes_with_the_answer_as_the_prompt(tmp_path):
+    # The acceptance: a parked crowned holder that asked q-X, cleared with an
+    # answer, wakes on the next tick with the answer as the prompt body.
+    rec, _summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=_seed_cursor,
+        extra={
+            "answered_fn": lambda: [
+                _answered(asker=None, qid="q-old"),  # unattributable: never a trigger
+                _answered(asker="aa11bb22"),
+            ]
+        },
+    )
+
+    assert rec.dispatches and rec.dispatches[0][:3] == ("epic-x", "escalation_answered", None)
+    assert rec.unread_calls == [], "a decided escalation must not still scan mailboxes"
+    detail = rec.dispatches[0][3]
+    assert "q-ab12cd34" in detail and "ship it" in detail, detail
+    assert "11111111-2222-3333-4444-555555555555" in detail, (
+        f"the prompt names the delivery address so the mail row can be drained: {detail}"
+    )
+    woken = [e for e in rec.events if e[0] == "king_woken"]
+    assert woken and woken[0][1]["reason"] == "escalation_answered"
+    import json as _json
+
+    payload = _json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert payload["answered_cursor"] == "2026-08-29T11:00:00Z"
+
+
+def test_an_answered_codex_escalation_matches_the_manifest_session_handle(tmp_path):
+    codex_session = "019c7714-3b77-74d1-9866-e1f484aae2ab"
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=_seed_cursor,
+        manifest_session_id=codex_session,
+        extra={"answered_fn": lambda: [_answered(asker="019c7714")]},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "escalation_answered"
+
+
+def test_the_answer_delivery_address_is_invisible_to_the_mail_trigger(tmp_path):
+    # Why this trigger exists: the answer's mail delivery addresses the
+    # holder's FULL session id (outstanding/deliver.py), and the mail scan
+    # covers name, short id, and scope projects only - so the mail trigger
+    # reads a permanent zero on an answer while the question journal fires.
+    full_id = "11111111-2222-3333-4444-555555555555"
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda address: [object()] if address == full_id else [],
+        pre=_seed_cursor,
+        extra={"answered_fn": lambda: []},
+    )
+
+    assert full_id not in rec.unread_calls, "the full id is not a scanned address"
+    assert rec.dispatches == [], "no mail spelling matched, nothing wakes"
+
+
+def test_the_answer_trigger_fires_despite_the_debounce(tmp_path):
+    # "Ahead of the debounce, since the king asked for it": a wake billed two
+    # minutes ago still refuses mail, board, and backstop, but not an answer.
+    def prime(manifest):
+        _seed_cursor(manifest)
+        bill_wake(manifest, now=NOW - timedelta(minutes=2))
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [object()],
+        pre=prime,
+        extra={"answered_fn": lambda: [_answered(asker="king-x")]},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "escalation_answered"
+    assert rec.dispatches[0][1] != "mail", "mail must stay debounced"
+
+
+def test_a_fresh_arm_seeds_the_answer_cursor_at_the_reigns_birth(tmp_path):
+    # The seed is the manifest's created_at (the reign's birth), never the
+    # journal's max ts: a max seed would swallow an answer that closed between
+    # the question and the first armed tick - the acceptance case itself.
+    from fno.king.state import parse_manifest
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        extra={"answered_fn": lambda: [_answered(asker="king-x")]},
+    )
+
+    assert rec.dispatches == [], "a first observation is not a trigger"
+    import json as _json
+
+    payload = _json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    created = parse_manifest(manifest)["created_at"]
+    birth = datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc
+    )
+    assert payload["answered_cursor"] == birth.isoformat()
+
+
+def test_an_answer_that_closed_after_the_first_observation_still_fires(tmp_path):
+    # The regression the birth seed exists for: the king asks, the operator
+    # answers, and only THEN does the first armed tick observe the journal.
+    # The seed must not swallow that answer, so the fixture answer closes
+    # AFTER the manifest's created_at (stamped at real now).
+    fresh = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    answered = lambda: [_answered(asker="king-x", answer="ship it", closed_ts=fresh)]  # noqa: E731
+    _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        extra={"answered_fn": answered},
+    )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        fresh_manifest=False,
+        extra={"answered_fn": answered},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "escalation_answered"
+    assert "ship it" in rec.dispatches[0][3]
+
+
+def test_two_answers_between_ticks_deliver_one_per_tick_in_order(tmp_path):
+    older = _answered(
+        asker="king-x",
+        answer="first ruling",
+        closed_ts=datetime(2026, 8, 29, 11, 0, 0, tzinfo=timezone.utc).isoformat(),
+        qid="q-older",
+    )
+    newer = _answered(
+        asker="king-x",
+        answer="second ruling",
+        closed_ts=datetime(2026, 8, 29, 11, 5, 0, tzinfo=timezone.utc).isoformat(),
+        qid="q-newer",
+    )
+    _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=_seed_cursor,
+        extra={"answered_fn": lambda: []},
+    )
+
+    first, _summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        fresh_manifest=False,
+        extra={"answered_fn": lambda: [older, newer]},
+    )
+    assert first.dispatches and "first ruling" in first.dispatches[0][3], (
+        "the OLDEST answer rides the first wake, not only the newest"
+    )
+
+    second, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        fresh_manifest=False,
+        extra={"answered_fn": lambda: [older, newer]},
+    )
+    assert second.dispatches and "second ruling" in second.dispatches[0][3], (
+        "the cursor advanced one answer, so the next tick delivers the next"
+    )
+
+
+def test_an_answer_to_another_asker_wakes_nothing(tmp_path):
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=_seed_cursor,
+        extra={"answered_fn": lambda: [_answered(asker="somebody-else")]},
+    )
+
+    assert rec.dispatches == []
+    assert [e for e in rec.events if e[0] == "king_woken"] == []
+
+
+def test_a_ceiling_refused_answer_keeps_the_cursor_so_it_stays_a_trigger(tmp_path):
+    # The debounce cannot refuse an answer (the king asked for it), so the
+    # one refusal left is the ceiling - and it must not consume the answer.
+    def prime(manifest):
+        _seed_cursor(manifest)
+        for _ in range(32):
+            bill_wake(manifest, now=NOW - timedelta(hours=1))
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=prime,
+        extra={"answered_fn": lambda: [_answered(asker="king-x")]},
+    )
+
+    assert rec.dispatches == [], "the ceiling refuses the 33rd wake"
+    refused = [e for e in rec.events if e[0] == "king_wake_refused"]
+    assert refused and refused[0][1]["reason"] == "escalation_answered"
+    import json as _json
+
+    payload = _json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert payload["answered_cursor"] == "2026-08-29T10:00:00Z", (
+        "a refused answer must stay a trigger"
+    )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        fresh_manifest=False,  # same ledger: the roll is what frees the wake
+        extra={
+            "answered_fn": lambda: [_answered(asker="king-x")],
+            "now": NOW + timedelta(hours=25),  # the window rolled; the answer waits
+        },
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "escalation_answered"
+
+
+# ── the successor path for a dead holder ───────────────────────────────────
+
+
+def _spent_respawn_budget(manifest):
+    """Rewrite the manifest with its respawn budget spent (4 of 4)."""
+    manifest.write_text(
+        "---\n"
+        "fno_id: k-1\n"
+        "scope: epic-x\n"
+        "harness_session_id: 11111111-2222-3333-4444-555555555555\n"
+        "respawn_count: 4\n"
+        "respawn_ceiling: 4\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_dead_holder_wakes_a_successor_under_the_recorded_crown(tmp_path):
+    # Acceptance 5.4: the holder's session is gone (not-found), a trigger is
+    # live, so the dispatch is a NEW king generation, not an ordinary wake.
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "unknown", "reason": "not-found"},
+        unread=lambda a: [object()] if a == "king-x" else [],
+    )
+
+    assert rec.dispatches and rec.dispatches[0][:3] == ("epic-x", "mail", "king-x")
+    assert rec.successor_flags == [True]
+    spawned = [e for e in rec.events if e[0] == "king_spawned_successor"]
+    assert spawned and spawned[0][1]["old_session_id"] == (
+        "11111111-2222-3333-4444-555555555555"
+    )
+    assert spawned[0][1]["trigger"] == "mail"
+    woken = [e for e in rec.events if e[0] == "king_woken"]
+    assert woken and woken[0][1]["successor"] is True
+
+
+def test_a_parked_holder_wakes_without_the_successor_flag(tmp_path):
+    # "done" is a parked holder (a transcript that ended), not a gone one:
+    # its wake is ordinary and journals no successor.
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [object()] if a == "king-x" else [],
+    )
+
+    assert rec.dispatches and rec.successor_flags == [False]
+    assert [e for e in rec.events if e[0] == "king_spawned_successor"] == []
+
+
+def test_a_dead_holder_at_the_respawn_ceiling_spawns_nothing_and_escalates(tmp_path):
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "unknown", "reason": "not-found"},
+        unread=lambda a: [object()] if a == "king-x" else [],
+        pre=_spent_respawn_budget,
+    )
+
+    assert rec.dispatches == [], "no spawn happens at the respawn ceiling"
+    refused = [e for e in rec.events if e[0] == "king_wake_refused"]
+    assert refused and refused[0][1]["refusal"] == "respawn-ceiling"
+    assert refused[0][1]["reason"] == "mail"
+    assert [e for e in rec.events if e[0] == "king_spawned_successor"] == []
+    # The bill never landed: the refusal spends no wake slot.
+    assert [e for e in rec.events if e[0] == "king_woken"] == []
+
+
+def test_a_dead_holder_with_an_absent_ceiling_asks_with_the_default(tmp_path):
+    def spent_legacy(manifest):
+        manifest.write_text(
+            "---\n"
+            "fno_id: k-1\n"
+            "scope: epic-x\n"
+            "harness_session_id: 11111111-2222-3333-4444-555555555555\n"
+            "respawn_count: 4\n"
+            "---\n",
+            encoding="utf-8",
+        )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "unknown", "reason": "not-found"},
+        unread=lambda a: [object()] if a == "king-x" else [],
+        pre=spent_legacy,
+    )
+
+    assert rec.dispatches == []
+    assert rec.asks == [("epic-x", 4, 4)]
+
+
+def test_the_spawned_walk_argv_carries_the_successor_flag(monkeypatch, tmp_path):
+    import subprocess as subprocess_mod
+
+    from fno.pr_watch import _king_wake as phase_mod
+
+    argv: list[str] = []
+
+    class _FakePopen:
+        def __init__(self, args, **kwargs):
+            argv.extend(args)
+
+    monkeypatch.setattr(subprocess_mod, "Popen", _FakePopen)
+    target = CrownTarget(
+        holder="king-x",
+        scope="epic-x",
+        root=tmp_path,
+        manifest=_king_manifest(tmp_path),
+        short_id="aa11bb22",
+    )
+    target.manifest.parent.mkdir(parents=True, exist_ok=True)
+    target.manifest.write_text("---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8")
+
+    phase_mod._dispatch_walk(target, "mail", "fno-agents", "king-x", None, True)
+
+    assert "--wake-successor" in argv
+    assert argv[argv.index("--wake-holder") + 1] == "king-x"
+
+
 def test_working_stalled_and_broken_instrument_holders_never_wake(tmp_path):
     for n, truth in enumerate(
         (
@@ -220,7 +616,7 @@ def test_unknown_not_found_is_absence_and_wakes(tmp_path):
         unread=lambda address: [object()],
     )
 
-    assert rec.dispatches == [("epic-x", "mail", "aa11bb22")]
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22", None)]
 
 
 def test_unarmed_phase_reads_no_bus_and_emits_nothing(tmp_path):
@@ -281,8 +677,8 @@ def test_the_ceiling_question_dedupes_on_its_marker(tmp_path):
         manifest=_king_manifest(tmp_path),
     )
 
-    first = _raise_ceiling_question(target, 32, 32)
-    second = _raise_ceiling_question(target, 32, 32)
+    first = _ask_wake_ceiling(target, 32, 32)
+    second = _ask_wake_ceiling(target, 32, 32)
 
     assert first == second, "an open question must not be re-asked each tick"
 
@@ -353,8 +749,6 @@ def test_an_unreadable_registry_wakes_nothing(tmp_path):
 
 # ── the board-change trigger ──────────────────────────────────────────────
 
-from fno.pr_watch._king_wake import _board_hash, _store_board_hash  # noqa: E402
-
 #: Fixture rung: a level-1 project crown over "proj", so no machine config
 #: or graph shape is load-bearing in these tests.
 _PROJECT_RESOLVER = lambda parts: (1, "proj")  # noqa: E731
@@ -382,6 +776,23 @@ _BOARD_B = _BOARD_A + [
         "_kanban_column": "ready",
         "priority": "p1",
     }
+]
+#: Two rows added: the acceptance case for the diff-as-prompt change.
+_BOARD_C = _BOARD_A + [
+    {
+        "id": "x-2",
+        "project": "proj",
+        "status": "ready",
+        "_kanban_column": "ready",
+        "priority": "p1",
+    },
+    {
+        "id": "x-3",
+        "project": "proj",
+        "status": "ready",
+        "_kanban_column": "ready",
+        "priority": "p1",
+    },
 ]
 
 
@@ -414,7 +825,7 @@ def test_first_observation_stores_the_hash_and_wakes_nothing(tmp_path):
     )
 
     assert rec.dispatches == [], "a first observation is not a change"
-    assert _stored(manifest) == _board_hash("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER)
+    assert _stored(manifest) == _board_digest("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER)
 
 
 def test_a_changed_board_wakes_with_reason_board_and_stores_the_hash(tmp_path):
@@ -432,17 +843,154 @@ def test_a_changed_board_wakes_with_reason_board_and_stores_the_hash(tmp_path):
         extra={"entries_fn": lambda: _BOARD_B, "scope_resolver": _PROJECT_RESOLVER},
     )
 
-    assert rec.dispatches == [("epic-x", "board", None)], "the refill wakes"
+    assert ("epic-x", "board", None) == rec.dispatches[0][:3], "the refill wakes"
     woken = [e for e in rec.events if e[0] == "king_woken"]
     assert woken and woken[0][1]["reason"] == "board"
-    assert _stored(manifest) == _board_hash("epic-x", _BOARD_B, _PROJECT_RESOLVER)
+    assert _stored(manifest) == _board_digest("epic-x", _BOARD_B, _PROJECT_RESOLVER)
+
+
+def test_the_board_diff_names_the_two_added_rows_and_nothing_unchanged(tmp_path):
+    # Acceptance 5.2: a board that gained two rows wakes with a prompt that
+    # names those two and omits the unchanged row. The woken session is
+    # fresh; without the diff on the command line it re-reads the whole board.
+    _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: _BOARD_C, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][3], "the diff is the wake payload"
+    detail = rec.dispatches[0][3]
+    assert "added: x-2" in detail and "added: x-3" in detail, detail
+    assert "x-1" not in detail, f"an unchanged row is noise: {detail}"
+
+
+def test_a_refused_board_change_keeps_the_old_rows_so_the_diff_survives(tmp_path):
+    def prime(manifest):
+        _store_board_hash(
+            _SidecarTarget(manifest),
+            _board_digest("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+        )
+        bill_wake(manifest, now=NOW - timedelta(minutes=2))  # inside debounce
+
+    _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_B, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        fresh_manifest=False,  # same ledger: the lapsed debounce frees the retry
+        # outside the debounce now, so the retry dispatches
+        extra={
+            "entries_fn": lambda: _BOARD_B,
+            "scope_resolver": _PROJECT_RESOLVER,
+            "now": NOW + timedelta(minutes=20),
+        },
+    )
+
+    assert rec.dispatches, "the retry wakes once the debounce lapses"
+    assert "added: x-2" in (rec.dispatches[0][3] or ""), rec.dispatches[0][3]
+
+
+def test_a_sidecar_from_before_rows_were_stored_is_a_first_observation(tmp_path):
+    # A legacy sidecar carries a hash with no rows beside it. An honest diff
+    # needs the prior rows, so that one transition records them and wakes
+    # nothing rather than naming every row "added". The rows sit at p2 so the
+    # backstop lane stays out of the case (quiet priority, no fresh terminal).
+    quiet_b = _BOARD_A_QUIET + [
+        {"id": "x-2", "project": "proj", "status": "ready", "_kanban_column": "ready", "priority": "p2"}
+    ]
+
+    def prime(manifest):
+        # A legacy sidecar is written directly: the hash with no rows beside
+        # it is a shape the production writer can no longer produce.
+        import json as _json
+
+        _sidecar(manifest).write_text(
+            _json.dumps(
+                {"board_hash": _board_digest("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER)}
+            ),
+            encoding="utf-8",
+        )
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: quiet_b, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "no honest diff, no board wake"
+    import json as json_mod
+
+    payload = json_mod.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert payload["board_rows"], "the pass records the rows it could not diff"
+
+
+def test_the_spawned_walk_argv_carries_the_board_diff(monkeypatch, tmp_path):
+    import subprocess as subprocess_mod
+
+    from fno.pr_watch import _king_wake as phase_mod
+
+    argv: list[str] = []
+
+    class _FakePopen:
+        def __init__(self, args, **kwargs):
+            argv.extend(args)
+
+    monkeypatch.setattr(subprocess_mod, "Popen", _FakePopen)
+    target = CrownTarget(
+        holder="king-x",
+        scope="epic-x",
+        root=tmp_path,
+        manifest=_king_manifest(tmp_path),
+        short_id="aa11bb22",
+    )
+    target.manifest.parent.mkdir(parents=True, exist_ok=True)
+    target.manifest.write_text("---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8")
+
+    phase_mod._dispatch_walk(
+        target, "board", "fno-agents", None, "added: x-2 (ready/p1)"
+    )
+
+    assert argv[argv.index("--wake-detail") + 1] == "added: x-2 (ready/p1)"
+
+
+def test_render_board_diff_covers_removed_changed_and_caps():
+    from fno.pr_watch._king_wake import MAX_DETAIL_CHARS, render_board_diff
+
+    old = [("x-1", "ready", "ready", "p1")]
+    new = [("x-1", "next", "next", "p0"), ("x-2", "ready", "ready", "p1")]
+    text = render_board_diff(old, new)
+    assert "changed: x-1" in text and "ready/ready/p1 -> next/next/p0" in text, text
+    assert "added: x-2" in text, text
+
+    removed = render_board_diff(old + [("x-9", "done", "done", "p2")], old)
+    assert "removed: x-9" in removed, removed
+    assert render_board_diff(old, old) == ""
+
+    wide = render_board_diff([], [(f"x-{n}", "ready", "ready", "p1") for n in range(500)])
+    assert len(wide) <= MAX_DETAIL_CHARS + 32, len(wide)
+    assert "more rows elided" in wide, "a capped diff names what it cut"
 
 
 def test_an_unchanged_board_wakes_nothing_and_keeps_the_stored_hash(tmp_path):
     def prime(manifest):
         _store_board_hash(
             _SidecarTarget(manifest),
-            _board_hash("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER),
+            _board_digest("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER),
         )
 
     rec, _summary, manifest = _run(
@@ -457,14 +1005,15 @@ def test_an_unchanged_board_wakes_nothing_and_keeps_the_stored_hash(tmp_path):
 
     assert rec.dispatches == [], "no mail and no change means no wake"
     assert rec.events == []
-    assert _stored(manifest) == _board_hash("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER)
+    assert _stored(manifest) == _board_digest("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER)
 
 
 def test_a_refused_board_change_keeps_the_old_hash_so_it_stays_a_trigger(tmp_path):
     def prime(manifest):
         _store_board_hash(
             _SidecarTarget(manifest),
-            _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+            _board_digest("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_A, _PROJECT_RESOLVER),
         )
         bill_wake(manifest, now=NOW - timedelta(minutes=2))  # inside debounce
 
@@ -478,7 +1027,7 @@ def test_a_refused_board_change_keeps_the_old_hash_so_it_stays_a_trigger(tmp_pat
     assert rec.dispatches == [], "the debounce refuses the spawn"
     refused = [e for e in rec.events if e[0] == "king_wake_refused"]
     assert refused and refused[0][1]["reason"] == "board"
-    assert _stored(manifest) == _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER), (
+    assert _stored(manifest) == _board_digest("epic-x", _BOARD_A, _PROJECT_RESOLVER), (
         "a refused change must not consume the trigger"
     )
 
@@ -487,7 +1036,8 @@ def test_a_priority_move_alone_counts_as_a_board_change(tmp_path):
     def prime(manifest):
         _store_board_hash(
             _SidecarTarget(manifest),
-            _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+            _board_digest("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_A, _PROJECT_RESOLVER),
         )
 
     rec, _summary, _manifest = _run(
@@ -500,7 +1050,7 @@ def test_a_priority_move_alone_counts_as_a_board_change(tmp_path):
         },
     )
 
-    assert rec.dispatches == [("epic-x", "board", None)]
+    assert [d[:3] for d in rec.dispatches] == [("epic-x", "board", None)]
 
 
 def test_an_empty_graph_read_is_not_a_board_emptied(tmp_path):
@@ -530,7 +1080,9 @@ _BOARD_QUIET = [
 def _primed_unchanged(manifest):
     """Store the current board's hash: mail empty, board unchanged."""
     _store_board_hash(
-        _SidecarTarget(manifest), _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER)
+        _SidecarTarget(manifest),
+        _board_digest("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+        _board_rows("epic-x", _BOARD_A, _PROJECT_RESOLVER),
     )
 
 
@@ -542,7 +1094,7 @@ def test_the_backstop_fires_when_no_event_did(tmp_path):
         extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
     )
 
-    assert rec.dispatches == [("epic-x", "backstop", None)], (
+    assert rec.dispatches == [("epic-x", "backstop", None, None)], (
         "actionable work, no event, no recent wake: the re-check fires"
     )
     woken = [e for e in rec.events if e[0] == "king_woken"]
@@ -568,7 +1120,9 @@ def test_the_backstop_waits_out_its_window(tmp_path):
 def test_the_backstop_skips_a_scope_with_nothing_actionable(tmp_path):
     def prime(manifest):
         _store_board_hash(
-            _SidecarTarget(manifest), _board_hash("epic-x", _BOARD_QUIET, _PROJECT_RESOLVER)
+            _SidecarTarget(manifest),
+            _board_digest("epic-x", _BOARD_QUIET, _PROJECT_RESOLVER),
+            _board_rows("epic-x", _BOARD_QUIET, _PROJECT_RESOLVER),
         )
 
     rec, _summary, _manifest = _run(
@@ -636,7 +1190,7 @@ def test_a_configured_ceiling_of_zero_resolves_unbounded(tmp_path):
         ask_fn=lambda *a: None,
     )
 
-    assert rec.dispatches == [("epic-x", "mail", "aa11bb22")], "ceiling 0 is unbounded"
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22", None)], "ceiling 0 is unbounded"
 
 
 def test_a_recent_king_terminal_suppresses_the_backstop(tmp_path):
@@ -669,6 +1223,81 @@ def test_a_recent_king_terminal_suppresses_the_backstop(tmp_path):
 
     assert rec.dispatches == [], "a walk that answered inside the window suffices"
     assert rec.events == []
+
+
+# ── the peer-review fixes ─────────────────────────────────────────────────
+
+
+def test_an_absent_respawn_ceiling_defaults_to_four_like_the_walk(tmp_path):
+    # Parity with KingQueue (loop_king.rs): Rust's parse_king_manifest
+    # defaults an absent respawn_ceiling to 4, so Python reading 0 here
+    # would call a spent budget unbounded while the walk refuses the spawn.
+    from fno.king.state import at_respawn_ceiling
+
+    spent = tmp_path / "spent.md"
+    spent.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 4\n---\n",
+        encoding="utf-8",
+    )
+    assert at_respawn_ceiling(spent) is True, "absent ceiling defaults to 4"
+
+    under = tmp_path / "under.md"
+    under.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 3\n---\n",
+        encoding="utf-8",
+    )
+    assert at_respawn_ceiling(under) is False
+
+    unbounded = tmp_path / "unbounded.md"
+    unbounded.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 9\nrespawn_ceiling: 0\n---\n",
+        encoding="utf-8",
+    )
+    assert at_respawn_ceiling(unbounded) is False, "explicit 0 stays unbounded"
+
+
+def test_a_corrupt_board_rows_reads_as_first_observation_not_a_raise(tmp_path):
+    # A truncated sidecar write (ints where rows belong) must not raise out
+    # of the tick pass - that strands every scope ordered after this one -
+    # and the pass must rewrite the sidecar with honest rows.
+    import json as _json
+
+    def prime(manifest):
+        _sidecar(manifest).write_text(
+            _json.dumps({"board_hash": "deadbeef", "board_rows": [1, 2, 3]}),
+            encoding="utf-8",
+        )
+
+    rec, summary, manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_A_QUIET, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "no honest diff, no board wake"
+    assert summary["crowns"] == 1, "the pass survived the corrupt sidecar"
+    payload = _json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert payload["board_rows"], "the pass rewrote the rows it could not diff"
+
+
+def test_the_answer_prompt_is_capped_like_the_board_diff(tmp_path):
+    # The prompt rides one argv element: a pasted log in an operator answer
+    # must not push past ARG_MAX and abort the whole pass.
+    from fno.pr_watch._king_wake import MAX_DETAIL_CHARS
+
+    long_answer = "x" * (MAX_DETAIL_CHARS * 2)
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        pre=_seed_cursor,
+        extra={"answered_fn": lambda: [_answered(asker="king-x", answer=long_answer)]},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][3], "the capped prompt still wakes"
+    assert len(rec.dispatches[0][3]) <= MAX_DETAIL_CHARS + 32, len(rec.dispatches[0][3])
+    assert rec.dispatches[0][3].endswith("...(truncated)")
 
 
 # ── the drain loop on the real bus machinery ──────────────────────────────
@@ -722,7 +1351,7 @@ def test_the_wake_fires_on_a_real_bus_row_and_drains_by_cursor(tmp_path, monkeyp
         ask_fn=lambda *a: None,
     )
 
-    assert rec.dispatches == [("epic-x", "mail", "aa11bb22")], f"woke: {rec.dispatches}"
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22", None)], f"woke: {rec.dispatches}"
 
     # The respawned session drains: the ack verb advances the cursor.
     assert advance_cursor("aa11bb22", waking.id) is True

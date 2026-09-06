@@ -14,7 +14,7 @@
 //! hardcoded to `/target --resume` and `Unit.extra_env` was read by nothing,
 //! so the spawned session was a target resume that did not know it was a king.
 //! The lifecycle those defects sat on is now real: manifests are per-scope at
-//! `.fno/kings/<scope>.md`, coronation arms them, `fno agents king done`
+//! `<space>/kings/<scope>.md`, coronation arms them, `fno agents king done`
 //! expires them, and a leftover file is inert without a live registry crown.
 //!
 //! The rebuild fixes the identity split at the source: the walk keys its unit
@@ -90,21 +90,34 @@ pub struct KingQueue {
     /// the CALLER before invoking the walk; an operator running `--wake` by
     /// hand is deliberately bypassing a rate limit, not a safety limit.
     wake: bool,
+    /// Successor mode (`--wake-successor`): the wake fired because the holder
+    /// is GONE, so the dispatch this walk performs is a new king generation -
+    /// exactly what the respawn budget exists to bound. Unlike an ordinary
+    /// wake (a parked holder resuming, normal operation billed to the wake
+    /// ledger alone), a successor bills `respawn_count` and is refused by the
+    /// respawn ceiling like any walk respawn. There is no second respawn
+    /// budget: same counter, same ceiling.
+    successor: bool,
 }
 
 impl KingQueue {
-    /// Read `.fno/kings/<scope>.md` from `repo_root` and construct the queue.
+    /// Read `<space>/kings/<scope>.md` from `repo_root` and construct the queue.
     ///
     /// A missing manifest is an error, not an empty queue. An empty queue
     /// would terminate `NoWork` and report success, which is the
     /// absence-as-evidence trap: "no work" and "nobody told me what I am
     /// watching" would produce the same clean exit.
-    pub fn from_manifest(
+    ///
+    /// The successor modifier is a parameter, not a second constructor: only
+    /// the wake phase passes `true` (a dead holder's replacement); every
+    /// other caller passes `false` and never mints successors.
+    pub fn from_manifest_full(
         repo_root: &Path,
         scope: &str,
         fno_bin: String,
         wake: bool,
         wake_holder: Option<&str>,
+        successor: bool,
     ) -> Result<Self, LoopError> {
         let home = crate::paths::AgentsHome::from_env();
         Self::from_manifest_with_registry(
@@ -113,6 +126,7 @@ impl KingQueue {
             fno_bin,
             wake,
             wake_holder,
+            successor,
             &home.registry_json(),
         )
     }
@@ -121,12 +135,14 @@ impl KingQueue {
     /// decision is unit-testable without mutating process env (a set_var race
     /// against parallel tests reading the same env would test the scheduler,
     /// not the guard).
+    #[allow(clippy::too_many_arguments)]
     pub fn from_manifest_with_registry(
         repo_root: &Path,
         scope: &str,
         fno_bin: String,
         wake: bool,
         wake_holder: Option<&str>,
+        successor: bool,
         registry_path: &Path,
     ) -> Result<Self, LoopError> {
         let scope = scope.trim();
@@ -140,10 +156,7 @@ impl KingQueue {
                 "unsafe king scope for the walk: {scope:?}"
             )));
         }
-        let state_root =
-            crate::paths::canonical_repo_root(repo_root).unwrap_or_else(|| repo_root.to_path_buf());
-        let manifest_path = state_root
-            .join(".fno")
+        let manifest_path = crate::paths::space_dir(repo_root)
             .join("kings")
             .join(format!("{scope}.md"));
         let content = fs::read_to_string(&manifest_path).map_err(|_| {
@@ -202,7 +215,15 @@ impl KingQueue {
             manifest_path,
             billed: false,
             wake,
+            successor,
         })
+    }
+
+    /// Whether this walk's dispatches count against the respawn budget. An
+    /// ordinary wake does not (the caller's wake ledger is its bound); a
+    /// successor does, because each successor IS a king generation.
+    fn respawn_accounted(&self) -> bool {
+        !self.wake || self.successor
     }
 
     /// The walk refuses to respawn another king past the manifest ceiling.
@@ -469,7 +490,7 @@ impl KingQueue {
 
 impl Queue for KingQueue {
     fn next(&mut self) -> Result<Option<Unit>, LoopError> {
-        if !self.wake && self.at_respawn_ceiling() {
+        if self.respawn_accounted() && self.at_respawn_ceiling() {
             return Ok(None);
         }
         // Stays in wake mode too: a spurious trigger over an empty board must
@@ -478,7 +499,7 @@ impl Queue for KingQueue {
         if self.board_actionable()? == 0 {
             return Ok(None);
         }
-        if !self.wake && !self.bill_one_respawn()? {
+        if self.respawn_accounted() && !self.bill_one_respawn()? {
             return Ok(None);
         }
         Ok(Some(Unit {
@@ -498,7 +519,8 @@ impl Queue for KingQueue {
     /// check reports Budget rather than queueing a past-ceiling respawn.
     /// Wake mode drops the ceiling term for the same reason `next()` does.
     fn has_pending(&mut self) -> Result<bool, LoopError> {
-        Ok((self.wake || !self.at_respawn_ceiling()) && self.board_actionable()? > 0)
+        Ok((!self.respawn_accounted() || !self.at_respawn_ceiling())
+            && self.board_actionable()? > 0)
     }
 
     /// Inert close: see the module doc for why this does nothing.
@@ -573,7 +595,7 @@ mod tests {
         // the only bound); reading it as "at ceiling" would refuse every
         // respawn for a scope that deliberately disabled the counter.
         let dir = std::env::temp_dir().join(format!("kingq-{}", std::process::id()));
-        let kings = dir.join(".fno").join("kings");
+        let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         let path = kings.join("k.md");
         fs::write(
@@ -581,18 +603,26 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_ceiling: 0\n---\n",
         )
         .unwrap();
-        let q = KingQueue::from_manifest(&dir, "k", "fno".to_string(), false, None).unwrap();
+        let q = KingQueue::from_manifest_full(&dir, "k", "fno".to_string(), false, None, false)
+            .unwrap();
         assert_eq!(q.respawn_ceiling(), 0);
         assert!(!q.at_respawn_ceiling());
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn refuses_an_unsafe_scope_and_names_the_manifest_it_tried() {
-        let err =
-            KingQueue::from_manifest(Path::new("."), "../escape", "fno".to_string(), false, None)
-                .err()
-                .expect("escape scope must refuse");
+        let err = KingQueue::from_manifest_full(
+            Path::new("."),
+            "../escape",
+            "fno".to_string(),
+            false,
+            None,
+            false,
+        )
+        .err()
+        .expect("escape scope must refuse");
         assert!(err.to_string().contains("unsafe king scope"));
     }
 
@@ -618,7 +648,8 @@ mod tests {
     #[test]
     fn a_live_crown_holder_read_from_the_registry_refuses_the_walk() {
         let dir = std::env::temp_dir().join(format!("kinglive-{}", std::process::id()));
-        let kings = dir.join(".fno").join("kings");
+        fs::create_dir_all(&dir).unwrap();
+        let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         fs::write(kings.join("k.md"), "---\nfno_id: k-1\nscope: epic-x\n---\n").unwrap();
         let registry = write_registry(&dir, "busy", Some("epic-x"));
@@ -639,6 +670,7 @@ mod tests {
             "fno".to_string(),
             false,
             None,
+            false,
             &registry,
         );
         assert!(plain.is_err(), "an ordinary walk never doubles a live row");
@@ -648,6 +680,7 @@ mod tests {
             "fno".to_string(),
             true,
             None,
+            false,
             &registry,
         );
         assert!(
@@ -660,6 +693,7 @@ mod tests {
             "fno".to_string(),
             true,
             Some("reigning-king"),
+            false,
             &registry,
         );
         assert!(
@@ -672,12 +706,14 @@ mod tests {
             "fno".to_string(),
             true,
             Some("someone-else"),
+            false,
             &registry,
         );
         assert!(
             wrong_row.is_err(),
             "naming a row other than the live holder never doubles a live one"
         );
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -724,12 +760,44 @@ mod tests {
     }
 
     #[test]
+    fn a_successor_wake_is_refused_by_the_respawn_ceiling_like_any_walk() {
+        // Wake mode normally drops the ceiling term (the caller's wake ledger
+        // is the bound there); a successor is a king generation, so the
+        // respawn budget binds it. The gate fires before any board read, so
+        // this needs no live fno binary to prove the refusal.
+        let dir = std::env::temp_dir().join(format!("kingsucc-{}", std::process::id()));
+        let kings = crate::paths::space_dir(&dir).join("kings");
+        fs::create_dir_all(&kings).unwrap();
+        fs::write(
+            &kings.join("k.md"),
+            "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 4\nrespawn_ceiling: 4\n---\n",
+        )
+        .unwrap();
+        let mut q = KingQueue::from_manifest_full(
+            &dir,
+            "k",
+            "fno".to_string(),
+            true,
+            Some("reigning-king"),
+            true,
+        )
+        .unwrap();
+        assert!(q.at_respawn_ceiling());
+        assert!(
+            q.next().is_ok_and(|unit| unit.is_none()),
+            "an at-ceiling successor yields no unit, before any board read"
+        );
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn a_concurrent_over_bill_refuses_instead_of_dispatching() {
         // Two walks raced past the stale ceiling check; the loser sees the
         // locked increment return a count PAST the ceiling and must yield no
         // unit. Simulated by bumping the file between construction and next().
         let dir = std::env::temp_dir().join(format!("kingrace-{}", std::process::id()));
-        let kings = dir.join(".fno").join("kings");
+        let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         let path = kings.join("k.md");
         fs::write(
@@ -737,7 +805,8 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 3\nrespawn_ceiling: 4\n---\n",
         )
         .unwrap();
-        let mut q = KingQueue::from_manifest(&dir, "k", "fno".to_string(), false, None).unwrap();
+        let mut q = KingQueue::from_manifest_full(&dir, "k", "fno".to_string(), false, None, false)
+            .unwrap();
         assert!(!q.at_respawn_ceiling(), "3 of 4 is under the ceiling");
         // The concurrent winner bills the ceiling first...
         assert_eq!(bump_respawn_count(&path).unwrap(), 4);
@@ -746,6 +815,7 @@ mod tests {
             !q.bill_one_respawn().unwrap(),
             "the race loser must not dispatch"
         );
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
         fs::remove_dir_all(&dir).ok();
     }
 }
