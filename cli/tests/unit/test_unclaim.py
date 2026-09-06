@@ -93,10 +93,16 @@ def test_unclaim_unknown_node_exits_1(tmp_graph, claims_root):
 # -- lockfile side -----------------------------------------------------------
 
 
-def _acquire(key: str, holder: str, pid: int, root: Path) -> None:
+def _acquire(
+    key: str, holder: str, pid: int, root: Path, pid_provenance: str = "session-prover"
+) -> None:
     # claims_dir(root) appends ".fno/claims"; pass the FNO_CLAIMS_ROOT itself.
+    # The default stamp says 'this fixture's pid is the holder's own process,
+    # provably dead when gone' - the native classifier's stale arm.
     from fno.claims.core import acquire_claim
-    acquire_claim(key=key, holder=holder, pid=pid, root=root)
+    acquire_claim(
+        key=key, holder=holder, pid=pid, pid_provenance=pid_provenance, root=root
+    )
 
 
 def _lock_exists(key: str, root: Path) -> bool:
@@ -107,7 +113,7 @@ def _lock_exists(key: str, root: Path) -> bool:
 def test_unclaim_releases_stale_lockfile(tmp_graph, claims_root):
     _seed(tmp_graph, [_claimed_node()])
     # pid that is certainly not alive => classify() returns "stale".
-    _acquire("node:ab-1234abcd", "target-session:gone", pid=2_000_000_000, root=claims_root)
+    _acquire("node:ab-1234abcd", "target-session:gone", pid=2_000_000_000, pid_provenance="session-prover", root=claims_root)
     assert _lock_exists("node:ab-1234abcd", claims_root)
     result = runner.invoke(app, ["backlog", "unclaim", "ab-1234abcd"])
     assert result.exit_code == 0, result.output

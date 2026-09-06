@@ -177,6 +177,10 @@ pub struct AcquireOpts {
     pub ttl_ms: Option<i64>,
     pub reason: Option<String>,
     pub metadata: Option<Map<String, Value>>,
+    /// Verbatim provenance override, accepted from a caller that already did
+    /// its own proving (the Python acquire's explicit-stamp rule). `None`
+    /// resolves the stamp from the pid's own origin.
+    pub pid_provenance: Option<String>,
     /// Explicit claims ROOT (the dir that contains `.fno/claims`). `None`
     /// resolves by key prefix: global-id keys (`node:`/`dispatch:`/
     /// `reconcile:`/`session:`) route to `$FNO_CLAIMS_ROOT` (else `$HOME`).
@@ -1977,14 +1981,13 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
         // durable pid is a multiplexer that outlives every session it hosts, so
         // the claimant would be vouching for a witness that never leaves. That
         // stamps ambient too, and the TTL stays the lease it claims to be.
-        pid_provenance: Some(
-            if opts.pid.is_some() || !pid_dies_with_session(harness.as_deref()) {
-                "ambient"
-            } else {
-                "session-prover"
+        pid_provenance: Some(match opts.pid_provenance.as_deref() {
+            Some(explicit) => explicit.to_string(),
+            None if opts.pid.is_some() || !pid_dies_with_session(harness.as_deref()) => {
+                "ambient".to_string()
             }
-            .to_string(),
-        ),
+            None => "session-prover".to_string(),
+        }),
         harness,
         metadata: opts.metadata.clone().unwrap_or_default(),
     }

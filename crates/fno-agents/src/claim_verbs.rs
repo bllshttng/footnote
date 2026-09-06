@@ -63,6 +63,10 @@ pub fn run_claim(args: &[String]) -> i32 {
                 None => return 2,
             },
             "--pid-unavailable" => opts.pid_unavailable = true,
+            "--pid-provenance" => match take("--pid-provenance") {
+                Some(p) => opts.pid_provenance = Some(p),
+                None => return 2,
+            },
             "--ttl-ms" => match take("--ttl-ms").and_then(|v| v.parse::<i64>().ok()) {
                 Some(t) => opts.ttl_ms = Some(t),
                 None => return 2,

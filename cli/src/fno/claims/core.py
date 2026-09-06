@@ -210,7 +210,7 @@ def _validate_inputs(
 
 
 def _resolve_pid_provenance(
-    pid: Optional[int], ttl_ms: Optional[int], harness: Optional[str]
+    pid: Optional[int], harness: Optional[str], *, pid_supplied: bool = True
 ) -> str:
     """Classify how a claim's pid was resolved: "session-prover" or "ambient".
 
@@ -238,20 +238,26 @@ def _resolve_pid_provenance(
     ``resolve_harness()`` call to make impossible. It also spares a second full
     ancestor walk: every caller has already resolved this value.
 
-    ``ttl_ms`` gates the walk: provenance is only ever consulted on a TTL
-    claim (PID-liveness claims never expire into the hybrid arm), so a
-    PID-liveness acquire skips the process walk entirely. Like the harness
+    ``ttl_ms`` used to gate the walk (provenance was only consulted on the
+    TTL hybrid arm). The native PID-ABSENT arm reads the stamp too, so a
+    self-held no-TTL claim must earn it the same way: without that, every
+    Python-written pid-liveness claim stamps ambient, a dead holder reads
+    Suspect forever (a no-TTL Suspect has no expiry path), and the claim is
+    never reclaimable - the machine-wide ``update:fno`` guard bricked exactly
+    so. A DEFAULTED pid (``pid_supplied=False``) is this process itself, so
+    the claimant vouches for it directly, gated on the harness dying with
+    the session (mirrors the Rust ``AcquireOpts`` rule). Like the harness
     resolution, callers invoke this OUTSIDE the recovery mutex - the walk has
     no business on a critical section every other acquirer polls on.
     """
-    if pid is None or ttl_ms is None:
+    if pid is None:
         return "ambient"
     try:
         from .session_pid import pid_dies_with_session, resolve_session_pid
 
         if not pid_dies_with_session(harness):
             return "ambient"
-        if resolve_session_pid(from_pid=os.getpid()) != pid:
+        if pid_supplied and resolve_session_pid(from_pid=os.getpid()) != pid:
             return "ambient"
         return "session-prover"
     except Exception:  # noqa: BLE001 - an unprovable pid is ambient, never an error
@@ -403,7 +409,12 @@ def acquire_claim(
     # the prover or stays ambient - a writer that cannot reach the prover
     # records the pid it has with "ambient" rather than lying.
     if pid_provenance is None:
-        pid_provenance = _resolve_pid_provenance(pid, ttl_ms, harness)
+        # The effective pid (a defaulted one is this process, which the
+        # provenance rule vouches for directly); the flag tells it which.
+        effective_pid = None if pid_unavailable else (pid if pid is not None else os.getpid())
+        pid_provenance = _resolve_pid_provenance(
+            effective_pid, harness, pid_supplied=pid is not None
+        )
 
     new_claim = _make_claim(
         key, holder, ttl_ms, reason, metadata, pid, host, harness,
@@ -738,7 +749,9 @@ def compare_and_rebind(
     resolved_harness = new_harness if new_harness is not None else resolve_self_identity().harness
     # Same placement, same reason: the rebind rewrites the pid, so its
     # provenance is earned here against the prover or it resets to ambient.
-    resolved_provenance = _resolve_pid_provenance(new_pid, ttl_ms, resolved_harness)
+    resolved_provenance = _resolve_pid_provenance(
+        npid, resolved_harness, pid_supplied=new_pid is not None
+    )
     recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
     acquired_lock = False
     recovery_token = ""
@@ -1272,7 +1285,7 @@ def refresh_claim(
                 # acquire had just stopped writing. Re-derive it against the
                 # record's OWN harness, which a rebind-less refresh keeps.
                 new_pid_provenance=_resolve_pid_provenance(
-                    anchor_pid, window, existing.harness
+                    anchor_pid, existing.harness
                 ),
                 keep_acquired_at=True,
             )

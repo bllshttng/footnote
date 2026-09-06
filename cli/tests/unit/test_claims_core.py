@@ -383,15 +383,25 @@ class TestPidProvenanceStamping:
             foreign.wait()
 
     def test_no_pid_ttl_claim_stamps_ambient_without_walking(self, tmp_path, monkeypatch):
-        """A defaulted pid is the transient acquiring subprocess: ambient, and
-        no process walk is paid for it (provenance is only read on TTL claims,
-        but a transient pid can never earn session-proven anyway)."""
+        """A defaulted pid is this process: the claimant vouches for it
+        directly (the Rust AcquireOpts rule), so no process walk is paid for
+        it. The voucher is gated on the harness dying with the session: under
+        a shared-host harness the pid is a multiplexer that outlives every
+        session, and the stamp falls back to ambient."""
         def _boom(**_kw):
             raise AssertionError("no walk should run for a defaulted pid")
 
         monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid", _boom)
+        monkeypatch.setattr(
+            "fno.claims.session_pid.pid_dies_with_session", lambda harness: False
+        )
         claim = acquire_claim("node:x-2", HOLDER_A, ttl_ms=60_000, root=tmp_path)
         assert claim.pid_provenance == "ambient"
+        monkeypatch.setattr(
+            "fno.claims.session_pid.pid_dies_with_session", lambda harness: True
+        )
+        claim = acquire_claim("node:x-2b", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+        assert claim.pid_provenance == "session-prover"
 
     def test_pid_liveness_claim_skips_the_walk(self, tmp_path, monkeypatch):
         """PID-liveness claims never reach the expired-TTL arm, so provenance

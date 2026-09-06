@@ -182,19 +182,18 @@ def test_acquire_omitted_pid_with_ttl_is_explicitly_unavailable(cwd_tmp, monkeyp
 
 
 def test_acquire_explicit_pid_overrides_session_default(cwd_tmp, monkeypatch):
-    # An explicit --pid always wins; resolve_session_pid is never consulted.
-    called = {"n": 0}
-
-    def _should_not_run(from_pid=None):
-        called["n"] += 1
+    # An explicit --pid always wins as the RECORDED pid. The prover may run
+    # to try earning provenance for it; a pid that is not this process's own
+    # session pid (4242 never matches) stamps ambient.
+    def _never_matches(from_pid=None):
         return 4242
 
-    monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid", _should_not_run)
+    monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid", _never_matches)
     result = runner.invoke(cli, ["acquire", "k", "--holder", "h",
                                  "--pid", str(os.getppid()), "--json"])
     assert result.exit_code == 0
     assert json.loads(result.output)["pid"] == os.getppid()
-    assert called["n"] == 0
+    assert json.loads(result.output)["pid_provenance"] == "ambient"
 
 
 def test_acquire_invalid_ttl_format(cwd_tmp):

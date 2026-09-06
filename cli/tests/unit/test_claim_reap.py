@@ -282,7 +282,7 @@ class TestReapDeadClaims:
         """The load-bearing case. A real process, really killed, never released."""
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
-            acquire_claim("node:x-killed", HOLDER_A, pid=proc.pid, root=tmp_path)
+            acquire_claim("node:x-killed", HOLDER_A, pid=proc.pid, pid_provenance="session-prover", root=tmp_path)
             proc.kill()
             proc.wait(timeout=10)
         finally:
@@ -392,8 +392,8 @@ class TestReapDeadClaims:
     def test_AC2_FR_both_roots_swept_in_one_run(self, tmp_path):
         root_a = tmp_path / "a"
         root_b = tmp_path / "b"
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=root_a)
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=root_b)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=root_a)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=root_b)
 
         summary = reap_dead_claims(roots=[root_a, root_b], apply=True)
 
@@ -405,7 +405,7 @@ class TestReapDeadClaims:
     def test_roots_deduped_by_resolve(self, tmp_path):
         """A root passed twice (e.g. the cwd-local root already being the
         global one) must be swept once, not twice."""
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path)
 
         summary = reap_dead_claims(roots=[tmp_path, tmp_path], apply=True)
 
@@ -447,7 +447,7 @@ class TestReapDeadClaims:
 
     def test_AC5_EDGE_failed_move_reported_not_reaped(self, tmp_path, monkeypatch):
         """The positive-marker rule: a no-op archive_claim must not count as reaped."""
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path)
 
         monkeypatch.setattr("fno.claims.core.archive_claim", lambda path, ts_ms: path)
 
@@ -466,8 +466,8 @@ class TestReapDeadClaims:
         claim is still reapable."""
         from fno.claims.io import archive_claim as real_archive_claim
 
-        acquire_claim("bad", HOLDER_A, pid=_dead_pid(), root=tmp_path)
-        acquire_claim("good", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        acquire_claim("bad", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path)
+        acquire_claim("good", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path)
 
         def _archive_or_raise(path, ts_ms):
             if "bad" in str(path):
@@ -494,7 +494,7 @@ class TestReapDeadClaims:
         call's own rename worked."""
         from fno.claims.io import archive_claim as real_archive_claim
 
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path)
 
         def _archive_then_race(path, ts_ms):
             result = real_archive_claim(path, ts_ms=ts_ms)
@@ -538,7 +538,7 @@ class TestReapDeadClaims:
         # of the root, so a test reading the cwd-derived journal back has to
         # name that same file.
         monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path)
 
         summary = reap_dead_claims(roots=[tmp_path], apply=False)
 
@@ -565,7 +565,7 @@ class TestReapDeadClaims:
         assert swept == []
 
     def test_second_apply_run_is_idempotent(self, tmp_path):
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path)
 
         first = reap_dead_claims(roots=[tmp_path], apply=True)
         second = reap_dead_claims(roots=[tmp_path], apply=True)
@@ -611,7 +611,7 @@ class TestReapDeadClaims:
 
 class TestIdempotentReacquireVsReapRecoveryMutex:
     def test_idempotent_reacquire_waits_for_reaps_recovery_mutex(self, tmp_path):
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path)
         path = claim_path("k", root=tmp_path)
         recovery_lock = path.with_name(path.name + ".recovery.d")
 
@@ -654,7 +654,7 @@ class TestIdempotentReacquireVsReapRecoveryMutex:
         now-stale ``existing`` it read before ever touching the mutex."""
         from fno.claims import core as claims_core
 
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path)
         real_read = claims_core.read_claim_file
         calls = {"n": 0}
 
@@ -739,7 +739,7 @@ class TestRefreshClaimVsReapRecoveryMutex:
 class TestReaderReportsFilteredCount:
     def test_AC7_counts_reconcile_with_lockfile_count(self, tmp_path):
         for i in range(5):
-            acquire_claim(f"k{i}", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+            acquire_claim(f"k{i}", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path)
         acquire_claim("k-live", HOLDER_A, pid=os.getpid(), root=tmp_path)
 
         rows, counts, states_by_key = list_claims_with_counts(root=tmp_path)
@@ -756,7 +756,7 @@ class TestReaderReportsFilteredCount:
 
     def test_cli_list_does_not_print_bare_no_claims_string(self, cwd_tmp):
         for i in range(3):
-            acquire_claim(f"k{i}", HOLDER_A, pid=_dead_pid(), root=cwd_tmp)
+            acquire_claim(f"k{i}", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=cwd_tmp)
 
         result = runner.invoke(cli, ["list"])
 
@@ -781,7 +781,7 @@ class TestReaderReportsFilteredCount:
 
 class TestReapCliVerb:
     def test_dry_run_is_the_default(self, cwd_tmp):
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=cwd_tmp)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=cwd_tmp)
 
         result = runner.invoke(cli, ["reap"])
 
@@ -790,7 +790,7 @@ class TestReapCliVerb:
         assert claim_path("k", root=cwd_tmp).exists()
 
     def test_apply_archives_and_exits_zero(self, cwd_tmp):
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=cwd_tmp)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=cwd_tmp)
 
         result = runner.invoke(cli, ["reap", "--apply"])
 
@@ -799,7 +799,7 @@ class TestReapCliVerb:
         assert not claim_path("k", root=cwd_tmp).exists()
 
     def test_apply_exits_nonzero_when_a_move_is_not_confirmed(self, cwd_tmp, monkeypatch):
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=cwd_tmp)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=cwd_tmp)
         monkeypatch.setattr("fno.claims.core.archive_claim", lambda path, ts_ms: path)
 
         result = runner.invoke(cli, ["reap", "--apply"])
@@ -807,7 +807,7 @@ class TestReapCliVerb:
         assert result.exit_code == 1
 
     def test_json_output_is_parseable(self, cwd_tmp):
-        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=cwd_tmp)
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), pid_provenance="session-prover", root=cwd_tmp)
         import json
 
         result = runner.invoke(cli, ["reap", "--json"])
@@ -932,7 +932,7 @@ class TestAbandonmentProbe:
         """A SUSPECT node claim on disk: dead pid, TTL still open."""
         acquire_claim(
             key=key, holder="target-session:s", ttl_ms=3_600_000,
-            pid=_dead_pid(), root=tmp_path,
+            pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path,
         )
 
     def test_without_a_probe_nothing_changes(self, tmp_path):
@@ -983,7 +983,7 @@ class TestAbandonmentProbe:
 
         acquire_claim(
             key="dispatch:x-one", holder="spawn-cli:1", ttl_ms=180_000,
-            pid=_dead_pid(), root=tmp_path,
+            pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path,
         )
         summary = reap_dead_claims(
             roots=[tmp_path], apply=False, abandonment_probe=_boom
@@ -1138,7 +1138,7 @@ class TestCliProbeWiring:
     def test_a_blind_roster_never_reaps_and_says_so(self, tmp_path, monkeypatch):
         acquire_claim(
             key="node:x-blind", holder="target-session:s", ttl_ms=3_600_000,
-            pid=_dead_pid(), root=tmp_path,
+            pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path,
         )
         self._fake_roster(monkeypatch, rows=[], warnings=["claude not on PATH"])
         r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
@@ -1150,7 +1150,7 @@ class TestCliProbeWiring:
         nothing to have found the worker in."""
         acquire_claim(
             key="node:x-empty", holder="target-session:s", ttl_ms=3_600_000,
-            pid=_dead_pid(), root=tmp_path,
+            pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path,
         )
         self._fake_roster(monkeypatch, rows=[])
         r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
@@ -1168,7 +1168,7 @@ class TestCliProbeWiring:
 
         acquire_claim(
             key="node:x-abandoned", holder="target-session:sid-gone", ttl_ms=3_600_000,
-            pid=_dead_pid(), root=tmp_path,
+            pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path,
         )
         self._fake_roster(
             monkeypatch,
@@ -1189,7 +1189,7 @@ class TestCliProbeWiring:
 
         acquire_claim(
             key="node:x-lying", holder="target-session:sid-busy", ttl_ms=3_600_000,
-            pid=_dead_pid(), root=tmp_path,
+            pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path,
         )
         self._fake_roster(
             monkeypatch,
@@ -1204,7 +1204,7 @@ class TestCliProbeWiring:
 
         acquire_claim(
             key="node:x-busy2", holder="target-session:sid-busy", ttl_ms=3_600_000,
-            pid=_dead_pid(), root=tmp_path,
+            pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path,
         )
         self._fake_roster(
             monkeypatch,
@@ -1224,7 +1224,7 @@ class TestCliProbeWiring:
 
         acquire_claim(
             key="node:x-codex", holder="target-session:sid-codex", ttl_ms=3_600_000,
-            pid=_dead_pid(), root=tmp_path,
+            pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path,
         )
         # Forty rows scanned, none of them able to represent this holder.
         self._fake_roster(
@@ -1243,7 +1243,7 @@ class TestCliProbeWiring:
 
         acquire_claim(
             key="node:x-odd", holder="some-foreign-holder-shape", ttl_ms=3_600_000,
-            pid=_dead_pid(), root=tmp_path,
+            pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path,
         )
         self._fake_roster(
             monkeypatch,
@@ -1363,7 +1363,7 @@ class TestExternalDeathEvidence:
         )
         acquire_claim(
             key="node:x-3f84", holder="target-session:sid-3f84",
-            ttl_ms=3_600_000, pid=_dead_pid(), root=tmp_path,
+            ttl_ms=3_600_000, pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path,
         )
         r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
         assert "would reap 1" in r.output
@@ -1381,7 +1381,7 @@ class TestExternalDeathEvidence:
         monkeypatch.setattr("fno.agents.watchdog.fleet_rows", _always_degraded)
         acquire_claim(
             key="node:x-dead-roster", holder="target-session:sid-1",
-            ttl_ms=3_600_000, pid=_dead_pid(), root=tmp_path,
+            ttl_ms=3_600_000, pid=_dead_pid(), pid_provenance="session-prover", root=tmp_path,
         )
         r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
         assert "would reap 0" in r.output

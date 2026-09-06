@@ -316,7 +316,8 @@ def test_python_stale_rust_reclaims_archives_and_audits(tmp_path: Path) -> None:
 def test_rust_stale_python_reclaims_and_archives(tmp_path: Path, monkeypatch) -> None:
     # Rust writes a claim anchored to a now-dead pid...
     r = rust("acquire", "session:stale-b", tmp_path, tmp_path,
-             "--holder", "pty:dead", "--pid", str(dead_pid()))
+             "--holder", "pty:dead", "--pid", str(dead_pid()),
+             "--pid-provenance", "session-prover")
     assert r.returncode == 0, r.stderr
     # ...Python observes it stale and reclaims it.
     monkeypatch.chdir(tmp_path)  # Python audit events land in <cwd>/.fno/events.jsonl
