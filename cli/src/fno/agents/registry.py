@@ -2071,9 +2071,9 @@ def register_existing_session(
         # the operator's own session env would record a self-edge. ADOPTED
         # rows are different (x-5283 LD3): adoption is vouching, not
         # spawning, so the captured session lands on adopted_by_session and
-        # the spawned_by_* edge stays empty. The identity guard below covers
-        # every OTHER self-registration caller: a row whose captured parent
-        # IS its own session id never stamps itself as its own parent.
+        # the spawned_by_* edge stays empty. The identity guard covers every
+        # OTHER self-registration caller: a row never stamps itself as its
+        # own parent.
         _sb_session = _sb_harness = _sb_cwd = None
         _adopted_by = None
         if origin != "operator":

@@ -1456,26 +1456,19 @@ def _king_share(cap: int, crowned: set[str], caller: str) -> int:
 def share_reading(census_obj: "LiveCensus", cap: int, caller: Optional[str]) -> dict:
     """One share reading, printed by every surface that answers the question.
 
-    ``kings``/``king_sessions``/``share``/``held``/``held_rows`` (the
-    caller's worker rows, by name) and ``unattributed`` (the LD4 bucket:
-    live rows that name nobody, count plus names). An unreadable registry
-    returns None for every count, never zero (x-5283 AC9).
+    ``kings``/``share``/``held``/``held_rows`` (the caller's worker rows, by
+    name) and ``unattributed`` (the LD4 bucket: live rows that name nobody,
+    count plus names). An unreadable registry returns None for every count,
+    never zero (x-5283 AC9).
     """
     if not census_obj.registry_readable:
-        return {
-            "kings": None,
-            "king_sessions": None,
-            "share": None,
-            "held": None,
-            "held_rows": None,
-            "unattributed": None,
-        }
+        return {"kings": None, "share": None, "held": None,
+                "held_rows": None, "unattributed": None}
     king_sessions = set(census_obj.crowned_sessions)
     unattributed_rows = census_obj.worker_rows.get(None, [])
     held_rows = list(census_obj.worker_rows.get(caller, [])) if caller else []
     return {
         "kings": len(king_sessions),
-        "king_sessions": sorted(king_sessions),
         "share": _king_share(cap, king_sessions, caller or ""),
         "held": len(held_rows),
         "held_rows": held_rows,

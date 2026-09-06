@@ -254,21 +254,16 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     }
 
 
-def crowned_sessions(rows: Optional[list] = None) -> set[str]:
+def crowned_sessions(rows: list) -> set[str]:
     """The sessions that hold a crown, read the way ``gather_court`` reads.
 
     Same non-terminal rows, same ``crown_level`` field: a row is a king here
     iff it is a king in the court (x-5283 LD1). The spawn gate divides
-    ``max_live`` by this set. An unreadable registry yields an empty set;
+    ``max_live`` by this set; an unreadable registry yields an empty set and
     callers guard readability themselves.
     """
-    from fno.agents.registry import TERMINAL_STATUSES, load_registry
+    from fno.agents.registry import TERMINAL_STATUSES
 
-    if rows is None:
-        try:
-            rows = load_registry()
-        except Exception:
-            return set()
     return {
         row.harness_session_id
         for row in rows
