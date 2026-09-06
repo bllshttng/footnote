@@ -297,37 +297,26 @@ def parse_manifest(path: Path) -> dict[str, str]:
     return out
 
 
+def _manifest_int(manifest: dict[str, str], key: str, default: int) -> int:
+    raw = manifest.get(key)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 def respawn_ceiling(path: Path) -> int:
     """Read the manifest ceiling with the Rust walk's default semantics."""
-    manifest = parse_manifest(path)
-
-    def _int(key: str, default: int) -> int:
-        raw = manifest.get(key)
-        if not raw:
-            return default
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return default
-
-    return _int("respawn_ceiling", DEFAULT_RESPAWN_CEILING)
+    return _manifest_int(parse_manifest(path), "respawn_ceiling", DEFAULT_RESPAWN_CEILING)
 
 
 def at_respawn_ceiling(path: Path) -> bool:
     """Whether the respawn budget is spent; the Rust walk is the authority."""
     manifest = parse_manifest(path)
-
-    def _int(key: str, default: int) -> int:
-        raw = manifest.get(key)
-        if not raw:
-            return default
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return default
-
-    ceiling = respawn_ceiling(path)
-    return ceiling > 0 and _int("respawn_count", 0) >= ceiling
+    ceiling = _manifest_int(manifest, "respawn_ceiling", DEFAULT_RESPAWN_CEILING)
+    return ceiling > 0 and _manifest_int(manifest, "respawn_count", 0) >= ceiling
 
 
 @dataclass
