@@ -2515,6 +2515,14 @@ fn is_do_stamp_terminal(reason: &str) -> bool {
 ///
 /// Log-only and never retried: a guard skip is a designed outcome, and retrying
 /// one would spin.
+///
+/// Also the do row's CLOSE, not only its backstop open: it now passes
+/// `--ended-at` alongside `--started-at`, so a do row that `claim release
+/// --stamp-do` never closed (the common case - a do session's claim is
+/// commonly freed by something other than `release`) still gets `ended_at`
+/// here, at its own finish line. `append_session_record`'s duplicate-fill is
+/// the same one `release --stamp-do` uses: it fills only timestamps the row
+/// left open, so when release already closed the row this is a no-op.
 fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
     let Some(node) = m.graph_node_id.as_deref() else {
         return;
@@ -2543,14 +2551,15 @@ fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
         );
     }
 
-    let mut cmd = Command::new("fno");
-    cmd.args(["backlog", "session", "add", node, "--phase", "do"]);
-    cmd.args(["--require-session", session]);
-    if let Some(plan) = m.plan_path.as_deref() {
-        cmd.args(["--guard-plan", plan]);
-    }
-    cmd.args(["--started-at", created_at]);
-    let ok = cmd
+    let args = do_stamp_args(
+        node,
+        session,
+        m.plan_path.as_deref(),
+        created_at,
+        &now_rfc3339_utc(),
+    );
+    let ok = Command::new("fno")
+        .args(&args)
         .current_dir(cwd)
         .status()
         .map(|s| s.success())
@@ -2558,6 +2567,36 @@ fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
     if !ok {
         eprintln!("finalize: do stamp failed for node {node} (non-fatal)");
     }
+}
+
+/// Pure argument-vector builder for the `do` row stamp, split out so the
+/// `--ended-at` flag is assertable without a subprocess.
+fn do_stamp_args(
+    node: &str,
+    session: &str,
+    plan_path: Option<&str>,
+    started_at: &str,
+    ended_at: &str,
+) -> Vec<String> {
+    let mut args = vec![
+        "backlog".to_string(),
+        "session".to_string(),
+        "add".to_string(),
+        node.to_string(),
+        "--phase".to_string(),
+        "do".to_string(),
+        "--require-session".to_string(),
+        session.to_string(),
+    ];
+    if let Some(plan) = plan_path {
+        args.push("--guard-plan".to_string());
+        args.push(plan.to_string());
+    }
+    args.push("--started-at".to_string());
+    args.push(started_at.to_string());
+    args.push("--ended-at".to_string());
+    args.push(ended_at.to_string());
+    args
 }
 
 /// True when `initial_head..HEAD` holds a non-merge commit on HEAD's own
@@ -3441,6 +3480,34 @@ mod tests {
         for planner in ["Budget", "NoProgress", "Interrupted", "NoWork"] {
             assert!(!is_do_stamp_terminal(planner), "{planner} must not stamp");
         }
+    }
+
+    #[test]
+    fn do_stamp_args_carries_ended_at() {
+        let args = do_stamp_args(
+            "x-2146",
+            "sess-1",
+            Some("plan.md"),
+            "2026-09-06T18:00:00Z",
+            "2026-09-06T18:30:00Z",
+        );
+        assert!(args.contains(&"--started-at".to_string()));
+        assert!(args.contains(&"2026-09-06T18:00:00Z".to_string()));
+        assert!(args.contains(&"--ended-at".to_string()));
+        assert!(args.contains(&"2026-09-06T18:30:00Z".to_string()));
+        assert!(args.contains(&"--guard-plan".to_string()));
+    }
+
+    #[test]
+    fn do_stamp_args_omits_guard_plan_when_absent() {
+        let args = do_stamp_args(
+            "x-2146",
+            "sess-1",
+            None,
+            "2026-09-06T18:00:00Z",
+            "2026-09-06T18:30:00Z",
+        );
+        assert!(!args.contains(&"--guard-plan".to_string()));
     }
 
     // ── x-1951: arm auto-merge at the green gate, not at PR creation ────────
