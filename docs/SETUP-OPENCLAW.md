@@ -35,7 +35,7 @@ Verify:
 ls ~/.openclaw/workspace/skills/footnote/ | head -5
 ```
 
-Invoking `openclaw -p "/think what should I build next"` now loads the `think` skill and runs it. Every skill marked `OOTB` for the `OC` column in [SKILL-COMPAT-MATRIX.md](./SKILL-COMPAT-MATRIX.md) works at this point. The loop family needs the next two steps.
+Invoking `openclaw -p "/think what should I build next"` now loads the `think` skill and runs it. The `openclaw` column in [docs/harnesses/verb-matrix.md](./harnesses/verb-matrix.md) reads `unmeasured` on every verb until a capability row is measured for it; [SKILL-COMPAT-MATRIX.md](./SKILL-COMPAT-MATRIX.md) explains the cells. The loop family needs the next two steps.
 
 ## 2. Install the loop wrapper
 
