@@ -61,6 +61,7 @@ use crate::vt::{self, frame_text, Modes};
 mod agent_actions;
 mod agent_rows_join;
 mod pane_identity;
+mod pane_reseat;
 mod portal_reach;
 mod squad_sync;
 

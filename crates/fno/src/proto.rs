@@ -310,7 +310,9 @@ fn default_true() -> bool {
 /// v69 (x-a600): `Command::RedrawPane`, `#[serde(default)]`; floor stays 58.
 /// v71 (prune sync): `ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`
 /// (handshake stops the skew) and the additive `PaneInfo.orphaned_worker`.
-pub const PROTO_VERSION: u32 = 71;
+/// v72 (x-867b): `ControlVerb::ThreadReseat` - the re-seat move (a live
+/// pane-hosted worker becomes a portal seat, keeping its PTY); floor stays 58.
+pub const PROTO_VERSION: u32 = 72;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -4061,8 +4063,9 @@ mod tests {
         // 66 -> 67. `LayoutSlot.cwd` (x-5baf) bumps it 67 -> 68.
         // `Command::RedrawPane` (x-a600) bumps it 68 -> 69. The prune
         // reload pair (`ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`)
-        // bumps it 69 -> 71.
-        assert_eq!(PROTO_VERSION, 71);
+        // bumps it 69 -> 71. The ThreadReseat control verb (x-867b) takes 72,
+        // so the version never moves backwards whichever branch lands first.
+        assert_eq!(PROTO_VERSION, 72);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
