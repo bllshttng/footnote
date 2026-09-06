@@ -40,6 +40,7 @@ fn print_help_lists_every_routable_verb() {
         "subscribe",
         "digest",
         "needs",
+        "feed",
     ];
     let listed: std::collections::HashSet<&str> = CLIENT_VERB_USAGE
         .iter()
