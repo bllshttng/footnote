@@ -1995,9 +1995,9 @@ class SpawnDefaultsBlock(BaseModel):
     The bottom-most operator rung of the spawn precedence chain: an explicit
     CLI flag > these defaults > the built-in (provider: harness-inference then
     claude). Every bare `fno agents spawn` / `/agent spawn` inherits any field
-    set here, injected field-by-field at the Python dispatch seam. Empty string
-    = unset (the `spawn_permission_mode` convention); an unset field falls
-    through to the built-in exactly as today.
+    set here, injected field-by-field at the Python dispatch seam. Empty
+    string = unset; an unset field falls through to the built-in exactly as
+    today.
 
     These defaults reach every spawn that has not pinned a field, including
     autonomous dispatch (`/target`, think dispatch, backlog advance); an explicit
@@ -2453,14 +2453,6 @@ class AgentsBlock(SweepKeys):
     # capacity (a fraction per core) instead of the old hardcoded 1.0, which
     # asked a 12-core machine's fleet to idle at 8% utilisation.
     footprint_sustained_cpu_cores: Optional[float] = None
-    # Default permission/approval mode for AUTONOMOUS dispatchers only
-    # (dispatch-node.sh / `fno backlog advance` / `/think dispatch`). Defaults to
-    # bypass so a fire-and-forget worker enters its worktree without a prompt
-    # nobody attends. An explicit --permission-mode flag wins. Opt out with an
-    # explicit "" (forward nothing -> claude's normal prompting) or "default"
-    # (prompting, expressed positively). Interactive `fno agents spawn` does NOT
-    # read this. Claude-native value, fail-closed at the spawn seam, never here.
-    spawn_permission_mode: str = "bypassPermissions"
 
     @field_validator("profiles", mode="before")
     @classmethod
@@ -2557,6 +2549,14 @@ class AgentsBlock(SweepKeys):
             data = {**data, "provider_limits": data["max_lanes"]}
             data.pop("max_lanes")
         return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_spawn_permission_mode(cls, data: object) -> object:
+        """Migrate a retired `agents.spawn_permission_mode`; body in `_legacy_permission_mode.py`."""
+        from fno.config._legacy_permission_mode import accept_legacy_spawn_permission_mode
+
+        return accept_legacy_spawn_permission_mode(data)
 
     @field_validator("provider_limits", mode="before")
     @classmethod

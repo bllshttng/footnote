@@ -85,8 +85,8 @@ NOT_STALE = "not-stale"
 # loop on any user message. This is now ONLY the CLI-arg seed passed to a fresh
 # ``claude --bg --resume <uuid>`` (the failover/revive path); it is NOT a socket
 # inject. The held socket nudge was removed in x-d93d: a bypassPermissions
-# recipient (which every autonomous /target worker is, via the
-# ``spawn_permission_mode`` default) holds every cross-session message by design.
+# recipient (which every autonomous /target worker is, via the built-in
+# unattended default) holds every cross-session message by design.
 CONTINUE_MESSAGE = "keep going"
 # A finished-but-lingering session is surfaced to the operator to CLOSE (run its
 # retro, then /stop), not to resume. Routed over an OS notification, not the
@@ -493,8 +493,8 @@ def recovery_sweep(
                 # honest action is to surface the stuck session once for the
                 # operator.
 
-        # x-d93d: the recipient is a bypass bg /target worker
-        # (``spawn_permission_mode`` default), so a socket nudge is held by
+        # x-d93d: the recipient is a bypass bg /target worker (the built-in
+        # unattended default), so a socket nudge is held by
         # Claude Code's ``crossSessionInbound`` guard and would stack an operator
         # dialog without recovering anything. Do NOT send. A node-bound worker
         # that is genuinely stuck is surfaced (bounded by ``max_nudges``, then

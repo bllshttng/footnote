@@ -130,11 +130,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# x-dfa4: config default for autonomous dispatch (config.agents.spawn_permission_mode).
-# An explicit --permission-mode flag wins; empty + config-unset = unchanged. A
-# stale `fno` that rejects the unmodeled key degrades to empty (fail-safe).
+# x-dfa4: config default for autonomous dispatch. An explicit --permission-mode
+# flag wins; else config.agents.defaults.permission_mode; else the built-in
+# unattended answer (x-7198; a shell dispatcher cannot import
+# SPAWN_PERMISSION_BUILTIN in spawn_defaults.py, so the literal is duplicated
+# here - a future change to one is a visible mismatch with the other). A stale
+# `fno` degrades to empty (fail-safe), which still falls through to the literal.
 if [[ -z "$PERMISSION_MODE" ]]; then
-  PERMISSION_MODE="$(fno config get agents.spawn_permission_mode 2>/dev/null | tr -d '[:space:]' || true)"
+  PERMISSION_MODE="$(fno config get agents.defaults.permission_mode 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ -z "$PERMISSION_MODE" ]]; then
+    PERMISSION_MODE="bypassPermissions"
+  fi
 fi
 
 # x-8151: the merge-posture machinery this file used to carry (the per-node

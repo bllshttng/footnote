@@ -168,7 +168,15 @@ set -euo pipefail
 # its only session-start mention, the same shape as the workspace-restore and
 # demand-signal raises. The row was compressed to neighbor idiom first
 # ("Reign as the crowned king", -22 B). 55 is the measured residue, zero spare.
-CEILING_BYTES=39695
+# +16 (39695 -> 39711), measured 2026-09-06 (x-7198): the mesh-spawn row in
+# skills/using-fno/SKILL.md gained one clause naming the new unattended
+# `--permission-mode` built-in (agents.defaults.permission_mode collapsed the
+# old spawn_permission_mode key onto it) - the fact a verb-seeded spawn is no
+# longer left in unpinned auto mode belongs on this row, the sole session-start
+# mention of the spawn seam. Trimmed from 265 to 133 measured bytes first
+# (dropped the "seedless seed resolves nothing" clause as inferable); 16 is
+# the residue, zero spare.
+CEILING_BYTES=39711
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.

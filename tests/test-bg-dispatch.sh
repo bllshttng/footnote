@@ -227,8 +227,9 @@ case "$sub $verb" in
     printf '{"harness":"%s","substrate":"%s","command":"%s"}\n' "$h" "${pair##*/}" "$cmd" ;;
   "config get")
     # x-4391/x-4be1: only auto_merge.grant is modeled; every other key (e.g.
-    # agents.spawn_permission_mode) falls through to empty, matching prod's
-    # "unset => empty" so the permission-mode read stays a no-op under the mock.
+    # agents.defaults.permission_mode) falls through to empty here, matching
+    # prod's "config-unset => empty" - the dispatcher's own literal fallback
+    # (x-7198) then supplies bypassPermissions on top of that empty read.
     key="${3:-}"
     if [[ "$key" == "auto_merge.grant" ]]; then
       [[ -f "$S/cfg_auto_merge_err" ]] && { echo "unknown config key 'auto_merge.grant'" >&2; exit 1; }
@@ -829,6 +830,16 @@ out="$(bash "$DISPATCH" --dry-run --permission-mode acceptEdits ab-aaaa1111 2>&1
 echo "$out" | grep -q -- "--permission-mode acceptEdits" \
   && pass "x-a5e4 P2: claude spawn still forwards --permission-mode" \
   || fail "x-a5e4 P2: claude should forward --permission-mode: $out"
+
+# ---- x-7198: neither --permission-mode NOR agents.defaults.permission_mode
+#      is set - the claude leg must still fall back to the built-in
+#      bypassPermissions, not drop the flag (the mock's "config get" returns
+#      empty for this key, matching a real unset config) ----
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
+echo "$out" | grep -q -- "--permission-mode bypassPermissions" \
+  && pass "x-7198: claude spawn falls back to bypassPermissions when unset" \
+  || fail "x-7198: claude spawn should fall back to bypassPermissions: $out"
 
 # ---- x-567d AC2-ERR: no autonomous substrate (resolve fails) -> hard-fail
 #      naming config.dispatch.harness, node NOT launched ----

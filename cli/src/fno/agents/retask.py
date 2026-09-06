@@ -227,11 +227,14 @@ def resolve_target_coordinate(
     if effort is not None:
         args += ["--effort", effort]
     args.append(f"/fno:target {node}")
+    # x-7198: a probe, not a real dispatch - the builtin rung would otherwise
+    # read as an explicit override and force every retask to respawn.
     resolved = inject_spawn_defaults(
         args,
         settings=settings,
         env=env,
         stderr=io.StringIO(),
+        apply_permission_builtin=False,
     )
     harness = _flag_value(resolved, "--harness", "-H")
     if not harness:

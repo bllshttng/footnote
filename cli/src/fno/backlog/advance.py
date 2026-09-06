@@ -1465,12 +1465,17 @@ def _spawn_worker(
     # default, byte-identical to today.
     if model:
         cmd += ["--model", model]
-    # x-dfa4: an explicit permission_mode wins; else the autonomous-dispatcher
-    # config default (config.agents.spawn_permission_mode). Both empty = unchanged.
+    # x-dfa4: an explicit permission_mode wins; else the operator's spawn
+    # default (config.agents.defaults.permission_mode); else the built-in
+    # unattended answer (x-7198). Never unset for a claude dispatch below.
     mode = (permission_mode or "").strip()
     if not mode and settings_obj is not None:
         try:
-            mode = (settings_obj.agents.spawn_permission_mode or "").strip()
+            from fno.agents.spawn_defaults import SPAWN_PERMISSION_BUILTIN
+
+            mode = (
+                settings_obj.agents.defaults.permission_mode or ""
+            ).strip() or SPAWN_PERMISSION_BUILTIN
         except Exception:  # noqa: BLE001 - fail-safe to unset (unchanged)
             mode = ""
     # CLAUDE-ONLY, mirroring dispatch-node.sh: the spawn seam exit-2 rejects a

@@ -1813,7 +1813,9 @@ def _settings_ns(auto_merge=False, perm=""):
     import types
 
     return types.SimpleNamespace(
-        agents=types.SimpleNamespace(spawn_permission_mode=perm),
+        agents=types.SimpleNamespace(
+            defaults=types.SimpleNamespace(permission_mode=perm)
+        ),
         auto_merge=types.SimpleNamespace(
             grant="dispatch" if auto_merge else "none"
         ),
@@ -2195,7 +2197,9 @@ def test_quota_change_after_selection_cannot_rewrite_the_spawn(iso, monkeypatch)
 # ---------------------------------------------------------------------------
 # Autonomous permission-mode gate (_spawn_worker argv)
 #
-# US1 flips config.agents.spawn_permission_mode's default to "bypassPermissions".
+# US1: an unset config falls through to the SPAWN_PERMISSION_BUILTIN
+# "bypassPermissions" (formerly config.agents.spawn_permission_mode's own
+# default, collapsed onto agents.defaults.permission_mode, x-7198).
 # US2 gates the --permission-mode forward on the resolved harness being claude,
 # so a failover leg landing on codex/gemini (which the spawn seam exit-2 rejects
 # for a mapped mode) never carries the claude-native flag. US3 is that failover
@@ -2221,7 +2225,9 @@ def _spawn_argv(monkeypatch, *, provider, perm_config, permission_mode=None, sub
 
     resolved_harness = harness or (provider if provider in ("codex", "gemini") else "claude")
     fake_settings = SimpleNamespace(
-        agents=SimpleNamespace(spawn_permission_mode=perm_config),
+        agents=SimpleNamespace(
+            defaults=SimpleNamespace(permission_mode=perm_config)
+        ),
         dispatch=SimpleNamespace(auto_merge=False),
     )
     monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: fake_settings)
@@ -2273,10 +2279,13 @@ def test_codex_leg_skips_explicit_mode(iso, monkeypatch):
     assert _perm_of(cmd) is None
 
 
-def test_claude_leg_explicit_empty_opts_out(iso, monkeypatch):
-    """AC1-EDGE: an explicit "" forwards nothing (claude prompts normally)."""
+def test_claude_leg_empty_config_falls_to_builtin(iso, monkeypatch):
+    """x-7198: agents.defaults.permission_mode's empty string means unset (the
+    general SpawnDefaultsBlock convention), not opt-out - unlike the retired
+    spawn_permission_mode field, there is no longer a distinct "explicit empty"
+    signal, so an empty config resolves the built-in exactly like no config."""
     cmd = _spawn_argv(monkeypatch, provider="claude", perm_config="")
-    assert _perm_of(cmd) is None
+    assert _perm_of(cmd) == "bypassPermissions"
 
 
 def test_claude_leg_default_mode_positive(iso, monkeypatch):
