@@ -242,6 +242,9 @@ RUST_CLIENT_VERBS = frozenset(
         "graph-get",
         "bash-census",
         "session-start-bytes",
+        # Orphan-crown sweep for `fno agents court`: daemon-free read invoked
+        # directly by the court render, never via `fno agents` routing.
+        "court-orphans",
     }
 )
 
@@ -440,6 +443,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "graph-get": "Batch graph.json read by id (x-997a); invoked directly by `fno backlog get`'s forwarder, not `fno agents` routing.",
     "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts (x-997a); invoked directly by `fno doctor bash-census`.",
     "session-start-bytes": "Session-start preamble byte total (x-997a); invoked directly by `fno doctor`'s session-start byte report.",
+    "court-orphans": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <csv>; invoked directly by `fno agents court`, not `fno agents` routing.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other
