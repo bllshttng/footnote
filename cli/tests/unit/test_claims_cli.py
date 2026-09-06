@@ -256,6 +256,17 @@ def test_release_stamp_do_skipped_on_no_op_names_the_key(cwd_tmp):
     assert "node:never-acquired" in result.output
 
 
+def test_release_stamp_do_no_op_on_non_node_key_is_silent(cwd_tmp):
+    """A do row was never in play for a non-node: key (the success branch at
+    line 536 only stamps node: keys), so the no-op skip message must not
+    fire either - it would falsely imply a do row existed for this key."""
+    result = runner.invoke(
+        cli, ["release", "dispatch:never-acquired", "--holder", "h", "--stamp-do"]
+    )
+    assert result.exit_code == 0
+    assert "do stamp skipped" not in result.output
+
+
 def test_status_free(cwd_tmp):
     result = runner.invoke(cli, ["status", "nothing", "--json"])
     assert result.exit_code == 0
