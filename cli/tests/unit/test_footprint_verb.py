@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 
 import pytest
 import typer
@@ -1595,21 +1596,25 @@ _CACHEDIR_TAG = "Signature: 8a477f597d28d172789f06886806bc55\n"
 
 
 def _pid_alive(pid: int) -> bool:
-    import errno
-
-    try:
-        os.kill(pid, 0)
-    except OSError as exc:
-        return exc.errno != errno.ESRCH
-    return True
+    """True while the pid exists AND runs. A SIGKILLed child of this test
+    process stays a zombie until its parent reaps it, and kill(pid, 0)
+    answers a zombie happily, so the state letter decides."""
+    out = subprocess.run(
+        ["ps", "-o", "state=", "-p", str(pid)], capture_output=True, text=True
+    ).stdout.strip()
+    return bool(out) and not out.startswith("Z")
 
 
 @pytest.fixture
 def planted_orphan(tmp_path):
-    """A real double-forked sleeper whose argv[0] is a deps-binary path shape,
-    under a target dir carrying a CACHEDIR.TAG. Yields the pid; kills it at
-    teardown. The double-fork is the measured leak shape: the sleeper's
-    parent shell exits and the sleeper reparents to init (ppid 1)."""
+    """A real sleeper holding 25 unreaped zombie children, under a target dir
+    with a CACHEDIR.TAG. Yields the pid; kills it at teardown.
+
+    The probe's argv[0] is the deps-binary path shape via execv (no copy of a
+    signed binary: macOS kills that at exec). Its 25 dead children make the
+    zombie clause name it at any ppid - a CI runner is a child subreaper, so
+    a backgrounded orphan there never reaches ppid 1, and the plant must not
+    depend on the parentless clause."""
     import signal
     import time
 
@@ -1618,30 +1623,37 @@ def planted_orphan(tmp_path):
     deps.mkdir(parents=True)
     (target / "CACHEDIR.TAG").write_text(_CACHEDIR_TAG)
     probe = deps / "probe-0123456789abcdef"
-    # A symlink, never a copied binary: macOS kills an exec of a copied
-    # signed system binary (signature invalid), and ps would then never see
-    # the plant. Through the symlink the image is still signed /bin/sleep.
-    os.symlink("/bin/sleep", probe)
-    holder = subprocess.Popen(
-        ["/bin/sh", "-c", f"'{probe}' 300 >/dev/null 2>&1 & echo $!"],
-        stdout=subprocess.PIPE,
+    inner = tmp_path / "probe_inner.py"
+    inner.write_text(
+        "import os, subprocess, time\n"
+        "kids = [subprocess.Popen(['/bin/sleep', '0.05']) for _ in range(25)]\n"
+        "time.sleep(1)\n"
+        f"os.execv('/bin/sleep', [{str(probe)!r}, '300'])\n"
     )
-    pid = int(holder.communicate()[0].split()[0])
-    holder.wait()
-    # The reparent is not instantaneous; wait until ps sees ppid 1.
-    deadline = time.monotonic() + 5
+    # One process throughout: sh execs python, which execv's into the
+    # sleeper, so `holder.pid` stays the pid ps will report.
+    holder = subprocess.Popen(
+        ["/bin/sh", "-c", f"exec {sys.executable} {inner}"], stdout=subprocess.DEVNULL
+    )
+    pid = holder.pid
+    # Wait until the execv lands and ps sees the probe path as argv[0].
+    deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         out = subprocess.run(
-            ["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True
-        ).stdout.strip()
-        if out == "1":
+            ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout
+        if "probe-0123456789abcdef" in out:
             break
-        time.sleep(0.05)
+        time.sleep(0.1)
+    else:
+        holder.kill()
+        raise AssertionError("planted probe never reached its argv[0] shape")
     yield pid
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    holder.wait()  # reap: a killed child of this process must not linger
 
 
 def test_orphan_confirmation_demands_a_cachedir_tag(tmp_path):
