@@ -57,7 +57,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::claims::{self, ClaimState};
 use crate::events::EventEmitter;
@@ -641,6 +641,29 @@ struct DispatchFacts {
     error: Option<String>,
 }
 
+fn undispatched_count(cfg: &DrainConfig) -> Result<usize, String> {
+    let out = retry_etxtbsy(|| {
+        fno_cmd(&cfg.fno_bin)
+            .args(["backlog", "undispatched", "--json"])
+            .current_dir(&cfg.cwd)
+            .output()
+    })
+    .map_err(|error| error.to_string())?;
+    if !out.status.success() {
+        return Err(format!("exit {:?}", out.status.code()));
+    }
+    let receipt: Value = serde_json::from_slice(&out.stdout).map_err(|error| error.to_string())?;
+    if receipt.get("status").and_then(Value::as_str) != Some("ok") {
+        return Err("observer status was not ok".to_string());
+    }
+    receipt
+        .get("rows")
+        .and_then(Value::as_array)
+        .filter(|rows| rows.iter().all(Value::is_object))
+        .map(Vec::len)
+        .ok_or_else(|| "missing valid rows array".to_string())
+}
+
 fn facts_from_receipt(receipt: &AdvanceEpicReceipt) -> DispatchFacts {
     let ready = receipt.children.len();
     let reason = if ready == 0 {
@@ -790,13 +813,23 @@ pub fn mission_drain_tick(
         .map(|(pos, total)| format!(" ({pos} of {total} draining)"))
         .unwrap_or_default();
     let detail = format!(
-        "mission={}{} ready={} closed={} dispatched={} pending={}",
+        "mission={}{} ready={} closed={} dispatched={} pending={}{}",
         cfg.mission,
         rotation,
         facts.ready,
         closed,
         newly_dispatched,
-        pending.len()
+        pending.len(),
+        match skip_reason.as_deref() {
+            Some("no_work") => match undispatched_count(cfg) {
+                Ok(count) => format!(" stranded={count}"),
+                Err(error) => {
+                    eprintln!("active-backlog: board-wide stranded count unavailable: {error}");
+                    " stranded=unknown".to_string()
+                }
+            },
+            _ => String::new(),
+        }
     );
     crate::tick_ledger::emit_tick(
         journal,
@@ -2041,6 +2074,30 @@ mod tests {
         p.display().to_string()
     }
 
+    fn stub_fno_advance_with_observer(
+        dir: &std::path::Path,
+        advance_json: &str,
+        observer_json: &str,
+        observer_marker: Option<&std::path::Path>,
+    ) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        let observer = observer_marker
+            .map(|path| format!("printf 'called' > '{}'\n", path.display()))
+            .unwrap_or_default();
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == advance ]]; then \\
+                 cat <<'JSON'\n{advance_json}\nJSON\nelif [[ \"$1\" == backlog && \"$2\" == undispatched ]]; then \\
+                 {observer}printf '%s' '{observer_json}'\nfi\nexit 0\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
     #[test]
     fn dispatch_mission_records_dispatched_and_continues() {
         let _env = env_guard();
@@ -2096,6 +2153,27 @@ mod tests {
         assert_eq!(data["interval_s"], 300);
         assert!(data["skip_reason"].is_null());
         assert!(data["detail"].as_str().unwrap().contains("dispatched=1"));
+    }
+
+    #[test]
+    fn mission_drain_tick_does_not_read_stranded_count_after_dispatch() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join("observer-called");
+        let fno = stub_fno_advance_with_observer(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a"]}"#,
+            r#"{"status":"ok","rows":[{}]}"#,
+            Some(&marker),
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        assert!(!marker.exists(), "stranded observer should be no-work only");
     }
 
     #[test]
@@ -2283,6 +2361,89 @@ mod tests {
             .filter(|v| v["type"] == "control_plane_tick")
             .collect();
         assert_eq!(rows[0]["data"]["skip_reason"], "no_work");
+    }
+
+    #[test]
+    fn mission_drain_tick_reports_stranded_board_rows_on_no_work() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let observer = r#"{"status":"ok","rows":[{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}]}"#;
+        let fno = stub_fno_advance_with_observer(
+            &tmp.path().join("bin"),
+            r#"{"children":[],"dispatched":[]}"#,
+            observer,
+            None,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let row = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .expect("one tick row");
+        assert_eq!(row["data"]["skip_reason"], "no_work");
+        let detail = row["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("mission=x-epic"), "detail was {detail}");
+        assert!(detail.contains("stranded=25"), "detail was {detail}");
+    }
+
+    #[test]
+    fn mission_drain_tick_names_unknown_stranded_count_on_observer_failure() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance_with_observer(
+            &tmp.path().join("bin"),
+            r#"{"children":[],"dispatched":[]}"#,
+            "not-json",
+            None,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let row = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .expect("one tick row");
+        let detail = row["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("stranded=unknown"), "detail was {detail}");
+        assert!(!detail.contains("stranded=0"), "detail was {detail}");
+    }
+
+    #[test]
+    fn mission_drain_tick_names_unknown_stranded_count_on_observer_error() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance_with_observer(
+            &tmp.path().join("bin"),
+            r#"{"children":[],"dispatched":[]}"#,
+            r#"{"status":"error","rows":[]}"#,
+            None,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let row = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .expect("one tick row");
+        let detail = row["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("stranded=unknown"), "detail was {detail}");
+        assert!(!detail.contains("stranded=0"), "detail was {detail}");
     }
 
     #[test]

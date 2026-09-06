@@ -146,6 +146,12 @@ consolidates is the trigger layer: `/megawalk`, `fno backlog advance`, headless
 `loop run`, and now the resident daemon all spin up the same engine and all grab
 the same `walker:<cwd>` singleton, so they are mutually exclusive.
 
+## Operator receipts
+
+An exhausted mission tick keeps the stable `skip_reason=no_work` token. It adds `stranded=N` to its detail. The value comes from `fno backlog undispatched --json`. That command counts finalized ready leaf plans with no execution claim outside the exhausted mission. A failed or malformed observer read reports `stranded=unknown`. It never fabricates zero. The mission remains pinned, so visibility improves without releasing the drain to the general queue.
+
+To change only the node's board rank, run `fno backlog rank <id> --top`. When the node is outside every resolved active mission scope, the receipt says `no live dispatcher will take it`. If scope cannot be read, the receipt says `dispatcher scope unavailable`. A node inside a mission keeps the normal rank receipt. Ranking never broadens mission membership.
+
 ## Events
 
 All transitions are emitted through the loop `Journal` (project journal fatal,
@@ -170,6 +176,7 @@ from `events.jsonl` alone:
 | One mission converges slowly | each active mission has its own independent loop, so other missions keep dispatching concurrently |
 | Backlog mutated many times quickly | the nudge is coalesced to one pending drain |
 | Operator `--stop` between ticks | `--continuation` never reactivates; the tick returns `deactivated` and the loop retires (no zombie ticks) |
+| Mission has no ready child while other planned work exists | the tick keeps `no_work` and names the mission plus board-wide `stranded=N` count; an unavailable observer reads `stranded=unknown` |
 | Empty / all-done mission | `advance --epic` reports `all_done`; the loop emits `active_backlog_mission_retired` and exits |
 | Invalid `interval` | config fails closed: the feature disables (no 0-sleep loop) |
 
