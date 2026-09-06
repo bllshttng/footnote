@@ -5344,168 +5344,6 @@ fn decode_cmds(buf: Vec<u8>) -> Vec<Command> {
     out
 }
 
-/// Open the section menu on a squad header and run its only entry.
-async fn arm_clear_dead(v: &mut View, squad: u64) {
-    let hdr = squad_header_at(v, squad);
-    assert!(v.open_row_menu(hdr, Anchor::Center), "section menu opens");
-    // Rename now leads the workspace menu, so explicitly select Clear dead.
-    let m = v.row_menu.as_mut().unwrap();
-    m.popup.sel = m
-        .actions
-        .iter()
-        .position(|a| *a == super::MenuAction::ClearDead)
-        .expect("clear-dead entry present");
-    let mut buf: Vec<u8> = Vec::new();
-    row_menu_execute_selected(v, &mut buf).await.unwrap();
-    assert!(buf.is_empty(), "the menu entry only arms the confirm");
-}
-
-#[tokio::test]
-async fn clear_dead_removes_every_dead_row_in_the_section() {
-    // (x-f300) The header menu's clear-dead sends one Remove per exited row
-    // and leaves every live row alone.
-    let mut v = view_with_dead_interleaved();
-    arm_clear_dead(&mut v, 1).await;
-    match v.confirm.as_ref().map(|c| &c.action) {
-        Some(ConfirmKind::ClearDead { dead, .. }) => assert_eq!(*dead, 2),
-        _ => panic!("expected a ClearDead confirm"),
-    }
-    let mut buf: Vec<u8> = Vec::new();
-    confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    assert_eq!(
-        decode_cmds(buf),
-        vec![
-            Command::RemoveAgent {
-                harness_session_id: None,
-                name: "dead-a".into()
-            },
-            Command::RemoveAgent {
-                harness_session_id: None,
-                name: "dead-b".into()
-            },
-        ],
-        "only the exited rows are removed"
-    );
-}
-
-#[test]
-fn nonworkspace_section_with_no_dead_rows_gets_a_notice() {
-    // The menu never renders a no-op entry: a NON-workspace band (Elsewhere)
-    // with nothing to clear and nothing to rename gets a notice, not a
-    // one-entry menu (AC-EDGE). A workspace section always opens (Rename).
-    let orphan_live = {
-        let mut r = lifecycle_row("stray-live", false, false);
-        r.squad = Some(99); // no such squad -> Elsewhere band
-        r
-    };
-    let mut v = view_with_agents(vec![orphan_live]);
-    let hdr = v
-        .display_rows()
-        .iter()
-        .position(|r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::Elsewhere))
-        .expect("elsewhere band");
-    assert!(!v.open_row_menu(hdr, Anchor::Center));
-    assert!(v.row_menu.is_none());
-    assert!(v.notice.is_some(), "and says why");
-}
-
-#[tokio::test]
-async fn workspace_section_menu_offers_rename() {
-    // US3: a workspace section header offers Rename (menu parity with
-    // selector `r`), even with no dead rows to clear.
-    let mut v = view_with_agents(vec![]);
-    v.layout.agents = vec![lifecycle_row("live-a", false, false)];
-    let hdr = squad_header_at(&v, 1);
-    assert!(v.open_row_menu(hdr, Anchor::Center), "workspace menu opens");
-    assert_eq!(
-        v.row_menu.as_ref().unwrap().actions,
-        vec![
-            super::MenuAction::Rename,
-            super::MenuAction::MoveSquad(-1),
-            super::MenuAction::MoveSquad(1),
-            super::MenuAction::RemoveSquad
-        ],
-        "no dead rows -> the five standing workspace verbs"
-    );
-    let mut buf: Vec<u8> = Vec::new();
-    row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
-    assert!(buf.is_empty(), "opening the overlay sends nothing");
-    assert_eq!(
-        v.rename.map(|(t, _)| t),
-        Some(RenameTarget::Squad(1)),
-        "opens the rename overlay for this workspace"
-    );
-}
-
-#[test]
-fn workspace_section_menu_offers_rename_then_clear_dead() {
-    // With dead rows present the workspace menu offers BOTH, Rename first.
-    let mut v = view_with_dead_interleaved();
-    let hdr = squad_header_at(&v, 1);
-    assert!(v.open_row_menu(hdr, Anchor::Center));
-    assert_eq!(
-        v.row_menu.as_ref().unwrap().actions,
-        vec![
-            super::MenuAction::Rename,
-            super::MenuAction::MoveSquad(-1),
-            super::MenuAction::MoveSquad(1),
-            super::MenuAction::RemoveSquad,
-            super::MenuAction::ClearDead
-        ]
-    );
-}
-
-#[tokio::test]
-async fn workspace_section_menu_move_sends_the_reorder_command() {
-    // AC8-HP: Move up/down ride the same Command::MoveSquad the keyboard
-    // J/K path sends; the server's silent clamp covers the at-edge case
-    // (AC9-EDGE), so the client sends unconditionally and never bells.
-    let mut v = view_with_agents(vec![]);
-    v.layout.agents = vec![lifecycle_row("live-a", false, false)];
-    let hdr = squad_header_at(&v, 1);
-    assert!(v.open_row_menu(hdr, Anchor::Center));
-    for (delta, label) in [(-1, "up"), (1, "down")] {
-        let m = v.row_menu.as_mut().unwrap();
-        m.popup.sel = m
-            .actions
-            .iter()
-            .position(|a| *a == super::MenuAction::MoveSquad(delta))
-            .unwrap_or_else(|| panic!("move-{label} entry present"));
-        let mut buf: Vec<u8> = Vec::new();
-        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
-        assert_eq!(
-            decode_cmds(buf),
-            vec![Command::MoveSquad { squad: 1, delta }],
-            "move {label} sends the reorder command"
-        );
-        assert!(v.open_row_menu(hdr, Anchor::Center), "re-open for the next");
-    }
-}
-
-#[tokio::test]
-async fn workspace_section_menu_remove_opens_the_confirm_not_the_command() {
-    // AC8-HP: Remove workspace routes through the SAME
-    // ConfirmKind::RemoveSquad confirm the keyboard path builds - a mouse
-    // click must not skip the destructive-action gate.
-    let mut v = view_with_agents(vec![]);
-    v.layout.agents = vec![lifecycle_row("live-a", false, false)];
-    let hdr = squad_header_at(&v, 1);
-    assert!(v.open_row_menu(hdr, Anchor::Center));
-    let m = v.row_menu.as_mut().unwrap();
-    m.popup.sel = m
-        .actions
-        .iter()
-        .position(|a| *a == super::MenuAction::RemoveSquad)
-        .unwrap();
-    let mut buf: Vec<u8> = Vec::new();
-    row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
-    assert!(buf.is_empty(), "the entry arms the confirm, sends nothing");
-    match v.confirm.as_ref().map(|c| &c.action) {
-        Some(ConfirmKind::RemoveSquad { squad, .. }) => assert_eq!(*squad, 1),
-        _ => panic!("expected a RemoveSquad confirm"),
-    }
-}
-
 #[test]
 fn name_entry_prompt_renders_centered_naming_its_target() {
     // The create/rename/recruit name inputs used to paint the bottom-left
@@ -5567,6 +5405,7 @@ fn every_confirm_variant_renders_shared_chrome_and_controls() {
             ConfirmKind::StopAgent {
                 sid: None,
                 name: "agent".into(),
+                pane_id: None,
             },
             "stop agent",
         ),
@@ -5574,6 +5413,7 @@ fn every_confirm_variant_renders_shared_chrome_and_controls() {
             ConfirmKind::RemoveAgent {
                 sid: None,
                 name: "agent".into(),
+                pane_id: None,
             },
             "remove agent",
         ),
@@ -5996,7 +5836,8 @@ async fn clear_dead_refolds_the_set_at_commit_not_at_open() {
         decode_cmds(buf),
         vec![Command::RemoveAgent {
             harness_session_id: None,
-            name: "dead-b".into()
+            name: "dead-b".into(),
+            pane_id: None
         }],
         "the vanished row is not re-removed"
     );
@@ -6018,7 +5859,8 @@ async fn clear_dead_routes_external_rows_by_attach_id() {
         vec![
             Command::RemoveAgent {
                 harness_session_id: None,
-                name: "plain-dead".into()
+                name: "plain-dead".into(),
+                pane_id: None,
             },
             Command::RemoveExternal {
                 attach_id: "deadbeef".into(),
@@ -6093,7 +5935,8 @@ async fn clear_dead_dismisses_member_tombstones() {
             },
             Command::RemoveAgent {
                 harness_session_id: None,
-                name: "plain-dead".into()
+                name: "plain-dead".into(),
+                pane_id: None,
             },
         ]
     );
@@ -6208,7 +6051,8 @@ async fn clear_dead_is_scoped_to_its_own_section() {
         decode_cmds(buf),
         vec![Command::RemoveAgent {
             harness_session_id: None,
-            name: "dead-in-1".into()
+            name: "dead-in-1".into(),
+            pane_id: None
         }],
         "the sibling squad's dead row is untouched"
     );
@@ -6241,7 +6085,8 @@ async fn clear_dead_works_on_the_elsewhere_band_too() {
         decode_cmds(buf),
         vec![Command::RemoveAgent {
             harness_session_id: None,
-            name: "stray-dead".into()
+            name: "stray-dead".into(),
+            pane_id: None
         }]
     );
 }
@@ -6560,6 +6405,9 @@ async fn row_menu_keys_run_the_same_execute_path_as_enter() {
     // execute path a click and Enter use - positive markers on the
     // command sent, the confirm armed, or the composer opened.
     let mut v = view_with_agents(vec![paneless_bg_row("w1")]);
+    // The confirm pref pinned ON: this test exercises the confirm-overlay
+    // path, which the default (off) now bypasses (x-e763 AC10/AC11).
+    v.confirm_lifecycle = true;
     assert!(v.open_row_menu(1, Anchor::Center));
 
     // o runs Open Here: the attach-here command.
@@ -6635,45 +6483,54 @@ async fn a_bound_byte_no_entry_offers_dismisses_without_action() {
     assert!(v.row_menu.is_none(), "the menu dismissed");
     assert!(buf.is_empty(), "no action fired");
 
-    // The remove byte on a LIVE row's menu: remove-row is bound, the row
-    // offers no Remove action (the entry is inert), so it dismisses too.
+    // The remove byte on a LIVE row's menu: remove-row is bound, the entry
+    // is enabled, and with the confirm pref at its default (off) the byte
+    // dispatches the remove in ONE gesture (x-e763, AC10).
     assert!(v.open_row_menu(1, Anchor::Center));
     let x = crate::keys::menu_byte_for("remove-row").unwrap();
     let mut buf: Vec<u8> = Vec::new();
     row_menu_keys(&mut v, &[x], &mut buf).await.unwrap();
     assert!(v.row_menu.is_none(), "the menu dismissed");
-    assert!(buf.is_empty(), "no remove fired from a live row's menu");
+    assert_eq!(
+        decode_cmds(buf),
+        vec![Command::RemoveAgent {
+            harness_session_id: None,
+            name: "w1".into(),
+            pane_id: None
+        }],
+        "the remove byte removed the live row in one gesture"
+    );
 }
 
 #[test]
-fn the_inert_remove_entry_shows_the_key_and_the_precondition() {
-    // AC11-EDGE: the disabled Remove entry carries the byte that WILL
-    // remove the row once the precondition clears, beside the
-    // precondition - and it stays unselectable, contributing no action
-    // slot, so the actions vector stays index-aligned with the rows.
+fn the_remove_entry_on_a_live_row_is_selectable_and_carries_the_key() {
+    // (x-e763) The old inert gate (greyed Remove, "stop first") asserted a
+    // server refusal that no longer exists: the server orchestrates
+    // stop-then-rm in one gesture. The live-row menu's Remove is now a
+    // real entry, selectable, carrying its menu-key hint.
     let mut v = view_with_agents(vec![paneless_bg_row("w1")]);
     assert!(v.open_row_menu(1, Anchor::Center));
     let m = v.row_menu.as_ref().unwrap();
     let remove_key = crate::keys::menu_key_for("remove-row").unwrap();
-    let inert_row = m.popup.rows.iter().find_map(|row| match row {
+    let live_row = m.popup.rows.iter().find_map(|row| match row {
         PopupRow::Entry {
             glyph,
             label,
             hint,
             enabled,
-        } if label == "Remove" && !*enabled => Some((glyph.clone(), hint.clone())),
+        } if label == "Remove" && *enabled => Some((glyph.clone(), hint.clone())),
         _ => None,
     });
     assert_eq!(
-        inert_row,
-        Some(("✕".into(), format!("{remove_key} stop first"))),
-        "the hint carries the key and the precondition"
+        live_row,
+        Some(("✕".into(), remove_key)),
+        "Remove is enabled and names its key"
     );
     assert!(
-        !m.actions
+        m.actions
             .iter()
             .any(|a| matches!(a, super::MenuAction::Remove)),
-        "an inert entry contributes no action slot"
+        "the entry carries a runnable action slot"
     );
 }
 
@@ -6811,6 +6668,9 @@ async fn menu_accelerator_remove_arms_the_dead_row_confirm() {
         SectionKey::Squad("/code/footnote".into()),
         SectionView::Expanded,
     );
+    // The confirm pref pinned ON: this test exercises the confirm-overlay
+    // path (x-e763 AC11).
+    v.confirm_lifecycle = true;
     let idx = agent_row_at(&v, |a| a.name == "dead");
     v.open_row_menu(idx, Anchor::Center);
     let key = crate::keys::menu_byte_for("remove-row").expect("remove-row registered");
@@ -6826,7 +6686,8 @@ async fn menu_accelerator_remove_arms_the_dead_row_confirm() {
         decode_cmds(buf),
         vec![Command::RemoveAgent {
             harness_session_id: None,
-            name: "dead".into()
+            name: "dead".into(),
+            pane_id: None
         }],
         "the confirm the key armed removes exactly this row"
     );
@@ -6927,6 +6788,9 @@ async fn a_confirm_survives_the_release_of_the_click_that_armed_it() {
     // Driven through handle_stdin with real SGR bytes - the builder-level
     // tests never touched this path, which is how the gap survived them.
     let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+    // The confirm pref pinned ON: this test exercises the confirm-overlay
+    // path (x-e763 AC11).
+    v.confirm_lifecycle = true;
     let row = agent_row_at(&v, |a| a.name == "w");
     assert!(v.open_row_menu(row, Anchor::Center));
     menu_select(&mut v, super::MenuAction::Stop).await;
@@ -6951,13 +6815,15 @@ async fn a_confirm_survives_the_release_of_the_click_that_armed_it() {
              underneath with no press before it"
     );
 
-    // Enter still commits it.
+    // Enter still commits it. The command carries the pane the row was
+    // drawn from (x-e763 AC6).
     confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
     assert_eq!(
         decode_cmds(buf),
         vec![Command::StopAgent {
             name: "w".into(),
-            harness_session_id: None
+            harness_session_id: None,
+            pane_id: Some(10)
         }],
         "Enter commits the confirm the click armed"
     );
@@ -6968,6 +6834,9 @@ async fn an_outside_press_does_not_dismiss_an_armed_confirm() {
     // The confirm owns every pointer event. An outside press is swallowed,
     // while only its rendered shared Chrome esc chip cancels it.
     let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+    // The confirm pref pinned ON: this test exercises the confirm-overlay
+    // path (x-e763 AC11).
+    v.confirm_lifecycle = true;
     let row = agent_row_at(&v, |a| a.name == "w");
     assert!(v.open_row_menu(row, Anchor::Center));
     menu_select(&mut v, super::MenuAction::Stop).await;
@@ -7415,35 +7284,19 @@ fn only_a_multi_pane_tab_wears_the_group_marker() {
 }
 
 #[test]
-fn a_live_row_shows_remove_as_inert_rather_than_hiding_it() {
-    // The server refuses RemoveAgent on a live row ("still live - stop it
-    // first"). Hiding the entry said the action does not exist; showing it
-    // greyed says it exists and names the precondition. Disabled contributes
-    // zero targets, so it can never be selected and never shifts the actions
-    // vector.
+fn a_live_rows_menu_carries_an_enabled_remove() {
+    // (x-e763) AC8: a live row's menu offers Remove as a real, enabled
+    // entry. Neither verb is gated behind the other any more.
     let live = agent_row("w", 10, Some(AgentBadge::Working), false);
     let menu = super::build_row_menu(&live, Anchor::Center);
-    let inert: Vec<&PopupRow> = menu
-        .popup
-        .rows
-        .iter()
-        .filter(|r| matches!(r, PopupRow::Entry { enabled: false, .. }))
-        .collect();
+    let enabled =
+        menu.popup.rows.iter().any(
+            |r| matches!(r, PopupRow::Entry { label, enabled: true, .. } if label == "Remove"),
+        );
+    assert!(enabled, "Remove is a selectable entry on a live row");
     assert!(
-        matches!(
-            inert.as_slice(),
-            [PopupRow::Entry { label, hint, .. }]
-                if label == "Remove"
-                    && hint == &format!(
-                        "{} stop first",
-                        crate::keys::menu_key_for("remove-row").unwrap_or_default()
-                    )
-        ),
-        "exactly one greyed Remove naming its key and precondition: {inert:?}"
-    );
-    assert!(
-        !menu.actions.contains(&super::MenuAction::Remove),
-        "a live row's Remove carries no action to run"
+        menu.actions.contains(&super::MenuAction::Remove),
+        "the entry carries a runnable action"
     );
 }
 
@@ -12175,20 +12028,24 @@ async fn confirm_keys_enter_sends_stop_then_remove_agent() {
             ConfirmKind::StopAgent {
                 name: "w".into(),
                 sid: None,
+                pane_id: None,
             },
             Command::StopAgent {
                 name: "w".into(),
                 harness_session_id: None,
+                pane_id: None,
             },
         ),
         (
             ConfirmKind::RemoveAgent {
                 name: "w".into(),
                 sid: None,
+                pane_id: None,
             },
             Command::RemoveAgent {
                 name: "w".into(),
                 harness_session_id: None,
+                pane_id: None,
             },
         ),
     ] {
@@ -18745,3 +18602,13 @@ fn ux_shot_twenty_tabs_before() {
         "twenty tabs (before: clipped)",
     );
 }
+
+// (x-e763) The section-menu / clear-dead family lives in its own module
+// under the file-budget gate; this file is shrink-only against main.
+#[path = "client/tests/section_menu_tests.rs"]
+mod section_menu_tests;
+use section_menu_tests::arm_clear_dead;
+
+// (x-e763) The default-dispatch lifecycle gestures, same file-budget rule.
+#[path = "client/tests/lifecycle_dispatch_tests.rs"]
+mod lifecycle_dispatch_tests;

@@ -981,6 +981,8 @@ struct View {
     /// The whole-machine resource meter, rendered in the status row. Off by
     /// default: it needs `macmon` on PATH, which fno core does not depend on.
     resource_meter_on: bool,
+    /// (x-e763) Ask before stop/remove. Default false: a stop means stop.
+    confirm_lifecycle: bool,
     /// The meter's latest one-line reading, or None before the first sample
     /// (and after a failed one - the row then says the sensor is unavailable
     /// and shows no number).
@@ -1504,7 +1506,7 @@ fn parse_macmon_sample(raw: &[u8]) -> Option<String> {
 
 mod confirm;
 
-pub(crate) use confirm::{ConfirmAction, ConfirmKind};
+pub(crate) use confirm::{remove_dead, ConfirmAction, ConfirmKind, CLEAR_DEAD_MAX};
 
 // The needs overlay's projection + render, moved out of this file (file
 // budget); the feed overlay answers its own question from its own module and
@@ -1951,25 +1953,6 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         glyph: glyph.into(),
         label: label.into(),
     };
-    // A live row cannot be removed - the server refuses `RemoveAgent` on one
-    // with "still live - stop it first". Rendering the entry greyed beside Stop
-    // says the row CAN be removed and names the precondition, where leaving it
-    // out of the live menus entirely said the action does not exist. Disabled
-    // contributes zero targets (`PopupRow::cells`), so it carries no action and
-    // the actions vector stays aligned with the selectable rows. (x-d545) The
-    // hint carries the key too: the one moment the menu could teach the byte
-    // that WILL remove the row one keypress later is this one, so the glyph
-    // (resolved through the menu scope, never a literal) rides beside the
-    // precondition.
-    let inert = |glyph: &str, label: &str| PopupRow::Entry {
-        glyph: glyph.into(),
-        label: label.into(),
-        hint: format!(
-            "{} stop first",
-            crate::keys::menu_key_for("remove-row").unwrap_or_default()
-        ),
-        enabled: false,
-    };
     add(PopupRow::Header(agent.name.clone()), &[]);
     add(PopupRow::Rule, &[]);
     if agent.exited {
@@ -2016,7 +1999,10 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         );
         add(PopupRow::Rule, &[]);
         add(entry_acc("■", "Stop", "stop-row"), &[MenuAction::Stop]);
-        add(inert("✕", "Remove"), &[]);
+        add(
+            entry_acc("✕", "Remove", "remove-row"),
+            &[MenuAction::Remove],
+        );
     } else if agent.attach_id.is_some() {
         // Paneless bg row: the motivating case - open as a tab or a split pane.
         // Open-here leads (repoint the focused viewer). The client can't know viewer-ness, so the
@@ -2045,7 +2031,10 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         add(entry_acc("◉", "Peek", "peek-row"), &[MenuAction::Peek]);
         add(entry_acc("✉", "Mail", "mail-row"), &[MenuAction::Mail]);
         add(entry_acc("■", "Stop", "stop-row"), &[MenuAction::Stop]);
-        add(inert("✕", "Remove"), &[]);
+        add(
+            entry_acc("✕", "Remove", "remove-row"),
+            &[MenuAction::Remove],
+        );
     } else {
         // A live row that is neither pane-hosted nor attachable here.
         add(entry_acc("◉", "Peek", "peek-row"), &[MenuAction::Peek]);
@@ -2054,7 +2043,10 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
             add(entry("↩", "Reattach"), &[MenuAction::Reattach]);
         }
         add(entry_acc("■", "Stop", "stop-row"), &[MenuAction::Stop]);
-        add(inert("✕", "Remove"), &[]);
+        add(
+            entry_acc("✕", "Remove", "remove-row"),
+            &[MenuAction::Remove],
+        );
     }
     // Diff is common to every row state: it reads the row's worktree,
     // which an exited or paneless row has just as much as a live pane-hosted
@@ -2154,32 +2146,6 @@ fn build_card_menu(
         actions,
     }
 }
-/// The command that clears ONE dead row, by what kind of row it is. Three
-/// stores hold dead rows and each has its own verb: a member TOMBSTONE lives in
-/// the squad's member list (`RemoveAgent` resolves only against the agent
-/// registry, so it would answer "no such agent" and leave the row on screen), an
-/// EXTERNAL row routes by its stable attach_id (x-7561), and a registry row goes
-/// by name. One mapping so the row menu and the bulk clear cannot disagree.
-fn remove_dead(a: &AgentRow) -> Command {
-    match (a.tombstone, a.squad, a.external, a.attach_id.clone()) {
-        (true, Some(squad), _, Some(attach_id)) => Command::DismissMember { squad, attach_id },
-        (_, _, true, Some(attach_id)) => Command::RemoveExternal {
-            attach_id,
-            name: a.name.clone(),
-        },
-        _ => Command::RemoveAgent {
-            name: a.name.clone(),
-            harness_session_id: a.harness_session_id.clone(),
-        },
-    }
-}
-
-/// How many rows one clear-dead may remove. Each row costs the server a
-/// `fno agents rm` subprocess (`agent_action` spawns one per command, unbounded),
-/// so an unbounded fan-out would let a long-lived section stampede the daemon.
-/// ponytail: a flat cap, repeat to clear the rest; the upgrade is a section-scoped
-/// bulk verb server-side, which the single-process `ReapAgents` already models.
-const CLEAR_DEAD_MAX: usize = 25;
 
 /// (x-f300) The section-header context menu. A workspace section (`squad`
 /// present) offers `Rename` - menu parity with selector `r`. `Clear dead` is
@@ -2349,6 +2315,7 @@ pub(crate) enum AuxAction {
     /// The whole-machine resource meter: flip the status-row meter, persist
     /// `resource_meter.enabled`, start or stop the sampler.
     ToggleResourceMeter,
+    ToggleConfirmLifecycle,
     /// (x-f75e) Apply the named mux theme now: swap the in-memory theme, then
     /// persist via `fno config set mux.theme`. The picker lists the shipped
     /// names, so this carries one of them.
@@ -2840,6 +2807,7 @@ impl View {
             agent_sort,
             status_on: true,
             resource_meter_on: false,
+            confirm_lifecycle: view_store::load_confirm_lifecycle(),
             resource_meter_text: None,
             resource_meter_refresh: 5,
             resource_meter_gate: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3985,9 +3953,11 @@ impl View {
                     self.resource_meter_on,
                     "resource meter (needs macmon)",
                 ));
+                rows.push(toggle(self.confirm_lifecycle, "confirm before stop/remove"));
                 actions.push(AuxAction::ToggleHoverFocus);
                 actions.push(AuxAction::ToggleStatus);
                 actions.push(AuxAction::ToggleResourceMeter);
+                actions.push(AuxAction::ToggleConfirmLifecycle);
             }
             SettingsTab::Theme => {
                 // The four shipped palettes; the active one is marked. Enter on a
@@ -13195,39 +13165,10 @@ async fn confirm_keys(
             | ConfirmKind::RemoveExternal { name, .. } => Some(name.clone()),
             _ => None,
         };
-        let cmds = match action.action {
-            ConfirmKind::Dispatch { node } => vec![Command::DispatchNode {
-                node,
-                account: view.active_account.clone(),
-            }],
-            ConfirmKind::RemoveSquad { squad, .. } => vec![Command::RemoveSquad(squad)],
-            ConfirmKind::StopAgent { name, sid } => {
-                vec![Command::StopAgent {
-                    name,
-                    harness_session_id: sid,
-                }]
-            }
-            ConfirmKind::RemoveAgent { name, sid } => {
-                vec![Command::RemoveAgent {
-                    name,
-                    harness_session_id: sid,
-                }]
-            }
-            ConfirmKind::ReapAgents => vec![Command::ReapAgents],
-            ConfirmKind::StopExternal { attach_id, name } => {
-                vec![Command::StopExternal { attach_id, name }]
-            }
-            ConfirmKind::RemoveExternal { attach_id, name } => {
-                vec![Command::RemoveExternal { attach_id, name }]
-            }
-            ConfirmKind::DismissMember { squad, attach_id } => {
-                vec![Command::DismissMember { squad, attach_id }]
-            }
-            // Handled (and returned) before this one-command table is reached.
-            ConfirmKind::CloseTab { .. } => unreachable!("CloseTab commits above"),
-            // Re-fold on Enter, not at open: the prompt may have sat for a while
-            // and the honest set is whatever is dead NOW.
+        let cmds: Vec<Command> = match action.action {
             ConfirmKind::ClearDead { key, squad, .. } => {
+                // Re-fold on Enter, not at open: the prompt may have sat for a
+                // while and the honest set is whatever is dead NOW.
                 let dead = view.section_dead_rows(&key, squad);
                 let total = dead.len();
                 let picked: Vec<Command> = dead
@@ -13245,6 +13186,21 @@ async fn confirm_keys(
                 }
                 picked
             }
+            // Handled (and returned) before this table is reached.
+            kind @ ConfirmKind::CloseTab { .. } => {
+                let _ = kind;
+                unreachable!("CloseTab commits above")
+            }
+            kind => match kind {
+                ConfirmKind::Dispatch { node } => vec![Command::DispatchNode {
+                    node,
+                    account: view.active_account.clone(),
+                }],
+                other => match other.command() {
+                    Some(cmd) => vec![cmd],
+                    None => Vec::new(),
+                },
+            },
         };
         if cmds.is_empty() {
             view.set_notice("nothing left to clear".into());
@@ -13979,12 +13935,6 @@ async fn execute_row_menu_action(
         // returns above. Visible refusal over a silent no-op.
         MenuAction::OpenPlan => view.set_notice("action does not apply to an agent".into()),
         MenuAction::Stop | MenuAction::Remove => {
-            // A confirm owns the bottom row; a too-short terminal refuses rather
-            // than arm an invisible prompt (matching the selector's stop/reap).
-            if view.term.0 < MIN_ROWS_FOR_STATUS {
-                view.set_notice("terminal too short for the confirm prompt".into());
-                return Ok(());
-            }
             let kind = match action {
                 MenuAction::Stop => match (a.external, a.attach_id.clone()) {
                     (true, Some(id)) => ConfirmKind::StopExternal {
@@ -13994,6 +13944,7 @@ async fn execute_row_menu_action(
                     _ => ConfirmKind::StopAgent {
                         name: a.name.clone(),
                         sid: a.harness_session_id.clone(),
+                        pane_id: a.pane_id,
                     },
                 },
                 // Remove routes by row KIND through [`remove_dead`], the same
@@ -14009,6 +13960,7 @@ async fn execute_row_menu_action(
                     _ => ConfirmKind::RemoveAgent {
                         name: a.name.clone(),
                         sid: a.harness_session_id.clone(),
+                        pane_id: a.pane_id,
                     },
                 },
             };
@@ -14018,10 +13970,41 @@ async fn execute_row_menu_action(
                 .display_rows()
                 .iter()
                 .position(|r| matches!(r, DisplayRow::Agent(row) if row.name == a.name));
-            view.open_confirm(ConfirmAction {
-                action: kind,
-                label: a.name.clone(),
-            });
+            // (x-e763) The confirm pref arms the overlay; the default (off)
+            // dispatches the SAME command the confirm would commit, so the two
+            // paths cannot disagree about what a gesture sends. The
+            // too-short-terminal guard rides the confirm branch only: it exists
+            // so the prompt is visible, which the default never shows.
+            if view.confirm_lifecycle {
+                // A confirm owns the bottom row; a too-short terminal refuses
+                // rather than arm an invisible prompt (matching the selector's
+                // stop/reap).
+                if view.term.0 < MIN_ROWS_FOR_STATUS {
+                    view.set_notice("terminal too short for the confirm prompt".into());
+                    return Ok(());
+                }
+                view.open_confirm(ConfirmAction {
+                    action: kind,
+                    label: a.name.clone(),
+                });
+            } else {
+                // The confirm path stamps the row when it commits; the default
+                // dispatch gets the same treatment, so the outcome notice
+                // renders at the row either way.
+                view.arm_row_stamp(&kind);
+                let sent = match kind.command() {
+                    Some(cmd) => {
+                        write_msg(sock_w, &ClientMsg::Command(cmd))
+                            .await
+                            .map_err(|e| format!("lifecycle dispatch send failed: {e}"))?;
+                        true
+                    }
+                    None => false,
+                };
+                if sent {
+                    view.reanchor_after_row_commit(Some(a.name.as_str()));
+                }
+            }
         }
         // Only ever built alongside `MenuTarget::Section`, which returned above.
         // A Notice rather than `unreachable!` - a panic here would take the whole
@@ -14363,6 +14346,17 @@ async fn execute_aux_action(
                 Err(_) => "status row applied this session; save failed".into(),
             };
             view.set_notice(notice);
+            view.reopen_settings_keeping_sel();
+        }
+        AuxAction::ToggleConfirmLifecycle => {
+            view.confirm_lifecycle = !view.confirm_lifecycle;
+            view_store::save_confirm_lifecycle(view.confirm_lifecycle);
+            let enabled = if view.confirm_lifecycle {
+                "true"
+            } else {
+                "false"
+            };
+            view.set_notice(format!("confirm before stop/remove: {enabled}"));
             view.reopen_settings_keeping_sel();
         }
         AuxAction::ToggleResourceMeter => {
@@ -15581,14 +15575,10 @@ async fn selector_keys(
                         // confirm - a live row is stopped as part of its
                         // removal, never as a second ceremony. Stop-only lives
                         // on the row menu's Stop.
-                        // (x-f191 scope b) `x` states the intent ONCE: remove.
-                        // The server orchestrates stop-then-rm behind this one
-                        // confirm - a live row is stopped as part of its
-                        // removal, never as a second ceremony. Stop-only lives
-                        // on the row menu's Stop.
                         _ => ConfirmKind::RemoveAgent {
                             name: name.clone(),
                             sid: harness_session_id,
+                            pane_id: None,
                         },
                     };
                     // (x-f191 scope a+c) The slot feeds the post-commit

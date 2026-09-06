@@ -60,6 +60,7 @@ use crate::vt::{self, frame_text, Modes};
 
 mod agent_actions;
 mod agent_rows_join;
+pub(crate) mod lifecycle_target;
 mod pane_identity;
 mod pane_reseat;
 mod portal_reach;
@@ -9603,56 +9604,6 @@ impl Core {
         });
     }
 
-    /// Resolve a sideline lifecycle target (x-76ea `StopAgent`/`RemoveAgent`) by
-    /// name against the current catalog, returning the exited flag of the single
-    /// resolved registry row. `name` is NOT a unique key (codex review): the
-    /// catalog dedups by `attach_id`, so an external roster row and a registry
-    /// row can carry the same name. Fail-closed on every ambiguity - absent, any
-    /// external row sharing the name (never act on a registry agent an external
-    /// shadows), or a >1 non-external collision - so a keypress can only ever act
-    /// on exactly one unambiguous registry agent, never a guessed match.
-    /// (x-9c5f) Widened from `Result<bool>` to the resolved row reference so
-    /// callers can read `.exited` AND `.claude_session_uuid` (the respawn arm
-    /// needs both); the fail-closed semantics (absent / external / ambiguous all
-    /// refused) are unchanged.
-    /// (v67) `harness_session_id` rides beside the label on
-    /// `StopAgent`/`RemoveAgent`; when it names a row, resolution prefers
-    /// identity and falls back to the label only when no row answers to that
-    /// id (a stale row, or an old client that carries the label alone). The
-    /// fail-closed rules are unchanged: absent, any external row sharing the
-    /// name (never act on a registry agent an external shadows), or a >1
-    /// non-external collision are all refused, so a keypress can only ever act
-    /// on exactly one unambiguous registry agent, never a guessed match.
-    fn resolve_lifecycle_target(
-        &self,
-        name: &str,
-        harness_session_id: Option<&str>,
-    ) -> Result<&RegistryAgent, String> {
-        if let Some(sid) = harness_session_id.filter(|s| !s.is_empty()) {
-            let by_id: Vec<&RegistryAgent> = self
-                .agents
-                .iter()
-                .filter(|a| !a.external && agent_harness_session_id(a) == Some(sid))
-                .collect();
-            if let [one] = by_id.as_slice() {
-                return Ok(one);
-            }
-        }
-        let matches: Vec<&RegistryAgent> = self.agents.iter().filter(|a| a.name == name).collect();
-        if matches.is_empty() {
-            return Err(format!("no such agent: {name}"));
-        }
-        if matches.iter().any(|a| a.external) {
-            return Err(format!(
-                "{name} is external - manage it from its own session"
-            ));
-        }
-        match matches.as_slice() {
-            [one] => Ok(one),
-            _ => Err(format!("{name} is ambiguous - use the CLI")),
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn attach(
         &mut self,
@@ -13375,6 +13326,7 @@ impl Core {
             Command::StopAgent {
                 name,
                 harness_session_id,
+                pane_id,
             } => {
                 // Stop a live sideline row (x-76ea). Stop ONLY: this is the
                 // menu's stop-only path; the one-gesture stop-and-remove
@@ -13383,18 +13335,23 @@ impl Core {
                 // catalog fail-closed, identity first (v67). The subprocess
                 // gets the row's CURRENT label, so a harness-side rename
                 // between capture and keypress still reaches the right row.
-                let resolved = self
-                    .resolve_lifecycle_target(&name, harness_session_id.as_deref())
-                    .map(|a| a.name.clone());
+                let resolved =
+                    self.resolve_lifecycle_full(&name, harness_session_id.as_deref(), pane_id);
                 match resolved {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(label) => self.agent_action(client_id, "stop", label),
+                    Ok(lifecycle_target::LifecycleTarget::Registry(owned)) => {
+                        self.agent_action(client_id, "stop", owned)
+                    }
+                    Ok(lifecycle_target::LifecycleTarget::Pane(pid)) => {
+                        self.stop_pane_child(client_id, pid, &name)
+                    }
                 }
                 Flow::Continue
             }
             Command::RemoveAgent {
                 name,
                 harness_session_id,
+                pane_id,
             } => {
                 // (x-f191 scope b) The operator states the intent ONCE: remove.
                 // The server orchestrates stop-then-rm off-loop - a live row is
@@ -13403,12 +13360,16 @@ impl Core {
                 // no-ops reaches the CLI's already-absent branch through rm's
                 // daemon-side live gate. Same resolution as StopAgent: the
                 // subprocess gets the resolved row's current label.
-                let resolved = self
-                    .resolve_lifecycle_target(&name, harness_session_id.as_deref())
-                    .map(|a| a.name.clone());
+                let resolved =
+                    self.resolve_lifecycle_full(&name, harness_session_id.as_deref(), pane_id);
                 match resolved {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(label) => self.stop_agent_action(client_id, label),
+                    Ok(lifecycle_target::LifecycleTarget::Registry(owned)) => {
+                        self.stop_agent_action(client_id, owned)
+                    }
+                    Ok(lifecycle_target::LifecycleTarget::Pane(pid)) => {
+                        return self.remove_pane_row(client_id, pid, &name)
+                    }
                 }
                 Flow::Continue
             }
@@ -20636,6 +20597,7 @@ mod tests {
             Command::StopAgent {
                 harness_session_id: None,
                 name: "ghost".into(),
+                pane_id: None,
             },
         );
         assert!(matches!(flow, Flow::Continue));
@@ -22487,6 +22449,7 @@ mod tests {
                 Command::StopAgent {
                     harness_session_id: None,
                     name: "ext-a".into(),
+                    pane_id: None,
                 },
             ),
             (
@@ -22494,6 +22457,7 @@ mod tests {
                 Command::RemoveAgent {
                     harness_session_id: None,
                     name: "ext-b".into(),
+                    pane_id: None,
                 },
             ),
         ] {
@@ -22685,6 +22649,7 @@ mod tests {
             Command::StopAgent {
                 name: "dup".into(),
                 harness_session_id: None,
+                pane_id: None,
             },
         );
         assert!(drain_notice(&mut rx).unwrap().contains("external"));
@@ -22702,6 +22667,7 @@ mod tests {
             Command::RemoveAgent {
                 name: "dup".into(),
                 harness_session_id: None,
+                pane_id: None,
             },
         );
         assert!(drain_notice(&mut rx).unwrap().contains("ambiguous"));
