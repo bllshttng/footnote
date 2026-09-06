@@ -1004,6 +1004,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // active_backlog tick row is an EventEmitter emit (the mission-level rows
     // ride Journal::append and are exempt like the drain decision events).
     "control_plane_tick",
+    // Evals demand (x-ab72, Python-emitted from the pr-watch tick's evals
+    // leg): the scheduled regression-tier run's outcome, and the could-not-
+    // fire row whose journal entries are the operator-notice rate bound.
+    "evals_scheduled_run",
+    "evals_stale",
     // Meta (daemon/worker-emitted)
     "event_payload_too_large",
     // Inside-leg state push (daemon-emitted, inside-out E3.2): a per-turn hook
