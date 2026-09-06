@@ -133,11 +133,10 @@ fno backlog update <id> --project <name> --cwd <path>
 
 ### Reorder within a lane
 
-`rank` floats a card inside its `(column, project)` lane without changing its
-column. Board order == work order, so `--top` also makes it run next.
+`rank` floats a card inside its `(column, project)` lane without changing its column. Board order == work order, so `--top` decides where the card sits in that order. It does not dispatch the node. When the node is inside an active mission scope, a drain reaches it. A top-ranked node outside every active mission scope stays undispatched.
 
 ```bash
-fno backlog rank <id> --top            # front of the lane (and runs next)
+fno backlog rank <id> --top            # front of the lane (order only, no dispatch)
 fno backlog rank <id> --bottom
 fno backlog rank <id> --before <id>    # anchor must already be ranked
 fno backlog rank <id> --after <id>
