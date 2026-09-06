@@ -201,6 +201,7 @@ Two hidden verbs serve the migration and the operator:
 
 - `fno backlog backfill-deferred-kind [--map FILE] [--apply]` classifies existing deferred rows by exact match against the built-in table plus a TSV map (`kind<TAB>exact reason` per line). Dry run by default. It never overwrites an existing kind and never closes or undefers anything.
 - `fno backlog stuck-epics` lists epics whose only incomplete children are deferred or superseded, each with a `closable` verdict and its holders. Read-only: closing one is always an operator ruling.
+- `fno backlog reopen <child> --reason ...` against a done-on-its-own-evidence parent stamps a `reopen_warning` on that parent, alongside the stderr warning. The marker names the child and the time, so the fact stays findable after the terminal with the warning is gone. When the parent is reopened directly, or the named child closes again, the marker clears.
 
 ## Finding work by meaning: find --fts
 

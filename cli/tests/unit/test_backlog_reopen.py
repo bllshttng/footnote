@@ -512,6 +512,77 @@ def test_an_epic_closed_on_its_own_evidence_is_left_done_and_named(tmp_graph):
     assert "own evidence" in res.output
 
 
+def test_the_reopen_warning_stamps_a_marker_on_the_evidence_closed_parent(tmp_graph):
+    """The stderr warning is gone the moment its terminal closes; the marker
+    survives it, naming the child and when."""
+    _write(
+        tmp_graph,
+        _node("ab-e0000000", type="epic", completion_note="closed by operator after review"),
+        _node("ab-c0000000", parent="ab-e0000000"),
+    )
+    res = runner.invoke(app, ["backlog", "reopen", "ab-c0000000", "--reason", "wrong"])
+    assert res.exit_code == 0, res.output
+    epic = _read(tmp_graph)["ab-e0000000"]
+    assert epic["reopen_warning"] == {"child": "ab-c0000000", "at": epic["reopen_warning"]["at"]}
+    assert epic["reopen_warning"]["at"]
+
+
+def test_the_marker_clears_when_the_parent_is_reopened_directly(tmp_graph):
+    _write(
+        tmp_graph,
+        _node(
+            "ab-e0000000", type="epic", completion_note="closed by operator after review",
+            reopen_warning={"child": "ab-c0000000", "at": "2026-08-01T00:00:00+00:00"},
+        ),
+        _node("ab-c0000000", parent="ab-e0000000", completed_at=None, status="in_progress"),
+    )
+    res = runner.invoke(app, ["backlog", "reopen", "ab-e0000000", "--reason", "correcting"])
+    assert res.exit_code == 0, res.output
+    epic = _read(tmp_graph)["ab-e0000000"]
+    assert epic["completed_at"] is None
+    assert "reopen_warning" not in epic
+
+
+def test_the_marker_clears_when_the_reopened_child_closes_again(tmp_graph):
+    """The regression companion to the completion_note re-annotate test: the
+    marker must not outlive the state it describes."""
+    from fno.graph.cli import _apply_completion_fields, _cascade_close_parents
+
+    _write(
+        tmp_graph,
+        _node(
+            "ab-e0000000", type="epic", completion_note="closed by operator after review",
+            reopen_warning={"child": "ab-c0000000", "at": "2026-08-01T00:00:00+00:00"},
+        ),
+        _node("ab-c0000000", parent="ab-e0000000", completed_at=None, status="in_progress"),
+    )
+    live = list(json.loads(tmp_graph.read_text())["entries"])
+    child = next(e for e in live if e["id"] == "ab-c0000000")
+    _apply_completion_fields(child)
+    _cascade_close_parents(live, "ab-c0000000")
+    epic = next(e for e in live if e["id"] == "ab-e0000000")
+    assert "reopen_warning" not in epic
+    # The parent was closed on its own evidence, so re-closing its child must
+    # not also re-close the parent - only the marker clears.
+    assert epic["completed_at"] is not None
+
+
+def test_an_already_open_child_reopen_writes_no_marker(tmp_graph):
+    """A no-op reopen (the node is not done - the same shape a raced writer
+    leaves the locked mutator's own raced_box branch to catch) never reaches
+    ``_cascade_reopen_parents``, so no marker is written."""
+    _write(
+        tmp_graph,
+        _node("ab-e0000000", type="epic", completion_note="closed by operator after review"),
+        _node("ab-c0000000", parent="ab-e0000000", completed_at=None, status="in_progress"),
+    )
+    res = runner.invoke(app, ["backlog", "reopen", "ab-c0000000", "--reason", "wrong"])
+    assert res.exit_code == 0, res.output
+    assert "nothing to reopen" in res.output
+    epic = _read(tmp_graph)["ab-e0000000"]
+    assert "reopen_warning" not in epic
+
+
 def test_the_cascade_climbs_more_than_one_level(tmp_graph):
     auto = "auto-closed: all children complete"
     _write(

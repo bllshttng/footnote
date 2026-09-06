@@ -8921,10 +8921,10 @@ def cmd_stuck_epics(
     if not rows:
         typer.echo("no stuck epics")
         return
-    for r in rows:
-        verdict = "closable" if r.closable else f"held open by {r.held_open_by}"
-        typer.echo(f"  {r.id} [{r.status}] {r.title} - {verdict}")
-        for h in r.holders:
+    for row in rows:
+        verdict = "closable" if row.closable else f"held open by {row.held_open_by}"
+        typer.echo(f"  {row.id} [{row.status}] {row.title} - {verdict}")
+        for h in row.holders:
             typer.echo(f"      {h['id']} [{h['status']}"
                        f"{', ' + h['deferred_kind'] if h.get('deferred_kind') else ''}]")
     typer.echo(
@@ -9041,23 +9041,20 @@ def _clear_completion_fields(node: dict, *, reason: str) -> None:
     node["completion_note"] = None
     node["reopened_at"] = datetime.now(timezone.utc).isoformat()
     node["reopened_reason"] = reason
+    node.pop("reopen_warning", None)  # moot once the parent itself is not done
 
 
 def _auto_closed_note(entry: dict) -> str:
     """completion_note for a container closed by all-children-complete (x-b9a5).
 
-    Both close paths (_cascade_close_parents on a child close,
-    _sweep_close_done_epics on reconcile) reach here holding the parent dict. A
-    container with its own plan_path but no PR may carry planned deliverables
-    the children never built; the cascade closes it anyway and stamps a real
-    completed_at, so the false-done is invisible to any audit keyed on
-    completion. Flag the gap: when plan_path is set and there is no pr_number,
-    the note records the container's own deliverables as UNVERIFIED.
-
-    It asserts nothing about whether the deliverables exist. A filesystem stat
-    had a measured 75% false-positive rate (renames and path conventions read
-    as missing), so plan_path + no pr_number is the only signal that does not
-    lie. A flag, not a gate: the close still happens, it just becomes findable.
+    Both close paths (_cascade_close_parents, _sweep_close_done_epics) reach
+    here holding the parent dict. A container with its own plan_path but no
+    PR may carry deliverables the children never built; the cascade closes it
+    anyway, so an untracked false-done needs a flag. When plan_path is set and
+    pr_number is not, the note marks the deliverables UNVERIFIED - not that
+    they are missing (a filesystem stat measured 75% false positives from
+    renames and path conventions), only that no PR proves them. A flag, not a
+    gate: the close still happens, it just becomes findable.
     """
     if entry.get("plan_path") and not entry.get("pr_number"):
         return "auto-closed: all children complete; own plan deliverables UNVERIFIED (plan_path set, no PR)"
@@ -9085,6 +9082,7 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
     Idempotent: an already-done or missing ancestor stops that branch. The walk
     is depth-capped against a malformed parent cycle.
     """
+    from fno.graph._reconcile import cascade_close_should_stop
     id_to_entry = {
         e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
@@ -9100,11 +9098,11 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
         if not isinstance(pid, str):
             break
         parent = id_to_entry.get(pid)
-        if parent is None or parent.get("completed_at"):
-            break  # missing or already-closed ancestor -> stop this branch
+        if parent is None:
+            break  # missing ancestor -> stop this branch
         kids = children_by_parent.get(pid) or []
-        if not kids or any(not k.get("completed_at") for k in kids):
-            break  # at least one child still open -> the epic is not done yet
+        if cascade_close_should_stop(parent, kids, cur):
+            break  # already closed, or a child still open -> stop this branch
         _apply_completion_fields(parent)
         if not parent.get("completion_note"):
             parent["completion_note"] = _auto_closed_note(parent)
@@ -10433,6 +10431,7 @@ def _cascade_reopen_parents(entries: list[dict], node_id: str) -> tuple[list[str
 
     Walks up under the same 64-deep cap the close path uses, for the same reason.
     """
+    from fno.graph._reconcile import stamp_reopen_warning
     id_to_entry = {
         e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
@@ -10449,6 +10448,7 @@ def _cascade_reopen_parents(entries: list[dict], node_id: str) -> tuple[list[str
         note = str(parent.get("completion_note") or "")
         if not note.startswith("auto-closed:"):
             warned.append(pid)
+            stamp_reopen_warning(parent, cur, node_id)
             break  # closed on its own evidence; stop rather than climb past it
         _clear_completion_fields(parent, reason=f"child {node_id} reopened")
         reopened.append(pid)
