@@ -39,11 +39,13 @@ fn blind_to_reviewed_commits(rep: &CoverageReport) -> bool {
 
 /// The terminal act a spent round budget names, replacing the review-verb
 /// instruction in the uncovered arm. The verb is what restarted the loop;
-/// past the cap the receipt must not teach another round. It names the
-/// decline-file-merge act and the one operator lever that reopens review.
-/// Contains no slash-verb and never the words "review verb" - the corpus
-/// asserts both absences with a positive marker for this very string.
-const CAP_SPENT_TERMINAL_ACT: &str = "decline the remainder, file it with the declining identity and the reason, then merge; the operator lever is config.review.max_rounds";
+/// past the cap the receipt must not teach another round. The configured
+/// rounds are the whole review gate: at the cap the review phase is
+/// complete, open findings stay in the PR conversation, and the PR merges
+/// on green CI. Contains no slash-verb and never the words "review verb" -
+/// the corpus asserts both absences with a positive marker for this very
+/// string.
+const CAP_SPENT_TERMINAL_ACT: &str = "the configured rounds are spent: the review phase is complete; open findings stay in the PR conversation; merge on green CI; the operator lever is config.review.max_rounds";
 
 /// One-line coverage summary for the terminal message and receipts (x-0eaf
 /// task 3.1). Printed from the coverage value at print time, never from a
@@ -343,10 +345,9 @@ mod tests {
             .unwrap();
         assert_eq!(v["attestation_origin"], serde_json::json!("self_attested"));
 
-        let mut held = unmeasured;
-        assert!(held.rests_on_self_attestation_alone());
-        held.apply_corroboration_policy(true);
-        assert_eq!(held.coverage, Coverage::Covered(0));
+        // Origin never gates, so the unmeasured-authorship row stays
+        // covered: the recorded origin is a fact on the row, not a gate.
+        assert_eq!(unmeasured.coverage, Coverage::Covered(1));
     }
 
     #[test]
@@ -478,7 +479,7 @@ mod tests {
         );
         assert!(
             line.contains(
-                "decline the remainder, file it with the declining identity and the reason, then merge"
+                "the configured rounds are spent: the review phase is complete; open findings stay in the PR conversation"
             ),
             "{line}"
         );
