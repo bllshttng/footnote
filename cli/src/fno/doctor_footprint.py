@@ -658,8 +658,7 @@ def _payload(
         "fleet_percent_capacity": reading.fleet_cpu_cores / cpu_capacity * 100,
         "fleet_percent_measured_cpu": measured_share,
         "leak_verdict": leak_verdict(reading.direct_process_count, process_threshold),
-        # x-5283 AC7: the verdict reads the LOAD snapshot; the sustained-CPU
-        # line below is a different axis and decided nothing.
+        # x-5283 AC7: the verdict reads the LOAD snapshot, not sustained CPU.
         "capacity_verdict": (cv := capacity_verdict(load_snapshot)),
         "capacity_verdict_axis": "load_1m" if cv != "unknown" else "unknown",
         "load_1m": getattr(load_snapshot, "load_1m", None),

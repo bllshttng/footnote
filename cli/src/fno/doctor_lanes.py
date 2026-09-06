@@ -344,7 +344,7 @@ def _census(
         # list.
         "top_consumers": None,
         # The caller's own share reading (x-5283), from the ONE function the
-        # spawn gate refuses on. None when it cannot be read.
+        # spawn gate refuses on; None when it cannot be read.
         "share": _share_reading(),
         # An unread count NAMES why, the rule every arm follows: without it
         # "unknown rows" cannot be told from an incomplete registry.

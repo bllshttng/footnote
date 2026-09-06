@@ -243,11 +243,6 @@ class LiveCensus:
     worker_rows: dict[Optional[str], list[str]] = field(default_factory=dict)
 
     @property
-    def worker_counts(self) -> dict[Optional[str], int]:
-        """Live worker rows per spawner, derived from :attr:`worker_rows`."""
-        return {k: len(v) for k, v in self.worker_rows.items()}
-
-    @property
     def count(self) -> int:
         """The full union size (fno rows + roster sessions + slot claims). The
         RAM-ground-truth / ``fno agents top`` display number — NOT the slot cap

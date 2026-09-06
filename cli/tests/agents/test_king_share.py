@@ -80,7 +80,9 @@ def test_census_charges_worker_rows_to_their_spawner(monkeypatch):
         [_row("w1", alive, spawned_by=KING_A), _row("w2", alive, spawned_by=KING_A),
          _row("w3", alive, spawned_by=KING_B), _row("w4", alive)],
     )
-    assert c.worker_counts == {KING_A: 2, KING_B: 1, None: 1}
+    assert {k: len(v) for k, v in c.worker_rows.items()} == {
+        KING_A: 2, KING_B: 1, None: 1,
+    }
     assert c.worker_rows == {KING_A: ["w1", "w2"], KING_B: ["w3"], None: ["w4"]}
     by_name = {w.name: w for w in c.workers}
     assert by_name["w1"].spawned_by == KING_A

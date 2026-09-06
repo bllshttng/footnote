@@ -891,9 +891,8 @@ def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
     """Name an unrecorded parent edge in the spawn output, and return the
     reason so the spawn event can carry it (x-5283): the event holds either
     a session id or this reason, never both empty. A null can be CORRECT
-    (an inherited foreign marker would record a stranger as parent); the
-    defect was its silence, so say it with the identity resolution's own
-    reason, and the spawner reads WHY.
+    (a foreign inherited marker would record a stranger as parent); the
+    defect was its silence, so say it with the identity resolution's reason.
     """
     if session_id:
         return None
