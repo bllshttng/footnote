@@ -1899,19 +1899,6 @@ def run_merge(
         # reason whose trailing paren closes an inner clause (a searched list,
         # a truncated sha) would swallow the note into the wrong parenthetical.
         line = _coverage_gate.refusal_line(refusal, note)
-        if state == _coverage_gate.IMPOSSIBLE:
-            # Distinct from the unreviewed receipt: "cannot be cleared by
-            # reviewing" prescribes escalation, not another round, and a
-            # receipt that reads like the ordinary refusal teaches exactly
-            # the loop this state exists to end.
-            _emit(
-                pr_number,
-                "blocked",
-                f"merge refused, coverage impossible: {line}",
-                "none",
-                err=True,
-            )
-            return 2
         if state == _coverage_gate.UNANSWERED:
             # UNANSWERED is an instrument failure, not a review verdict: a
             # receipt that says "unreviewed" about a probe that died sends a
@@ -1942,20 +1929,6 @@ def run_merge(
             + note[len(_coverage_gate.OVERRIDE_NOTE_PREFIX) :],
             file=sys.stderr,
         )
-
-    seg = next(
-        (
-            s
-            for s in note.split("; ")
-            if s.startswith(_coverage_gate.SELF_ATTESTED_NOTE_PREFIX)
-        ),
-        "",
-    )
-    if seg:
-        # The segment is already a whole sentence carrying its own label, so it
-        # prints verbatim. Re-labelling it here spelled "coverage coverage is
-        # the author's own ..." on the receipt this PR exists to make readable.
-        print(seg, file=sys.stderr)
 
     # covered_head (from the gate) pins the merge so a racing push after the
     # coverage check cannot land an unreviewed head (x-0eaf TOCTOU). The

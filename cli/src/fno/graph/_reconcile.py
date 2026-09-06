@@ -2390,11 +2390,10 @@ def _emit_zero_coverage_escape(record: "MergeDriftRecord", events_path: Path) ->
     if cov is None:
         return False
     if cov.get("coverage") == "covered":
-        try:
-            if int(cov.get("reviewed_count") or 0) > 0:
-                return False  # genuinely reviewed; not an escape
-        except (TypeError, ValueError):
-            pass
+        # The word decides, never the count: a budget spent on fail rounds
+        # reads covered with passed_count 0, and the count conjunct here
+        # reported that as "nothing reviewed this diff".
+        return False  # genuinely reviewed; not an escape
     count = cov.get("reviewed_count", 0)
     count_str = str(count) if count is not None else "unknown"
     detail = (

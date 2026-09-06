@@ -764,7 +764,7 @@ def test_max_rounds_below_one_fails_loud(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Zero or negative fails the load, never silently zeroes the budget - a
-    missing cap would fire IMPOSSIBLE on every second round."""
+    missing cap would let every round refund into an unbounded review."""
     with pytest.raises(Exception):
         _load(
             tmp_path,
@@ -865,14 +865,15 @@ def test_posture_legacy_explicit_floor_optout_infers_no_review() -> None:
     assert resolved.migration == "fno config set review.posture no_review --local"
 
 
-def test_posture_legacy_corroboration_infers_independent() -> None:
-    """Corroboration makes the author's own attestation read uncovered, so the
-    honest legacy reading is the rung demanding non-self evidence."""
+def test_posture_legacy_corroboration_is_ignored() -> None:
+    """Origin never gates, so require_corroboration no longer feeds the
+    legacy inference: setting it changes nothing the posture reports."""
     from fno.config import resolve_review_posture
 
-    resolved = resolve_review_posture(_review("require_corroboration: true\n"))
-    assert resolved.value == "independent_review"
-    assert resolved.signals == ("require_corroboration",)
+    with_it = resolve_review_posture(_review("require_corroboration: true\n"))
+    without = resolve_review_posture(_review("optout_ttl_minutes: 30\n"))
+    assert with_it.value == without.value == "self_review"
+    assert "require_corroboration" not in with_it.signals
 
 
 def test_posture_legacy_peers_infers_self_and_peer() -> None:
@@ -927,3 +928,12 @@ def test_posture_descriptors_cover_nine_rungs_with_costs() -> None:
         assert d.value == name
         assert d.cost
         assert d.summary
+
+
+def test_require_corroboration_registry_row_names_the_deprecation() -> None:
+    """The row teaches the retirement: the key loads but changes nothing."""
+    from fno.config.registry import FIELD_META
+
+    doc = FIELD_META["review.require_corroboration"].doc.casefold()
+    assert "deprecated" in doc
+    assert "origin never gates" in doc

@@ -53,21 +53,20 @@ fn gate_finding_blocks(primitive: &Value) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DispositionBlocker {
     pub finding_key: String,
-    /// "open", "fixed-unreviewed", "fixed-uncorroborated",
-    /// "declined-uncorroborated", "declined-without-reason", or
+    /// "open", "fixed-unreviewed", "declined-without-reason", or
     /// "truncated-remainder".
     pub axis: &'static str,
     /// A CONFIRMED correctness or security finding (or the truncated
-    /// remainder, which cannot be inspected). At the round cap only a hard
-    /// blocker withholds the merge; the rest are filed as nodes.
+    /// remainder, which cannot be inspected). Recorded on the receipt and
+    /// gates nothing: at the configured rounds the budget discharges every
+    /// open finding, hard included.
     pub hard: bool,
 }
 
-/// The two categories the round cap can never file away: a finding the
-/// reviewer CONFIRMED as a correctness or security defect. The class gate is
-/// what makes file-the-remainder safe - noise can be filed, a confirmed bug
-/// cannot - so this reads the same primitive fields `gate_finding_blocks`
-/// re-derives from, never the producer's count.
+/// The two categories a finding the reviewer CONFIRMED as a correctness or
+/// security defect can carry. Recorded on the blocker for the receipt; it
+/// reads the same primitive fields `gate_finding_blocks` re-derives from,
+/// never the producer's count.
 const HARD_CATEGORIES: &[&str] = &["correctness", "security"];
 
 fn hard_finding(primitive: &Value) -> bool {
@@ -87,17 +86,11 @@ fn hard_finding(primitive: &Value) -> bool {
     HARD_CATEGORIES.contains(&category.as_str())
 }
 
-/// Whether the blockers still withhold `reviewed`. Under the budget every
-/// blocker withholds. At the cap only a hard one does: the rest are filed by
-/// the merge gate and the PR merges (one review stays the floor - an empty
-/// chain never reaches here with rounds spent).
+/// Whether the blockers still withhold `reviewed`: any open finding
+/// withholds below the cap, and at the cap nothing does - the configured
+/// rounds are the whole review gate, so the PR merges on green CI.
 pub fn blockers_withhold(blockers: &[DispositionBlocker], rounds_exhausted: bool) -> bool {
-    blockers.iter().any(|b| b.hard || !rounds_exhausted)
-}
-
-/// The IMPOSSIBLE predicate: rounds spent AND a hard blocker remains.
-pub fn blockers_impossible(blockers: &[DispositionBlocker], rounds_exhausted: bool) -> bool {
-    rounds_exhausted && blockers.iter().any(|b| b.hard)
+    !rounds_exhausted && !blockers.is_empty()
 }
 
 /// The head an attestation row pinned, for the delta-witness read.
@@ -112,22 +105,14 @@ fn row_head(row: &Value) -> &str {
 /// every predicate).
 ///
 /// Terminal means: fixed (and a LATER round reviewed a head the finding's
-/// last raise did not sit on, with corroboration the author cannot mint
-/// alone), non-blocking by the gate's own re-derivation, or declined WITH
-/// corroboration the author cannot mint alone (`self_attested_alone` is the
-/// coverage row's existing predicate - a disposition pass carries its own
-/// corroboration requirement, independent of
-/// `config.review.require_corroboration`, because a disposition pass can be
-/// gamed by declining and a clean review cannot). Pure: no IO. An empty chain
+/// last raise did not sit on), non-blocking by the gate's own re-derivation,
+/// or declined WITH a recorded reason. Origin never gates: whoever attested
+/// the disposition, the terminality is the same. Pure: no IO. An empty chain
 /// has no findings and blocks nothing.
-pub fn disposition_blockers_on_chain(
-    chain: &[Value],
-    self_attested_alone: bool,
-) -> Vec<DispositionBlocker> {
+pub fn disposition_blockers_on_chain(chain: &[Value]) -> Vec<DispositionBlocker> {
     if chain.is_empty() {
         return Vec::new();
     }
-    let last_round = chain.len().saturating_sub(1);
 
     let mut findings: Vec<(String, &Value, usize, String)> = Vec::new(); // key, primitive, raised round, raised head
     let mut dispositions: std::collections::HashMap<String, (&str, &str)> =
@@ -200,17 +185,12 @@ pub fn disposition_blockers_on_chain(
                 hard: hard_finding(primitive),
             }),
             Some(("fixed", _)) => {
-                // Terminal only when a LATER round reviewed the fix delta
-                // AND the chain is not the author's own signature alone.
-                // The delta witness reads the rows AFTER the last raise,
-                // not the disposition entry: the disposition rides one
-                // event, so a last-wins copy of its head pinned the gate
-                // to a stale same-head dispose forever when the real
-                // fix's round re-emitted nothing. And head inequality
-                // alone is clearable at zero cost - an empty commit
-                // between attest and dispose - so the corroboration term
-                // is what refuses that author, the same signature test a
-                // decline already answers to.
+                // Terminal when a LATER round reviewed the fix delta. The
+                // delta witness reads the rows AFTER the last raise, not
+                // the disposition entry: the disposition rides one event,
+                // so a last-wins copy of its head pinned the gate to a
+                // stale same-head dispose forever when the real fix's
+                // round re-emitted nothing.
                 let delta_witnessed = chain[*raised + 1..]
                     .iter()
                     .any(|row| row_head(row) != raised_head.as_str());
@@ -220,12 +200,6 @@ pub fn disposition_blockers_on_chain(
                         axis: "fixed-unreviewed",
                         hard: hard_finding(primitive),
                     });
-                } else if self_attested_alone {
-                    blockers.push(DispositionBlocker {
-                        finding_key: key.clone(),
-                        axis: "fixed-uncorroborated",
-                        hard: hard_finding(primitive),
-                    });
                 }
             }
             Some(("declined", reason)) => {
@@ -233,12 +207,6 @@ pub fn disposition_blockers_on_chain(
                     blockers.push(DispositionBlocker {
                         finding_key: key.clone(),
                         axis: "declined-without-reason",
-                        hard: hard_finding(primitive),
-                    });
-                } else if self_attested_alone {
-                    blockers.push(DispositionBlocker {
-                        finding_key: key.clone(),
-                        axis: "declined-uncorroborated",
                         hard: hard_finding(primitive),
                     });
                 }
@@ -257,16 +225,15 @@ pub fn disposition_blockers_on_chain(
 
 #[cfg(test)]
 mod tests {
-    use super::disposition_blockers_on_chain;
+    use super::{blockers_withhold, disposition_blockers_on_chain};
 
     #[test]
     fn same_head_rerun_never_clears_a_fixed_finding() {
         // A fixed disposition is terminal only when a later round attested a
-        // head the finding's last raise did not sit on, with corroboration
-        // the author cannot mint alone. A same-head re-run is one more row
-        // under the same branch invocation with no new commit; keyed on the
-        // round index alone, an author clears a CONFIRMED finding by
-        // re-attesting the head that raised it.
+        // head the finding's last raise did not sit on. A same-head re-run is
+        // one more row under the same branch invocation with no new commit;
+        // keyed on the round index alone, an author clears a CONFIRMED
+        // finding by re-attesting the head that raised it.
         use serde_json::json;
         let finding = json!({
             "finding_key": "f.py:1:correctness",
@@ -299,7 +266,7 @@ mod tests {
             row("h1", "fail", vec![finding.clone()], vec![]),
             row("h1", "pass", vec![], vec![fixed_disp.clone()]),
         ];
-        let blockers = disposition_blockers_on_chain(&chain, false);
+        let blockers = disposition_blockers_on_chain(&chain);
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].axis, "fixed-unreviewed");
 
@@ -308,15 +275,14 @@ mod tests {
             row("h1", "fail", vec![finding], vec![]),
             row("h2", "pass", vec![], vec![fixed_disp]),
         ];
-        assert!(disposition_blockers_on_chain(&chain, false).is_empty());
+        assert!(disposition_blockers_on_chain(&chain).is_empty());
     }
 
     #[test]
-    fn attest_empty_commit_dispose_still_blocks() {
-        // The exploit this closes: attest, empty-commit, dispose. A new head
-        // between raise and dispose satisfies head inequality at zero cost,
-        // so on the author's own signature alone the fixed finding stays
-        // non-terminal, refused by name as fixed-uncorroborated.
+    fn attest_empty_commit_dispose_is_terminal() {
+        // Attest, empty-commit, dispose: the new head between raise and
+        // dispose IS the fix-delta witness, and origin never gates - the
+        // disposition is terminal on the author's own signature alone.
         use serde_json::json;
         let finding = json!({
             "finding_key": "f.py:1:correctness",
@@ -337,22 +303,47 @@ mod tests {
                                   "reason": "attested by the author"}],
             }}),
         ];
-        let blockers = disposition_blockers_on_chain(&chain, true);
-        assert_eq!(blockers.len(), 1);
-        assert_eq!(blockers[0].finding_key, "f.py:1:correctness");
-        assert_eq!(blockers[0].axis, "fixed-uncorroborated");
+        assert!(disposition_blockers_on_chain(&chain).is_empty());
+    }
 
-        // Corroboration is the missing term: the same chain corroborated
-        // reads terminal (the legitimate cross-session flow).
-        assert!(disposition_blockers_on_chain(&chain, false).is_empty());
+    #[test]
+    fn a_declined_finding_with_a_reason_is_terminal() {
+        // Origin never gates: the author's own decline with a recorded
+        // reason reads exactly like a second session's.
+        use serde_json::json;
+        let finding = json!({
+            "finding_key": "s.rs:1:security",
+            "category": "security",
+            "verdict": null,
+            "blocking": true,
+            "has_required_fields": true,
+        });
+        let chain = vec![json!({"type": "review_attestation", "data": {
+            "head_sha": "h1", "verdict": "fail", "branch": "feature/x",
+            "findings": [finding],
+            "dispositions": [{"finding_key": "s.rs:1:security",
+                              "disposition": "declined",
+                              "reason": "not applicable here"}],
+        }})];
+        assert!(disposition_blockers_on_chain(&chain).is_empty());
+
+        // A reason-less decline stays non-terminal.
+        let chain = vec![json!({"type": "review_attestation", "data": {
+            "head_sha": "h1", "verdict": "fail", "branch": "feature/x",
+            "findings": [finding],
+            "dispositions": [{"finding_key": "s.rs:1:security",
+                              "disposition": "declined",
+                              "reason": "  "}],
+        }})];
+        assert_eq!(disposition_blockers_on_chain(&chain).len(), 1);
     }
 
     #[test]
     fn real_fix_after_a_stale_same_head_dispose_answers() {
         // A same-head `fixed`, then a real fix whose round re-emits no
-        // disposition: the delta witness reads the later rows, so the
-        // corroborated chain is terminal instead of pinned to the stale
-        // same-head dispose forever.
+        // disposition: the delta witness reads the later rows, so the chain
+        // is terminal instead of pinned to the stale same-head dispose
+        // forever.
         use serde_json::json;
         let finding = json!({
             "finding_key": "f.py:1:correctness",
@@ -377,6 +368,20 @@ mod tests {
                 "findings": [], "dispositions": [],
             }}),
         ];
-        assert!(disposition_blockers_on_chain(&chain, false).is_empty());
+        assert!(disposition_blockers_on_chain(&chain).is_empty());
+    }
+
+    #[test]
+    fn withhold_below_the_cap_any_open_at_the_cap_none() {
+        // One predicate: below the configured rounds any open finding
+        // withholds; at the cap nothing does, hard included.
+        let open_hard = vec![super::DispositionBlocker {
+            finding_key: "f.py:1:correctness".to_string(),
+            axis: "open",
+            hard: true,
+        }];
+        assert!(blockers_withhold(&open_hard, false));
+        assert!(!blockers_withhold(&open_hard, true));
+        assert!(!blockers_withhold(&[], false));
     }
 }

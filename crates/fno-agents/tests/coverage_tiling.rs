@@ -14,8 +14,9 @@
 //! was a stale served row, not logic, and these tests keep it that way.
 
 use fno_agents::loopcheck::{
-    classify_coverage_tiled, compute_range_tiling, coverage_receipt_line, Coverage,
-    CoverageProducer, CoverageVerdict, Freshness, RangeTiling, ReviewState,
+    classify_coverage_tiled, compute_range_tiling, coverage_event_data_tiled,
+    coverage_receipt_line, Coverage, CoverageProducer, CoverageVerdict, Freshness, RangeTiling,
+    ReviewState,
 };
 use std::fs;
 use std::path::Path;
@@ -488,14 +489,11 @@ fn specimen_events() -> String {
 
 #[test]
 fn ac5_marker_specimen_blocks_nothing() {
-    // The specimen's fixed findings are terminal once the chain carries
-    // corroboration; on the author's own signature alone a fixed finding
-    // stays non-terminal (the fixed-uncorroborated axis), the same
-    // signature test a decline answers to.
-    let corroborated = disposition_blockers(&specimen_events(), BRANCH, SPECIMEN_HEAD, false);
-    assert_eq!(corroborated, Vec::new());
-    let alone = disposition_blockers(&specimen_events(), BRANCH, SPECIMEN_HEAD, true);
-    assert_eq!(alone[0].axis, "fixed-uncorroborated");
+    // The specimen's fixed findings are terminal: each fix delta was
+    // reviewed by a later round. Origin never gates, so one call covers
+    // every authorship shape.
+    let blockers = disposition_blockers(&specimen_events(), BRANCH, SPECIMEN_HEAD);
+    assert_eq!(blockers, Vec::new());
 }
 
 #[test]
@@ -513,25 +511,23 @@ fn ac5b_marker_one_open_finding_blocks_by_key() {
         serde_json::json!([]),
         false,
     ));
-    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, true);
-    // On the author's own signature alone the specimen's five fixed
-    // findings are non-terminal too (fixed-uncorroborated); the open one
-    // still blocks by key among them.
-    assert_eq!(blockers.len(), 6);
-    let open = blockers
-        .iter()
-        .find(|b| b.finding_key == "cli/src/fno/pr/_coverage_gate.py:999:correctness")
-        .expect("the open finding blocks by key");
-    assert_eq!(open.axis, "open");
-    assert!(blockers
-        .iter()
-        .filter(|b| b.finding_key != open.finding_key)
-        .all(|b| b.axis == "fixed-uncorroborated"));
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD);
+    // The specimen's five fixed findings are terminal (later rounds
+    // reviewed each fix delta); only the open finding blocks.
+    assert_eq!(blockers.len(), 1);
+    assert_eq!(
+        blockers[0].finding_key,
+        "cli/src/fno/pr/_coverage_gate.py:999:correctness"
+    );
+    assert_eq!(blockers[0].axis, "open");
 }
 
 #[test]
-fn declined_without_corroboration_blocks() {
-    let events = [dispositions_event(
+fn declined_with_a_reason_is_terminal_reasonless_blocks() {
+    // Origin never gates: the author's own decline with a recorded reason
+    // is terminal exactly as a second session's. What blocks is a decline
+    // with no reason at all.
+    let reasoned = [dispositions_event(
         SPECIMEN_HEAD,
         serde_json::json!([finding("sec.rs:1:security", "security", None, true)]),
         serde_json::json!([serde_json::json!({
@@ -542,12 +538,23 @@ fn declined_without_corroboration_blocks() {
         false,
     )]
     .join("\n");
-    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, true);
-    assert_eq!(blockers.len(), 1);
-    assert_eq!(blockers[0].axis, "declined-uncorroborated");
+    let blockers = disposition_blockers(&reasoned, BRANCH, SPECIMEN_HEAD);
+    assert_eq!(blockers, Vec::new());
 
-    let clean = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, false);
-    assert_eq!(clean, Vec::new());
+    let reasonless = [dispositions_event(
+        SPECIMEN_HEAD,
+        serde_json::json!([finding("sec.rs:1:security", "security", None, true)]),
+        serde_json::json!([serde_json::json!({
+            "finding_key": "sec.rs:1:security",
+            "disposition": "declined",
+            "reason": "  ",
+        })]),
+        false,
+    )]
+    .join("\n");
+    let blockers = disposition_blockers(&reasonless, BRANCH, SPECIMEN_HEAD);
+    assert_eq!(blockers.len(), 1);
+    assert_eq!(blockers[0].axis, "declined-without-reason");
 }
 
 #[test]
@@ -565,7 +572,7 @@ fn fixed_in_the_last_round_is_unreviewed() {
         false,
     )]
     .join("\n");
-    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, false);
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD);
     assert_eq!(blockers.len(), 1);
     assert_eq!(blockers[0].axis, "fixed-unreviewed");
 }
@@ -582,7 +589,7 @@ fn producer_count_is_never_the_answer() {
         false,
     )]
     .join("\n");
-    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, false);
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD);
     assert_eq!(blockers.len(), 1);
     assert_eq!(blockers[0].finding_key, "lie.py:1:style");
 }
@@ -600,7 +607,7 @@ fn nonblocking_by_class_needs_no_disposition() {
     )]
     .join("\n");
     assert_eq!(
-        disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, false),
+        disposition_blockers(&events, BRANCH, SPECIMEN_HEAD),
         Vec::new()
     );
 }
@@ -614,17 +621,14 @@ fn truncated_remainder_blocks() {
         true,
     )]
     .join("\n");
-    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, false);
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD);
     assert_eq!(blockers.len(), 1);
     assert_eq!(blockers[0].axis, "truncated-remainder");
 }
 
 #[test]
 fn empty_chain_blocks_nothing() {
-    assert_eq!(
-        disposition_blockers("", BRANCH, SPECIMEN_HEAD, true),
-        Vec::new()
-    );
+    assert_eq!(disposition_blockers("", BRANCH, SPECIMEN_HEAD), Vec::new());
 }
 
 // --- AC6: a non-author GitHub approval is a sufficient producer ---
@@ -687,9 +691,6 @@ fn github_approval_counts_when_flag_on_and_approver_is_not_the_author() {
     // The receipt's counted list names bob: "1 reviewed (bob)".
     let line = coverage_receipt_line(&rep, None, None);
     assert!(line.contains("1 reviewed (bob)"), "receipt was: {line}");
-    // Corroboration falls out: a counted human approval is by construction
-    // not the author's own attestation.
-    assert!(!rep.rests_on_self_attestation_alone());
 }
 
 #[test]
@@ -1571,7 +1572,7 @@ fn cap_a_declined_tiling_chain_counts_as_coverage_past_the_budget() {
 
 #[test]
 fn cap_only_a_confirmed_correctness_or_security_finding_is_hard() {
-    use fno_agents::loopcheck::{blockers_impossible, blockers_withhold};
+    use fno_agents::loopcheck::blockers_withhold;
     let events = [dispositions_event(
         SPECIMEN_HEAD,
         serde_json::json!([
@@ -1583,7 +1584,7 @@ fn cap_only_a_confirmed_correctness_or_security_finding_is_hard() {
         false,
     )]
     .join("\n");
-    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, true);
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD);
     assert_eq!(blockers.len(), 3);
     let hard: Vec<&str> = blockers
         .iter()
@@ -1593,16 +1594,16 @@ fn cap_only_a_confirmed_correctness_or_security_finding_is_hard() {
     // CONFIRMED security is hard. Unconfirmed correctness is not. CONFIRMED
     // performance is not - the two categories are the whole list.
     assert_eq!(hard, vec!["a.py:1:security"]);
-    // Under the budget every blocker withholds; at the cap only the hard one.
+    // Hardness is a receipt fact: it gates the standing waiver below the
+    // cap and nothing else. Under the budget every blocker withholds; at
+    // the cap the budget discharges all of them.
     assert!(blockers_withhold(&blockers, false));
-    assert!(blockers_withhold(&blockers, true));
-    assert!(blockers_impossible(&blockers, true));
-    assert!(!blockers_impossible(&blockers, false));
+    assert!(!blockers_withhold(&blockers, true));
 }
 
 #[test]
 fn cap_with_only_fileable_findings_stops_withholding() {
-    use fno_agents::loopcheck::{blockers_impossible, blockers_withhold};
+    use fno_agents::loopcheck::blockers_withhold;
     let events = [dispositions_event(
         SPECIMEN_HEAD,
         serde_json::json!([finding("b.py:2:correctness", "correctness", None, true)]),
@@ -1610,7 +1611,7 @@ fn cap_with_only_fileable_findings_stops_withholding() {
         false,
     )]
     .join("\n");
-    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, true);
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD);
     assert_eq!(blockers.len(), 1);
     assert!(!blockers[0].hard);
     assert!(
@@ -1619,9 +1620,8 @@ fn cap_with_only_fileable_findings_stops_withholding() {
     );
     assert!(
         !blockers_withhold(&blockers, true),
-        "at the cap it is filed, not held"
+        "at the cap the budget discharges it"
     );
-    assert!(!blockers_impossible(&blockers, true));
 }
 
 #[test]
@@ -1634,21 +1634,23 @@ fn cap_truncated_remainder_is_always_hard() {
         true,
     )]
     .join("\n");
-    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, false);
-    assert!(blockers[0].hard, "what cannot be inspected cannot be filed");
-    assert!(blockers_withhold(&blockers, true));
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD);
+    assert!(
+        blockers[0].hard,
+        "what cannot be inspected is recorded hard"
+    );
+    // Below the cap it withholds; at the cap the budget discharges it too.
+    assert!(blockers_withhold(&blockers, false));
+    assert!(!blockers_withhold(&blockers, true));
 }
 
-// --- the cap's two axes (shared corpus with the Python gate) -----------------
+// --- the cap's round count (shared corpus with the Python gate) --------------
 //
 // The SAME constructed chain is asserted on the Python side by
-// `test_cap_verdict_reads_the_events_axis_alone_for_impossible` and
-// `test_cap_verdict_agreement_chain_is_impossible_and_names_the_key`
-// (cli/tests/unit/test_pr_coverage_check.py), to the SAME
-// (impossible, rounds_used) pair. No live PR sources this fixture: the
-// specimens that measured the divergence are being cleared while this
-// lands, and on both of them the two axes AGREE - a fixture where they
-// agree cannot show which axis the conjunct reads.
+// `test_cap_verdict_rounds_read_the_max_of_both_axes` and
+// `test_cap_verdict_counts_the_chain_and_names_the_key`
+// (cli/tests/unit/test_pr_coverage_check.py), to the SAME rounds_used and
+// the SAME named key. No live PR sources this fixture.
 
 const CAP_BRANCH: &str = "feature/x-cap";
 const CAP_KEY: &str = "cli/src/fake.py:779:correctness";
@@ -1682,8 +1684,8 @@ fn cap_round(i: usize) -> String {
 }
 
 #[test]
-fn cap_the_impossible_conjunct_reads_the_events_axis_alone() {
-    use fno_agents::loopcheck::{blockers_impossible, rounds_since_last_pass};
+fn cap_the_budget_reads_the_max_of_both_axes() {
+    use fno_agents::loopcheck::rounds_since_last_pass;
     // One fail round raising a CONFIRMED correctness finding, plus a reviews
     // payload naming five distinct reviewed commits, at max_rounds 2.
     let events = cap_round(0);
@@ -1691,49 +1693,42 @@ fn cap_the_impossible_conjunct_reads_the_events_axis_alone() {
     let reviews: Vec<serde_json::Value> = (0..5)
         .map(|i| serde_json::json!({"state": "APPROVED", "commit": {"oid": format!("r{i:038x}")}}))
         .collect();
-    // The reported budget: one shared head set across both axes (the law's
-    // sentence, d-608344c1), so the attestation head plus five distinct
-    // reviewed commits answer 6 - a bot round IS a round, and heads the two
-    // axes share are counted once.
+    // The reported budget counts one shared head set: the attestation head
+    // plus five distinct reviewed commits answer 6 - a bot round IS a round,
+    // and heads the two axes share are counted once.
     assert_eq!(
         rounds_since_last_pass(&events, CAP_BRANCH, &head, Some(&reviews)),
         6
     );
     // The events axis alone: 1 of 2, not spent.
     assert_eq!(rounds_since_last_pass(&events, CAP_BRANCH, &head, None), 1);
-    let blockers = disposition_blockers(&events, CAP_BRANCH, &head, true);
+    let blockers = disposition_blockers(&events, CAP_BRANCH, &head);
     assert_eq!(blockers.len(), 1);
-    assert!(blockers[0].hard, "CONFIRMED correctness is hard");
-    // Budget axis spent, impossible axis not: the conjunct the gate applies
-    // reads the events axis, so this chain is NOT impossible - the unspent
-    // capacity is local and a disposition-carrying attestation clears it.
-    assert!(blockers_impossible(&blockers, true));
-    assert!(!blockers_impossible(&blockers, false));
+    assert!(blockers[0].hard, "CONFIRMED correctness is recorded hard");
 }
 
 #[test]
-fn cap_the_agreement_chain_is_impossible_on_both_gates() {
-    use fno_agents::loopcheck::{blockers_impossible, rounds_since_last_pass};
+fn cap_the_agreement_chain_names_the_key_on_both_gates() {
+    use fno_agents::loopcheck::rounds_since_last_pass;
     // One fail raising the CONFIRMED correctness finding, then five
-    // findings-free passes, each at its own head: six events-axis rounds
-    // against max_rounds 2. Both axes agree here, and the chain is
-    // impossible - the Python side asserts the same pair on the same chain.
+    // findings-free passes, each at its own head: six rounds against
+    // max_rounds 2. The Python side asserts the same count and the same
+    // key on the same chain; at the cap the key is context, not a block.
     let events: String = (0..6).map(cap_round).collect::<Vec<_>>().join("\n");
     let head = format!("{:040x}", 5);
     assert_eq!(rounds_since_last_pass(&events, CAP_BRANCH, &head, None), 6);
-    let blockers = disposition_blockers(&events, CAP_BRANCH, &head, true);
+    let blockers = disposition_blockers(&events, CAP_BRANCH, &head);
     assert_eq!(blockers.len(), 1);
     assert!(blockers[0].hard);
     assert_eq!(blockers[0].finding_key, CAP_KEY);
-    assert!(blockers_impossible(&blockers, true));
 }
 
 #[test]
 fn cap_range_tiling_seeds_the_events_axis_off_the_events_count() {
     use fno_agents::loopcheck::rounds_since_last_pass;
-    // compute_range_tiling holds no review objects, so both its budget and
-    // its impossible axis start as the events-only answer; the refresh sites
-    // inside read_pr_info widen the budget and leave the impossible axis.
+    // compute_range_tiling holds no review objects, so its budget starts as
+    // the events-only answer; the refresh sites inside read_pr_info widen
+    // it to both axes.
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path();
     let (_base, shas, head) = repo_with(repo, 2);
@@ -1785,10 +1780,6 @@ fn cap_range_tiling_seeds_the_events_axis_off_the_events_count() {
     let tiling = tiling_for(repo, &events);
     assert_eq!(tiling.rounds_used, 2);
     assert!(tiling.rounds_exhausted, "2 of 2 spends the budget");
-    assert!(
-        tiling.events_rounds_exhausted,
-        "no review objects in hand: both axes are the events answer"
-    );
 }
 
 // --- x-aecc: declining must satisfy coverage ---------------------------------
@@ -1924,6 +1915,46 @@ fn xaecc_marker1_fail_only_chain_fully_dispositioned_reads_covered() {
         unattested.is_empty(),
         "an answered fail satisfies the reviewers gate: {unattested:?}"
     );
+
+    // The counter counts REVIEWS, passes or not: a fail round that answered
+    // the head reads reviewed_count 1 and passed_count 0, and a second
+    // reviewer's fail round makes it 2 and 0 - never "zero reviews" on a PR
+    // two rounds were spent reviewing.
+    let data = coverage_event_data_tiled(1, &rep, &head, "", None, Some(&tiling));
+    assert_eq!(data["reviewed_count"], serde_json::json!(1));
+    assert_eq!(data["passed_count"], serde_json::json!(0));
+    let peer_decline = {
+        let mut row: serde_json::Value = serde_json::from_str(&declined_round(
+            &base,
+            &head,
+            serde_json::json!([finding("c.py:3:correctness", "correctness", None, true)]),
+            serde_json::json!([declined("c.py:3:correctness")]),
+        ))
+        .unwrap();
+        row["ts"] = serde_json::json!("2026-08-26T20:00:00Z");
+        row["data"]["reviewer"] = serde_json::json!("peer");
+        row.to_string()
+    };
+    let mut lines_two: Vec<String> = events.lines().map(str::to_string).collect();
+    lines_two.push(peer_decline);
+    let events_two = events_file(repo, &lines_two);
+    let rep_two = classify_coverage_tiled(
+        &[],
+        &[],
+        &events_two,
+        &[],
+        true,
+        None,
+        &at_head,
+        BRANCH,
+        &head,
+        Some(&tiling),
+        None,
+        false,
+    );
+    let data_two = coverage_event_data_tiled(1, &rep_two, &head, "", None, Some(&tiling));
+    assert_eq!(data_two["reviewed_count"], serde_json::json!(2));
+    assert_eq!(data_two["passed_count"], serde_json::json!(0));
 }
 
 #[test]
@@ -2012,7 +2043,7 @@ fn xaecc_marker2_one_nonterminal_finding_withholds_and_is_named() {
         "an unanswered fail must not count as a review"
     );
     assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
-    let blockers = disposition_blockers(&events, BRANCH, &head, false);
+    let blockers = disposition_blockers(&events, BRANCH, &head);
     assert_eq!(blockers.len(), 1, "the refusal names exactly one finding");
     assert_eq!(blockers[0].finding_key, k2);
     assert_eq!(blockers[0].axis, "open");

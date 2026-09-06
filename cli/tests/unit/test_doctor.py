@@ -285,7 +285,6 @@ def test_build_report_checks_source_sync_after_post_merge_refresh(
         "_groom_health",
         "_archive_id_collisions",
         "_launch_agent_failures",
-        "_self_attested_coverage_report",
         "_plugin_cache_report",
         "_silent_switch_report",
         "_auto_merge_review_gap",

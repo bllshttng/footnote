@@ -1052,7 +1052,7 @@ def resolve_review_posture(review: "ReviewBlock") -> ResolvedReviewPosture:
 
     Explicit leaf wins. Absent, infer ONE visible posture from the legacy
     settings (the shipped `self_review_required` floor, the github_apps gate,
-    peers, corroboration, and an explicit opt-out), preserving each: an
+    peers, and an explicit opt-out), preserving each: an
     explicit `self_review_required=false` with nothing else reads `no_review`
     today and must keep reading that, while a declared-empty github_apps list
     (PR + CI only) reads `tests_pass`. Nothing configured at all is NOT
@@ -1080,7 +1080,6 @@ def resolve_review_posture(review: "ReviewBlock") -> ResolvedReviewPosture:
         name.strip().lstrip("/") not in _SELF_LANE_EXCLUDED_REVIEWERS
         for name in review.reviewers
     )
-    corroboration = review.require_corroboration
 
     signals: list[str] = []
     if declared_none:
@@ -1089,8 +1088,6 @@ def resolve_review_posture(review: "ReviewBlock") -> ResolvedReviewPosture:
         signals.append("github_apps")
     if peers:
         signals.append("peers")
-    if corroboration:
-        signals.append("require_corroboration")
     if floor_off:
         signals.append("self_review_required=false")
     if self_named:
@@ -1104,10 +1101,6 @@ def resolve_review_posture(review: "ReviewBlock") -> ResolvedReviewPosture:
         value = "self_and_github" if not floor_off else "github_review"
     elif peers:
         value = "self_and_peer" if not floor_off else "peer_review"
-    elif corroboration:
-        # The author's own attestation reads uncovered under corroboration, so
-        # the honest legacy reading is the rung that demands non-self evidence.
-        value = "independent_review"
     elif self_named:
         value = "self_review"
     elif floor_off:
@@ -1364,25 +1357,23 @@ class ReviewBlock(BaseModel):
     # documented escape hatch. Read by the stop gate (loopcheck.rs) and mirrored
     # into the merge primitive so the two agree.
     self_review_required: bool = True
-    # When true, a PR whose only coverage is the author's own (self_attested)
-    # local attestation reads as uncovered; a second session's attestation or a
-    # GitHub App review satisfies it. DEFAULT FALSE so no existing install
-    # changes behavior - flip it only with the doctor's self-attestation report
-    # in hand.
+    # Deprecated and ignored since 2026-09-05: origin never gates, so the
+    # field is kept only so an existing config still loads. Setting it
+    # changes nothing.
     require_corroboration: bool = False
     # Whether a non-author human GitHub APPROVED review satisfies coverage on
-    # its own (and the corroboration term). DEFAULT TRUE: this is the one
+    # its own. DEFAULT TRUE: this is the one
     # producer a stranger's GitHub project emits with no footnote machinery
     # at all. GitHub refuses an author's approval of their own PR
     # server-side; the gate still asserts it (an unreadable PR author
     # excludes fail-closed). The limit: GitHub's refusal is per identity, not
     # per human - a second account with its own token can still self-approve.
     github_approval_satisfies: bool = True
-    # The review-round budget before the gate reports IMPOSSIBLE: more rounds
-    # than this with blocking findings still non-terminal cannot be cleared by
-    # re-reviewing; the refusal says so (the PR-1170 eleven-round shape). A
-    # round is one reviewed HEAD; CI, lint and rebases are not rounds, a pass
-    # refunds nothing, and the parse floor is 1.
+    # The review-round budget, and the whole review gate: a PR gets AT MOST
+    # this many rounds, and reaching the number satisfies the review
+    # obligation - the PR merges on green CI with open findings left in the
+    # PR conversation. A round is one reviewed HEAD; CI, lint and rebases are
+    # not rounds, a pass refunds nothing, and the parse floor is 1.
     max_rounds: int = Field(default=2, ge=1)
     # The attestation law's budgets (registry has the prose for both).
     carry_interdiff_lines: int = Field(default=100, ge=0)
