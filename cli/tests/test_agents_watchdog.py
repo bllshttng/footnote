@@ -890,7 +890,10 @@ def test_stopped_row_survives_claude_agents_json(monkeypatch):
     ids = {r.get("id") for r in rows}
     assert "baf9409a" in ids and "51f36553" in ids  # stopped row survives
     assert all(r.get("kind") != "interactive" for r in rows)
-    assert live_map["baf9409a"]["live_status"] == "stopped"
+    # x-8bfb: "stopped" is a terminal claude state carrying no live turn, same
+    # axis as "failed" - it now maps onto the output vocabulary instead of
+    # passing through raw, and the mapping is quiet rather than a WARN.
+    assert live_map["baf9409a"]["live_status"] == "Done"
     assert live_map["51f36553"]["live_status"] == "Working"
     assert warnings == []
 
