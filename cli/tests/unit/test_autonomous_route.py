@@ -36,6 +36,53 @@ def _route(**kw):
 
 
 class TestRouteActions:
+    def test_ac4_hp_real_probe_cuts_over_to_the_healthy_record(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        import time
+        from fno.adapters.providers.error_taxonomy import ErrorRule
+        from fno.adapters.providers.model import QuotaConfig
+        from fno.adapters.providers.rotation import Combo, next_healthy_provider
+        from fno.adapters.providers.runtime_state import (
+            PROVIDER_HEALTH_TTL_SECONDS,
+            UsageSnapshot,
+            UsageWindow,
+            update_provider_health,
+            write_usage_snapshot,
+        )
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime.json"))
+        quota = QuotaConfig(observe=True, defer_dispatch=True)
+        monkeypatch.setattr(
+            "fno.adapters.providers.loader.load_quota_config",
+            lambda repo_root=None: quota,
+        )
+        now = time.time()
+        write_usage_snapshot(
+            UsageSnapshot(
+                provider_id="source",
+                windows=(UsageWindow("5h", 100.0, now + 3600),),
+                probed_at=now,
+                source="quota-endpoint",
+            ),
+            now=now,
+        )
+        update_provider_health(
+            "healthy", ErrorRule(status=429, backoff=True),
+            now=now - PROVIDER_HEALTH_TTL_SECONDS - 1,
+            resets_at=now + 3600,
+        )
+        def destination(_cwd, _exhausted):
+            chosen = next_healthy_provider(
+                Combo(name="fallback", providers=("healthy",)), quota=quota
+            )
+            return (chosen, "codex", {}) if chosen else None
+        monkeypatch.setattr(ar, "_select_destination", destination)
+        route = ar.select_autonomous_route(
+            provider_id="source", node_cwd=str(tmp_path), now=now
+        )
+        assert route.action == "cutover"
+        assert route.record_id == "healthy"
+
     def test_exhausted_cuts_over_to_the_other_harness(self, monkeypatch) -> None:
         # AC1-HP: exhausted claude + healthy codex candidate -> cutover, with
         # the complete destination tuple a spawn needs.

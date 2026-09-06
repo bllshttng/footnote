@@ -40,8 +40,14 @@ def probe_recorder(monkeypatch: pytest.MonkeyPatch):
             source="quota-endpoint",
             confidence="exact",
         )
-
     monkeypatch.setattr(runtime_state, "refresh_usage", fake_refresh)
+    monkeypatch.setattr(
+        runtime_state,
+        "refresh_usage_detailed",
+        lambda provider_id, **kw: runtime_state.UsageRefresh(
+            fake_refresh(provider_id, **kw)
+        ),
+    )
     return calls
 
 
@@ -94,7 +100,6 @@ class TestObserveSplitsLookingFromActing:
         """The whole point of the split: seeing a wall changes what fno KNOWS,
         not what it does, until deferral is armed separately."""
         _quota(monkeypatch, observe=True, defer_dispatch=False)
-
         def fake_refresh(provider_id, **kw):
             return UsageSnapshot(
                 provider_id=provider_id,
@@ -102,8 +107,13 @@ class TestObserveSplitsLookingFromActing:
                 probed_at=kw.get("now", 0.0),
                 source="quota-endpoint",
             )
-
-        monkeypatch.setattr(runtime_state, "refresh_usage", fake_refresh)
+        monkeypatch.setattr(
+            runtime_state,
+            "refresh_usage_detailed",
+            lambda provider_id, **kw: runtime_state.UsageRefresh(
+                fake_refresh(provider_id, **kw)
+            ),
+        )
         sig = evaluate_quota_signal("zai", now=1000.0, repo_root=tmp_path)
         assert sig.state is HeadroomState.EXHAUSTED
         assert sig.defer is False and sig.cutover is False
@@ -116,6 +126,41 @@ class TestObserveSplitsLookingFromActing:
         assert probe_recorder == []
         assert sig.reason == "p0-exempt"
 
+    def test_ac2_err_credential_probe_failure_stays_unknown_and_eligible(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import time
+        from fno.adapters.providers.error_taxonomy import ErrorRule
+        from fno.adapters.providers.rotation import Combo, next_healthy_provider
+        from fno.adapters.providers.runtime_state import (
+            PROVIDER_HEALTH_TTL_SECONDS,
+            UsageRefresh,
+            update_provider_health,
+        )
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime.json"))
+        quota = QuotaConfig(observe=True, defer_dispatch=True)
+        monkeypatch.setattr(
+            "fno.adapters.providers.loader.load_quota_config",
+            lambda repo_root=None: quota,
+        )
+        now = time.time()
+        update_provider_health(
+            "p1", ErrorRule(status=429, backoff=True),
+            now=now - PROVIDER_HEALTH_TTL_SECONDS - 1,
+            resets_at=now + 3600,
+        )
+        monkeypatch.setattr(
+            runtime_state,
+            "refresh_usage_detailed",
+            lambda *args, **kwargs: UsageRefresh(None, "credential-rejected"),
+        )
+        sig = evaluate_quota_signal("p1", priority="p2", now=now, repo_root=tmp_path)
+        assert sig.state is HeadroomState.UNKNOWN
+        assert sig.defer is False and sig.cutover is False
+        assert sig.reason == "credential-rejected"
+        assert next_healthy_provider(
+            Combo(name="fallback", providers=("p1",)), quota=quota
+        ) == "p1"
 
 class TestQuotaConfigDefaults:
     def test_observe_defaults_off(self) -> None:
