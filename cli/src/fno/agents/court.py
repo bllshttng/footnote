@@ -259,8 +259,7 @@ def crowned_sessions(rows: list) -> set[str]:
 
     Same non-terminal rows, same ``crown_level`` field: a row is a king here
     iff it is a king in the court (x-5283 LD1). The spawn gate divides
-    ``max_live`` by this set; an unreadable registry yields an empty set and
-    callers guard readability themselves.
+    ``max_live`` by this set; callers guard readability themselves.
     """
     from fno.agents.registry import TERMINAL_STATUSES
 

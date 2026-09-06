@@ -417,10 +417,8 @@ class AgentEntry:
     spawned_by_session: Optional[str] = None
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
-    # x-5283 LD3: adoption is VOUCHING, not spawning. ``spawned_by_*`` keeps
-    # one meaning - who spawned this row, whose share pays for it - so the
-    # grantor of an adopted row lives here. Additive-optional like the triple
-    # above (schema v28).
+    # x-5283 LD3: adoption is VOUCHING, not spawning; the grantor lives here
+    # so ``spawned_by_*`` keeps one meaning. Additive-optional (schema v28).
     adopted_by_session: Optional[str] = None
     # x-42c5: the CAUSE of the spawn, distinct from spawned_by_* above (which
     # identify WHO called `fno agents spawn`, not WHY). An automated dispatcher

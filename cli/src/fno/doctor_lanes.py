@@ -340,10 +340,8 @@ def _census(
         from fno.claims.self_identity import resolve_self_identity
         from fno.config import load_settings
 
-        share = share_reading(
-            gate_census(), int(load_settings().agents.max_live),
-            resolve_self_identity().session_id,
-        )
+        share = share_reading(gate_census(), int(load_settings().agents.max_live),
+                              resolve_self_identity().session_id)
     except Exception:
         share = None
     census: dict[str, Any] = {
