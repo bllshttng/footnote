@@ -2705,7 +2705,12 @@ def test_the_roster_warns_before_it_outgrows_its_budget(monkeypatch):
 def test_a_fast_roster_probe_stays_quiet(monkeypatch):
     """The warning is a headroom signal, not a per-sweep banner."""
     from fno.agents.harnesses import claude as claude_mod
+    from fno.agents import registry as registry_mod
 
+    # fleet_rows also warns about registry rows, and the registry lives in the
+    # HOME sandbox one earlier test in this worker may have written to. Without
+    # this the empty assertion below measures that leftover, not the probe.
+    monkeypatch.setattr(registry_mod, "load_registry", lambda: [])
     clock = iter([1000.0, 1000.5])
     monkeypatch.setattr(watchdog.time, "time", lambda: next(clock))
     monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **k: ([], []))
