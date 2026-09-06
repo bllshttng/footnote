@@ -258,26 +258,15 @@ is known):
    inline-filling every child would blow this session's context budget - the
    failure it trades against is worse than the cost.
 
-8. **Nudge the ordered drain once, after linking (the same advance nudge as
-   blueprint completion).** When your owned children are filled and linked
-   (`status: ready`, `plan_path` set), issue exactly one:
+8. When every owned child is filled and linked, issue one advance nudge - the same call blueprint completion uses. Linked means `status: ready` with `plan_path` set:
 
    ```bash
    fno backlog advance --epic "$EPIC_ID"
    ```
 
-   The advance verb is the sole launcher: it picks the top-ranked unblocked child
-   under epic rank, parent-scoped child rank, `blocked_by`, join width, and
-   spawn-gate headroom - which may be a fan-out sibling, not a child you just
-   filled. Relay its receipt (`epic <id>: dispatched N, skipped M` or the
-   `skipped reason=...` hold line). Unlinked scaffolds stay parked (`idea` rung,
-   undispatchable), and a held or failed advance is non-fatal: the children stay
-   `ready` for a later drain tick or a manual `/target bg <node>`. Never spawn a
-   worker yourself here.
+   The advance verb is the sole launcher. It picks the top-ranked unblocked child under epic rank, parent-scoped child rank, `blocked_by`, join width, and spawn-gate headroom. That child can be a fan-out sibling, not a child you just filled. Relay its receipt (`epic <id>: dispatched N, skipped M` or the `skipped reason=...` hold line). Unlinked scaffolds stay parked (`idea` rung, undispatchable). A held or failed advance is non-fatal. The children stay `ready` for a later drain tick or a manual `/target bg <node>`. Never spawn a worker yourself here.
 
-**Slug stability.** Use stable slugs across re-decomposition so idempotency
-holds. Numeric (`1`, `2`, ...) is the simple default; named slugs
-(`auth-flow`) are fine as long as they do not change between runs.
+**Slug stability.** Use stable slugs across re-decomposition so idempotency holds. Numeric (`1`, `2`, ...) is the simple default. Named slugs (`auth-flow`) are fine as long as they do not change between runs.
 
 **Packaging: `separate` only.** Every child gets its own self-contained quick-plan file. `plan == PR == node` for children too. Decompose scaffolds one stub per child, born `status: idea`. The stub carries `## Why (from epic)` plus Context, Changes, Files to Modify, Verification and Execution Strategy. It lands at the canonical `fno do plan path` name in the child's own project plans dir, reported as `scaffolded plan:`. Legacy `<stem>.group-<slug>.md` stubs are grandfathered in place. The child is born WITHOUT a `plan_path`. Identity is the durable `group_slug` field, so the unlinked child is still found on re-decompose. Linking the filled plan makes it `ready`, from inline step 2 or the fan-out pass. This is the default and only packaging. You need not pass `--plans`, and `--plans fragment` errors.
 

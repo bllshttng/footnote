@@ -67,29 +67,20 @@ Locked behaviors:
                           receipt: dispatched <ids> | skipped reason=<why>
 ```
 
-Blueprint completion never spawns a worker itself. It issues exactly one `fno backlog advance` call - the epic form when the adopted node has a live epic parent, the plain form when it has none - and relays the receipt. The advance verb is the sole launcher, so the node that starts is the top-ranked unblocked child, which may be a different sibling than the plan just written. A disabled gate, no ready child, or zero spawn headroom holds with a named reason (`skipped reason=disabled` / `lane-cap` / `already-claimed`); the plan stays intact and the node stays `ready`.
+Blueprint completion never spawns a worker itself. It issues exactly one `fno backlog advance` call and relays the receipt: the epic form for a live epic parent, the plain form for a parentless node. The advance verb is the sole launcher. The node that starts is the top-ranked unblocked child, which can be a different sibling than the plan just written. A disabled gate, no ready child, or zero spawn headroom holds with a named reason (`skipped reason=disabled` / `lane-cap` / `already-claimed`). The plan stays intact and the node stays `ready`.
 
-The retired launch-on-write hook (the deleted `autolaunch-on-ready.sh`, gated by a deleted `target` config leaf) dispatched the plan just written, ignoring rank, siblings, and headroom. Its tombstone lives in `scripts/ci/retired-config-leaves.txt`; the replacement is `fno backlog advance`.
+The retired launch-on-write hook (the deleted `autolaunch-on-ready.sh`, gated by a deleted `target` config leaf) dispatched the plan just written, ignoring rank, siblings, and headroom. Its tombstone lives in `scripts/ci/retired-config-leaves.txt`. The replacement is `fno backlog advance`.
 
 ## Native-plan-mode auto-launch (Task 3.3a): no hook dispatch, and why
 
 Task 3.3a was originally deferred as "dispatch from `hooks/capture-plan-mode.sh` after the sidecar write", waiting on the capture-hook fix (read the plan body from `tool_response.filePath` first, drop the phantom `approved`/`decision`/`isError` rejection gates, add the `awaitingLeaderApproval` skip) that a separate change had already landed.
 That capture-hook fix is in. The hook dispatch it was waiting for is closed unbuilt, because the capture hook is the wrong seam and the native path already reaches Layer 2 without it.
 
-**At capture time there is nothing to dispatch.**
-The sidecar frontmatter is hook-generated (`captured_at`, `session_id`, `slug`, `source`, `status`) and carries no node id, a native plan has no `claims:` / `graph_node_id:`, and the sidecar path is not a plan the backlog knows.
-Nothing the hook has written is resolvable to a node, so a dispatch placed there has no node to launch.
-The plan is not executable at that moment either. `/blueprint` compiles acceptance criteria the native plan does not yet carry. The backfill that synthesizes them runs inside a later `/target`, long after the hook has exited.
-See the "Why synthesis precedes /blueprint" section of [target-plan-mode-integration.md](target-plan-mode-integration.md).
+**At capture time there is nothing to dispatch.** The sidecar frontmatter is hook-generated (`captured_at`, `session_id`, `slug`, `source`, `status`) and carries no node id. A native plan has no `claims:` / `graph_node_id:`, and the sidecar path is not a plan the backlog knows. Nothing the hook has written is resolvable to a node, so a dispatch placed there has no node to launch. The plan is not executable at that moment either. `/blueprint` compiles acceptance criteria the native plan does not yet carry. The backfill that synthesizes them runs inside a later `/target`, long after the hook has exited. See the "Why synthesis precedes /blueprint" section of [target-plan-mode-integration.md](target-plan-mode-integration.md).
 
-**The native path inherits the ordered nudge for free.**
-The front door calls `/blueprint` on the enriched doc, and `/blueprint` issues the advance nudge as its last action in every mode.
-An approved native plan reaches exactly the same ordered dispatch the blueprint path uses, with no hook involvement.
+**The native path inherits the ordered nudge for free.** The front door calls `/blueprint` on the enriched doc. `/blueprint` issues the advance nudge as its last action in every mode. An approved native plan reaches the same ordered dispatch the blueprint path uses, with no hook involvement.
 
-**That inheritance has one residual: the front-door confirm window.**
-`/blueprint` is called at front-door step 5, before the human is asked "Execute autonomously? [y/N]" at step 6.
-During that window the node is `ready` and unclaimed, so anything that dispatches a ready node (the advance nudge itself, the active-backlog drain, a direct `dispatch-node.sh`, another session's `/target`) can still start work the human has not approved.
-Closing that properly means not leaving the node ready-and-unclaimed while the front door is still asking, which is a change to the front door rather than to the nudge.
+**That inheritance has one residual: the front-door confirm window.** `/blueprint` is called at front-door step 5, before the human is asked "Execute autonomously? [y/N]" at step 6. During that window the node is `ready` and unclaimed. Anything that dispatches a ready node can still start work the human has not approved. That includes the advance nudge itself, the active-backlog drain, a direct `dispatch-node.sh`, and another session's `/target`. Closing that properly means not leaving the node ready-and-unclaimed while the front door is still asking. That is a change to the front door, not to the nudge.
 
 ## Components
 
