@@ -112,7 +112,10 @@ def test_map_covers_current_surface_once():
     # transcript read the loopcheck distress leg shells) and this branch adds
     # `agents friction-escalate` (the watchdog friction lane): 571 -> 573.
     # This branch also allocates `backlog requeue` its row: 573 -> 574.
-    assert len(mapped) == 574, (
+    # x-e221 adds `agents worker blueprint-feed` (+ its `worker` mirror) and
+    # the hidden territory readout `config active-backlog-territories`:
+    # counted from the merged file, 574 -> 577.
+    assert len(mapped) == 577, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
