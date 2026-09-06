@@ -28,6 +28,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "bash-census",
     "board",
     "claim",
+    "codex-assign-project",
     "codex-loaded-threads",
     "court-orphans",
     "detect",
@@ -168,6 +169,16 @@ async fn run(args: Vec<String>) -> i32 {
     // fno verb is added. The socket round-trip needs the user's daemon.
     if matches!(verb, "review-start") {
         return fno_agents::codex_inject::run_review_start(&args[1..]).await;
+    }
+
+    // `codex-assign-project` is the hidden project-assignment verb (x-dc97):
+    // resolve or create the repo's codex project for --cwd, and when
+    // --thread-id is given, assign that bound thread to it. The Python headless
+    // create lane shells this binary fire-and-forget after `thread.started`.
+    // Same `matches!` treatment as `review-start` so it stays out of
+    // CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the routable-verb parity guard.
+    if matches!(verb, "codex-assign-project") {
+        return fno_agents::codex_inject::run_codex_assign_project(&args[1..]).await;
     }
 
     // `claim` is the HIDDEN debug front over the native claims module

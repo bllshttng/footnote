@@ -491,7 +491,13 @@ impl CodexThread {
         // `launch` completes the app-server handshake as part of connecting,
         // so the driver is protocol-ready the moment it exists.
         let mut driver = Self::launch(cwd.clone()).await?;
-        let request = thread_start_request_with_options(1, &cwd, model, yolo, "never");
+        // Project assignment (x-dc97): the thread rolls up under its repo's
+        // ChatGPT Project instead of a cwd-keyed bucket. Resolution is
+        // fail-open and bounded; a None below drops the key and the request
+        // stays byte-identical to the unassigned form.
+        let project_id = crate::codex_inject::ensure_project_for_cwd(&cwd).await;
+        let request =
+            thread_start_request_with_options(1, &cwd, model, yolo, "never", project_id.as_deref());
         let response = driver.request(1, request).await?;
         let (thread_id, rollout_path) = parse_thread_start_response(&response)
             .map_err(|error| ThreadDriverError::Protocol(error.to_string()))?;
@@ -1573,6 +1579,7 @@ fn thread_start_request_with_options(
     model: Option<&str>,
     yolo: bool,
     approval_policy: &str,
+    project_id: Option<&str>,
 ) -> String {
     let mut params = json!({
         "cwd": cwd,
@@ -1581,6 +1588,9 @@ fn thread_start_request_with_options(
     });
     if let Some(model) = model.filter(|model| !model.is_empty()) {
         params["model"] = json!(model);
+    }
+    if let Some(project_id) = project_id.filter(|id| !id.is_empty()) {
+        params["projectId"] = json!(project_id);
     }
     json!({"id": id, "method": "thread/start", "params": params}).to_string()
 }
@@ -1797,10 +1807,45 @@ mod tests {
             None,
             false,
             "never",
+            None,
         ))
         .unwrap();
         assert_eq!(value["params"]["sandbox"], "workspace-write");
         assert!(value["params"].get("sandboxPolicy").is_none());
+    }
+
+    /// The assigned form carries `params.projectId` (x-dc97): the thread lane's
+    /// whole side of the assignment contract is one conditional key on the map
+    /// it already builds for `model`.
+    #[test]
+    fn thread_start_carries_the_resolved_project_id() {
+        let value: Value = serde_json::from_str(&thread_start_request_with_options(
+            1,
+            std::path::Path::new("/tmp/w"),
+            None,
+            false,
+            "never",
+            Some("proj-1"),
+        ))
+        .unwrap();
+        assert_eq!(value["params"]["projectId"], "proj-1");
+    }
+
+    /// No resolvable project -> NO key at all, never an empty string: the
+    /// protocol reads an explicit empty projectId as a CLEAR, so an absent
+    /// resolution must omit the field the way today's request does.
+    #[test]
+    fn thread_start_without_a_project_omits_the_key_entirely() {
+        let value: Value = serde_json::from_str(&thread_start_request_with_options(
+            1,
+            std::path::Path::new("/tmp/w"),
+            None,
+            false,
+            "never",
+            None,
+        ))
+        .unwrap();
+        assert!(value["params"].get("projectId").is_none());
     }
 
     #[test]

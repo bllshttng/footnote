@@ -596,7 +596,7 @@ fn resolve_allow_missing(path: &std::path::Path) -> std::path::PathBuf {
 ///
 /// A failing `git rev-parse` writes only to stderr, so empty stdout already
 /// covers every failure the exit code would report.
-fn git_common_dir(cwd: &std::path::Path) -> Option<String> {
+pub(crate) fn git_common_dir(cwd: &std::path::Path) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(cwd)
