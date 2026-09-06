@@ -394,9 +394,31 @@ pub(crate) fn scopes_overlap(
 /// whose registry state is suspect, and refusing on a read error would strand
 /// exactly those, while the live-holder refusal above catches the double-rule
 /// case whenever the registry CAN be read.
+///
+/// The PROJECT MAP is the other axis, and it fails the other way. Rung
+/// derivation reads it; an `Err` swallowed to an empty map derives every
+/// member as non-project (rung 2), the stored row keeps its true level, and
+/// the cross-rung exemption then compares a corrupted rung against a real one
+/// - a live portfolio reads as a court rather than a rival, and the walk
+/// crowns a second king on one member. So an unreadable map downgrades the
+/// check to raw-member overlap: any shared member blocks the walk, the same
+/// rule as the same-rung case. An unrelated scope still recovers.
 fn live_crown_holder_in(registry_path: &Path, scope: &str, repo_root: &Path) -> Option<String> {
+    live_crown_holder_in_with_projects(
+        registry_path,
+        scope,
+        &crate::king_board::project_map(repo_root),
+    )
+}
+
+fn live_crown_holder_in_with_projects(
+    registry_path: &Path,
+    scope: &str,
+    projects: &Result<HashMap<String, String>, String>,
+) -> Option<String> {
     let registry = crate::state::load_registry(registry_path).ok()?;
-    let projects = crate::king_board::project_map(repo_root).unwrap_or_default();
+    let config_unreadable = projects.is_err();
+    let projects = projects.clone().unwrap_or_default();
     let scope_level = derived_scope_level(scope, &projects);
     let is_terminal = |row: &crate::state::RegistryEntry| {
         matches!(
@@ -413,7 +435,11 @@ fn live_crown_holder_in(registry_path: &Path, scope: &str, repo_root: &Path) -> 
         .filter(|row| !is_terminal(row))
         .find(|row| {
             row.crown_scope.as_deref().is_some_and(|held| {
-                crown_rivals(held, row.crown_level, scope, scope_level, &projects)
+                if config_unreadable {
+                    scopes_overlap(held, scope, &projects)
+                } else {
+                    crown_rivals(held, row.crown_level, scope, scope_level, &projects)
+                }
             })
         })
         .map(|row| row.name.clone())
@@ -855,12 +881,20 @@ mod tests {
         // The ladder's shape: a portfolio king's court IS project kings, so a
         // live row over {alpha,beta} must not stop the walk from reviving an
         // orphaned king over alpha. Bare member overlap refused exactly that
-        // recovery.
+        // recovery. The map is injected Ok: rung derivation needs real
+        // projects, and an env without a readable config must not decide this
+        // test.
         let dir = std::env::temp_dir().join(format!("kingcourt-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let registry = write_registry_with_level(&dir, "busy", Some("alpha,beta"), 0);
 
-        assert_eq!(live_crown_holder_in(&registry, "alpha", &dir), None);
+        let mut map = HashMap::new();
+        map.insert("alpha".to_string(), "alpha".to_string());
+        map.insert("beta".to_string(), "beta".to_string());
+        assert_eq!(
+            live_crown_holder_in_with_projects(&registry, "alpha", &Ok(map)),
+            None
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -873,6 +907,31 @@ mod tests {
         assert_eq!(
             live_crown_holder_in(&registry, "epic-a", &dir),
             Some("reigning-king".to_string())
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_project_map_fails_closed_not_silent() {
+        // An Err map swallowed to empty derives the walk scope as rung 2 while
+        // the stored row keeps rung 0; the cross-rung exemption then reads a
+        // live portfolio as a court and crowns a second king on one member.
+        // Unreadable config must downgrade to raw overlap, which blocks.
+        let dir = std::env::temp_dir().join(format!("kingnomap-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let registry = write_registry_with_level(&dir, "busy", Some("alpha,beta"), 0);
+
+        let projects: Result<HashMap<String, String>, String> =
+            Err("no work.workspaces in any candidate config.toml".to_string());
+        assert_eq!(
+            live_crown_holder_in_with_projects(&registry, "alpha", &projects),
+            Some("reigning-king".to_string())
+        );
+        // An unrelated scope still recovers: raw overlap answers, not a blanket
+        // refusal.
+        assert_eq!(
+            live_crown_holder_in_with_projects(&registry, "gamma", &projects),
+            None
         );
         fs::remove_dir_all(&dir).ok();
     }

@@ -28,6 +28,7 @@
 use crate::loop_king::scopes_overlap;
 use crate::state::{load_registry, RegistryEntry};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
@@ -217,6 +218,24 @@ pub fn reign_state(
     harness: Option<&str>,
     registry_path: &Path,
 ) -> ReignState {
+    reign_state_with_projects(
+        root,
+        scope,
+        session,
+        harness,
+        registry_path,
+        &crate::king_board::project_map(root),
+    )
+}
+
+fn reign_state_with_projects(
+    root: &Path,
+    scope: Option<&str>,
+    session: Option<&str>,
+    harness: Option<&str>,
+    registry_path: &Path,
+    projects_result: &Result<HashMap<String, String>, String>,
+) -> ReignState {
     let rows = match load_rows(registry_path) {
         Ok(rows) => rows,
         Err(e) => {
@@ -319,7 +338,7 @@ pub fn reign_state(
     // the scan answers shared membership through the same alias-aware helper
     // the walk guard uses - never string equality, which reads a live king
     // over e-1,e-2 as "no crown over e-1".
-    let projects = crate::king_board::project_map(root).unwrap_or_default();
+    let projects = projects_result.clone().unwrap_or_default();
     let holders: Vec<&RegistryEntry> = rows
         .iter()
         .filter(|r| {
@@ -330,6 +349,33 @@ pub fn reign_state(
         })
         .collect();
     if holders.is_empty() {
+        // An unreadable project map degrades alias matching to raw spellings,
+        // so an empty answer can be a MISS. But only when live crowned rows
+        // exist for a miss to hide: an empty (or all-terminal) registry is
+        // decisive on its own, whatever the map read.
+        let live_crowned = rows
+            .iter()
+            .filter(|r| {
+                !is_terminal(r)
+                    && r.crown_scope
+                        .as_deref()
+                        .is_some_and(|s| !s.trim().is_empty())
+            })
+            .count();
+        if live_crowned > 0 && projects_result.is_err() {
+            let reason = format!(
+                "project map unreadable ({}), so alias members may hide a live \
+                 holder; no raw-spelled holder over {scope}",
+                projects_result.as_ref().err().cloned().unwrap_or_default()
+            );
+            return ReignState {
+                crowned: None,
+                scope: Some(scope),
+                live: None,
+                unknown_reason: Some(reason),
+                ..Default::default()
+            };
+        }
         let reason = format!("no live crowned row over {scope}");
         return ReignState {
             crowned: Some(false),
@@ -861,6 +907,33 @@ mod tests {
             state.manifest_session.as_deref(),
             Some(sid),
             "the manifest read keys on the holder's own scope"
+        );
+    }
+
+    #[test]
+    fn unreadable_project_map_answers_unknown_not_no_crown() {
+        // The scan degrades to raw spellings when the map errs, so an empty
+        // answer can be an alias miss. That must read as unknown, never as a
+        // clean "no live crowned row".
+        let root = tmp("nomap");
+        let reg = registry_file(
+            &root,
+            &[row(
+                "other-king",
+                "cccc3333-0000-4000-8000-000000000003",
+                Some("gamma"),
+                AgentStatus::Busy,
+            )],
+        );
+        let projects: Result<std::collections::HashMap<String, String>, String> =
+            Err("no work.workspaces in any candidate config.toml".to_string());
+        let state = reign_state_with_projects(&root, Some("alpha"), None, None, &reg, &projects);
+        assert_eq!(state.crowned, None);
+        assert_eq!(state.live, None);
+        let reason = state.unknown_reason.unwrap();
+        assert!(
+            reason.contains("project map unreadable"),
+            "reason was {reason}"
         );
     }
 
