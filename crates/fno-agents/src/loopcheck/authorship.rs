@@ -56,6 +56,18 @@ pub(crate) fn classify_attestation_origin(
     }
 }
 
+/// The manifest's `harness_session_id` for this cwd: the PRIMARY authorship
+/// source, before the carry-forward fallback below. The manifest moved into
+/// the worktree slice of the space; the legacy checkout path is the read
+/// fallback for one release.
+pub(crate) fn resolve_manifest_author(cwd: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(crate::paths::worktree_space_dir(cwd).join("target-state.md"))
+        .or_else(|_| std::fs::read_to_string(cwd.join(".fno/target-state.md")))
+        .ok()
+        .and_then(|content| super::scan_manifest_field(&content, "harness_session_id"))
+        .filter(|s| s != "null")
+}
+
 /// The newest non-empty `author_session_id` recorded on a `review_coverage`
 /// event FOR THIS PR, for a read whose process resolved no target manifest.
 /// The field is persisted for exactly this historical comparison (schema note

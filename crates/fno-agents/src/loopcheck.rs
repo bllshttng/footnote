@@ -13267,22 +13267,12 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         author_harness_override.as_deref(),
     );
 
-    // Authorship: --session-id, else the manifest's harness_session_id when one
-    // exists, else None. The historical carry-forward happens inside
-    // read_pr_info, where the PR number is known: the events file is
-    // project-wide, so a carry computed before the number resolves cannot be
-    // filtered and would hand this PR a foreign PR's author. A failed PR-head
-    // read therefore emits its unknown row with no author id at all - which
-    // refuses at the corroboration gate, the correct closed posture.
-    let author_session = session_id.or_else(|| {
-        // The manifest moved into the worktree slice of the space; the
-        // legacy checkout path is the read fallback for one release.
-        std::fs::read_to_string(crate::paths::worktree_space_dir(&cwd).join("target-state.md"))
-            .or_else(|_| std::fs::read_to_string(cwd.join(".fno/target-state.md")))
-            .ok()
-            .and_then(|content| scan_manifest_field(&content, "harness_session_id"))
-            .filter(|s| s != "null")
-    });
+    // Authorship: --session-id, else the manifest's harness_session_id
+    // (authorship::resolve_manifest_author). The historical carry-forward
+    // happens inside read_pr_info, where the PR number is known: the events
+    // file is project-wide, so a carry computed before the number resolves
+    // cannot be filtered and would hand this PR a foreign PR's author.
+    let author_session = session_id.or_else(|| authorship::resolve_manifest_author(&cwd));
 
     // Head precedence is explicit --head, then the named PR's head, then the
     // local checkout for the branch-inference path. A failed named-PR read
