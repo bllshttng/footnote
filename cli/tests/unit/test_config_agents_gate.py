@@ -76,11 +76,57 @@ def test_worker_qos_unknown_coerces_to_utility():
 
 
 def test_spawn_defaults_unset_by_default():
-    # US7: empty string = unset (the spawn_permission_mode convention).
+    # US7: empty string = unset.
     d = AgentsBlock().defaults
     assert d.provider == ""
     assert d.model == ""
     assert d.effort == ""
+
+
+# --- x-7198: legacy agents.spawn_permission_mode migrates onto
+# agents.defaults.permission_mode; the field itself is retired. ---------------
+
+
+def test_legacy_spawn_permission_mode_migrates_when_defaults_unset():
+    """AC1-HP: the legacy value copies onto defaults.permission_mode, once."""
+    from fno.config import _DEPRECATED_WARNED
+
+    _DEPRECATED_WARNED.discard("agents.spawn_permission_mode")
+    b = AgentsBlock.model_validate({"spawn_permission_mode": "plan"})
+    assert b.defaults.permission_mode == "plan"
+    assert not hasattr(b, "spawn_permission_mode")
+    assert "agents.spawn_permission_mode" in _DEPRECATED_WARNED
+
+    # Once per process: a second load does not warn again.
+    warned_before = len(_DEPRECATED_WARNED)
+    AgentsBlock.model_validate({"spawn_permission_mode": "plan"})
+    assert len(_DEPRECATED_WARNED) == warned_before
+
+
+def test_legacy_spawn_permission_mode_dropped_when_defaults_already_set():
+    """AC1-EDGE: both set -> defaults.permission_mode wins, legacy is dropped."""
+    b = AgentsBlock.model_validate(
+        {
+            "spawn_permission_mode": "plan",
+            "defaults": {"permission_mode": "acceptEdits"},
+        }
+    )
+    assert b.defaults.permission_mode == "acceptEdits"
+    assert not hasattr(b, "spawn_permission_mode")
+
+
+def test_neither_permission_key_set_warns_nothing_and_stays_unset():
+    """AC1-ERR: no legacy key present -> no warning, byte-identical to today."""
+    from fno.config import _DEPRECATED_WARNED
+
+    _DEPRECATED_WARNED.discard("agents.spawn_permission_mode")
+    b = AgentsBlock.model_validate({})
+    assert b.defaults.permission_mode == ""
+    assert "agents.spawn_permission_mode" not in _DEPRECATED_WARNED
+
+
+def test_spawn_permission_mode_field_no_longer_exists():
+    assert "spawn_permission_mode" not in AgentsBlock.model_fields
 
 
 def test_spawn_defaults_values_pass_through():

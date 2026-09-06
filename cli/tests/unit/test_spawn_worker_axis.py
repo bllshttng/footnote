@@ -27,7 +27,7 @@ def _settings(*, stage_harness: str = "", legacy_harness: str = ""):
     return SimpleNamespace(
         agents=SimpleNamespace(
             profiles={"target": profile} if stage_harness else {},
-            spawn_permission_mode="",
+            defaults=SimpleNamespace(permission_mode=""),
         ),
         dispatch=SimpleNamespace(
             harness=legacy_harness, substrate="", command="", allowed_verbs=[]

@@ -232,8 +232,9 @@ case "$sub $verb" in
     printf '{"harness":"%s","substrate":"%s","command":"%s"}\n' "$h" "${pair##*/}" "$cmd" ;;
   "config get")
     # x-4391/x-4be1: only auto_merge.grant is modeled; every other key (e.g.
-    # agents.spawn_permission_mode) falls through to empty, matching prod's
-    # "unset => empty" so the permission-mode read stays a no-op under the mock.
+    # agents.defaults.permission_mode) falls through to empty here, matching
+    # prod's "config-unset => empty" - the dispatcher's own literal fallback
+    # (x-7198) then supplies bypassPermissions on top of that empty read.
     key="${3:-}"
     if [[ "$key" == "auto_merge.grant" ]]; then
       [[ -f "$S/cfg_auto_merge_err" ]] && { echo "unknown config key 'auto_merge.grant'" >&2; exit 1; }
