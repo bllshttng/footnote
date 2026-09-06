@@ -935,4 +935,4 @@ def test_crowning_an_adopted_row_never_makes_it_the_grantors_worker(
     write_registry(uncrowned)
     after = spawn_gate.share_reading(spawn_gate.census(), 30, grantor)
     assert after["held"] == 1
-    assert adopted in after["king_sessions"]
+    assert adopted in spawn_gate.census().crowned_sessions
