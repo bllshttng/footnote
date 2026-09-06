@@ -297,6 +297,58 @@ def _child_env(root: Path) -> dict:
     return env
 
 
+def _test_timeout_seconds() -> int:
+    """The wall-clock bound for one suite run: FNO_TEST_TIMEOUT_SECONDS wins,
+    then ``config.test.timeout_seconds``, else 1800."""
+    raw = os.environ.get("FNO_TEST_TIMEOUT_SECONDS")
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            pass
+        else:
+            if value > 0:
+                return value
+    try:
+        from fno.config import load_settings
+
+        value = int(load_settings().test.timeout_seconds)
+    except Exception:  # noqa: BLE001 - a broken settings value degrades to default
+        return 1800
+    return value if value > 0 else 1800
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """SIGKILL the run's whole process group, then reap the leader."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass  # the group is already gone; nothing to kill
+    proc.wait()
+
+
+def _run_suite_bounded(cmd: Sequence[str], env: Mapping[str, str], timeout: int, **kw) -> int:
+    """Run cmd in its own process group; kill the GROUP on timeout or interrupt.
+
+    Killing cargo alone orphans the deps/ test binary it exec'd - the measured
+    shape: a deps binary at ppid 1 for 3h07m holding 227 zombies. The group is
+    the unit because cargo execs the test binary in place. (The smoke lane's
+    ``_run_bounded`` below is the same discipline with a DEVNULL contract.)
+    """
+    proc = subprocess.Popen(cmd, env=env, start_new_session=True, **kw)
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        sys.stderr.write(
+            f"fno doctor test: TIMEOUT after {timeout}s; process group killed\n"
+        )
+        return 124
+    except BaseException:
+        _kill_group(proc)
+        raise
+
+
 def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
     """Run each command with output captured to `log`; print the terse verdict.
 
@@ -304,19 +356,25 @@ def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
     looks stalled - a watcher can `tail -f` the log. Returns the first non-zero
     child exit code, else 0.
     """
+    timeout = _test_timeout_seconds()
     rc = 0
     with open(log, "w", encoding="utf-8") as fh:
         for cmd in cmds:
-            print(f"running: {' '.join(map(str, cmd))} | log: {log}", flush=True)
+            print(
+                f"running: {' '.join(map(str, cmd))} | log: {log} | timeout: {timeout}s",
+                flush=True,
+            )
             fh.write(f"$ {' '.join(map(str, cmd))}\n")
             fh.flush()
             try:
-                proc = subprocess.run(cmd, env=env, stdout=fh, stderr=subprocess.STDOUT)
+                rc_cmd = _run_suite_bounded(
+                    cmd, env, timeout, stdout=fh, stderr=subprocess.STDOUT
+                )
             except OSError as exc:
                 sys.stderr.write(f"fno doctor test: failed to run {cmd[0]}: {exc}\n")
                 return 127
-            if proc.returncode != 0:
-                rc = proc.returncode
+            if rc_cmd != 0:
+                rc = rc_cmd
                 break  # first failure wins; its output is the log tail
     if rc == 0:
         lines = [ln.rstrip() for ln in _tail(log, 5) if ln.strip()]
@@ -360,13 +418,12 @@ def _run(args: Sequence[str], stream: bool = False) -> int:
     cmd = [interp, "-m", "pytest", *pytest_args]
     if stream:
         try:
-            proc = subprocess.run(cmd, env=env)  # inherit stdio; no pipe, no mask
+            return _run_suite_bounded(cmd, env, _test_timeout_seconds())
         except OSError as exc:
             # FileNotFoundError (missing) AND PermissionError (present but not
             # executable) are both OSError; either means we could not run it.
             sys.stderr.write(f"fno doctor test: failed to run interpreter {interp}: {exc}\n")
             return 127
-        return proc.returncode
     return _run_captured([cmd], env, _log_path(root))
 
 
@@ -431,18 +488,23 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
     else:
         base = ["cargo", "test", "-q"]
     cap_tail: list[str] = []
+    timeout = _test_timeout_seconds()
     if threads is None:
-        sys.stdout.write(f"fno doctor test rust: lanes {lanes_note}; runner default parallelism\n")
+        sys.stdout.write(
+            f"fno doctor test rust: lanes {lanes_note}; runner default parallelism; timeout {timeout}s\n"
+        )
     elif override:
         sys.stdout.write(
-            f"fno doctor test rust: lanes {lanes_note}; user parallelism flag wins, cap not applied\n"
+            f"fno doctor test rust: lanes {lanes_note}; user parallelism flag wins, cap not applied; timeout {timeout}s\n"
         )
     else:
         if nextest:
             base = [*base, "--test-threads", str(threads)]
         else:
             cap_tail = ["--", "--test-threads", str(threads)]
-        sys.stdout.write(f"fno doctor test rust: lanes {lanes_note}; test threads capped at {threads}\n")
+        sys.stdout.write(
+            f"fno doctor test rust: lanes {lanes_note}; test threads capped at {threads}; timeout {timeout}s\n"
+        )
 
     if "--manifest-path" in cargo_args:
         cmds = [[*base, *cargo_args]]
@@ -457,16 +519,15 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
 
     env = _child_env(root)
     if stream:
-        rc = 0
         for cmd in cmds:
             try:
-                proc = subprocess.run(cmd, env=env)
+                rc = _run_suite_bounded(cmd, env, timeout)
             except OSError as exc:
                 sys.stderr.write(f"fno doctor test: failed to run {cmd[0]}: {exc}\n")
                 return 127
-            if proc.returncode != 0:
-                return proc.returncode
-        return rc
+            if rc != 0:
+                return rc
+        return 0
     return _run_captured(cmds, env, _log_path(root))
 
 

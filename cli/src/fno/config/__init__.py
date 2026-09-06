@@ -1929,6 +1929,19 @@ class SandboxBlock(BaseModel):
     on_unavailable: Literal["refuse", "warn"] = "refuse"
 
 
+class TestBlock(BaseModel):
+    """Suite-runner bounds and orphan hygiene (``fno doctor test`` / ``fno doctor footprint``)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    # Wall-clock bound for one suite run; on expiry the run's whole process
+    # GROUP is killed, so the deps/ test binary cargo exec'd dies with it.
+    timeout_seconds: int = 1800
+    # An orphaned test binary younger than this is reported, never killed: it
+    # may be a live run. Every measured specimen was over three hours old.
+    orphan_min_elapsed_seconds: int = 900
+
+
 class A2aBlock(BaseModel):
     """Agent-to-agent switchboard settings (nested under 'config.agents.a2a').
 
@@ -4493,6 +4506,7 @@ class ConfigBlock(BaseModel):
     # probe list would make cloning a repo remote code execution.
     done_probes: list[str] = Field(default_factory=list)
     target: TargetConfig = Field(default_factory=TargetConfig)
+    test: TestBlock = Field(default_factory=TestBlock)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
     process_admission: ProcessAdmissionBlock = Field(
         default_factory=ProcessAdmissionBlock
