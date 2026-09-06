@@ -12396,12 +12396,10 @@ impl Core {
                     if stand_in {
                         if let Some(Portal { row_key, .. }) = self.portals.get(&idx) {
                             let row_key = row_key.clone();
-                            let mut hits = self.agents.iter().filter(|a| {
-                                a.mux.is_none()
-                                    && !a.exited
-                                    && (a.attach_id.as_deref() == Some(row_key.as_str())
-                                        || a.name == row_key)
-                            });
+                            let mut hits = self
+                                .agents
+                                .iter()
+                                .filter(|a| portal_reach::row_answers_key(a, &row_key));
                             if let (Some(_), None) = (hits.next(), hits.next()) {
                                 return self.reach_portal(
                                     client_id,

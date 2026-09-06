@@ -21,6 +21,13 @@ pub(super) fn row_matches_portal_key(row: &RegistryAgent, key: &str, portal_key:
     portal_key == key || row.attach_id.as_deref() == Some(portal_key) || portal_key == row.name
 }
 
+/// The live-paneless-row match, shared by every door: the reach's
+/// resolution, the control door's ambiguity check, and the held-seat
+/// focus fill must agree on who answers a key.
+pub(super) fn row_answers_key(a: &RegistryAgent, key: &str) -> bool {
+    a.mux.is_none() && !a.exited && (a.attach_id.as_deref() == Some(key) || a.name == key)
+}
+
 /// One control-door reach parked while the row's re-entry plan resolves
 /// off-loop: the observer stays registered, the harvest receiver and the
 /// held reply wait here, and the ReentryPlanReady replay finishes the reach
@@ -116,9 +123,7 @@ impl Core {
             || !matches!(placement.target, PaneTarget::CurrentRoute);
         // Resolve exactly one live paneless row for the key. Names are not
         // unique; a name that matches two rows must refuse, never pick.
-        let mut hits = self.agents.iter().filter(|a| {
-            a.mux.is_none() && !a.exited && (a.attach_id.as_deref() == Some(key) || a.name == key)
-        });
+        let mut hits = self.agents.iter().filter(|a| row_answers_key(a, key));
         let row = match (hits.next(), hits.next()) {
             (Some(a), None) => a.clone(),
             (Some(_), Some(_)) => {
@@ -591,9 +596,7 @@ impl Core {
         // never pick, same as reach_portal's own guard. The count is over
         // LIVE PANELESS rows - the rows a reach could serve - so a hosted
         // or exited namesake never turns a reachable row into a refusal.
-        let mut named_hits = self.agents.iter().filter(|a| {
-            a.mux.is_none() && !a.exited && (a.name == name || a.attach_id.as_deref() == Some(name))
-        });
+        let mut named_hits = self.agents.iter().filter(|a| row_answers_key(a, name));
         if let (Some(_), Some(_)) = (named_hits.next(), named_hits.next()) {
             let _ = reply.send(ServerMsg::Err {
                 code: err_code::BAD_REQUEST,
