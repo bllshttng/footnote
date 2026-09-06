@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crate::daemon::now_rfc3339_like;
-use crate::state::RegistryEntry;
+use crate::state::{Lineage, RegistryEntry};
 use crate::AgentStatus;
 
 /// Build the registry row for a Codex app-server thread. Codex has no fno
@@ -44,7 +44,6 @@ pub(crate) fn build_codex_thread_entry(
         requested_provider: None,
         requested_effort: effort.filter(|v| !v.is_empty()).map(str::to_string),
         harness: Some("codex".into()),
-        harness_session_id: Some(session_id.clone()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         // x-d285: non-claude harness; the account axis does not apply.
@@ -55,9 +54,6 @@ pub(crate) fn build_codex_thread_entry(
         session_id: None,
         origin: Some("spawn".into()),
         spawn_trigger: None,
-        spawned_by_session: parent_session,
-        spawned_by_harness: parent_harness,
-        spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
         claude_session_uuid: None,
         messaging_socket_path: None,
@@ -90,7 +86,7 @@ pub(crate) fn build_codex_thread_entry(
         crown_scope: None,
         crown_grantor: None,
         route_settings_path: None,
-        fno_id: Some(session_id),
+        fno_id: Some(session_id.clone()),
         delivery_policy: None,
         // v19: the launch posture is the resume posture. The doc's old warning
         // that "a registry row records no sandbox posture" died here.
@@ -102,6 +98,9 @@ pub(crate) fn build_codex_thread_entry(
             }
             .to_string(),
         ),
-        ..Default::default()
+        ..RegistryEntry::new(
+            Some(session_id),
+            Lineage::captured((parent_session, parent_harness, parent_cwd)),
+        )
     }
 }

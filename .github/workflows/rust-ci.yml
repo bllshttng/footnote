@@ -32,10 +32,6 @@ on:
       - cli/src/fno/agents/registry_schema.toml
       - scripts/ci/check-provider-vocabulary-parity.sh
       - tests/ci/test_provider_vocabulary_parity.sh
-      - scripts/ci/check-session-identity-parity.sh
-      - tests/ci/test_session_identity_parity.sh
-      - scripts/ci/check-spawn-lineage-parity.sh
-      - tests/ci/test_spawn_lineage_parity.sh
       - scripts/ci/check-proto-version-bump.sh
       - scripts/ci/check-reviewer-descriptor-parity.sh
       - scripts/ci/check-review-app-parity.sh
@@ -298,15 +294,6 @@ jobs:
         run: |
           bash tests/ci/test_provider_vocabulary_parity.sh
           bash scripts/ci/check-provider-vocabulary-parity.sh
-
-      - name: Session identity parity check
-        # Installed-user birth writers must persist the canonical full session
-        # identity before their rows become addressable across harnesses.
-        run: |
-          bash tests/ci/test_session_identity_parity.sh
-          bash scripts/ci/check-session-identity-parity.sh
-          bash tests/ci/test_spawn_lineage_parity.sh
-          bash scripts/ci/check-spawn-lineage-parity.sh
 
   stress:
     name: rust e2e concurrency stress (20 trials)

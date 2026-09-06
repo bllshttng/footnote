@@ -495,6 +495,7 @@ def adopt_store_hit(
     from fno.agents.registry import (
         AgentEntry,
         AgentResolutionError,
+        mint_agent_entry,
         register_existing_session,
     )
 
@@ -537,17 +538,17 @@ def adopt_store_hit(
         from fno.agents.dispatch import _capture_parent_edge
 
         _sb_session = _capture_parent_edge()[0]
-        return AgentEntry(
+        return mint_agent_entry(
+            harness_session_id=hit.session_id,
+            spawned_by_session=None,
+            spawned_by_harness=None,
+            spawned_by_cwd=None,
             name=_fallback_name(hit.session_id),
             cwd=hit.cwd,
             log_path=log_path,
             harness=hit.harness,
-            harness_session_id=hit.session_id,
             status="orphaned",
             short_id=short_id,
-            spawned_by_session=None,
-            spawned_by_harness=None,
-            spawned_by_cwd=None,
             adopted_by_session=_sb_session,
             # Same fact as the registered row above, and it has to be stated
             # here too: this one is handed straight back to the caller when

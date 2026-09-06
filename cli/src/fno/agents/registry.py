@@ -686,6 +686,32 @@ class AgentEntry:
         return f"L{self.crown_level} {self.crown_scope or '?'}"
 
 
+def mint_agent_entry(
+    *,
+    harness_session_id: Optional[str],
+    spawned_by_session: Optional[str],
+    spawned_by_harness: Optional[str],
+    spawned_by_cwd: Optional[str],
+    **kwargs: Any,
+) -> AgentEntry:
+    """The one Python mint constructor: birth writers build rows through this.
+
+    The canonical session identity and the parent edge are keyword-only with
+    no defaults, so a mint site that omits either gets a TypeError instead of
+    a silently-None row. This is the Python twin of Rust's
+    ``RegistryEntry::new`` and the replacement for the retired session-identity
+    and spawn-lineage parity scripts. Reads stay tolerant: ``AgentEntry``
+    itself keeps field defaults so legacy rows without these keys still load.
+    """
+    return AgentEntry(
+        harness_session_id=harness_session_id,
+        spawned_by_session=spawned_by_session,
+        spawned_by_harness=spawned_by_harness,
+        spawned_by_cwd=spawned_by_cwd,
+        **kwargs,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Shared identifier resolver (x-1b1e): every session-connecting `fno agents`
 # verb accepts the registry name, full harness session id, explicit transport
@@ -2083,14 +2109,17 @@ def register_existing_session(
             if origin == "adopted":
                 _adopted_by = _sb_session
                 _sb_session = _sb_harness = _sb_cwd = None
-        fresh = AgentEntry(
+        fresh = mint_agent_entry(
+            harness_session_id=session_id,
+            spawned_by_session=_sb_session,
+            spawned_by_harness=_sb_harness,
+            spawned_by_cwd=_sb_cwd,
             name=chosen,
             harness=harness,
             provider=provider,
             model=model,
             model_basis="requested" if model else None,
             effort=effort,
-            harness_session_id=session_id,
             cwd=cwd,
             log_path=log_path,
             status=_REGISTERED_STATUS,
@@ -2103,9 +2132,6 @@ def register_existing_session(
             # runs on is unobserved, so the substrate stays unknown (never
             # "pane").
             substrate=None,
-            spawned_by_session=_sb_session,
-            spawned_by_harness=_sb_harness,
-            spawned_by_cwd=_sb_cwd,
             adopted_by_session=_adopted_by,
             delivery_policy=(
                 None if delivery_policy in (None, "off") else delivery_policy

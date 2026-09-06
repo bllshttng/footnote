@@ -65,6 +65,7 @@ from fno.agents.registry import (
     TERMINAL_STATUSES,
     _has_resolvable_handle,
     load_registry,
+    mint_agent_entry,
     update_registry,
 )
 from fno.agents.crown import (
@@ -4816,7 +4817,11 @@ def dispatch_spawn_pane(
             ):
                 touched_log_path = _touch_log_path(name)
                 final_log_path = str(touched_log_path) if touched_log_path is not None else ""
-            entry = AgentEntry(
+            entry = mint_agent_entry(
+                    harness_session_id=stored_session_uuid,
+                    spawned_by_session=spawned_by_session,
+                    spawned_by_harness=spawned_by_harness,
+                    spawned_by_cwd=spawned_by_cwd,
                     name=name,
                     harness=provider,
                     provider=resolved_lane_provider,
@@ -4838,14 +4843,10 @@ def dispatch_spawn_pane(
                     # a concurrent reconcile cannot land one without the other
                     # and lose the only evidence the death left.
                     log_path=final_log_path,
-                    harness_session_id=stored_session_uuid,
                     status=row_status,
                     pid=child_pid,
                     pid_start_time=pid_start_time,
                     mux={"session": session, "pane_id": pane_id},
-                    spawned_by_session=spawned_by_session,
-                    spawned_by_harness=spawned_by_harness,
-                    spawned_by_cwd=spawned_by_cwd,
                     spawn_trigger=spawn_trigger,
                     # footnote created this worker, so the reap lane's "did a
                     # human start this session by hand" reads no. The operator

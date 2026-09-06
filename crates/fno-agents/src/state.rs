@@ -1009,6 +1009,43 @@ pub struct RegistryEntry {
     pub legacy_claude_short_id: Option<String>,
 }
 
+/// The spawn-time parent edge as one value. Ambient, never required of a
+/// caller, but never implicit either: the mint constructor takes it
+/// positionally, so a mint site with no parent names [`Lineage::none`] in its
+/// own code instead of inheriting a silent `None`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lineage {
+    pub session: Option<String>,
+    pub harness: Option<String>,
+    pub cwd: Option<String>,
+}
+
+impl Lineage {
+    pub fn none() -> Self {
+        Self {
+            session: None,
+            harness: None,
+            cwd: None,
+        }
+    }
+}
+
+impl RegistryEntry {
+    /// The one mint constructor. The canonical session identity and the
+    /// parent edge are positional, so no mint site can build the struct-update
+    /// base without naming both. This is the compile-time replacement for the
+    /// retired session-identity and spawn-lineage parity scripts.
+    pub fn new(harness_session_id: Option<String>, spawned_by: Lineage) -> Self {
+        Self {
+            harness_session_id,
+            spawned_by_session: spawned_by.session,
+            spawned_by_harness: spawned_by.harness,
+            spawned_by_cwd: spawned_by.cwd,
+            ..Default::default()
+        }
+    }
+}
+
 /// The one-live-ref invariant (brief Locked 7), checked at write time by both
 /// [`update_registry`] (Rust) and Python's `write_registry`: a row that carries
 /// the `mux` ref must not ALSO carry a transport identity (non-empty `short_id`:

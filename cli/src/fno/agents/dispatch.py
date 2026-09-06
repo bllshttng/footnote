@@ -69,6 +69,7 @@ from fno.agents.registry import (
     RegistryVersionError,
     TERMINAL_STATUSES,
     load_registry,
+    mint_agent_entry,
     resolve_agent_in,
     resolve_registered_agent_across_sources,
     update_registry,
@@ -752,7 +753,11 @@ def _codex_create_path(
     # without lineage).
     _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
     _cx_lineage_reason = _report_unlinked_parent(_cx_session)
-    new_entry = AgentEntry(
+    new_entry = mint_agent_entry(
+        harness_session_id=session_id,
+        spawned_by_session=_cx_session,
+        spawned_by_harness=_cx_harness,
+        spawned_by_cwd=_cx_cwd,
         name=name,
         cwd=str(cwd),
         log_path=str(output_path),
@@ -761,10 +766,6 @@ def _codex_create_path(
         model=model,
         model_basis="requested" if model else None,
         effort=effort,
-        harness_session_id=session_id,
-        spawned_by_session=_cx_session,
-        spawned_by_harness=_cx_harness,
-        spawned_by_cwd=_cx_cwd,
         # The THIRD Python path that mints a worker row, after the pane and bg
         # paths. Its Rust counterpart in codex_ask.rs stamps this, so leaving it
         # off here made one codex worker read "spawn" and another read absent
@@ -1234,13 +1235,16 @@ def _lane_b_thread_spawn(
 
         _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
         _report_unlinked_parent(_cx_session)
-        new_entry = AgentEntry(
+        new_entry = mint_agent_entry(
+            harness_session_id=session_id,
+            spawned_by_session=_cx_session,
+            spawned_by_harness=_cx_harness,
+            spawned_by_cwd=_cx_cwd,
             name=name,
             cwd=str(cwd),
             log_path=str(log_path),
             harness=harness,
             host_mode="interactive",
-            harness_session_id=session_id,
             pid=proc.pid,
             # The child pid out of the same Identify reply that proved the
             # keeper: the daemon's restart sweep asserts it unchanged, so a
@@ -1251,9 +1255,6 @@ def _lane_b_thread_spawn(
             # it captures the worker-server census.
             pid_start_time=_keeper_pid_start_time(proc.pid),
             messaging_socket_path=str(sock),
-            spawned_by_session=_cx_session,
-            spawned_by_harness=_cx_harness,
-            spawned_by_cwd=_cx_cwd,
             origin="spawn",
             # The keeper-hosted thread lane; the event below spells it
             # "thread" already.
@@ -1796,7 +1797,11 @@ def _claude_create_path(
     lane_provider = route_provider or resolve_lane_vendor(
         ["claude", *(["--model", model] if model else [])], harness="claude"
     )
-    new_entry = AgentEntry(
+    new_entry = mint_agent_entry(
+        harness_session_id=session_uuid,
+        spawned_by_session=spawned_by_session,
+        spawned_by_harness=spawned_by_harness,
+        spawned_by_cwd=spawned_by_cwd,
         name=name,
         cwd=str(cwd),
         log_path=str(touched_log_path) if touched_log_path is not None else "",
@@ -1825,10 +1830,6 @@ def _claude_create_path(
         requested_model=model or route_model,
         requested_provider=route_provider or lane_provider,
         requested_effort=effort,
-        harness_session_id=session_uuid,
-        spawned_by_session=spawned_by_session,
-        spawned_by_harness=spawned_by_harness,
-        spawned_by_cwd=spawned_by_cwd,
         spawn_trigger=spawn_trigger,
         # The SAME stamp the pane path writes. Two Python paths mint a worker
         # row - pane and bg - and stamping only one would leave the reap lane

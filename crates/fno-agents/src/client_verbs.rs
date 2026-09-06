@@ -1535,7 +1535,7 @@ fn synthesized_name(short: &str) -> String {
 /// a registered-but-not-driven row the GC keeps (non-terminal, no confirmed-dead
 /// pid -> `gc_action` Keep).
 fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::RegistryEntry {
-    use crate::state::RegistryEntry;
+    use crate::state::{Lineage, RegistryEntry};
     let harness = if !id.harness.is_empty() {
         id.harness.clone()
     } else if id.harness_session_id.is_empty()
@@ -1555,6 +1555,16 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
     // the CLIENT process, so the markers name the session that vouched for
     // the adopted row.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
+    // Built before the literal: `claude_session_uuid` below moves `session`,
+    // and the struct-update base is evaluated last.
+    let base = RegistryEntry::new(
+        Some(session.clone()),
+        Lineage {
+            session: parent_session,
+            harness: parent_harness,
+            cwd: parent_cwd,
+        },
+    );
     RegistryEntry {
         node: None,
         // Synthesized from an identity that arrived without a row; the lane
@@ -1583,7 +1593,6 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         requested_provider: None,
         requested_effort: None,
         harness: Some(harness),
-        harness_session_id: Some(session.clone()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         route_provider_id: None,
@@ -1623,10 +1632,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         delivery_policy: None,
         sandbox_posture: None,
         spawn_trigger: None,
-        spawned_by_session: parent_session,
-        spawned_by_harness: parent_harness,
-        spawned_by_cwd: parent_cwd,
-        ..Default::default()
+        ..base
     }
 }
 
