@@ -37,7 +37,25 @@ def _capture_rust_cmds(monkeypatch, nextest=True):
     class _Proc:
         returncode = 0
 
-    monkeypatch.setattr(test_cmd.subprocess, "run", lambda cmd, env=None, **kw: cmds.append(list(cmd)) or _Proc())
+    def _record(cmd):
+        # Only the suite commands are recorded: config loads and root
+        # resolvers shell git on the side and were never part of this capture.
+        argv = cmd.split() if isinstance(cmd, str) else list(cmd)
+        if argv and argv[0] != "git":
+            cmds.append(argv)
+        return _Proc()
+
+    class _GroupProc:
+        # The runner spawns through Popen in its own process group, so a
+        # fake here must answer wait(timeout) like a real exit.
+        def __init__(self, cmd, env=None, **kw):
+            _record(cmd)
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(test_cmd.subprocess, "run", lambda cmd, env=None, **kw: _record(cmd))
+    monkeypatch.setattr(test_cmd.subprocess, "Popen", _GroupProc)
     monkeypatch.setattr(
         test_cmd.shutil,
         "which",
