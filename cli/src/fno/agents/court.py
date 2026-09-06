@@ -115,9 +115,9 @@ def _manifest_limb(scope: Any, row: Any) -> dict[str, Any]:
 def _manifest_only_crowns(held: list[str]) -> tuple[list[dict[str, Any]], bool]:
     """Crowns whose row is gone but whose manifest holds them: the Rust sweep
     (`fno-agents court-orphans`) walks the spaces ROOT, because a vanished
-    row names no cwd. Returns ``(entries, ran)``; ``ran`` False means the sweep
-    could not run (no binary, non-zero exit - a stale binary lacks the verb -
-    timeout, bad JSON) and an empty list there is an ABSENCE, not zero orphans."""
+    row names no cwd. Returns ``(entries, ran)``: ``ran`` False means the sweep
+    could not answer (no binary, non-zero exit, timeout, bad JSON), so an
+    empty list is an ABSENCE, never zero orphans."""
     import json
     import subprocess
 
@@ -133,10 +133,10 @@ def _manifest_only_crowns(held: list[str]) -> tuple[list[dict[str, Any]], bool]:
             + [part for scope in held for part in ("--held", scope)],
             capture_output=True, text=True, check=False, timeout=30,
         )
-        orphans = json.loads(proc.stdout) if proc.returncode == 0 else None
+        if proc.returncode != 0:
+            return [], False
+        orphans = json.loads(proc.stdout)
     except (OSError, ValueError, subprocess.SubprocessError):
-        return [], False
-    if orphans is None:
         return [], False
     entries = [
         {
@@ -198,8 +198,7 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
             # regardless of crown_scope; surface the anomaly, never skip it.
             if getattr(row, "crown_scope", None):
                 # The half crown still HOLDS its territory: _conflicts counts
-                # it as a claim, so the orphan sweep must see the scope too,
-                # or a manifest for it renders beside the live row holding it.
+                # it as a claim, so the sweep must too.
                 if isinstance(row.crown_scope, str) and row.crown_scope.strip():
                     held_scopes.append(row.crown_scope)
                 entries.append(
@@ -243,9 +242,8 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
         "registry_readable": True,
         "graph_readable": by_id is not None,
         "summary": {
-            # total counts ROW crowns only: the census reads it as a row count
-            # and computes workers from it, so a manifest-only entry would
-            # subtract a worker that still exists.
+            # total counts ROW crowns only: the census computes workers from
+            # it, so a manifest-only entry would subtract a live worker.
             "total": len(entries) - len(orphans),
             "manifest_only": len(orphans),
             "sweep_ran": sweep_ran,
