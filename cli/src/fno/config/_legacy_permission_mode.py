@@ -1,24 +1,13 @@
-"""Migration for the retired `agents.spawn_permission_mode` config key (x-7198).
-
-Split out of `config/__init__.py` to keep that file inside the shrink-only
-file budget (`scripts/ci/check-file-budget.sh`) - this validator body is pure
-and has no reason to live inline in the biggest config module.
-"""
+"""Migration for the retired `agents.spawn_permission_mode` key (x-7198); split
+out of `config/__init__.py` to stay inside its shrink-only file budget."""
 
 from __future__ import annotations
 
 
 def accept_legacy_spawn_permission_mode(data: object) -> object:
-    """Migrate a retired `agents.spawn_permission_mode` onto `defaults.permission_mode`.
-
-    Two config keys used to answer "what permission mode does an
-    unattended worker get" (x-7198): this legacy top-level scalar, read by
-    the three autonomous dispatchers, and `defaults.permission_mode`,
-    read by every other spawn. A deleted key must migrate, never be
-    ignored - an operator who set the legacy value must not silently get
-    the built-in instead. Copy it onto the surviving key when that is
-    unset; when both are set, keep the surviving key's value and say so;
-    either way drop the legacy field so the model no longer carries it.
+    """Migrate `agents.spawn_permission_mode` onto `defaults.permission_mode`
+    (x-7198): copy it over when unset there, keep the surviving value and warn
+    when both are set, and always drop the legacy field afterward.
     """
     if not isinstance(data, dict) or "spawn_permission_mode" not in data:
         return data
