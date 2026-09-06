@@ -489,7 +489,9 @@ def test_rust_client_verbs_match_client_rs() -> None:
     # but Python never routes them. `board` is reached only through
     # `fno inbox board` shelling to the binary via resolve_binary (d-e11b2b3e);
     # adding it to RUST_CLIENT_VERBS would mint a second surface for it.
-    routable = arms | (specials - {"board"})
+    # `notify-watch` is the same shape: the pr-watch tick phase and the arms
+    # readout are its only callers, both through resolve_binary.
+    routable = arms | (specials - {"board", "notify-watch"})
 
     assert routable == set(rr.RUST_CLIENT_VERBS), (
         "RUST_CLIENT_VERBS is out of sync with client.rs routable verbs.\n"

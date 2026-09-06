@@ -48,6 +48,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "manifest-eval",
     "manifest-for-session",
     "needs",
+    "notify-watch",
     "feed",
     "ping",
     "pr-heal",
@@ -301,6 +302,13 @@ async fn run(args: Vec<String>) -> i32 {
     // parity guard does not see it - no advertised fno verb is added.
     if verb == "board" {
         return fno_agents::king_board::run_board(&args[1..]);
+    }
+
+    // `notify-watch` (x-87fb): the operator-notice sampler, read-only,
+    // daemon-free. Same `==` treatment as `board`: a read-only collector, not
+    // a routable `fno agents` verb, so no advertised fno verb is added.
+    if verb == "notify-watch" {
+        return fno_agents::operator_notice::run_notify_watch_verb(&args[1..]);
     }
 
     // `verify-evidence`: Rust port of scripts/lib/verify-event-evidence.sh

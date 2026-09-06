@@ -646,6 +646,37 @@ fn resolve_agents_value(cwd: &Path, key: &str) -> Option<String> {
     })
 }
 
+/// `[notify] signals` (default empty): the signals the notify_watch arm
+/// samples. An explicit empty list is a real project-level override and masks
+/// any lower-precedence global list; an unset key reads as off everywhere.
+pub fn notify_signals(cwd: &Path) -> Vec<String> {
+    resolve(cwd, |t| {
+        t.get("notify")?
+            .as_table()?
+            .get("signals")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<String>>()
+            })
+    })
+    .unwrap_or_default()
+}
+
+/// `[notify] min_interval_s` (default 300): the rate floor a changed token is
+/// held behind before the same change may notify again.
+pub fn notify_min_interval_s(cwd: &Path) -> u64 {
+    resolve(cwd, |t| {
+        t.get("notify")?
+            .as_table()?
+            .get("min_interval_s")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as u64)
+    })
+    .unwrap_or(300)
+}
+
 /// `mux.notify_on_blocked` (default ON): the daemon fires an OS notification when
 /// a badge ENTERS `blocked` (x-dd84).
 pub fn notify_on_blocked_enabled(cwd: &Path) -> bool {

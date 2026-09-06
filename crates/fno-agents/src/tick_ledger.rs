@@ -58,6 +58,10 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         default_interval_s: 1800,
     },
     ArmSpec {
+        arm: "notify_watch",
+        default_interval_s: 300,
+    },
+    ArmSpec {
         arm: "stop_hook",
         default_interval_s: 0,
     },

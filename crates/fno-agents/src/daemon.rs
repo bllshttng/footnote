@@ -9526,35 +9526,13 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
 
 /// Fire a fire-and-forget OS notification for a badge transition (x-dd84).
 ///
-/// Detached to its own thread so a missing or slow `fno inbox notify` can never stall
-/// the registry write that observed the transition - the same bounded/fail-open
-/// discipline as the external claim-status writer that once froze admit
-/// (memory project_grid_rail_drive_freeze). `FNO_BIN` selects the binary
-/// (default `fno`); a spawn failure (notifier not on PATH) logs one warn and is
-/// dropped, and the registry write that called this has already succeeded.
+/// Detached inside `operator_notice::notify_operator` so a missing or slow
+/// `fno inbox notify` can never stall the registry write that observed the
+/// transition - the same bounded/fail-open discipline as the external
+/// claim-status writer that once froze admit. A spawn failure is logged and
+/// dropped; the registry write that called this has already succeeded.
 pub(crate) fn notify_transition(title: String, body: String) {
-    // var_os (not var) so a non-UTF-8 FNO_BIN passes through to Command
-    // unmangled, matching scrape::fno_bin (gemini MEDIUM on #161).
-    let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
-    // ponytail: reap on the detached thread; `fno inbox notify` is a sub-second
-    // osascript/notify-send call, so waiting on it here cannot realistically leak.
-    std::thread::spawn(move || {
-        match std::process::Command::new(&fno)
-            .args(["inbox", "notify", &title, &body])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(mut child) => {
-                let _ = child.wait();
-            }
-            Err(e) => eprintln!(
-                "fno-agents-daemon: badge notify skipped ({} notify): {e}",
-                fno.to_string_lossy()
-            ),
-        }
-    });
+    crate::operator_notice::notify_operator(&title, &body, None);
 }
 
 /// Which null-uuid row (if any) should adopt a full session uuid seen on an

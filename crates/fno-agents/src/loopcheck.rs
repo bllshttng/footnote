@@ -3698,11 +3698,9 @@ fn best_effort_notify(title: &str, body: &str) {
         return;
     }
     // var_os avoids a lossy UTF-8 conversion on a path/binary env value and
-    // hands the raw OsString straight to Command (gemini review).
+    // hands the raw OsString straight to the spawn (gemini review).
     let fno_bin = std::env::var_os("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|| "fno".into());
-    let _ = Command::new(fno_bin)
-        .args(["inbox", "notify", title, body])
-        .spawn();
+    crate::operator_notice::notify_operator_with(&fno_bin, title, body, None);
 }
 
 /// Post a bot's review trigger to the PR once, returning true on success (x-b167
