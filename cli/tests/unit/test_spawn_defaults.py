@@ -2585,3 +2585,63 @@ def test_proven_account_owns_the_harness_aggregate(monkeypatch):
     cap = rc(providers=("claude",))
     assert cap["claude"]["state"] == "exhausted"
     assert cap["claude"]["window"] == "identity:makers"
+def test_lane_coordinate_forwards_route_and_account(monkeypatch):
+    """AC6-COORDINATE: a named row's vendor route and account constraint ride
+    the launch argv; the coordinate is not discarded after the capacity check."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "ok"},
+                                 "evidence": {}}},
+    )
+    rows = [{"name": "flash-zai", "harness": "claude", "model": "glm",
+             "route": "zai/glm-5.3", "account": "zai-main"}]
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(rows, {"target": {"lanes": ["flash-zai"]}}),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--route") + 1] == "zai/glm-5.3"
+    assert out[out.index("--account") + 1] == "zai-main"
+
+
+def test_record_route_contradiction_refuses(monkeypatch):
+    """AC6-COORDINATE: the account record resolves its own vendor; a lane
+    route that contradicts it would check one coordinate and bill another."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    rows = [{"name": "flash-zai", "harness": "claude", "model": "glm",
+             "route": "zai/glm-5.3", "account": "zai-main"}]
+    s = _slot_settings(rows, {"target": {"lanes": ["flash-zai"]}})
+    s.accounts = SimpleNamespace(records=[{"id": "zai-main", "route": "openai/x"}])
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            settings=s,
+            stderr=err,
+            env={},
+        )
+    assert exc.value.code == 2
+    assert "contradicting the lane route 'zai/glm-5.3'" in err.getvalue()
+
+
+def test_explicit_model_pin_overrides_the_lanes(monkeypatch):
+    """AC6-COORDINATE: a typed --model outranks the slot, receipt names the
+    override, and no lane harness is borrowed for the foreign model."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "--model", "gpt-5.6-luna", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS, {"target": {"lanes": ["flash-x", "sonnet-x"]}}
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "gpt-5.6-luna"
+    assert "slot=model-pin-override" in err.getvalue()
+    applied = err.getvalue()
+    assert "applied slot=" not in applied or "model-pin-override" in applied

@@ -527,6 +527,21 @@ def _effective_difficulty(node: Optional[Mapping]) -> tuple[str, str]:
     return "high", "difficulty missing; rounds up to high"
 
 
+def _account_record_vendor(settings: object, account: str) -> str:
+    """The vendor a config.accounts.records entry binds, or '' when unnamed."""
+    if settings is None or not account:
+        return ""
+    try:
+        records = getattr(getattr(settings, "accounts", None), "records", None) or []
+        for record in records:
+            if isinstance(record, Mapping) and record.get("id") == account:
+                route = str(record.get("route", "") or "")
+                return route.replace(",", "/").partition("/")[0].strip()
+    except Exception:  # noqa: BLE001 - an unreadable record refuses nothing
+        return ""
+    return ""
+
+
 def _lane_field(lane: object, name: str) -> str:
     value = lane.get(name, "") if isinstance(lane, Mapping) else getattr(lane, name, "")
     return value.strip() if isinstance(value, str) else ""
@@ -598,6 +613,7 @@ def resolve_slot(
     role: Optional[str] = None,
     protected_role: Optional[str] = None,
     model_occupied: bool = False,
+    explicit_model: bool = False,
     explicit_lane: bool = False,
 ) -> tuple[Optional[dict[str, Any]], list[str]]:
     """Which lane does this dispatch ride right now: the ONE slot resolver.
@@ -651,6 +667,13 @@ def resolve_slot(
             inventory=inventory,
         )
         return candidate, prefix + grid_chain
+
+    if explicit_model:
+        # An explicit model pin outranks the lanes (operator authority); it
+        # never borrows a lane's harness or capacity. The profile scalars and
+        # defaults answer instead, and the receipt names the override. Config
+        # defaults do NOT outrank lanes; only a typed flag does.
+        return None, prefix + ["slot=model-pin-override (an explicit model outranks the lanes)"]
 
     chain = prefix + [f"slot {rung_base} lanes walked in declared order"]
 
@@ -727,6 +750,13 @@ def resolve_slot(
         )
         if row.effort:
             pick["effort"] = row.effort
+        # AC6-COORDINATE: the candidate carries the evidence that selected it,
+        # so no downstream door re-derives or contradicts it.
+        pick["evidence"] = {"capacity": state, "window": window}
+        detail = (capacity or {}).get(row.harness)
+        ev = detail.get("evidence") or {} if isinstance(detail, Mapping) else {}
+        if row.account and not row.route:
+            pick["evidence"]["identity"] = ev.get(row.account, "unknown")
         return pick
 
     for index, (rung, row_name) in enumerate(plan):
@@ -747,6 +777,17 @@ def resolve_slot(
         vendor: Optional[str] = None
         if row.route:
             vendor = row.route.replace(",", "/").partition("/")[0].strip() or None
+        if row.account and row.route:
+            # The record the account names resolves its OWN launch env; a lane
+            # route contradicting that vendor would check one coordinate and
+            # bill another, so it refuses before anything launches.
+            rec_vendor = _account_record_vendor(settings, row.account)
+            if rec_vendor and vendor and rec_vendor != vendor:
+                chain.append(
+                    f"slot=config {rung} account {row.account!r} resolves vendor"
+                    f" {rec_vendor!r}, contradicting the lane route {row.route!r}"
+                )
+                return None, chain
         cap = provider_lanes_cap(caps.get(vendor)) if vendor else None
         if vendor is not None and cap is not None:
             try:

@@ -1163,6 +1163,7 @@ def inject_spawn_defaults(
                     role=grid_role,
                     protected_role=protected_name,
                     model_occupied=model_occupied,
+                    explicit_model=has_model,
                     explicit_lane=_explicit_lane,
                 )
             except Exception:  # noqa: BLE001 - a routing fault never breaks a spawn
