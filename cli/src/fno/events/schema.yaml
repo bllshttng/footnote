@@ -2912,6 +2912,53 @@ event_types:
           description: "The cadence this arm runs on, in seconds; the readout reads stale past twice this. 0 marks an event-driven arm (stop_hook): staleness does not apply."
     consumers: [operator]
 
+  - name: evals_scheduled_run
+    description: "The pr-watch tick ran the regression tier on its schedule (the eval bank's demand leg): what ran and what it graded. The counterpart row in `fno doctor` and `fno backlog triage health` reads the same history this run appends, so a run that appends nothing is a could-not-fire (evals_stale), never a success."
+    sources: [daemon, test]
+    data:
+      required: [task_count, passes, duration_s]
+      properties:
+        task_count:
+          type: integer
+          description: "Distinct regression tasks the scheduled run executed, read back as the history delta, never parsed from subprocess stdout."
+        passes:
+          type: integer
+          description: "How many of those runs passed. Graded fails still land here; a plumbing failure is evals_stale instead."
+        duration_s:
+          type: number
+          description: "Wall seconds the underlying `fno doctor evals run --tier regression` subprocess took."
+        age_days_before:
+          type: number
+          description: "Optional. Age of the newest regression row when the leg fired; null when the bank had never run."
+        window_days:
+          type: integer
+          description: "Optional. The evals.schedule_days window the leg fired against."
+    consumers: [operator]
+
+  - name: evals_stale
+    description: "The eval bank is past twice its stale window and the scheduled run could not fire (gate refused, subprocess timeout, non-zero exit, or an exit-0 run that appended no rows). One journal row per attempt; the operator notice rides at most once per schedule window and reads this journal as its rate bound, so this event is the dedup."
+    sources: [daemon, test]
+    data:
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          enum: [gate, timeout, error, no_rows]
+          description: "Why the run could not fire: gate (spawn gate refused), timeout (the tick budget killed the subprocess), error (non-zero exit or spawn trouble), no_rows (exit 0 but no history rows appended)."
+        detail:
+          type: string
+          description: "Optional. The refusal, exit line, or stderr tail naming the cause."
+        age_days:
+          type: number
+          description: "Optional. Age of the newest regression row when the leg fired; absent when the bank had never run or the age was unreadable."
+        never_ran:
+          type: boolean
+          description: "Optional. True when the history holds no regression row at all: due, not aged."
+        window_days:
+          type: integer
+          description: "Optional. The evals.schedule_days window the notice dedup rides."
+    consumers: [operator]
+
   - name: gh_probe
     description: "The stop gate's gh-availability probe conclusion, one row per fire. Tri-state: found, absent (NotFound and no file at the path), or spawn_trouble (gh exists but could not be spawned right now: ETXTBSY, EACCES, a missing interpreter). Spawn trouble reads as present, so a transient spawn failure can no longer degrade a session to advisory mode as 'gh absent'. Deliberately NOT the loop_check type: read_prior_fires counts loop_check rows as fire observations, and a fingerprint-less row would break the no-progress streak."
     sources: [hook]

@@ -13,10 +13,12 @@ below 100%) and graduation (a capability task that passed its last N runs).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from fno.evals import history as _history
+from fno.config import load_settings
 
 
 @dataclass(frozen=True)
@@ -143,23 +145,54 @@ def graduation_candidates(rows: list[dict[str, object]], *, n: int = 3) -> list[
     return candidates
 
 
-def evals_health_summary(history_path: Path) -> Optional[dict[str, Any]]:
-    """One-line evals health for `fno backlog triage health`, or None.
+def _parse_ts(value: object) -> Optional[datetime]:
+    """Parse a history row's ``ts`` (ISO-8601, Z or offset), or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
-    Returns None when no history exists or it holds no rows, so the triage-health
-    consumer shows an evals line ONLY when there is data (the consumption armor:
-    the report has a real consumer from day one). Never raises.
+
+def evals_health_summary(
+    history_path: Path,
+    *,
+    stale_days: Optional[int] = None,
+    now: Optional[datetime] = None,
+) -> Optional[dict[str, Any]]:
+    """One-line evals health for triage health and doctor; the demand row.
+
+    None when no history or no rows; never raises. Semantics in docs/evals.md.
     """
     if not history_path.exists():
         return None
-    report = build_report(load_rows(history_path))
+    rows = load_rows(history_path)
+    report = build_report(rows)
     if report["no_data"]:
         return None
     reg = report["tiers"].get("regression")
+    if stale_days is None:
+        try:
+            stale_days = int(load_settings().evals.stale_days)
+        except Exception:  # noqa: BLE001 - the summary never raises
+            stale_days = 7
+    if now is None:
+        now = datetime.now(timezone.utc)
+    reg_ts = [dt for r in rows if r.get("tier") == "regression"
+              and (dt := _parse_ts(r.get("ts"))) is not None]
+    newest_dt = max(reg_ts) if reg_ts else None
+    never_ran = reg is None
+    age_days = None if newest_dt is None else round(
+        (now - newest_dt).total_seconds() / 86400, 3)
+    stale = never_ran is False and age_days is not None and age_days > stale_days
     return {
         "regression_pass_rate": reg["pass_rate"] if reg else None,
         "flake_count": len(report["flakes"]),
         "regression_alarm": report["regression_alarm"],
+        "age_days": age_days,
+        "stale": stale,
+        "never_ran": never_ran,
     }
 
 

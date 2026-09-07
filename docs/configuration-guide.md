@@ -183,6 +183,8 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `groom.enabled` | bool | `true` | never | Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true. |
 | `restart.enabled` | bool | `true` | never | Enable crash-recovery worker revival after `fno agents restart --mux` kills a server. Defaults true. |
 | `evals.enabled` | bool | `true` | never | Enable the headless eval-suite grading-worker spawn. Defaults true. |
+| `evals.schedule_days` | int | `7` | never | Days between scheduled regression-tier runs on the pr-watch tick (0 disables). |
+| `evals.stale_days` | int | `7` | never | Age in days at which the newest regression-tier run reads STALE in doctor and triage health. |
 | `recovery.enabled` | bool | `true` | advanced | Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.defaults.permission_mode built-in for autonomous dispatch); a non-bypass worker cannot run autonomously and is not resumed. |
 | `recovery.idle_threshold_seconds` | int | `900` | never | How stale a bg session must be (seconds) before recovery acts on it. |
 | `recovery.max_nudges` | int | `3` | never | Per-session cap on held-by-design surfaces before recovery stops surfacing a stuck session (close notifications are once-only, tracked separately). |

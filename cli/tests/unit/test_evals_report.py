@@ -1,6 +1,7 @@
 """Report fold + graduation (US3): AC2-HP, AC6-HP."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -140,6 +141,80 @@ def test_evals_health_summary(tmp_path: Path) -> None:
     assert summary["flake_count"] == 1
     assert summary["regression_pass_rate"] == 0.5
     assert summary["regression_alarm"] == ["r"]
+
+
+# --- age fields (x-ab72): the demand side ---
+
+_NOW = datetime(2026, 9, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _ts(dt: datetime) -> str:
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def test_health_summary_stale_when_newest_regression_old(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, {**_row("r", "regression", True), "ts": _ts(_NOW - timedelta(days=9))})
+    summary = evals_health_summary(hp, stale_days=7, now=_NOW)
+    assert summary is not None
+    assert summary["stale"] is True
+    assert summary["age_days"] == pytest.approx(9.0, abs=0.01)
+    assert summary["never_ran"] is False
+
+
+def test_health_summary_fresh_inside_window(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, {**_row("r", "regression", True), "ts": _ts(_NOW - timedelta(days=2))})
+    summary = evals_health_summary(hp, stale_days=7, now=_NOW)
+    assert summary is not None
+    assert summary["stale"] is False
+    assert summary["age_days"] == pytest.approx(2.0, abs=0.01)
+
+
+def test_health_summary_never_ran_when_no_regression_row(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, {**_row("cap", "capability", True), "ts": _ts(_NOW - timedelta(days=1))})
+    summary = evals_health_summary(hp, stale_days=7, now=_NOW)
+    assert summary is not None
+    assert summary["never_ran"] is True
+    assert summary["stale"] is False
+    assert summary["age_days"] is None
+    assert summary["regression_pass_rate"] is None
+
+
+def test_health_summary_unreadable_ts_never_asserts_stale(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, {**_row("r", "regression", True), "ts": "not-a-timestamp"})
+    summary = evals_health_summary(hp, stale_days=7, now=_NOW)
+    assert summary is not None
+    assert summary["age_days"] is None
+    assert summary["stale"] is False
+    assert summary["never_ran"] is False
+
+
+def test_health_summary_rows_without_ts_never_assert_stale(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, _row("r", "regression", True))
+    summary = evals_health_summary(hp, stale_days=7, now=_NOW)
+    assert summary is not None
+    assert summary["stale"] is False
+
+
+def test_health_summary_stale_days_resolves_from_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Evals:
+        stale_days = 2
+
+    class _Settings:
+        evals = _Evals()
+
+    monkeypatch.setattr("fno.evals.report.load_settings", lambda: _Settings())
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, {**_row("r", "regression", True), "ts": _ts(_NOW - timedelta(days=3))})
+    summary = evals_health_summary(hp, now=_NOW)
+    assert summary is not None
+    assert summary["stale"] is True
 
 
 # --- CLI ---
