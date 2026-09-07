@@ -432,9 +432,8 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
     older, newer = session_events[-2], session_events[-1]
 
     def _pane_map(ev: dict) -> dict:
-        # A row without an integer pane_id is journal noise (the schema makes
-        # pane_id required, but a debug view must never crash on it): skip it
-        # rather than KeyError the whole table.
+        # A row without an integer pane_id is journal noise: skip it rather
+        # than KeyError the whole table.
         return {
             p["pane_id"]: p
             for p in ev.get("data", {}).get("panes", [])
@@ -488,8 +487,7 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
 
 
 def _render_pane_stats_lines(section: dict) -> list[str]:
-    """The human-readable per-pane counter block. Scope-stated even when the
-    news is "cannot say": one sample or an unreadable journal prints its
+    """The human-readable per-pane counter block: "cannot say" prints its
     status line, never an empty table that reads as 'no cost'."""
     out = ["pane counters (mux server; monotonic totals differenced over the window)"]
     if section["status"] != "ok":

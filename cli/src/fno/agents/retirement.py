@@ -30,8 +30,8 @@ def resolve_node(
     The field is authoritative but null on most live rows, so the fallback
     reads ``<prefix>-<node_id>-<slug>``: tokens 1 and 2 only, ``tokens[1:3]``
     joined against the full ids, then bare ``tokens[1]`` against a hex index
-    - so a slug word like ``feed`` in ``t-d15a-feed-timeout`` is never read
-    as an id, and a bare hex matching two graph ids resolves to nothing.
+    - a slug word like ``feed`` is never read as an id, and a bare hex
+    matching two graph ids resolves to nothing.
     """
     if node_field:
         return node_field, "registry"
