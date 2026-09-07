@@ -303,6 +303,18 @@ class _WatchdogBudgetSpent(Exception):
 #: legs behind it.
 _WAKE_APPLY_FLOOR_S = 200
 
+
+def _wd_apply_and_emit(wd, verdict, *, cwd: str, agent: str, label: str) -> str:
+    try:
+        outcome, detail = wd.apply_verdict(verdict, lanes="wake", cwd=cwd, agent=agent)
+    except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
+        outcome, detail = "refused", f"{label} crashed: {exc!r}"
+    wd.emit_event(
+        "watchdog_applied" if outcome == "applied" else "watchdog_refused",
+        {"row_id": verdict.row_id, "verdict": verdict.verdict, "detail": detail},
+    )
+    return outcome
+
 #: A stranded sweep is one batched git fetch plus a rev-list and a
 #: last-commit-age call per worktree - cheap, but not free at 60+
 #: worktrees. Skipping under this floor costs nothing: the next tick
@@ -693,21 +705,26 @@ def tick() -> None:
                                         "%s left for the next tick", verdict.row_id,
                                     )
                                     continue
-                                try:
-                                    outcome, detail = _wd.apply_verdict(
-                                        verdict, lanes="wake", cwd=row.cwd
-                                    )
-                                except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
-                                    outcome, detail = "refused", f"wake crashed: {exc!r}"
+                                _wd_apply_and_emit(_wd, verdict, cwd=row.cwd, agent=row.agent, label="wake")
                                 acted += 1
-                                _wd.emit_event(
-                                    "watchdog_applied" if outcome == "applied" else "watchdog_refused",
-                                    {
-                                        "row_id": verdict.row_id,
-                                        "verdict": verdict.verdict,
-                                        "detail": detail,
-                                    },
-                                )
+                        # SILENCE lane (x-c624): registry-scoped rows fleet_rows misses.
+                        if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
+                            log.warning("pr-watch: watchdog silence budget spent")
+                        else:
+                            try:
+                                silence_vs, silence_rows_out = _wd.silence_verdicts(roots, now_s=now)
+                            except Exception as exc:  # noqa: BLE001 - a broken lane never aborts the tick
+                                log.warning("pr-watch: silence sweep failed: %s", exc)
+                                silence_vs, silence_rows_out = [], []
+                            for silence_v, silence_row in zip(silence_vs, silence_rows_out):
+                                if silence_v.verdict != _wd.SILENCE:
+                                    continue
+                                if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
+                                    log.warning("pr-watch: watchdog silence budget spent")
+                                    break
+                                _wd_apply_and_emit(_wd, silence_v, cwd=silence_row.cwd,
+                                                    agent=silence_row.agent, label="silence drive")
+                                acted += 1
                         recovery_scans = []
                         recovery_roots_done = 0
                         for recovery_root in roots:
