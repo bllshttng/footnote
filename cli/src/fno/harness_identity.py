@@ -1236,10 +1236,9 @@ def current_session_ids(env: Optional[Mapping[str, str]] = None) -> set[str]:
 
 # --- The agents-registry spawn record as an identity source (x-e882) --------
 
-#: Row statuses under which a session still owns its identity: a
+#: Row statuses under which a session still owns its identity (a
 #: harness_session_id held by such a row is provably not another acquiring
-#: session's. Declared in this platform leaf so the agents registry and the
-#: spawn-record reader cannot drift.
+#: session's). Declared here so the registry and the reader cannot drift.
 OWNERSHIP_LIVE_STATUSES = frozenset(
     {"spawning", "ready", "idle", "busy", "live", "restarting"}
 )
@@ -1258,9 +1257,8 @@ def live_thread_row_for_cwd(
     sibling thread's lookup returns its own row.
 
     Exactly one ownership-live ``substrate: thread`` row with a non-empty
-    harness and session id answers. Zero and two-plus matches return None -
-    ambiguity refuses, it never picks. An absent, unreadable, or alien-shape
-    registry returns None and raises nothing, the usual degrade contract.
+    harness and session id answers; zero and two-plus matches return None, as
+    does an absent, unreadable, or alien-shape registry (raise nothing).
     """
     if not cwd:
         return None

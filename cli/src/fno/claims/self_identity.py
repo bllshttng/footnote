@@ -155,10 +155,9 @@ def _fill_spawn_record(owned):
 
     Order is the whole guard: a resolved session id short-circuits before the
     registry is read, a resolved harness that DISAGREES with the record leaves
-    the answer untouched, and no matching record changes nothing, so every
-    non-thread answer stays byte-identical. ``spawn_record`` stays outside
-    ``_PROVEN_DISPOSITIONS``: the record proves ownership for the worker its
-    cwd names, but the manifest shared-anchor check stays armed for it.
+    the answer untouched, no matching record changes nothing. ``spawn_record``
+    stays outside ``_PROVEN_DISPOSITIONS``: the manifest shared-anchor check
+    stays armed for record-carried ids.
     """
     if owned.session_id:
         return owned
