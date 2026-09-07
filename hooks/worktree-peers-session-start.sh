@@ -123,9 +123,19 @@ _SWEEP_GRACE_S=300
 # through `session-start.sh`; fixing the hook covers them and the next one.
 # `0` is ambient on purpose and keeps the checkout path.
 _STRANDED_DIR="$SCRIPT_DIR/../.fno"
-if [[ "${FNO_TEST_HERMETIC:-}" == "1" && -n "${HOME:-}" ]]; then
-  _STRANDED_DIR="$HOME/.fno"
-  mkdir -p "$_STRANDED_DIR" 2>/dev/null || true
+if [[ "${FNO_TEST_HERMETIC:-}" == "1" ]]; then
+  # Through the emitted stub, never a bare `$HOME/.fno`:
+  # scripts/ci/check-no-hardcoded-paths.sh bars that spelling in hooks/, and it
+  # caught this exact line. The stub is plain bash with no subprocess, and
+  # REPO_ROOT is pre-set so it skips its own `git rev-parse` on a hot path.
+  _PATHS_STUB="$SCRIPT_DIR/../scripts/lib/paths.sh"
+  if [[ -f "$_PATHS_STUB" ]]; then
+    REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+    # shellcheck source=/dev/null
+    source "$_PATHS_STUB"
+    _STRANDED_DIR="${STATE_DIR}"
+    mkdir -p "$_STRANDED_DIR" 2>/dev/null || true
+  fi
 fi
 _CACHE_FILE="$_STRANDED_DIR/.worktree-stranded-cache.json"
 # A dedicated stamp, not the cache file's own mtime: the window must be
