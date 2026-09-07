@@ -2153,8 +2153,12 @@ fn a_portal_onto_a_done_row_prunes_with_the_done_set() {
     .unwrap();
     let mut core = empty_core();
     core.shells = vec!["/bin/cat".into()];
-    // The registry still names OTHER ids, so deadbee1 reads as forgotten.
     core.agents = vec![bg_row("other", "/tmp/seen", Some("cafebabe"))];
+    // The forgotten-tombstone arm reads the registry, not core.agents; pin
+    // the seam to rows naming OTHER ids so deadbee1 reads as forgotten even
+    // on a machine with no registry file (CI).
+    let _registry = RestoreRegistryRowsGuard;
+    set_restore_registry_rows(vec![bg_row("other", "/tmp/seen", Some("cafebabe"))]);
     let (c, mut rx) = client_with_rx(1);
     core.clients.push(c);
     core.restore_squads(24, 80, 999);
