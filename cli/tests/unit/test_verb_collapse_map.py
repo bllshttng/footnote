@@ -111,7 +111,8 @@ def test_map_covers_current_surface_once():
     # 570 -> 571. Upstream added `agents newest-assistant-text` (the hidden
     # transcript read the loopcheck distress leg shells) and this branch adds
     # `agents friction-escalate` (the watchdog friction lane): 571 -> 573.
-    assert len(mapped) == 573, (
+    # This branch also allocates `backlog requeue` its row: 573 -> 574.
+    assert len(mapped) == 574, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

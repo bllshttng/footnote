@@ -220,6 +220,7 @@ backlog triage trend	T1	backlog triage trend	2
 backlog triage validate	T1	backlog triage validate	1
 backlog unarchive	T1	backlog unarchive	2
 backlog unclaim	T1	backlog unclaim	8
+backlog requeue	T1	backlog requeue	3
 backlog undefer	T1	backlog undefer	14
 backlog undispatched	T1	backlog undispatched	0
 backlog unqueue	T1	backlog unqueue	0
