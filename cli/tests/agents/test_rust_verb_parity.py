@@ -58,12 +58,24 @@ def _fno_shim_dir() -> str | None:
 
     The shim resolves ``fno-py`` at exec time rather than install time, because
     it is the surrounding ``uv run`` that puts the venv bin on PATH.
+
+    ``mux`` never forwards: the Python front execs whichever ``fno`` is on
+    PATH for that verb, which here is this shim again, and the recursion runs
+    until the runner kills it. The Rust attach verb reaches the mux through
+    ``fno mux thread``, so the shim answers as a box with no live mux server.
     """
     if shutil.which("fno"):
         return None
     d = tempfile.mkdtemp(prefix="fno-parity-shim-")
     shim = Path(d) / "fno"
-    shim.write_text('#!/bin/sh\nexec fno-py "$@"\n')
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = mux ]; then\n'
+        '  echo "fno mux: no live mux server (parity shim)" >&2\n'
+        "  exit 24\n"
+        "fi\n"
+        'exec fno-py "$@"\n'
+    )
     shim.chmod(0o755)
     return d
 
@@ -119,10 +131,11 @@ def _run_rust(args: list[str], home: Path) -> subprocess.CompletedProcess:
     # front's verification notice is setup noise, not part of the client verb
     # contract, and would make Rust stderr differ from the Python oracle.
     env.pop("FNO_RUST_FRONT", None)
-    # Only when the real binary is absent, so a machine that HAS fno keeps
-    # exercising the genuine article rather than a shim.
+    # Only when nothing on the PATH handed to the client provides fno, so a
+    # machine that HAS fno keeps exercising the genuine article, and a test
+    # that put its own fno shim first on PATH keeps that shim in front.
     shim_dir = _fno_shim_dir()
-    if shim_dir:
+    if shim_dir and shutil.which("fno", path=env.get("PATH", "")) is None:
         env["PATH"] = shim_dir + os.pathsep + env.get("PATH", "")
     # A short-token parity case asks the Rust client to invoke the Python
     # all-source resolver. Keep that test hermetic instead of scanning the
@@ -132,6 +145,10 @@ def _run_rust(args: list[str], home: Path) -> subprocess.CompletedProcess:
         "FNO_CLAUDE_PROJECTS_DIR": home.parent / "empty-claude-projects",
         "FNO_CODEX_SESSIONS_DIR": home.parent / "empty-codex-sessions",
         "FNO_OPENCODE_STORAGE_DIR": home.parent / "empty-opencode" / "storage",
+        # attach tries the mux thread portal first; an empty mux dir means
+        # no socket, so the verb falls through to the path under test
+        # instead of driving the operator's live server.
+        "FNO_MUX_DIR": home.parent / "empty-mux",
     }
     for key, path in isolated_stores.items():
         if key not in env:
@@ -485,15 +502,16 @@ def test_attach_refuses_codex_parity(tmp_path) -> None:
         [{"name": "cx", "provider": "codex", "cwd": "/tmp/x", "log_path": "/x/l", "short_id": "cx", "project_root": "/x", "status": "live", "created_at": "t"}],
     )
     rust = _run_rust(["attach", "cx"], agents)
-    # Mirrors dispatch.attach_agent's one-shot refusal message + exit 13.
-    # The seeded row carries a short_id and no interactive host mode, so it is
-    # not a codex THREAD (x-6678) and keeps the refusal.
-    expected = (
-        "codex agents are one-shot; no persistent session to attach to. "
-        "Use 'fno agents logs cx --follow' for live output.\n"
-    )
-    assert rust.stderr == expected
-    assert rust.returncode == 13
+    # Characterization: there is no Python attach leg to mirror. The seeded
+    # row carries a short_id and no interactive host mode, so it is not a
+    # codex THREAD (x-6678) and no declared form fires. codex reads
+    # features.attach = native, so the refusal names the daemon-kept lane
+    # the row needs and takes the portal's own no-server exit.
+    assert rust.returncode == 24, rust.stderr
+    assert 'features.attach = "native"' in rust.stderr
+    assert "fno mux serve" in rust.stderr
+    assert "fno agents logs cx --follow" in rust.stderr
+    assert "one-shot" not in rust.stderr
 
 
 @requires_rust
@@ -544,12 +562,63 @@ def test_attach_refuses_gemini_verbatim(tmp_path) -> None:
           "short_id": "", "project_root": "/x", "status": "live", "created_at": "t"}],
     )
     rust = _run_rust(["attach", "gm"], agents)
-    expected = (
-        "gemini agents are one-shot; no persistent session to attach to. "
-        "Use 'fno agents logs gm --follow' for live output.\n"
+    # gemini declares no attach claim, so the row reads unmeasured and the
+    # refusal names the key, the state and the probe that settles it.
+    assert rust.returncode == 13, rust.stderr
+    assert 'features.attach = "unmeasured"' in rust.stderr
+    assert "fno agents harness probe gemini" in rust.stderr
+    assert "fno agents logs gm --follow" in rust.stderr
+    assert "one-shot" not in rust.stderr
+
+
+def _mux_thread_shim(tmp_path: Path, monkeypatch, script: str) -> None:
+    """Put a fake ``fno`` first on PATH whose ``mux thread`` arm runs ``script``.
+
+    The attach verb reaches the mux thread portal by shelling ``fno mux
+    thread <name>``; the shim stands in for a live server so the portal's
+    success and refusal arms are testable without one.
+    """
+    d = tmp_path / "shim"
+    d.mkdir()
+    shim = d / "fno"
+    shim.write_text('#!/bin/sh\nif [ "$1" = mux ] && [ "$2" = thread ]; then\n' + script + '\nfi\nexec fno-py "$@"\n')
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", str(d) + os.pathsep + os.environ.get("PATH", ""))
+
+
+@requires_rust
+def test_attach_lands_in_the_thread_pane_when_the_portal_answers(tmp_path, monkeypatch) -> None:
+    # A live mux server takes every harness through the daemon-kept lane
+    # first: the verb prints where it landed and exits 0 without touching
+    # the inline path (gemini, which the inline path refuses).
+    agents = tmp_path / "agents"
+    _seed_registry(
+        agents,
+        [{"name": "gm", "provider": "gemini", "cwd": "/tmp/x", "log_path": "/x/l",
+          "short_id": "", "project_root": "/x", "status": "live", "created_at": "t"}],
     )
-    assert rust.stderr == expected
-    assert rust.returncode == 13
+    _mux_thread_shim(tmp_path, monkeypatch, 'echo "thread pane -> $3"; exit 0')
+    rust = _run_rust(["attach", "gm"], agents)
+    assert rust.returncode == 0, rust.stderr
+    assert rust.stdout == "thread pane -> gm\n"
+    assert "features.attach" not in rust.stderr
+
+
+@requires_rust
+def test_attach_surfaces_a_portal_refusal_instead_of_double_attaching(tmp_path, monkeypatch) -> None:
+    # Any exit the portal owns (not no-server, usage, or unanswered) is the
+    # server refusing: the verb repeats it verbatim and never falls through
+    # to an attach the server just refused.
+    agents = tmp_path / "agents"
+    _seed_registry(
+        agents,
+        [{"name": "gm", "provider": "gemini", "cwd": "/tmp/x", "log_path": "/x/l",
+          "short_id": "", "project_root": "/x", "status": "live", "created_at": "t"}],
+    )
+    _mux_thread_shim(tmp_path, monkeypatch, 'echo "fno mux thread: no such agent: $3" >&2; exit 1')
+    rust = _run_rust(["attach", "gm"], agents)
+    assert rust.returncode == 1, rust.stderr
+    assert rust.stderr == "fno mux thread: no such agent: gm\n"
 
 
 # --------------------------------------------------------------------------- #
@@ -708,7 +777,9 @@ def test_rust_reads_real_python_written_registry(tmp_path) -> None:
     # id is the LAST token: codex's globals (-c, --cd) all sit before the
     # subcommand, so nothing trails the positional.
     assert rust.stdout.strip().endswith(" resume uuid-9")
-    # attach refuses codex (agent FOUND -> the refusal message, not "not found").
+    # attach found the agent: a codex row with no thread shape reads the
+    # native features.attach claim and names the daemon-kept lane (exit 24),
+    # never "not found" (exit 2).
     att = _run_rust(["attach", "cx"], agents)
-    assert att.returncode == 13
-    assert "one-shot" in att.stderr
+    assert att.returncode == 24, att.stderr
+    assert 'features.attach = "native"' in att.stderr

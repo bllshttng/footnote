@@ -146,16 +146,21 @@ fno agents attach worker-claude
 
 For **claude** agents, `attach` shells out to `claude attach <short_id>` inheriting stdin / stdout / stderr — the claude TUI takes over the terminal. fno's exit code mirrors claude's on detach.
 
-For **codex** and **gemini** agents, `attach` refuses with exit 13:
+For a **codex thread**, `attach` execs the row's declared attach form (`codex resume <thread-id> --remote unix://...`). A **pi** row joins its own session. Every other row is asked of the capability table: `features.attach` in `harness_capabilities.toml` says whether fno can reach a live session on that harness. A harness that reads `native` (opencode, for example) attaches through the daemon-kept lane, the mux thread portal, which the verb tries first for every harness. With no live mux server that lane is down, and the refusal says so with exit 24:
 
 ```bash
-fno agents attach worker-codex
-# codex agents are one-shot; no persistent session to attach to.
-# Use 'fno agents logs worker-codex --follow' for live output.
-# Cross-provider attach is planned for the fno-owned supervisor.
+fno agents attach worker-opencode
+# attach to 'worker-opencode' (opencode): the capability row records features.attach = "native", and the wired arm is the daemon-kept lane (the mux thread portal), but this row declares no attachable thread of its own and no live mux server answered. Start one with 'fno mux serve' and retry; 'fno agents logs worker-opencode --follow' shows live output meanwhile.
 ```
 
-The fno-owned supervisor will land cross-provider attach in a future story. Until then, tail the logs:
+A harness whose row reads `absent`, `capable` or `unmeasured` (gemini declares no attach claim, so it reads `unmeasured`) refuses by name with exit 13:
+
+```bash
+fno agents attach worker-gemini
+# attach to 'worker-gemini' (gemini) is refused: its capability row records features.attach = "unmeasured" - it has not had attach reachability measured. Settle the row with 'fno agents harness probe gemini'. 'fno agents logs worker-gemini --follow' still shows live output.
+```
+
+Either way, tail the logs:
 
 ```bash
 fno agents logs worker-codex --follow

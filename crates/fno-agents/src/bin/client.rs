@@ -357,7 +357,7 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::client_verbs::run_adopt(&args[1..], &AgentsHome::from_env());
     }
     if verb == "attach" {
-        return fno_agents::client_verbs::run_attach(&args[1..], &AgentsHome::from_env());
+        return fno_agents::attach::run_attach(&args[1..], &AgentsHome::from_env());
     }
     // `recover` (x-d285): hidden-but-invocable manual restoration of a recorded
     // session under its account/route, with explicit two-id selection. Reads

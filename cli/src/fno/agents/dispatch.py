@@ -44,7 +44,6 @@ from typing import (
     Literal,
     Mapping,
     Optional,
-    Sequence,
 )
 
 if TYPE_CHECKING:
@@ -396,20 +395,6 @@ _FROM_NAME_MAX_LEN = 128
 _FROM_NAME_DEFAULT = "fno"
 _FROM_NAME_FORBIDDEN_CHARS = frozenset('"<>&')
 _DEFAULT_FOLLOWUP_TIMEOUT_SEC = 600.0
-
-# (x-07c2) `fno mux thread` exit for "no live mux server" - mirrors the Rust
-# EXIT_NO_SERVER. On this code `attach_agent` falls through to the inline
-# path; every other non-zero exit is a server refusal it surfaces.
-_MUX_THREAD_NO_SERVER = 24
-# The Rust EXIT_USAGE (2): the verb never reached a server - malformed args,
-# or a deployed binary older than `mux thread` (version skew). Neither can be
-# a refusal about the agent, so it falls through to the inline path too.
-_MUX_THREAD_USAGE = 2
-# The Rust EXIT_CONTROL_UNANSWERED (20): the verb sent, but the server never
-# replied within its own timeout - outcome unknown, not a refusal. Falls
-# through to the inline path rather than surfacing a hard failure for a
-# merely slow mux server.
-_MUX_THREAD_UNANSWERED = 20
 
 # x-c393: how recent an inside_leg report must be for a worker to count as
 # "provably live" when a follow-up fails to route. Mirrors the Rust
@@ -3338,18 +3323,6 @@ class ReconcileResult:
     mux_cleared: list[dict] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class AttachResult:
-    """Return shape for :func:`attach_agent`.
-
-    ``exit_code`` mirrors claude's exit on detach. CLI propagates this.
-    """
-
-    name: str
-    provider: str
-    exit_code: int
-
-
 def _validate_lifecycle_name(name: str) -> None:
     """Reject empty / path-traversal names for stop/rm/reconcile/attach.
 
@@ -4074,7 +4047,7 @@ def stop_agent(
             except OSError as exc:
                 # Gemini medium: surface PermissionError / EIO as structured
                 # DispatchAskError rather than a raw Python traceback. Mirrors
-                # the catch on attach_agent and the new one on rm_agent.
+                # the catch on rm_agent.
                 events.emit(
                     "agent_stopped",
                     name=name,
@@ -4423,7 +4396,7 @@ def rm_agent(
                         ) from exc
                     except OSError as exc:
                         # Gemini medium: surface as structured DispatchAskError
-                        # not a raw traceback. Matches attach_agent's catch.
+                        # not a raw traceback. Matches stop_agent's catch.
                         events.emit(
                             "agent_removed",
                             name=name,
@@ -5531,255 +5504,6 @@ def reconcile_agents(
         backfilled=backfilled,
         mux_cleared=mux_cleared,
     )
-
-
-def _reentry_binding_for_row(
-    entry: "AgentEntry",
-) -> "tuple[Optional[dict[str, str]], Optional[str], Optional[Sequence[str]]]":
-    """The launch binding a re-entry of this claude row must restore, or a refusal.
-
-    The Python-side arm of the x-d285 rule, applied when the Rust client is
-    not installed (with one installed, the runtime router serves attach and
-    resume from the Rust binary, whose doors consume the canonical
-    ``fno-agents reentry-plan`` verdict). Same rule, same primitives the Rust
-    resolver uses: the account axis is three-valued, the route file must still
-    record a route, and missing evidence on a routed or non-Anthropic row
-    refuses rather than guessing a namespace - a silent default is how the
-    wrong bill gets paid.
-
-    Returns ``(binding_env, settings_path, scrub_vars)``:
-    - ``binding_env``: the account overlay (``CLAUDE_CONFIG_DIR``), or None
-      for a proven default/legacy row;
-    - ``settings_path``: the validated route-settings path, or None;
-    - ``scrub_vars``: auth vars the caller must clear from the child env so
-      an ambient credential cannot override the binding (claude prefers an
-      env credential over a settings file).
-
-    Raises :class:`DispatchAskError` (exit 3) naming the missing evidence.
-    """
-    launch_account = getattr(entry, "launch_account", None)
-    route_path = getattr(entry, "route_settings_path", None) or None
-    provider = getattr(entry, "provider", None)
-    routed = bool(route_path)
-    non_anthropic = bool(provider) and provider != "anthropic"
-
-    if launch_account is None and (routed or non_anthropic):
-        shape = "routed" if routed else f"on provider {provider!r}"
-        raise DispatchAskError(
-            f"agent row {entry.name!r} is {shape} and records no launch "
-            "account; re-entering it would guess a namespace. Restamp the "
-            "row or re-spawn the worker.",
-            exit_code=3,
-        )
-
-    binding_env: Optional[dict[str, str]] = None
-    scrub_vars: tuple = ()
-    if launch_account is not None and launch_account != "default":
-        from fno.agents.account_env import (
-            AccountResolutionError,
-            SCRUB_AUTH_VARS,
-            resolve_account_overlay,
-        )
-
-        try:
-            overlay = resolve_account_overlay(launch_account)
-        except AccountResolutionError as exc:
-            raise DispatchAskError(
-                f"launch account {launch_account!r} recorded on row "
-                f"{entry.name!r} no longer resolves: {exc}",
-                exit_code=3,
-            ) from exc
-        binding_env = dict(overlay.env)
-        scrub_vars = SCRUB_AUTH_VARS
-
-    settings_path: Optional[str] = None
-    if route_path:
-        from fno.agents.model_routing import RouteRestoreError, read_route_settings
-
-        try:
-            read_route_settings(route_path)
-        except RouteRestoreError as exc:
-            raise DispatchAskError(
-                f"agent row {entry.name!r} was launched on the route recorded "
-                f"at {route_path}, and it cannot be restored ({exc}). Refusing "
-                "to re-enter it on the default account.",
-                exit_code=3,
-            ) from exc
-        settings_path = route_path
-        from fno.agents.account_env import SCRUB_AUTH_VARS as _SCRUB
-
-        scrub_vars = _SCRUB
-
-    return binding_env, settings_path, list(scrub_vars)
-
-
-def attach_agent(name: str) -> AttachResult:
-    """Interactive attach to a running agent session.
-
-    With a live mux server, this drives the one dedicated thread pane
-    (x-07c2): the server picks Drive/Follow/Locate per row from harness
-    capability, so codex and gemini rows land on a peek-follow or a
-    locate screen there instead of the exit-13 refusal below.
-
-    With no mux server, the inline path below runs unchanged. claude:
-    shells out to ``claude attach <short_id>`` with inherited stdio.
-    The claude TUI takes over the terminal until the operator detaches.
-    fno's exit code mirrors claude's.
-
-    codex / gemini: exit 13 with a message pointing at Phase 6 (the
-    future fno-owned supervisor) as the planned landing for cross-
-    provider attach (Locked Decision 13).
-
-    NO per-agent flock is acquired (Locked Decision 8b): attach holds
-    the terminal for indefinite human time and locking would deadlock
-    every concurrent stop / rm / ask. claude's own supervisor handles
-    concurrent attach safety natively.
-    """
-    _validate_lifecycle_name(name)
-    # Resolve to the ENTRY, not just the canonical name: when the harness-store
-    # heal (x-9cc5) synthesizes a row it could not persist, re-reading the
-    # registry by name would miss it and report not-found - defeating the
-    # best-effort recovery in exactly the registry-unwritable case it exists for.
-    # A genuine miss falls back to today's exact-name lookup, preserving the
-    # familiar not-found/exit-2 contract. Ambiguous or unavailable identity
-    # evidence must refuse before any attach side effect.
-    from fno.agents.registry import AgentResolutionError, resolve_agent
-
-    try:
-        resolved = resolve_agent(name)
-    except AgentResolutionError as exc:
-        if exc.ambiguous or exc.unavailable:
-            raise DispatchAskError(
-                str(exc),
-                exit_code=12 if exc.unavailable else 2,
-            ) from exc
-        existing = _resolve_registry_entry(name)
-    except (OSError, RegistryVersionError) as exc:
-        raise DispatchAskError(
-            f"registry read failed: {exc}",
-            exit_code=12,
-        ) from exc
-    else:
-        existing, name = resolved.entry, resolved.entry.name
-
-    # (x-07c2) Mux-aware branch: with a live mux server this verb drives the
-    # ONE dedicated thread pane and prints where it landed. The tier decides
-    # what the pane runs, server-side (attach / peek --follow / the locate
-    # screen), so the verb serves every harness, not only claude. Exit 24 is
-    # "no live mux server": fall through to the inline path below unchanged.
-    from fno.agents.mux_spawn import _run_mux
-
-    try:
-        landed = _run_mux(["mux", "thread", name], subprocess.run, timeout=15)
-    except DispatchAskError:
-        # A missing fno binary or a hung mux is not a reason to lose the
-        # inline path; it reports the same way the inline spawn would.
-        landed = None
-    if landed is not None and landed.returncode == 0:
-        sys.stdout.write(landed.stdout)
-        events.emit(
-            "agent_attached",
-            name=name,
-            provider=existing.harness or "claude",
-            route="mux-thread-pane",
-        )
-        return AttachResult(
-            name=name,
-            provider=existing.harness or "claude",
-            exit_code=0,
-        )
-    if landed is not None and landed.returncode not in (
-        _MUX_THREAD_NO_SERVER,
-        _MUX_THREAD_USAGE,
-        _MUX_THREAD_UNANSWERED,
-    ):
-        # The server answered with a refusal: surface it verbatim rather than
-        # silently falling through to an attach it just refused.
-        raise DispatchAskError(
-            (landed.stderr or landed.stdout or "fno mux thread refused").strip(),
-            exit_code=landed.returncode,
-        )
-
-    if existing.harness in ("codex", "gemini"):
-        # (x-6678) A codex THREAD is attachable now: it lives on the shared
-        # app-server daemon and `codex resume --remote` opens the real TUI on
-        # it. That path is the Rust verb's (client_verbs.rs), which is what
-        # `fno agents attach` routes to. This fallback runs only when the Rust
-        # binary is unavailable, and in that world no codex thread exists to
-        # attach to, because the Rust daemon is what spawns one.
-        sys.stderr.write(
-            f"{existing.harness} agents are one-shot; no persistent "
-            "session to attach to. Use 'fno agents logs "
-            f"{name} --follow' for live output.\n"
-        )
-        # Forensic event so an `events.jsonl` audit can correlate
-        # "why did this attach attempt fail" against operator activity.
-        # (Sigma-review C4 finding: silent on the refused path before.)
-        events.emit(
-            "agent_attach_refused",
-            name=name,
-            provider=existing.harness,
-            reason="one-shot-provider-no-persistent-session",
-        )
-        return AttachResult(name=name, provider=existing.harness, exit_code=13)
-
-    if existing.harness != "claude":
-        raise DispatchAskError(
-            f"attach for harness {existing.harness!r} is not implemented",
-            exit_code=2,
-        )
-
-    short_id = existing.short_id
-    if not short_id:
-        raise DispatchAskError(
-            f"registry entry {name!r} has no short id on file; cannot attach.",
-            exit_code=12,
-        )
-
-    if not is_provider_available("claude"):
-        raise DispatchAskError("claude CLI not on PATH", exit_code=14)
-
-    from fno.agents.harnesses import claude as claude_mod
-
-    # x-d285: the inline attach restores the row's recorded launch binding or
-    # refuses before anything launches. A fresh claude process re-resolves its
-    # account namespace from ambient env, so a bare `claude attach` from the
-    # wrong shell lands in the wrong config namespace. A proven default row
-    # resolves to no binding and keeps the historical bare invocation.
-    binding_env, settings_path, scrub_vars = _reentry_binding_for_row(existing)
-
-    try:
-        exit_code = claude_mod.claude_attach(
-            short_id,
-            env=binding_env,
-            settings_path=settings_path,
-            scrub_vars=scrub_vars,
-        )
-    except FileNotFoundError as exc:
-        raise DispatchAskError("claude CLI not on PATH", exit_code=14) from exc
-    except OSError as exc:
-        # PermissionError / EIO / other subprocess errors should surface
-        # as a clean DispatchAskError, not a raw Python traceback to the
-        # operator's terminal (sigma-review H5 finding).
-        events.emit(
-            "agent_attached",
-            name=name,
-            provider="claude",
-            short_id=short_id,
-            claude_exit=None,
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        raise DispatchAskError(f"claude attach failed: {exc}", exit_code=1) from exc
-
-    events.emit(
-        "agent_attached",
-        name=name,
-        provider="claude",
-        short_id=short_id,
-        claude_exit=exit_code,
-    )
-    return AttachResult(name=name, provider="claude", exit_code=exit_code)
 
 
 # =====================================================================

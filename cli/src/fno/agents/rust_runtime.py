@@ -55,6 +55,31 @@ BIN_NOT_FOUND_EXIT = 127
 #: nothing was removed and nothing needs retrying.
 RM_DECLINED_EXIT = 3
 
+
+def refuse_without_binary(verb: str) -> NoReturn:
+    """Refuse a verb whose Python leg was ported to Rust and deleted.
+
+    Called when no installed binary resolved or ``FNO_AGENTS_RUNTIME=python``
+    is set: there is nothing to fall back to, so the refusal names the
+    binary, the flag, and how to get the binary. Exit :data:`BIN_NOT_FOUND_EXIT`.
+    """
+    forced = (
+        f"{RUNTIME_ENV}=python is set, and there is no Python {verb} left to "
+        "force; unset it with the binary installed. "
+        if runtime_mode() == "python"
+        else ""
+    )
+    print(
+        f"fno agents {verb}: the Python {verb} runtime was ported to the Rust "
+        f"runtime, so {verb} requires the '{rust_binary.BINARY_NAME}' binary, "
+        f"which was not found. {forced}"
+        "Get it via `pip install fno` (bundled wheel), `cargo install "
+        "fno-agents`, or `cargo build --release -p fno-agents` plus "
+        f"`export {rust_binary.BINARY_ENV}=<path>`.",
+        file=sys.stderr,
+    )
+    raise SystemExit(BIN_NOT_FOUND_EXIT)
+
 FOLDED_AGENT_SUBCOMMANDS = {
     "autonomy": (
         "fno.autonomy_cli:autonomy_app",
