@@ -1298,8 +1298,10 @@ def build_pane_argv(
     (crates/fno-agents/src/provider.rs), which builds the HEADLESS one-shot
     form for the `--substrate headless` lane; the two intentionally differ
     (e.g. opencode: bare ``opencode --prompt <msg>`` here vs
-    ``opencode run --auto <msg>`` there) and there is no cross-language
-    parity contract between them - don't go looking for one.
+    ``opencode run --dangerously-skip-permissions <msg>`` there) and there is no
+    cross-language parity contract between them - don't go looking for one.
+    The headless flag is NOT ``--auto``: that spelling is stale vendor docs and
+    does not exist in ``run --help``.
 
     ``model`` (x-c772): an explicit ``--model`` forwarded to the provider's own
     TUI flag (claude/codex/gemini/agy ``--model <m>``; opencode
