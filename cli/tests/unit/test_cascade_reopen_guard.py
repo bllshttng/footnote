@@ -20,6 +20,7 @@ from __future__ import annotations
 from fno.graph._reconcile import _reopen_outranks_child_closes
 from fno.graph.cli import (
     _cascade_close_parents,
+    _strandable_contained_ids,
     _strandable_epic_ids,
 )
 
@@ -109,3 +110,27 @@ def test_cascade_positive_control_same_fixture_closes_without_the_reopen():
     parent, child = _pair()
     assert _cascade_close_parents([parent, child], "c") == ["p"]
     assert parent.get("completed_at")
+
+
+def _contained_pair(*, reopened_at=None):
+    """A contained child whose delivery unit already closed."""
+    owner = {"id": "unit", "status": "done", "completed_at": CHILD_CLOSE}
+    child = {"id": "c", "status": "in_progress", "contained_in": "unit"}
+    if reopened_at is not None:
+        child["reopened_at"] = reopened_at
+    return owner, child
+
+
+def test_contained_sweep_skips_a_reopened_child():
+    owner, child = _contained_pair(reopened_at=AFTER_CLOSE)
+    assert _strandable_contained_ids([owner, child]) == set()
+
+
+def test_contained_sweep_positive_control_same_fixture_closes_without_the_reopen():
+    owner, child = _contained_pair()
+    assert _strandable_contained_ids([owner, child]) == {"c"}
+
+
+def test_contained_reopen_before_the_owner_close_is_stale():
+    owner, child = _contained_pair(reopened_at=BEFORE_CLOSE)
+    assert _strandable_contained_ids([owner, child]) == {"c"}

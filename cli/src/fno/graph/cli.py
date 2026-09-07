@@ -8723,6 +8723,8 @@ def _strandable_contained_ids(entries: list[dict]) -> set[str]:
 
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
+    from fno.graph._reconcile import _reopen_outranks_child_closes
+
     by_id = {e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
     out: set[str] = set()
     for e in entries:
@@ -8738,7 +8740,13 @@ def _strandable_contained_ids(entries: list[dict]) -> set[str]:
         # - so it would abort the whole sweep. Exactly the failure class as the
         # SessionStart jq bug this same PR fixes; a read of untrusted graph rows
         # must never be the thing that takes reconcile down.
-        if owner is not None and owner.get("completed_at") and isinstance(nid, str) and nid:
+        if (
+            owner is not None
+            and owner.get("completed_at")
+            and isinstance(nid, str)
+            and nid
+            and not _reopen_outranks_child_closes(e, [owner])
+        ):
             out.add(nid)
     return out
 
