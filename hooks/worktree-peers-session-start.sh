@@ -112,7 +112,22 @@ CACHE_MAX_AGE_S=900
 # still no cache file past this grace period means the last background
 # sweep hung, crashed, or was killed - not that it is still running.
 _SWEEP_GRACE_S=300
-_CACHE_FILE="$SCRIPT_DIR/../.fno/.worktree-stranded-cache.json"
+# Where the two files below live. `$SCRIPT_DIR/../.fno` is right for a real
+# session: the cache is per-checkout. It is wrong under a test runner, where
+# executing this hook writes the checkout's own state root, which is live state
+# on a developer box and a hand-built `<root>/.fno/<file>` path either way.
+#
+# `FNO_TEST_HERMETIC=1` declares a sandboxed process root, and the pytest
+# conftest chain stamps it with `HOME` inside the sandbox, so honouring it here
+# redirects every test caller at once. Three test files execute this hook
+# through `session-start.sh`; fixing the hook covers them and the next one.
+# `0` is ambient on purpose and keeps the checkout path.
+_STRANDED_DIR="$SCRIPT_DIR/../.fno"
+if [[ "${FNO_TEST_HERMETIC:-}" == "1" && -n "${HOME:-}" ]]; then
+  _STRANDED_DIR="$HOME/.fno"
+  mkdir -p "$_STRANDED_DIR" 2>/dev/null || true
+fi
+_CACHE_FILE="$_STRANDED_DIR/.worktree-stranded-cache.json"
 # A dedicated stamp, not the cache file's own mtime: the window must be
 # claimed (stamp touched) BEFORE the background sweep launches, the same
 # up-front-claim pattern reconcile-throttle.sh uses, so a second SessionStart
@@ -120,7 +135,7 @@ _CACHE_FILE="$SCRIPT_DIR/../.fno/.worktree-stranded-cache.json"
 # also kicking its own ~100s sweep. Touching the CACHE FILE itself to claim
 # would truncate the stale-but-valid JSON a concurrent session's read (lines
 # below) might be mid-parse of.
-_STAMP_FILE="$SCRIPT_DIR/../.fno/.worktree-stranded-refresh-stamp"
+_STAMP_FILE="$_STRANDED_DIR/.worktree-stranded-refresh-stamp"
 # _reconcile_mtime, not a third hand-rolled `stat -f || stat -c`: GNU `stat -f`
 # means --file-system, not a format flag, so it SUCCEEDS on Linux and prints
 # garbage instead of failing - the `||` fallback to `stat -c %Y` never fires,
