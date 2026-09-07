@@ -142,6 +142,30 @@ def _crown_map() -> dict[str, str]:
         return {}
 
 
+def _registry_maps() -> tuple[dict[str, str], dict[str, Optional[str]]]:
+    """One registry read feeding both session-id joins. Best-effort, like
+    :func:`_crown_map`: a read failure degrades to empty maps rather than
+    breaking the process view.
+
+    ``handles`` is the session uuid -> registry handle bridge; ``nodes`` is
+    the handle -> backlog-node map the retirement verdict resolves through
+    (x-1379). One read, so the node join adds no second walk of the registry.
+    """
+    try:
+        from fno.agents.registry import load_registry
+
+        handles: dict[str, str] = {}
+        nodes: dict[str, Optional[str]] = {}
+        for e in load_registry():
+            if e.harness_session_id and e.name:
+                handles[e.harness_session_id] = e.name
+            if e.name:
+                nodes[e.name] = e.node
+        return handles, nodes
+    except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
+        return {}, {}
+
+
 def _registry_handles() -> dict[str, str]:
     """session uuid -> registry handle. Best-effort, like :func:`_crown_map`.
 
@@ -150,16 +174,7 @@ def _registry_handles() -> dict[str, str]:
     identities, and nothing on screen relates them -- which is how a grep across
     the two views returned nothing and got read as "all agents are dead".
     """
-    try:
-        from fno.agents.registry import load_registry
-
-        return {
-            e.harness_session_id: e.name
-            for e in load_registry()
-            if e.harness_session_id and e.name
-        }
-    except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
-        return {}
+    return _registry_maps()[0]
 
 
 class RowTruth(NamedTuple):
@@ -203,14 +218,26 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
     from fno.agents.registry import load_registry
     from fno.agents.session_truth import resolve_session_truth
 
+    by_name: dict = {}
+    by_session: dict = {}
     try:
-        entries = {e.name: e for e in load_registry()}
+        for e in load_registry():
+            by_name[e.name] = e
+            if e.harness_session_id:
+                by_session[e.harness_session_id] = e
     except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
-        entries = {}
+        pass
 
     out: dict[str, RowTruth] = {}
     for w in workers:
-        entry = entries.get(w.name)
+        # The session uuid joins first (x-1379): a foreign claude row is
+        # labelled by the FIRST 8 hex of that uuid while the registry keys it
+        # by the handle, so a name lookup reads None for exactly the row this
+        # bridge exists to reach - and the PROGRESS column rendered `-` on
+        # every such row before it.
+        entry = by_session.get(w.session_id or "")
+        if entry is None:
+            entry = by_name.get(w.name)
         truth = resolve_session_truth(w.name)
         truth_state = truth.get("state")
         reach = classify_reachability(
@@ -241,8 +268,20 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
 
 
 def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
-    handles = _registry_handles()
+    handles, reg_nodes = _registry_maps()
     truth_map = _row_truth(workers)
+    # One retirement read for the whole roster (x-1379): the graph is loaded
+    # once inside verdicts, fed by the node fields the pass above already
+    # carried up. The name passed is the REGISTRY identity (the handle), not
+    # the census label: a foreign claude row is labelled by the first 8 hex,
+    # which resolves no node, while its handle carries the
+    # <prefix>-<node>-<slug> shape the name fallback reads.
+    from fno.agents.retirement import verdicts
+
+    registry_ids = [handles.get(w.session_id or "") or w.name for w in workers]
+    verdict_map = verdicts(
+        (idn, reg_nodes.get(idn)) for idn in registry_ids
+    )
     rows = []
     for w in workers:
         # The served truth for the row; a foreign claude row still gets the
@@ -260,6 +299,7 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
         # resolves - not through the display name, which reads None for
         # exactly the row `handle` above exists to bridge.
         reg_name = handle or w.name
+        v = verdict_map.get(reg_name)
         rows.append(
             {
                 "source": w.source,
@@ -296,6 +336,13 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 # showed, with the basis that says which question it answered.
                 "reach": row_truth.reach if row_truth else None,
                 "reach_basis": row_truth.reach_basis if row_truth else None,
+                # x-1379: has this worker's node already shipped. Null node is
+                # a real answer (unresolvable name, no registry node), never a
+                # lookup miss; `retire` is the verdict a king acts on.
+                "node": v.node if v else None,
+                "node_basis": v.node_basis if v else None,
+                "retire": v.retire if v else False,
+                "retire_reason": v.reason if v else None,
                 "crown": crowns.get(reg_name),  # US9: null when uncrowned
             }
         )
@@ -556,6 +603,30 @@ def _render_pane_stats_lines(section: dict) -> list[str]:
     return out
 
 
+def _retirable_lines(rows: list[dict], lanes: list[dict]) -> list[str]:
+    """One line per lane holder whose node already shipped (x-1379).
+
+    The provider is read from the SAME ``lane_rows`` output the LANES block
+    rendered, never recounted: a display that recounted would disagree with
+    the refusal the first time the two walked the registry differently. A
+    holder no lane names still gets its line - the verdict is the graph's,
+    not the lane counter's.
+    """
+    holder_lane: dict[str, str] = {}
+    for lane in lanes:
+        for h in lane.get("holders") or []:
+            holder_lane[h] = lane.get("provider")
+    out = []
+    for r in rows:
+        if not r.get("retire"):
+            continue
+        lane = holder_lane.get(r["name"])
+        holds = f" holds a {lane} lane" if lane else " holds a lane"
+        pr = (r["retire_reason"] or "").rsplit(" ", 1)[-1]
+        out.append(f"retirable: {r['name']}{holds}; {r['node']} is done, merged at PR {pr}")
+    return out
+
+
 def render_top(
     as_json: bool = False, include_subagents: bool = False, include_pane_stats: bool = False
 ) -> str:
@@ -593,9 +664,16 @@ def render_top(
     if lanes:
         out.extend(_render_lane_lines(lanes))
         out.append("")
+    # The retirable line sits with the lanes (x-1379): a retirable holder is
+    # the same shape of fact as a full lane - a cap refusing spawns the table
+    # below reports as healthy - so it leads for the reason the lanes lead.
+    retirable = _retirable_lines(rows, lanes)
+    if retirable:
+        out.extend(retirable)
+        out.append("")
     header = (
         f"{'SOURCE':<7} {'NAME':<24} {'HARNESS':<9} {'SUBSTRATE':<10} "
-        f"{'KING':<9} {'PID':>7} {'RSS_MB':>7} {'PROGRESS':<17} "
+        f"{'KING':<9} {'PID':>7} {'RSS_MB':>7} {'NODE':<8} {'PROGRESS':<17} "
         f"{'REACH':<11} STATUS"
     )
     out.append(header)
@@ -615,6 +693,7 @@ def render_top(
             f"{r['source']:<7} {name_cell:<24} {r['harness']:<9} "
             f"{r['substrate']:<10} {r['king'] or '-':<9} {r['pid'] or '-':>7} "
             f"{r['rss_mb'] if r['rss_mb'] is not None else '-':>7} "
+            f"{r['node'] or '-':<8} "
             f"{r['progress'] or '-':<17} {r['reach'] or '-':<11} {activity}"
             + (f" ({r['status_basis']})" if r.get("status_basis") else "")
         )
@@ -622,7 +701,7 @@ def render_top(
         out.append(f"(+{c.slot_claims} queued headless slot claim(s))")
     out.append(
         "census: PID/RSS are the process at scan time; REACH reads the "
-        "transcript (fno agents truth for the full evidence)"
+        "transcript; NODE and the retirement line read the graph"
     )
     if subagents is not None:
         out.append("")

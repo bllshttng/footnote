@@ -3946,7 +3946,10 @@ def cmd_top(
     The same union the spawn gate counts, so this is the audit surface every
     gate message points at. Python-only (RSS via psutil; not routed to the
     Rust client). ``--subagents`` (x-af92) appends a read-only sidechain
-    section; those rows are observable but not addressable.
+    section; those rows are observable but not addressable. Each row also
+    carries the backlog node it resolves to and whether that node already
+    shipped (``retire``, x-1379); a ``retirable:`` line under LANES names
+    every lane holder whose node is done and merged.
     """
     from fno.agents.top import render_top
 
