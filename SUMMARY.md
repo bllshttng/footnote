@@ -13,6 +13,7 @@ Branch `feature/x-e221`, four commits, one per wave:
 - The plan's verify names `cli/tests/agents/test_king_court.py` and `cli/tests/unit/test_dashboard_behavior.py`; neither exists in the tree. The real neighboring suites were used instead: `test_crown_court.py`, `test_king_board_default_state.py` (Python) and the `king_board` lib tests (Rust), plus a new dedicated test per acceptance criterion.
 - The stop hook needed no change: its actionable set is the session's own plan and node by construction (target-state manifest), so it is territory-scoped already and the plan's "stop-hook actionable set" clause is satisfied without edits.
 - `dispatch_member`'s argv order regressed in wave 1 (`--json` moved first); restored to the documented seam `advance --epic <id> --continuation --json`, which the integration test pins.
+- The new `max_live_per_territory` config field staled three pinned seams, each caught by its own gate: the committed config-doc references (schema-drift tests), the provider loader's reserved-keys frozenset (set-equality test against the schema), and the route-survival gate-event tuple. The repro script's `timeout || gtimeout` preference chain was rewritten onto the shared `with_timeout` bound when the single-implementation guard flagged it.
 - Task 1.1 test coverage consolidated `test_crown_level_derivation.py` cases into `test_king_scope.py` (noted at that wave).
 
 ## Design notes worth keeping

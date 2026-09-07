@@ -264,6 +264,7 @@ _AGENTS_RESERVED_KEYS = frozenset(
         # model's before-validator, so it stays reserved here too.
         "max_lanes",
         "max_live",
+        "max_live_per_territory",
         "max_fleet_cpu_share",
         "max_load_per_cpu",
         "pane_group_max",

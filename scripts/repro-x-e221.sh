@@ -17,7 +17,7 @@ fail() { echo "repro-x-e221: FAIL: $1" >&2; exit 1; }
 ROOT=$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null) || ROOT=$(pwd)
 cd "$ROOT" || fail "cannot cd to repo root $ROOT"
 
-TIMEOUT_BIN=$(command -v timeout || command -v gtimeout) || fail "timeout/gtimeout required to bound subprocesses"
+. "$ROOT/scripts/lib/with-timeout.sh" || fail "cannot source the shared timeout bound"
 CARGO=$(command -v cargo) || fail "cargo required (Rust cap reader + board marker)"
 UV=$(command -v uv) || fail "uv required (python test runner)"
 
@@ -32,11 +32,11 @@ export PYTHONPATH="$ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}"
 # One python entrypoint: the cli project env (its deps) + repo source via
 # PYTHONPATH, the app invoked with argv.
 fno_py() {
-  "$UV" run --project "$ROOT/cli" "$TIMEOUT_BIN" 120 python3 -c 'import sys; from fno.cli import app; sys.exit(app())' "$@"
+  with_timeout 120 "$UV" run --project "$ROOT/cli" python3 -c 'import sys; from fno.cli import app; sys.exit(app())' "$@"
 }
 
 py() {
-  "$UV" run --project "$ROOT/cli" "$TIMEOUT_BIN" 120 python3 "$@"
+  with_timeout 120 "$UV" run --project "$ROOT/cli" python3 "$@"
 }
 
 # --- fixture: settings (the one candidate FNO_CONFIG names) -----------------
