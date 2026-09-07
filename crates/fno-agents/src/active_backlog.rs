@@ -231,21 +231,7 @@ fn node_has_pr_ref(cfg: &DrainConfig, node_id: &str) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
         return true;
     };
-    // A ref must be USABLE, not merely present: `pr_number` an integer and
-    // `pr_url` a non-empty string, matching what the CLI's node_pr_refs can
-    // actually derive a ref from. An empty pr_url is not evidence of a ship.
-    if v.get("pr_number").and_then(|n| n.as_u64()).is_some() {
-        return true;
-    }
-    if v.get("pr_url")
-        .and_then(|u| u.as_str())
-        .is_some_and(|u| !u.trim().is_empty())
-    {
-        return true;
-    }
-    v.get("additional_prs")
-        .and_then(|a| a.as_array())
-        .is_some_and(|a| !a.is_empty())
+    value_has_usable_pr_ref(&v)
 }
 
 /// Reconcile passes a ref-less `DonePRGreen` must persist across before it counts
@@ -590,19 +576,115 @@ fn resolve_crash(
     );
 }
 
+/// Does a parsed `fno backlog get` node carry a USABLE PR reference? `pr_number`
+/// an integer and `pr_url` a non-empty string, matching what the CLI's
+/// node_pr_refs can actually derive a ref from. An empty pr_url is not evidence
+/// of a ship.
+fn value_has_usable_pr_ref(v: &serde_json::Value) -> bool {
+    if v.get("pr_number").and_then(|n| n.as_u64()).is_some() {
+        return true;
+    }
+    if v.get("pr_url")
+        .and_then(|u| u.as_str())
+        .is_some_and(|u| !u.trim().is_empty())
+    {
+        return true;
+    }
+    v.get("additional_prs")
+        .and_then(|a| a.as_array())
+        .is_some_and(|a| !a.is_empty())
+}
+
+/// Did a SYNCHRONOUS (headless) child already reach a terminal state? The
+/// one-shot worker ran to completion before its dispatch returned, so graph
+/// state is the only evidence left. FAIL-OPEN: an unreadable or unparseable
+/// read reports closed, never a fabricated failure (same discipline as
+/// `node_has_pr_ref`).
+fn sync_child_completed(cfg: &DrainConfig, node_id: &str) -> bool {
+    let read = || -> Option<serde_json::Value> {
+        let out = retry_etxtbsy(|| {
+            fno_cmd(&cfg.fno_bin)
+                .args(["backlog", "get", node_id])
+                .current_dir(&cfg.cwd)
+                .output()
+        })
+        .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        serde_json::from_slice(&out.stdout).ok()
+    };
+    let Some(v) = read() else {
+        return true;
+    };
+    let stamped = |key: &str| {
+        v.get(key)
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| !t.trim().is_empty())
+    };
+    stamped("completed_at") || stamped("deferred_at") || value_has_usable_pr_ref(&v)
+}
+
+/// Resolve a synchronous (headless) child on the spot instead of holding it
+/// open for crash reconcile (x-7f1f). A completed/deferred/PR'd node records a
+/// success; a node with none of those goes through `map_outcome` as
+/// `CloseOutcome::Parked`, so the streak, the defer and the journal row stay
+/// one implementation with the detached path.
+fn resolve_sync_child(
+    cfg: &DrainConfig,
+    breaker: &mut CircuitBreaker,
+    journal: &Journal,
+    node_id: &str,
+) {
+    if sync_child_completed(cfg, node_id) {
+        breaker.record_success(node_id);
+        let _ = journal.append(
+            "active_backlog_sync_resolved",
+            json!({"node_id": node_id, "resolution": "success"}),
+        );
+        return;
+    }
+    // Journal the sync branch under its own reason BEFORE map_outcome's rows,
+    // so the event stream can tell a synchronous resolve from a detached one.
+    let _ = journal.append(
+        "active_backlog_sync_resolved",
+        json!({"node_id": node_id, "resolution": "not-closed"}),
+    );
+    let message = "synchronous child finished with no completion, defer or PR ref in graph state";
+    let ur = UnitResult {
+        unit_id: node_id.to_string(),
+        evidence: Evidence {
+            reason: TerminationReason::NoProgress,
+            message: message.to_string(),
+        },
+        close: CloseOutcome::Parked(message.to_string()),
+    };
+    map_outcome(
+        cfg,
+        breaker,
+        journal,
+        &TerminationReason::NoProgress,
+        Some(&ur),
+    );
+}
+
 /// One child row from the `advance --epic --json` receipt's `children[]`, the
 /// shared vocabulary with the per-child journal events at advance.py:3638.
 /// Every field defaulted so an evolving receipt never fails the parse.
 #[derive(Debug, Default, Deserialize)]
 struct AdvanceChild {
     #[serde(default)]
-    #[allow(dead_code)] // not read yet; kept for parity with the CLI receipt shape
     node_id: String,
     #[serde(default)]
-    #[allow(dead_code)]
     decision: String,
     #[serde(default)]
     reason: String,
+    /// Resolved launch substrate. `"headless"` is SYNCHRONOUS: `subprocess.run`
+    /// returned only after the one-shot worker finished, so the child must be
+    /// resolved from graph state now, never held open for crash reconcile.
+    /// Empty on an older CLI's receipt (enqueue as detached, the old behavior).
+    #[serde(default)]
+    substrate: String,
 }
 
 /// The `fno backlog advance --epic <id> --json` receipt, the only fields the
@@ -614,12 +696,11 @@ struct AdvanceEpicReceipt {
     deactivated: bool,
     #[serde(default)]
     all_done: bool,
-    /// Node ids `advance --epic` dispatched this pass (fire-and-forget), to be
-    /// reconciled from events on later ticks.
-    #[serde(default)]
-    dispatched: Vec<String>,
     /// Every child the pass considered this tick, dispatched or not - the
-    /// honest signal `mission_drain_tick` was previously discarding.
+    /// honest signal `mission_drain_tick` was previously discarding. THE
+    /// enqueue authority: `dispatched` (the receipt's human-facing id list)
+    /// is substrate-blind and can no longer be trusted to say what is held
+    /// open.
     #[serde(default)]
     children: Vec<AdvanceChild>,
     /// A receipt-level gate error (e.g. `"disabled"`, `"walker-live"`) reported
@@ -639,6 +720,9 @@ struct DispatchFacts {
     ready: usize,
     reason: Option<String>,
     error: Option<String>,
+    /// Children resolved synchronously this pass (dispatched headless rows):
+    /// real work the tick did even though nothing entered `pending`.
+    sync_resolved: usize,
 }
 
 fn undispatched_count(cfg: &DrainConfig) -> Result<usize, String> {
@@ -681,6 +765,8 @@ fn facts_from_receipt(receipt: &AdvanceEpicReceipt) -> DispatchFacts {
         ready,
         reason,
         error: receipt.error.clone(),
+        // Set later, by the dispatch loop that actually resolves the rows.
+        sync_resolved: 0,
     }
 }
 
@@ -694,6 +780,7 @@ fn facts_from_receipt(receipt: &AdvanceEpicReceipt) -> DispatchFacts {
 /// gone mission is caught by the loop's re-resolve, not guessed at here.
 fn dispatch_mission(
     cfg: &DrainConfig,
+    breaker: &mut CircuitBreaker,
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
 ) -> (MissionDispatch, DispatchFacts) {
@@ -739,25 +826,40 @@ fn dispatch_mission(
             return (MissionDispatch::Continue, DispatchFacts::default());
         }
     };
-    let facts = facts_from_receipt(&receipt);
+    let mut facts = facts_from_receipt(&receipt);
     if receipt.deactivated || receipt.all_done {
         return (MissionDispatch::Retire, facts);
     }
     let mut new_ids = Vec::new();
-    for node_id in &receipt.dispatched {
+    for child in &receipt.children {
+        if child.decision != "dispatched" {
+            // A skipped row means "not now" and never touches the breaker.
+            continue;
+        }
+        // Synchronous (headless) dispatch: subprocess.run returned only after
+        // the one-shot worker finished and released its claim, so there is
+        // nothing to reconcile later - the crash floor would fabricate a crash
+        // on tick 3, every time (x-7f1f). Resolve from graph state now.
+        if child.substrate == "headless" {
+            resolve_sync_child(cfg, breaker, journal, &child.node_id);
+            facts.sync_resolved += 1;
+            continue;
+        }
         // Guard against re-recording a still-pending node (a prior tick's
         // dispatch whose worker has not yet closed): advance already dedups by
-        // live claim, but a boot-window respawn could echo the id.
-        if pending.iter().any(|p| p.node_id == *node_id) {
+        // live claim, but a boot-window respawn could echo the id. An older
+        // CLI's receipt carries an empty substrate and lands here: enqueued as
+        // detached, today's behavior.
+        if pending.iter().any(|p| p.node_id == child.node_id) {
             continue;
         }
         pending.push(PendingDispatch {
-            node_id: node_id.clone(),
+            node_id: child.node_id.clone(),
             session_id: None,
             ticks: 0,
             stamp_waits: 0,
         });
-        new_ids.push(node_id.clone());
+        new_ids.push(child.node_id.clone());
     }
     if !new_ids.is_empty() {
         let _ = journal.append(
@@ -785,11 +887,12 @@ pub fn mission_drain_tick(
     reconcile_pending(cfg, breaker, pending, journal);
     let closed = pending_before.saturating_sub(pending.len()) as u64;
     let pre_dispatch = pending.len();
-    let (outcome, facts) = dispatch_mission(cfg, pending, journal);
+    let (outcome, facts) = dispatch_mission(cfg, breaker, pending, journal);
     let newly_dispatched = (pending.len() - pre_dispatch) as u64;
+    let sync_closed = facts.sync_resolved as u64;
     let skip_reason: Option<String> = match outcome {
         MissionDispatch::Retire => Some("mission_retired".to_string()),
-        MissionDispatch::Continue if closed + newly_dispatched > 0 => None,
+        MissionDispatch::Continue if closed + newly_dispatched + sync_closed > 0 => None,
         // Something dispatched by an earlier tick is still running: a full
         // spawn lane on THIS pass does not make that stale.
         MissionDispatch::Continue if !pending.is_empty() => Some("in_flight".to_string()),
@@ -813,12 +916,13 @@ pub fn mission_drain_tick(
         .map(|(pos, total)| format!(" ({pos} of {total} draining)"))
         .unwrap_or_default();
     let detail = format!(
-        "mission={}{} ready={} closed={} dispatched={} pending={}{}",
+        "mission={}{} ready={} closed={} dispatched={} sync={} pending={}{}",
         cfg.mission,
         rotation,
         facts.ready,
         closed,
         newly_dispatched,
+        sync_closed,
         pending.len(),
         match skip_reason.as_deref() {
             Some("no_work") => match undispatched_count(cfg) {
@@ -835,7 +939,7 @@ pub fn mission_drain_tick(
         journal,
         "active_backlog",
         "daemon",
-        closed + newly_dispatched,
+        closed + newly_dispatched + sync_closed,
         skip_reason.as_deref(),
         Some(&detail),
         cfg.interval_seconds.max(1),
@@ -1338,14 +1442,19 @@ mod tests {
     }
 
     #[test]
-    fn advance_epic_receipt_parses_dispatched_and_liveness() {
-        // The mission drain reads only dispatched + deactivated + all_done.
+    fn advance_epic_receipt_parses_children_and_substrate() {
+        // children[] is THE enqueue authority; substrate decides detached vs
+        // synchronous (x-7f1f).
         let r: AdvanceEpicReceipt = serde_json::from_slice(
             br#"{"epic_id":"x-e","error":null,"activated":true,"deactivated":false,
-                 "all_done":false,"dispatched":["x-a","x-b"],"children":[]}"#,
+                 "all_done":false,"dispatched":["x-a"],
+                 "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"},
+                             {"node_id":"x-b","decision":"dispatched","substrate":"headless"}]}"#,
         )
         .unwrap();
-        assert_eq!(r.dispatched, vec!["x-a", "x-b"]);
+        assert_eq!(r.children.len(), 2);
+        assert_eq!(r.children[0].substrate, "thread");
+        assert_eq!(r.children[1].substrate, "headless");
         assert!(!r.deactivated);
         assert!(!r.all_done);
     }
@@ -1353,9 +1462,9 @@ mod tests {
     #[test]
     fn advance_epic_receipt_defaults_on_partial_json() {
         // A minimal / evolving receipt must never fail the parse (every field
-        // defaults benignly): no dispatched nodes, mission still live.
+        // defaults benignly): no children, mission still live.
         let r: AdvanceEpicReceipt = serde_json::from_slice(br#"{"epic_id":"x-e"}"#).unwrap();
-        assert!(r.dispatched.is_empty());
+        assert!(r.children.is_empty());
         assert!(!r.deactivated && !r.all_done);
     }
 
@@ -2074,6 +2183,33 @@ mod tests {
         p.display().to_string()
     }
 
+    /// `backlog advance --epic` answers `advance_json`; `backlog get` answers
+    /// `node_json`; every other verb appends its argv to `record`. For the
+    /// synchronous-child tests, which read graph state AND fire defers.
+    fn stub_fno_advance_and_get(
+        dir: &std::path::Path,
+        record: &std::path::Path,
+        advance_json: &str,
+        node_json: &str,
+    ) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\n\
+                 if [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
+                 cat <<'JSON'\n{advance_json}\nJSON\nexit 0; fi\n\
+                 if [ \"$2\" = \"get\" ]; then printf '%s' '{node_json}'; exit 0; fi\n\
+                 echo \"$@\" >> \"{}\"\nexit 0\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
     fn stub_fno_advance_with_observer(
         dir: &std::path::Path,
         advance_json: &str,
@@ -2104,13 +2240,16 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let fno = stub_fno_advance(
             &tmp.path().join("bin"),
-            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a","x-b"]}"#,
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a","x-b"],
+                "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"},
+                            {"node_id":"x-b","decision":"dispatched","substrate":"thread"}]}"#,
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
         let mut pending = Vec::new();
 
-        let (outcome, _facts) = dispatch_mission(&cfg, &mut pending, &journal);
+        let (outcome, _facts) = dispatch_mission(&cfg, &mut breaker, &mut pending, &journal);
         assert_eq!(outcome, MissionDispatch::Continue);
         assert_eq!(
             pending
@@ -2130,7 +2269,8 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let fno = stub_fno_advance(
             &tmp.path().join("bin"),
-            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a"]}"#,
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,
+                "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"}]}"#,
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, project_journal) = test_journal(tmp.path());
@@ -2162,7 +2302,8 @@ mod tests {
         let marker = tmp.path().join("observer-called");
         let fno = stub_fno_advance_with_observer(
             &tmp.path().join("bin"),
-            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a"]}"#,
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,
+                "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"}]}"#,
             r#"{"status":"ok","rows":[{}]}"#,
             Some(&marker),
         );
@@ -2247,9 +2388,10 @@ mod tests {
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
         let mut pending = Vec::new();
         assert_eq!(
-            dispatch_mission(&cfg, &mut pending, &journal).0,
+            dispatch_mission(&cfg, &mut breaker, &mut pending, &journal).0,
             MissionDispatch::Retire
         );
     }
@@ -2264,9 +2406,10 @@ mod tests {
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
         let mut pending = Vec::new();
         assert_eq!(
-            dispatch_mission(&cfg, &mut pending, &journal).0,
+            dispatch_mission(&cfg, &mut breaker, &mut pending, &journal).0,
             MissionDispatch::Retire
         );
     }
@@ -2278,17 +2421,18 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let fno = stub_fno_advance(
             &tmp.path().join("bin"),
-            r#"{"epic_id":"x-epic","dispatched":["x-a"]}"#,
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"}]}"#,
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
         let mut pending = vec![PendingDispatch {
             node_id: "x-a".to_string(),
             session_id: None,
             ticks: 2,
             stamp_waits: 0,
         }];
-        dispatch_mission(&cfg, &mut pending, &journal);
+        dispatch_mission(&cfg, &mut breaker, &mut pending, &journal);
         assert_eq!(pending.len(), 1, "x-a already pending must not be re-added");
     }
 
@@ -2301,9 +2445,10 @@ mod tests {
         let fno = stub_fno_advance(&tmp.path().join("bin"), "wedged python traceback");
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
         let mut pending = Vec::new();
         assert_eq!(
-            dispatch_mission(&cfg, &mut pending, &journal).0,
+            dispatch_mission(&cfg, &mut breaker, &mut pending, &journal).0,
             MissionDispatch::Continue
         );
         assert!(pending.is_empty());
@@ -2464,5 +2609,102 @@ mod tests {
             .filter(|v| v["type"] == "control_plane_tick")
             .collect();
         assert_eq!(rows[0]["data"]["skip_reason"], "gate:disabled");
+    }
+
+    // ── synchronous children (x-7f1f) ────────────────────────────────────────
+
+    #[test]
+    fn dispatch_mission_resolves_synchronous_child_on_the_spot() {
+        // A headless dispatch already ran to completion - subprocess.run returned
+        // only after the worker released its claim - so it must never enter
+        // pending: the crash floor would fabricate a crash on tick 3, every time.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("record");
+        let fno = stub_fno_advance_and_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-h","decision":"dispatched","substrate":"headless"}]}"#,
+            r#"{"id":"x-h","completed_at":"2026-09-06T12:00:00Z"}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        let (outcome, facts) = dispatch_mission(&cfg, &mut breaker, &mut pending, &journal);
+        assert_eq!(outcome, MissionDispatch::Continue);
+        assert_eq!(facts.sync_resolved, 1);
+        assert!(pending.is_empty(), "a synchronous child is never held open");
+        assert_eq!(breaker.consecutive_failures("x-h"), 0);
+        let lines = journal_lines(&project_journal);
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("active_backlog_sync_resolved") && l.contains("success")));
+        assert!(!lines.iter().any(|l| l.contains("active_backlog_parked")));
+        assert!(
+            !record.exists(),
+            "no defer on a completed synchronous child"
+        );
+    }
+
+    #[test]
+    fn synchronous_child_not_closed_trips_breaker_and_defers_once() {
+        // A synchronous child with no completion, no defer and no PR ref scores
+        // as a failure per tick through the SAME map_outcome policy, and trips
+        // the breaker exactly once at failure_limit - the detached path's
+        // behaviour.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("record");
+        let fno = stub_fno_advance_and_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-h","decision":"dispatched","substrate":"headless"}]}"#,
+            r#"{"id":"x-h"}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        for _ in 0..3 {
+            mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+        }
+        let defers = std::fs::read_to_string(&record)
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains("backlog defer x-h"))
+            .count();
+        assert_eq!(defers, 1, "exactly one defer at failure_limit=3");
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("active_backlog_parked")));
+    }
+
+    #[test]
+    fn dispatch_mission_enqueues_older_receipt_without_substrate() {
+        // An older CLI's child rows carry no substrate key: enqueued as
+        // detached, today's behaviour - never synchronously resolved.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-a","decision":"dispatched"}]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        dispatch_mission(&cfg, &mut breaker, &mut pending, &journal);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|p| p.node_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["x-a"]
+        );
+        assert_eq!(breaker.consecutive_failures("x-a"), 0);
     }
 }

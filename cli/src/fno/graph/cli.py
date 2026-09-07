@@ -10295,6 +10295,7 @@ def _run_advance_epic(
                             "decision": r.decision,
                             "reason": r.reason,
                             "short_id": r.short_id,
+                            "substrate": r.substrate,
                         }
                         for r in result.child_results
                     ],
