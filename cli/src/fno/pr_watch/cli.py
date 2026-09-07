@@ -858,38 +858,6 @@ def tick() -> None:
             # An unarmed lane still ticks: "why it did nothing" is the readout's job.
             _emit_tick_row("watchdog", interval_s=wd_i, skip_reason="watchdog_off")
 
-        set_tick_phase("evals")
-        # The eval bank's demand leg (x-ab72): nothing forced a run, so the
-        # harness went 40 days quiet behind a healthy-looking stale 100%.
-        # Guard first, import inside: the launchd hot path pays nothing when
-        # the schedule is off, and a settings stub with no evals block (the
-        # tick's test harnesses) reads as unarmed, never armed.
-        _evals_cfg = getattr(settings, "evals", None)
-        _evals_sched = int(getattr(_evals_cfg, "schedule_days", 0) or 0)
-        try:
-            if _evals_cfg is not None and _evals_sched > 0:
-                from fno.pr_watch._evals_phase import run_evals_phase
-
-                left = deadline - (time.monotonic() - started)
-                _evals_row = run_evals_phase(
-                    settings,
-                    emit=_emit_event,
-                    budget_left_s=left,
-                    fno_bin=_resolve_fno_binary(),
-                )
-                _emit_tick_row(
-                    "evals", interval_s=_evals_sched * 86400,
-                    acted=_evals_row["acted"],
-                    skip_reason=_evals_row["skip_reason"],
-                    detail=_evals_row["detail"],
-                )
-            else:
-                _emit_tick_row("evals", interval_s=0, skip_reason="evals_off")
-        except Exception as exc:  # noqa: BLE001 - never let the bank leg break the tick
-            log.warning("pr-watch: evals phase failed: %s", exc)
-            _emit_tick_row("evals", interval_s=_evals_sched * 86400,
-                           skip_reason="evals_failed", detail=str(exc)[:200])
-
         set_tick_phase("sweep")
         # A dead tick must not kill the legs below. The receipt contract makes
         # _tick raise on a failed emission even though state is already persisted,

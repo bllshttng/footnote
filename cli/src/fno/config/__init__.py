@@ -58,6 +58,7 @@ from pydantic import (
 # idiom mypy's --no-implicit-reexport requires (these names used to be defined here).
 from fno.config import _watchdog
 from fno.config._auto_heal import AutoHealBlock
+from fno.config._evals import EvalsBlock
 from fno.config._sweeps import ReapReceiptsBlock, SweepKeys
 from fno.config._watchdog import WatchdogBlock
 from fno.config_io import _apply_search_ceiling as _apply_search_ceiling
@@ -3220,63 +3221,6 @@ class RestartBlock(BaseModel):
     @classmethod
     def _coerce_enabled(cls, v: object) -> bool:
         return _coerce_bool_default_true(v)
-
-
-class EvalsBlock(BaseModel):
-    """Eval-suite worker settings (nested under 'config.evals').
-
-    x-aaaf wave 2: `evals/runner.py`'s `run_task` spawns a headless grading
-    worker with no enable key at all. Default ``True`` matches its CURRENT
-    effective behavior (it always ran when invoked) - shipping this gate
-    changes nothing until an operator explicitly disables it.
-
-    x-ab72 adds the demand side: ``stale_days`` is the age at which the newest
-    regression-tier run reads STALE in `fno doctor` and `fno backlog triage
-    health`; ``schedule_days`` is how often the pr-watch tick runs the
-    regression tier (0 disables the scheduled run).
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    enabled: bool = True
-
-    @field_validator("enabled", mode="before")
-    @classmethod
-    def _coerce_enabled(cls, v: object) -> bool:
-        return _coerce_bool_default_true(v)
-
-    schedule_days: int = 7
-    stale_days: int = 7
-
-    @model_validator(mode="before")
-    @classmethod
-    def _sanitize_days(cls, v: object) -> object:
-        """Drop a non-integer or negative day value so the field default applies.
-
-        A malformed value must never break load_settings(); it degrades to the
-        modeled default for that key (with a WARNING), the block's existing
-        fail-safe posture.
-        """
-        if not isinstance(v, dict):
-            return v
-        out = dict(v)
-        for key in ("schedule_days", "stale_days"):
-            if key not in out:
-                continue
-            raw_val = out[key]
-            if isinstance(raw_val, bool):
-                ok = False
-            else:
-                try:
-                    ok = int(raw_val) >= 0
-                except (TypeError, ValueError):
-                    ok = False
-            if not ok:
-                _LOG.warning(
-                    "config.evals.%s=%r invalid; using default", key, raw_val
-                )
-                out.pop(key)
-        return out
 
 
 class RecoveryBlock(BaseModel):

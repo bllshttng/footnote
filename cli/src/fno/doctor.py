@@ -1171,15 +1171,10 @@ def _post_merge_sync_health() -> dict[str, Any]:
 
 
 def _evals_health() -> dict[str, Any]:
-    """Is the newest regression-tier eval run inside its staleness window?
+    """The eval bank's staleness verdict; UNKNOWN never asserts staleness.
 
-    The failure class is DISUSE: the eval harness is fully built, nothing
-    forced a run, and a 40-day-old 100% rendered exactly like a fresh one.
-    The window is ``config.evals.stale_days``; the vocabulary matches the
-    neighbouring arms - STALE proven only from the history's newest
-    regression ts, UNKNOWN when there is no history, no regression row, or
-    an unreadable timestamp (never asserts staleness on unknown). Advisory:
-    never changes doctor's status or exit code.
+    The failure class is DISUSE: the harness is fully built, nothing forced a
+    run, and a 40-day-old 100% rendered like a fresh one. Advisory.
     """
     try:
         from fno.evals.report import evals_health_summary
@@ -1187,17 +1182,10 @@ def _evals_health() -> dict[str, Any]:
 
         s = evals_health_summary(evals_history())
     except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
+        s = None
+    if s is None or s["never_ran"] or s["age_days"] is None:
         return {"state": "unknown", "stale": False, "age_days": None,
-                "detail": "evals history unreadable"}
-    if s is None:
-        return {"state": "unknown", "stale": False, "age_days": None,
-                "detail": "no eval history"}
-    if s["never_ran"]:
-        return {"state": "unknown", "stale": False, "age_days": None,
-                "detail": "history has no regression-tier run"}
-    if s["age_days"] is None:
-        return {"state": "unknown", "stale": False, "age_days": None,
-                "detail": "history rows carry no readable timestamp"}
+                "detail": "no regression-tier run on record"}
     age = s["age_days"]
     return {
         "state": "stale" if s["stale"] else "fresh",
