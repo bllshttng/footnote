@@ -785,17 +785,19 @@ def _sandbox_denial_text(facts: Optional[TailFacts]) -> Optional[str]:
     if facts.last_role != "assistant":
         return None
     text = facts.last_text or facts.tail_text
-    tag = re.search(r"<help\b(?P<attributes>[^>]*)>", text, re.IGNORECASE)
+    tag = re.search(r"<help(?:\s(?P<attributes>[^>]*))?>", text, re.IGNORECASE)
     if tag is None:
         return None
     evidence_match = re.search(
         r"\bevidence\s*=\s*(['\"])(?P<value>.*?)\1",
-        tag.group("attributes"),
+        tag.group("attributes") or "",
         re.IGNORECASE,
     )
     if evidence_match is None:
         return None
     evidence = evidence_match.group("value")
+    if not evidence:
+        return None
     if "Operation not permitted" not in evidence:
         return None
     if re.search(r"(?<![\w.])\.git[/\\]", evidence) is None:
@@ -810,6 +812,8 @@ def _sandbox_blocked_verdict(
     claim_for: Callable[[str], dict],
 ) -> Optional[Verdict]:
     """Classify a Codex Git denial only when both reaping guards are clear."""
+    if row.harness != "codex":
+        return None
     evidence = _sandbox_denial_text(facts)
     if evidence is None:
         return None
@@ -3005,6 +3009,7 @@ def apply_verdict(
     runner=subprocess.run,
     failover_fn: Optional[Callable[[Any, Any], str]] = None,
     rotation: Optional[RotationBudget] = None,
+    node: Optional[str] = None,
 ) -> tuple[str, str]:
     """Execute one verdict inside ``lanes`` ("wake" | "all"); only ``SKIPPED`` is
     silent. wake/silence resume with ``cwd`` set; the transcript reads run under
@@ -3019,15 +3024,28 @@ def apply_verdict(
                 v, cwd=cwd, failover_fn=failover_fn, rotation=rotation
             )
         if v.verdict == SANDBOX_BLOCKED:
-            return _apply_sandbox_blocked(v, cwd=cwd, runner=runner)
+            return _apply_sandbox_blocked(v, cwd=cwd, node=node, runner=runner)
     except (OSError, subprocess.SubprocessError) as exc:
         return "refused", f"{v.verdict} action failed: {exc}"
     return SKIPPED, f"{v.verdict} has no auto-action"
 
 
 def _apply_sandbox_blocked(
-    v: Verdict, *, cwd: str, runner: Callable
+    v: Verdict, *, cwd: str, node: Optional[str], runner: Callable
 ) -> tuple[str, str]:
+    if not node:
+        return "refused", "reap refused: node identity is unreadable"
+    try:
+        claim = _answered(_claim_view(node))
+    except Exception as exc:  # noqa: BLE001 - reaping requires a fresh claim read
+        return "refused", f"reap refused: claim unreadable ({exc})"
+    if claim.get("state") != "free":
+        return "held", f"reap held: node claim is {claim.get('state') or 'unknown'}"
+    commit_count = _branch_commit_count(cwd)
+    if commit_count is None:
+        return "refused", "reap refused: branch commit count unreadable"
+    if commit_count:
+        return "held", f"reap held: branch carries {commit_count} commit(s)"
     proc = runner(
         [
             *_fno(),

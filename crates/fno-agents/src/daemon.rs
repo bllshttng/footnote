@@ -3222,7 +3222,6 @@ fn build_claude_stream_entry(
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
-        git_grant: None,
         ..RegistryEntry::new(
             Some(uuid.into()),
             Lineage::captured((parent_session, parent_harness, parent_cwd)),
@@ -9776,7 +9775,6 @@ mod tests {
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
-            git_grant: None,
             ..Default::default()
         }
     }
@@ -11659,7 +11657,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
-            git_grant: None,
             ..Default::default()
         }
     }
@@ -11891,20 +11888,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     #[test]
     fn build_codex_thread_entry_stamps_the_launch_posture() {
         let worktree = tempfile::tempdir().unwrap();
-        assert!(std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(worktree.path())
-            .status()
-            .unwrap()
-            .success());
-        let git_common_dir = std::process::Command::new("git")
-            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .current_dir(worktree.path())
-            .output()
-            .unwrap();
-        assert!(git_common_dir.status.success());
-        let git_common_dir = String::from_utf8(git_common_dir.stdout).unwrap();
-        let git_common_dir = git_common_dir.trim();
         let _guard = crate::path_test_guard();
         let start = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -11921,7 +11904,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             });
         let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true, None);
         assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
-        assert_eq!(yolo.git_grant.as_deref(), Some(git_common_dir));
         assert!(
             entry_posture_is_full_access(&yolo)
                 && yolo.fno_id.as_deref() == Some("thread-p")
@@ -11930,11 +11912,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let bounded =
             build_codex_thread_entry("t", worktree.path(), &start, None, None, false, None);
         assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
-        assert_eq!(bounded.git_grant.as_deref(), Some(git_common_dir));
-        let outside_repo = tempfile::tempdir().unwrap();
-        let outside =
-            build_codex_thread_entry("t", outside_repo.path(), &start, None, None, false, None);
-        assert_eq!(outside.git_grant, None);
         assert!(!entry_posture_is_full_access(&bounded));
         // A requested model stamps its basis on the row; an absent one
         // leaves the basis absent with it.
@@ -14649,7 +14626,6 @@ done
                 fno_id: None,
                 delivery_policy: None,
                 sandbox_posture: None,
-                git_grant: None,
                 ..Default::default()
             });
         })
@@ -14720,7 +14696,6 @@ done
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
-            git_grant: None,
             ..Default::default()
         }
     }

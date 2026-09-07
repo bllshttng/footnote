@@ -3406,7 +3406,9 @@ def test_the_advisory_reaches_the_digest():
 
 
 def test_codex_sandbox_denial_is_a_reap_verdict(monkeypatch):
-    rows = [Row("cccc3333-0011", "t-sandbox", "working", "x-sandbox", "/tmp/w")]
+    rows = [
+        Row("cccc3333-0011", "t-sandbox", "working", "x-sandbox", "/tmp/w", "codex")
+    ]
     monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
     [v] = _run(
         rows,
@@ -3426,7 +3428,9 @@ def test_codex_sandbox_denial_is_a_reap_verdict(monkeypatch):
 
 def test_codex_sandbox_denial_in_user_text_is_not_reaped(monkeypatch):
     monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
-    rows = [Row("cccc3333-0013", "t-sandbox", "working", "x-sandbox", "/tmp/w")]
+    rows = [
+        Row("cccc3333-0013", "t-sandbox", "working", "x-sandbox", "/tmp/w", "codex")
+    ]
     [v] = _run(
         rows,
         {
@@ -3479,10 +3483,29 @@ def test_codex_response_item_is_normalized_for_distress_reads():
 )
 def test_incomplete_or_mismatched_help_evidence_is_not_reaped(text, monkeypatch):
     monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
-    rows = [Row("cccc3333-0014", "t-sandbox", "working", "x-sandbox", "/tmp/w")]
+    rows = [
+        Row("cccc3333-0014", "t-sandbox", "working", "x-sandbox", "/tmp/w", "codex")
+    ]
     [v] = _run(
         rows,
         {"cccc3333-0014": _facts(text)},
+        claims={"x-sandbox": {"state": "free"}},
+    )
+    assert v.verdict != SANDBOX_BLOCKED
+    assert v.action == "none"
+
+
+def test_claude_row_with_same_text_is_not_a_codex_sandbox_reap():
+    rows = [Row("cccc3333-0016", "t-claude", "working", "x-sandbox", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {
+            "cccc3333-0016": _facts(
+                '<help reason="Codex sandbox blocks Git writes" '
+                'evidence=".git/refs/heads/feature/x.lock: '
+                'Operation not permitted">'
+            )
+        },
         claims={"x-sandbox": {"state": "free"}},
     )
     assert v.verdict != SANDBOX_BLOCKED
@@ -3500,7 +3523,9 @@ def test_codex_sandbox_denial_stays_when_a_guard_holds(
     monkeypatch, claims, commit_count, guard_text
 ):
     monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: commit_count)
-    rows = [Row("cccc3333-0012", "t-sandbox", "working", "x-sandbox", "/tmp/w")]
+    rows = [
+        Row("cccc3333-0012", "t-sandbox", "working", "x-sandbox", "/tmp/w", "codex")
+    ]
     [v] = _run(
         rows,
         {
@@ -3515,6 +3540,41 @@ def test_codex_sandbox_denial_stays_when_a_guard_holds(
     assert v.verdict != SANDBOX_BLOCKED
     assert v.action == "none"
     assert guard_text in v.basis.lower()
+
+
+@pytest.mark.parametrize(
+    "claim,commit_count,guard_text",
+    [
+        ({"state": "live", "holder": "target-session:new"}, 0, "claim"),
+        ({"state": "free"}, 1, "commit"),
+    ],
+)
+def test_sandbox_reap_rechecks_guards_before_removal(
+    monkeypatch, claim, commit_count, guard_text
+):
+    calls = []
+    monkeypatch.setattr(watchdog, "_claim_view", lambda node: claim)
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: commit_count)
+    v = Verdict(
+        "cccc3333-0015",
+        "t-sandbox",
+        "working",
+        SANDBOX_BLOCKED,
+        "Codex sandbox blocked Git writes",
+        "reap",
+    )
+
+    outcome, detail = apply_verdict(
+        v,
+        lanes="all",
+        cwd="/tmp/w",
+        node="x-sandbox",
+        runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    assert outcome == "held"
+    assert guard_text in detail
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------

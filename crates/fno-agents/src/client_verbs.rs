@@ -1621,7 +1621,6 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         },
         delivery_policy: None,
         sandbox_posture: None,
-        git_grant: None,
         spawn_trigger: None,
         ..RegistryEntry::new(
             Some(session),
