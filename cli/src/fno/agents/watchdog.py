@@ -558,9 +558,8 @@ def verdicts(
     > reroute > wake > leave). Each basis string names the measurement that decided it,
     so a reader can falsify the call. ``claim_for(node)`` returns the
     ``node:<id>`` claim view (``{"state", "holder"}``); ``node_state_for``
-    returns the graph entry (``{"status", ...}``) or None.
-    ``worktree_check`` defaults to the filesystem linked-worktree read;
-    inject a stub to keep the classifier off the disk."""
+    returns the graph entry (``{"status", ...}``) or None. ``worktree_check``
+    defaults to the filesystem linked-worktree read; inject a stub."""
     facts_by_row: dict[str, Optional[TailFacts]] = {}
     for row in rows:
         try:
@@ -1013,8 +1012,7 @@ def _record_text(e: dict) -> str:
     return " ".join(" ".join(parts).split())
 
 
-#: A command that reads one PR's status. The sanctioned CI-wait
-#: (``fno do pr wait``) never reaches the transcript: a repeat is re-asking.
+#: A command that reads one PR's status; ``fno do pr wait`` never reaches the transcript, so a repeat is re-asking.
 _PR_READ_RE = re.compile(
     r"\b(?:fno\s+do\s+pr|gh\s+pr)\s+(?:status|info|view|checks|wait)\s+#?(\d+)"
 )
@@ -1025,8 +1023,8 @@ _PR_ID_IN_BLOB_RE = re.compile(r'(?:pr|pulls|number)[/":# =]+(\d+)', re.I)
 
 def _pr_poll_record(e: dict) -> tuple[tuple[str, int, str], ...]:
     """PR facts from one raw record: ("read", n, "") for a status-read
-    command, ("settled", n, "MERGED"|"CLOSED") for a tool result asserting
-    a terminal state - the two places ``_record_text`` drops."""
+    command, ("settled", n, terminal) for a tool result asserting it - the
+    two places ``_record_text`` drops."""
     msg = e.get("message")
     content = msg.get("content") if isinstance(msg, dict) else None
     blobs: list[str] = []
@@ -1928,13 +1926,12 @@ def _persisted_open_breakers() -> list[dict[str, Any]]:
 
 
 def _production_pr_state(cwd: str, pr_number: int) -> Optional[str]:
-    """Current PR state via the routed reader in the row's own checkout, or
-    None when unreadable (UNKNOWN; the polling lane stays silent). Only
-    called per real finding."""
+    """Current PR state via the routed reader in the row's own checkout;
+    None is UNKNOWN and the polling lane stays silent on it."""
     try:
         proc = subprocess.run(
             [*_fno(), "do", "pr", "info", str(pr_number)],
-            capture_output=True, text=True, timeout=60, check=False,
+            capture_output=True, text=True, timeout=15, check=False,
             cwd=cwd or None,
         )
     except (OSError, subprocess.SubprocessError):
@@ -2082,12 +2079,19 @@ def run_sweep(
     graph_state = graph_fn()
     if isinstance(graph_state, _Unreadable):
         warnings = [*warnings, f"graph unreadable for every row: {graph_state.detail}"]
-    # The PR-state reader only arms on the fully-production path (no injected
-    # seams): a test that forgets a PR stub gets a silent lane, never a
-    # subprocess against its fixtures.
-    pr_state_for = pr_state_fn
-    if pr_state_for is None and rows_provider is None and transcript_fn is None:
-        pr_state_for = _production_pr_state
+    # The PR-state reader only arms on the fully-production path: a test that
+    # forgets a PR stub gets a silent lane, never a subprocess against its
+    # fixtures. Memoized per distinct (cwd, PR) so rows share one read.
+    base_pr_state = pr_state_fn
+    if base_pr_state is None and rows_provider is None and transcript_fn is None:
+        base_pr_state = _production_pr_state
+    seen_pr_states: dict[tuple[str, int], Optional[str]] = {}
+
+    def pr_state_for(cwd: str, pr_number: int) -> Optional[str]:
+        if (cwd, pr_number) not in seen_pr_states and base_pr_state is not None:
+            seen_pr_states[(cwd, pr_number)] = base_pr_state(cwd, pr_number)
+        return seen_pr_states.get((cwd, pr_number))
+
     vs = verdicts(
         rows,
         transcript_for=transcript_fn,

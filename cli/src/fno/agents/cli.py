@@ -4687,10 +4687,9 @@ def cmd_watchdog(
         for v, _row in pairs:
             shown_counts[v.verdict] = shown_counts.get(v.verdict, 0) + 1
 
-    # Push, not pull: mail before writing the sweep file, so the change gate
-    # compares against the PREVIOUS sweep's signature and only a delivered
-    # digest advances it - a transient send failure must not permanently
-    # swallow the verdict behind an unchanged signature.
+    # Push, not pull: mail before writing the sweep file, so only a delivered
+    # digest advances the change gate - a transient send failure must not
+    # permanently swallow the verdict behind an unchanged signature.
     recipient = mail_to
     if recipient is None:
         try:
@@ -4706,10 +4705,9 @@ def cmd_watchdog(
             print(f"watchdog mail: {receipt}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 - mail never breaks the sweep
         print(f"watchdog mail failed: {exc}", file=sys.stderr)
-    # A filtered run publishes only its own rows, so it must not stamp the
-    # whole non-leave set, and its stamp has to be the union of what it just
-    # published and what was already published - stamping the subset alone
-    # makes the next tick re-emit every filtered-out row.
+    # A filtered run publishes only its own rows: never stamp the whole
+    # non-leave set, and stamp the UNION with what was already published,
+    # or the next tick re-emits every filtered-out row.
     events_payload = (
         payload if only is None
         else {**payload, "verdicts": [v._asdict() for v, _ in pairs]}
@@ -4728,9 +4726,8 @@ def cmd_watchdog(
     )
 
     # Classification events ride every mode (a dry-run-only verdict once left
-    # apply modes with no event record at all), gated on fresh_non_leave so a
-    # filtered hand-run neither diverges from the tick's record nor makes it
-    # re-emit most of the fleet.
+    # apply modes with no event record), gated on fresh_non_leave so a filtered
+    # hand-run neither diverges from the tick's record nor re-emits the fleet.
     fresh_ids = wd.fresh_non_leave(events_payload, prev_events_sig)
     for v, _row in pairs:
         if v.verdict != wd.LEAVE and v.row_id in fresh_ids:
