@@ -765,6 +765,20 @@ def resolve_slot(
                         f"slot skip {rung} {row_name} provider {vendor} at {current} of {cap}"
                     )
                     continue
+        harness_detail = (capacity or {}).get(row.harness)
+        evidence = harness_detail.get("evidence") or {} if isinstance(harness_detail, Mapping) else {}
+        if row.account and not row.route:
+            # A slot-account claim is governed by the attribution owner's
+            # verdict; a vendor route (an API lane) never claimed the slot.
+            ident = evidence.get(row.account, "unknown")
+            if ident == "mismatch":
+                chain.append(f"slot skip {rung} {row_name} account_identity_mismatch")
+                continue
+            if ident == "unknown" and on_unknown == "skip":
+                chain.append(
+                    f"slot skip {rung} {row_name} account_identity_unknown (on_unknown=skip)"
+                )
+                continue
         state, window = row_capacity(row, capacity)
         if state in ("exhausted", "blocked"):
             chain.append(f"slot skip {rung} {row_name} capacity={state}")
@@ -910,6 +924,31 @@ def harness_accounts(
     return list(dict.fromkeys(accounts))
 
 
+def _identity_evidence(harness: str, accounts: list[str]) -> dict[str, str]:
+    """proven|mismatch per account, from the attribution owner alone.
+
+    ``proven``: the record id the owner says is the CLI's active slot occupant
+    on an untainted slot. Any other named account on a PROVEN slot is a
+    ``mismatch`` - it pins a name the slot disproves. No owner answer, a
+    tainted slot, or a store read failure leaves every account unnamed, which
+    consumers read as ``account_identity_unknown``. This never reads
+    credentials itself; x-d6be owns that and this consumes its verdicts.
+    """
+    try:
+        from fno.adapters.providers.managed import (
+            active_slot_id,
+            slot_tainted,
+            store_root,
+        )
+
+        active = active_slot_id(harness)
+        if not active or slot_tainted(harness, store_root()):
+            return {}
+        return {a: ("proven" if a == active else "mismatch") for a in accounts}
+    except Exception:  # noqa: BLE001 - an unreadable owner reads as unknown
+        return {}
+
+
 def runtime_capacity(
     providers: tuple[str, ...] = ("claude", "codex", "gemini", "opencode"),
     *,
@@ -920,8 +959,12 @@ def runtime_capacity(
     account's headroom, aggregate MAX (ok if ANY account is ok, exhausted only
     if EVERY account is). Every harness NAMED by a declared row is probed
     alongside ``providers``. The value is a detail mapping
-    ``{state, window, accounts}``; bare state strings still resolve via
-    :func:`_capacity_state`. Never probes, never touches the network.
+    ``{state, window, accounts, evidence, resets}``; bare state strings still
+    resolve via :func:`_capacity_state`. When the attribution owner proves an
+    active slot account, ITS state is the aggregate - MAX over the sibling
+    records can never make canonical claude look healthy - and when the slot
+    only yields mismatches the aggregate reads unknown. Never probes, never
+    touches the network.
     """
     try:
         from fno.adapters.providers.runtime_state import headrooms
@@ -934,18 +977,30 @@ def runtime_capacity(
         for harness in harnesses:
             accounts = harness_accounts(harness, settings=settings, inventory=inv)
             detail: dict[str, str] = {}
+            resets: dict[str, object] = {}
             best: Optional[str] = None
             window = "absent"
             for account, verdict in headrooms(accounts).items():
                 state = verdict.state.value
                 detail[account] = state
+                resets[account] = verdict.resets_at
                 if best is None or _CAPACITY_RANK.get(state, 1) > _CAPACITY_RANK.get(best, 1):
                     best = state
                     window = verdict.source or "unknown"
+            evidence = _identity_evidence(harness, accounts)
+            proven = [a for a, v in evidence.items() if v == "proven"]
+            if proven and detail.get(proven[0]):
+                best = detail[proven[0]]
+                window = f"identity:{proven[0]}"
+            elif evidence and not proven and any(v == "mismatch" for v in evidence.values()):
+                best = "unknown"
+                window = "identity-unproven"
             out[harness] = {
                 "state": best or "unknown",
                 "window": window,
                 "accounts": detail,
+                "evidence": evidence,
+                "resets": resets,
             }
         return out
     except Exception:  # noqa: BLE001 - unknown capacity never breaks dispatch

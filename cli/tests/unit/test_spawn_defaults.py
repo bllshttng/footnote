@@ -2462,3 +2462,126 @@ def test_overlay_only_profile_still_resolves(monkeypatch):
         env={},
     )
     assert out[out.index("--model") + 1] == "claude-sonnet-5"
+_IDENTITY_ROWS = [
+    {"name": "canon-opus", "harness": "claude", "model": "opus",
+     "account": "makers"},
+    {"name": "alt-sonnet", "harness": "claude", "model": "sonnet",
+     "account": "readyrule"},
+]
+
+
+def test_identity_mismatch_pin_is_always_excluded(monkeypatch):
+    """AC6-PIN: the slot proves makers is active; a readyrule pin is a
+    mismatch and never serves, whatever on_unknown allows."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {
+            "claude": {
+                "state": "ok",
+                "accounts": {"makers": "ok", "readyrule": "ok"},
+                "evidence": {"makers": "proven", "readyrule": "mismatch"},
+            },
+        },
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _IDENTITY_ROWS,
+            {"target": {"lanes": ["alt-sonnet", "canon-opus"],
+                        "on_unknown": "allow"}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "opus"
+    assert "account_identity_mismatch" in err.getvalue()
+
+
+def test_identity_unknown_is_governed_by_on_unknown(monkeypatch):
+    """AC6-IDENTITY: an unproven slot claim is excluded under skip and named
+    under the default allow."""
+    capacity = {
+        "claude": {"state": "unknown", "accounts": {"makers": "ok"},
+                   "evidence": {}},
+    }
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _IDENTITY_ROWS[:1], {"target": {"lanes": ["canon-opus"]}}
+        ),
+        stderr=err,
+        env={},
+    )
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: capacity)
+    assert out[out.index("--harness") + 1] == "claude"
+
+    monkeypatch.setenv("FNO_SPAWN_GATE", "1")
+    err2 = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            settings=_slot_settings(
+                _IDENTITY_ROWS[:1],
+                {"target": {"lanes": ["canon-opus"], "on_unknown": "skip"}},
+            ),
+            stderr=err2,
+            env={},
+        )
+    assert exc.value.code == 2
+    assert "account_identity_unknown (on_unknown=skip)" in err2.getvalue()
+
+
+def test_vendor_route_lane_never_claims_the_slot(monkeypatch):
+    """AC6-IDENTITY: an API lane with its own account and route skips the
+    identity gate; the slot occupant is not its business."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {
+            "claude": {
+                "state": "ok",
+                "accounts": {"zai-main": "ok"},
+                "evidence": {},
+            },
+        },
+    )
+    rows = [{"name": "flash-zai", "harness": "claude", "model": "glm",
+             "route": "zai/glm-5.3", "account": "zai-main"}]
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(rows, {"target": {"lanes": ["flash-zai"]}}),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--harness") + 1] == "claude"
+    assert "account_identity" not in err.getvalue()
+
+
+def test_proven_account_owns_the_harness_aggregate(monkeypatch):
+    """AC6-IDENTITY: an unpinned row reads the proven account's state, never
+    a MAX that a sibling record could fake."""
+    from fno.route_resolve import runtime_capacity as rc
+
+    monkeypatch.setattr(
+        "fno.route_resolve.harness_accounts", lambda harness, **kw: ["makers", "readyrule"]
+    )
+
+    class _V:
+        def __init__(self, state):
+            self.state = type("S", (), {"value": state})()
+            self.resets_at = None
+            self.source = "window"
+
+    monkeypatch.setattr(
+        "fno.adapters.providers.runtime_state.headrooms",
+        lambda ids: {"makers": _V("exhausted"), "readyrule": _V("ok")},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve._identity_evidence",
+        lambda harness, accounts: {"makers": "proven", "readyrule": "mismatch"},
+    )
+    cap = rc(providers=("claude",))
+    assert cap["claude"]["state"] == "exhausted"
+    assert cap["claude"]["window"] == "identity:makers"
