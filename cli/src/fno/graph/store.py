@@ -1366,15 +1366,9 @@ def reap_open_session_record(
             return report
         rows = node.get("sessions") or []
         report["status_after"] = node.get("status")
-        report["remaining_open_do"] = sum(
-            1
-            for row in rows
-            if isinstance(row, dict)
-            and row.get("phase") == "do"
-            and isinstance(row.get("started_at"), str)
-            and row["started_at"].strip()
-            and "ended_at" not in row
-        )
+        from fno.graph.statuses import is_open_do_row
+
+        report["remaining_open_do"] = sum(1 for row in rows if is_open_do_row(row))
         report["settled"] = True
     except Exception:  # noqa: BLE001 - the settlement read is advisory
         report["settled"] = report.get("found", False)
