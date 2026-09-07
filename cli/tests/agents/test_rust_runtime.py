@@ -268,6 +268,9 @@ def test_codex_code_payload_after_provider_fence_is_checked() -> None:
     assert rr._is_codex_code_payload(
         ["spawn", "--", "$fno:target x-f370"]
     )
+    assert rr._is_codex_code_payload(
+        ["spawn", "--message=$fno:target x-f370"]
+    )
 
 
 def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> None:
@@ -360,6 +363,40 @@ def test_codex_full_auto_still_requires_a_git_grant(monkeypatch, tmp_path) -> No
 
     assert result.exit_code == 2
     assert "resolved git grant" in result.output
+
+
+def test_codex_danger_full_access_mode_skips_bounded_grant_refusal(
+    monkeypatch, tmp_path
+) -> None:
+    from fno.cli import app
+
+    called: list[list[str]] = []
+
+    def fake_route(args, **kw):
+        called.append(list(args))
+        raise SystemExit(0)
+
+    monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
+    monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    result = CliRunner().invoke(
+        app,
+        [
+            "agents",
+            "spawn",
+            "$fno:target x-f370",
+            "--harness",
+            "codex",
+            "--substrate",
+            "thread",
+            "--cwd",
+            str(tmp_path),
+            "--permission-mode",
+            "danger-full-access:never",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert called
 
 
 def test_agents_help_falls_through_when_opted_in(monkeypatch) -> None:

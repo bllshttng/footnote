@@ -575,7 +575,12 @@ _CODE_PAYLOAD_PREFIXES = frozenset(
 
 def _is_codex_code_payload(args: Sequence[str]) -> bool:
     """Recognize a bounded code workflow seed at the spawn seam."""
-    for token in args[1:]:
+    tokens = list(args[1:])
+    for index, token in enumerate(tokens):
+        if token == "--message" and index + 1 < len(tokens):
+            token = tokens[index + 1]
+        elif token.startswith("--message="):
+            token = token.split("=", 1)[1]
         if token.startswith("-"):
             continue
         if token.split(maxsplit=1)[0] in _CODE_PAYLOAD_PREFIXES:
@@ -602,7 +607,8 @@ def _is_bounded_codex_code_spawn(args: Sequence[str]) -> bool:
     ):
         return False
     permission_mode = (_spawn_flag_value(args, "--permission-mode") or "").strip().lower()
-    return permission_mode not in {"yolo", "bypasspermissions"}
+    sandbox_mode = permission_mode.split(":", 1)[0]
+    return sandbox_mode not in {"yolo", "bypasspermissions", "danger-full-access"}
 
 
 def _codex_git_grant_for_spawn(args: Sequence[str]) -> str:

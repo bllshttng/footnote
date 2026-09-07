@@ -785,13 +785,20 @@ def _sandbox_denial_text(facts: Optional[TailFacts]) -> Optional[str]:
     if facts.last_role != "assistant":
         return None
     text = facts.last_text or facts.tail_text
-    if "Operation not permitted" not in text:
+    tag = re.search(r"<help\b(?P<attributes>[^>]*)>", text, re.IGNORECASE)
+    if tag is None:
         return None
-    if re.search(r"<help[>\s]", text) is None:
+    evidence_match = re.search(
+        r"\bevidence\s*=\s*(['\"])(?P<value>.*?)\1",
+        tag.group("attributes"),
+        re.IGNORECASE,
+    )
+    if evidence_match is None:
         return None
-    if "evidence=" not in text:
+    evidence = evidence_match.group("value")
+    if "Operation not permitted" not in evidence:
         return None
-    if re.search(r"(?<![\w.])\.git[/\\]", text) is None:
+    if re.search(r"(?<![\w.])\.git[/\\]", evidence) is None:
         return None
     return text
 

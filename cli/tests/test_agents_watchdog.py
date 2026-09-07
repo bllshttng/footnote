@@ -3469,6 +3469,27 @@ def test_codex_response_item_is_normalized_for_distress_reads():
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        '<help reason="Codex sandbox blocks Git writes" '
+        'evidence=".git/refs/heads/feature/x.lock: Operation not permitted',
+        '<help evidence=".git/refs/heads/feature/x.lock"> '
+        'Operation not permitted',
+    ],
+)
+def test_incomplete_or_mismatched_help_evidence_is_not_reaped(text, monkeypatch):
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
+    rows = [Row("cccc3333-0014", "t-sandbox", "working", "x-sandbox", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {"cccc3333-0014": _facts(text)},
+        claims={"x-sandbox": {"state": "free"}},
+    )
+    assert v.verdict != SANDBOX_BLOCKED
+    assert v.action == "none"
+
+
+@pytest.mark.parametrize(
     "claims,commit_count,guard_text",
     [
         ({"x-sandbox": {"state": "live", "holder": "target-session:other"}}, 0, "claim"),
