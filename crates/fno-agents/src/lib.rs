@@ -76,6 +76,7 @@ pub mod daemon;
 pub mod delivery_completion;
 pub mod digest;
 pub mod disposition_gate;
+mod distress;
 pub mod drift;
 pub mod envelope;
 pub mod events;
