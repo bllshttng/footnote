@@ -552,6 +552,82 @@ def rust_runtime_enabled() -> bool:
 #: writable-dir grant published before the route/fork.
 _WORKER_DIR_VERBS = ("resume", "ask", "revive", "wake")
 
+_CODE_PAYLOAD_PREFIXES = frozenset(
+    {
+        "/target",
+        "/execute",
+        "/tdd",
+        "/fix",
+        "/pr",
+        "/fno:target",
+        "/fno:execute",
+        "/fno:tdd",
+        "/fno:fix",
+        "/fno:pr",
+        "$fno:target",
+        "$fno:execute",
+        "$fno:tdd",
+        "$fno:fix",
+        "$fno:pr",
+    }
+)
+
+
+def _is_codex_code_payload(args: Sequence[str]) -> bool:
+    """Recognize a bounded code workflow seed at the spawn seam."""
+    for token in _args_before_argv(args)[1:]:
+        if token.startswith("-"):
+            continue
+        if token.split(maxsplit=1)[0] in _CODE_PAYLOAD_PREFIXES:
+            return True
+    return False
+
+
+def _is_bounded_codex_code_spawn(args: Sequence[str]) -> bool:
+    """Return true only for Codex code payloads that need a Git grant."""
+    harness = (_spawn_flag_value(args, "--harness", "-H") or "").strip().lower()
+    if not harness:
+        try:
+            from fno.harness_identity import resolve_harness_identity
+
+            harness = (resolve_harness_identity(os.environ).harness or "claude").lower()
+        except Exception:
+            harness = "claude"
+    if harness != "codex" or not _is_codex_code_payload(args):
+        return False
+    if _has_flag(
+        args,
+        longs=("--yolo", "--dangerously-bypass-approvals-and-sandbox"),
+    ):
+        return False
+    permission_mode = (_spawn_flag_value(args, "--permission-mode") or "").strip().lower()
+    return permission_mode not in {"yolo", "bypasspermissions", "full-auto"}
+
+
+def _codex_git_grant_for_spawn(args: Sequence[str]) -> str:
+    """Resolve the Git common dir for the spawn's effective working directory."""
+    from fno.agents.harnesses.codex import _git_common_dir
+    from fno.agents.spawn_defaults import _flag_value
+
+    cwd = _flag_value(list(args), "--cwd", "-c")
+    return _git_common_dir(Path(cwd) if cwd else Path.cwd())
+
+
+def _refuse_codex_code_spawn_without_git_grant(args: Sequence[str]) -> None:
+    """Refuse a bounded Codex code spawn before any worker row is minted."""
+    if not _is_bounded_codex_code_spawn(args):
+        return
+    cwd = _spawn_flag_value(args, "--cwd", "-c") or str(Path.cwd())
+    if _codex_git_grant_for_spawn(args):
+        return
+    print(
+        "fno agents spawn: Codex code payloads require a resolved git grant; "
+        f"cwd={cwd}; git rev-parse --path-format=absolute --git-common-dir "
+        "failed; no worker launched",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 
 def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
     """Publish fno's computed writable-dir set for the Rust spawn route.
@@ -1411,6 +1487,7 @@ def make_agents_group_cls() -> type:
                         from fno.agents.spawn_defaults import inject_spawn_defaults
 
                         args = inject_spawn_defaults(args)
+                        _refuse_codex_code_spawn_without_git_grant(args)
                     # Same seam, same reason as the account handling below: the
                     # writable-dir grant must cover BOTH runtimes. The Python
                     # token builders only ever see the pane substrate, because

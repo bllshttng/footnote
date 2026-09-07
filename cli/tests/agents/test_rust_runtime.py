@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -229,6 +230,101 @@ def test_spawn_seam_injects_config_defaults(monkeypatch) -> None:
     assert "--model" in argv and argv[argv.index("--model") + 1] == "gpt-5.6-sol"
     # positionals still resolvable after the injected flags
     assert argv[-2:] == ["worker-A", "hi"] or "worker-A" in argv
+
+
+def test_codex_code_spawn_refuses_when_git_grant_is_unresolved(
+    monkeypatch, tmp_path
+) -> None:
+    """A bounded code worker is refused before the route can mint a row."""
+    from fno.cli import app
+
+    called: list[list[str]] = []
+    monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
+    result = CliRunner().invoke(
+        app,
+        [
+            "agents",
+            "spawn",
+            "$fno:target x-f370",
+            "--harness",
+            "codex",
+            "--substrate",
+            "thread",
+            "--cwd",
+            str(tmp_path),
+            "--node",
+            "x-f370",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert str(tmp_path) in result.output
+    assert "git rev-parse" in result.output
+    assert called == []
+
+
+def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> None:
+    """A resolved grant is the positive control and must not refuse."""
+    from fno.cli import app
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    called: list[list[str]] = []
+
+    def fake_route(args, **kw):
+        called.append(list(args))
+        raise SystemExit(0)
+
+    monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
+    monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    result = CliRunner().invoke(
+        app,
+        [
+            "agents",
+            "spawn",
+            "$fno:target x-f370",
+            "--harness",
+            "codex",
+            "--substrate",
+            "thread",
+            "--cwd",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert called and called[0][0] == "spawn"
+
+
+def test_codex_yolo_code_spawn_skips_bounded_grant_refusal(monkeypatch, tmp_path) -> None:
+    from fno.cli import app
+
+    called: list[list[str]] = []
+
+    def fake_route(args, **kw):
+        called.append(list(args))
+        raise SystemExit(0)
+
+    monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
+    monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    result = CliRunner().invoke(
+        app,
+        [
+            "agents",
+            "spawn",
+            "$fno:target x-f370",
+            "--harness",
+            "codex",
+            "--substrate",
+            "thread",
+            "--cwd",
+            str(tmp_path),
+            "--yolo",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert called
 
 
 def test_agents_help_falls_through_when_opted_in(monkeypatch) -> None:
