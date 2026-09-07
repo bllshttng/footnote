@@ -155,9 +155,11 @@ _wt_pids() {
     # subprocess per pid: a concurrent sweep's own argv carries every
     # worktree path (see the lock comment above), so candidates scale with
     # the number of overlapping sweeps and a per-pid `ps` turned that into
-    # N sweeps x 49 worktrees x N matches.
+    # N sweeps x 49 worktrees x N matches. ppid rides the SAME snapshot: the
+    # ancestor drop below reads it in memory, never via a second ps call.
     # The marker keeps awk's first input non-empty and positively identifies a
     # completed snapshot; otherwise an empty ps makes the candidates FNR==NR.
+    ps_snap="$(ps -Ao pid=,ppid=,command= 2>/dev/null; printf '%s\n' '__FNO_PS_SNAPSHOT_COMPLETE__')"
     filtered="$(awk '
         BEGIN { snapshot_marker = "__FNO_PS_SNAPSHOT_COMPLETE__" }
         FNR==NR {
@@ -169,8 +171,9 @@ _wt_pids() {
             snapshot_rows++
             sub(/^[ \t]+/, "", line)
             pid = $1
-            sub("^" pid "[ \t]+", "", line)
+            sub("^" pid "[ \t]+[^ \t]+[ \t]+", "", line)
             cmdbypid[pid] = line
+            ppidbypid[pid] = $2
             next
         }
         {
@@ -183,29 +186,27 @@ _wt_pids() {
             if (cmd ~ /archive-worktree\.sh/ || cmd ~ /worktree-lifecycle\.sh/) next
             print pid
         }
-    ' <(ps -Ao pid=,command= 2>/dev/null; printf '%s\n' '__FNO_PS_SNAPSHOT_COMPLETE__') <(printf '%s\n' "$candidates"))"
+    ' <(printf '%s\n' "$ps_snap") <(printf '%s\n' "$candidates"))"
     # A candidate that is an ANCESTOR of this sweep is the sweep's own
     # invoker, never a squatter: under pytest-xdist the worker's argv carries
-    # the test's tmp paths and its descendants match pgrep, reading as
-    # processes:2 in a tree nobody is in (CI smoke, 2026-09-07). The chain
-    # walk is bounded: a pid whose ancestry does not reach $$ within 12 hops
-    # is unrelated and stays.
-    local filtered2="" pid_walk hop walk_pid ancestor
-    filtered2=""
-    while IFS= read -r pid_walk; do
-        [[ -z "$pid_walk" ]] && continue
-        ancestor=0
-        walk_pid="$pid_walk"
-        for hop in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            [[ -z "$walk_pid" || "$walk_pid" == "0" || "$walk_pid" == "1" ]] && break
-            if [[ "$walk_pid" == "$$" ]]; then
-                ancestor=1
-                break
-            fi
-            walk_pid="$(ps -o ppid= -p "$walk_pid" 2>/dev/null | tr -d ' ')"
-        done
-        [[ "$ancestor" -eq 1 ]] && continue
-        filtered2="${filtered2}${pid_walk}"$'\n'
+    # the test's tmp paths and its pgrep matches read as phantom processes in
+    # a tree nobody is in (CI smoke, 2026-09-07). Walk UP from $$ through the
+    # snapshot's ppid map and drop any candidate on that chain; walking up
+    # from the CANDIDATE finds only its own ancestors and can never reach $$,
+    # a descendant. A pid missing from the snapshot ends the walk.
+    local mine="" walk_pid hop pid_keep
+    walk_pid="$$"
+    for hop in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        [[ -z "$walk_pid" || "$walk_pid" == "0" || "$walk_pid" == "1" ]] && break
+        mine="${mine}${walk_pid}"$'\n'
+        walk_pid="$(awk -v want="$walk_pid" '
+            $1 == want { print $2; exit }
+        ' <<< "$ps_snap")"
+    done
+    local filtered2=""
+    while IFS= read -r pid_keep; do
+        [[ -z "$pid_keep" ]] && continue
+        printf '%s\n' "$mine" | grep -qx "$pid_keep" || filtered2="${filtered2}${pid_keep}"$'\n'
     done <<< "$filtered"
     printf '%s\n' "$filtered2"
     return "$snapshot_rc"
@@ -391,7 +392,9 @@ _cargo_offload_base() {
     if command -v fno >/dev/null 2>&1; then
         raw="$(fno config get config.paths.cargo_targets_base 2>/dev/null || true)"
     fi
-    [[ "$raw" == "null" || -z "$raw" ]] && raw="$HOME/.fno/cargo-targets"
+    # The state-dir fallback form is the shape the hardcoded-path gate
+    # exempts: honor a configured state_dir, else the standard ~/.fno.
+    [[ "$raw" == "null" || -z "$raw" ]] && raw="${STATE_DIR:-$HOME/.fno}/cargo-targets"
     # Config stores ~ literally; expand a leading ~ to $HOME.
     printf '%s\n' "${raw/#\~/$HOME}"
 }

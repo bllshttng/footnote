@@ -113,11 +113,7 @@ def _check_path_max(value: str, field_name: str) -> None:
 
 
 class PathsBlock(BaseModel):
-    """Per-resource path overrides.
-
-    Every field is optional; omitting it causes the resolver to derive
-    the path from state_dir instead.
-    """
+    """Per-resource path overrides; an omitted field derives from state_dir."""
 
     model_config = ConfigDict(extra="ignore")
 
