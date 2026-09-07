@@ -295,3 +295,23 @@ def test_bearer_lane_refuses_a_shared_slot_holding_two_credentials(
 
     assert got.status == binding.AMBIGUOUS
     assert got.reason == "ambiguous-slot"
+
+
+def test_a_cached_binding_reports_when_it_was_proven(store: Path, monkeypatch) -> None:
+    """The read time is not the observation time. Reporting it as one renders
+    every cached answer as brand new, however old the proof behind it is."""
+    _bind(store, "makers", MAKERS)
+    record = _record("makers")
+    _serve(monkeypatch, {"t-makers": MAKERS})
+    monkeypatch.setattr(binding, "credential_blobs", lambda *_: [_blob("t-makers")])
+
+    fresh = binding.resolve_account_binding(
+        record, root=store, by_id={"makers": record}, now=100.0
+    )
+    cached = binding.resolve_account_binding(
+        record, root=store, by_id={"makers": record}, now=400.0
+    )
+
+    assert fresh.observed_at == 100.0
+    assert cached.status == binding.MATCHED
+    assert cached.observed_at == 100.0  # not 400.0: the proof is 5 minutes old

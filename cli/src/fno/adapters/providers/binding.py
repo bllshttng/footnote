@@ -130,11 +130,16 @@ def resolve_account_binding(
     if record is not None:
         harness = record.harness
     cred_root = credential_root(record) if record is not None else None
+    # The time the identity was PROVEN, which is the read time until a cache hit
+    # says otherwise. Reporting the read time for a cached answer would render
+    # every observation as brand new, however old the proof behind it is.
+    observed_at = now
 
     def _at(status: str, **kw) -> AccountBinding:
         kw.setdefault("credential_root", cred_root)
         kw.setdefault("requested_record", requested)
-        return AccountBinding(harness, status, observed_at=now, **kw)
+        kw.setdefault("observed_at", observed_at)
+        return AccountBinding(harness, status, **kw)
 
     if harness != "claude":
         return _at(UNKNOWN, reason="unsupported-harness")
@@ -167,7 +172,8 @@ def resolve_account_binding(
     if len(blobs) == 1:
         cached = managed.cached_slot_principal(harness, root, blobs[0], now=now, ttl=ttl)
         if cached is not None:
-            observed, ref = cached, managed.credential_digest(blobs[0])
+            observed, observed_at = cached
+            ref = managed.credential_digest(blobs[0])
     if observed is None:
         principal, proven, failure = managed.principal_of_blobs(blobs)
         if principal is None:

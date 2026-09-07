@@ -295,8 +295,11 @@ def _identity_lines(record, got, worst_pct: float, threshold: float, now: float)
         return []
     prefix = f"{record.id}  [{record.harness}]  "
     if got.status == MATCHED:
+        # matched_record is None when two records share the identity, which is
+        # still a match for the pinned one - naming it beats printing None.
+        served = got.matched_record or got.requested_record
         age = max(0, int((now - got.observed_at) // 60))
-        lines = [f"{prefix}identity: {got.matched_record} (observed {age}m ago)"]
+        lines = [f"{prefix}identity: {served} (observed {age}m ago)"]
     else:
         lines = [prefix + got.receipt]
     if worst_pct >= threshold:

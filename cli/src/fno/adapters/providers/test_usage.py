@@ -1610,9 +1610,11 @@ class TestPrincipalEvidenceTTL:
         from fno.adapters.providers import managed
 
         managed.note_slot_principal("claude", tmp_path, "acct-a", "tok-1", now=1000.0)
+        # The proof time rides along, so a reader can render a real observation
+        # age instead of restamping every cached answer as brand new.
         assert managed.cached_slot_principal(
             "claude", tmp_path, "tok-1", now=1000.0 + 60
-        ) == "acct-a"
+        ) == ("acct-a", 1000.0)
         assert managed.cached_slot_principal(
             "claude", tmp_path, "tok-1", now=1000.0 + 100_000
         ) is None

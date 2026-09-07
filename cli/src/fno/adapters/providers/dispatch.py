@@ -164,8 +164,10 @@ def dispatch_env(
 ) -> dict[str, str]:
     """Return the subprocess env dict for invoking provider_id's CLI.
 
-    Pure function. Does not mutate any global state. Reads settings.yaml
-    via load_providers(), looks up the record, and computes the env.
+    Reads settings.yaml via load_providers(), looks up the record, and computes
+    the env. For a claude record with a bound principal it also asks the binding
+    who the credential root serves, which can cost one profile call and writes
+    that proof to the digest-keyed cache. No account record is mutated.
 
     Raises:
         ProviderNotFoundError: if provider_id not in config.records

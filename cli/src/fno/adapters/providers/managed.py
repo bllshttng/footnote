@@ -1283,8 +1283,11 @@ def cached_slot_principal(
     *,
     now: float | None = None,
     ttl: float = _PRINCIPAL_TTL_S,
-) -> Optional[str]:
-    """The account uuid last PROVEN for exactly ``blob``, while still fresh.
+) -> Optional[tuple[str, float]]:
+    """``(account uuid, when)`` last PROVEN for exactly ``blob``, while still fresh.
+
+    The timestamp travels because a caller that renders an observation age from
+    the read time instead reports every cached answer as brand new.
 
     Keyed on a digest of the credential, not just the harness. Time alone is the
     wrong key: an out-of-band `/login` inside the TTL would otherwise reuse
@@ -1307,7 +1310,8 @@ def cached_slot_principal(
     uuid, at = data.get("account_uuid"), data.get("at")
     if not isinstance(uuid, str) or not isinstance(at, (int, float)):
         return None
-    return uuid if (now if now is not None else time.time()) - at < ttl else None
+    fresh = (now if now is not None else time.time()) - at < ttl
+    return (uuid, float(at)) if fresh else None
 
 
 def note_slot_principal(
@@ -1370,7 +1374,7 @@ def bearer_principal_verdict(
         return "unprovable"  # an incomplete binding cannot vouch for anything
     cached = cached_slot_principal(cli, root, bearer, now=now, ttl=ttl)
     if cached is not None:
-        return "match" if cached == want else "mismatch"
+        return "match" if cached[0] == want else "mismatch"
     principal, _failure = principal_of_bearer(bearer)
     got = identity_key(principal)
     if got is None:
