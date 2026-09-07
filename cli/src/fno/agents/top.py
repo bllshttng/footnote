@@ -34,8 +34,7 @@ def lane_rows() -> list[dict]:
     refusal the first time either changes. A count that cannot be read is
     reported as unreadable, NEVER as 0: the gate treats the unreadable case
     as a refusal (fail-closed), so an empty fleet would invert the meaning.
-    Providers appear when they carry a configured cap, or when a live row
-    names them (uncapped, `cap: None`).
+    Providers appear when capped or when a live row names them (`cap: None`).
     """
     from fno.agents.spawn_gate import (
         LIVE_STATUSES,
