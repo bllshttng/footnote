@@ -312,7 +312,9 @@ fn default_true() -> bool {
 /// (handshake stops the skew) and the additive `PaneInfo.orphaned_worker`.
 /// v72 (x-867b): `ControlVerb::ThreadReseat` - the re-seat move (a live
 /// pane-hosted worker becomes a portal seat, keeping its PTY); floor stays 58.
-pub const PROTO_VERSION: u32 = 72;
+/// v73: `LayoutSlot.portal`, `#[serde(default)]` - the persisted portal seat
+/// (index + row key) a restore holds idle; floor stays 58.
+pub const PROTO_VERSION: u32 = 73;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
