@@ -173,7 +173,7 @@ A literal like `agy` or `openclaw` under a provider-named binding is still a def
 
 ## Lane names are keys, not axis values
 
-A lane name (an `agents.profiles.<verb>.lanes` entry) is a `[[routing.models]]` row key and never an axis value. The row carries the axes (`harness`, `model`, `route`, `account`); the name is only the handle a lane list refers to it by, so a lane named `flash-zai` asserts nothing about any axis. Reading a lane name as a provider, vendor or model value is the same conflation this document exists to kill.
+A lane name (an `agents.profiles.<verb>.lanes` entry) is a `[[routing.models]]` row key and never an axis value. The row carries the axes: `harness`, `model`, `route` and `account`. The name is only the handle a lane list refers to it by. A lane named `flash-zai` asserts nothing about any axis. Reading a lane name as a provider, vendor or model value is the same conflation this document exists to kill.
 
 ## Canonical spawned-session identity
 
