@@ -4423,3 +4423,51 @@ def _converge_skip_unmapped(
         "skipped", EVENT_SKIPPED, reason="unmapped-project",
         node_id=child["id"], detail=detail,
     )
+
+
+def echo_advance_receipt(result: AdvanceEpicResult, *, kind: str, json_out: bool) -> None:
+    """Render one advance receipt (epic or loose) the way the CLI echoes it.
+
+    Both CLI runners share this so the JSON shape cannot drift between the two
+    drains - the Rust supervisor parses both with one struct.
+    """
+    import typer
+
+    if json_out:
+        typer.echo(
+            json.dumps(
+                {
+                    "epic_id": result.epic_id,
+                    "error": result.error,
+                    "activated": result.activated,
+                    "deactivated": result.deactivated,
+                    "all_done": result.all_done,
+                    "dispatched": list(result.dispatched),
+                    "children": [
+                        {
+                            "node_id": r.node_id,
+                            "decision": r.decision,
+                            "reason": r.reason,
+                            "short_id": r.short_id,
+                        }
+                        for r in result.child_results
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return
+    if result.error:
+        typer.echo(f"{kind} {result.epic_id}: {result.error}", err=True)
+    elif kind == "epic" and result.deactivated:
+        reason = "complete" if result.all_done else "stopped"
+        typer.echo(f"epic {result.epic_id}: mission deactivated ({reason})")
+    else:
+        n = len(result.dispatched)
+        skips = [r for r in result.child_results if r.decision == "skipped"]
+        fails = [r for r in result.child_results if r.decision == "failed"]
+        typer.echo(
+            f"{kind} {result.epic_id}: dispatched {n}"
+            + (f", skipped {len(skips)}" if skips else "")
+            + (f", failed {len(fails)}" if fails else "")
+        )

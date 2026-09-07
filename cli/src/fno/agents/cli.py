@@ -2228,20 +2228,18 @@ def cmd_spawn(
                 raise typer.Exit(code=2)
             route_provider = recorded_provider
 
-    # The node guard sits BELOW the resume-provider resolution on purpose.
-    # It acquires `dispatch:<id>` (and the handover `node:<id>`), and every
-    # exit above it is an exit that would strand those keys for their whole
-    # TTL with nothing launched. Taking the reservation after the launch is
-    # proven is one placement; a release bolted onto each exit is a guard on
-    # one of N paths, and the next exit added to that stretch leaks again.
-    # Below this point the next exit is `run_gate`, whose `except BaseException`
-    # releases both keys. Not the ONLY one: the TARGET_NO_MERGE set-or-clear
-    # block sits between a successful `run_gate` and the `try` whose `finally`
-    # releases, so an exception there still leaks both. Narrow, and named rather
-    # than papered over.
+    # The node guard sits BELOW the resume-provider resolution on purpose:
+    # it acquires `dispatch:<id>` (and the handover `node:<id>`), and every
+    # exit above it strands those keys for their whole TTL with nothing
+    # launched. Taking the reservation after the launch is proven is one
+    # placement; a release bolted onto each exit is a guard on one of N paths,
+    # and the next exit added to that stretch leaks again. Below this point
+    # the next exit is `run_gate`, whose `except BaseException` releases both
+    # keys. Not the ONLY one: the TARGET_NO_MERGE set-or-clear block sits
+    # between a successful `run_gate` and the `try` whose `finally` releases,
+    # so an exception there still leaks both - narrow, and named.
     node_reservation: tuple[str, str] | None = None
     node_claim: tuple[str, str] | None = None
-    guarded_node: str | None = None
     if node is not None:
         guarded_node = prov_env.get("FNO_NODE")
         if not guarded_node:
@@ -2336,7 +2334,7 @@ def cmd_spawn(
             force=force,
             no_wait=no_wait,
             route_provider=route_provider,
-            node=guarded_node,
+            node=prov_env.get("FNO_NODE") if node is not None else None,
         )
     except GateRefused as exc:
         _release_dispatch_claims(node_reservation, node_claim)

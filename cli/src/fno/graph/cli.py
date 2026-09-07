@@ -10243,72 +10243,6 @@ def _canonical_post_close(
 # -- reconcile (close merged-PR drift) --
 
 
-def _run_advance_loose(
-    project: str,
-    *,
-    max_dispatch: Optional[int],
-    json_out: bool,
-    verbose: bool,
-    model: Optional[str],
-    provider: Optional[str],
-) -> None:
-    """Run the project territory's loose-node drain and render its receipt (x-e221).
-
-    Same JSON shape as the epic receipt so the Rust drain parses both with one
-    struct. Never reports deactivated: a loose territory has no mission
-    lifecycle to retire on.
-    """
-    from fno.backlog.advance import advance_project_loose
-
-    try:
-        result = advance_project_loose(
-            project,
-            max_dispatch=max_dispatch,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-        )
-    except Exception as exc:  # noqa: BLE001 - the drain itself is non-fatal per-child
-        typer.echo(f"advance --loose: unexpected error (non-fatal): {exc}", err=True)
-        raise typer.Exit(code=0)
-
-    if json_out:
-        typer.echo(
-            json.dumps(
-                {
-                    "epic_id": result.epic_id,
-                    "error": result.error,
-                    "activated": result.activated,
-                    "deactivated": result.deactivated,
-                    "all_done": result.all_done,
-                    "dispatched": list(result.dispatched),
-                    "children": [
-                        {
-                            "node_id": r.node_id,
-                            "decision": r.decision,
-                            "reason": r.reason,
-                            "short_id": r.short_id,
-                        }
-                        for r in result.child_results
-                    ],
-                },
-                indent=2,
-            )
-        )
-    else:
-        if result.error:
-            typer.echo(f"loose {result.epic_id}: {result.error}", err=True)
-        else:
-            n = len(result.dispatched)
-            skips = [r for r in result.child_results if r.decision == "skipped"]
-            fails = [r for r in result.child_results if r.decision == "failed"]
-            typer.echo(
-                f"loose {result.epic_id}: dispatched {n}"
-                + (f", skipped {len(skips)}" if skips else "")
-                + (f", failed {len(fails)}" if fails else "")
-            )
-
-
 def _run_advance_epic(
     epic: str,
     *,
@@ -10345,44 +10279,9 @@ def _run_advance_epic(
         typer.echo(f"advance --epic: unexpected error (non-fatal): {exc}", err=True)
         raise typer.Exit(code=0)
 
-    if json_out:
-        typer.echo(
-            json.dumps(
-                {
-                    "epic_id": result.epic_id,
-                    "error": result.error,
-                    "activated": result.activated,
-                    "deactivated": result.deactivated,
-                    "all_done": result.all_done,
-                    "dispatched": list(result.dispatched),
-                    "children": [
-                        {
-                            "node_id": r.node_id,
-                            "decision": r.decision,
-                            "reason": r.reason,
-                            "short_id": r.short_id,
-                        }
-                        for r in result.child_results
-                    ],
-                },
-                indent=2,
-            )
-        )
-    else:
-        if result.error:
-            typer.echo(f"epic {result.epic_id}: {result.error}", err=True)
-        elif result.deactivated:
-            reason = "complete" if result.all_done else "stopped"
-            typer.echo(f"epic {result.epic_id}: mission deactivated ({reason})")
-        else:
-            n = len(result.dispatched)
-            skips = [r for r in result.child_results if r.decision == "skipped"]
-            fails = [r for r in result.child_results if r.decision == "failed"]
-            typer.echo(
-                f"epic {result.epic_id}: dispatched {n}"
-                + (f", skipped {len(skips)}" if skips else "")
-                + (f", failed {len(fails)}" if fails else "")
-            )
+    from fno.backlog.advance import echo_advance_receipt
+
+    echo_advance_receipt(result, kind="epic", json_out=json_out)
 
     # A refusal (bad node) is the only non-zero exit; a per-child failure is a
     # loud receipt, not a verb error.
@@ -10907,14 +10806,20 @@ def cmd_advance(
         if not project:
             typer.echo("advance: --loose requires --project", err=True)
             raise typer.Exit(code=2)
-        _run_advance_loose(
-            project,
-            max_dispatch=max_dispatch,
-            json_out=json_out,
-            verbose=verbose,
-            model=model,
-            provider=provider,
-        )
+        from fno.backlog.advance import advance_project_loose, echo_advance_receipt
+
+        try:
+            loose_result = advance_project_loose(
+                project,
+                max_dispatch=max_dispatch,
+                verbose=verbose,
+                model=model,
+                provider=provider,
+            )
+        except Exception as exc:  # noqa: BLE001 - the drain itself is non-fatal per-child
+            typer.echo(f"advance --loose: unexpected error (non-fatal): {exc}", err=True)
+            raise typer.Exit(code=0)
+        echo_advance_receipt(loose_result, kind="loose", json_out=json_out)
         return
     if stop or max_dispatch is not None or continuation:
         typer.echo("advance: --stop / --max / --continuation require --epic", err=True)

@@ -2308,18 +2308,27 @@ class ProcessAdmissionBlock(BaseModel):
     @classmethod
     def _coerce_max_processes(cls, v: object) -> int:
         """Invalid values keep the measured process-unit default; never disable."""
-        if isinstance(v, bool):
-            return 400
-        if isinstance(v, int) and v >= 1:
-            return v
-        if isinstance(v, str):
-            try:
-                parsed = int(v.strip())
-            except ValueError:
-                return 400
-            return parsed if parsed >= 1 else 400
-        return 400
+        return cast(int, _coerce_positive_int(v, 400))
 
+
+
+def _coerce_positive_int(v: object, default: Optional[int]) -> Optional[int]:
+    """A malformed/non-positive int reads as `default`; never raises.
+
+    One body for the half-dozen field coercers that share the shape: a bool
+    is never a count, a decimal string parses, anything else is the default.
+    """
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, int) and v >= 1:
+        return v
+    if isinstance(v, str):
+        try:
+            n = int(v.strip())
+        except ValueError:
+            return default
+        return n if n >= 1 else default
+    return default
 
 
 def _finite_or(value: object, default: float) -> float:
@@ -2499,33 +2508,13 @@ class AgentsBlock(SweepKeys):
     @classmethod
     def _coerce_max_live(cls, v: object) -> object:
         """Drop a non-positive / non-int max_live to the default (3); never raise."""
-        if isinstance(v, bool):
-            return 3
-        if isinstance(v, int) and v >= 1:
-            return v
-        if isinstance(v, str):
-            try:
-                n = int(v.strip())
-            except ValueError:
-                return 3
-            return n if n >= 1 else 3
-        return 3
+        return _coerce_positive_int(v, 3)
 
     @field_validator("max_live_per_territory", mode="before")
     @classmethod
     def _coerce_max_live_per_territory(cls, v: object) -> object:
         """Drop a non-positive / non-int cap to the default (4); never raise."""
-        if isinstance(v, bool):
-            return 4
-        if isinstance(v, int) and v >= 1:
-            return v
-        if isinstance(v, str):
-            try:
-                n = int(v.strip())
-            except ValueError:
-                return 4
-            return n if n >= 1 else 4
-        return 4
+        return _coerce_positive_int(v, 4)
 
     @field_validator("pane_group_max", mode="before")
     @classmethod
@@ -3720,33 +3709,13 @@ class ActiveBacklogConfig(BaseModel):
     @classmethod
     def _coerce_failure_limit(cls, v: object) -> object:
         """Drop a non-positive-int failure_limit to the default (3); never raise."""
-        if isinstance(v, bool):
-            return 3
-        if isinstance(v, int) and v >= 1:
-            return v
-        if isinstance(v, str):
-            try:
-                n = int(v.strip())
-            except ValueError:
-                return 3
-            return n if n >= 1 else 3
-        return 3
+        return _coerce_positive_int(v, 3)
 
     @field_validator("max_concurrent", mode="before")
     @classmethod
     def _coerce_max_concurrent(cls, v: object) -> object:
         """Drop a non-positive-int max_concurrent to the default (1); never raise."""
-        if isinstance(v, bool):
-            return 1
-        if isinstance(v, int) and v >= 1:
-            return v
-        if isinstance(v, str):
-            try:
-                n = int(v.strip())
-            except ValueError:
-                return 1
-            return n if n >= 1 else 1
-        return 1
+        return _coerce_positive_int(v, 1)
 
     def interval_seconds(self) -> Optional[int]:
         """Parsed poll-floor in seconds, or ``None`` if the interval is invalid."""
