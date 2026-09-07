@@ -4,7 +4,7 @@
 //! The gesture sites, the commit mapping and the row stamp all read
 //! these types through the re-export in the parent.
 
-use super::{SectionKey, TabId};
+use super::{agent_lattice_state, LatticeState, SectionKey, TabId};
 use crate::proto::Command;
 
 /// The command that clears ONE dead row, by what kind of row it is. Three
@@ -27,7 +27,11 @@ pub(crate) fn remove_dead(a: &super::AgentRow) -> Command {
             // nothing to answer, so resolution stays registry-only here.
             // The live-row gesture path carries pane_id itself.
             pane_id: None,
-            measure: false,
+            // (x-b5d1) Every door that removes an Unmeasured row measures:
+            // the dead-row sweep and the row menu ride the same flag the x
+            // gesture sets, so no path pays a stop leg a `?` row cannot
+            // answer. The server's gate still refuses a row that reads Alive.
+            measure: agent_lattice_state(a) == LatticeState::Unmeasured,
         },
     }
 }

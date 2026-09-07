@@ -116,23 +116,26 @@ pub(super) async fn run_stop_or_remove(name: &str) -> String {
     compose_stop_remove(&stop_note, name, &rm)
 }
 
+/// The daemon's own last non-empty stdout line, for notices that quote the
+/// verdict verbatim - "claude row already absent" is the fact that unstuck
+/// the operator when the CLI did this by hand. One extraction shared by
+/// every rm-quoting notice builder, so they cannot drift.
+fn daemon_verdict(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
 /// The combined stop+rm notice: the stop outcome first, then what the rm leg
 /// decided. Pure; the testable half of [`run_stop_or_remove`].
 fn compose_stop_remove(stop_note: &str, name: &str, rm: &AgentVerbResult) -> String {
     if rm.ok {
-        // Quote the daemon's own verdict - "claude row already absent" is
-        // the fact that unstuck the operator when the CLI did this by hand.
-        let verdict = rm
-            .stdout
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .trim();
-        if verdict.is_empty() {
-            format!("{stop_note}; removed it")
-        } else {
-            format!("{stop_note}; removed it ({verdict})")
+        match daemon_verdict(&rm.stdout) {
+            Some(v) => format!("{stop_note}; removed it ({v})"),
+            None => format!("{stop_note}; removed it"),
         }
     } else {
         format!("{stop_note}; {}", render_agent_verb("rm", name, rm))
@@ -155,13 +158,7 @@ fn measure_remove_notice(name: &str, rm: &AgentVerbResult) -> String {
     if !rm.ok {
         return render_agent_verb("rm", name, rm);
     }
-    let verdict = rm
-        .stdout
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .map(str::trim);
-    match verdict {
+    match daemon_verdict(&rm.stdout) {
         Some(v) => format!("removed {name} ({v})"),
         None => render_agent_verb("rm", name, rm),
     }

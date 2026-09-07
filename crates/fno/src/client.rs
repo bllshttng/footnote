@@ -13945,7 +13945,7 @@ async fn execute_row_menu_action(
                         name: a.name.clone(),
                         sid: a.harness_session_id.clone(),
                         pane_id: a.pane_id,
-                        measure: false,
+                        measure: agent_lattice_state(&a) == LatticeState::Unmeasured,
                     },
                 },
             };
