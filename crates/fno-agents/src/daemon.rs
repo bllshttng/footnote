@@ -25,7 +25,7 @@ use crate::protocol::{
     read_request, write_request, write_response, ErrorCode, Namespace, Request, Response,
 };
 pub use crate::receipt::{build_reap_receipt, write_reap_receipt, ReapReceipt};
-use crate::state::{self, RegistryEntry};
+use crate::state::{self, Lineage, RegistryEntry};
 use crate::AgentStatus;
 use serde_json::{json, Map, Value};
 use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership check
@@ -3693,7 +3693,6 @@ fn build_claude_stream_entry(
         requested_provider: None,
         requested_effort: None,
         harness: Some("claude".into()),
-        harness_session_id: Some(uuid.into()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         // x-d285: the daemon env is what this claude child inherits, so the
@@ -3712,9 +3711,6 @@ fn build_claude_stream_entry(
         project_root: cwd_s,
         session_id: None,
         spawn_trigger: None,
-        spawned_by_session: parent_session,
-        spawned_by_harness: parent_harness,
-        spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
         claude_session_uuid: Some(uuid.into()),
         messaging_socket_path: None,
@@ -3742,7 +3738,10 @@ fn build_claude_stream_entry(
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
-        ..Default::default()
+        ..RegistryEntry::new(
+            Some(uuid.into()),
+            Lineage::captured((parent_session, parent_harness, parent_cwd)),
+        )
     }
 }
 

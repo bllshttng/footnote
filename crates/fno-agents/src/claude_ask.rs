@@ -1736,7 +1736,7 @@ pub fn ask_followup(
 
 use crate::paths::AgentsHome;
 use crate::state::{
-    find_keyed_mut, load_registry, registry_write_key, update_registry, RegistryEntry,
+    find_keyed_mut, load_registry, registry_write_key, update_registry, Lineage, RegistryEntry,
 };
 use crate::AgentStatus;
 
@@ -2942,10 +2942,10 @@ fn create(
         requested_model: model.filter(|m| !m.is_empty()).map(str::to_string),
         requested_provider: None,
         requested_effort: effort.filter(|v| !v.is_empty()).map(str::to_string),
-        // Canonical identity at birth (x-ec59); harness_session_id mirrors the
-        // resolved uuid. A bounded miss stays a named spawning row below.
+        // Canonical identity at birth (x-ec59): the session id rides the
+        // struct-update base below. A bounded miss stays a named spawning row,
+        // so the constructor's Option is exactly the observed semantics.
         harness: Some("claude".to_string()),
-        harness_session_id: session_uuid.clone(),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         // x-d285: the client env is the spawn seam's verbatim, so the three-valued read is honest.
@@ -2961,7 +2961,7 @@ fn create(
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,
-        claude_session_uuid: session_uuid,
+        claude_session_uuid: session_uuid.clone(),
         messaging_socket_path: None,
         codex_session_id: None,
         gemini_session_id: None,
@@ -2996,10 +2996,18 @@ fn create(
         // later reader has to guess at.
         origin: Some("spawn".to_string()),
         spawn_trigger: None,
-        spawned_by_session: parent_session,
-        spawned_by_harness: parent_harness,
-        spawned_by_cwd: parent_cwd,
-        ..Default::default()
+        // The required identity/lineage args ride the struct-update base below.
+        // The session id itself is NOT folded into it: a bounded miss is a
+        // legitimate None at birth (this row stays a named spawning row), so
+        // the explicit field above keeps that semantics.
+        ..RegistryEntry::new(
+            session_uuid.clone(),
+            Lineage {
+                session: parent_session,
+                harness: parent_harness,
+                cwd: parent_cwd,
+            },
+        )
     };
 
     // Re-check the name UNDER the registry lock before appending. The per-agent

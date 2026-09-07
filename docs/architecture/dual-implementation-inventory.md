@@ -90,16 +90,12 @@ All eight are shared-vocabulary. None is a port candidate. The reasons differ en
 | `check-provider-vocabulary-parity.sh` | provider vocabulary across four Rust files and two Python files | shared-vocabulary |
 | `check-review-app-parity.sh` | review-App logins across `BOT_PROFILES` in Rust and two Python declarations, plus a `usage_markers` field per profile | shared-vocabulary |
 | `check-reviewer-descriptor-parity.sh` | `_RESOLVABLE_REVIEWERS` against `REVIEWER_INVOCATIONS`: invocation string, self-cert flag, per-harness verb overrides | shared-vocabulary |
-| `check-session-identity-parity.sh` | the identity-writing surfaces in two Rust files and the Python registry | shared-vocabulary |
-| `check-spawn-lineage-parity.sh` | that every registry mint site stamps the `spawned_by_*` parent edge, across eight Rust files and four Python files | shared-vocabulary |
 
-Two of these need a note. A reader in a hurry can mistake them for port candidates.
-
-`check-spawn-lineage-parity.sh` is an invariant gate, not a parity gate, despite its name. It asserts that twelve separate mint sites each stamp a field. Collapse the four Python sites into Rust and eight sites remain, under the same gate. The thing that drifts is a site forgetting the stamp, not two languages disagreeing.
+One of these needs a note. A reader in a hurry can mistake it for a port candidate.
 
 `check-coverage-context-parity.sh` and `check-harness-roster-parity.py` both compare code against artifacts that are not code. A GitHub workflow, operator ruleset data, and setup-doc filenames are among them. No port retires either one.
 
-`check-reviewer-descriptor-parity.sh` is the closest of the eight to a port candidate. It compares one declaration set held twice, in two languages. A port of the config layer deletes one side. It is still not dual LOGIC, and the config layer is not on the sequence below.
+`check-reviewer-descriptor-parity.sh` is the closest of the five to a port candidate. It compares one declaration set held twice, in two languages. A port of the config layer deletes one side. It is still not dual LOGIC, and the config layer is not on the sequence below.
 
 ## The port protocol
 
