@@ -1,22 +1,14 @@
 """The one effective-account answer every claude launch and usage reader shares.
 
-Four readers used to decide account identity for themselves: ``account_env``
-read the active-slot stamp, ``dispatch`` returned a config directory, ``usage``
-ranked credential sources, and ``doctor`` compared a stamp against a live
-principal. A path and a stamp both say where a credential is meant to be. They
-never say who that credential presents as. So the four could disagree and each
-one still printed a confident receipt naming an account.
+A path says where a credential is meant to be. A stamp says who put it there.
+Neither says who the credential presents as, so the four readers that each
+decided identity for themselves could disagree and still print a receipt naming
+an account. This joins the evidence ``managed`` already collects to the
+credential root a launch will actually read. It proves nothing new.
 
-This module joins the evidence ``managed`` already collects - the profile
-principal, the credential-digest cache, the per-record principal binding - to
-the credential root a launch will ACTUALLY read. It proves nothing new. It
-gives the four readers one answer.
-
-The answer fails closed in one direction only. ``mismatch`` is a positive
-observation and refuses. ``unknown`` never refuses: an unreachable profile
-endpoint must not ground the fleet, and the caller's documented permissive
-posture stands. What ``unknown`` does forbid is a receipt naming an account as
-served.
+``mismatch`` is a positive observation and refuses. ``unknown`` never refuses:
+an unreachable profile endpoint must not ground the fleet. What ``unknown``
+forbids is a receipt naming an account as served.
 """
 from __future__ import annotations
 
@@ -34,9 +26,7 @@ MISMATCH = "mismatch"
 UNKNOWN = "unknown"
 AMBIGUOUS = "ambiguous"
 
-#: The receipt slug a launch path emits when it refuses.
 MISMATCH_RECEIPT = "account_identity_mismatch"
-#: The receipt slug every reader emits instead of naming an account as served.
 UNKNOWN_RECEIPT = "account_identity_unknown"
 
 
@@ -44,11 +34,9 @@ UNKNOWN_RECEIPT = "account_identity_unknown"
 class AccountBinding:
     """Who the credential serving this launch provably belongs to.
 
-    ``credential_root`` is ``None`` for the shared slot (``~/.claude``), which
-    is a location and not an identity - the whole point of the record below it.
-    ``credential_ref`` is a digest, never a secret, so a caller can say "this
-    reading came from that credential generation" without a token reaching a
-    receipt or disk.
+    ``credential_root`` is ``None`` for the shared ``~/.claude`` slot, which is
+    a location and not an identity. ``credential_ref`` is a digest, so a caller
+    names the credential generation without a token reaching a receipt or disk.
     """
 
     harness: str
@@ -68,10 +56,9 @@ class AccountBinding:
 
     @property
     def receipt(self) -> str:
-        """A one-line receipt safe to print. Never names an unproven account."""
-        # The label rides a fresh proof; a cached one carries the identity key
-        # only. The record name is what an operator recognizes, so it comes
-        # first among what is left - never a bare uuid pair when a name exists.
+        """A line safe to print. It never names an account it cannot prove."""
+        # A fresh proof carries the label; a cached one carries the identity key
+        # only, so the record name stands in before a bare uuid pair does.
         who = (
             self.observed_label
             or self.matched_record
@@ -101,13 +88,10 @@ class AccountBinding:
 
 
 def credential_root(record: ProviderRecord) -> Path | None:
-    """The dir whose credential actually serves ``record``; ``None`` = shared slot.
+    """The dir whose credential serves ``record``; ``None`` = the shared slot.
 
-    ``config_dir`` (the per-account login) outranks ``credentials_source`` (the
-    oauth_dir staging lane) for the same reason ``resolve_account_overlay``
-    ranks them that way: a converged account always rides its own dir. A managed
-    record has neither and rides the shared slot, which is why a stamp - not a
-    path - is all that ever named it.
+    ``config_dir`` outranks the ``credentials_source`` staging lane, so a
+    converged account always rides its own dir.
     """
     if record.config_dir is not None:
         return Path(record.config_dir)
@@ -119,17 +103,14 @@ def credential_root(record: ProviderRecord) -> Path | None:
 def credential_blobs(harness: str, root: Path | None) -> list[str]:
     """Every distinct credential a reader of ``root`` can be served.
 
-    ``root=None`` is the shared slot and defers to ``managed``. A dir of its own
-    reads the Keychain item SCOPED to that dir plus that dir's own
-    ``.credentials.json`` - never the unscoped item, which belongs to whoever
-    occupies the shared slot. Transcript folders under the dir may be symlinks
-    anywhere; sharing transcripts never merges credential identity, because
+    A dir of its own reads the Keychain item SCOPED to it plus its own
+    ``.credentials.json``, never the unscoped item, which belongs to whoever
+    occupies the shared slot. Its transcript folders may symlink anywhere;
     neither source read here is a transcript.
 
-    Raises ``managed.KeychainError`` when a source could not be READ, which is a
-    different thing from a source that is absent: shrinking the candidate set on
-    a denied read is how an unambiguous-looking slot ends up holding two
-    accounts.
+    Raises ``managed.KeychainError`` when a source could not be READ. Shrinking
+    the candidate set on a denied read is how an unambiguous-looking slot ends
+    up holding two accounts.
     """
     if harness != "claude":
         return []
@@ -150,11 +131,6 @@ def credential_blobs(harness: str, root: Path | None) -> list[str]:
 
 
 def _records() -> dict[str, ProviderRecord]:
-    """Configured records by id; ``{}`` when the config cannot be read.
-
-    An unreadable config yields no candidates, so matching reports ``zero-match``
-    rather than guessing which account a live credential belongs to.
-    """
     try:
         from fno.adapters.providers.loader import load_providers
 
@@ -173,17 +149,14 @@ def resolve_account_binding(
     now: float | None = None,
     ttl: float = managed._PRINCIPAL_TTL_S,
 ) -> AccountBinding:
-    """Bind ``record`` (or the unpinned shared slot) to a proven principal.
+    """Bind ``record``, or the unpinned shared slot, to a proven principal.
 
-    ``record=None`` asks the canonical question - who is signed in right now? -
-    and answers it independently of the active-slot label, because the label is
-    what an out-of-band ``claude /login`` leaves wrong and untainted.
+    ``record=None`` asks who is signed in right now, independently of the
+    active-slot label: the label is what an out-of-band ``claude /login`` leaves
+    wrong and untainted. ``bearer`` narrows the question to one exact
+    credential, which is what a usage probe needs.
 
-    ``bearer`` narrows the question to one exact credential, which is what a
-    usage probe needs: proving one bearer and then measuring another is the same
-    misattribution by a longer route.
-
-    Never raises and never writes. Every failure is a typed ``unknown``.
+    Never raises and never writes a record. Every failure is a typed ``unknown``.
     """
     now = time.time() if now is None else now
     root = root or managed.store_root()
@@ -200,18 +173,17 @@ def resolve_account_binding(
     if harness != "claude":
         return _at(UNKNOWN, reason="unsupported-harness")
     if record is not None and record.auth == "api_key":
-        # An API key is its own access path. The ambient Anthropic subscription
-        # is not what it bills, so its principal is not the question asked here.
+        # An API key is its own access path. The ambient subscription is not
+        # what it bills, so its principal is not the question asked here.
         return _at(UNKNOWN, reason="api-key-route")
-
     if bearer is not None:
         # The bearer lane owns its own unbound case, in `managed`, so the
         # short-circuit below must not run ahead of it.
         return _bearer_binding(_at, harness, requested, cred_root, root, bearer, now, ttl)
 
-    # An unbound record has no reference identity, so nothing can be compared to
-    # it. Answering here keeps the launch path offline and free in the common
-    # case, and `doctor` already reports the unbound record with its repair.
+    # An unbound record has no reference identity to compare against, so
+    # answering here keeps the launch path offline on the common path. `doctor`
+    # reports the unbound record with its repair.
     want = None
     if requested is not None:
         want = managed.identity_key(managed.record_principal(requested, root))
@@ -278,20 +250,15 @@ def _bearer_binding(
     """Bind one exact bearer, deferring to ``managed``'s per-bearer verdict.
 
     A shared-slot bearer that proves out is still unattributable when the slot
-    presents more than one distinct credential: claude reads the scoped Keychain
-    item while the usage probe reads the unscoped one, so the account proven is
-    not necessarily the account billed. Settled offline on the candidate count.
+    presents two distinct credentials: claude reads the scoped Keychain item
+    while the probe reads the unscoped one. Settled offline on the count.
     """
     ref = managed.credential_digest(bearer)
     if requested is None:
         return _at(UNKNOWN, reason="bearer-needs-record", credential_ref=ref)
-    if cred_root is None:
-        try:
-            if len(managed.canonical_slot_blobs(harness)) > 1:
-                return _at(AMBIGUOUS, reason="ambiguous-slot", credential_ref=ref)
-        except managed.KeychainError:
-            return _at(UNKNOWN, reason="credential-unreadable", credential_ref=ref)
     try:
+        if cred_root is None and len(managed.canonical_slot_blobs(harness)) > 1:
+            return _at(AMBIGUOUS, reason="ambiguous-slot", credential_ref=ref)
         verdict = managed.bearer_principal_verdict(
             harness, requested, root, bearer, now=now, ttl=ttl
         )

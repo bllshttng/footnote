@@ -253,8 +253,8 @@ _MANUAL_SWITCH = (
 def _identity_by_record(records, now: float) -> dict:
     """The effective-account verdict per claude record, keyed by record id.
 
-    One read per record, from the same binding the launch paths use, so the
-    usage surface cannot name an account a spawn would refuse.
+    From the same binding the launch paths use, so the usage surface cannot
+    name an account a spawn would refuse.
     """
     from fno.adapters.providers.binding import resolve_account_binding
 
@@ -274,34 +274,31 @@ def _identity_by_record(records, now: float) -> dict:
 
 def _add_identity(entry: dict, got) -> None:
     """Attach the identity verdict to a JSON usage row, when there is one."""
-    if got is None:
-        return
-    entry["identity"] = {
-        "status": got.status,
-        "account": got.matched_record,
-        "reason": got.reason,
-        "observed_at": got.observed_at,
-    }
+    if got is not None:
+        entry["identity"] = {
+            "status": got.status,
+            "account": got.matched_record,
+            "reason": got.reason,
+            "observed_at": got.observed_at,
+        }
 
 
 def _identity_lines(record, got, worst_pct: float, threshold: float, now: float) -> list[str]:
     """The identity and manual-switch lines for one record's usage row.
 
-    Says nothing when identity is proven and the account has headroom. An
-    unproven identity is named rather than passed over, because silence there
-    reads as a proven account.
+    An unproven identity is named rather than passed over: silence there reads
+    as a proven account.
     """
     from fno.adapters.providers.binding import MATCHED
 
     if got is None:
         return []
     prefix = f"{record.id}  [{record.harness}]  "
-    lines = []
-    if got.status != MATCHED:
-        lines.append(prefix + got.receipt)
-    else:
+    if got.status == MATCHED:
         age = max(0, int((now - got.observed_at) // 60))
-        lines.append(f"{prefix}identity: {got.matched_record} (observed {age}m ago)")
+        lines = [f"{prefix}identity: {got.matched_record} (observed {age}m ago)"]
+    else:
+        lines = [prefix + got.receipt]
     if worst_pct >= threshold:
         lines.append(prefix + _MANUAL_SWITCH)
     return lines
@@ -1382,11 +1379,9 @@ def _slot_identity_findings(harness_kind: str) -> list[dict]:
     """Identity findings for one CLI's shared slot, from the shared binding.
 
     The same read the launch paths and the usage probe make, so doctor cannot
-    report a healthy account that a spawn then refuses.
-
-    Free until it can answer: with no stamp, or no principal bound to the
-    stamped record, there is nothing to compare - and ``unbound-principal``
-    above already names that case with its repair.
+    report a healthy account that a spawn then refuses. Free until it can
+    answer: with no stamp, or no principal bound to the stamped record, there is
+    nothing to compare, and ``unbound-principal`` above already names that.
     """
     from fno.adapters.providers.binding import (
         AMBIGUOUS,
@@ -1398,57 +1393,43 @@ def _slot_identity_findings(harness_kind: str) -> list[dict]:
         return []
     repair = f"repair with `fno config accounts reconcile-slot {harness_kind}`"
     where = f"slot:{harness_kind}"
+
+    def _finding(problem: str, detail: str) -> list[dict]:
+        return [{"record": where, "problem": problem, "detail": detail}]
+
     try:
         root = managed.store_root()
         stamped = managed.active_slot_id(harness_kind, root)
     except (OSError, managed.ManagedStoreError):
-        # A denied or timed-out read is a diagnosis we could not make, not a
-        # crash in a read-only verb.
-        return []
-    if not stamped:
-        return []
-    bound = managed.record_principal(stamped, root)
-    if bound is None:
+        return []  # a diagnosis we could not make, not a crash in a read-only verb
+    if not stamped or managed.record_principal(stamped, root) is None:
         return []
 
+    bound = managed.identity_key(managed.record_principal(stamped, root))
     got = resolve_account_binding(None, harness=harness_kind, root=root)
     if got.status == AMBIGUOUS and got.reason == "ambiguous-slot":
-        return [{
-            "record": where,
-            "problem": "ambiguous-slot",
-            "detail": (
-                "the slot's stored credentials belong to different accounts "
-                "(a stale scoped Keychain item beside a live unscoped one), so "
-                "whichever is stamped, some reader gets the other; sign out and "
-                f"back in, then `fno config accounts reconcile-slot {harness_kind}`"
-            ),
-        }]
+        return _finding("ambiguous-slot", (
+            "the slot's stored credentials belong to different accounts (a stale "
+            "scoped Keychain item beside a live unscoped one), so whichever is "
+            f"stamped, some reader gets the other; sign out and back in, then {repair}"
+        ))
     if got.observed_principal is None:
         # AC3-EDGE. This used to read as healthy: an unreadable slot cannot
         # demonstrate drift, so the check that would have caught a wrong stamp
         # returned nothing and doctor stayed quiet about it.
-        return [{
-            "record": where,
-            "problem": UNKNOWN_RECEIPT,
-            "detail": (
-                f"who the live slot serves could not be proven ({got.reason}), so "
-                f"usage and launch receipts stay unknown rather than naming "
-                f"'{stamped}'; this is not a healthy slot and not a successful "
-                f"switch - {repair}"
-            ),
-        }]
-    if got.observed_principal == managed.identity_key(bound):
+        return _finding(UNKNOWN_RECEIPT, (
+            f"who the live slot serves could not be proven ({got.reason}), so usage "
+            f"and launch receipts stay unknown rather than naming '{stamped}'; this "
+            f"is not a healthy slot and not a successful switch - {repair}"
+        ))
+    if got.observed_principal == bound:
         return []
-    return [{
-        "record": where,
-        "problem": "slot-identity-drift",
-        "detail": (
-            f"the stamp names '{stamped}' but the live slot credential belongs "
-            f"to {got.observed_label or got.observed_principal} (an out-of-band "
-            f"`{harness_kind} /login`), so usage is being attributed to the "
-            f"wrong account - {repair}"
-        ),
-    }]
+    return _finding("slot-identity-drift", (
+        f"the stamp names '{stamped}' but the live slot credential belongs to "
+        f"{got.observed_label or got.observed_principal} (an out-of-band "
+        f"`{harness_kind} /login`), so usage is being attributed to the wrong "
+        f"account - {repair}"
+    ))
 
 
 @cli.command("doctor")

@@ -95,10 +95,7 @@ def fx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Fixture:
     monkeypatch.setenv("FNO_STATE_DIR", str(home / ".fno"))
     # Disposable roots, so the probe reads the fixture's files and never the
     # machine's Keychain or a real account.
-    import fno.adapters.providers.usage as usage_mod
-
     monkeypatch.setattr(managed, "_read_claude_keychain_item", lambda _s: None)
-    monkeypatch.setattr(usage_mod, "_read_claude_keychain_blobs", lambda _d: [])
     monkeypatch.setattr(
         managed,
         "slot_principal",

@@ -338,10 +338,9 @@ def _login_present(config_dir: Path) -> bool:
 def _refuse_identity_mismatch(record, providers_root: Path, by_id: dict) -> None:
     """Refuse a pin whose credential root provably serves a different account.
 
-    Only a POSITIVE mismatch refuses. An unreachable profile endpoint must not
-    ground the fleet, so every other verdict leaves this lane's documented
-    posture alone - what an unproven identity forbids is a receipt naming the
-    account as served, not the launch.
+    Only a POSITIVE mismatch refuses; an unreachable profile endpoint must not
+    ground the fleet. See docs/provider-rotation.md, the effective-account
+    binding.
     """
     from fno.adapters.providers.binding import MISMATCH, resolve_account_binding
 

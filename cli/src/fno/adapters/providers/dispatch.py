@@ -145,12 +145,10 @@ def _env_for_api_key(
 def _refuse_identity_mismatch(
     record: ProviderRecord, root: Path, by_id: dict[str, ProviderRecord]
 ) -> None:
-    """Refuse a record whose credential root provably serves another account.
+    """The same refusal ``resolve_account_overlay`` makes, from the same binding.
 
-    The same rule ``resolve_account_overlay`` applies, from the same binding:
-    two launch env paths that disagree about who is being billed are two
-    receipts, one of which is wrong. Only a POSITIVE mismatch refuses; an
-    unreachable profile endpoint leaves this path exactly as it was.
+    Two launch env paths that disagree about who is billed are two receipts,
+    one of which is wrong.
     """
     from fno.adapters.providers.binding import MISMATCH, resolve_account_binding
 

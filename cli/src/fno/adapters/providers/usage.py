@@ -22,12 +22,9 @@ token, bearer, or credential material is ever logged, emitted, or persisted.
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
 import logging
 import os
-import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -36,6 +33,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from fno.adapters.providers.binding import credential_blobs, credential_root
 from fno.adapters.providers.dispatch import dispatch_env
 from fno.adapters.providers.model import ProviderRecord
 from fno.agents.model_routing import _parse_target
@@ -50,7 +48,6 @@ PROBE_TIMEOUT_SECONDS = 10  # matches Claude Code's own 10s usage-fetch budget
 # resets_at: ISO-8601 string}` - NOT a `windows[]` array of epoch floats.
 _CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CLAUDE_USER_AGENT = "claude-code/2.1.0"  # a custom UA risks being rejected
-_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"  # macOS Keychain item, live-verified
 # The API's known window keys mapped to our short labels. The response also
 # carries model-specific weekly windows (seven_day_opus, seven_day_sonnet, ...);
 # those are captured generically by _parse_claude_windows (any five_hour /
@@ -144,18 +141,6 @@ class UsageSnapshot:
 # ---------------------------------------------------------------------------
 
 
-def _read_claude_bearer(record: ProviderRecord) -> str | None:
-    """Read the OAuth access token from the record's resolved credentials dir.
-
-    Deprecated single-token shim: returns the FIRST candidate (see
-    :func:`_claude_bearer_candidates`). Kept for callers/tests that want one
-    token; the probe itself tries every candidate because a scoped Keychain
-    item can hold a STALE token (401) while the unscoped one is live.
-    """
-    cands = _claude_bearer_candidates(record)
-    return cands[0] if cands else None
-
-
 def _token_from_blob(blob: str | None) -> str | None:
     """Extract ``claudeAiOauth.accessToken`` from a credential JSON blob."""
     if not blob:
@@ -171,31 +156,6 @@ def _token_from_blob(blob: str | None) -> str | None:
             if isinstance(token, str) and token:
                 return token
     return None
-
-
-def _canonical_claude_slot_dir() -> Path:
-    """The shared claude slot, ``~/.claude``, ignoring any ambient pin.
-
-    Deliberately NOT ``managed._claude_slot_config_dir()``, which honors
-    ``CLAUDE_CONFIG_DIR``: that is right for a slot WRITE performed by an
-    operator verb, and wrong for an attribution read, because a worker pinned to
-    another account exports that variable and would make the probe read its
-    credential while the stamp names someone else.
-    """
-    return Path.home() / ".claude"
-
-
-def _record_credential_dir(record: ProviderRecord) -> Path | None:
-    """The record's OWN credential dir, or None when it has no per-record source.
-
-    One line, because the ranking belongs to ``binding.credential_root``: this
-    reader, both launch env paths and doctor all have to agree about which dir
-    serves a record, and three copies of the ranking is how they stopped
-    agreeing.
-    """
-    from fno.adapters.providers.binding import credential_root
-
-    return credential_root(record)
 
 
 def _is_active_slot_occupant(record: ProviderRecord) -> bool:
@@ -245,7 +205,7 @@ def _attributed_credential_dir(record: ProviderRecord) -> tuple[bool, Path | Non
     ids, so a probe reading it would report a dead token's window or another
     account's usage. Its job is slot materialization, not identity.
     """
-    own = _record_credential_dir(record)
+    own = credential_root(record)
     if own is not None:
         return True, own
     if record.auth == "managed" and _is_active_slot_occupant(record):
@@ -275,7 +235,7 @@ def _shares_the_slot(record: ProviderRecord) -> bool:
     A ``config_dir`` record is attributable without the slot, so neither the
     taint nor a drifted stamp can affect it and it never enters any repair.
     """
-    return record.auth == "managed" and _record_credential_dir(record) is None
+    return record.auth == "managed" and credential_root(record) is None
 
 
 def _reconcile_slot_once(record: ProviderRecord, now: float) -> bool:
@@ -355,75 +315,27 @@ def _bearer_verdict(record: ProviderRecord, bearer: str, now: float) -> str:
 def _claude_bearer_candidates(record: ProviderRecord) -> list[str]:
     """All candidate OAuth bearer tokens for ``record``, in preference order.
 
-    Claude Code stores the token in a ``<dir>/.credentials.json`` file (Linux /
-    symlinked setups) OR the macOS Keychain (the darwin default, where no file
-    exists - the reason a file-only read returned None here).
-
-    The candidate set is bounded by attribution (see
-    :func:`_attributed_credential_dir`): a record with its own dir reads ONLY
-    that dir's scoped Keychain item, never the unscoped fallback, because the
-    unscoped item belongs to whoever occupies the shared ``~/.claude`` slot and
-    borrowing it would file the active account's usage under this record's name.
-    A record with no own dir is probed only when it IS the slot occupant, in
-    which case the unscoped item is its own token.
+    The candidate set is `binding.credential_blobs` over the attributed root, so
+    the probe reads exactly what the launch paths and doctor read. A record with
+    its own dir never sees the unscoped Keychain item, which belongs to whoever
+    occupies the shared slot. The shared-slot read ignores the ambient
+    ``CLAUDE_CONFIG_DIR``, which a pinned worker exports.
 
     All read fresh per probe (tokens rotate); never cached, never logged.
     """
     probeable, src = _attributed_credential_dir(record)
     if not probeable:
         return []
-
     tokens: list[str] = []
-    seen: set[str] = set()
-
-    def _add(tok: str | None) -> None:
-        if tok and tok not in seen:
-            seen.add(tok)
-            tokens.append(tok)
-
-    # The shared slot is the CANONICAL ~/.claude, never the ambient
-    # CLAUDE_CONFIG_DIR. A worker pinned to account B runs with B's dir exported,
-    # so honoring the env here would read B's credential while the slot stamp
-    # says A - and file B's usage under A's id, the exact lie this attribution
-    # rule exists to prevent. `resolve_account_overlay`'s managed-active lane
-    # pins the canonical path for the same reason.
-    creds_dir = src if src is not None else _canonical_claude_slot_dir()
     try:
-        _add(_token_from_blob((creds_dir / ".credentials.json").read_text(encoding="utf-8")))
-    except OSError:
-        pass
-    for blob in _read_claude_keychain_blobs(src):
-        _add(_token_from_blob(blob))
+        blobs = credential_blobs(record.harness, src)
+    except Exception:  # noqa: BLE001 - an unreadable source offers no candidate
+        return []
+    for blob in blobs:
+        token = _token_from_blob(blob)
+        if token and token not in tokens:
+            tokens.append(token)
     return tokens
-
-
-def _read_claude_keychain_blobs(config_dir: Path | None) -> list[str]:
-    """Return the raw credential blob(s) attributable to ``config_dir``.
-
-    A dir reads its SCOPED item (``Claude Code-credentials-<sha256[:8]>``) only;
-    ``None`` means the shared slot and reads the unscoped ``Claude
-    Code-credentials``. The two are never mixed: falling back from a stale scoped
-    item to the unscoped one is exactly how a per-account probe ends up reporting
-    the active account's numbers. Non-darwin or a denied access prompt yields [].
-    """
-    if sys.platform != "darwin":
-        return []
-    account = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
-    if config_dir is not None:
-        suffix = hashlib.sha256(str(config_dir).encode()).hexdigest()[:8]
-        service = f"{_CLAUDE_KEYCHAIN_SERVICE}-{suffix}"
-    else:
-        service = _CLAUDE_KEYCHAIN_SERVICE
-    try:
-        out = subprocess.run(
-            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    if out.returncode == 0 and out.stdout.strip():
-        return [out.stdout.strip()]
-    return []
 
 
 def _iso_to_epoch(value: Any) -> float | None:
