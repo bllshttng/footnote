@@ -20,7 +20,6 @@ import pytest
 def _clear_caches() -> None:
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 @pytest.fixture(autouse=True)

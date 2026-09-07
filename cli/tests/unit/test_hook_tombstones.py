@@ -10,7 +10,6 @@ import typer
 import typer.main
 from click.testing import CliRunner
 
-from fno import paths
 from fno.hook_config import referenced_scripts, stubless_deletions
 from fno.lint_cli import lint
 
@@ -67,13 +66,6 @@ def _repo_with_hooks(tmp_path: Path) -> tuple[Path, str]:
     _commit_all(repo, "base: config references demo-gate.sh")
     base = _git(repo, "rev-parse", "HEAD").strip()
     return repo, base
-
-
-@pytest.fixture(autouse=True)
-def _fresh_repo_root_cache():
-    paths.resolve_repo_root.cache_clear()
-    yield
-    paths.resolve_repo_root.cache_clear()
 
 
 def _invoke(repo: Path, *args: str):

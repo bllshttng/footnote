@@ -19,7 +19,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.decide.cli import decide_app
-from fno.paths import project_events_json, project_log
+from fno.paths import project_log
 
 runner = CliRunner()
 
@@ -475,7 +475,6 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
     import fno.paths as paths_mod
 
-    paths_mod.resolve_repo_root.cache_clear()
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     return tmp_path
 

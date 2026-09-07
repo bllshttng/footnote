@@ -6,7 +6,6 @@ prevent using the project-local snapshot.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Generator
 
@@ -19,29 +18,10 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     config_mod._loaded_from = None
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-    if hasattr(paths_mod, "resolve_repo_root"):
-        try:
-            paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
     yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     config_mod._loaded_from = None
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
-
 # ---------------------------------------------------------------------------
 # AC5-HP: project_local exists -> return it without calling config_file()
 # ---------------------------------------------------------------------------
@@ -88,11 +68,8 @@ def test_default_settings_path_falls_back_to_config_file_when_no_local(
     monkeypatch.setenv("FNO_CONFIG", str(global_settings))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     config_mod._loaded_from = None
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.adapters.providers.dispatch import _default_settings_path
     result = _default_settings_path()
@@ -125,11 +102,8 @@ def test_default_settings_path_project_local_returned_even_if_config_file_raises
     monkeypatch.setenv("FNO_CONFIG", str(bad_settings))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     config_mod._loaded_from = None
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.adapters.providers.dispatch import _default_settings_path
 
@@ -160,11 +134,8 @@ def test_default_settings_path_project_local_wins_over_global(
     monkeypatch.setenv("FNO_CONFIG", str(global_settings))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     config_mod._loaded_from = None
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.adapters.providers.dispatch import _default_settings_path
     result = _default_settings_path()

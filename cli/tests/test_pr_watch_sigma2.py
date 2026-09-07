@@ -141,7 +141,6 @@ class TestEmitEventAnchoredPath:
         # Clear any cached settings
         try:
             from fno.config import load_settings
-            load_settings.cache_clear()
         except Exception:
             pass
 
@@ -171,7 +170,6 @@ class TestEmitEventAnchoredPath:
         # Reset cache after HOME change
         try:
             from fno.config import load_settings
-            load_settings.cache_clear()
         except Exception:
             pass
         monkeypatch.setenv("HOME", str(fake_home))
@@ -198,7 +196,6 @@ class TestEmitEventAnchoredPath:
         monkeypatch.setenv("HOME", str(fake_home))
         try:
             from fno.config import load_settings
-            load_settings.cache_clear()
         except Exception:
             pass
 
@@ -284,7 +281,6 @@ class TestCliTickIntegration:
         monkeypatch.setenv("HOME", str(fake_home))
         try:
             from fno.config import load_settings
-            load_settings.cache_clear()
         except Exception:
             pass
 
@@ -661,7 +657,6 @@ class TestControlPlaneArmRows:
         monkeypatch.setenv("PR_WATCH_FIRE_CMD", "true")
         try:
             from fno.config import load_settings
-            load_settings.cache_clear()
         except Exception:
             pass
 

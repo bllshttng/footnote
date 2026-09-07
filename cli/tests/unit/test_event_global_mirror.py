@@ -51,9 +51,6 @@ def _configure(tmp_path: Path, monkeypatch, state_dir: str) -> Path:
     from fno import config as config_mod
     from fno import paths as paths_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
     return paths_mod.global_events_json()
 
 
@@ -154,7 +151,6 @@ def test_the_mirrored_copy_is_repo_scoped_and_the_project_copy_is_not(
     monkeypatch.setenv("FNO_REPO_ROOT", str(checkout))
     monkeypatch.chdir(tmp_path)
     from fno import paths as paths_mod
-    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
 
     project = checkout / ".fno" / "events.jsonl"
     result = _emit(project, "review_attestation", ATTESTATION)

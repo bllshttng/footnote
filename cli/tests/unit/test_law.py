@@ -25,7 +25,6 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
     from fno import paths
 
-    paths.resolve_repo_root.cache_clear()
     (tmp_path / ".fno").mkdir(parents=True)
     index = tmp_path / "state" / "decisions.jsonl"
     index.parent.mkdir()

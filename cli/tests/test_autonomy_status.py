@@ -62,7 +62,6 @@ def test_ac1_hp_every_known_spawner_appears(
 
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     rows = collect_status(tmp_path)
 
@@ -97,7 +96,6 @@ def test_ac1_hp_env_override_rank_is_visible(
     _write_settings(tmp_path, "schema_version: 1\n")
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     monkeypatch.setenv("FNO_AUTO_CONTINUE", "1")
 
     rows = collect_status(tmp_path)
@@ -115,7 +113,6 @@ def test_previously_ungated_spawners_now_gated_and_default_true(
     _write_settings(tmp_path, "schema_version: 1\n")
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     rows = collect_status(tmp_path)
     by_name = {r.name: r for r in rows}
@@ -139,7 +136,6 @@ def test_king_loop_row_is_present_and_defaults_off(
     _write_settings(tmp_path, "schema_version: 1\n")
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     rows = collect_status(tmp_path)
     king = next(r for r in rows if r.name == "king loop")
@@ -156,7 +152,6 @@ def test_master_switch_row_present_and_armed_by_default(
     _write_settings(tmp_path, "schema_version: 1\n")
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     rows = collect_status(tmp_path)
     master = next(r for r in rows if r.name == "autonomy (master switch)")
@@ -173,7 +168,6 @@ def test_master_switch_off_vetoes_every_other_row(
     _write_settings(tmp_path, "schema_version: 1\nautonomy:\n  enabled: false\n")
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     rows = collect_status(tmp_path)
     by_name = {r.name: r for r in rows}

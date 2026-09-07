@@ -54,7 +54,6 @@ def pinned(tmp_path: Path, monkeypatch) -> dict[str, Path]:
     # and the autouse conftest clear already ran before this fixture.
     import fno.paths as paths_mod
 
-    paths_mod.resolve_repo_root.cache_clear()
 
     scratch = tmp_path / "scratch" / "events.jsonl"
     monkeypatch.setenv("FNO_EVENTS_PATH", str(scratch))

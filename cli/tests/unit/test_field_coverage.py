@@ -7,7 +7,6 @@ import typer
 import typer.main
 from click.testing import CliRunner
 
-from fno import paths
 from fno.agents.registry import AgentEntry
 from fno.lint_cli import lint
 
@@ -24,11 +23,7 @@ runner = CliRunner()
 
 def _invoke(monkeypatch, repo: Path, *args: str):
     monkeypatch.setenv("FNO_REPO_ROOT", str(repo))
-    paths.resolve_repo_root.cache_clear()
-    try:
-        return runner.invoke(app, ["field-coverage", *args])
-    finally:
-        paths.resolve_repo_root.cache_clear()
+    return runner.invoke(app, ["field-coverage", *args])
 
 
 def _write_source_fixture(repo: Path, *, required: list[str], extra: list[str]) -> None:

@@ -27,11 +27,7 @@ def _hermetic_worktree_config(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("FNO_CONFIG", str(iso))
     from fno import config as _config
     from fno import paths as _paths
-    _config.load_settings.cache_clear()
-    _paths._settings.cache_clear()
     yield
-    _config.load_settings.cache_clear()
-    _paths._settings.cache_clear()
 
 
 # ----------------------------------------------------------------------

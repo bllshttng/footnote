@@ -79,7 +79,6 @@ def _isolate(
 
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.graph._constants as gc
     import fno.paths as paths_mod
 
@@ -112,7 +111,6 @@ def _isolate(
     monkeypatch.setitem(vars(gc), "GRAPH_MD", paths["md"])
     monkeypatch.setitem(vars(gc), "GRAPH_HTML", paths["html"])
     yield paths
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def _mutate(graph: Path, entries: list[dict], new_title: str) -> None:
@@ -317,14 +315,12 @@ def test_project_local_rows_warn_not_render(_isolate, tmp_path, monkeypatch, cap
     monkeypatch.setenv("FNO_CONFIG", str(local_cfg))
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     from fno.graph.roadmap_public import render_configured_targets
 
     render_configured_targets([])
     err = capsys.readouterr().err
     assert "project-local row(s) ignored" in err
     assert not _isolate["target"].exists()
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def test_render_targets_table_typo_degrades_to_empty(caplog):

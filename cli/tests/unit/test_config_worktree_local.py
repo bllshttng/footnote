@@ -36,7 +36,6 @@ def _load(tmp_path, monkeypatch, shared: str, local: str | None):
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", os.devnull)
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     return config_mod.load_settings()
 
 
@@ -127,7 +126,6 @@ def test_symlinked_local_file_is_skipped(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", os.devnull)
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     s = config_mod.load_settings()
     assert s.project.id == "shared-project"
 
@@ -168,19 +166,13 @@ def test_production_anchor_via_repo_root(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", os.devnull)
     from fno import config as config_mod
-    from fno import paths as paths_mod
 
-    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    try:
-        s = config_mod.load_settings()
-        assert s.project.id == "from-repo-root"
-        # Both files were migrated to flat TOML (hard cut).
-        assert (d / "config.toml").is_file()
-        assert (d / "config.local.toml").is_file()
-        assert not (d / "settings.yaml").exists()
-    finally:
-        paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
+    s = config_mod.load_settings()
+    assert s.project.id == "from-repo-root"
+    # Both files were migrated to flat TOML (hard cut).
+    assert (d / "config.toml").is_file()
+    assert (d / "config.local.toml").is_file()
+    assert not (d / "settings.yaml").exists()
 
 
 def test_non_string_key_in_local_does_not_crash(caplog):

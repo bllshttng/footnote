@@ -19,7 +19,6 @@ def _load(tmp_path: Path, monkeypatch, content: str) -> None:
     f = d / "settings.yaml"
     f.write_text(content, encoding="utf-8")
     monkeypatch.setenv("FNO_CONFIG", str(f))
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def test_default_false_bounded_both_providers(tmp_path, monkeypatch):

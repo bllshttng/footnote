@@ -31,7 +31,6 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
     for fn in ("_settings", "resolve_repo_root"):
         obj = getattr(paths_mod, fn, None)
@@ -41,7 +40,6 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
             except AttributeError:
                 pass
     yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     for fn in ("_settings", "resolve_repo_root"):
         obj = getattr(paths_mod, fn, None)
         if obj is not None:

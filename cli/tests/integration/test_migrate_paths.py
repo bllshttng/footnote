@@ -18,7 +18,6 @@ Autouse fixture pins FNO_REPO_ROOT (feedback_fno_repo_root_leaks_between_tests).
 """
 from __future__ import annotations
 
-import os
 import stat
 import threading
 import time
@@ -41,22 +40,8 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
     yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
-
 def _settings_root(tmp_path: Path) -> Path:
     """Return the isolated settings_root for this test."""
     return tmp_path / ".fno"

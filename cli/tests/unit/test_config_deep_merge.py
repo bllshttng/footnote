@@ -18,12 +18,9 @@ def _clear_caches() -> None:
     from fno import config as config_mod
     from fno import paths as paths_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     # paths._settings caches the same SettingsModel; clear it too so a stale
     # model from a prior test cannot leak through path helpers (Gemini MEDIUM,
     # PR #409).
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
 
 @pytest.fixture(autouse=True)
