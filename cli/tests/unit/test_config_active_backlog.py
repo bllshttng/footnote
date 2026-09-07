@@ -158,7 +158,8 @@ def _pin_global(monkeypatch, tmp_path, body):
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(glob))
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+    # The declaration key is unchanged by a content rewrite; drop the entry.
+    config_mod._load_settings_at.cache_clear()
     return glob
 
 

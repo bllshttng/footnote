@@ -20,6 +20,10 @@ def _hermetic_worktree_config(tmp_path_factory, monkeypatch):
     iso = tmp_path_factory.mktemp("iso") / "config.toml"
     iso.write_text("")
     monkeypatch.setenv("FNO_CONFIG", str(iso))
+    # Settings resolution reads the repo root at call time; pin it so the
+    # pin branch short-circuits without a git probe. The tests here count
+    # subprocess calls, and the probe would land in their mock.
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path_factory.mktemp("root")))
     from fno import config as _config
     from fno import paths as _paths
     yield
