@@ -1009,6 +1009,7 @@ def tick() -> None:
                         f"{left:.1f}s left, under the {_STRANDED_FLOOR_S:.0f}s "
                         "a stranded sweep costs"
                     )
+                from fno.branch_provenance_cache import write_cache
                 from fno.worktree_stranded import STRANDED, UNKNOWN, apply_sweep, sweep
 
                 # "report" mode still classifies (so counts stay honest) but
@@ -1033,6 +1034,10 @@ def tick() -> None:
                         break
                     try:
                         stranded_rows = sweep(repo=root)
+                        # Persist the rows for the board before the counts are
+                        # reduced to a log line: the board renders branch
+                        # provenance from this cache, never from git.
+                        write_cache(root, stranded_rows)
                         outcomes = apply_sweep(stranded_rows, wake=wake)
                     except Exception as exc:  # noqa: BLE001 - one bad repo never stops the rest
                         log.warning("pr-watch: stranded sweep failed for %s: %s", root, exc)

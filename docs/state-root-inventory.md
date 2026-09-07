@@ -186,6 +186,7 @@ Two files stay inside a checkout, each because moving it breaks the thing that w
 |---|---|---|
 | `.fno/config.toml` | `fno config project init` / the operator | committed project config, the same class as `.claude/settings.json` |
 | `.fno/state-root-denied.json` | the DENIED worker, through `crates/fno-agents/src/claims.rs::write_state_root_breadcrumb` and its Python twin `cli/src/fno/claims/io.py::_breadcrumb_path` | until the next successful claim on this repo, which deletes it |
+| `.fno/branch-provenance.json` | the pr-watch tick's stranded leg, via `cli/src/fno/branch_provenance_cache.py::write_cache` | overwritten every tick, never appended; safe to delete (the next tick rewrites it); the Kanban board's Branch Provenance section reads it |
 
 The breadcrumb is here because it is the only thing a mute worker can still say.
 
