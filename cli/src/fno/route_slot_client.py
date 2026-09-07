@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from typing import Any, Optional
+from typing import Any
 
 from fno.rust_binary import find_dev_binary, resolve_binary
 

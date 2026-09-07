@@ -1,13 +1,11 @@
 """Dispatch-time model resolution: the config-first router's read side.
 
 The declared inventory (``config.routing.models``) is the PRIMARY routing
-surface: nothing built-in is authoritative, so adding a model, a provider or a
-harness is a config edit. The OpenRouter snapshot is OPTIONAL enrichment and
-can never make the grid inert; a virgin install records
-``grid=no-inventory-declared`` and injects nothing. Per AXIS (Locked
-Decision 1): an explicit flag or a profile field occupies the axis it names
-and nothing more - ``dispatch --model > task model > task difficulty >
-plan model > plan difficulty > provider default``. Field semantics:
+surface: adding a model, provider or harness is a config edit. The snapshot
+is OPTIONAL enrichment and can never make the grid inert; a virgin install
+records ``grid=no-inventory-declared`` and injects nothing. Axis rule: an
+explicit flag or profile field occupies the axis it names and nothing more
+(``--model > task > plan > provider default``). Fields:
 docs/architecture/role-based-model-routing.md.
 """
 from __future__ import annotations
@@ -75,10 +73,9 @@ class InventoryRow:
 
     def accounts(self) -> list[str]:
         """The account record id whose quota this row spends, if named.
-
-        ``route`` deliberately contributes nothing: it names a VENDOR lane,
-        and folding it in would add a pseudo-account whose permanent UNKNOWN
-        dilutes a real account's live lock in the MAX aggregate.
+        ``route`` names a VENDOR lane, not an account: folding it in would
+        add a pseudo-account whose permanent UNKNOWN dilutes a real
+        account's live lock in the MAX aggregate.
         """
         return [self.account] if self.account else []
 

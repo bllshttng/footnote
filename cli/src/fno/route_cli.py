@@ -311,15 +311,12 @@ def inventory_cmd(
 ) -> None:
     """What can this installation reach: every declared routing row.
 
-    One row per declared model with its resolved band (row band, else a
-    snapshot-derived percentile, else unbanded) and a reachability verdict:
-    ``ok`` (a known harness can invoke it), ``not-installed`` (the named
-    harness is not one fno can drive; the row refuses BY NAME on stderr rather
-    than silently vanishing from routing), ``unbanded`` (a candidate at every
-    band; it ranks after the banded rows that clear), or ``incomplete`` (no
-    --model value). An empty inventory says so. After the rows, a ``slots``
-    section names each dispatched verb's lanes with live capacity and the lane
-    a spawn would take right now.
+    One row per declared model with its resolved band and a reachability
+    verdict: ``ok`` | ``not-installed`` (refused BY NAME on stderr, never
+    silently dropped) | ``unbanded`` (a candidate at every band) |
+    ``incomplete`` (no --model value). After the rows, a ``slots`` section
+    names each verb's lanes, their live capacity, and the lane a spawn
+    would take right now.
     """
     from fno.agents.harnesses import READABLE_PROVIDERS
     from fno.route_resolve import resolve_inventory, runtime_capacity, slot_states, slot_verbs
