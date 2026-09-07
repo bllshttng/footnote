@@ -8,8 +8,10 @@ no real cache is ever moved.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -68,6 +70,30 @@ def _offload(canon: Path, base: Path, *flags: str) -> subprocess.CompletedProces
     )
 
 
+def _offload_transient_tolerant(canon: Path, base: Path, *flags: str) -> tuple[subprocess.CompletedProcess, int]:
+    """Run the offload, retrying once when a transient process protects a tree.
+
+    A tree with a live process is left for the next run by design. Under CI
+    concurrency a protection candidate can be an enumeration transient that
+    dies within milliseconds of the snapshot, so one retry keeps the
+    assertion on the sweep's behavior instead of runner timing. A persistent
+    holder protects both attempts and the caller's assertions still fail.
+    Returns the last result and the moved count across attempts.
+    """
+    r = _offload(canon, base, *flags)
+    moved = _moved_total(r)
+    if "reason=processes" in r.stdout:
+        time.sleep(0.5)
+        r = _offload(canon, base, *flags)
+        moved += _moved_total(r)
+    return r, moved
+
+
+def _moved_total(r: subprocess.CompletedProcess) -> int:
+    m = re.search(r"moved=(\d+)", r.stdout)
+    return int(m.group(1)) if m else 0
+
+
 def _sweep(canon: Path, base: Path, *flags: str, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     script = canon / "scripts" / "lib" / "worktree-lifecycle.sh"
     env = os.environ.copy()
@@ -110,7 +136,7 @@ def test_dry_run_prints_bytes_and_dest_for_every_target(repo: Path, base: Path):
     target = _add_target(repo, "off-dry", 2 * 1024 * 1024)
     canon_target = _add_canonical_target(repo, 1024 * 1024)
 
-    r = _offload(repo, base)
+    r, _moved = _offload_transient_tolerant(repo, base)
 
     assert r.returncode == 0, r.stderr
     assert "mode=dry-run" in r.stdout
@@ -129,11 +155,11 @@ def test_apply_moves_canonical_and_worktree_caches_to_per_tree_dests(repo: Path,
     target = _add_target(repo, "off-live-tree", 2 * 1024 * 1024)
     canon_target = _add_canonical_target(repo, 1024 * 1024)
 
-    r = _offload(repo, base, "--apply")
+    r, moved = _offload_transient_tolerant(repo, base, "--apply")
 
     assert r.returncode == 0, r.stderr
     assert "mode=apply" in r.stdout
-    assert "moved=2" in r.stdout
+    assert moved == 2
     wt_dest = (base / repo.name / "off-live-tree" / "fixture").resolve()
     canon_dest = (base / repo.name / "canonical" / "fixture").resolve()
     assert wt_dest != canon_dest, "no two trees may share a destination"

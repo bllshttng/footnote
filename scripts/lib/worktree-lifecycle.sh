@@ -110,6 +110,9 @@ _wt_permanent() {
 # pgrep lane still catches background processes carrying the path in argv.
 _WT_CWD_SNAPSHOT=""
 _WT_CWD_SNAPSHOT_OK=0
+# Snapshot-time evidence for the candidates _wt_pids kept, pid:cmd@cwd,
+# comma-joined. A later `ps -p` re-read lies: the process can die in between.
+_WT_PIDS_DIAG=""
 
 _wt_refresh_cwd_snapshot() {
     local raw=""
@@ -212,7 +215,8 @@ _wt_pids() {
     # empty one (sandbox denies ps, or a stub prints nothing) proves nothing,
     # so every candidate is kept (the battery's empty-ps pin).
     ps_rows="$(awk -v m="__FNO_PS_SNAPSHOT_COMPLETE__" '$0 == m { exit } NF { c++ } END { print c + 0 }' <<< "$ps_snap")"
-    local filtered2="" pid_keep ps_cmd in_cwd
+    local filtered2="" pid_keep ps_cmd cwd_row
+    _WT_PIDS_DIAG=""
     if [[ "$ps_rows" -gt 0 ]]; then
         while IFS= read -r pid_keep; do
             [[ -z "$pid_keep" ]] && continue
@@ -225,15 +229,16 @@ _wt_pids() {
             # same way (dead between enumeration and this snapshot).
             if [[ -n "$ps_cmd" && "$ps_cmd" != *defunct* ]]; then
                 filtered2="${filtered2}${pid_keep}"$'\n'
+                _WT_PIDS_DIAG="${_WT_PIDS_DIAG}${pid_keep}:${ps_cmd:0:60}@ps-row,"
                 continue
             fi
             # No live ps row: keep only on a cwd-snapshot sighting, proof the
             # process was anchored in the tree when lsof ran.
-            in_cwd=0
-            printf '%s\n' "${_WT_CWD_SNAPSHOT:-}" \
-                | awk -F '\t' -v want="$pid_keep" '$1 == want { found=1 } END { exit !found }' && in_cwd=1
-            if [[ "$in_cwd" -eq 1 ]]; then
+            cwd_row="$(printf '%s\n' "${_WT_CWD_SNAPSHOT:-}" \
+                | awk -F '\t' -v want="$pid_keep" '$1 == want { print $2; exit }')"
+            if [[ -n "$cwd_row" ]]; then
                 filtered2="${filtered2}${pid_keep}"$'\n'
+                _WT_PIDS_DIAG="${_WT_PIDS_DIAG}${pid_keep}:no-ps-row@${cwd_row:0:60},"
             fi
         done <<< "$filtered"
     else
@@ -668,15 +673,12 @@ _cargo_target_offload() {
             fi
             bytes="$(_cargo_target_bytes "$target")"
             if [[ "$protection" != "-" ]]; then
-                # pid:cmd rides last (tail position, like detail): a
+                # pid:cmd@cwd rides last (tail position, like detail): a
                 # diagnostic for a protection verdict, never parsed by
-                # consumers.
-                local pid_diag="" pd_pid pd_cwd
-                while IFS= read -r pd_pid; do
-                    [[ -z "$pd_pid" ]] && continue
-                    pd_cwd="$(printf '%s\n' "${_WT_CWD_SNAPSHOT:-}" | awk -F '\t' -v p="$pd_pid" '$1 == p { print $2; exit }')"
-                    pid_diag="${pid_diag}${pd_pid}:$(ps -o command= -p "$pd_pid" 2>/dev/null | cut -c1-50)@${pd_cwd:-no-cwd-row},"
-                done <<< "$pids"
+                # consumers. Snapshot-time truth from _wt_pids: a later
+                # `ps -p` re-read reports the empty command of a process
+                # that died in between and names nothing.
+                pid_diag="${_WT_PIDS_DIAG%,}"
                 printf 'cargo-offload protected bytes=%s reason=%s path=%s pids=%s\n' \
                     "$bytes" "$protection" "$target" "${pid_diag%,}"
                 kept=$((kept + 1))
