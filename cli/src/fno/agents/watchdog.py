@@ -79,6 +79,10 @@ RECOVERABLE = "recoverable"
 #: LEAVE), so the keeper findings never appear in the per-row table. Discovery
 #: and the verdict live in :mod:`fno.agents.keeper_lane`.
 KEEPER = "keeper"
+#: Report-only: two or more live rows sit in one linked worktree. A fact
+#: about the tree, never about the row, so it outranks every row-lane below
+#: ghost and no apply level acts on it.
+CONTENDED = "contended"
 
 #: Every verdict this module can return. `--only` validates against THIS, not
 #: against a hand-copied tuple in the CLI: the copy went stale the moment a
@@ -86,6 +90,7 @@ KEEPER = "keeper"
 #: had been producing all along.
 VERDICTS = frozenset({
     GHOST, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE, KEEPER,
+    CONTENDED,
 })
 
 _RECOVERY_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd])$", re.IGNORECASE)
@@ -587,12 +592,16 @@ def verdicts(
     node_state_for: Callable[[str], Optional[dict]],
     now_s: float,
     provider_outages: Optional[dict[str, Any]] = None,
+    worktree_check: Optional[Callable[[str], bool]] = None,
 ) -> list[Verdict]:
-    """One verdict per row, in table precedence (ghost > reroute > wake >
-    leave). Each basis string names the measurement that decided it, so
-    a reader can falsify the call. ``claim_for(node)`` returns the
+    """One verdict per row, in table precedence (ghost > contended > reroute
+    > wake > leave). Each basis string names the measurement that decided it,
+    so a reader can falsify the call. ``claim_for(node)`` returns the
     ``node:<id>`` claim view (``{"state", "holder"}``); ``node_state_for``
-    returns the graph entry (``{"status", ...}``) or None."""
+    returns the graph entry (``{"status", ...}``) or None.
+    ``worktree_check`` defaults to the filesystem read that tells a linked
+    worktree from a shared checkout; inject a stub to keep the classifier
+    off the disk."""
     facts_by_row: dict[str, Optional[TailFacts]] = {}
     for row in rows:
         try:
@@ -609,8 +618,34 @@ def verdicts(
         for row_id in breaker.get("row_ids") or []
     )
 
+    # Contention reads the TREE, not the row: two live occupants of one
+    # linked worktree is a fact no row-lane below can see. Occupied is the
+    # default - finished_with_the_tree needs the positive quiet-plus-done
+    # reading, so an unreadable tail counts as occupied, because guessing
+    # wrong costs somebody's uncommitted work. A shared checkout is
+    # coordination, not contention; only linked worktrees tally.
+    worktree_check = worktree_check or _is_linked_worktree
+    live_in_tree: dict[str, list[str]] = {}
+    for row in rows:
+        if (
+            row.cwd
+            and worktree_check(row.cwd)
+            and not finished_with_the_tree(
+                facts_by_row.get(row.row_id), now_s, QUIET_AFTER_S
+            )
+        ):
+            live_in_tree.setdefault(row.cwd, []).append(row.row_id)
+
     out: list[Verdict] = []
     for row in rows:
+        occupants = live_in_tree.get(row.cwd, ())
+        # Only a row that is ITSELF a live occupant reports contention: one
+        # finished row beside one live row is one session in the tree, and
+        # the finished half must not report a contention it already left.
+        peers = (
+            tuple(sid for sid in occupants if sid != row.row_id)
+            if row.row_id in occupants else ()
+        )
         verdict = _verdict_one(
             row,
             facts=facts_by_row.get(row.row_id),
@@ -618,6 +653,7 @@ def verdicts(
             node_state_for=node_state_for,
             now_s=now_s,
             in_quorum_breaker=row.row_id in quorum_row_ids,
+            peers=peers,
         )
         # The unclaimed advisory upgrades a LEAVE, and it is applied HERE
         # rather than at a leave return because there are four of them. Putting
@@ -737,6 +773,7 @@ def _verdict_one(
     node_state_for: Callable[[str], Optional[dict]],
     now_s: float,
     in_quorum_breaker: bool = False,
+    peers: tuple[str, ...] = (),
 ) -> Verdict:
 
     # ghost: the row claims working/blocked but its recorded id resolves to no
@@ -745,6 +782,19 @@ def _verdict_one(
     if facts is None and row.state in _GHOST_STATES:
         return Verdict(row.row_id, row.name, row.state, GHOST,
                        f"no transcript for {row.row_id}", "report")
+
+    # contended: the tree this row sits in holds another live occupant. It
+    # sits below ghost on purpose - no transcript is a liveness fact and
+    # outranks a tree fact - and above every row-lane: contention is the one
+    # reading that changes what acting on this row would mean, so it must be
+    # visible before any lane consumes the row. Report-only at every level.
+    if peers:
+        return Verdict(
+            row.row_id, row.name, row.state, CONTENDED,
+            f"worktree {row.cwd} holds {len(peers) + 1} live sessions, "
+            f"peers {'/'.join(peers)}",
+            "report",
+        )
 
     window, reset_epoch, stamp = ("none", None, "")
     if facts is not None:
