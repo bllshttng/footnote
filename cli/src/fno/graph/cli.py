@@ -4352,6 +4352,51 @@ def _joined_open_candidates() -> list[dict]:
 EXTERNAL_SELECTION_TTL = "15m"
 
 
+def _dispatch_node_summary(e) -> dict:
+    """The ONE projection a dispatcher sees when it picks work.
+
+    `next` and `ready` both feed autonomous dispatch, so the two summaries
+    are one thing spelled twice: the union of every field either surface
+    carried, no filtering, no ordering. A key dropped here is dropped from
+    every dispatch decision - the silent `dispatch_verb` loss this exists
+    to prevent (x-0961). Consumers read by key, so additions are safe.
+    """
+    return {
+        # slug leads () so a list / clipboard is readable; `id` stays the
+        # canonical key right after.
+        "slug": e.get("slug"),
+        "id": e["id"],
+        "title": e.get("title"),
+        "priority": e.get("priority"),
+        "domain": e.get("domain"),
+        "project": e.get("project"),
+        "cwd": e.get("cwd"),
+        "parent": e.get("parent"),
+        "size": e.get("size"),
+        "difficulty": e.get("difficulty"),
+        # select_lane_fill's dispatch-time collision gate compares plan file
+        # surfaces; without this it has nothing to read.
+        "plan_path": e.get("plan_path"),
+        # The per-node model pin rides so the active-backlog drain can
+        # prefer it over cfg.model.
+        "model": e.get("model"),
+        # The per-node dispatch overrides must ride so the resolver's
+        # verb/brief routing fires for real graph nodes, not only for
+        # tests that inject them.
+        "dispatch_verb": e.get("dispatch_verb"),
+        "dispatch_brief": e.get("dispatch_brief"),
+        "mission_id": e.get("mission_id"),
+        "mission_wave": e.get("mission_wave"),
+        "mission_slug": e.get("mission_slug"),
+        "mission_from_msg_id": e.get("mission_from_msg_id"),
+        # x-fe2c: age and rank ride too, so a dispatcher can order and
+        # staleness-check without a second `backlog get` per node.
+        "created_at": e.get("created_at"),
+        "touched_at": e.get("touched_at"),
+        "rank": e.get("rank"),
+    }
+
+
 @cli.command("next")
 def cmd_next(
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
@@ -4496,33 +4541,6 @@ def cmd_next(
         candidates.sort(key=make_selection_sort_key(entries, live_claimed=claimed))
         return candidates
 
-    def _node_summary(e):
-        return {
-            # slug leads (); `id` stays the canonical key right after.
-            "slug": e.get("slug"),
-            "id": e["id"],
-            "title": e.get("title"),
-            "priority": e.get("priority"),
-            "domain": e.get("domain"),
-            "project": e.get("project"),
-            "cwd": e.get("cwd"),
-            "size": e.get("size"),
-            "plan_path": e.get("plan_path"),
-            "difficulty": e.get("difficulty"),
-            # : the per-node model pin must ride in the next-JSON so the
-            # active-backlog drain can prefer it over cfg.model.
-            "model": e.get("model"),
-            # : the per-node dispatch overrides must ride in the next-JSON so
-            # `advance`'s resolver routing (US1) actually fires for real graph nodes
-            # (which come from this summary), not only for tests that inject them.
-            "dispatch_verb": e.get("dispatch_verb"),
-            "dispatch_brief": e.get("dispatch_brief"),
-            "mission_id": e.get("mission_id"),
-            "mission_wave": e.get("mission_wave"),
-            "mission_slug": e.get("mission_slug"),
-            "mission_from_msg_id": e.get("mission_from_msg_id"),
-        }
-
     from fno.backlog.undispatched import (
         ObserverReadError,
         build_selection_divergence_event,
@@ -4659,7 +4677,7 @@ def cmd_next(
                     )
                 except ClaimHeldByOther:
                     continue
-                result[0] = _node_summary(winner)
+                result[0] = _dispatch_node_summary(winner)
                 break
         else:
 
@@ -4669,7 +4687,7 @@ def cmd_next(
                     winner = candidates[0]
                     winner["locked_by"] = claim
                     winner["locked_at"] = datetime.now(timezone.utc).isoformat()
-                    result[0] = _node_summary(winner)
+                    result[0] = _dispatch_node_summary(winner)
                 return entries
 
             locked_mutate_graph(_graph_path(), mutator)
@@ -4681,7 +4699,7 @@ def cmd_next(
             entries = read_graph(_graph_path())
         candidates = _with_observer(_pick_ready(entries), entries)
         if candidates:
-            result[0] = _node_summary(candidates[0])
+            result[0] = _dispatch_node_summary(candidates[0])
 
     if result[0] is None:
         # Zero-silent-starvation receipts ( G1): explain to stderr why
@@ -4906,27 +4924,7 @@ def cmd_ready(
     # from the full graph so epic parents always resolve.
     ready.sort(key=make_selection_sort_key(entries, live_claimed=claimed))
 
-    output = [
-        {
-            # slug leads () so a `ready` list / clipboard is readable.
-            "slug": e.get("slug"),
-            "id": e["id"],
-            "title": e.get("title"),
-            "priority": e.get("priority"),
-            "domain": e.get("domain"),
-            "project": e.get("project"),
-            "cwd": e.get("cwd"),
-            "parent": e.get("parent"),
-            "difficulty": e.get("difficulty"),
-            # select_lane_fill's dispatch-time collision gate compares plan file
-            # surfaces; without this it has nothing to read.
-            "plan_path": e.get("plan_path"),
-            # : carry the model pin so the lane-fill dispatcher (select_lane_fill
-            # -> _ready_nodes -> `fno backlog ready`) can thread it into the spawn.
-            "model": e.get("model"),
-        }
-        for e in ready
-    ]
+    output = [_dispatch_node_summary(e) for e in ready]
 
     typer.echo(json.dumps(output, indent=2))
 

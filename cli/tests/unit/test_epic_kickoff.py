@@ -7,6 +7,13 @@ idempotence (not TTL-dependent), and cascade-close deactivation.
 Claim + graph isolation mirrors test_advance: claims route under a tmp
 FNO_CLAIMS_ROOT/FNO_REPO_ROOT, the graph is a tmp graph.json with fno.paths.graph_json
 patched to it, and _spawn_worker / _ready_leaf_children are patched at the module.
+
+BLIND SPOT, known and accepted here: patching _ready_leaf_children bypasses
+the real `fno backlog ready` projection, and the injected dicts below are
+richer than that surface ever was - which is exactly how the dispatch_verb
+loss (x-0961) stayed invisible to this suite. The projection is now covered
+end-to-end by test_dispatch_verb_projection.py, which runs the real
+selection subprocess; keep dispatch-projection regressions THERE.
 """
 from __future__ import annotations
 

@@ -1319,6 +1319,7 @@ def _spawn_worker(
     dispatch_account: Optional[str] = None,
     permission_mode: Optional[str] = None,
     node: Optional[dict] = None,
+    dispatch_reservation: Optional[tuple] = None,
     caller: str = "unknown",
     events_path: Optional[Path] = None,
     grid_reason: Optional[str] = None,
@@ -1426,6 +1427,32 @@ def _spawn_worker(
     # reach the resolver too, or the command follows the stage table instead.
     launch_axis = _launch_harness_axis(launch, node_cwd)
     node_verb = (verb or "").strip() or None
+    # x-0961: "declared nothing" and "declaration eaten by a lossy feed" used
+    # to produce a byte-identical dispatch. The `verb` param collapses both to
+    # None; only the node dict carries the difference, so the receipt names it
+    # - and reads the DICT alone, never the verb param, so a caller whose verb
+    # diverges from the dict surfaces as verb=builtin beside verb_source=
+    # declared (the mismatch this field exists to expose) instead of a receipt
+    # that launders the divergence. A dict without the key at all can only
+    # come from a projection that dropped it - the exact silent loss this
+    # names out loud. Canonicalized the same way the resolver's allowlist rung
+    # does, so receipt and command agree on the spelling.
+    if isinstance(node, dict) and "dispatch_verb" in node:
+        verb_source = (
+            "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
+        )
+    else:
+        verb_source = "field-absent"
+        print(
+            f"advance: WARNING: dispatching {node_id} without knowing whether it "
+            f"declared a verb: the node dict {caller} passed carries no "
+            "dispatch_verb key. The selection projection feeding this dispatcher "
+            "is lossy (x-0961); fix the projection, not the node.",
+            file=sys.stderr,
+        )
+    receipt_verb = node_verb or "builtin"
+    if receipt_verb.startswith("/fno:"):
+        receipt_verb = "/" + receipt_verb[len("/fno:"):]
     resolve_kwargs: dict = {
         "harness": ((harness or "").strip() or launch_axis or None),
         "node_id": node_id,
@@ -1501,6 +1528,13 @@ def _spawn_worker(
     # and the events into the account's home where nothing looks (x-c33e).
     if dispatch_account:
         cmd += ["--dispatch-account", dispatch_account]
+    # x-0961: the worker-to-node join. Without --node the registry row carries
+    # node: null, so no instrument can answer which worker is on which node;
+    # every manual spawn passes it, which is why manual dispatches joined and
+    # advance dispatches did not.
+    cmd += ["--node", node_id]
+    if node_slug:
+        cmd += ["--slug", node_slug]
     cmd += ["--name", agent_name, target_cmd]
 
     # The brief (US3) rides the spawn subprocess env as TARGET_BRIEF (never the
@@ -1528,6 +1562,17 @@ def _spawn_worker(
     # merge so the resolver's own value (either way) is the only one that lands.
     base_env = {k: v for k, v in os.environ.items() if k != "TARGET_NO_MERGE"}
     run_env = {**base_env, **merged_env} if merged_env else (base_env or None)
+    # x-0961: the caller's dispatch:<id> reservation and the --node spawn
+    # door's own family-2 guard collide - the door acquires the SAME key,
+    # sees a foreign `advance:<pid>` holder it must never clear, and refuses
+    # with reservation-held. Hand the reservation over: release ours just
+    # before shelling the door, and the door's O_EXCL acquisition (its
+    # reservation plus the node:<id> handover) immediately re-closes the
+    # sub-second window. A racing dispatcher in that window is refused by the
+    # door's own atomic node-handover, so the release cannot double-dispatch.
+    if dispatch_reservation is not None:
+        _res_key, _res_holder, _res_root = dispatch_reservation
+        _safe_release(_res_key, _res_holder, _res_root)
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=600, env=run_env
     )
@@ -1535,6 +1580,17 @@ def _spawn_worker(
         stderr = (proc.stderr or "").strip()
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
             raise SpawnAlreadyRunning(f"agent {agent_name} already exists")
+        # The --node door's family-2 guard dedups (a peer door won the node
+        # handover, or our released reservation was re-taken mid-launch) by
+        # refusing with already-running. That is the benign skip the caller's
+        # own reservation used to produce, not a spawn failure - including the
+        # race where we handed the reservation over and lost the re-acquire.
+        if (
+            proc.returncode == 2
+            and "node dispatch refused" in stderr
+            and "verdict=already-running" in stderr
+        ):
+            raise SpawnAlreadyRunning(f"door refused {node_id}: {stderr[:120]}")
         raise SpawnError(
             f"fno agents spawn exited {proc.returncode}: "
             f"{(stderr or proc.stdout or '').strip()[:200]}"
@@ -1584,6 +1640,8 @@ def _spawn_worker(
             "account": dispatch_account or "",
             "substrate": substrate,
             "command": target_cmd,
+            "verb": receipt_verb,
+            "verb_source": verb_source,
             "cwd": node_cwd or "",
             "caller": caller,
             "grid": grid_why or "",
@@ -1596,7 +1654,13 @@ def _spawn_worker(
         # row and the receipt cannot disagree (the row has no harness-
         # independent form; prov is what it records).
         receipt.update(
-            {"short_id": launch_identity, "substrate": substrate, "harness": prov}
+            {
+                "short_id": launch_identity,
+                "substrate": substrate,
+                "harness": prov,
+                "verb": receipt_verb,
+                "verb_source": verb_source,
+            }
         )
     return launch_identity
 
@@ -2062,6 +2126,7 @@ def dispatch_lanes(
                         worktree, node_id, _base_project_id(root)
                     )
                 _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
+                lane_receipt: dict = {}
                 short_id = _spawn_worker(
                     node_id,
                     str(worktree),
@@ -2076,8 +2141,10 @@ def dispatch_lanes(
                     verb=node.get("dispatch_verb"),
                     brief=_brief,
                     node=node,
+                    dispatch_reservation=(dispatch_key, dispatch_holder, dispatch_root),
                     caller="dispatch_lanes",
                     events_path=ev_path,
+                    receipt=lane_receipt,
                     # The door resolved the grid, so the seam's own consult never
                     # runs and the reason field would be blank on the busiest door.
                     grid_reason=lane_grid_why,
@@ -2099,6 +2166,8 @@ def dispatch_lanes(
                     "agent_name": _worker_agent_name(node_id, slug),
                     "lane": True,
                     "worktree": str(worktree),
+                    "verb": lane_receipt.get("verb", "builtin"),
+                    "verb_source": lane_receipt.get("verb_source", "field-absent"),
                     "brief": _brief_tag,
                 },
                 ev_path,
@@ -2115,6 +2184,7 @@ def dispatch_lanes(
         finally:
             if not dispatched:
                 _safe_release(dispatch_key, dispatch_holder, dispatch_root)
+
     if report is not None:
         report["dispatched"] = sum(
             receipt.get("status") == "dispatched" for receipt in receipts
@@ -3401,6 +3471,7 @@ def advance(
         else:
             eff_provider = provider if provider is not None else node.get("provider")
         _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
+        next_receipt: dict = {}
         short_id = _spawn_worker(
             node_id,
             node_cwd,
@@ -3414,8 +3485,10 @@ def advance(
             node=node,
             verb=node.get("dispatch_verb"),
             brief=_brief,
+            dispatch_reservation=(dispatch_key, holder, dispatch_root),
             caller="advance",
             events_path=ev_path,
+            receipt=next_receipt,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -3450,6 +3523,8 @@ def advance(
             "node_id": node_id,
             "short_id": short_id,
             "agent_name": _worker_agent_name(node_id, node.get("slug") or node.get("title")),
+            "verb": next_receipt.get("verb", "builtin"),
+            "verb_source": next_receipt.get("verb_source", "field-absent"),
             "brief": _brief_tag,
             "rank": rank,
             **({"closed_node_id": closed_node_id} if closed_node_id else {}),
@@ -3458,7 +3533,10 @@ def advance(
     )
     if verbose:
         print(
-            f"advance: dispatched {node_id} -> target worker {short_id} (brief={_brief_tag})",
+            f"advance: dispatched {node_id} -> target worker {short_id} "
+            f"(verb={next_receipt.get('verb', 'builtin')} "
+            f"source={next_receipt.get('verb_source', 'field-absent')} "
+            f"brief={_brief_tag})",
             file=sys.stderr,
         )
     _tick(1, None, f"node={node_id} worker={short_id}")
@@ -3744,6 +3822,7 @@ def _converge_one(
                 verb=node_meta.get("dispatch_verb"),
                 brief=_brief,
                 node=node_meta,
+                dispatch_reservation=(dispatch_key, holder, dispatch_root),
                 caller="_converge_one",
                 events_path=ev_path,
                 receipt=spawn_receipt,
@@ -3761,6 +3840,8 @@ def _converge_one(
                     "short_id": short_id,
                     "agent_name": _worker_agent_name(node_id, slug),
                     "cross_project": cross_project,
+                    "verb": spawn_receipt.get("verb", "builtin"),
+                    "verb_source": spawn_receipt.get("verb_source", "field-absent"),
                     "brief": _brief_tag,
                 }
             ),
@@ -3771,9 +3852,13 @@ def _converge_one(
             _kind = "cross-project" if cross_project else "same-project"
             print(
                 f"advance: dispatched {_scope}{_kind} {node_id} -> "
-                f"target worker {short_id} (--cwd {root}) (brief={_brief_tag})",
+                f"target worker {short_id} (--cwd {root}) "
+                f"(verb={spawn_receipt.get('verb', 'builtin')} "
+                f"source={spawn_receipt.get('verb_source', 'field-absent')} "
+                f"brief={_brief_tag})",
                 file=sys.stderr,
             )
+
         dispatched = True
         return AdvanceResult(
             "dispatched",
