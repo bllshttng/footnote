@@ -177,17 +177,7 @@ def pr_url_for_repo(
 ) -> Optional[str]:
     """The canonical PR url for the checkout at ``cwd``, or None.
 
-    A writer must resolve the url at least as capably as the reader resolves
-    the slug, so this shares ``resolve_current_repo_slug``'s origin-then-gh
-    chain: a url-less ``pr_number`` names no repo, and PR numbers collide
-    across repos.
-
-    An absent ``cwd`` resolves against the invocation checkout - the caller is
-    standing in the repo it is stamping. A ``cwd`` that IS recorded but no
-    longer exists returns None instead: that is positive evidence the node
-    belongs to another repo, and `backlog done`/`backlog update` can name any node
-    in the cross-project graph, so falling back would stamp the running repo's
-    slug onto a foreign node.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     if cwd:
         cwd = os.path.expanduser(cwd)
@@ -388,15 +378,7 @@ def verify_pending_supersessions(
 ) -> list[dict]:
     """Verify predecessor cause surfaces against one merged PR's file set.
 
-    Returns positive receipts for predecessors that remain pending. A
-    predecessor never becomes terminal from the relationship alone: every
-    declared repo-relative surface must appear in the merged PR's changed-file
-    evidence.
-
-    ``evidence_complete=False`` says the file list is known to be short of the
-    PR's real one. A surface missing from a truncated list is an absence with
-    two explanations, so neither verdict is available: nothing verifies and the
-    receipt names the truncation rather than blaming the surface.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     changed = {
         _normalize_surface(path)
@@ -449,15 +431,7 @@ def verify_pending_supersessions(
 def successors_owing_verification(entries: list[dict]) -> dict[str, dict]:
     """Successor id -> successor node, for pending predecessors already owed proof.
 
-    ``verify_pending_supersessions`` only ever runs while reconcile is CLOSING a
-    successor. A successor that closed at any other moment - an earlier sweep, a
-    hand-run ``fno backlog done``, or a supersede recorded against a node that
-    had already shipped - never passes through that path. Its predecessors stay
-    pending, pending reads as blocked, and nothing in the system ever revisits
-    them: the only escape was ``unsupersede``.
-
-    This finds those rows so the sweep can settle them against the evidence the
-    successor already carries.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     by_id = {
         entry.get("id"): entry
@@ -672,16 +646,7 @@ def bind_pr_rows(
 def node_cwd_in_repo(entry: dict, our_root: str) -> bool:
     """Does ``entry``'s own ``cwd`` sit inside ``our_root`` (or is it missing)?
 
-    A missing/empty/non-string cwd can't be proven NOT this repo's, and
-    there is no cost to treating it as in-scope here: ``reverse_map_unstamped``
-    (the only caller of this scope) independently skips a missing cwd
-    unconditionally before it would ever fire a gh call, so this branch
-    changes candidate-set membership only - never the observable close/skip
-    outcome for a no-cwd node.
-
-    Module-level (not nested inside a caller) precisely so this predicate is
-    unit-testable on its own, independent of the reverse-map machinery that
-    happens to make its no-cwd branch behaviorally inert today.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     raw_cwd = entry.get("cwd")
     if not isinstance(raw_cwd, str) or not raw_cwd:
@@ -933,45 +898,7 @@ def resolve_promise_evidence(
 ) -> PromiseVerdict:
     """Decide whether a node's plan promised work that has not all shipped.
 
-    Fires ONLY on an explicit declaration - a plan that declares neither
-    ``close_probes`` nor ``expected_url_count`` closes exactly as it does today.
-    Inferring "multi-wave" from ``## Wave N`` headings was rejected: the common
-    case (one .md == one PR == one node) uses waves as internal structure and
-    would false-positive identically to a half-ship, parking every such node on
-    autonomous /target. Coverage grows as /blueprint stamps ``expected_url_count``
-    going forward, so nothing retroactively parks.
-
-    Three conditions, first refusal wins. D reads the carve-out ledger and is
-    independent of the plan; B and C read the plan at ``node["plan_path"]``:
-
-      D. Unharvested deferred carve-outs. The project ledger
-         (``.fno/carveouts.jsonl``) still carries a ``deferred`` carve-out -
-         declared scope that did not ship. It must become a node (the retro
-         harvest files and consumes it) or be force-overridden. ``oos-bug`` and
-         ``backfill`` carve-outs do NOT block (genuine discovery, filed by the
-         later harvest); both land in the same ledger and look identical, which
-         is why a deferred item can merge away unnoticed (cv-99ebc0f3 on
-         x-44cb). Checked first and independent of the plan so a close is held
-         even when the plan is absent or unreadable. Scoped to the closing
-         node's OWN rows via the ``node`` field stamped at capture time
-         (``find_held_node`` proven ownership): a row filed by another node's
-         session must not hold this close open (x-40be - one unrelated
-         carve-out was blocking every close in the repo). Unattributed rows
-         (legacy, ambient shell, harness without a session id) block nothing
-         at close time; they stay visible via ``fno backlog carveout list`` and the
-         retro sweep, which are the repo-wide backstop.
-      B. Outcome probes. Any ``close_probes`` entry exits non-zero. Probes are
-         delegated to ``fno-agents probe-run`` (the same runner the loop uses for
-         ``done_probes``); a declared gate that cannot be evaluated fails closed.
-      C. Ship count. ``expected_url_count: N`` (N >= 2) and fewer than N of the
-         node's PR refs are MERGED. The right check for multi-repo / split
-         deliveries.
-
-    A gate that only fires on an explicit promise cannot false-positive, which
-    is the reason the count is written at blueprint time rather than inferred
-    afterward. Fails open on an absent/unreadable plan or unparseable
-    frontmatter: a stale ``plan_path`` must not wedge a close, but the warning
-    names the unreadable path so the gap is visible, not silent.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     # Condition D (checked first; independent of the plan): an unharvested
     # `deferred` carve-out is declared scope that did not ship, and it blocks
@@ -1181,17 +1108,7 @@ def _promise_refusal_c(node_id: str, plan_display: str, expected: int, merged: i
 def _unharvested_deferred_carveouts(cwd: Optional[str]) -> list[dict]:
     """Unharvested ``deferred`` carve-outs on the node's project ledger.
 
-    ``deferred`` blocks a close (declared scope did not ship); ``oos-bug`` and
-    ``backfill`` do not (genuine discovery, filed by the later harvest). Both
-    land in the same ``.fno/carveouts.jsonl``, which is why a deferred item can
-    merge away unnoticed (cv-99ebc0f3 on x-44cb). The ledger is resolved from
-    the NODE's project (``cwd``), not the ambient command repo: a cross-project
-    close names a foreign node from this session, and reading the ambient
-    ledger would both miss the foreign carve-out and let an unrelated local one
-    block it. Falls back to the ambient canonical ledger when ``cwd`` is absent
-    or unresolvable (the same-project close, the common case). Fails open on an
-    unreadable ledger: a corrupt ledger must not wedge a close, and the retro
-    harvest is the durable resolution path either way.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     root = _carveout_ledger_root(cwd)
     try:
@@ -1764,16 +1681,7 @@ def reverse_map_unstamped(
 ) -> list[MergeDriftRecord]:
     """Close open nodes with NO PR refs by matching the id in a merged branch.
 
-    A /target session that dies between ``gh pr create`` and the node<->PR
-    stamp leaves an open node with no ``pr_number`` - invisible to the forward
-    ``scan_merge_drift`` (which needs a ref to query). The branch convention
-    (``branch_name()``) still carries the full node id, so one
-    ``gh pr list --state merged`` per repo reverse-maps it. A unique headRef hit
-    synthesizes the same MergeDriftRecord the stamped path emits (so the
-    existing close path applies unchanged); an ambiguous hit (two merged PRs
-    for one id) emits an ``error`` record naming both, never a guess.
-
-    ``list_merged`` is injected in tests to avoid shelling to gh.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     if list_merged is None:
         list_merged = list_merged_pr_branches
@@ -1891,16 +1799,7 @@ def detect_reverted_nodes(
 ) -> list[tuple[str, int]]:
     """(node_id, revert_pr_number) pairs to stamp ``reverted: true``.
 
-    A merged PR whose title starts with ``Revert`` and whose body references
-    a PR number carried by a not-yet-reverted graph node names that node's
-    ship as reverted. Pure (no I/O) so tests need no gh.
-
-    Matching is REPO-SCOPED: the graph is global across projects, so bare PR
-    numbers collide. A candidate node must carry a ``pr_url`` in the SAME
-    repo as the revert PR's own ``url``, a body qualifier
-    (``Reverts other/repo#N``) must match that repo, and an ambiguous match
-    (two same-repo nodes on one number) stamps nothing - the same
-    ambiguity-resolves-to-nothing rule as the W1 backfill.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     # pr_number -> [(entry, that ref's repo slug)]; refs without a parseable
     # pr_url are indexed with slug None and never match (conservative).
@@ -1952,18 +1851,7 @@ def scan_merge_drift(
 ) -> list[MergeDriftRecord]:
     """Find open nodes whose PR has merged outside the ship gate.
 
-    Returns one record per open node that resolves to a MERGED PR, plus
-    records flagged with ``error`` for nodes whose PR state could not be
-    resolved. Nodes whose PRs are all still OPEN (or closed-unmerged) yield no
-    record - they are not drift. ``node_id`` restricts the scan to a single
-    node (a str) or a set of nodes (an iterable of str) - e.g. every node one
-    specific PR's exact trailer names, so a ``--pr-number`` call scans only
-    what that PR could possibly touch instead of the whole graph (x-59a6).
-    Tests inject a ``query`` stub to avoid shelling out to gh.
-
-    A second pass (``reverse_map_unstamped``) covers open nodes with NO PR ref
-    at all - a session that died before the node<->PR stamp - by matching the
-    node id against merged branch names. ``list_merged`` is injected in tests.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     if query is None:
         query = query_pr_merge_state
@@ -2158,23 +2046,8 @@ def emit_session_satisfied_for_record(
     reason: str = "reconcile_detected_merge",
 ) -> Optional[Path]:
     """Emit a ``session_satisfied{source:"pr_merge"}`` event for the target
-    session that owns a merged-and-now-closed node (Group 1 / ab-f7f8bc53).
 
-    Today only an in-gate merge through ``scripts/lib/pr-merge.sh`` emits this
-    signal, so an out-of-band merge (web button, bare ``gh pr merge``) leaves the
-    owning session hot and the stop hook hard re-blocks it. After reconcile
-    closes the drifted node, this hands the same auto-complete signal to the
-    owning session.
-
-    The event binds to that session via ``session_id`` + ``gate_state_hash`` (the
-    md5 of the owning target-state.md at emit time), matching the stop hook's
-    staleness check (``check_session_satisfied``). The defensive stop-hook probe
-    (Task 1.2) is the backstop for when this emit is stale or never lands.
-
-    Best-effort and non-fatal: returns the events.jsonl path on a successful
-    emit, or None when there is nothing to satisfy (no cwd, no live state file,
-    already-COMPLETE session, missing session_id) or any failure. A failure here
-    must never abort the reconcile close.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     state_path = _owning_state_path(record)
     if state_path is None or not state_path.exists():
@@ -2418,23 +2291,8 @@ def emit_gate_escape_for_record(
     events_path: Optional[Path] = None,
 ) -> Optional[Path]:
     """Tier-1 auto-emit (x-f894): a ``gate_escape{reason:dead-bot}`` when
-    reconcile closes an out-of-band-merged node whose required review bot never
-    reviewed.
 
-    Boundary (the #222 rule - the load-bearing correctness surface):
-      - required_bots empty          -> NOT an escape: a no-required-bots repo
-                                        self-merging a green PR is normal (AC2).
-      - every required bot reviewed  -> NOT an escape: the gate was met; only
-                                        the merge happened out of band (AC2b).
-      - some required bot never reviewed -> escape: the loop should have waited
-                                        for / resolved that review (AC1).
-
-    Lands in the CANONICAL events log (``events_path`` overrides for tests) so a
-    closed node's telemetry outlives its worktree and retro aggregates one
-    coherent log. Dedup on (pr, reason) (AC4). Telemetry fails OPEN: any failure
-    logs a durable emit-failure line beside the events log (AC7) and returns
-    None, never raising - the emit must never abort the reconcile close (AC5).
-    Returns the events.jsonl path on a successful emit.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     reason = _GATE_ESCAPE_REASON_DEADBOT
     resolved_events: Optional[Path] = events_path

@@ -479,18 +479,7 @@ def _latest_receipt(node_id: str, events: list[dict]) -> Optional[str]:
 def _merge_unconfirmed(child: dict) -> bool:
     """True when a done child carries a PR that GitHub never confirmed merged.
 
-    A child reads ``done`` the moment ``/target`` finalizes, not when the PR
-    merges, so at a wave gate the graph can say a dependency landed while its
-    branch is still open. ``merge_status`` is written only by
-    :func:`_apply_completion_fields` when a caller resolved MERGED from gh, so
-    its absence is exactly "nobody confirmed this".
-
-    Deliberately NOT called "unmerged". The absence has two explanations - the
-    PR is genuinely open, or it merged through a path that never stamped the
-    field - and asserting the first from the absence of the second is the
-    absence-as-evidence trap. The caller's wording, and ``--verify-merges``,
-    keep that distinction. Measured 2026-09-01: 16 of 444 done nodes carrying a
-    PR were in this state, spanning 2026-04-28 to 2026-08-26.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     return (
         child.get("status") == "done"
@@ -892,19 +881,7 @@ def _prompt_difficulty_value(value: str) -> str:
 def _encounter_provenance(harness: str | None) -> dict[str, str]:
     """Model/effort provenance for an encounter record, or nothing.
 
-    Read from the harness's own env, and only for the harness that owns those
-    names. The variables survive a fork, so a codex session launched from a
-    claude shell inherits them; writing them onto a codex vote would attribute
-    it to a model that did not cast it, which reads as measured. A harness with
-    nothing to report omits the keys rather than writing a plausible default.
-
-    The two names are not equally first-party. CLAUDE_EFFORT lives in the
-    claude binary's own namespace, so its presence is claude's doing.
-    ANTHROPIC_MODEL is a provider SDK name a shell can export for unrelated
-    tooling, so it counts only when ANTHROPIC_BASE_URL is exported beside it:
-    the launcher that owns the model string owns the endpoint and sets the
-    pair, and a lone model string says nothing about the route this session
-    actually ran on.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     provenance: dict[str, str] = {}
     if harness != "claude":
@@ -4166,18 +4143,7 @@ def _starvation_receipts(
 ) -> list[tuple[str, str]]:
     """Classify why each ready-ish in-scope node was NOT selected (G1 receipts).
 
-    Zero-silent-starvation (, epic Success Definition 2): when ``next``
-    returns null but buildable-looking nodes exist, name why each was excluded
-    so an operator is never left guessing. Reasons: ``plan-less`` | ``container``
-    | ``claimed`` | ``design`` | ``quarantined`` | ``dead-ancestor``. A node
-    genuinely in review (open PR) or committed to a batch is not starved and
-    gets no line.
-    Pure over the injected ``claimed`` set + ``now`` so it is unit-testable.
-
-    Mirrors ``_pick_ready``'s SCOPING (project, parent subtree via ``scope_ids``,
-    ``--mission``, ``--roadmap-id``) so a scoped request that returns null never
-    explains itself with an out-of-scope node (codex P2). Only the exclusion
-    filters differ - that is the whole point of the receipt.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.backlog.advance import selection_guards
     from fno.graph._intake import filter_by_project
@@ -8755,18 +8721,7 @@ def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
 def _strandable_contained_ids(entries: list[dict]) -> set[str]:
     """Open nodes whose delivery unit is ALREADY done - closeable right now.
 
-    ``_cascade_close_contained`` only fires while a unit is being closed, and
-    ``scan_merge_drift`` never returns an already-closed unit, so a node that
-    became contained AFTER its owner shipped is reachable by neither. That is
-    not hypothetical: re-running an `adopt` spec back-fills ``contained_in``
-    onto a node adopted by an older fno, and if that node's owner has already
-    merged, the back-fill removes it from selection (the containment guard) with
-    nothing left that would ever complete it - visible, unbuildable, never done.
-
-    Read-only. The same self-heal role ``_strandable_epic_ids`` plays for
-    all-done epics, and for the same reason: a state the forward path now
-    prevents still has to be swept out of graphs that already carry it. Once
-    migrated this returns empty and the sweep is a no-op.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     by_id = {e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
     out: set[str] = set()
@@ -9775,19 +9730,7 @@ def _evidence_pr_number(evidence, refs: list) -> Optional[int]:
 def _cascade_reopen_parents(entries: list[dict], node_id: str) -> tuple[list[str], list[str]]:
     """Reopen ancestor epics the cascade auto-closed. Returns (reopened, warned).
 
-    The inverse of :func:`_cascade_close_parents`, and not a refusal, because a
-    done epic with a live child is not a risky state to correct - it is an
-    inconsistent one. The epic's work IS its children; one of them is open again.
-
-    The judgment call is WHICH ancestors. An epic closed by the cascade carries
-    the ``auto-closed:`` note :func:`_auto_closed_note` wrote, so reopening it
-    just restores what the cascade would compute today. An epic closed WITHOUT
-    that note was closed on its own evidence - a real PR, an operator decision -
-    and silently reopening it would discard a judgment this verb never made. So
-    those are left done and NAMED, which is the refuse-and-say-why rule applied
-    to a case where either silent choice is wrong.
-
-    Walks up under the same 64-deep cap the close path uses, for the same reason.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph._reconcile import stamp_reopen_warning
     id_to_entry = {
@@ -13819,121 +13762,19 @@ def cmd_discover(
     The output is a ranked worklist for a human.  It never closes, undefers,
     or otherwise writes a node.
     """
-    from collections import Counter
+    from fno.graph import discovery
 
-    from fno.graph import discovery, relatedness
-    from fno.graph.store import read_graph
-
-    graph_path = _graph_path()
-    before = graph_path.read_bytes()
-    entries = read_graph(graph_path)
-    expired = [
-        entry
-        for entry in entries
-        if entry.get("status") == "deferred" and entry.get("deferred_kind") == "expired"
-    ]
-    excluded_by_kind = sum(
-        1
-        for entry in entries
-        if entry.get("status") == "deferred" and entry.get("deferred_kind") != "expired"
-    )
-    token_cache = {
-        entry["id"]: relatedness._tokens(entry)
-        for entry in entries
-        if isinstance(entry.get("id"), str)
-    }
-
-    worklist: list[dict[str, Any]] = []
-    degraded_warnings: list[str] = []
-    pr_merged_cache: dict[int, bool] = {}
-
-    def _pr_merged(number: int) -> bool:
-        """gh-verified merge state; deferral clears every node-side completion field."""
-        if number not in pr_merged_cache:
-            from fno.pr._verify import _gh_api_json
-
-            row = _gh_api_json(
-                ["repos/{owner}/{repo}/pulls/" + str(number), "--jq", ".merged"],
-                cwd=".",
-            )
-            pr_merged_cache[number] = row is True
-        return pr_merged_cache[number]
-
-    for entry in expired:
-        result = discovery.candidates(
-            str(entry.get("title") or ""),
-            str(entry.get("details") or ""),
-            entries=entries,
-            graph_path=graph_path,
-            exclude_id=entry.get("id") if isinstance(entry.get("id"), str) else None,
-            limit=limit,
-            token_cache=token_cache,
-            domain=str(entry.get("domain") or "code"),
-        )
-        if result.degraded and result.warning and result.warning not in degraded_warnings:
-            degraded_warnings.append(result.warning)
-        assessment = discovery.assess(entry, result, pr_state=_pr_merged)
-        worklist.append(
-            {
-                "id": entry.get("id"),
-                "title": entry.get("title"),
-                **assessment.as_dict(),
-                "candidates": [candidate.as_dict() for candidate in result],
-            }
-        )
-
-    # The highest measured candidate score is the worklist rank.  Ties break
-    # on id so a batch is reproducible across runs.
-    worklist.sort(
-        key=lambda row: (
-            -(row["candidates"][0]["score"] if row["candidates"] else 0.0),
-            str(row.get("id") or ""),
-        )
-    )
-    if worklist and all(row["candidates"] for row in worklist):
-        message = (
-            "failed instrument: every expired node matched a candidate; "
-            "refusing to report an all-match worklist"
-        )
-        typer.echo(message, err=True)
+    report, refusal = discovery.expired_worklist(limit, graph_path=_graph_path())
+    if refusal:
+        typer.echo(refusal, err=True)
         raise typer.Exit(code=2)
 
-    positive: dict[str, Any] | None = None
-    if worklist and all(not row["candidates"] for row in worklist):
-        control_query = str(expired[0].get("title") or expired[0].get("id") or "")
-        positive = discovery.positive_control(
-            control_query, graph_path=graph_path, entries=entries
-        )
-        if not positive["matches"]:
-            typer.echo(
-                "failed instrument: the positive control matched nothing, so "
-                "the all-empty worklist is not trusted",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-
-    after = graph_path.read_bytes()
-    if after != before:
-        typer.echo(
-            "failed instrument: graph bytes changed during read-only discovery",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    report = {
-        "population": "deferred_kind=expired",
-        "assessed": len(expired),
-        "excluded_by_kind": excluded_by_kind,
-        "verdicts": dict(Counter(row["verdict"] for row in worklist)),
-        "degraded": bool(degraded_warnings),
-        "warnings": degraded_warnings,
-        "positive_control": positive,
-        "worklist": worklist,
-    }
     if json_output:
         typer.echo(json.dumps(report, indent=2))
         return
 
+    worklist = report["worklist"]
+    positive = report["positive_control"]
     typer.echo(
         f"discover: assessed={report['assessed']} "
         f"excluded-by-kind={report['excluded_by_kind']}"
@@ -13946,7 +13787,7 @@ def cmd_discover(
             f"positive control: {positive['query']!r} -> "
             f"{', '.join(positive['matches']) or 'no matches'} ({positive['lane']})"
         )
-    for warning in degraded_warnings:
+    for warning in report["warnings"]:
         typer.echo(f"degraded: {warning}", err=True)
 
 

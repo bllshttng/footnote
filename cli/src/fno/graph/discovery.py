@@ -95,13 +95,7 @@ def candidates(
 ) -> CandidateResults:
     """Union FTS5 and relatedness recall, ranked by relatedness score.
 
-    ``entries`` is an optional narrowed pool for callers such as the filing
-    gate.  The FTS cache still searches the graph bytes, then ids are filtered
-    to that pool.  Relatedness is allowed below the filing floor so an FTS-only
-    vocabulary hit remains visible with its measured score.  ``domain`` is the
-    incoming node's own domain: relatedness grants a same-domain bonus, so a
-    caller that knows it must pass it rather than let every query read as
-    ``code``.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     if limit < 1:
         return CandidateResults()
@@ -236,11 +230,7 @@ def assess(
 ) -> Assessment:
     """Assess one node without changing it or making an external mutation.
 
-    ``pr_state`` is the caller's gh-verified answer for whether a PR number is
-    merged.  Deferral clears every node-side completion field, so a shipped
-    node that later expired is only provable through evidence that survives
-    the defer: a verified merged PR, or files recorded in its text that still
-    exist on disk.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     candidates_list = list(cands)
     pr_number = node.get("pr_number")
@@ -280,3 +270,123 @@ def assess(
         [],
         "no duplicate or completion evidence, and the original condition is not provable",
     )
+
+
+def expired_worklist(
+    limit: int, *, graph_path: Path | None = None
+) -> tuple[dict[str, Any], str]:
+    """Assess every expired deferred node and build the ranked worklist.
+
+    Returns ``(report, refusal)``.  ``refusal`` is empty on success and
+    otherwise names a failed-instrument control (all-match, empty positive
+    control, or graph bytes that changed mid-read), each an exit-2 condition
+    the caller renders.  Read-only by construction, and the re-read at the end
+    proves it.
+    """
+    from collections import Counter
+
+    from fno.graph import relatedness
+    from fno.graph.store import read_graph
+
+    path = graph_path or _graph_path()
+    before = path.read_bytes()
+    entries = read_graph(path)
+    expired = [
+        entry
+        for entry in entries
+        if entry.get("status") == "deferred" and entry.get("deferred_kind") == "expired"
+    ]
+    excluded_by_kind = sum(
+        1
+        for entry in entries
+        if entry.get("status") == "deferred" and entry.get("deferred_kind") != "expired"
+    )
+    token_cache = {
+        entry["id"]: relatedness._tokens(entry)
+        for entry in entries
+        if isinstance(entry.get("id"), str)
+    }
+
+    worklist: list[dict[str, Any]] = []
+    degraded_warnings: list[str] = []
+    pr_merged_cache: dict[int, bool] = {}
+
+    def _pr_merged(number: int) -> bool:
+        """gh-verified merge state; deferral clears every node-side completion field."""
+        if number not in pr_merged_cache:
+            from fno.pr._verify import _gh_api_json
+
+            row = _gh_api_json(
+                ["repos/{owner}/{repo}/pulls/" + str(number), "--jq", ".merged"],
+                cwd=".",
+            )
+            pr_merged_cache[number] = row is True
+        return pr_merged_cache[number]
+
+    for entry in expired:
+        result = candidates(
+            str(entry.get("title") or ""),
+            str(entry.get("details") or ""),
+            entries=entries,
+            graph_path=path,
+            exclude_id=entry.get("id") if isinstance(entry.get("id"), str) else None,
+            limit=limit,
+            token_cache=token_cache,
+            domain=str(entry.get("domain") or "code"),
+        )
+        if result.degraded and result.warning and result.warning not in degraded_warnings:
+            degraded_warnings.append(result.warning)
+        assessment = assess(entry, result, pr_state=_pr_merged)
+        worklist.append(
+            {
+                "id": entry.get("id"),
+                "title": entry.get("title"),
+                **assessment.as_dict(),
+                "candidates": [candidate.as_dict() for candidate in result],
+            }
+        )
+
+    # The highest measured candidate score is the worklist rank.  Ties break
+    # on id so a batch is reproducible across runs.
+    worklist.sort(
+        key=lambda row: (
+            -(row["candidates"][0]["score"] if row["candidates"] else 0.0),
+            str(row.get("id") or ""),
+        )
+    )
+    if worklist and all(row["candidates"] for row in worklist):
+        return (
+            {},
+            "failed instrument: every expired node matched a candidate; "
+            "refusing to report an all-match worklist",
+        )
+
+    positive: dict[str, Any] | None = None
+    if worklist and all(not row["candidates"] for row in worklist):
+        control_query = str(expired[0].get("title") or expired[0].get("id") or "")
+        positive = positive_control(control_query, graph_path=path, entries=entries)
+        if not positive["matches"]:
+            return (
+                {},
+                "failed instrument: the positive control matched nothing, so "
+                "the all-empty worklist is not trusted",
+            )
+
+    after = path.read_bytes()
+    if after != before:
+        return (
+            {},
+            "failed instrument: graph bytes changed during read-only discovery",
+        )
+
+    report = {
+        "population": "deferred_kind=expired",
+        "assessed": len(expired),
+        "excluded_by_kind": excluded_by_kind,
+        "verdicts": dict(Counter(row["verdict"] for row in worklist)),
+        "degraded": bool(degraded_warnings),
+        "warnings": degraded_warnings,
+        "positive_control": positive,
+        "worklist": worklist,
+    }
+    return report, ""
