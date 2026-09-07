@@ -162,16 +162,12 @@ def evals_health_summary(
 ) -> Optional[dict[str, Any]]:
     """One-line evals health for `fno backlog triage health` and `fno doctor`, or None.
 
-    Returns None when no history exists or it holds no rows (the consumption
-    armor: the report has a real consumer from day one). Never raises.
-
-    The age fields are the demand side (x-ab72): the harness went 40 days
-    unridden while a stale 100% rendered as healthy. ``stale`` is True when
-    the newest regression-tier run is older than *stale_days* (resolved from
-    ``config.evals.stale_days``, default 7). A history with rows but no
-    regression run reads ``never_ran``: due, not aged. A regression row
-    without a readable ts degrades to ``age_days=None`` and never asserts
-    staleness - unknown is not fresh.
+    None when no history or no rows (the consumption armor: the report has a
+    real consumer from day one). Never raises. ``stale`` is True when the
+    newest regression-tier run is older than *stale_days* (resolved from
+    ``config.evals.stale_days``, default 7); ``never_ran`` means the history
+    has rows but no regression run: due, not aged. A regression row without
+    a readable ts degrades to ``age_days=None`` - unknown is not fresh.
     """
     if not history_path.exists():
         return None

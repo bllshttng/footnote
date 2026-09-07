@@ -2488,20 +2488,17 @@ def _emit_human(
             "run `gh auth status`."
         )
 
-    # Evals demand (x-ab72), advisory like the arms above: a red evals row is
-    # an escalation, never a gate. Silent when fresh, like every neighbour.
+    # Evals demand: a red row is an escalation, never a gate; silent when fresh.
     ev = result.get("evals") or {}
     if ev.get("stale"):
         out(
-            "fno doctor: evals STALE - the newest regression-tier run is "
+            f"fno doctor: evals STALE - the newest regression-tier run is "
             f"{int(ev.get('age_days') or 0)}d old; run "
             "`fno doctor evals run --tier regression -y`."
         )
     elif ev.get("state") == "unknown":
-        # No history is not a clean bill: staleness is unmeasured, not fine.
         out(
-            "fno doctor: evals UNKNOWN "
-            f"({ev.get('detail') or 'no eval history'}); "
+            f"fno doctor: evals UNKNOWN ({ev.get('detail') or 'no eval history'}); "
             "run `fno doctor evals run --tier regression -y`."
         )
 

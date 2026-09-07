@@ -16,11 +16,9 @@ _LOG = logging.getLogger(__name__)
 class EvalsBlock(BaseModel):
     """Eval-suite settings: the grading-worker gate plus the demand keys.
 
-    ``enabled`` gates the headless grading-worker spawn (x-aaaf wave 2) and
-    defaults True: the spawner ran unconditionally before the gate existed.
-    ``schedule_days`` is how often the regression tier runs on a schedule (0
-    disables); ``stale_days`` is the age at which the newest regression-tier
-    run reads STALE in `fno doctor` and `fno backlog triage health`.
+    ``enabled`` gates the headless grading-worker spawn and defaults True.
+    ``schedule_days``: days between scheduled regression-tier runs (0 off).
+    ``stale_days``: age at which the newest regression run reads STALE.
     """
 
     model_config = ConfigDict(extra="ignore")
