@@ -279,7 +279,8 @@ def test_pr_poll_record_sees_commands_and_results_records_drop():
              "content": [{"type": "text",
                           "text": '{"pr":1371,"state":"MERGED"}'}]},
         ]}},
-        # The session's own prose asserting the same.
+        # Prose asserting the merge: real text for the records view, but the
+        # settle marker only ever comes from a tool result's JSON.
         {"message": {"role": "assistant", "content": [
             {"type": "text", "text": "PR 1371 merged, moving on"},
         ]}},
@@ -287,7 +288,6 @@ def test_pr_poll_record_sees_commands_and_results_records_drop():
     facts = watchdog._facts_from_entries(entries, 10)
     assert facts.pr_polls == (
         ("read", 1371, ""),
-        ("settled", 1371, "MERGED"),
         ("settled", 1371, "MERGED"),
     )
     assert facts.records[2][1] == "PR 1371 merged, moving on"
