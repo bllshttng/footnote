@@ -12,6 +12,10 @@ from typing import Callable, Mapping, Optional
 from fno.paths import github_cli_proxy_dir
 
 PROXY_EXEC_LINE = 'exec fno-gh-proxy "$@"'
+# The OTHER shape a shim takes: pip and uv write a console script importing the
+# entry point, with no exec line, so it read as a real binary. On 2026-09-07
+# `~/.local/bin/gh` was one, and every gh read died on the re-entry refusal.
+PROXY_IMPORT_LINE = "from fno.pr.gh_proxy import main"
 _WRAPPER = f"#!/bin/sh\n{PROXY_EXEC_LINE}\n"
 _PROXY_DIR_ENV = "FNO_GH_PROXY_DIR"
 # The proxy stamps this into the env it hands `os.execve`, so its own successor

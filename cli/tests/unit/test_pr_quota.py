@@ -520,3 +520,52 @@ def test_gh_global_flags_before_the_command_word_reach_the_coverage_reserve(
     assert calls[-1] == [
         "/real/gh", "-R", "owner/repo", "pr", "view", "1252", "--json", "reviews",
     ]
+
+
+def _console_script_shim(directory, name="gh"):
+    """A shim as pip or uv writes it: a console script, with no exec line.
+
+    Observed 2026-09-07 at `~/.local/bin/gh`. `_is_proxy_shim` only knew the
+    two-line sh wrapper, so this read as a real binary, `resolve_real_gh`
+    handed the proxy its own shim, and every gh read in the session died on
+    the re-entry refusal.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text(
+        "#!/usr/bin/python3\n"
+        "# -*- coding: utf-8 -*-\n"
+        "import sys\n"
+        "from fno.pr.gh_proxy import main\n"
+        "if __name__ == '__main__':\n"
+        "    sys.exit(main())\n"
+    )
+    path.chmod(0o755)
+    return path
+
+
+def test_a_console_script_shim_is_recognized_and_skipped(monkeypatch, tmp_path):
+    shim_dir = tmp_path / "console-shim"
+    real_dir = tmp_path / "real"
+    shim = _console_script_shim(shim_dir)
+    real = _real(real_dir)
+    monkeypatch.setattr(_quota, "github_cli_proxy_dir", lambda: tmp_path / "elsewhere")
+    monkeypatch.delenv("FNO_GH_PROXY_DIR", raising=False)
+    monkeypatch.delenv("FNO_REAL_GH", raising=False)
+    monkeypatch.setenv("PATH", f"{shim_dir}:{real_dir}")
+
+    assert _quota._is_proxy_shim(shim), "the console-script shape must read as a shim"
+    assert _quota.resolve_real_gh() == str(real.resolve())
+
+
+def test_a_real_gh_is_not_mistaken_for_a_console_script_shim(tmp_path):
+    """The control: the marker must not fire on a gh that merely names it."""
+    real = _real(tmp_path / "real")
+    mentions = tmp_path / "mentions"
+    mentions.mkdir()
+    mention = mentions / "gh"
+    mention.write_text("#!/bin/sh\n# unrelated to from fno.pr.gh_proxy import main\necho real\n")
+    mention.chmod(0o755)
+
+    assert not _quota._is_proxy_shim(real)
+    assert not _quota._is_proxy_shim(mention)

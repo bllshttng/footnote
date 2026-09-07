@@ -23,10 +23,10 @@ pins that they agree. When the verb cannot be reached, every caller keeps its
 own fail-closed default, which is today's behaviour exactly.
 
 The same argument reaches one class of untracked content: the symlinks
-`setup-worktree.sh` writes. Measured 2026-09-06 on `.claude/worktrees/x-ba96`,
-they were the tree's ENTIRE difference, so footnote dirtied the tree at creation
-and the DIRTY rule then protected that dirt forever. Such a link holds no human
-work, so it is discounted and named. Everything else untracked still blocks.
+`setup-worktree.sh` writes. On `.claude/worktrees/x-ba96` (2026-09-06) they were
+the tree's ENTIRE difference, so footnote dirtied it at creation and the DIRTY
+rule protected that dirt forever. Such a link holds no human work, so it is
+discounted and named; everything else untracked still blocks.
 """
 from __future__ import annotations
 
@@ -43,9 +43,8 @@ from typing import Callable, Optional, Union
 # first.
 _UNMERGED = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
 
-# What `scripts/setup/setup-worktree.sh` links, canonical-relative: these five
-# roots, and anything one level under `.claude/`. The second half is a shape,
-# not a list of names: the script's own list grows, and a copy here would drift.
+# What `setup-worktree.sh` links, canonical-relative: these five roots, and
+# anything one level under `.claude/`. A shape, not a list: the script's grows.
 _SETUP_LINK_ROOTS = frozenset({"internal", ".agents", ".codex", ".codex-plugin", ".gemini"})
 
 
@@ -102,7 +101,7 @@ def _is_setup_link(link: Path, canonical: Path) -> bool:
 
     Read the link ONE hop rather than resolving it: setup writes an absolute
     ``$CANONICAL/$rel``, so the raw target IS the attribution, and resolving
-    would follow ``internal`` (itself a symlink) out of the checkout.
+    follows ``internal`` (itself a symlink) out of the checkout.
     """
     try:
         target = os.readlink(link)
@@ -123,8 +122,8 @@ def _is_setup_dirt(path: Path, canonical: Path) -> bool:
     """A setup symlink, or a directory holding nothing but setup dirt.
 
     Setup makes a REAL ``.claude`` directory and fills it with links, so git
-    reports the directory and never its contents. An empty one reads False:
-    git never reports one, and yes would discount what was never looked at.
+    reports the directory, never its contents. An empty one reads False: git
+    never reports one, and yes would discount what was never looked at.
     """
     if path.is_symlink():
         return _is_setup_link(path, canonical)
@@ -218,9 +217,9 @@ def classify(porcelain: str, discount: Optional[Callable[[str], bool]] = None) -
     then any staged or unstaged modification of tracked content. Everything
     else is a deletion of a tracked file, which is recoverable from HEAD.
 
-    `discount` names untracked paths that carry no human work. It is asked
-    about `??` lines only, so tracked and unmerged dirt block as before, and
-    omitting it answers exactly what this function always answered.
+    `discount` names untracked paths carrying no human work. It is asked about
+    `??` lines only, so tracked and unmerged dirt block as before; omit it and
+    this answers exactly what it always answered.
     """
     deletions = 0
     discounted: list[str] = []
@@ -242,13 +241,8 @@ def classify(porcelain: str, discount: Optional[Callable[[str], bool]] = None) -
             continue
         return Verdict(False, "modified-tracked", _path_of(raw))
     if discounted:
-        return Verdict(
-            True,
-            "setup-links",
-            ", ".join(discounted),
-            deletions,
-            tuple(discounted),
-        )
+        detail = ", ".join(discounted)
+        return Verdict(True, "setup-links", detail, deletions, tuple(discounted))
     return Verdict(True, "clean", "", deletions)
 
 
