@@ -302,17 +302,17 @@ fn default_true() -> bool {
 /// v65 (tab organization): `ControlVerb::TabReorder { squad, tab, to }` and
 /// `PaneInfo.shell_idle`, the "idle now" reading the used-shell prune sweep
 /// needs. A new verb is not additive-tolerant; the field rides the generation.
-/// v66 (sideline rename): `Command::RenameAgent` - a new verb, this
-/// generation. Also adds `ControlVerb::ThreadPane`'s `#[serde(default)]`
-/// `placement` (the geometry a FRESH portal open honors; additive, floor
-/// unchanged; a repoint keeps owning its geometry and says so).
+/// v66 (sideline rename): `Command::RenameAgent`, a new verb; also
+/// `ThreadPane`'s `#[serde(default)]` `placement` (the geometry a FRESH
+/// portal open honors; a repoint keeps owning its geometry and says so).
 /// v68 (x-5baf): `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
 /// v69 (x-a600): `Command::RedrawPane`, `#[serde(default)]`; floor stays 58.
 /// v71 (prune sync): `ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`
 /// (handshake stops the skew) and the additive `PaneInfo.orphaned_worker`.
 /// v72 (x-867b): `ControlVerb::ThreadReseat` - the re-seat move (a live
 /// pane-hosted worker becomes a portal seat, keeping its PTY); floor stays 58.
-pub const PROTO_VERSION: u32 = 72;
+/// v73: `LayoutSlot.portal` serde(default), the persisted portal seat; floor stays 58.
+pub const PROTO_VERSION: u32 = 73;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -4044,7 +4044,7 @@ mod tests {
         // reload pair (`ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`)
         // bumps it 69 -> 71. The ThreadReseat control verb (x-867b) takes 72,
         // so the version never moves backwards whichever branch lands first.
-        assert_eq!(PROTO_VERSION, 72);
+        assert_eq!(PROTO_VERSION, 73);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
