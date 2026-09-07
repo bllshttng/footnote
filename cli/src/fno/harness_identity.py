@@ -1268,8 +1268,8 @@ def live_thread_row_for_cwd(
             return None
         wanted = os.path.realpath(cwd)
         matches: list[tuple[str, str]] = []
-        # The whole read lives in the try so a corrupted row (a cwd holding an
-        # embedded NUL raises on realpath) degrades to None, never raises.
+        # Whole read in the try: a corrupted row cwd (embedded NUL raises on
+        # realpath) degrades to None, never raises.
         for row in rows:
             if not isinstance(row, dict):
                 continue
