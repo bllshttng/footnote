@@ -918,13 +918,18 @@ def slot_states(
     settings: object = None,
 ) -> dict[str, Any]:
     """Readout of one verb's slot: lanes in order with live capacity states,
-    the ``on_exhausted`` terminal, and the lane a spawn would take right now
-    (resolved by :func:`resolve_slot` itself). Display, never selection.
+    identity and observation source per lane, the ``on_exhausted`` terminal,
+    and the lane a spawn would take right now (resolved by
+    :func:`resolve_slot` itself). Display, never selection; callers label it
+    a preview.
     """
     settings, _profile, lanes = _slot_entry(settings, verb)
     if inventory is None:
         inventory = resolve_inventory(settings=settings)
-    out: dict[str, Any] = {"verb": verb, "lanes": [], "on_exhausted": "", "would_take": ""}
+    out: dict[str, Any] = {
+        "verb": verb, "lanes": [], "on_exhausted": "", "would_take": "",
+        "routing": "unarmed",
+    }
     if not lanes:
         if inventory.declared and inventory.rows:
             out["would_take"] = f"no lanes; grid over {len(inventory.rows)} rows"
@@ -946,14 +951,26 @@ def slot_states(
     for rung, row_name in plan:
         row = lane_inv.rows.get(row_name)
         state = "no-such-row" if row is None else row_capacity(row, capacity)[0]
-        out["lanes"].append({"rung": rung, "name": row_name, "state": state})
+        entry: dict[str, Any] = {"rung": rung, "name": row_name, "state": state}
+        if row is not None and row.account and not row.route:
+            detail = (capacity or {}).get(row.harness)
+            ev = detail.get("evidence") or {} if isinstance(detail, Mapping) else {}
+            entry["identity"] = ev.get(row.account, "unknown")
+        if row is not None:
+            detail = (capacity or {}).get(row.harness)
+            if isinstance(detail, Mapping) and detail.get("window"):
+                entry["source"] = detail["window"]
+        out["lanes"].append(entry)
     candidate, slot_chain = resolve_slot(
         verb, None, capacity, inventory=inventory, settings=settings
     )
     if candidate is not None and candidate.get("lane_rung"):
         out["would_take"] = f"{candidate['lane_rung']} {candidate['lane']}"
-    elif slot_chain:
-        out["would_take"] = slot_chain[-1]
+        out["routing"] = "armed"
+    else:
+        out["routing"] = "unarmed"
+        if slot_chain:
+            out["would_take"] = slot_chain[-1]
     return out
 
 

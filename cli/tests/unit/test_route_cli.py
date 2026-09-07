@@ -372,10 +372,12 @@ def test_inventory_prints_slots_with_live_capacity(monkeypatch) -> None:
     res = runner.invoke(route_app, ["inventory"])
     assert res.exit_code == 0
     assert "slots:" in res.output
+    assert "preview (simulated; no launch)" in res.output
     assert "lanes[0] flash-zai capacity=unknown" in res.output
     assert "lanes[1] luna-codex capacity=unknown" in res.output
     assert "on_exhausted=queue" in res.output
     assert "would take agents.profiles.target.lanes[0] flash-zai" in res.output
+    assert "routing=armed" in res.output
 
     # the lane whose harness reads exhausted skips; the next lane answers
     monkeypatch.setattr(
@@ -398,6 +400,7 @@ def test_inventory_json_carries_slots(monkeypatch) -> None:
     target = next(s for s in payload["slots"] if s["verb"] == "target")
     assert target["would_take"] == "agents.profiles.target.lanes[0] flash-zai"
     assert target["on_exhausted"] == "queue"
+    assert target["routing"] == "armed"
     # a verb with no lanes says so, both halves
     think = next(s for s in payload["slots"] if s["verb"] == "think")
     assert think["would_take"].startswith("no lanes; grid over ")

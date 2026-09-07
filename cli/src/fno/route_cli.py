@@ -393,7 +393,7 @@ def inventory_cmd(
 
 def _echo_slots(slots: list[dict]) -> None:
     """Print the per-verb slot readout under the row table."""
-    typer.echo("slots:")
+    typer.echo("slots: preview (simulated; no launch)")
     for slot in slots:
         lanes = slot.get("lanes") or []
         if not lanes:
@@ -401,12 +401,14 @@ def _echo_slots(slots: list[dict]) -> None:
             continue
         lane_text = ", ".join(
             f"{lane['rung'].rsplit('.', 1)[-1]} {lane['name']} capacity={lane['state']}"
+            + (f" identity={lane['identity']}" if lane.get("identity") else "")
             for lane in lanes
         )
         line = f"  {slot['verb']}: {lane_text}"
         if slot.get("on_exhausted"):
             line += f"; on_exhausted={slot['on_exhausted']}"
         line += f"; would take {slot['would_take']}"
+        line += f"; routing={slot.get('routing', 'unarmed')}"
         typer.echo(line)
 
 
