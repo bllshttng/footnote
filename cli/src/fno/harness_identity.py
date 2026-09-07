@@ -1235,7 +1235,6 @@ def current_session_ids(env: Optional[Mapping[str, str]] = None) -> set[str]:
 
 
 # --- The agents-registry spawn record as an identity source (x-e882) --------
-
 #: Row statuses under which a session still owns its identity (a
 #: harness_session_id held by such a row is provably not another acquiring
 #: session's). Declared here so the registry and the reader cannot drift.
