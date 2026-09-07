@@ -134,6 +134,7 @@ _wt_refresh_cwd_snapshot() {
 
 _wt_pids() {
     local wt="$1" root pids="" pids_f="" re candidates filtered snapshot_rc=0
+    local ps_rc=0 ps_out="" ps_snap="" ps_rows=0
     root="$(cd "$wt" 2>/dev/null && pwd -P)" || root="$wt"
     if [[ "${_WT_CWD_SNAPSHOT_OK:-0}" -eq 1 ]]; then
         pids="$(printf '%s\n' "${_WT_CWD_SNAPSHOT:-}" | awk -F '\t' -v root="$root" -v logical="$wt" '
@@ -162,7 +163,9 @@ _wt_pids() {
     # ancestor drop below reads it in memory, never via a second ps call.
     # The marker keeps awk's first input non-empty and positively identifies a
     # completed snapshot; otherwise an empty ps makes the candidates FNR==NR.
-    ps_snap="$(ps -Ao pid=,ppid=,command= 2>/dev/null; printf '%s\n' '__FNO_PS_SNAPSHOT_COMPLETE__')"
+    ps_rc=0
+    ps_out="$(ps -Ao pid=,ppid=,command= 2>/dev/null)" || ps_rc=$?
+    ps_snap="$(printf '%s\n' "$ps_out"; printf '%s\n' '__FNO_PS_SNAPSHOT_COMPLETE__')"
     filtered="$(awk '
         BEGIN { snapshot_marker = "__FNO_PS_SNAPSHOT_COMPLETE__" }
         FNR==NR {
@@ -190,60 +193,95 @@ _wt_pids() {
             print pid
         }
     ' <(printf '%s\n' "$ps_snap") <(printf '%s\n' "$candidates"))"
-    # Two drops, both read from the ONE ps snapshot in memory:
-    # 1. A candidate that is an ANCESTOR of this sweep is the sweep's own
-    #    invoker (the xdist worker whose argv carries the test's tmp paths,
-    #    CI smoke 2026-09-07). Walk UP from $$ through the ppid map; walking
-    #    from the CANDIDATE can never reach $$, a descendant.
-    # 2. A candidate with a row in NEITHER snapshot (this ps snapshot, or the
-    #    lsof cwd snapshot) was an enumeration transient: a fork of the
-    #    sweep's own pipeline visible to pgrep mid-exec with the sweep's
-    #    argv, dead before either snapshot (CI, pids=@no-cwd-row with an
-    #    empty command). It held nothing long enough to own build artifacts.
-    #    A descendant with its own cwd in the tree stays: a real occupant
-    #    (the battery pins this).
-    local mine="" walk_pid hop pid_keep ps_rows
-    walk_pid="$$"
-    for hop in 1 2 3 4 5 6 7 8 9 10 11 12; do
-        [[ -z "$walk_pid" || "$walk_pid" == "0" || "$walk_pid" == "1" ]] && break
-        mine="${mine}${walk_pid}"$'\n'
-        walk_pid="$(awk -v want="$walk_pid" '
-            $1 == want { print $2; exit }
-        ' <<< "$ps_snap")"
-    done
-    # The transient drop only fires on a positively-populated ps snapshot: an
-    # empty one (sandbox denies ps, or a stub prints nothing) proves nothing,
-    # so every candidate is kept (the battery's empty-ps pin).
+    # The drops below fire only on a positively-populated ps snapshot: an
+    # empty one (fork-starved sweep, sandbox denies ps) proves nothing, so
+    # every candidate is kept fail-closed and the diagnostic records the ps
+    # exit status plus any cwd sighting, readable from the protection line.
     ps_rows="$(awk -v m="__FNO_PS_SNAPSHOT_COMPLETE__" '$0 == m { exit } NF { c++ } END { print c + 0 }' <<< "$ps_snap")"
-    local filtered2="" pid_keep ps_cmd cwd_row
+    local filtered2="" pid_keep cwd_row kept_info kp kcmd kcwd
     _WT_PIDS_DIAG=""
-    if [[ "$ps_rows" -gt 0 ]]; then
+    if [[ "$ps_rows" -eq 0 ]]; then
+        filtered2="$filtered"
         while IFS= read -r pid_keep; do
             [[ -z "$pid_keep" ]] && continue
-            printf '%s\n' "$mine" | grep -qx "$pid_keep" && continue
-            ps_cmd="$(awk -v want="$pid_keep" '
-                $1 == want { $1 = ""; $2 = ""; sub(/^[\t ]+/, ""); print; exit }
-            ' <<< "$ps_snap")"
-            # A zombie keeps its ps row but owns no fds, no cwd, no mmap: it
-            # cannot hold build artifacts. An empty command column reads the
-            # same way (dead between enumeration and this snapshot).
-            if [[ -n "$ps_cmd" && "$ps_cmd" != *defunct* ]]; then
-                filtered2="${filtered2}${pid_keep}"$'\n'
-                _WT_PIDS_DIAG="${_WT_PIDS_DIAG}${pid_keep}:${ps_cmd:0:60}@ps-row,"
-                continue
-            fi
-            # No live ps row: keep only on a cwd-snapshot sighting, proof the
-            # process was anchored in the tree when lsof ran.
             cwd_row="$(printf '%s\n' "${_WT_CWD_SNAPSHOT:-}" \
                 | awk -F '\t' -v want="$pid_keep" '$1 == want { print $2; exit }')"
-            if [[ -n "$cwd_row" ]]; then
-                filtered2="${filtered2}${pid_keep}"$'\n'
-                _WT_PIDS_DIAG="${_WT_PIDS_DIAG}${pid_keep}:no-ps-row@${cwd_row:0:60},"
-            fi
+            _WT_PIDS_DIAG="${_WT_PIDS_DIAG}${pid_keep}:no-ps@${cwd_row:-no-cwd-row},"
         done <<< "$filtered"
-    else
-        filtered2="$filtered"
+        _WT_PIDS_DIAG="ps-rc=${ps_rc} ${_WT_PIDS_DIAG%,}"
+        printf '%s\n' "$filtered2"
+        return "$snapshot_rc"
     fi
+    # Survivors resolved in ONE awk pass over the in-memory snapshots, never
+    # one fork per candidate: under a fork-starved sweep the per-candidate
+    # awk calls multiply the very pressure that emptied the ps snapshot
+    # (CI smoke 2026-09-07, ps-rc diagnostic). Three drops, all reading the
+    # same snapshot:
+    # 1. machinery (done in the first awk) and ancestors of this sweep: the
+    #    candidate's ppid chain is walked to $$ in memory;
+    # 2. zombies and enumeration transients: a ps row whose command column
+    #    is empty or defunct owns no fds, no cwd, no mmap, and cannot hold
+    #    build artifacts;
+    # 3. a candidate with a live ps row, or a cwd-snapshot sighting, stays.
+    filtered2=""
+    # bash 3.2 cannot parse nested quotes inside ${var:-"..."}: the empty
+    # cwd snapshot rides as a placeholder row instead.
+    cwd_input="${_WT_CWD_SNAPSHOT}"
+    if [[ -z "$cwd_input" ]]; then
+        cwd_input="-"
+    fi
+    kept_info="$(awk -v self="$$" '
+        FNR == 1 { stage++ }
+        stage == 1 {
+            line = $0
+            if (line == "__FNO_PS_SNAPSHOT_COMPLETE__") {
+                seen_complete = 1
+                next
+            }
+            sub(/^[ \t]+/, "", line)
+            pid = $1
+            sub("^" pid "[ \t]+[^ \t]+[ \t]+", "", line)
+            cmdbypid[pid] = line
+            ppidbypid[pid] = $2
+            next
+        }
+        stage == 2 {
+            if (!walked && seen_complete) {
+                # The ANCESTORS of the sweep: walk UP from $$ once, after
+                # the ppid map is complete. A candidate IN this set is the
+                # sweep invoker. Walking from the CANDIDATE upward and
+                # hitting $$ would read the opposite: a descendant of the
+                # sweep, and a descendant anchored in the tree is a real
+                # occupant (the battery pins this).
+                p = self
+                for (i = 0; i < 12 && p != "" && p != "0" && p != "1"; i++) {
+                    mine[p] = 1
+                    p = ppidbypid[p]
+                }
+                walked = 1
+            }
+            if ($0 == "-") next
+            cwdbypid[$1] = $2
+            next
+        }
+        stage == 3 {
+            pid = $1
+            if (pid in mine) next
+            cmd = cmdbypid[pid]
+            if (cmd != "" && cmd !~ /defunct/) {
+                print pid "\t" cmd "\t-"
+                next
+            }
+            if (pid in cwdbypid) {
+                print pid "\tno-ps-row\t" cwdbypid[pid]
+            }
+        }
+    ' <(printf '%s\n' "$ps_snap") <(printf '%s\n' "$cwd_input") <(printf '%s\n' "$filtered"))"
+    while IFS=$'\t' read -r kp kcmd kcwd; do
+        [[ -z "$kp" ]] && continue
+        filtered2="${filtered2}${kp}"$'\n'
+        _WT_PIDS_DIAG="${_WT_PIDS_DIAG}${kp}:${kcmd:0:60}@${kcwd:0:60},"
+    done <<< "$kept_info"
     printf '%s\n' "$filtered2"
     return "$snapshot_rc"
 }
