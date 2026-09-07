@@ -824,10 +824,9 @@ def _report_deprecated_dispatch_harness() -> None:
 
 
 def _report_band_routing() -> None:
-    """Say when band routing is routing nothing, and why: silent only once at
-    least one verb's slot would take a lane. ``model_routing.roles`` is a
-    DIFFERENT axis; having it set reads as already on.
-    """
+    """Say when band routing is routing nothing, and why. Silent once any
+    verb's slot would take a lane; ``model_routing.roles`` is a DIFFERENT
+    axis and reads as already on."""
     from fno import route_resolve
     from fno.config import load_settings
 

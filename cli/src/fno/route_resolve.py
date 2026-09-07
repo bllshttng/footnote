@@ -533,9 +533,8 @@ def slot_states(
     inventory: Optional[Inventory] = None,
     settings: object = None,
 ) -> dict[str, Any]:
-    """Readout of one verb's slot: lanes with live capacity and identity,
-    the policy lines, and the lane a spawn would take right now - the verb's
-    own answer. Display, never selection."""
+    """Readout of one verb's slot: lanes, policy lines, and would_take - the
+    verb's own answer. Display, never selection."""
     settings, _profile, lanes = _slot_entry(settings, verb)
     if inventory is None:
         inventory = resolve_inventory(settings=settings)
