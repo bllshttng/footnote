@@ -25,6 +25,12 @@ import typer
 
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.tombstones import tombstone_group_cls
+from fno.graph._constants import SOURCE_KIND_DEFAULT, validate_source_kind
+from fno.graph.node_builder import (  # noqa: F401 - re-export for lazy importers
+    _build_backlog_node,
+    _session_provenance,
+)
+from fno.graph.node_builder import register as _register_node_builder
 from fno.graph.rank import cmd_rank as _cmd_rank
 
 cli = typer.Typer(
@@ -47,6 +53,7 @@ cli = typer.Typer(
 
 # Nested triage sub-app: `fno backlog triage <verb>`.
 from fno.graph.triage import cli as _triage_cli  # noqa: E402
+_register_node_builder(cli)
 
 cli.add_typer(_triage_cli, name="triage")
 
@@ -82,7 +89,7 @@ cli.command("decide-retract", hidden=True)(backlog_decide_retract)
 cli.command("decide-reindex", hidden=True)(backlog_decide_reindex)
 
 
-# Node-lifecycle sub-apps folded under backlog (unit 6 of the x-9d6c reorg):
+# Node-lifecycle sub-apps folded under backlog (unit 6 of the  reorg):
 # annotate findings, carve-out records, and the retro harvest are all node
 # metadata operations. The old top-level spellings stay one-release shims
 # (fno.verb_moves); the mounts below are the canonical homes.
@@ -95,7 +102,7 @@ cli.add_typer(_carveout_app, name="carveout", hidden=True)
 cli.add_typer(_retro_app, name="retro", hidden=True)
 
 
-# Selection-time enforcement (ab-fcf9cec5): a node another session is actively
+# Selection-time enforcement (): a node another session is actively
 # driving holds a live ``node:<id>`` claim and must be skipped so two sessions
 # never pick up the same node. The implementation is homed in graph/statuses.py
 # (so the board renderers can share it without a cli<->render cycle); re-exported
@@ -117,22 +124,7 @@ def _require_live_claimed_node_ids(operation: str) -> set[str]:
 
 def _has_unmerged_open_pr(e: dict) -> bool:
     """True when a node already carries a PR but is not yet closed (done) -
-    i.e. work is in flight / in review, so it must NOT be re-selected for
-    dispatch (ab-372130f6).
-
-    A node only leaves the ready pool at merge-and-close (completed_at set ->
-    recompute_statuses derives status "done"). During the whole PR window
-    pr_number is set but completed_at is None, so the status derivation still
-    yields "ready"; this predicate is the missing selection-time guard,
-    mirroring _live_claimed_node_ids() - the PID-based node claim dies when the
-    builder session exits, leaving no in-flight signal behind.
-
-    Excludes every not-done node that carries a pr_number, regardless of
-    merge_status: an open unmerged PR (the originally-observed ab-58645f63
-    case), a merged-but-reconcile-pending PR (do not re-dispatch already-merged
-    work in the close gap), and a closed-without-merge PR (un-dispatchable until
-    pr_number is cleared - see the plan's known edges) all mean "not fresh
-    ready work".
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     if e.get("completed_at"):
         return False  # already done; status derivation bucketed it out of ready
@@ -170,25 +162,7 @@ def _needs_design(e: dict) -> bool:
 
 def _container_ids(entries: list[dict]) -> set[str]:
     """Ids of nodes that are some other node's ``parent`` - i.e. epics/containers.
-
-    A container is never directly buildable: its work lives in its decomposed
-    children, and it carries no PR of its own. So every work-SELECTION surface
-    drops it from the candidate pool - `next`/`ready`/`--all-ready` build the
-    leaves, never the box (x-33b2). Shared by `next` (_pick_ready) and `ready`
-    (cmd_ready) so the two surfaces cannot drift; advance_dependents applies the
-    same rule on the merge edge-following path.
-
-    A child whose ``contained_in`` is the parent ships INSIDE the parent's PR,
-    so the parent is the delivery unit, not a box: an owner whose only children
-    are its own contained subtasks still drains. Free children make the parent
-    a box exactly as before.
-
-    No "keep the all-done epic selectable" exception is needed: an epic closes
-    automatically via ``_cascade_close_parents`` on the merge that finishes its
-    last child (uniform across projects), so it is already ``done`` - never a
-    lingering ``ready`` container that selection would have to surface for
-    closure. That replaces the old "walker closes the epic via next" path,
-    which conflicted with never building a container.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     return {
         p
@@ -294,7 +268,7 @@ def _briefs_dir() -> Path:
 
 
 # -- relatedness sidecar (`fno backlog relatedness build|get`) --
-# A node-to-node relatedness map read by x-9ed6's offer path and /triage.
+# A node-to-node relatedness map read by 's offer path and /triage.
 # Sidecar, not a graph mutation, so `build` writes unconditionally.
 
 _relatedness_cli = typer.Typer(
@@ -350,7 +324,7 @@ def cmd_relatedness_get(
     top_k: int = typer.Option(5, "--top-k", "-K", help="Max related nodes to return."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit a JSON array."),
 ) -> None:
-    """Print the top related nodes for one node (the x-9ed6 consumer API).
+    """Print the top related nodes for one node (the  consumer API).
 
     No map -> exit non-zero, empty stdout (the caller's fallback signal).
     Present map, no edges -> exit 0, empty list. The two are distinct (AC3).
@@ -401,7 +375,7 @@ def _live_worker(node_id: str) -> Optional[str]:
     """The holder of a live/suspect ``node:<id>`` claim, else None.
 
     A suspect claim (TTL-unexpired, pid dead) still belongs to its session, so
-    it counts as a worker here (x-ba4b). Routes through the global claims root
+    it counts as a worker here (). Routes through the global claims root
     that node ids key on, so it reads the same lockfile the dispatcher wrote.
     """
     from fno.claims.core import claim_status
@@ -788,25 +762,6 @@ cli.add_typer(_epic_cli, name="epic", hidden=True)
 _NodeFields = dict
 
 
-def _scan_md_field(text: str, key: str) -> Optional[str]:
-    """First ``<key>: <value>`` value in a target-state.md, matched-quote-stripped.
-
-    Local mirror of ``fno.agents.whoami._scan_field`` so ``graph`` does not import
-    ``agents`` (avoids an import cycle). ``None`` if the key is absent.
-    """
-    import re
-
-    # ^\s* tolerates indentation; (.+) captures the whole value so a path/title
-    # containing spaces is not truncated at the first space (\S+ would).
-    pattern = re.compile(rf"^\s*{re.escape(key)}:\s*(.+)")
-    for line in text.splitlines():
-        match = pattern.match(line)
-        if match:
-            value = match.group(1).strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-                value = value[1:-1]
-            return value
-    return None
 
 
 def _stamp_ship_on_pr_link(node_id: str) -> None:
@@ -888,186 +843,6 @@ def _resolve_asserted_id(
     return resolved
 
 
-def _session_provenance(
-    running_cwd: Optional[str] = None,
-    *,
-    source_node: Optional[str] = None,
-    known_ids: Optional[set] = None,
-) -> dict:
-    """Parent-edge provenance for a node born inside a live session.
-
-    Reads the running session's env + ``.fno/target-state.md`` and returns
-    ``source_session_id`` / ``source_harness`` / ``source_cwd`` /
-    ``source_node_id`` / ``source_plan_path``. Every key degrades to ``None``
-    and the function NEVER raises (AC-EDGE).
-
-    The origin resolves through three branches in strict precedence:
-
-    1. ``source_node`` - an explicit ``--source-node``, already resolved and
-       validated by the CLI verb. Taken as given: re-judging it would need a
-       raise this function has promised not to make.
-    2. The owned manifest (below, claude-only and ownership-proven).
-    3. ``FNO_NODE`` - written at spawn time by the spawner. NOT gated on
-       harness: it is the only origin signal a codex/opencode worker has.
-
-    ``known_ids`` is the caller's live snapshot. When supplied, an ambiently
-    resolved id absent from it degrades to ``None`` rather than stamping an edge
-    that dangles, and the dropped token comes back in ``source_node_dropped``.
-    Every filing path resolves it inside its locked mutator, so the check costs
-    no extra read; omitting it skips the check.
-
-    ``source_cwd`` is the originating SESSION's cwd, which is the key claude
-    transcript dirs are slugged by -- distinct from the node's durable ``cwd``
-    (the canonical project root). The read-back resolver needs the session cwd,
-    so it is persisted separately rather than reusing the node's ``cwd``.
-
-    Ownership of the manifest is proven exactly as ``whoami.find_held_node``
-    does it: the manifest's ``claude_transcript_id`` must equal this process's
-    ``CLAUDE_CODE_SESSION_ID``, so a stale / reused / foreign worktree manifest
-    never leaks a node this session does not hold. Node + plan resolution is
-    claude-only (the only proven transcript-resolver lane); codex/gemini stamp
-    session + harness and degrade the rest.
-    """
-    cwd = running_cwd if running_cwd is not None else os.getcwd()
-
-    from fno.claims.self_identity import resolve_self_identity
-
-    identity = resolve_self_identity()
-    session = getattr(identity, "session_id", None)
-    harness = getattr(identity, "harness", None)
-
-    source_node_id: Optional[str] = None
-    source_plan_path: Optional[str] = None
-    if session and harness == "claude":
-        try:
-            text = (Path(cwd) / ".fno" / "target-state.md").read_text(encoding="utf-8")
-            # Current key is claude_session_id; old-key fallback for one release.
-            manifest_claude_sid = _scan_md_field(text, "claude_session_id") or _scan_md_field(
-                text, "claude_transcript_id"
-            )
-            if manifest_claude_sid == session:
-                nid = _scan_md_field(text, "graph_node_id")
-                if nid and nid.lower() != "null":
-                    source_node_id = nid
-                plan = _scan_md_field(text, "plan_path")
-                if plan and plan.lower() != "null":
-                    source_plan_path = plan
-        except (OSError, ValueError):
-            pass
-
-    if source_node_id is None:
-        source_node_id = (os.environ.get("FNO_NODE") or "").strip() or None
-
-    dropped: Optional[str] = None
-    if source_node_id is not None and known_ids is not None and source_node_id not in known_ids:
-        dropped, source_node_id = source_node_id, None
-
-    if source_node:
-        # The explicit flag wins, so nothing was dropped: an ambient candidate
-        # that lost a precedence contest is not a capture failure to report.
-        source_node_id, dropped = source_node, None
-
-    return {
-        "source_session_id": session,
-        "source_harness": harness,
-        # session cwd is the transcript-resolver key; only meaningful with a session.
-        "source_cwd": cwd if session else None,
-        "source_node_id": source_node_id,
-        "source_plan_path": source_plan_path,
-        # Not a node field. An ambient signal naming a node the graph no longer
-        # has is the one case worth telling the operator about: capture silently
-        # regressing to nothing is what this feature exists to catch.
-        "source_node_dropped": dropped,
-    }
-
-
-def _build_backlog_node(
-    *,
-    title: str,
-    type_: str = "feature",
-    parent: Optional[str] = None,
-    project: Optional[str] = None,
-    cwd: Optional[str] = None,
-    priority: str = "p2",
-    blocks_everything: bool = False,
-    difficulty: Optional[str],
-    difficulty_source: str = "filed",
-    domain: str = "code",
-    blocked_by: Optional[list[str]] = None,
-    roadmap_id: Optional[str] = None,
-    vision_path: Optional[str] = None,
-    details: Optional[str] = None,
-    size: Optional[str] = None,
-    batch: Optional[str] = None,
-    plan_path: Optional[str] = None,
-    tags: Optional[list[str]] = None,
-    source_node: Optional[str] = None,
-    known_ids: Optional[set] = None,
-    out: Optional[dict] = None,
-) -> _NodeFields:
-    """Build a backlog node dict shared by ``cmd_add`` and ``cmd_idea``.
-
-    ``out``, when given, receives metadata ABOUT the capture that is not itself
-    a node field (currently ``source_node_dropped``). A separate channel rather
-    than a transient key on the returned dict, so a caller that does not know to
-    strip it cannot persist it into the graph.
-
-    Centralizes the field set so a schema addition (e.g. a new graph
-    field) shows up in every entry-creating verb at once. ``difficulty`` is
-    required so every caller makes the routing decision explicitly instead of
-    silently minting an unroutable node. ``difficulty_source`` names the writer
-    in the history entry. The returned dict has no ``id`` - the caller assigns
-    one inside its locked mutator so duplicate-ID checks happen against the
-    live snapshot.
-    """
-    from fno.graph._constants import ID_PREFIX  # noqa: F401
-
-    # Parent-edge provenance (x-30f6): stamped from the running session's env +
-    # manifest, or from an explicit --source-node. Centralized here so
-    # every creator verb (add/idea/decompose) self-describes its origin.
-    prov = _session_provenance(source_node=source_node, known_ids=known_ids)
-    if out is not None:
-        out["source_node_dropped"] = prov["source_node_dropped"]
-    return {
-        "id": None,  # caller fills inside locked mutator
-        "parent": parent,
-        "tags": list(tags or []),
-        "title": title,
-        "type": type_,
-        "project": project,
-        "cwd": cwd,
-        "priority": priority,
-        "blocks_everything": blocks_everything,
-        "difficulty": difficulty,
-        "difficulty_history": (
-            [{"value": difficulty, "source": difficulty_source, "ts": datetime.now(timezone.utc).isoformat()}]
-            if difficulty is not None
-            else []
-        ),
-        "domain": domain,
-        "blocked_by": list(blocked_by or []),
-        "session_id": None,
-        "locked_at": None,
-        "completed_at": None,
-        "has_brief": False,
-        "roadmap_id": roadmap_id,
-        "vision_path": vision_path,
-        "details": details,
-        "size": size,
-        "batch": batch,
-        "cost_usd": None,
-        "cost_sessions": [],
-        "plan_path": plan_path,
-        "pr_number": None,
-        "pr_url": None,
-        "merge_status": None,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "source_session_id": prov["source_session_id"],
-        "source_harness": prov["source_harness"],
-        "source_cwd": prov["source_cwd"],
-        "source_node_id": prov["source_node_id"],
-        "source_plan_path": prov["source_plan_path"],
-    }
 
 
 def _refuse_create_on_external_backend() -> None:
@@ -1238,6 +1013,7 @@ def _create_node_impl(
     batch: Optional[str] = None,
     tags: Optional[list[str]] = None,
     source_node: Optional[str] = None,
+    source_kind: str = SOURCE_KIND_DEFAULT,
     related: Optional[list[str]] = None,
     evidence: Optional[str] = None,
     require_difficulty: bool = False,
@@ -1291,6 +1067,12 @@ def _create_node_impl(
             f"Error: invalid type '{type_}'. Must be one of: {', '.join(sorted(VALID_NODE_TYPES))}",
             err=True,
         )
+        raise typer.Exit(code=1)
+
+    try:
+        validate_source_kind(source_kind)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1)
 
     if details is not None and description is not None:
@@ -1359,13 +1141,14 @@ def _create_node_impl(
             batch=batch,
             tags=resolved_tags,
             source_node=resolved_source_node,
+            source_kind=source_kind,
             known_ids=live_ids,
             out=capture_meta,
         )
         node["id"] = new_id
         # Enforce the epic-nesting cap on the create path too, or `add --type
         # epic --parent <nested-epic>` would slip a 3rd epic level past the same
-        # guard cmd_update applies (x-6c2b). Scoped to a real cap violation: a
+        # guard cmd_update applies (). Scoped to a real cap violation: a
         # non-epic, or a parent that does not resolve, keeps the existing lenient
         # pass-through (add/idea has never hard-validated --parent).
         if parent:
@@ -1464,7 +1247,7 @@ def _create_node_impl(
     elif node_holder[0] is not None and node_holder[0].get("source_node_id"):
         typer.echo(f"origin: {node_holder[0]['source_node_id']}", err=True)
 
-    # Filing-time dedup net (plan x-6ac7): warn if the just-born node resembles
+    # Filing-time dedup net (plan ): warn if the just-born node resembles
     # an existing one across all live states. Post-write, fresh read, non-fatal -
     # the mutation already committed, so a failure anywhere degrades to one
     # warning and never fails the filing or touches its exit code.
@@ -1566,6 +1349,14 @@ def cmd_add(
             "ambient capture. Refuses if it does not resolve."
         ),
     ),
+    source_kind: str = typer.Option(
+        SOURCE_KIND_DEFAULT,
+        "--source-kind",
+        help=(
+            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
+            "Mark an operator ask with operator_request."
+        ),
+    ),
     related: Optional[List[str]] = typer.Option(
         None,
         "--related",
@@ -1594,6 +1385,7 @@ def cmd_add(
         batch=batch,
         tags=tag,
         source_node=source_node,
+        source_kind=source_kind,
         related=related,
         evidence=evidence,
         require_difficulty=True,
@@ -1745,6 +1537,14 @@ def cmd_idea(
         help=(
             "Origin node this filing came out of (id, slug, or bare hex). Overrides "
             "ambient capture. Refuses if it does not resolve."
+        ),
+    ),
+    source_kind: str = typer.Option(
+        SOURCE_KIND_DEFAULT,
+        "--source-kind",
+        help=(
+            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
+            "Mark an operator ask with operator_request."
         ),
     ),
     related: Optional[List[str]] = typer.Option(
@@ -1961,6 +1761,7 @@ def cmd_idea(
         batch=batch,
         tags=tag,
         source_node=source_node,
+        source_kind=source_kind,
         related=related,
         evidence=evidence,
         require_difficulty=True,
@@ -2246,14 +2047,14 @@ def cmd_decompose(
         # Resolved adopt claims, keyed on the node id `_find_node` returns
         # rather than the spelling the spec used. validate_groups can only
         # compare raw strings, and a 4-7 hex `ab-` prefix resolves to the same
-        # entry as the full id - so `ab-abcd` in one group and `ab-abcd0001` in
+        # entry as the full id - so `ab-abcd` in one group and `` in
         # another read as two claims there and are one node here.
         adopt_claim: dict[str, str] = {}
         plan_to_group: list[tuple[dict, dict]] = []  # (node, normalized group)
         for grp in norm:
             frag_path = child_plan_path(base, grp["slug"])
             sep_path = separate_plan_path(base, grp["slug"])
-            # Tolerant lookup: identity is the durable group_slug (x-edf7 US2), so
+            # Tolerant lookup: identity is the durable group_slug ( US2), so
             # a child born unlinked (no plan_path yet) is still found; the legacy
             # plan_path match (fragment or separate form) upserts a pre-field child
             # in place instead of duplicating (idempotent on slug across migration).
@@ -2292,7 +2093,7 @@ def cmd_decompose(
                 action = "created"
                 # Born UNLINKED (plan_path=None -> derives `idea`): linking the
                 # filled plan is the design-completion signal that flips the child
-                # `ready` (x-edf7 US2, Locked Decision 4). group_slug is the durable
+                # `ready` ( US2, Locked Decision 4). group_slug is the durable
                 # identity that survives the unlinked window.
                 node = _build_backlog_node(
                     title=grp["title"],
@@ -2321,7 +2122,7 @@ def cmd_decompose(
             slug_to_id[grp["slug"]] = node["id"]
             plan_to_group.append((node, grp))
 
-            # Adoption (x-b9d7 US2): re-parent each named node under this group
+            # Adoption ( US2): re-parent each named node under this group
             # child, inside the same locked mutation. Nothing is minted for it
             # and nothing is deleted; membership rides the `parent` pointer.
             adopted: list[str] = []
@@ -2440,7 +2241,7 @@ def cmd_decompose(
         # left in place, not deleted - deleting graph nodes is destructive.
         orphan_box[0] = [o["id"] for o in orphans]
 
-        # Epic children that no group adopted (x-b9d7 US3). Uses the SAME
+        # Epic children that no group adopted ( US3). Uses the SAME
         # predicate as the adoption refusal above, deliberately: keying this on
         # the base-scoped group_child_slug instead would list a group child
         # whose plan path no longer matches a renamed epic doc, and the warning
@@ -2504,7 +2305,7 @@ def cmd_decompose(
     #     it reads settings (plans_content_dir walks .claude/settings) and settings
     #     reads never happen under the lock. Each child is born at its CANONICAL
     #     `fno do plan path` name, routed into the CHILD project's plans dir - not the
-    #     epic's dir, not the legacy `.group-<slug>.md` name (x-d6a6).
+    #     epic's dir, not the legacy `.group-<slug>.md` name ().
     # US4: transcribe the epic's why (intent + Locked Decisions) once - every child
     # scaffold is born grounded, AND a fan-out seed carries it so the /think worker
     # stays grounded even when its origin transcript is unresolved. A missing
@@ -2570,7 +2371,7 @@ def cmd_decompose(
                 canonical.parent.mkdir(parents=True, exist_ok=True)
                 # Seed the folded nodes (discovery children adopted into this one
                 # PR) as a coverage checklist, so a fresh-context builder sees
-                # every commitment the plan must address (x-d9a4 task 1.7).
+                # every commitment the plan must address ( task 1.7).
                 adopted_nodes = [
                     (aid, (by_id.get(aid) or {}).get("title") or aid)
                     for aid in (grp.get("adopt") or [])
@@ -2595,7 +2396,7 @@ def cmd_decompose(
                     err=True,
                 )
 
-    # 4a. Per-child design pass (x-edf7 US3) + born-with-why (v2 A1). Runs BEFORE
+    # 4a. Per-child design pass ( US3) + born-with-why (v2 A1). Runs BEFORE
     #     the report so a flagged fan-out's outcome rides in the --json payload
     #     (a machine caller must see when a child was left an unlinked idea, not a
     #     silent success). Two lanes, one shared RunState bounding the batch's blast
@@ -2636,7 +2437,7 @@ def cmd_decompose(
                 "FNO_THINK_SPAWN": "1",
                 "FNO_THINK_SPAWN_ATTENDED": "spawn",
             }
-            # x-3571 wave-2 lane: opt-in, default OFF. Wave 0 means "no
+            #  wave-2 lane: opt-in, default OFF. Wave 0 means "no
             # intra-epic blocker", which `compute_waves` already derives (and
             # already projects as `wave:`), so there is nothing new to compute -
             # only a second reason to spawn beside the `needs_think` flag.
@@ -2771,7 +2572,7 @@ def cmd_decompose(
         for msg in downgrades:
             typer.echo(f"warning: {msg}", err=True)
 
-    # 4c. Name the epic children no group adopted (x-b9d7 US3). Emitted on BOTH
+    # 4c. Name the epic children no group adopted ( US3). Emitted on BOTH
     #     report paths, not just the human one: a --json caller decomposing a
     #     populated epic needs this as much as an operator does, and stderr
     #     never pollutes the JSON on stdout.
@@ -3041,7 +2842,7 @@ def _intake_impl(
         # path must not surface as if the intake itself failed.
         sys.stderr.write(f"warning: post-intake project check failed: {e}\n")
 
-    # Filing-time dedup net (plan x-6ac7): warn if the just-born node resembles
+    # Filing-time dedup net (plan ): warn if the just-born node resembles
     # an existing one across all live states. Own try/except so a dedup failure
     # is reported as itself, not conflated with the project check above.
     try:
@@ -3157,7 +2958,7 @@ def cmd_note(
     Distinct from ``update --details`` (which REPLACES the rationale) and the
     single ``completion_note``: ``note`` accumulates a list of ``{ts, text}``
     entries. The status-fanout backlog-progress adapter stamps one per
-    ``task_done``/``run_summary`` (x-2057); it is also hand-runnable.
+    ``task_done``/``run_summary`` (); it is also hand-runnable.
     """
     from fno.graph.store import append_progress_note
     from fno.claims.self_identity import resolve_self_identity
@@ -3236,31 +3037,9 @@ def cmd_encounter(
 ) -> None:
     """Record ONE encounter with this node, from this session, with evidence.
 
-    An encounter is a thing that happened, not an opinion. A poll count of N
-    agents who like a node is unfalsifiable; N distinct sessions that each name
-    what the node cost them is falsifiable against a transcript. That is why
-    evidence is required, and why an agent vote needs a provable identity: a
-    vote no transcript can vouch for is a poll. The one exception is the
-    operator lane: on this single-operator machine the human may vote from a
-    plain terminal by passing --operator, which votes under the stable
-    ``operator`` voter key. That lane is a declaration, not proof - any session
-    can pass the flag - so the record keeps the casting session's id whenever
-    one is provable, and the demand read displays the agent/operator split
-    instead of folding the two kinds together.
-
-    Read the signal with ``fno backlog demand``. This verb never writes rank and
-    never touches a kanban column: the board stays the work order, and demand is
-    a column the operator ranks FROM.
-
-    There is no correction verb:
-    an encounter is a thing that happened and cannot be edited or withdrawn.
-    An edit path would make the record deniable, which is the property this
-    signal exists to prevent. A later correction is a ``fno backlog note``.
-
-    Exit codes are distinct so a probe can tell the refusals apart. 1 evidence
-    (or an unknown node), 3 duplicate, 4 style, 5 unprovable identity. 2 is
-    typer's usage error and is deliberately unused here: an identity refusal
-    sharing a code with a mistyped flag is a refusal nothing can verify.
+    An encounter is a thing that happened and cannot be edited or withdrawn:
+    there is no correction verb, and a later correction is a `fno backlog note`.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno import style
     from fno.claims.self_identity import resolve_self_identity
@@ -3387,22 +3166,7 @@ def cmd_demand(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the rows as JSON."),
 ) -> None:
     """Show where agent encounters and operator priority DISAGREE.
-
-    Sorted by divergence, not by volume. A p0 with many encounters tells you
-    nothing, because you already ranked it. A p3 or a never-dispatched node with
-    many encounters is the whole point of the signal.
-
-    Operator votes count in ``enc`` and remain visible in the split: ``enc 5
-    (4a/1o)``. Provenance is displayed rather than excluded, so the reader can
-    distinguish agent demand from the operator's own vote.
-
-    `dispatched` is how many of the encountering sessions were also sent to this
-    node. Read it beside the count: `enc 12, dispatched 12` is one king that
-    fanned out, while `enc 3, dispatched 0` is three sessions that hit the node
-    while doing something else.
-
-    A read, and only a read. It never writes rank and never moves a column; the
-    board stays the work order and this is a column you rank FROM.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph.demand import demand_rows, format_rows
     from fno.graph.store import read_graph
@@ -3456,7 +3220,7 @@ def cmd_update(
             "owner/name of the repo the PR lives in, when that differs from the "
             "cwd checkout. A cwd-derived url is a guess; naming the repo makes "
             "the stamp an assertion, which is also what lets it override a "
-            "recorded pr_url that names a different repo (x-43e4)."
+            "recorded pr_url that names a different repo ()."
         ),
     ),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority"),
@@ -3481,7 +3245,7 @@ def cmd_update(
     model: Optional[str] = typer.Option(
         None,
         "--model",
-        help="Pin the model dispatchers launch this node's worker on (x-571f), e.g. fable|opus|sonnet or a full provider-model id. Single non-whitespace token. Pass 'null' to clear (revert to provider default).",
+        help="Pin the model dispatchers launch this node's worker on (), e.g. fable|opus|sonnet or a full provider-model id. Single non-whitespace token. Pass 'null' to clear (revert to provider default).",
     ),
     _model_tier_tombstone: Optional[str] = typer.Option(
         None,
@@ -3660,7 +3424,7 @@ def cmd_update(
     if size is not None and size.lower() != "null" and size.upper() not in {"S", "M", "L"}:
         typer.echo(f"Error: invalid size '{size}'. Must be one of: S, M, L", err=True)
         raise typer.Exit(code=1)
-    # Model pin (x-571f): a validated-shape pass-through, not an allowlist. The
+    # Model pin (): a validated-shape pass-through, not an allowlist. The
     # value must be a single shell-safe token so it survives unquoted use in the
     # dispatchers (dispatch-node.sh $model_arg, the loop-driver MODEL_FLAG
     # word-split) without word-splitting OR globbing. The charset [A-Za-z0-9._:/-]
@@ -3771,7 +3535,7 @@ def cmd_update(
     def _resolve_or_refuse(number: int, label: str, *, primary: bool = False) -> str:
         # A named --repo is an assertion: build the url from it and say so. It
         # is the one legal way to override a recorded pr_url that names another
-        # repo (the x-5764 repair shape), so it applies before any derivation.
+        # repo (the  repair shape), so it applies before any derivation.
         if repo is not None:
             if not is_repo_slug(repo):
                 _refuse(
@@ -3792,7 +3556,7 @@ def cmd_update(
         # A cwd-derived url is a guess. On the primary PR ref it must not
         # overwrite recorded truth that names a different repo: PR numbers
         # collide across repos, so the guess would hand reconcile merge
-        # evidence for an unrelated PR (x-43e4). Name the repo to assert the
+        # evidence for an unrelated PR (). Name the repo to assert the
         # move; --add-pr is exempt because additional_prs are cross-repo by
         # design (multi-repo features ship a PR per repo).
         if primary:
@@ -3875,7 +3639,7 @@ def cmd_update(
     # url that passed _check_url_shape above carries a number. Without this,
     # reconcile never sees the PR (node_pr_refs gates on isinstance(pr_number,
     # int)) - a node linked by --pr-url alone stays invisible to merge
-    # detection, the x-9ab2 shape.
+    # detection, the  shape.
     derived_pr_number: Optional[int] = None
     if pr_url is not None and not clearing_url and pr_number is None:
         derived_pr_number = pr_number_from_url(pr_url)
@@ -3980,7 +3744,7 @@ def cmd_update(
             if plan_path.lower() == "null":
                 node["plan_path"] = None
             else:
-                # plan == PR == node (x-04b9): a plan file is the delivery unit
+                # plan == PR == node (): a plan file is the delivery unit
                 # of exactly one node. Refuse to arm a second node against a plan
                 # another node already owns; the ambiguous state is what armed
                 # two concurrent dispatches against one sequential-mode plan on
@@ -4187,7 +3951,7 @@ def cmd_update(
             # a child it no longer owns until it is projected (codex P2).
             reparent_old_parent[0] = node.get("parent")
             # Re-parenting AWAY from the delivery unit un-adopts the node
-            # (x-e957). Without this there is no supported way out of a mistyped
+            # (). Without this there is no supported way out of a mistyped
             # `adopt` id: only decompose writes `contained_in`, re-running the
             # spec without the entry leaves the stale value, and graph.json is a
             # hook-blocked forbidden surface - so one typo permanently unarmed a
@@ -4426,7 +4190,7 @@ def _release_node_lockfile(node_id: str) -> str:
             )
             return "lockfile left (corrupted)"
 
-        # state == "live" or "suspect" (x-ba4b): only release if it is ours -
+        # state == "live" or "suspect" (): only release if it is ours -
         # a suspect claim (TTL-unexpired, dead pid) is still owned, so a peer's
         # is left intact and only our own is cleared.
         holder = status.get("holder") or ""
@@ -4510,7 +4274,7 @@ def _starvation_receipts(
 ) -> list[tuple[str, str]]:
     """Classify why each ready-ish in-scope node was NOT selected (G1 receipts).
 
-    Zero-silent-starvation (x-3236, epic Success Definition 2): when ``next``
+    Zero-silent-starvation (, epic Success Definition 2): when ``next``
     returns null but buildable-looking nodes exist, name why each was excluded
     so an operator is never left guessing. Reasons: ``plan-less`` | ``container``
     | ``claimed`` | ``design`` | ``quarantined`` | ``dead-ancestor``. A node
@@ -4647,23 +4411,8 @@ class _ExternalSelectionError(RuntimeError):
 
 
 def _joined_open_candidates() -> list[dict]:
-    """The transient joined selection model: ``list_open()`` exactly once, one
-    sidecar load per OPEN id, never the closed history (AC4's bound: 48 live
-    rows, not the ~2,000 inactive archive).
-
-    A transient render for selection filters and ranking only - never
-    persisted, never a shared convenience record (locked decision 3). The
-    rung is DERIVED at read time from seam-carried evidence (open + PR = in
-    review; open + linked plan = ready; plan-less = idea, the cold-dispatch
-    admission): no stored status flag crosses the seam, and footnote's
-    mutation-stamped rungs (deferred/superseded) cannot exist on an
-    externally-owned item. Footnote-minted scoping pins (project, roadmap_id,
-    mission_*) carry no external equivalent and stay absent: a scoped request
-    over them is honestly empty, and `--project`/-A detection degrades to
-    "all open candidates" exactly as a join with no project column must.
-    Priority/rank/created_at ride the selection projection, so footnote's
-    ranking (applied by _pick_ready AFTER this join) is tracker-owned on both
-    backends - the same sort key picks the same winner (AC5).
+    """The transient joined selection model: ``list_open`` exactly once, one
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.tracker import get_tracker
     from fno.tracker import sidecar as sidecar_store
@@ -4779,7 +4528,7 @@ def cmd_next(
         assert pre_entries is not None  # set under the same condition above
         project_filter = detect_project(pre_entries)
 
-    # Epic-scope filter (C2, ab-facfaade): restrict candidates to the
+    # Epic-scope filter (C2, ): restrict candidates to the
     # transitive children of --parent. Resolve the parent id up-front so a
     # missing node is a hard error (AC2-ERR) and a childless node prints a
     # clear note while still returning null so the walker can fall back
@@ -4812,7 +4561,7 @@ def cmd_next(
         # an already-done node.
         # `allowed` covers the persisted-status gate (ready, plus idea/deferred
         # only on explicit --include-ideas/--include-deferred). A plan-less idea
-        # (Rung.NONE) is ALSO admitted by default (x-e24a): `/target` authors its
+        # (Rung.NONE) is ALSO admitted by default (): `/target` authors its
         # plan, so the autonomous drain dispatches it. A linked-but-undesigned
         # decompose stub (Rung.IDEA) is NOT admitted here - it needs warm
         # inline-fill and stays behind --include-ideas.
@@ -4827,16 +4576,16 @@ def cmd_next(
         # step's own reasoning now rides on the filter it belongs to:
         #   roadmap / mission / parent-scope - explicit scoping flags.
         #   project - detects from the candidate list, so it narrows a LIST.
-        #   live-claim (ab-fcf9cec5) - a live session already holds the node.
-        #   unmerged-open-pr (ab-372130f6) - the only in-flight signal left once
+        #   live-claim () - a live session already holds the node.
+        #   unmerged-open-pr () - the only in-flight signal left once
         #     the builder session's pid claim dies; scoped to `ready` so an
         #     explicitly --include-deferred/--include-ideas row still surfaces.
-        #   container (x-33b2) - build the leaves, not the box.
+        #   container () - build the leaves, not the box.
         #   batched - ships via the batch PR.
-        #   selection-guard (x-3236) - dead ancestor / stale-ready quarantine.
+        #   selection-guard () - dead ancestor / stale-ready quarantine.
         from fno.backlog.explain import build_selection_filters, run_cascade
 
-        # Selection-time claim enforcement (ab-fcf9cec5) and the container set
+        # Selection-time claim enforcement () and the container set
         # are read ONCE here, under this call's graph read, and handed to the
         # cascade: recomputing inside it would read a different instant.
         claimed = _require_live_claimed_node_ids("backlog selection")
@@ -4862,7 +4611,7 @@ def cmd_next(
 
     def _node_summary(e):
         return {
-            # slug leads (ab-f82e8083); `id` stays the canonical key right after.
+            # slug leads (); `id` stays the canonical key right after.
             "slug": e.get("slug"),
             "id": e["id"],
             "title": e.get("title"),
@@ -4873,10 +4622,10 @@ def cmd_next(
             "size": e.get("size"),
             "plan_path": e.get("plan_path"),
             "difficulty": e.get("difficulty"),
-            # x-571f: the per-node model pin must ride in the next-JSON so the
+            # : the per-node model pin must ride in the next-JSON so the
             # active-backlog drain can prefer it over cfg.model.
             "model": e.get("model"),
-            # x-0676: the per-node dispatch overrides must ride in the next-JSON so
+            # : the per-node dispatch overrides must ride in the next-JSON so
             # `advance`'s resolver routing (US1) actually fires for real graph nodes
             # (which come from this summary), not only for tests that inject them.
             "dispatch_verb": e.get("dispatch_verb"),
@@ -5048,7 +4797,7 @@ def cmd_next(
             result[0] = _node_summary(candidates[0])
 
     if result[0] is None:
-        # Zero-silent-starvation receipts (x-3236 G1): explain to stderr why
+        # Zero-silent-starvation receipts ( G1): explain to stderr why
         # nothing was picked. Advisory - stdout stays exactly the node-or-"null"
         # contract `_next_node` parses, so a receipt failure never breaks
         # dispatch. Under an external backend the receipts explain the ACTUAL
@@ -5197,7 +4946,7 @@ def cmd_ready(
     # carry completed_at while its persisted status is still "ready". Guard on
     # completed_at so a done node never lists as actionable work (the same guard
     # is in `next`'s _pick_ready, the dispatch path).
-    # Same plan-less idea admission as `next`'s _pick_ready (x-e24a): a Rung.NONE
+    # Same plan-less idea admission as `next`'s _pick_ready (): a Rung.NONE
     # idea is cold-dispatchable and surfaces alongside ready work; a linked
     # Rung.IDEA stub stays behind --include-ideas.
     ready = [
@@ -5213,7 +4962,7 @@ def cmd_ready(
     # out-of-mission nodes as actionable (codex P1 on PR #137).
     if mission:
         ready = [e for e in ready if e.get("mission_id") == mission]
-    # Epic-scope filter (C2, ab-facfaade): transitive children of --parent.
+    # Epic-scope filter (C2, ): transitive children of --parent.
     if parent:
         target = _find_node(entries, parent)
         if target is None:
@@ -5223,12 +4972,12 @@ def cmd_ready(
         if not scope:
             typer.echo(f"no children under {target['id']}", err=True)
         ready = [e for e in ready if e.get("id") in scope]
-    # Selection-time claim enforcement (ab-fcf9cec5): hide nodes a live
+    # Selection-time claim enforcement (): hide nodes a live
     # session already holds (same rule as `graph next`).
     claimed = _require_live_claimed_node_ids("backlog ready")
     if claimed:
         ready = [e for e in ready if e.get("id") not in claimed]
-    # Same in-flight guard as `next` (ab-372130f6): a human / megawalk `ready`
+    # Same in-flight guard as `next` (): a human / megawalk `ready`
     # listing must not present an already-PR'd node as actionable work.
     # cmd_ready keeps its own inline status/claim filter (it does not route
     # through _pick_ready), so the guard is applied here too for parity.
@@ -5236,7 +4985,7 @@ def cmd_ready(
     # paused PR-bearing node still lists (the defer contract resurfaces those
     # on request; codex PR #516 P2).
     ready = [e for e in ready if e.get("status") != "ready" or not _has_unmerged_open_pr(e)]
-    # Containers are never actionable work (x-33b2 / codex P2 on PR #69): drop
+    # Containers are never actionable work ( / codex P2 on PR #69): drop
     # epics so `fno backlog ready` - and the `dispatch-node.sh --all-ready` bulk
     # path that enumerates it - never presents/launches the box instead of its
     # leaves. No all-done exception: the epic auto-closes via
@@ -5249,7 +4998,7 @@ def cmd_ready(
     # as individual ready work). Shares _is_batched_member with `next`'s
     # _pick_ready so the surfaces cannot drift.
     ready = [e for e in ready if not _is_batched_member(e)]
-    # G1 guards (x-3236): dead-ancestor + stale-ready quarantine, the SAME filter
+    # G1 guards (): dead-ancestor + stale-ready quarantine, the SAME filter
     # `next`'s _pick_ready applies. `ready` is a third dispatch-feeding surface -
     # `select_lane_fill` -> `_ready_nodes` shells `fno backlog ready` for both
     # parallel lane-fill AND the active-backlog daemon's single-node path, and
@@ -5272,7 +5021,7 @@ def cmd_ready(
 
     output = [
         {
-            # slug leads (ab-f82e8083) so a `ready` list / clipboard is readable.
+            # slug leads () so a `ready` list / clipboard is readable.
             "slug": e.get("slug"),
             "id": e["id"],
             "title": e.get("title"),
@@ -5285,7 +5034,7 @@ def cmd_ready(
             # select_lane_fill's dispatch-time collision gate compares plan file
             # surfaces; without this it has nothing to read.
             "plan_path": e.get("plan_path"),
-            # x-571f: carry the model pin so the lane-fill dispatcher (select_lane_fill
+            # : carry the model pin so the lane-fill dispatcher (select_lane_fill
             # -> _ready_nodes -> `fno backlog ready`) can thread it into the spawn.
             "model": e.get("model"),
         }
@@ -5317,7 +5066,7 @@ def cmd_lane_fill(
 
     Prints the JSON list of nodes that would dispatch as concurrent lanes -
     the file-collision gate decides, so same-domain nodes with disjoint
-    surfaces co-schedule (epic x-42d5, group 2). Read-only by
+    surfaces co-schedule (epic , group 2). Read-only by
     default; ``--claim``
     atomically holds a dispatch-time lane slot per node - what the dispatcher
     does before spawn (Locked Decision #8). ``max_lanes < 1`` prints ``[]``
@@ -5371,7 +5120,7 @@ def cmd_dispatch_lanes(
 
     Selects collision-clean ready nodes (like ``lane-fill``), then for each one
     isolates a worktree off origin/main, seeds its per-lane
-    ``.fno/config.local.toml`` (x-cbce: own project.id), and
+    ``.fno/config.local.toml`` (: own project.id), and
     spawns a detached ``/target`` worker rooted there (merge posture per
     ``config.auto_merge.grant``). Prints one JSON object: ``lanes`` (one receipt
     per selected lane, ``status`` dispatched | skipped) plus a ``fill`` summary.
@@ -5458,27 +5207,12 @@ def cmd_join(
     ),
     model: Optional[str] = typer.Option(
         None, "--model", "-m",
-        help="Explicit model for the joiner spawns (x-571f shape); empty "
+        help="Explicit model for the joiner spawns ( shape); empty "
         "leaves the spawn CLI's own default resolution.",
     ),
 ) -> None:
-    """Spawn execute-waves joiners into a held node's worktree (x-8d1d).
-
-    The node must hold a LIVE node claim with a bound plan: join resolves the
-    holder's worktree from the claim, computes the plan's ready-graph width,
-    and spawns ``/fno:execute waves <plan>`` workers INTO that worktree as
-    visitors - they take task claims under their own roster names and never
-    the node claim. One worker per wave band when the plan carries bands
-    (highest band first, the lead; each lane resolved per band), else
-    ``min(workers, width - 1)`` shapeless workers; the width rule caps the
-    count either way. An omitted --workers derives the ask from the node
-    priority and the plan's highest wave band instead of asking for one
-    joiner. Prints one JSON receipt:
-    ``{"node", "worktree", "width", "priority", "band", "workers",
-    "workers_source", "spawned", "lead", "lanes"}``.
-
-    Refusals: exit 2 nothing to join (no live claim), exit 3 width 1, exit 4
-    no usable bound plan, exit 5 already joined (live j-<node>-* workers).
+    """Spawn execute-waves joiners into a held node's worktree .
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.backlog.advance import JoinRefuse, join_node
     from fno.graph.fuzzy import resolve_node
@@ -5808,7 +5542,7 @@ def _echo_node_entry(e: dict, field: Optional[str], grouped: bool) -> None:
 @cli.command("get")
 def cmd_get(
     ids: List[str] = typer.Argument(
-        ..., help="One or more node ab-id, slug, or bare 8-hex (e.g. ab-ff6f96e0 | dashless-spawn | ff6f96e0)"
+        ..., help="One or more node ab-id, slug, or bare 8-hex (e.g.  | dashless-spawn | ff6f96e0)"
     ),
     field: Optional[str] = typer.Option(None, help="Print only this field"),
     grouped: bool = typer.Option(
@@ -5841,11 +5575,11 @@ def cmd_get(
     # Strict read: exit 1 stays "read cleanly, node absent"; an unreadable graph
     # gets GRAPH_UNREADABLE_EXIT so a caller cannot mistake it for an absent node.
     entries = _resolve_entries_or_exit(id)
-    # Deterministic resolution tiers 1-3 (ab-f82e8083): exact ab-id, exact slug,
+    # Deterministic resolution tiers 1-3 (): exact ab-id, exact slug,
     # bare-8-hex re-prefix. A slug/bare-hex argument resolves to the same node
     # an ab-id would, so the spawn VALIDATE step (`fno backlog get "$node"`)
     # accepts every exact entry form. `resolve_node` is already exact-only, so
-    # --strict pins that contract for the router (x-4af4): should `get` ever gain
+    # --strict pins that contract for the router (): should `get` ever gain
     # a describe-it fuzzy default, --strict stays the exact-only seed path.
     match = resolve_node(id, entries)
     if match.kind == "exact":
@@ -5958,7 +5692,7 @@ def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
     """Per-phase lifecycle roster: start, end, duration per row, and an honest
     node total. Returns ``(human_lines, summary_dict)``.
 
-    Honesty is the acceptance criterion (node x-015c): a phase with no row
+    Honesty is the acceptance criterion (node ): a phase with no row
     renders 'not recorded'; a row with an end but no start renders 'end only';
     neither renders as a duration, and the total states how many of the
     lifecycle phases contributed a duration rather than summing silently over
@@ -6266,14 +6000,14 @@ def cmd_provenance(
         _spawned_walk(entries, node_id) if spawned else ([], False, False)
     )
 
-    # Runtime-attempt projection (x-2ccd wave 3): live/suspect/stale/interrupted
+    # Runtime-attempt projection ( wave 3): live/suspect/stale/interrupted
     # attempts read off manifests + the claim, alongside the confirmed lifecycle
     # rows below. Never a confirmed `do` row; never a graph mutation.
     from fno.provenance.runtime_attempts import runtime_attempts
 
     runtime = runtime_attempts(node_id, e)
 
-    # Lifecycle roster (x-015c): per-phase start/end/duration + an honest total,
+    # Lifecycle roster (): per-phase start/end/duration + an honest total,
     # computed once for both the JSON and human paths.
     roster_lines, roster_summary = _lifecycle_roster(e["sessions"])
 
@@ -6294,7 +6028,7 @@ def cmd_provenance(
                 _edge("node_birth", birth_result),
                 _edge("spawn", spawn_result),
             ],
-            # Append-only lifecycle provenance in raw append order (x-b6e4).
+            # Append-only lifecycle provenance in raw append order ().
             # read_graph's defaults guarantee the key, so no fallback guard.
             "sessions": e["sessions"],
             # Per-phase roster with starts, durations, and an honest total
@@ -6357,7 +6091,7 @@ def cmd_provenance(
         if walk_truncated:
             lines.append(f"    note: depth cap {_SPAWNED_MAX_DEPTH} reached; walk truncated")
 
-    # Runtime attempts (x-2ccd wave 3): live/suspect/stale/interrupted attempts
+    # Runtime attempts ( wave 3): live/suspect/stale/interrupted attempts
     # projected from manifests + the claim. Rendered BEFORE lifecycle so an
     # operator sees the current/interrupted state first; explicitly labeled
     # unconfirmed so it is never mistaken for a confirmed `do` lifecycle row.
@@ -6379,7 +6113,7 @@ def cmd_provenance(
             lines.append(f"      work:      {work}")
             lines.append(f"      lifecycle: {a.get('lifecycle', '?')}")
 
-    # Lifecycle roster (x-b6e4, x-015c): per-phase start/end/duration + an
+    # Lifecycle roster (, ): per-phase start/end/duration + an
     # honest total. Distinct from the birth/spawn edges above -- those are
     # single parent pointers; this is the per-phase who-did-what across sessions
     # and harnesses. Every lifecycle phase always renders (not recorded / end
@@ -6390,11 +6124,11 @@ def cmd_provenance(
     typer.echo("\n".join(lines))
 
 
-# -- session add (lifecycle provenance, x-b6e4) --
+# -- session add (lifecycle provenance, ) --
 
 session_app = typer.Typer(
     name="session",
-    help="Append-only lifecycle session provenance (x-b6e4).",
+    help="Append-only lifecycle session provenance ().",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -6478,25 +6212,7 @@ def cmd_session_add(
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the result as JSON."),
 ) -> None:
     """Stamp a node with a lifecycle phase record (idempotent, append-only).
-
-    Identify the node by NODE (id/slug/hex) or by ``--pr-number <n>`` (the unique
-    PR-linked node) -- exactly one of the two. With ``--pr-number`` and no
-    ``--repo`` the verb resolves the current checkout's slug itself, so a caller
-    needs no conditional flag (x-f47f). Harness + session id default to the
-    ambient session identity; with neither an env marker nor an explicit flag the
-    stamp is skipped and a warning names the node/PR and phase (provenance is
-    never invented, AC2-ERR). Exit 0 on append or duplicate; exit 2 on missing
-    identity, an unresolvable NODE, unknown phase, or bad input. A ``--pr-number``
-    that maps to zero or several nodes is a best-effort SKIP, not an error: it
-    warns (naming the candidates) and exits 0, because refusing to guess is the
-    designed outcome and a caller must not log it as a failure (x-f47f AC3-ERR).
-
-    ``--require-session`` and ``--guard-plan`` are the honesty guards an
-    unattended caller (finalize's do-provenance backstop, x-0469) needs: a stale
-    manifest in a reused worktree or a plan claiming another node must not
-    mis-attribute work on an append-only record. Both skip with exit 0 and one
-    named reason, because a guard skip is a designed outcome the caller must not
-    log as a failure.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph.fuzzy import resolve_node
     from fno.graph.store import (
@@ -6877,11 +6593,11 @@ def cmd_session_reap_open(
 cli.add_typer(session_app, name="session", hidden=True)
 
 
-# -- task rows + task claims (epic x-09d7 group 3) --
+# -- task rows + task claims (epic  group 3) --
 
 task_app = typer.Typer(
     name="task",
-    help="Task-grain rows and the task claim on status transition (x-09d7).",
+    help="Task-grain rows and the task claim on status transition ().",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -7448,7 +7164,7 @@ def cmd_bases(
         help="Directory to emit the .base files into (default: internal/fno/backlog/).",
     ),
 ) -> None:
-    """Emit the canonical epic/mission progress Base files (x-6c2b).
+    """Emit the canonical epic/mission progress Base files ().
 
     Regenerable: refreshes a file carrying the generated marker, refuses to
     clobber a hand-authored base (one prints `refused:`). Prints one line per
@@ -7835,29 +7551,7 @@ def cmd_remove(
     force: bool = typer.Option(False, "--force", "-F", help="Skip cascade warning"),
 ) -> None:
     """Delete a node from the graph permanently. This verb exists and works.
-
-    It had no docstring until 2026-08-11, which is why `fno help backlog --all`
-    printed its name against an empty description and read as a stub. An agent
-    consequently ruled that no delete verb existed and made that the
-    load-bearing reason for a decision, and another project kept 23 nodes it
-    believed un-file-able. Hence this paragraph: the verb's own help is the one
-    place a caller asking "can this node go away" will actually look.
-
-    A HARD delete, unlike ``archive``, which moves the node to
-    ``graph-archive.json`` and keeps it readable. Prefer ``archive`` for shipped
-    work, ``supersede`` when something replaced it, and ``defer`` when it is
-    merely not now. Reach for ``remove`` on a duplicate, a test artifact, or a
-    node filed by mistake - the cases where the record itself is the noise.
-
-    Repairs every edge that pointed at the node, because nothing else can once
-    the node is gone: drops it from every ``blocked_by``, from the symmetric
-    ``related`` lists, nulls a dependent's ``source_node_id`` rather than
-    leaving a dangling string, and releases contained children (the reconcile
-    heal deliberately skips a MISSING owner, so an orphan there is permanent).
-
-    Refuses when other nodes name it as a blocker, listing them, since removing
-    it silently unblocks work whose real dependency never landed. ``--force``
-    confirms that trade.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import read_graph, locked_mutate_graph
@@ -7897,7 +7591,7 @@ def cmd_remove(
             # that source_node_id is null or resolves - never a dangling string.
             if e.get("source_node_id") == task_id:
                 e["source_node_id"] = None
-        # Same invariant for containment (x-e957), and here a dangling pointer
+        # Same invariant for containment (), and here a dangling pointer
         # is a permanent trap rather than mere untidiness: the reconcile heal
         # deliberately skips a MISSING owner, so nothing would ever free them.
         _freed_box[0] = _release_contained_children(entries, task_id)
@@ -8310,23 +8004,7 @@ def cmd_pick(
     ),
 ) -> None:
     """Interactively manage the backlog queue via fzf with live marker updates.
-
-    Pressing keys updates the marker in real time via fzf's reload
-    action. So pressing ``q`` on a ``[ ]`` row flips it to ``[Q]``
-    in-place; pressing ``u`` on a ``[Q]`` row flips it back to ``[ ]``.
-
-      q       queue this row     -> marker becomes [Q]
-      u       unqueue this row   -> marker becomes [ ]
-      space   toggle this row    -> marker flips
-      o       open plan in Obsidian (idea rows: no-op)
-      Enter   commit all pending marker changes atomically
-      Ctrl-C  cancel; no marks land on the graph
-      type    fuzzy-filter the visible rows
-
-    Markers reflect the effective state INCLUDING pending changes.
-    Latest mark per row wins, so you can change your mind by pressing
-    the opposite key. Idempotent: re-queuing an already-queued row is
-    a no-op on commit.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     import os as _os
     import platform
@@ -8979,36 +8657,7 @@ def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) 
 
 def _clear_completion_fields(node: dict, *, reason: str) -> None:
     """Undo :func:`_apply_completion_fields`. Shared by ``reopen`` and its cascade.
-
-    It lives beside its forward counterpart for that function's own stated
-    reason: the close paths share one helper so they cannot drift, and an open
-    path that drifts from the close path is the same defect pointed the other
-    way.
-
-    Clearing ``completed_at`` IS the status change - ``recompute_statuses``
-    derives the node's underlying state from its absence, exactly as it derives
-    ``done`` from its presence.
-
-    ``completion_note`` is cleared rather than overwritten with the reopen
-    trail, and this is load-bearing rather than tidy: ``_cascade_close_parents``
-    only writes its ``auto-closed:`` note when that field is EMPTY, so an epic
-    carrying reopen prose would never be recognizable as cascade-closed again,
-    and a later reopen would leave it done under a live child. The trail goes in
-    dedicated ``reopened_at`` / ``reopened_reason`` fields instead.
-
-    Four things are deliberately NOT restored, because reopening a node is not
-    rewinding time:
-
-    - ``merge_status`` stays. It records that GitHub confirmed a merge, which is
-      still true after a reopen; clearing it would erase a fact to express an
-      opinion.
-    - ``cost_usd`` / ``cost_sessions`` stay. The spend happened.
-    - ``locked_by`` / ``locked_at`` stay null. ``done`` cleared them, and
-      inventing a holder here would give the node a claim no lockfile backs;
-      claims are acquired by ``fno do target init``.
-    - ``deferred_at`` / ``queued_at`` stay null. ``done`` cleared those too, and
-      re-parking is ``defer``'s job - the same policy ``cmd_unsupersede``
-      applies to un-containment.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     node["completed_at"] = None
     node["completion_note"] = None
@@ -9018,7 +8667,7 @@ def _clear_completion_fields(node: dict, *, reason: str) -> None:
 
 
 def _auto_closed_note(entry: dict) -> str:
-    """completion_note for a container closed by all-children-complete (x-b9a5).
+    """completion_note for a container closed by all-children-complete ().
 
     Both close paths (_cascade_close_parents, _sweep_close_done_epics) reach
     here holding the parent dict. A container with its own plan_path but no
@@ -9035,25 +8684,8 @@ def _auto_closed_note(entry: dict) -> str:
 
 
 def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
-    """Close ancestor epics whose children are now all complete (x-33b2).
-
-    Called inside the close mutator right after a node's completion fields are
-    set. An epic is a container with no PR of its own - its work IS its
-    decomposed children - so it is "done" exactly when all of them are. Walking
-    UP the ``parent`` chain, each ancestor whose children all carry
-    ``completed_at`` is closed too (and tagged with a completion_note so the
-    PR-less close is self-explaining), continuing to the grandparent.
-
-    This is the closure path that lets epics be excluded from build-SELECTION
-    everywhere (`next`/`ready`/advance_dependents never dispatch the box): the
-    box closes itself off the merge event that finishes its last child. It fires
-    on every close path (done + reconcile) since each calls
-    this after ``_apply_completion_fields``, and it is uniform across projects
-    because it follows the parent EDGE, not a project filter - so a cross-project
-    parent closes on the same merge that completes its last child.
-
-    Idempotent: an already-done or missing ancestor stops that branch. The walk
-    is depth-capped against a malformed parent cycle.
+    """Close ancestor epics whose children are now all complete .
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph._reconcile import cascade_close_should_stop
     id_to_entry = {
@@ -9079,7 +8711,7 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
         _apply_completion_fields(parent)
         if not parent.get("completion_note"):
             parent["completion_note"] = _auto_closed_note(parent)
-        # Deactivate the mission (x-9608 K1): a kicked-off epic carries
+        # Deactivate the mission ( K1): a kicked-off epic carries
         # mission_active=true for K2's drain loop; its last child landing closes
         # the epic here, so clear the marker in the same mutation. Durable
         # deactivation - the drain never keeps looping a done mission.
@@ -9180,29 +8812,7 @@ def _live_child_ids(entries: list[dict], owner_id: Optional[str]) -> list[str]:
 
 def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
     """Clear ``parent`` on the owner's non-done children; return the ids freed.
-
-    The membership-axis sibling of ``_release_contained_children``. That helper
-    covers ``contained_in`` (delivery: ships inside this PR); this one covers
-    ``parent`` (epic membership). A permanently dead unit's children would
-    otherwise stay parented to it: any one later revived (undeferred or
-    unsuperseded) then hits the dead-ancestor selection guard and strands - the
-    exact state this release exists to prevent.
-
-    NON-DONE children only. ``completed_at`` is the one truly terminal marker
-    (done never reactivates), so a shipped child keeps ``parent`` as history.
-    Live, deferred, and superseded children can all return to dispatch, so all
-    get cleared: leaving a deferred child parented to a dead unit would strand
-    it the moment it is undeferred. This is the gap a release keyed on liveness
-    alone misses - the supersede guard refuses only over currently-dispatchable
-    children, so deferred/superseded children pass it and must be released here.
-
-    Lives in ``cmd_supersede``, not the shared release helper, because
-    ``cmd_defer`` also calls that helper and defer is a pause (undefer exists):
-    a deferred epic's children must keep their membership through the pause.
-    Supersede is permanent, so only it orphans.
-
-    Nothing re-parents on ``unsupersede``: re-adoption is decompose's job, the
-    same policy the contained release states for un-containment.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     if not owner_id:
         return []
@@ -9223,48 +8833,8 @@ def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> 
 
 
 def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
-    """Close every node that shipped inside ``node_id``'s PR (x-e957 task 1.5).
-
-    Called inside the close mutator right after a delivery unit's completion
-    fields are set. A node carrying ``contained_in`` was folded into that unit
-    by ``decompose ... adopt:``; its work rides the unit's PR, so it has no PR
-    of its own and ``scan_merge_drift`` - which only ever returns nodes carrying
-    a PR - can never see it. Before this, dispatch and cost had each learned to
-    read containment and completion had no inference at all, so a contained node
-    stayed open forever behind a merged PR.
-
-    Deliberately NOT the inverse of ``_cascade_close_parents``. That one closes
-    a parent when its last child lands (bottom-up, conditional on the siblings);
-    this closes children off their owner's merge (top-down, unconditional). One
-    level only: containment is a direct relation to the node that owns the PR,
-    not a chain, so a node contained in a contained node is a shape decompose
-    cannot produce.
-
-    Three deliberate omissions, each load-bearing:
-
-    - No ledger rollup. Reusing the done root's path would hand each contained
-      node the same plan's cost and re-introduce the very triple count task 1.4
-      just removed. ``cost_usd`` stays None; the note is what makes that null
-      read as located rather than missing.
-    - No ``merge_status``. The field means "GitHub confirmed THIS node's PR
-      merged" and a contained node has no PR, matching how the PR-less epic
-      cascade leaves it unset.
-    - No auto-continue dispatch. See the AC6 note in
-      ``tests/unit/test_reconcile_cascade.py``: a contained node is not a legal
-      ``blocked_by`` target, and fanning one merge into N dispatches would scale
-      with how finely an epic happened to be decomposed. The close still
-      re-arms any dependent for the next selection pass.
-
-    Idempotent: an already-closed node keeps its own completion and note, so a
-    child that shipped its own PR is never relabelled as contained cargo.
-    Reconcile runs on every SessionStart, so this matters more than once.
-
-    The note is built BEFORE any mutation and nothing fallible runs between a
-    node's ``_apply_completion_fields`` and its note. The caller treats a raised
-    cascade as a warning and keeps the delivery unit's close, so anything that
-    can throw mid-loop leaves nodes closed with no note - done, with the reason
-    they are done missing. Cheap to arrange, and the alternative is a state no
-    reader can interpret.
+    """Close every node that shipped inside ``node_id``'s PR.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     unit = next(
         (e for e in entries if isinstance(e, dict) and e.get("id") == node_id),
@@ -9446,27 +9016,7 @@ def _stamp_and_graduate_plan(
     session_id: Optional[str] = None,
 ) -> bool:
     """Best-effort: stamp a plan ``shipped`` (when a ship URL is known) then graduate.
-
-    The completion path (``done``/``reconcile``) closes a node because its PR
-    landed. ``graduate`` ALONE is a no-op on a plan that never went through
-    target's ship gate: ``cmd_graduate`` returns early unless ``status`` is
-    already ``shipped``, so a never-stamped plan's frontmatter would never record
-    the ship (ab-bd9f476c). When a concrete PR ``url`` is available we first
-    ``stamp`` the plan (sets ``shipped_at`` + ``status: in_review`` + records the
-    URL and session id) and THEN ``graduate`` (flips ``shipped -> done`` once the
-    URL count is met). Without a URL we fall back to graduate-only - the prior
-    behavior - rather than assert a ship we cannot evidence (e.g. a forced close
-    on an advisory node with no PR).
-
-    Returns True when a stamp/graduate actually ran successfully (the relevant
-    verb exited 0); False when the run failed. Non-fatal: every failure warns
-    and returns False, never raising, so a node close is never aborted by a
-    stamp problem.
-
-    Shared by ``done`` and ``reconcile``. The stamper is the in-package
-    ``fno.plan._stamp`` module, run under the same interpreter as fno, so it
-    resolves whether the package runs from the repo (editable install) or a
-    uv-installed venv.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     import subprocess
 
@@ -9531,31 +9081,7 @@ SetExpectedStatus = Literal["ok", "skipped", "failed"]
 
 def _set_expected_count(plan_path: str, count: int) -> tuple[SetExpectedStatus, str]:
     """Authoritatively write expected_url_count=count onto a plan's frontmatter.
-
-    Used by ``decompose`` so a shared epic-decomposition doc graduates only
-    after all N group PRs ship, not after the first. Runs the in-package
-    ``fno.plan._stamp`` ``set-expected`` verb (the same sys.executable pattern
-    as ``_graduate_plan``) to keep plan-frontmatter I/O in its single owner and
-    this graph CLI graph-agnostic about frontmatter format.
-
-    Returns ``(status, detail)`` where status is a ``SetExpectedStatus``:
-
-    - ``"ok"``      - the count was written.
-    - ``"skipped"`` - benign: the count could not be written for a reason that
-      PROVABLY does NOT create the early-graduation risk: the base doc does not
-      exist (set-expected exit 3). target also cannot stamp the doc at ship time,
-      so it never graduates early. Mirrors ``_graduate_plan``'s best-effort,
-      non-fatal philosophy. The caller proceeds silently.
-    - ``"failed"``  - a real risk that must be surfaced: either the module RAN
-      and reported a write failure on a doc it could read (e.g. malformed
-      frontmatter; set-expected exit 1/2), OR the spawn itself raised. A spawn
-      failure is INDETERMINATE - unlike an absent doc it does not prove the doc
-      is unstampable at ship, so it could mask early graduation; the caller
-      surfaces it as a loud, actionable stderr warning.
-
-    The caller never rolls back the graph and never exits non-zero on any of
-    these outcomes (group nodes are the source of truth, and a non-zero exit
-    would break pipelines that call decompose for a best-effort stamp).
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     import subprocess
 
@@ -9689,7 +9215,7 @@ def _done_gate_pipeline(
         assert reason is not None  # the `--force requires --reason` guard above ensures this
         first_pr_number, first_pr_url = refs[0]
         # A forced close still names a PR; stamp the plan against it so the ship
-        # is recorded even when the cross-check was bypassed (ab-bd9f476c).
+        # is recorded even when the cross-check was bypassed ().
         evidence_pr_url = first_pr_url
         pr_repo = repo_slug_from_url(first_pr_url)
         # Best-effort: try to read the current PR state for journaling
@@ -9723,7 +9249,7 @@ def _done_gate_pipeline(
             err=True,
         )
 
-    # -- Step 3b: promise gate (x-5d34) --
+    # -- Step 3b: promise gate () --
     # The merge gate asked "is a PR merged"; this asks "did the plan's declared
     # work all ship". Skipped under --force so a deliberate half-ship stays a
     # journaled line (the backlog_done_forced event above) rather than silence.
@@ -9854,7 +9380,7 @@ def _done_via_seam(task_id: str, *, skip_stamp: bool, force: bool, reason: Optio
     if sc.plan_path and not skip_stamp:
         _stamp_and_graduate_plan(sc.plan_path, url=evidence_pr_url, session_id=None)
 
-    # Retro-at-done lifecycle trigger (x-122a): same non-fatal posture as the
+    # Retro-at-done lifecycle trigger (): same non-fatal posture as the
     # graph path; the seam row carries what the resolver needs.
     try:
         from fno.provenance.spawn_think import on_node_retro
@@ -9907,7 +9433,7 @@ def cmd_done(
             "owner/name of the repo the PR lives in, when that differs from the "
             "cwd checkout. Naming the repo makes the stamp an assertion rather "
             "than a cwd derivation, which is also what lets it override a "
-            "recorded pr_url naming a different repo (x-43e4)."
+            "recorded pr_url naming a different repo ()."
         ),
     ),
     link: Optional[str] = typer.Option(
@@ -9936,35 +9462,7 @@ def cmd_done(
     ),
 ) -> None:
     """Mark a node complete.
-
-    Sets ``completed_at`` to an ISO timestamp; ``recompute_statuses`` derives
-    ``status: done`` from that field and unblocks any dependents.
-
-    Before mutation, a gh cross-check verifies that at least one referenced PR
-    is MERGED (x-aba7: graph done = merged, uniformly). An OPEN PR is NOT
-    closing evidence - the node is awaiting merge and closes on the actual
-    merge via reconcile / merge-triggered advance. CI state is irrelevant to
-    the close decision.
-
-    The rich completion surface (--backfill, --force-overwrite, --pr-number,
-    --pr-url, --link, --note, title/branch query) ported here from the retired
-    root `fno done` spelling (x-6233): those paths delegate to the
-    implementation that already owned them, so the old spelling forwards
-    argv-verbatim onto this one.
-
-    Exit codes:
-        0  success (node closed)
-        1  validation error (bad id, node not found)
-        2  usage error (--force without --reason)
-        3  gh cross-check refused: CLOSED-unmerged / UNKNOWN, no merge evidence
-           (retryable when the PR merges; walker treats this as Parked)
-        4  gh outage: subprocess failure / timeout / parse error; retryable
-        5  awaiting merge: PR OPEN, not merged; node stays in_review
-           (success-shaped; close lands via reconcile/advance at merge)
-        6  promise unmet: plan promised work that has not all shipped
-           (multi-wave with no assertion, a failed close_probe, or fewer
-           merged ships than expected_url_count). Use --force --reason to
-           record a deliberate half-ship.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph._constants import has_node_id_prefix
 
@@ -10022,7 +9520,7 @@ def cmd_done(
                 task_id = _match.id
             # none/ambiguous fall through to the delegate for its messages.
 
-    # The rich surface delegates (x-6233): any ported flag or a missing id
+    # The rich surface delegates (): any ported flag or a missing id
     # (branch auto-detect) routes to the implementation that already owns
     # those paths - and only when NO close flag is set, because the delegate
     # has no --force/--reason/--skip-stamp and would drop them. A node id
@@ -10152,7 +9650,7 @@ def cmd_done(
             n["session_id"] = _sid
         if cost_rollup.get("points") is not None and n.get("points") is None:
             n["points"] = cost_rollup["points"]
-        # Close any now-all-done ancestor epic (x-33b2): the box is done when its
+        # Close any now-all-done ancestor epic (): the box is done when its
         # children are, and it carries no PR of its own to close it explicitly.
         cascade_closed_out.extend(_cascade_close_parents(entries, task_id))
         plan_path_out[0] = n.get("plan_path")
@@ -10212,7 +9710,7 @@ def _canonical_post_close(
     if plan_path and not skip_stamp:
         # Stamp the plan shipped (against the evidencing PR) THEN graduate, so a
         # plan that never went through target's ship gate still records the ship
-        # rather than getting a graduate no-op (ab-bd9f476c).
+        # rather than getting a graduate no-op ().
         _stamp_and_graduate_plan(
             plan_path,
             url=evidence_pr_url,
@@ -10228,7 +9726,7 @@ def _canonical_post_close(
     if not skip_stamp:
         _project_plans_from_graph([task_id, *cascade_closed])
 
-    # A2 (x-122a): retro-at-done lifecycle trigger. Dispatch a `retro` context
+    # A2 (): retro-at-done lifecycle trigger. Dispatch a `retro` context
     # /think while the closed node's session context is still resolvable. Gated
     # by config.think_spawn.on_retro (default OFF) and strictly non-fatal: a
     # dispatch failure never unwinds the close it rode in on.
@@ -10254,7 +9752,7 @@ def _run_advance_epic(
     provider: Optional[str],
     continuation: bool = False,
 ) -> None:
-    """Run the epic advance and render its receipt (x-9608 K1).
+    """Run the epic advance and render its receipt ( K1).
 
     Refusals (no-such-node / not-a-container) exit non-zero: unlike the
     merge-advance path (a dispatch decision is never an error), an operator naming
@@ -10358,7 +9856,7 @@ def _archived_entry(node_id: str) -> Optional[dict]:
         # `_find_node`, not an exact compare: it is what resolved the id against
         # the WORKING graph a line earlier, and a stricter match here recreates
         # the very ambiguity this helper exists to remove. An exact compare made
-        # `reopen ab-9728` report "not found" for an archived `ab-9728f3c1`,
+        # `reopen ab-9728` report "not found" for an archived ``,
         # which is the same message a typo gets.
         return _find_node(read_graph(path), node_id)
     except Exception:  # noqa: BLE001 - the archive is advisory; a bad read must not mask the real refusal
@@ -10451,34 +9949,7 @@ def cmd_reopen(
     ),
 ) -> None:
     """Clear a node's completion, returning it to its underlying state.
-
-    Every other lifecycle transition had an inverse (``defer``/``undefer``,
-    ``supersede``/``unsupersede``, ``queue``/``unqueue``); ``done`` was terminal
-    with none, so a node closed in error was corrected by hand-editing
-    ``graph.json``, which a PreToolUse hook forbids for good reason.
-
-    Refuses when a referenced PR is MERGED. That is ``done``'s gate inverted:
-    the work is in main, and clearing the completion would make the graph assert
-    that shipped work did not ship. The remedy is almost always to file the
-    remaining work as its own node (``fno backlog idea``) rather than to reopen
-    the record of the part that landed. ``--force`` records a deliberate reopen
-    of shipped work, and is journaled as such.
-
-    Ancestor epics the cascade auto-closed when this node closed are reopened
-    alongside it, since an epic is done exactly when its children are. An epic
-    closed on its own evidence is left done and named on stderr, because
-    reopening it would discard a judgment this verb never made.
-
-    Reopening does not reclaim, un-defer, or un-queue the node; see
-    :func:`_clear_completion_fields` for what it deliberately leaves alone.
-
-    Exit codes:
-        0  success (node reopened), or a no-op warning on a node that is not done
-        1  validation error (bad id, node not found in the graph or the archive)
-        2  usage error (blank --reason)
-        3  refused: a referenced PR is MERGED. Use --force --reason to override
-        4  archived, or a gh outage. Both are retryable: unarchive first, or
-           retry once gh is reachable. The node stays done either way
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph, read_graph
@@ -10609,7 +10080,7 @@ def cmd_reopen(
             raced_box[0] = True
             return entries
         # The CANONICAL id, not the argument: _find_node resolves a partial id
-        # (`ab-9728` for `ab-9728f3c1`), while the cascade walks a parent map
+        # (`ab-9728` for ``), while the cascade walks a parent map
         # keyed on full ids. Passing the argument through would make the cascade
         # silently find nothing for exactly the callers who typed the short form,
         # leaving an auto-closed epic done over a live child. cmd_unsupersede
@@ -10676,7 +10147,7 @@ def cmd_advance(
     epic: Optional[str] = typer.Option(
         None,
         "--epic",
-        help="Advance (converge) an epic mission: fan out its ready leaf children across all projects (x-9608 K1). Mutually exclusive with --closed.",
+        help="Advance (converge) an epic mission: fan out its ready leaf children across all projects ( K1). Mutually exclusive with --closed.",
     ),
     stop: bool = typer.Option(
         False,
@@ -10731,13 +10202,13 @@ def cmd_advance(
 ) -> None:
     """Dispatch a fresh /target --no-merge worker for the next now-unblocked node.
 
-    Merge-triggered auto-continue (ab-3cd195b6). Opt-in and non-fatal: when
+    Merge-triggered auto-continue (). Opt-in and non-fatal: when
     auto-continue is disabled it emits advance_skipped{disabled} and dispatches
     nothing. Driven by the merge event (reconcile / post-merge), so megawalk,
     /target, and /megatron all inherit it without driver-specific code. Always
     exits 0 (a dispatch decision is never an error to the host op).
 
-    ``--epic <id>`` switches to the epic advance / converge path (x-9608 K1):
+    ``--epic <id>`` switches to the epic advance / converge path ( K1):
     mark the epic's mission active and fan out every currently-ready LEAF child
     across all projects. Idempotent; the width derives from spawn-gate headroom
     (fleet max_live and provider lanes) + ``--max`` overall. ``--stop``
@@ -10826,7 +10297,7 @@ def cmd_advance(
         typer.echo("advance: --stop / --max / --continuation require --epic", err=True)
         raise typer.Exit(code=2)
 
-    # RC2 (x-33b2): closed_project is the CLOSED NODE's own project, read from the
+    # RC2 (): closed_project is the CLOSED NODE's own project, read from the
     # graph - NEVER the --project next-selection flag. --project restricts which
     # project advance() picks `next` from; it is normally OMITTED on a manual
     # `advance --closed A`, which left closed_project=None and defeated
@@ -10915,7 +10386,7 @@ def cmd_reconcile_findings(
     Retro files a node from a reviewer comment; on an autonomously-merged,
     bot-reviewed PR the fix often lands after the comment without the thread
     being resolved or replied to, so the node is filed for work already done
-    (x-632c). This re-runs the harvest addressed-detection against each open
+    (). This re-runs the harvest addressed-detection against each open
     retro node's source PR and closes the ones now addressed - the
     reconciliation counterpart to the harvest-side suppression. Dry-run by
     default; ``--apply`` closes via ``fno backlog done --force``. A PR whose
@@ -11054,7 +10525,7 @@ def cmd_reconcile(
     # only shape allowed to touch the whole graph: revert detection, the
     # stranded-epic self-heal, and an unbounded forward/reverse scan. A
     # `--pr-number` call names one specific PR and must stay bounded to it
-    # (x-59a6 review fix - it used to fall through to a full sweep on every
+    # ( review fix - it used to fall through to a full sweep on every
     # merge, since it left `node` at None just like the truly-bare case).
     _full_sweep = node is None and pr_number is None
 
@@ -11065,42 +10536,7 @@ def cmd_reconcile(
         _our_repo: Optional[str],
     ) -> set[str]:
         """Every node id ``_pr_number`` could possibly close: the trailer's
-        own claims, any node already carrying ``_pr_number`` as a ref
-        (stamped at creation, before this feature existed), plus every OPEN,
-        ref-less node whose own ``cwd`` matches THIS repo's root.
-
-        The last group exists because ``scan_merge_drift`` passes this exact
-        scope straight through to ``reverse_map_unstamped`` (its reverse
-        branch-name-map pass), which is what closes a node whose session
-        died before the pr_number stamp landed. Omitting ref-less nodes here
-        would silently zero out that entire pass on every ``--pr-number``
-        call - the node's own branch names it, but a scope with nothing in
-        it matches nothing. It is NOT free to include every such node
-        graph-wide, though: the graph is a single store shared across every
-        project on the machine, and ``reverse_map_unstamped`` fires one gh
-        call per DISTINCT node cwd in its scope (bounded by
-        ``REVERSE_MAP_BUDGET_S``) - an unscoped sweep pays a gh call for
-        every other project's ref-less nodes too, on every ordinary merge in
-        this repo. Scoped below by matching each candidate's own ``cwd``
-        against ``repo_root()`` (this checkout's own root, cheap and local -
-        no gh call) - never by comparing a resolved project-NAME string
-        against the node's stored ``project`` field: that field is written
-        by a completely different resolver (settings-based project
-        detection at intake) that can drift from an independently-derived
-        name, and a node created via ``fno backlog new`` before being
-        claimed by a plan legitimately carries ``project: null``, which a
-        name comparison would misread as "not this repo" even when its cwd
-        matches exactly.
-
-        The graph is CROSS-PROJECT: a bare number match, scoped by nothing,
-        would pull in a same-numbered PR belonging to a different repo's
-        node. Scoped by repo like every other PR-matching path in this
-        module - a ref with no parseable url is still accepted as
-        best-effort, but an unresolvable OUR OWN repo refuses every
-        number-based match rather than wildcarding it in, matching
-        ``_find_pr_node_id``'s actual stance (it returns ``None`` outright
-        when its own slug is unresolvable, rather than treating that as a
-        pass for every candidate).
+        Full contract: docs/architecture/backlog-graph-verb-contracts.md
         """
         from fno.graph._intake import repo_root
         from fno.graph._reconcile import node_cwd_in_repo, node_pr_refs, repo_slug_from_url
@@ -11187,7 +10623,7 @@ def cmd_reconcile(
     closure_refused: Optional[str] = None
     supersession_files_by_pr: dict[int, list[str]] = {}
     entries = read_graph(_graph_path())
-    # x-baef: leftover model_tier rows read as no band everywhere now (the
+    # : leftover model_tier rows read as no band everywhere now (the
     # compat read died with the field), so the daily sweep names them until
     # the one-shot migration clears the key. Self-extinguishing: zero rows,
     # zero lines, and the migrated graph never trips it again. The split
@@ -11287,7 +10723,7 @@ def cmd_reconcile(
                         err=True,
                     )
 
-    # Open-PR binding heal (x-d3c6): an open PR whose branch names an open,
+    # Open-PR binding heal (): an open PR whose branch names an open,
     # ref-less node leaves that node invisible to every graph-first reader
     # until something fills pr_number. One bounded open-PR listing per repo
     # BEFORE the scan, so the healed rows feed the forward scan and the status
@@ -11358,7 +10794,7 @@ def cmd_reconcile(
 
     # A --pr-number call scans only what THIS PR could touch - its own
     # stamped ref plus every exact trailer claim - never the whole graph
-    # (x-59a6 review fix: this used to fall through to an unscoped scan on
+    # ( review fix: this used to fall through to an unscoped scan on
     # every merge, since `node` stays None for a --pr-number-only call, the
     # same shape as a truly bare sweep). An explicit --node still wins.
     _scan_scope: Optional[Union[str, set[str]]]
@@ -11377,7 +10813,7 @@ def cmd_reconcile(
             # Same condition leg_stamp already warns about before it calls
             # this same command with an explicit --repo; surface it here too
             # for a caller (a bare `fno backlog reconcile --pr-number`) that
-            # never resolves one itself (round-11 review fix, x-59a6).
+            # never resolves one itself (round-11 review fix, ).
             typer.echo(
                 f"warning: reconcile --pr-number {pr_number}: could not resolve "
                 "this repo's slug; scoping to exact trailer claims and open "
@@ -11390,7 +10826,7 @@ def cmd_reconcile(
     records = scan_merge_drift(entries, node_id=_scan_scope)
 
     # Auto-bind closure claims for every OTHER merged PR this sweep just
-    # discovered on its own (x-59a6). --pr-number above covers the two paths
+    # discovered on its own (). --pr-number above covers the two paths
     # that already KNOW the PR number (the post-merge ritual, `fno do pr
     # merge`); a THIRD path merges with no caller ever naming a number at
     # all - an operator merging in the GitHub UI, or a king's automation -
@@ -11487,7 +10923,7 @@ def cmd_reconcile(
     closeable = [r for r in records if r.closeable]
     failures = [r for r in records if r.error is not None]
 
-    # Promise gate (x-5d34): a merged PR is not enough when the plan promised
+    # Promise gate (): a merged PR is not enough when the plan promised
     # more. Partition the closeable set so an unmet-promise node stays open
     # rather than closing silently on the unattended sweep. Reconcile is the
     # MAINSTREAM close (auto-fires on SessionStart), so without this leg a node
@@ -11539,7 +10975,7 @@ def cmd_reconcile(
     # still fires).
     strandable = _strandable_epic_ids(entries) if _full_sweep else set()
     # Same self-heal role for contained nodes whose unit already shipped
-    # (x-e957): neither the merge-time cascade nor scan_merge_drift can reach
+    # (): neither the merge-time cascade nor scan_merge_drift can reach
     # them, so without this leg a back-filled `contained_in` on an
     # already-merged owner strands the node permanently. Full sweep only, for
     # the same reason as the epic sweep above.
@@ -11600,7 +11036,7 @@ def cmd_reconcile(
                 "merged_at": merged.merged_at,
             }
 
-        # Edge settlement probe (x-e451): computes the plan once; the mutator
+        # Edge settlement probe (): computes the plan once; the mutator
         # applies its change map under the lock and reports its receipts.
         # Fail-open like every self-heal leg above: a keeper binary older than
         # the settle_edges verb costs this run its settlement, never the sweep.
@@ -11616,11 +11052,11 @@ def cmd_reconcile(
     contained_closed: list[str] = []
     contained_errors: list[dict] = []
     supersession_unverified: list[dict] = []
-    # Blocked_by edges the sweep settled (x-e451): pruned to done blockers,
+    # Blocked_by edges the sweep settled (): pruned to done blockers,
     # rewired to live successors, or held with a receipt naming why.
     blocked_by_settlement: list[dict] = []
     # Set below only on the dry-run simulate branch; epics_waiting reuses it
-    # (x-59a6 review fix) so its "still open" read agrees with the same
+    # ( review fix) so its "still open" read agrees with the same
     # preview `candidates`/`healed_epics` already report as would-close.
     _sim: Optional[list[dict]] = None
     # The post-lock graph exists only when the sweep mutated something; the
@@ -11638,12 +11074,12 @@ def cmd_reconcile(
         # closed or removed out-of-band between the read-only scan and the lock
         # is skipped) so the post-lock work only touches genuinely-closed nodes.
         actually_closed: list = []
-        # Ancestor epics the cascade closed this sweep (x-33b2). Their OWN
+        # Ancestor epics the cascade closed this sweep (). Their OWN
         # dependents (a node blocked_by the epic) must be auto-continued too, so
         # we accumulate the ids here and run the same dispatch path for them
         # after the lock - else an epic-level dependent stalls.
         cascade_closed_acc: list = []
-        # Nodes closed because they shipped inside a closed node's PR (x-e957).
+        # Nodes closed because they shipped inside a closed node's PR ().
         # Reporting only, and kept SEPARATE from cascade_closed_acc (which
         # drives auto-continue): a sweep that closes three nodes while saying
         # it closed one reads as "already in sync" to the next operator.
@@ -11731,7 +11167,7 @@ def cmd_reconcile(
                     if record.pr_number and not node_obj.get("pr_number"):
                         node_obj["pr_number"] = record.pr_number
                         node_obj["pr_url"] = record.pr_url
-                    # Close every node that shipped inside this PR (x-e957),
+                    # Close every node that shipped inside this PR (),
                     # BEFORE the parent cascade: the epic is only all-done once
                     # its contained children are closed too. A loud warning,
                     # never an abort - the unit's own close is the load-bearing
@@ -11756,7 +11192,7 @@ def cmd_reconcile(
                             "(`fno backlog reconcile` retries on the next run)",
                             err=True,
                         )
-                    # Cascade-close now-all-done ancestor epics (x-33b2), uniform
+                    # Cascade-close now-all-done ancestor epics (), uniform
                     # across projects (follows the parent edge, not a filter).
                     cascade_closed_acc.extend(_cascade_close_parents(entries, record.node_id))
                     actually_closed.append(record)
@@ -11808,7 +11244,7 @@ def cmd_reconcile(
                         "stay blocked (`fno backlog reconcile` retries next run)",
                         err=True,
                     )
-                # Apply the probe's settlement plan (x-e451), idempotent.
+                # Apply the probe's settlement plan (), idempotent.
                 blocked_by_settlement_acc.extend(
                     apply_edge_settlement(entries, edge_settlement)
                 )
@@ -11826,7 +11262,7 @@ def cmd_reconcile(
             """Merge-triggered auto-continue dispatch for one just-closed node:
             same-project `next`, cross-project dependents, and contract de-stub.
             Shared by directly-closed records AND cascade-closed ancestor epics
-            (x-33b2) so an epic-level dependent is dispatched, not stranded."""
+            () so an epic-level dependent is dispatched, not stranded."""
             from fno.backlog.advance import advance as _advance
             from fno.backlog.advance import advance_dependents as _advance_deps
             from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
@@ -11842,7 +11278,7 @@ def cmd_reconcile(
             # no-op (missing script) or fail, so don't claim it stamped. Pass the
             # merged PR url so a plan that never went through the ship gate is
             # stamped shipped->done rather than getting a graduate no-op
-            # (ab-bd9f476c).
+            # ().
             stamped = bool(record.plan_path) and _stamp_and_graduate_plan(
                 record.plan_path,
                 url=record.pr_url,
@@ -11863,7 +11299,7 @@ def cmd_reconcile(
                 )
 
             # Hand the auto-complete signal to the owning target session (Group 1
-            # / ab-f7f8bc53): an out-of-band merge bypassed pr-merge.sh's emit, so
+            # / ): an out-of-band merge bypassed pr-merge.sh's emit, so
             # the owning session is still IN_PROGRESS and its stop hook would hard
             # re-block. Best-effort + non-fatal: a failure here logs and continues
             # (the defensive stop-hook probe is the backstop).
@@ -11874,7 +11310,7 @@ def cmd_reconcile(
             # closes a node once (AC4-EDGE).
             emit_human_touch_for_record(record)
 
-            # Ledger backstop (x-88df US3): the ledger's only writer is the
+            # Ledger backstop ( US3): the ledger's only writer is the
             # origin's own finalize, so a killed/reaped origin leaks its row.
             # Stamp a minimal row for the transcript-gone tail; the
             # direct-finalize rung's full row supersedes it via the collapse
@@ -11907,7 +11343,7 @@ def cmd_reconcile(
                     err=True,
                 )
 
-            # Tier-1 gate_escape (x-f894): a STRICTER subset of the touch above -
+            # Tier-1 gate_escape (): a STRICTER subset of the touch above -
             # only when a required review bot never reviewed the oob-merged PR
             # (the #222 boundary). Resolve the repo's required bots and let the
             # helper apply the boundary + emit; fail-open, never aborts.
@@ -11938,7 +11374,7 @@ def cmd_reconcile(
                 }
             )
 
-            # Merge-triggered auto-continue (ab-3cd195b6): with the close
+            # Merge-triggered auto-continue (): with the close
             # committed above (AC1-RACE ordering), dispatch a fresh /target
             # worker for the next now-unblocked node. advance gates on
             # enablement internally and is strictly non-fatal: a failed advance
@@ -11953,7 +11389,7 @@ def cmd_reconcile(
                 # project B, and B's campaign-arm marker lives under B's root.
                 _adv_cwd = _adv_node.get("cwd") if _adv_node else None
                 # If the closed node's recorded cwd is an archived worktree,
-                # route from its project root instead (x-3dd0): otherwise advance
+                # route from its project root instead (): otherwise advance
                 # probes the campaign-arm marker under a missing dir and strands
                 # the next node. Re-resolved from the POST-lock node so a
                 # concurrent reproject is still honored.
@@ -11975,7 +11411,7 @@ def cmd_reconcile(
         # only touches directly-closed records; the epic parents need this.
         _project_plans_from_graph([r.node_id for r in actually_closed] + list(cascade_closed_acc))
 
-        # x-33b2: a cascade-closed parent epic unblocks its OWN dependents (a
+        # : a cascade-closed parent epic unblocks its OWN dependents (a
         # node blocked_by the epic), which the per-record loop above never
         # dispatched - run the same auto-continue for each cascade-closed
         # ancestor too. Deduped; read-only from the close-stable graph.
@@ -12128,7 +11564,7 @@ def cmd_reconcile(
 
         # The probe travels with the sweep: this is the UNATTENDED reaper, and
         # a producer on one of N paths is the same defect as a guard on one of
-        # N. Same for the node_settlement (x-94f8).
+        # N. Same for the node_settlement ().
         _optout_sink: list = []
         _reap = reap_dead_claims(
             apply=not dry_run,
@@ -12166,7 +11602,7 @@ def cmd_reconcile(
         if not json_out:
             typer.echo(f"warning: claim reap skipped: {_reap_exc}", err=True)
 
-    # x-59a6: when this run's --pr-number closure claims land under a
+    # : when this run's --pr-number closure claims land under a
     # still-open parent epic, name exactly which sibling ship(s) keep it open -
     # else a PR that ships one of two required nodes reads as silent
     # (`closed=[thisone]`) and an operator cannot tell "genuinely unfinished"
@@ -12206,7 +11642,7 @@ def cmd_reconcile(
                         err=True,
                     )
 
-    # Ledger session harvest (x-4f1b): fill every execution row's ABSENT
+    # Ledger session harvest (): fill every execution row's ABSENT
     # `sessions` from its graph node and mark the rest explicitly, before the
     # sweep reports. Reconcile auto-fires on SessionStart, so this lands
     # before any reaping work can consult a row. The counts ride the JSON
@@ -12227,7 +11663,7 @@ def cmd_reconcile(
     if json_out:
         payload = {
             "dry_run": dry_run,
-            # --pr-number closure binding (x-59a6), reported separately from
+            # --pr-number closure binding (), reported separately from
             # `closed` below: zero closes must never masquerade as zero claims.
             # `closure_claims` is every id the trailer named; `closure_bound` is
             # the subset newly bound THIS run (already-bound/already-done ids are
@@ -12236,7 +11672,7 @@ def cmd_reconcile(
             "closure_claims": closure_claims,
             "closure_bound": closure_bound,
             "closure_refused": closure_refused,
-            # Open-PR binding heals (x-d3c6), reported separately from
+            # Open-PR binding heals (), reported separately from
             # closure_*: these FILL pr_number/pr_url for visibility and never
             # close a node; advisories name ambiguity / gh read failure.
             "open_pr_bound": open_bound,
@@ -12244,7 +11680,7 @@ def cmd_reconcile(
             "supersession_unverified": supersession_unverified,
             "blocked_by_settlement": blocked_by_settlement,
             # Parent epics of this run's closure claims that are still open,
-            # each naming its still-open sibling children exactly (x-59a6).
+            # each naming its still-open sibling children exactly ().
             "epics_waiting": epics_waiting,
             "candidates": [
                 {
@@ -12264,7 +11700,7 @@ def cmd_reconcile(
                 for node_id, (before, after) in status_drift.items()
             ],
             # Nodes closed because they shipped inside a closed node's PR
-            # (x-e957). Reported separately from `closed`, whose entries all
+            # (). Reported separately from `closed`, whose entries all
             # carry their own pr_number - a contained node has none.
             "contained_closed": contained_closed,
             # Cascade/sweep and canonical-sync legs. In the payload because the
@@ -12286,7 +11722,7 @@ def cmd_reconcile(
                 }
                 for r in failures
             ],
-            # Closeable records held open by the promise gate (x-5d34): a merged
+            # Closeable records held open by the promise gate (): a merged
             # PR whose plan promised work that has not all shipped.
             "promise_unmet": [{"node_id": nid, "reason": reason} for nid, reason in promise_unmet],
             "promise_warnings": promise_warnings,
@@ -12690,7 +12126,7 @@ def cmd_maintain(
     entries = recompute_statuses(read_graph(_graph_path()))
 
     if suspect_reverts:
-        # Short-circuit (x-7dcb): a retro sweep, not another leg. Runs before
+        # Short-circuit (): a retro sweep, not another leg. Runs before
         # the claim check and every other detector below - it reads and
         # prints only, so it needs none of their machinery.
         reverts = _maintain.detect_suspect_reverts(entries)
@@ -12740,7 +12176,7 @@ def cmd_maintain(
         max_failed_attempts = 3
     stale = _maintain.detect_stale_ideas(entries, staleness_days)
 
-    # G1 stale-ready quarantine leg (x-3236): the propose-only mirror of the
+    # G1 stale-ready quarantine leg (): the propose-only mirror of the
     # failure-defer leg over READY rows abandoned past
     # config.backlog.staleness_days (default 21, distinct from the idea-stage
     # staleness above). --apply defers each with the quarantine reason. Reuses
@@ -12885,7 +12321,7 @@ def cmd_maintain(
                     )
                 except Exception as exc:  # noqa: BLE001 - one bad row must not abort
                     typer.echo(f"warning: auto-defer of {cand.node_id} failed: {exc}", err=True)
-            # G1 stale-ready quarantine (x-3236): the reversible defer for a ready
+            # G1 stale-ready quarantine (): the reversible defer for a ready
             # node abandoned past the threshold. Same in-lock re-sample as the
             # failure leg (a node claimed/done/deferred since the read is left
             # alone - the "quarantine racing a live claim must lose" race rule).
@@ -13399,7 +12835,7 @@ _ARCHIVE_SKIP_REASONS = (
 def _archive_bucket_counts(skipped: list) -> dict[str, int]:
     """Tally ``skipped`` by ``_skip`` reason, zero-filled for every known reason.
 
-    Zero-filled so the receipt always names all four buckets (x-a023): a run
+    Zero-filled so the receipt always names all four buckets (): a run
     that holds back 0 for a reason reads as "checked, none held", not as an
     absent line a reader has to interpret as either "zero" or "not measured".
     A reason not in ``_ARCHIVE_SKIP_REASONS`` still lands in the dict and the
@@ -13435,21 +12871,7 @@ def cmd_archive(
     ),
 ) -> None:
     """Sweep old terminal (done/superseded) nodes into graph-archive.json.
-
-    Dry-run by default: prints how many would move and why some are held back.
-    ``--apply`` mutates under the graph lock (archive written first, then the
-    working graph, so a crash duplicates rather than loses). Never archives a
-    node an OPEN node still references through a hard edge (blocker, parent,
-    supersede target). A SOFT edge (the open node's ``related`` peer or
-    ``source_node_id`` origin) does not hold the target: the reference is
-    stripped from the open side at apply time and the node leaves; the
-    read-through fallback keeps its id resolvable.
-
-    Every run's receipt names all four held-back buckets plus the soft-edge
-    strip count, and every run emits a ``graph_archive_swept`` event, dry-run
-    included: a leg that runs daily and reports bare "ok" is indistinguishable
-    from one that never ran (x-a023) - the count that matters is often the
-    held-back one, not the moved one.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from datetime import datetime, timezone
 
@@ -13718,7 +13140,7 @@ def cmd_album(
             e
             for e in read_graph(archive_path)
             if isinstance(e, dict)
-            # The shared row-status read: legacy archive rows carry only completed_at (x-c672).
+            # The shared row-status read: legacy archive rows carry only completed_at ().
             and derived_status(e) == "done"
             # Superseded is derived from superseded_by (graph/types.py), so a
             # row can carry both; the album shows shipped work only.
@@ -13798,21 +13220,7 @@ def cmd_unarchive(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
 ) -> None:
     """Move one node from graph-archive.json back into the working graph.
-
-    ``archive`` is a bulk hygiene sweep with no way back, so a node swept early
-    (or swept correctly and then needed again) could only be recovered by
-    hand-editing, which a PreToolUse hook forbids. It is the fourth instance of
-    the same shape as the missing ``reopen``, and the audit that produced this
-    verb found it in ten minutes.
-
-    Write order mirrors ``archive`` inverted, for its reason: the working graph
-    is written FIRST, so a crash between the two writes leaves a duplicate that
-    the next sweep dedupes rather than a lost node. Read-through
-    (``entries_with_archive``) already tolerates the window.
-
-    Refuses to guess:
-        0  moved, or a warning that the node is already in the working graph
-        1  the id is in neither the working graph nor the archive
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph._intake import _find_node
@@ -13966,7 +13374,7 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
 
     raw_difficulty = frontmatter.get("difficulty")
     if raw_difficulty is None and frontmatter.get("model_tier") is not None:
-        # Same loss-signal as the intake lane (x-baef): the claim reads the
+        # Same loss-signal as the intake lane (): the claim reads the
         # canonical key only, so a plan still spelling model_tier must hear
         # the band was dropped rather than wonder why the node has none.
         typer.echo(
@@ -14311,7 +13719,7 @@ def _do_intake_multi(
         except Exception as e:  # noqa: BLE001
             _safe_stderr_warn(f"warning: post-claim projection skipped: {e}\n")
 
-    # Filing-time dedup net (plan x-6ac7): per just-born node, warn if it
+    # Filing-time dedup net (plan ): per just-born node, warn if it
     # resembles an existing one. Fresh post-write read; non-fatal.
     try:
         from fno.graph._intake import _find_node, _warn_similar_nodes
@@ -14352,6 +13760,14 @@ def cmd_find(
     domain: Optional[str] = typer.Option(None, "--domain", "-d", help="Filter by domain"),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project"),
     status: Optional[str] = typer.Option(None, "--status", "-s", help="Filter by status"),
+    source_kind: Optional[str] = typer.Option(
+        None,
+        "--source-kind",
+        help=(
+            "Filter by origin: organic|from_inbox|from_observation|from_supervisor|"
+            "operator_request. operator_request lists the operator's own asks."
+        ),
+    ),
     use_fts: bool = typer.Option(
         False,
         "--fts",
@@ -14368,7 +13784,7 @@ def cmd_find(
 ) -> None:
     """Search graph entries: exact id/slug/bare-hex, else high-recall over title+slug+details.
 
-    The describe-it candidate generator (ab-f82e8083): a free-text query matches
+    The describe-it candidate generator (): a free-text query matches
     across title, slug, AND details so the model has the recall it needs to rank
     a fuzzy description. An ``ab-`` query keeps the existing id/prefix resolution
     (resolve_id) byte-for-byte so `done`/intake callers are unaffected.
@@ -14437,6 +13853,10 @@ def cmd_find(
             return False
         if status is not None and e.get("status") != status:
             return False
+        # A node written before this field existed carries the organic default,
+        # so the filter reads the resolved value, never a missing key.
+        if source_kind is not None and (e.get("source_kind") or SOURCE_KIND_DEFAULT) != source_kind:
+            return False
         return True
 
     matched = [e for e in _resolve_against(entries) if _passes_filters(e)]
@@ -14479,7 +13899,7 @@ def cmd_find(
 
     for e in matched:
         # Lead with the slug-forward handle (`slug (ab-id)`, or `(ab-id)` when
-        # unslugged); the canonical hex stays present and copyable (ab-f82e8083).
+        # unslugged); the canonical hex stays present and copyable ().
         typer.echo(
             "\t".join(
                 [
@@ -14492,207 +13912,6 @@ def cmd_find(
             )
         )
 
-
-# -- new --
-
-
-@cli.command(
-    "new",
-    hidden=True,
-    epilog="Paired verb: `fno backlog remove <id>` deletes it.",
-)
-def cmd_new(
-    title: str = typer.Argument(..., help="Title of the new entry"),
-    domain: str = typer.Option("code", "--domain", help="Domain (fuzzy-suggested against history)"),
-    project: Optional[str] = typer.Option(
-        None,
-        "--project",
-        help="Project name. Defaults to current git repo's basename; pass --unscoped to skip auto-scope.",
-    ),
-    priority: str = typer.Option("p2", "--priority", help="p0|p1|p2|p3"),
-    difficulty: str = typer.Option(
-        "medium", "--difficulty", help="Intrinsic work difficulty: low|medium|high."
-    ),
-    blocks_everything: bool = typer.Option(
-        False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."
-    ),
-    unscoped: bool = typer.Option(
-        False,
-        "--unscoped",
-        help="Create with project=null and cwd=null. Default auto-scopes to current git repo.",
-    ),
-    force_domain: bool = typer.Option(
-        False,
-        "--force-domain",
-        help="Skip the fuzzy domain suggestion and use --domain verbatim.",
-    ),
-    source_kind: str = typer.Option(
-        "organic",
-        "--source-kind",
-        help="organic|from_inbox|from_observation|from_supervisor",
-    ),
-    source_project: Optional[str] = typer.Option(
-        None, "--source-project", help="Source project name"
-    ),
-    source_session_id: Optional[str] = typer.Option(
-        None, "--source-session-id", help="Source session ID"
-    ),
-    source_inbox_msg: Optional[str] = typer.Option(
-        None, "--source-inbox-msg", help="Source inbox message ID"
-    ),
-) -> None:
-    """Create a new graph entry without a plan file.
-
-    Auto-scopes project and cwd from the current git repo by default. Pass
-    --unscoped to opt out (e.g. for cross-project ideas with no clear home).
-    --project always overrides the auto-detected name when both are present.
-    """
-    _refuse_create_on_external_backend()
-    from fno.graph._constants import (
-        mint_node_id,
-        normalize_difficulty,
-    )
-    from fno.graph.fuzzy import suggest_domain
-    from fno.graph.store import read_graph, locked_mutate_graph
-
-    _VALID_SOURCE_KINDS = {"organic", "from_inbox", "from_observation", "from_supervisor"}
-    if source_kind not in _VALID_SOURCE_KINDS:
-        typer.echo(
-            f"Error: invalid --source-kind '{source_kind}'. "
-            f"Must be one of: {', '.join(sorted(_VALID_SOURCE_KINDS))}",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    _validate_priority_or_exit(priority, blocks_everything=blocks_everything)
-    try:
-        normalized_difficulty = normalize_difficulty(difficulty)
-        if normalized_difficulty is None:
-            raise ValueError("difficulty must not be empty")
-        difficulty = normalized_difficulty
-    except ValueError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=2)
-
-    entries = read_graph(_graph_path())
-
-    if not force_domain:
-        sugg = suggest_domain(domain, entries)
-        if sugg.confidence == "fuzzy" and sugg.match != domain:
-            typer.echo(
-                f"fno backlog new: did you mean --domain {sugg.match}? "
-                f"Pass --domain {sugg.match} or add --force-domain to keep {domain!r}.",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        # 'exact' and 'new' pass through silently.
-
-    # Auto-scope from current git repo unless --unscoped is set. --project
-    # always overrides the auto-detected basename. Skipping the auto-scope
-    # gives us back the pre-fix behavior for the rare global-idea case.
-    #
-    # Uses the shared resolve_git_roots() helper: linked worktrees record the
-    # canonical main checkout as cwd (a durable node outlives its worktree)
-    # while keeping the canonical repo basename as project (so all worktrees
-    # of the same repo share one project name).
-    #
-    # When --project is explicit, derive cwd from the work-map first regardless
-    # of --unscoped. An explicit project is a stronger signal than the
-    # auto-scope default.
-    resolved_project = project
-    resolved_cwd: Optional[str] = None
-    if project is not None:
-        from fno.graph._intake import project_root_from_settings
-
-        resolved_cwd = project_root_from_settings(project)
-        # resolved_project stays as-is (the explicit flag value)
-    if resolved_cwd is None and not unscoped:
-        from fno.graph._intake import resolve_git_roots
-
-        derived_name, canonical_root = resolve_git_roots()
-        if canonical_root:
-            resolved_cwd = canonical_root
-            if resolved_project is None:
-                resolved_project = derived_name
-
-    new_id_holder: list[Optional[str]] = [None]
-
-    def mutator(es: list[dict]) -> list[dict]:
-        live_ids = {e.get("id") for e in es}
-        new_id = mint_node_id(live_ids)
-        new_id_holder[0] = new_id
-        # This verb builds its node inline rather than through
-        # _build_backlog_node, so ambient origin capture has to be wired
-        # explicitly or `new` stays the one creation path outside the contract.
-        prov = _session_provenance(known_ids=live_ids)
-        node = {
-            "id": new_id,
-            "parent": None,
-            "title": title,
-            "type": "feature",
-            "project": resolved_project,
-            "cwd": resolved_cwd,
-            "priority": priority,
-            "blocks_everything": blocks_everything,
-            "difficulty": difficulty,
-            "difficulty_history": [
-                {
-                    "value": difficulty,
-                    "source": "filed",
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                }
-            ],
-            "domain": domain,
-            "blocked_by": [],
-            "session_id": None,
-            "locked_at": None,
-            "completed_at": None,
-            "has_brief": False,
-            "roadmap_id": None,
-            "vision_path": None,
-            "details": None,
-            "size": None,
-            "batch": None,
-            "cost_usd": None,
-            "cost_sessions": [],
-            "plan_path": None,
-            "pr_number": None,
-            "pr_url": None,
-            "merge_status": None,
-            "artifact_url": None,
-            "completion_note": None,
-            "source": "fno-new",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "source_kind": source_kind,
-            "source_project": source_project,
-            "source_session_id": source_session_id or prov["source_session_id"],
-            "source_harness": prov["source_harness"],
-            "source_cwd": prov["source_cwd"],
-            "source_node_id": prov["source_node_id"],
-            "source_plan_path": prov["source_plan_path"],
-            "source_inbox_msg": source_inbox_msg,
-        }
-        es.append(node)
-        return es
-
-    locked_mutate_graph(_graph_path(), mutator)
-
-    # Filing-time dedup net (plan x-6ac7): `fno backlog new` is a reachable plan-less
-    # birth path with its own mutator, so it gets the same post-write warn as
-    # idea/add/intake (codex P2). Non-fatal; this verb's stdout is the bare id,
-    # not JSON, so the stderr receipt cannot corrupt a machine-readable payload.
-    if new_id_holder[0] is not None:
-        try:
-            from fno.graph._intake import _find_node, _warn_similar_nodes
-
-            post_entries = read_graph(_graph_path())
-            node = _find_node(post_entries, new_id_holder[0] or "")
-            if node is not None:
-                _warn_similar_nodes(node, post_entries, intake_hint=False)
-        except Exception as e:  # noqa: BLE001 - dedup never breaks a filing
-            _safe_stderr_warn(f"warning: post-file dedup check skipped: {e}\n")
-
-    typer.echo(new_id_holder[0])
 
 
 # ---------------------------------------------------------------------------
@@ -14951,7 +14170,7 @@ def cmd_supersede(
         # A pre-existing deferral stays: status precedence reads superseded
         # above deferred, so the park resurfaces if the supersession is
         # reversed.
-        # Release anything that was shipping inside it (x-e957, sigma). Same
+        # Release anything that was shipping inside it (, sigma). Same
         # trap `cmd_remove` was fixed for, one step short of deletion: a
         # superseded unit will never merge, so `_strandable_contained_ids`
         # (which keys on completed_at) never heals its children, while
@@ -15009,25 +14228,7 @@ def cmd_unsupersede(
     node_id: str = typer.Argument(..., help="The superseded node ID to revive"),
 ) -> None:
     """Reverse a supersede on ``node_id``. Idempotent in the safe direction.
-
-    Clears ``superseded_by`` and removes ``node_id`` from the replacer's
-    ``supersedes`` list; any ``deferred_at`` park the node carried before the
-    supersession survives, so the status recomputes back to ``deferred``
-    after the reversal. The plan doc is forced off terminal ``superseded``
-    (the forward-only projector will not leave a terminal on its own).
-
-    A node that is merely deferred (no ``superseded_by``) is left untouched:
-    reactivating parked work is ``undefer``'s job, and clearing a deferral here
-    would silently make deferred work dispatchable.
-
-    Reactivation is a separate verb from ``undefer`` on purpose: reviving a
-    plan that another plan supplanted is a conscious act. ``recompute_statuses``
-    has always named this verb as the only route back from ``superseded`` - it
-    just did not exist.
-
-    Does NOT re-contain or re-parent children released when the node was
-    superseded: re-adoption is decompose's job, the same policy ``cmd_undefer``
-    applies to un-containment.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
@@ -15215,7 +14416,7 @@ _TRACKER_OWNED_VERBS = frozenset(
         "lane-fill",
         "dispatch-lanes",
         # join spawns workers into a held worktree; the joiners, not join,
-        # write task rows (x-8d1d)
+        # write task rows ()
         "join",
         # footnote-owned DATA with a graph-resident write path (refused until the
         # write moves to the sidecar seam)

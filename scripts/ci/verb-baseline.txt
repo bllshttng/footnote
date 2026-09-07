@@ -89,6 +89,9 @@ inbox decide !--decision !--origin !--subject
 inbox decisions !--subject
 inbox law set
 inbox notify
+inbox operator ack
+inbox operator list
+inbox operator status
 inbox outstanding ask
 inbox outstanding clear !--origin
 inbox outstanding mine do
