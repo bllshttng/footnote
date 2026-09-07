@@ -4561,7 +4561,7 @@ event_types:
           description: "The 8-hex jobId of the finished-but-open bg session surfaced to close."
 
   - name: watchdog_verdict
-    description: "The external fleet watchdog classified a fleet row outside every session and the verdict is not 'leave': a ghost, a reapable, a reroute, or a wake candidate. The basis names the measurement that decided it so a reader can falsify the call."
+    description: "The external fleet watchdog classified a fleet row outside every session and the verdict is not 'leave': a ghost, a stale row, a reroute, a wake candidate, or a report-only friction verdict. The basis names the measurement that decided it so a reader can falsify the call."
     sources: [daemon]
     data:
       required: [row_id, verdict]
@@ -4574,7 +4574,7 @@ event_types:
           description: "The row's name."
         verdict:
           type: string
-          description: "ghost | reap | retire | stale | reroute | wake | leave | unclaimed."
+          description: "ghost | stale | reroute | wake | leave | unclaimed | contended | polling_settled."
         basis:
           type: string
           description: "The measurement that decided the verdict (e.g. 'no transcript for <id>', 'node <id> done', '429 resets 18:48:21Z, 8m out')."

@@ -20,6 +20,7 @@ import typer
 
 from fno.agents import watchdog
 from fno.agents.watchdog import (
+    CONTENDED,
     GHOST,
     LEAVE,
     REROUTE,
@@ -63,13 +64,15 @@ def _facts(
     return TailFacts([(epoch, text)], epoch, text, role, text)
 
 
-def _run(rows, transcripts, *, claims=None, nodes=None, now_s=NOW_1840):
+def _run(rows, transcripts, *, claims=None, nodes=None, now_s=NOW_1840,
+         pr_state_for=None):
     return verdicts(
         rows,
         transcript_for=lambda sid: transcripts.get(sid),
         claim_for=lambda node: (claims or {}).get(node, {}),
         node_state_for=lambda node: (nodes or {}).get(node),
         now_s=now_s,
+        pr_state_for=pr_state_for,
     )
 
 
@@ -101,6 +104,228 @@ def test_healthy_injectable_row_is_leave():
     # the generic no-lane line. The basis states what was measured either
     # way, never "reachable" - nothing here probes reachability.
     assert "does not owe a move" in v.basis
+
+
+def _linked_worktree_dir(tmp_path, name: str) -> str:
+    """A stand-in linked worktree: a directory whose ``.git`` is a FILE, which
+    is the one marker ``_is_linked_worktree`` reads."""
+    wt = tmp_path / name
+    wt.mkdir()
+    (wt / ".git").write_text("gitdir: /tmp/elsewhere/main\n")
+    return str(wt)
+
+
+def test_two_live_rows_in_one_worktree_are_contended(tmp_path):
+    wt = _linked_worktree_dir(tmp_path, "w1")
+    a = Row("aaaa1111-0000", "w1", "working", None, wt)
+    b = Row("bbbb2222-0000", "w2", "working", None, wt)
+    vs = _run(
+        [a, b],
+        {"aaaa1111-0000": _facts("still on it"),
+         "bbbb2222-0000": _facts("still on it")},
+    )
+    assert [v.verdict for v in vs] == [CONTENDED, CONTENDED]
+    assert "2 live sessions" in vs[0].basis
+    assert "bbbb2222-0000" in vs[0].basis
+    assert "aaaa1111-0000" in vs[1].basis
+
+
+def test_one_live_row_in_a_worktree_is_not_contended(tmp_path):
+    wt = _linked_worktree_dir(tmp_path, "w1")
+    [v] = _run(
+        [Row("aaaa1111-0000", "w1", "working", None, wt)],
+        {"aaaa1111-0000": _facts("still on it")},
+    )
+    assert v.verdict == LEAVE
+
+
+def test_finished_peer_does_not_contend_the_tree(tmp_path):
+    wt = _linked_worktree_dir(tmp_path, "w1")
+    a = Row("aaaa1111-0000", "w1", "working", None, wt)
+    b = Row("bbbb2222-0000", "w2", "stopped", None, wt)
+    vs = _run(
+        [a, b],
+        # The peer is quiet past QUIET_AFTER_S with a finished tail, which is
+        # the positive not-in-the-tree reading; the live row must not report
+        # contention against it.
+        {"aaaa1111-0000": _facts("still on it"),
+         "bbbb2222-0000": _facts(FINISHED_TAIL, age_min=30)},
+    )
+    assert all(v.verdict == LEAVE for v in vs)
+
+
+def test_shared_checkout_is_coordination_not_contention(tmp_path):
+    shared = tmp_path / "canonical"
+    shared.mkdir()  # no .git file: a shared checkout, not a linked worktree
+    a = Row("aaaa1111-0000", "w1", "working", None, str(shared))
+    b = Row("bbbb2222-0000", "w2", "working", None, str(shared))
+    vs = _run(
+        [a, b],
+        {"aaaa1111-0000": _facts("still on it"),
+         "bbbb2222-0000": _facts("still on it")},
+    )
+    assert all(v.verdict == LEAVE for v in vs)
+
+
+def test_ghost_outranks_contended_and_still_counts_as_occupant(tmp_path):
+    wt = _linked_worktree_dir(tmp_path, "w1")
+    ghost = Row("aaaa1111-0000", "w1", "working", None, wt)
+    live = Row("bbbb2222-0000", "w2", "working", None, wt)
+    vs = _run([ghost, live], {"bbbb2222-0000": _facts("still on it")})
+    assert vs[0].verdict == GHOST
+    # The unreadable tail counts as occupied, so the live peer still reports
+    # the tree it is actually sharing.
+    assert vs[1].verdict == CONTENDED
+    assert "aaaa1111-0000" in vs[1].basis
+
+
+def test_contended_never_acts_at_any_apply_level(tmp_path):
+    wt = _linked_worktree_dir(tmp_path, "w1")
+    a = Row("aaaa1111-0000", "w1", "working", None, wt)
+    b = Row("bbbb2222-0000", "w2", "working", None, wt)
+    [v, _] = _run(
+        [a, b],
+        {"aaaa1111-0000": _facts("still on it"),
+         "bbbb2222-0000": _facts("still on it")},
+    )
+    assert v.verdict == CONTENDED
+    outcome, detail = apply_verdict(v, lanes="all")
+    assert outcome == watchdog.SKIPPED
+    assert "outside" in detail
+
+
+def _polling_facts(poll_events):
+    """Fresh working-tail facts carrying a hand-built pr_polls view."""
+    text = "checking the pull request"
+    return TailFacts(
+        [(NOW_1840 - 60, text)], NOW_1840 - 60, text, "assistant", text,
+        tuple(poll_events),
+    )
+
+
+def test_settled_pr_reads_upgrade_leave_to_polling_settled():
+    row = Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")
+    [v] = _run(
+        [row],
+        {"aaaa1111-0000": _polling_facts([
+            ("read", 1371, ""),
+            ("settled", 1371, "MERGED"),
+            ("read", 1371, ""),
+            ("read", 1371, ""),
+            ("read", 1371, ""),
+        ])},
+        pr_state_for=lambda cwd, n: "MERGED",
+    )
+    assert v.verdict == watchdog.POLLING_SETTLED
+    assert v.basis == "3 PR-status reads of #1371 after the tail read it MERGED"
+    assert v.action == "report"
+    outcome, detail = apply_verdict(v, lanes="all")
+    assert outcome == watchdog.SKIPPED
+    assert "outside" in detail
+
+
+def test_open_pr_at_any_cadence_never_polls_as_settled():
+    row = Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")
+    events = [("settled", 1371, "CLOSED")] + [("read", 1371, "")] * 4
+    [v] = _run(
+        [row],
+        {"aaaa1111-0000": _polling_facts(events)},
+        # The live read says OPEN (reopened): the tail's stale CLOSED marker
+        # must not outvote the current state.
+        pr_state_for=lambda cwd, n: "OPEN",
+    )
+    assert v.verdict == LEAVE
+
+
+def test_unreadable_pr_state_attests_nothing():
+    row = Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")
+    events = [("settled", 1371, "MERGED")] + [("read", 1371, "")] * 3
+    [v] = _run(
+        [row],
+        {"aaaa1111-0000": _polling_facts(events)},
+        pr_state_for=lambda cwd, n: None,
+    )
+    assert v.verdict == LEAVE
+
+
+def test_reads_before_the_settle_marker_do_not_count():
+    row = Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")
+    [v] = _run(
+        [row],
+        {"aaaa1111-0000": _polling_facts([
+            ("read", 1371, ""),
+            ("read", 1371, ""),
+            ("settled", 1371, "MERGED"),
+            ("read", 1371, ""),
+        ])},
+        pr_state_for=lambda cwd, n: "MERGED",
+    )
+    # One read after the answer arrived is a wrap-up check, not a cadence.
+    assert v.verdict == LEAVE
+
+
+def test_pr_poll_record_sees_commands_and_results_records_drop():
+    entries = [
+        # A status-read command: visible to _pr_poll_record only - the
+        # flattened records text must not suddenly carry command strings the
+        # tail classifier was never tuned for.
+        {"message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash",
+             "input": {"command": "fno do pr status 1371"}},
+        ]}},
+        # The result that shows the answer arrived.
+        {"message": {"role": "user", "content": [
+            {"type": "tool_result",
+             "content": [{"type": "text",
+                          "text": '{"pr":1371,"state":"MERGED"}'}]},
+        ]}},
+        # Prose asserting the merge: real text for the records view, but the
+        # settle marker only ever comes from a tool result's JSON.
+        {"message": {"role": "assistant", "content": [
+            {"type": "text", "text": "PR 1371 merged, moving on"},
+        ]}},
+    ]
+    facts = watchdog._facts_from_entries(entries, 10)
+    assert facts.pr_polls == (
+        ("read", 1371, ""),
+        ("settled", 1371, "MERGED"),
+    )
+    assert facts.records[2][1] == "PR 1371 merged, moving on"
+    # The command string and the tool_result body both stay invisible to the
+    # flattened records text.
+    assert facts.records[0][1] == ""
+    assert facts.records[1][1] == ""
+
+
+def test_run_sweep_carries_the_pr_state_seam_end_to_end():
+    from fno.agents import watchdog as wd
+
+    entries = [
+        {"message": {"role": "user", "content": [
+            {"type": "tool_result",
+             "content": [{"type": "text",
+                          "text": '{"pr":1371,"state":"MERGED"}'}]},
+        ]}},
+    ] + [
+        {"message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash",
+             "input": {"command": "gh pr view 1371"}},
+        ]}},
+    ] * 2
+    row = Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")
+    payload, out_rows = wd.run_sweep(
+        now_s=NOW_1840,
+        rows_provider=lambda: ([row], []),
+        transcript_fn=lambda sid: wd._facts_from_entries(entries, 10),
+        claim_fn=lambda node: {},
+        graph_fn=lambda: {},
+        pr_state_fn=lambda cwd, n: "MERGED",
+    )
+    assert not payload.get("refused")
+    [v] = payload["verdicts"]
+    assert v["verdict"] == watchdog.POLLING_SETTLED
+    assert payload["counts"]["polling_settled"] == 1
+    assert out_rows[0].row_id == "aaaa1111-0000"
 
 
 def test_single_sgt_429_is_report_only_until_provider_quorum():

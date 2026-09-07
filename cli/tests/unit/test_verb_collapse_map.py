@@ -108,9 +108,10 @@ def test_map_covers_current_surface_once():
     # `agents court-orphans` sweep its row. Counted from the merged file,
     # never taken from either side: 570. This branch also adds
     # `agents king drain`, the scope drain read the reign terminations key on:
-    # 570 -> 571. This branch adds `agents newest-assistant-text`, the hidden
-    # transcript read the loopcheck distress leg shells: 571 -> 572.
-    assert len(mapped) == 572, (
+    # 570 -> 571. Upstream added `agents newest-assistant-text` (the hidden
+    # transcript read the loopcheck distress leg shells) and this branch adds
+    # `agents friction-escalate` (the watchdog friction lane): 571 -> 573.
+    assert len(mapped) == 573, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

@@ -4687,11 +4687,9 @@ def cmd_watchdog(
         for v, _row in pairs:
             shown_counts[v.verdict] = shown_counts.get(v.verdict, 0) + 1
 
-    # Push, not pull: a verdict the king has to remember to fetch goes
-    # unread. Mail before writing the sweep file, so the change gate compares
-    # against the PREVIOUS sweep's signature - and only a delivered digest
-    # advances it (mail_gate), or a transient send failure would permanently
-    # swallow the verdict behind an unchanged signature.
+    # Push, not pull: mail before writing the sweep file, so only a delivered
+    # digest advances the change gate - a transient send failure must not
+    # permanently swallow the verdict behind an unchanged signature.
     recipient = mail_to
     if recipient is None:
         try:
@@ -4707,17 +4705,13 @@ def cmd_watchdog(
             print(f"watchdog mail: {receipt}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 - mail never breaks the sweep
         print(f"watchdog mail failed: {exc}", file=sys.stderr)
-    # A filtered run publishes only its own rows, so it must not stamp the
-    # whole non-leave set: doing so tells the next tick that ghost/wake rows
-    # it never emitted were already published.
+    # A filtered run publishes only its own rows: never stamp the whole
+    # non-leave set, and stamp the UNION with what was already published,
+    # or the next tick re-emits every filtered-out row.
     events_payload = (
         payload if only is None
         else {**payload, "verdicts": [v._asdict() for v, _ in pairs]}
     )
-    # A filtered run publishes a SUBSET, so its stamp has to be the union of
-    # what it just published and what was already published. Stamping the
-    # subset alone drops every filtered-out row from the record, and the next
-    # tick re-emits all of them.
     prev_events_sig = wd._last_events_signature()
     signature_to_stamp = wd.union_signature(
         prev_events_sig, wd.verdict_signature(events_payload)
@@ -4731,13 +4725,9 @@ def cmd_watchdog(
         ),
     )
 
-    # Classification events ride every mode: a verdict emitted only under a
-    # dry run left apply modes with no event record at all, while the tick
-    # emits per non-leave row regardless of mode. The two lanes must not
-    # diverge on what the record shows - and that cuts both ways. Emitting
-    # ungated here duplicated every row the tick had already published, and
-    # the stamp above then told the next tick they were all published, so a
-    # filtered hand-run made the tick re-emit most of the fleet.
+    # Classification events ride every mode (a dry-run-only verdict once left
+    # apply modes with no event record), gated on fresh_non_leave so a filtered
+    # hand-run neither diverges from the tick's record nor re-emits the fleet.
     fresh_ids = wd.fresh_non_leave(events_payload, prev_events_sig)
     for v, _row in pairs:
         if v.verdict != wd.LEAVE and v.row_id in fresh_ids:
@@ -4850,64 +4840,25 @@ def cmd_watchdog(
 def cmd_stale_escalate(
     json_out: bool = typer.Option(False, "--json", "-J", help="Machine-readable output."),
 ) -> None:
-    """Reconcile the durable stale-row question to the measured fleet.
-
-    Runs the real sweep (roster + transcripts + claims + graph), filters the
-    verdicts no action lane may take (``stale`` - past the wake ceiling),
-    and reconciles ONE ``[watchdog-stale:*]`` operator question to that set:
-    same set is a duplicate, a changed set closes the old ask and asks fresh,
-    an empty set closes what is open. Report-only by contract: this verb
-    never wakes or reroutes, and never touches a worktree - the daemon's idle
-    tick is its only scheduled caller.
-    """
+    """Reconcile the durable stale-row question to the measured fleet."""
     from fno.agents import stale_lane as se
-    from fno.agents import watchdog as wd
-    from fno.carveout.core import resolve_carveout_root, resolve_session_id
 
-    payload, rows = wd.run_sweep()
-    if payload.get("refused"):
-        outcome, qid, stale_count, oldest = "refused", "", 0, 0
-    else:
-        stale_pairs = [
-            (wd.Verdict(**data), row)
-            for data, row in zip(payload["verdicts"], rows)
-            if data["verdict"] == wd.STALE
-        ]
-        try:
-            from fno.paths import resolve_repo_root
+    se.run(json_out=json_out)
 
-            session_id = resolve_session_id(resolve_repo_root())
-        except Exception:  # noqa: BLE001 - an unbound ask still records
-            session_id = None
-        outcome, qid = se.reconcile_stale(
-            stale_pairs,
-            root=resolve_carveout_root(),
-            session_id=session_id,
-            cwd=Path.cwd(),
-        )
-        stale_count = len(stale_pairs)
-        oldest = se.oldest_h([v.basis or "" for v, _row in stale_pairs]) or 0
 
-    summary = f"Summary: {stale_count} stale, outcome {outcome}, oldest {oldest}h"
-    if json_out:
-        sys.stdout.write(json.dumps({
-            "outcome": outcome,
-            "question_id": qid,
-            "stale_count": stale_count,
-            "oldest_h": oldest,
-            "summary": summary,
-        }) + "\n")
-        sys.stdout.flush()
-    else:
-        typer.echo(summary)
+@agents_app.command("friction-escalate", hidden=True)
+def cmd_friction_escalate(
+    json_out: bool = typer.Option(False, "--json", "-J", help="Machine-readable output."),
+) -> None:
+    """Reconcile ONE [watchdog-friction:*] question to the measured fleet."""
+    from fno.agents import friction_lane as fl
+
+    fl.run(json_out=json_out)
 
 
 @agents_app.command("ping", hidden=True)
 def cmd_ping() -> None:
-    """Health-check placeholder: defers the real probe to a future story.
-
-    Exits 0 so the ``_NOT_IMPLEMENTED`` catalog shrinks without a new verb surface.
-    """
+    """Health check (placeholder): exit 0, no verb surface grown."""
     typer.echo("(not yet implemented; planned for a future story)")
 
 
