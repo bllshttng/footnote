@@ -10831,7 +10831,7 @@ async fn attach_and_run(
     // loop, gen-tagged, one fold in flight; a result for a closed/superseded
     // overlay is discarded.
     let (feed_tx, mut feed_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::feed_overlay::FeedItem>>)>();
+        tokio::sync::mpsc::unbounded_channel::<(u64, crate::feed_overlay::FoldResult)>();
 
     // x-f730 task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
@@ -11520,14 +11520,13 @@ async fn attach_and_run(
                     if gen == f.gen {
                         f.inflight = false;
                         match outcome {
-                            Some(items) => {
+                            Ok(items) => {
                                 f.items = items;
                                 f.sel = 0;
-                                f.degraded = false;
+                                f.error = None;
                             }
-                            // Fold failed/timed out: keep prior rows visible,
-                            // flip the loud degraded notice.
-                            None => f.degraded = true,
+                            // Keep prior rows visible; render the typed reason.
+                            Err(e) => f.error = Some(e),
                         }
                         if let Err(e) = compositor.draw(&view.compose()) {
                             break Err(format!("draw: {e}"));

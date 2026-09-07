@@ -24,7 +24,7 @@ fn overlay(items: Vec<crate::feed_overlay::FeedItem>) -> FeedOverlay {
     FeedOverlay {
         items,
         sel: 0,
-        degraded: false,
+        error: None,
         inflight: false,
         want: false,
         gen: 0,
@@ -94,13 +94,23 @@ fn lines_render_newest_first_with_selection_marker() {
 }
 
 #[test]
-fn degraded_footer_states_the_failure() {
+fn degraded_footer_renders_the_typed_reason() {
+    // x-d15a: the failure line names the cause, never the old generic
+    // "feed unavailable" sentence. Timeout names its budget; a malformed
+    // body carries the projection's stderr so the cause leads the line.
     let mut o = overlay(vec![]);
-    o.degraded = true;
+    o.error = Some(crate::feed_overlay::FeedError::Timeout);
+    let lines = feed_overlay_lines(&o);
+    assert!(lines.iter().any(|l| l.contains("timed out after 10s")));
+
+    let mut o = overlay(vec![]);
+    o.error = Some(crate::feed_overlay::FeedError::Exit(
+        "unreadable store: graph.json".into(),
+    ));
     let lines = feed_overlay_lines(&o);
     assert!(lines
         .iter()
-        .any(|l| l.contains("feed unavailable - fno agents feed failed")));
+        .any(|l| l.contains("unreadable store: graph.json")));
 }
 
 #[test]
