@@ -45,6 +45,13 @@ def _transcript(tmp_path: Path, rows: list[dict]) -> Path:
     return p
 
 
+def _pin(monkeypatch, tmp_path: Path, rows: list[dict], session: str = "s-test") -> None:
+    """Point the verb at a fixture transcript through the env pins."""
+    tp = _transcript(tmp_path, rows)
+    monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", session)
+    monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(tp))
+
+
 def _user_row(text, uuid: str, ts: str = "2026-09-06T21:00:00.000Z") -> dict:
     return {
         "type": "user",
@@ -57,9 +64,10 @@ def _user_row(text, uuid: str, ts: str = "2026-09-06T21:00:00.000Z") -> dict:
 # -- the classifier and the queue --
 
 
-def test_prose_turn_queues_and_mail_turn_does_not(tmp_path, tmp_ledger):
+def test_prose_turn_queues_and_mail_turn_does_not(tmp_path, tmp_ledger, monkeypatch):
     """AC: a fixture holding one prose and one <fno_mail> turn lists exactly the prose turn."""
-    tp = _transcript(
+    _pin(
+        monkeypatch,
         tmp_path,
         [
             _user_row("please widen the review gate", "u-prose-1"),
@@ -70,18 +78,16 @@ def test_prose_turn_queues_and_mail_turn_does_not(tmp_path, tmp_ledger):
             ),
         ],
     )
-    result = runner.invoke(
-        app,
-        ["inbox", "operator", "list", "--json", "--session-id", "s-test", "--transcript", str(tp)],
-    )
+    result = runner.invoke(app, ["inbox", "operator", "list", "--json"])
     assert result.exit_code == 0, result.output
     rows = json.loads(result.stdout)
     assert [r["turn_id"] for r in rows] == ["u-prose-1"]
 
 
-def test_bare_command_and_system_only_turns_never_queue(tmp_path, tmp_ledger):
+def test_bare_command_and_system_only_turns_never_queue(tmp_path, tmp_ledger, monkeypatch):
     """A bare slash command, a bare $fno: verb, and system-reminder-only content are not turns."""
-    tp = _transcript(
+    _pin(
+        monkeypatch,
         tmp_path,
         [
             _user_row("/fno:setup", "u-cmd-1"),
@@ -96,31 +102,27 @@ def test_bare_command_and_system_only_turns_never_queue(tmp_path, tmp_ledger):
             ),
         ],
     )
-    result = runner.invoke(
-        app,
-        ["inbox", "operator", "list", "--json", "--session-id", "s-test", "--transcript", str(tp)],
-    )
+    result = runner.invoke(app, ["inbox", "operator", "list", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == []
 
 
-def test_command_with_following_prose_still_queues(tmp_path, tmp_ledger):
+def test_command_with_following_prose_still_queues(tmp_path, tmp_ledger, monkeypatch):
     """A slash invocation carrying prose after it is an operator turn (fail toward the queue)."""
-    tp = _transcript(
+    _pin(
+        monkeypatch,
         tmp_path,
         [_user_row("/fno:target x-1. A plan already exists at /tmp/plan.md, execute it", "u-arg-1")],
     )
-    result = runner.invoke(
-        app,
-        ["inbox", "operator", "list", "--json", "--session-id", "s-test", "--transcript", str(tp)],
-    )
+    result = runner.invoke(app, ["inbox", "operator", "list", "--json"])
     assert result.exit_code == 0, result.output
     assert [r["turn_id"] for r in json.loads(result.stdout)] == ["u-arg-1"]
 
 
-def test_status_counts_pending_and_ack_disposes(tmp_path, tmp_ledger):
+def test_status_counts_pending_and_ack_disposes(tmp_path, tmp_ledger, monkeypatch):
     """AC: depth reads 3 with zero acks; after one ack it reads 2 and the ledger holds a row."""
-    tp = _transcript(
+    _pin(
+        monkeypatch,
         tmp_path,
         [
             _user_row("first ask", "u-1", ts="2026-09-06T20:00:00.000Z"),
@@ -128,20 +130,18 @@ def test_status_counts_pending_and_ack_disposes(tmp_path, tmp_ledger):
             _user_row("third ask", "u-3", ts="2026-09-06T22:00:00.000Z"),
         ],
     )
-    args = ["inbox", "operator", "status", "--json", "--session-id", "s-test", "--transcript", str(tp)]
-    result = runner.invoke(app, args)
+    result = runner.invoke(app, ["inbox", "operator", "status", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["depth"] == 3
     assert payload["oldest_turn_id"] == "u-1"
 
     ack = runner.invoke(
-        app,
-        ["inbox", "operator", "ack", "u-1", "--outcome", "nothing", "--session-id", "s-test"],
+        app, ["inbox", "operator", "ack", "u-1", "--outcome", "nothing"]
     )
     assert ack.exit_code == 0, ack.output
 
-    result = runner.invoke(app, args)
+    result = runner.invoke(app, ["inbox", "operator", "status", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["depth"] == 2
     ledger = tmp_ledger / "s-test.jsonl"
@@ -151,16 +151,11 @@ def test_status_counts_pending_and_ack_disposes(tmp_path, tmp_ledger):
     assert rows[0]["outcome"] == "nothing"
 
 
-def test_ack_with_ref_names_the_artifact(tmp_path, tmp_ledger):
-    tp = _transcript(tmp_path, [_user_row("record this as law", "u-law-1")])
+def test_ack_with_ref_names_the_artifact(tmp_path, tmp_ledger, monkeypatch):
+    _pin(monkeypatch, tmp_path, [_user_row("record this as law", "u-law-1")])
     ack = runner.invoke(
         app,
-        [
-            "inbox", "operator", "ack", "u-law-1",
-            "--outcome", "law:da1b2c3d",
-            "--why", "operator said so",
-            "--session-id", "s-test",
-        ],
+        ["inbox", "operator", "ack", "u-law-1", "--outcome", "law:da1b2c3d", "--why", "operator said so"],
     )
     assert ack.exit_code == 0, ack.output
     row = json.loads(ack.stdout)
@@ -168,18 +163,18 @@ def test_ack_with_ref_names_the_artifact(tmp_path, tmp_ledger):
     assert row["ref"] == "da1b2c3d"
 
 
-def test_invalid_outcome_refused_naming_legal_values(tmp_path, tmp_ledger):
+def test_invalid_outcome_refused_naming_legal_values(tmp_path, tmp_ledger, monkeypatch):
     """AC: a nonsense --outcome exits non-zero and names the legal forms."""
-    ack = runner.invoke(
-        app,
-        ["inbox", "operator", "ack", "u-x", "--outcome", "nonsense", "--session-id", "s-test"],
-    )
+    _pin(monkeypatch, tmp_path, [_user_row("ask", "u-x")])
+    ack = runner.invoke(app, ["inbox", "operator", "ack", "u-x", "--outcome", "nonsense"])
     assert ack.exit_code != 0
     assert "law:" in ack.output and "capture:" in ack.output and "node:" in ack.output
 
 
 def test_status_without_session_refuses(tmp_path, tmp_ledger, monkeypatch):
     """AC: no resolvable session exits non-zero and names what it read, never depth 0."""
+    monkeypatch.delenv("FNO_OPERATOR_SESSION_ID", raising=False)
+    monkeypatch.delenv("FNO_OPERATOR_TRANSCRIPT", raising=False)
     monkeypatch.setattr(
         "fno.claims.self_identity.resolve_self_identity",
         lambda *a, **k: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
@@ -189,16 +184,12 @@ def test_status_without_session_refuses(tmp_path, tmp_ledger, monkeypatch):
     assert "session" in result.output
 
 
-def test_status_with_missing_transcript_refuses(tmp_path, tmp_ledger):
+def test_status_with_missing_transcript_refuses(tmp_path, tmp_ledger, monkeypatch):
     """AC: an unreadable transcript exits non-zero and names the store, never depth 0."""
-    result = runner.invoke(
-        app,
-        [
-            "inbox", "operator", "status", "--json",
-            "--session-id", "s-ghost",
-            "--transcript", str(tmp_path / "absent.jsonl"),
-        ],
-    )
+    absent = tmp_path / "absent.jsonl"
+    monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "s-ghost")
+    monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(absent))
+    result = runner.invoke(app, ["inbox", "operator", "status", "--json"])
     assert result.exit_code != 0
     assert "transcript" in result.output
     assert "s-ghost" in result.output

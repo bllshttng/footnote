@@ -3,25 +3,26 @@
 A king records from the direction it is pushed: worker mail arrives as a
 discrete event with an id and a queue, so it gets recorded, while operator
 conversation is a stream with no event boundary and no receipt, so it does
-not. This sub-app gives the operator turn the same shape mail already has -
-an id, a queue, and an ack - without a capture-time write path or a hook.
+not. This sub-app gives the operator turn the shape mail already has: an id,
+a queue, and an ack, with no capture-time write path and no hook.
 
-The session transcript is already the event log. Every operator message is a
-user turn with an id and a timestamp, so the queue is DERIVED rather than
-stored: the undispositioned turns are the user turns in this session's
-transcript minus the turn ids already acked. It works retroactively on
-something said an hour ago.
+The transcript is already the event log, so the queue is DERIVED: the
+undispositioned turns are the prose user turns minus the ids already acked,
+which works retroactively on something said an hour ago. Recording still
+runs through the existing capture verbs first; ``ack`` then names what the
+turn produced - one ack verb instead of a ``--from-turn`` flag threaded
+through three surfaces.
 
-Recording still goes through the existing capture verbs first (``fno inbox
-law set``, ``fno backlog capture add``, ``fno backlog idea --source-kind
-operator_request``); ``ack`` then names what the turn produced. One ack verb
-is fewer moving parts than a ``--from-turn`` flag threaded through three
-surfaces.
+Session/transcript/ledger resolution (in order: explicit env pins, then the
+ambient identity): ``FNO_OPERATOR_SESSION_ID``, ``FNO_OPERATOR_HARNESS``,
+``FNO_OPERATOR_TRANSCRIPT``, ``FNO_OPERATOR_CAPTURE_DIR``. The pins are the
+tools/tests/hook seam - a Stop hook runs outside the harness process, so it
+pins nothing and lets the ambient identity resolve.
 
-Known hole, named in ``--help`` on purpose: ``fno agents mail send --raw``
-strips the mail envelope, so raw mail reads as operator here. Over-counting
-is the safe direction - a false queue entry costs one ack, a missed operator
-turn costs the failure this queue exists to close.
+Known hole, named on purpose: ``fno agents mail send --raw`` strips the
+envelope, so raw mail reads as operator here. Over-counting is the safe
+direction: a false queue entry costs one ack, a missed operator turn costs
+the failure this queue exists to close.
 """
 
 from __future__ import annotations
@@ -36,97 +37,13 @@ from typing import Optional
 
 import typer
 
-#: Ack outcomes. ``nothing`` disposes a turn that needed no artifact; every
-#: other outcome is ``<kind>:<ref>`` naming what the turn produced.
+#: Ack outcomes: ``nothing``, or ``<kind>:<ref>`` naming what the turn made.
 _ACK_KINDS = ("law", "capture", "node")
 
-#: Rendered excerpt length for human output and ``status``.
 _EXCERPT_CHARS = 160
 
-operator_app = typer.Typer(
-    name="operator",
-    help="Queue of this session's undispositioned operator turns. "
-    "Derived from the transcript, acked to a per-session ledger. Hole: "
-    "`fno agents mail send --raw` strips the envelope, so raw mail reads "
-    "as operator here (over-counting is the safe direction).",
-    no_args_is_help=True,
-)
-
-
-# ---------------------------------------------------------------------------
-# Resolution: which session, which transcript, which ledger
-# ---------------------------------------------------------------------------
-
-
-def _capture_dir() -> Path:
-    """The operator-capture ledger root.
-
-    ``FNO_OPERATOR_CAPTURE_DIR`` wins (tests, tools); else ``$FNO_HOME`` /
-    ``~/.fno``, matching the session-start hook's resolution.
-    """
-    override = os.environ.get("FNO_OPERATOR_CAPTURE_DIR")
-    if override:
-        return Path(override)
-    home = os.environ.get("FNO_HOME")
-    base = Path(home).expanduser() if home else Path.home() / ".fno"
-    return base / "operator-capture"
-
-
-def _resolve_session(
-    session_id: Optional[str],
-    harness: str,
-    transcript: Optional[Path],
-    *,
-    require_transcript: bool = True,
-) -> tuple[str, str, Optional[Path]]:
-    """``(session_id, harness, transcript_path)`` for this run.
-
-    Explicit overrides win; otherwise the session comes from the ambient
-    identity (no crown gate - the derived queue depth is state the code reads
-    for itself) and the transcript from the harness resolver. Both failures
-    are named, never read as an empty queue. ``require_transcript=False``
-    (the ack ledger) needs only the session id.
-    """
-    sid = (session_id or "").strip()
-    if not sid:
-        from fno.claims.self_identity import resolve_self_identity
-
-        ident = resolve_self_identity()
-        sid = (ident.session_id or "").strip()
-        if not sid:
-            raise OperatorCaptureError(
-                "no resolvable session identity: pass --session-id, or run "
-                "inside a harness session"
-            )
-        harness = ident.harness or harness
-    if not require_transcript:
-        return sid, harness, None
-    if transcript is not None:
-        if not transcript.is_file():
-            raise OperatorCaptureError(
-                f"no readable transcript for session {sid} ({harness}); "
-                f"resolved to {transcript} - pass --transcript to name it"
-            )
-        return sid, harness, transcript
-    from fno.provenance.observed import resolve_transcript_path
-
-    path = resolve_transcript_path(harness, sid, os.getcwd())
-    if path is None or not path.is_file():
-        raise OperatorCaptureError(
-            f"no readable transcript for session {sid} ({harness}); "
-            f"resolved to {path or 'nothing'} - pass --transcript to name it"
-        )
-    return sid, harness, path
-
-
-class OperatorCaptureError(Exception):
-    """A resolution or validation refusal, surfaced as a non-zero exit."""
-
-
-# ---------------------------------------------------------------------------
-# The transcript reader and the classifier
-# ---------------------------------------------------------------------------
-
+_ARG_TOKEN_RE = re.compile(r"[a-zA-Z0-9._/:@%+=~-]+")
+_SENTENCE_TAILS = (".", "?", "!", ";", ",")
 _SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 _SYNTHETIC_PREFIXES = (
     "<command-name>",
@@ -136,27 +53,66 @@ _SYNTHETIC_PREFIXES = (
 )
 
 
-def _turn_text(obj: dict) -> str:
-    """The user-visible text of a transcript row, ``""`` when it has none.
+class OperatorCaptureError(Exception):
+    """A resolution or validation refusal, surfaced as a non-zero exit."""
 
-    Handles both content shapes (plain string, block list) across the claude
-    and codex row formats. Tool-result and hook blocks carry no text, so a
-    turn made only of those reads empty - which the classifier then refuses.
+
+operator_app = typer.Typer(
+    name="operator",
+    help="Queue of this session's undispositioned operator turns, derived "
+    "from the transcript and acked to a per-session ledger under "
+    "~/.fno/operator-capture/. Hole: raw mail (send --raw) reads as "
+    "operator; over-counting is the safe direction.",
+    no_args_is_help=True,
+)
+
+
+def _capture_dir() -> Path:
+    override = os.environ.get("FNO_OPERATOR_CAPTURE_DIR")
+    if override:
+        return Path(override)
+    home = os.environ.get("FNO_HOME")
+    base = Path(home).expanduser() if home else Path.home() / ".fno"
+    return base / "operator-capture"
+
+
+def _resolve_session(require_transcript: bool = True) -> tuple[str, Optional[Path]]:
+    """``(session_id, transcript_path)``, named on failure, never an empty queue.
+
+    The ambient identity is not crown-gated: the queue depth is state the
+    code derives for itself. ``require_transcript=False`` (the ack ledger)
+    needs only the session id - the ledger outlives transcripts.
     """
-    msg = obj.get("message")
-    content = msg.get("content") if isinstance(msg, dict) else obj.get("content")
-    payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else None
-    if payload is not None:
-        content = payload.get("content")
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-    parts = []
-    for block in content:
-        if isinstance(block, dict) and isinstance(block.get("text"), str):
-            parts.append(block["text"])
-    return " ".join(parts)
+    sid = os.environ.get("FNO_OPERATOR_SESSION_ID", "").strip()
+    harness = os.environ.get("FNO_OPERATOR_HARNESS") or "claude"
+    transcript: Optional[Path] = (
+        Path(os.environ["FNO_OPERATOR_TRANSCRIPT"])
+        if os.environ.get("FNO_OPERATOR_TRANSCRIPT")
+        else None
+    )
+    if not sid:
+        from fno.claims.self_identity import resolve_self_identity
+
+        ident = resolve_self_identity()
+        sid = (ident.session_id or "").strip()
+        if not sid:
+            raise OperatorCaptureError(
+                "no resolvable session identity (FNO_OPERATOR_SESSION_ID or "
+                "a harness session)"
+            )
+        harness = ident.harness or harness
+    if not require_transcript:
+        return sid, None
+    if transcript is None:
+        from fno.provenance.observed import resolve_transcript_path
+
+        transcript = resolve_transcript_path(harness, sid, os.getcwd())
+    if transcript is None or not transcript.is_file():
+        raise OperatorCaptureError(
+            f"no readable transcript for session {sid} ({harness}); "
+            f"resolved to {transcript or 'nothing'} - set FNO_OPERATOR_TRANSCRIPT"
+        )
+    return sid, transcript
 
 
 def _is_user_turn(obj: dict) -> bool:
@@ -164,14 +120,32 @@ def _is_user_turn(obj: dict) -> bool:
     if obj.get("type") == "user":
         return not obj.get("isMeta")
     payload = obj.get("payload")
+    return isinstance(payload, dict) and payload.get("type") == "message" and payload.get("role") == "user"
+
+
+def _turn_text(obj: dict) -> str:
+    """The user-visible text of a row, ``""`` when it has none.
+
+    Both content shapes (string, block list) across the claude and codex row
+    formats; tool-result and hook blocks carry no text, so a turn made only
+    of those reads empty.
+    """
+    msg = obj.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else obj.get("content")
+    payload = obj.get("payload")
     if isinstance(payload, dict):
-        # Codex rollout rows carry the message one level down.
-        return payload.get("type") == "message" and payload.get("role") == "user"
-    return False
+        content = payload.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return " ".join(
+        b["text"] for b in content if isinstance(b, dict) and isinstance(b.get("text"), str)
+    )
 
 
 def _turn_id(obj: dict, text: str) -> str:
-    """A stable id for the ack ledger: the transcript's own when it has one."""
+    """A stable ledger id: the transcript's own uuid/id, else a digest."""
     for key in ("uuid", "id"):
         val = obj.get(key)
         if isinstance(val, str) and val.strip():
@@ -190,24 +164,18 @@ def _turn_ts_epoch(obj: dict) -> Optional[float]:
         return None
 
 
-_ARG_TOKEN_RE = re.compile(r"[a-zA-Z0-9._/:@%+=~-]+")
-_SENTENCE_TAILS = (".", "?", "!", ";", ",")
-
-
 def _is_bare_command(text: str) -> bool:
-    """True for a single-line slash command or ``$fno:`` verb invocation.
+    """A single-line slash command or ``$fno:`` verb with flag-shaped args only.
 
-    The tail after the command token must be only flag/argument tokens: as
-    soon as a token ends in sentence punctuation, the turn carries prose, and
-    prose may carry a ruling. A filename dot is fine (over-counting toward
-    the queue is the safe direction); ``x-1.`` is not.
+    A token ending in sentence punctuation means the turn carries prose, and
+    prose may carry a ruling. A filename dot is fine (the safe direction is
+    over-counting); ``x-1.`` is not.
     """
     if "\n" in text or not (text.startswith("/") or text.startswith("$fno:")):
         return False
-    tokens = text.split()
     return all(
         _ARG_TOKEN_RE.fullmatch(t) and not t.endswith(_SENTENCE_TAILS)
-        for t in tokens[1:]
+        for t in text.split()[1:]
     )
 
 
@@ -215,23 +183,15 @@ def classify(text: str) -> Optional[str]:
     """The operator-shaped text of a turn, or ``None`` when it is not one.
 
     In order, failing toward the queue: injected mail never queues; a bare
-    slash command or ``$fno:`` verb with no following prose carries no
-    ruling; a turn with no user text outside hook/system-reminder content is
-    not a turn; everything else enters the queue.
+    command invocation carries no ruling; a turn with no user text outside
+    system-reminder/hook content is not a turn; everything else queues.
     """
     from fno.mail.envelope import contains_fno_mail_tag
 
     if contains_fno_mail_tag(text):
         return None
-    stripped = text.strip()
-    if not stripped:
-        return None
-    if stripped.startswith(("<command-name>", "<local-command")):
-        return None
-    cleaned = _SYSTEM_REMINDER_RE.sub("", stripped).strip()
-    if not cleaned:
-        return None
-    if cleaned.startswith(_SYNTHETIC_PREFIXES):
+    cleaned = _SYSTEM_REMINDER_RE.sub("", text.strip()).strip()
+    if not cleaned or cleaned.startswith(_SYNTHETIC_PREFIXES):
         return None
     if _is_bare_command(cleaned):
         return None
@@ -239,23 +199,13 @@ def classify(text: str) -> Optional[str]:
 
 
 def read_operator_turns(transcript_path: Path) -> list[dict]:
-    """Undispositioned-candidate operator turns, oldest first.
-
-    Each row is ``{"turn_id", "ts_epoch", "text"}``; ``ts_epoch`` is ``None``
-    when the row carries no parseable timestamp, and the caller treats an
-    unknown age as unknown rather than inventing one.
-    """
-    turns: list[dict] = []
+    """Operator turns, oldest first, as ``{turn_id, ts_epoch, text}``."""
     try:
         raw = transcript_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        raise OperatorCaptureError(
-            f"transcript {transcript_path} could not be read: {exc}"
-        ) from exc
+        raise OperatorCaptureError(f"transcript {transcript_path} unreadable: {exc}") from exc
+    turns: list[dict] = []
     for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
         try:
             obj = json.loads(line)
         except ValueError:
@@ -263,21 +213,11 @@ def read_operator_turns(transcript_path: Path) -> list[dict]:
         if not isinstance(obj, dict) or not _is_user_turn(obj):
             continue
         text = classify(_turn_text(obj))
-        if text is None:
-            continue
-        turns.append(
-            {
-                "turn_id": _turn_id(obj, text),
-                "ts_epoch": _turn_ts_epoch(obj),
-                "text": text,
-            }
-        )
+        if text is not None:
+            turns.append(
+                {"turn_id": _turn_id(obj, text), "ts_epoch": _turn_ts_epoch(obj), "text": text}
+            )
     return turns
-
-
-# ---------------------------------------------------------------------------
-# The ack ledger
-# ---------------------------------------------------------------------------
 
 
 def _ledger_path(session_id: str) -> Path:
@@ -285,15 +225,11 @@ def _ledger_path(session_id: str) -> Path:
 
 
 def read_acked_turn_ids(session_id: str) -> set[str]:
-    """Turn ids this session already disposed, from the ledger file."""
-    path = _ledger_path(session_id)
-    if not path.is_file():
+    try:
+        raw = _ledger_path(session_id).read_text(encoding="utf-8", errors="replace")
+    except OSError:
         return set()
     acked: set[str] = set()
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return acked
     for line in raw.splitlines():
         try:
             row = json.loads(line)
@@ -306,19 +242,13 @@ def read_acked_turn_ids(session_id: str) -> set[str]:
 
 def ack_turn(session_id: str, turn_id: str, outcome: str, why: str) -> dict:
     """Append one ack row; the file is the receipt and the watermark at once."""
-    outcome = (outcome or "").strip()
-    kind, _, ref = outcome.partition(":")
-    kind = kind.strip()
-    ref = ref.strip()
+    kind, _, ref = (outcome or "").strip().partition(":")
+    kind, ref = kind.strip(), ref.strip()
     if kind == "nothing" and not ref:
         outcome = "nothing"
-    elif kind in _ACK_KINDS and ref:
-        outcome = f"{kind}:{ref}"
-    else:
+    elif not (kind in _ACK_KINDS and ref):
         legal = ", ".join(f"{k}:<ref>" for k in _ACK_KINDS)
-        raise OperatorCaptureError(
-            f"invalid --outcome {outcome!r}. Must be nothing or {legal}"
-        )
+        raise OperatorCaptureError(f"invalid --outcome {outcome!r}. Must be nothing or {legal}")
     row = {
         "turn_id": turn_id,
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -333,20 +263,19 @@ def ack_turn(session_id: str, turn_id: str, outcome: str, why: str) -> dict:
     return row
 
 
-# ---------------------------------------------------------------------------
-# The queue projection
-# ---------------------------------------------------------------------------
+def excerpt(text: str, limit: int = _EXCERPT_CHARS) -> str:
+    """One-line excerpt; newlines collapse so a row stays one row."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "\N{HORIZONTAL ELLIPSIS}"
 
 
 def queue_depth(session_id: str, transcript_path: Path) -> dict:
-    """``{"depth", "oldest_age_s", "oldest_excerpt", "oldest_turn_id"}``."""
     acked = read_acked_turn_ids(session_id)
     pending = [t for t in read_operator_turns(transcript_path) if t["turn_id"] not in acked]
-    now = datetime.now(timezone.utc).timestamp()
     oldest = pending[0] if pending else None
     age = None
     if oldest is not None and oldest["ts_epoch"] is not None:
-        age = max(0, int(now - oldest["ts_epoch"]))
+        age = max(0, int(datetime.now(timezone.utc).timestamp() - oldest["ts_epoch"]))
     return {
         "depth": len(pending),
         "oldest_age_s": age,
@@ -355,65 +284,27 @@ def queue_depth(session_id: str, transcript_path: Path) -> dict:
     }
 
 
-def excerpt(text: str, limit: int = _EXCERPT_CHARS) -> str:
-    """One-line excerpt; newlines collapse so a row stays one row."""
-    flat = " ".join(text.split())
-    return flat if len(flat) <= limit else flat[: limit - 1] + "\N{HORIZONTAL ELLIPSIS}"
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-_SESSION_OVERRIDE_HELP = "Session override (diagnostics/tests; default: ambient identity)"
-_HARNESS_OVERRIDE_HELP = "Harness for the transcript lookup (default: the resolved one)"
-
-
-def _fail(message: str) -> None:
-    typer.echo(f"error: {message}", err=True)
-    raise typer.Exit(code=1)
-
-
-def _context(
-    session_id: Optional[str],
-    harness: str,
-    transcript: Optional[Path],
-    *,
-    require_transcript: bool = True,
-) -> tuple[str, Optional[Path]]:
+def _resolve_or_fail(require_transcript: bool = True) -> tuple[str, Optional[Path]]:
     try:
-        sid, _, path = _resolve_session(
-            session_id, harness, transcript, require_transcript=require_transcript
-        )
+        return _resolve_session(require_transcript)
     except OperatorCaptureError as exc:
-        _fail(str(exc))
-    return sid, path
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1)
 
 
 @operator_app.command("list")
 def cmd_list(
     limit: int = typer.Option(None, "--limit", "-L", min=1, help="Max turns to show."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit a JSON array."),
-    session_id: Optional[str] = typer.Option(None, "--session-id", help=_SESSION_OVERRIDE_HELP),
-    harness: str = typer.Option("claude", "--harness", help=_HARNESS_OVERRIDE_HELP),
-    transcript: Optional[Path] = typer.Option(None, "--transcript", help="Transcript file override"),
 ) -> None:
     """Undispositioned operator turns, oldest first."""
-    sid, path = _context(session_id, harness, transcript)
+    sid, path = _resolve_or_fail()
     acked = read_acked_turn_ids(sid)
     pending = [t for t in read_operator_turns(path) if t["turn_id"] not in acked]
     if limit is not None:
         pending = pending[:limit]
     if json_output:
-        typer.echo(
-            json.dumps(
-                [
-                    {"turn_id": t["turn_id"], "ts_epoch": t["ts_epoch"], "text": t["text"]}
-                    for t in pending
-                ],
-                indent=2,
-            )
-        )
+        typer.echo(json.dumps(pending, indent=2))
         return
     if not pending:
         typer.echo("no undispositioned operator turns")
@@ -433,30 +324,23 @@ def cmd_ack(
         help="nothing | law:<decision-id> | capture:<fu-id> | node:<node-id>",
     ),
     why: str = typer.Option(None, "--why", help="One-line reason, kept in the ledger."),
-    session_id: Optional[str] = typer.Option(None, "--session-id", help=_SESSION_OVERRIDE_HELP),
-    harness: str = typer.Option("claude", "--harness", help=_HARNESS_OVERRIDE_HELP),
-    transcript: Optional[Path] = typer.Option(None, "--transcript", help="Transcript file override"),
 ) -> None:
     """Dispose one operator turn, naming what it produced."""
-    # An ack needs the session only: the ledger outlives transcripts, so a
-    # rotated or compacted transcript must not block disposing a turn.
-    sid, _ = _context(session_id, harness, transcript, require_transcript=False)
+    sid, _ = _resolve_or_fail(require_transcript=False)
     try:
         row = ack_turn(sid, turn_id, outcome, why or "")
     except OperatorCaptureError as exc:
-        _fail(str(exc))
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1)
     typer.echo(json.dumps(row))
 
 
 @operator_app.command("status")
 def cmd_status(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the depth payload."),
-    session_id: Optional[str] = typer.Option(None, "--session-id", help=_SESSION_OVERRIDE_HELP),
-    harness: str = typer.Option("claude", "--harness", help=_HARNESS_OVERRIDE_HELP),
-    transcript: Optional[Path] = typer.Option(None, "--transcript", help="Transcript file override"),
 ) -> None:
     """Queue depth for this session - the number the capture hook reads."""
-    sid, path = _context(session_id, harness, transcript)
+    sid, path = _resolve_or_fail()
     depth = queue_depth(sid, path)
     if json_output:
         typer.echo(json.dumps(depth, indent=2))
@@ -466,8 +350,6 @@ def cmd_status(
         return
     age = depth["oldest_age_s"]
     age_text = f", oldest {age}s old" if age is not None else ""
-    typer.echo(
-        f"operator queue: {depth['depth']} undispositioned turn(s){age_text}"
-    )
+    typer.echo(f"operator queue: {depth['depth']} undispositioned turn(s){age_text}")
     if depth["oldest_excerpt"]:
         typer.echo(f"  oldest: {depth['oldest_excerpt']}")

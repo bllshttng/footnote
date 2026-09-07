@@ -49,37 +49,25 @@ def _session_provenance(
 ) -> dict:
     """Parent-edge provenance for a node born inside a live session.
 
-    Reads the running session's env + ``.fno/target-state.md`` and returns
-    ``source_session_id`` / ``source_harness`` / ``source_cwd`` /
-    ``source_node_id`` / ``source_plan_path``. Every key degrades to ``None``
-    and the function NEVER raises (AC-EDGE).
+    Returns ``source_session_id`` / ``source_harness`` / ``source_cwd`` /
+    ``source_node_id`` / ``source_plan_path``; every key degrades to ``None``
+    and the function NEVER raises. Origin precedence: an explicit
+    ``--source-node`` (already validated, taken as given), then the owned
+    manifest (claude-only, ownership-proven), then ``FNO_NODE`` from the
+    spawner - not harness-gated, the only origin signal a codex/opencode
+    worker has. With ``known_ids``, an ambient id absent from the snapshot
+    degrades to ``None`` rather than stamping a dangling edge, and the dropped
+    token comes back in ``source_node_dropped``; resolve it inside the locked
+    mutator so the check costs no extra read.
 
-    The origin resolves through three branches in strict precedence:
-
-    1. ``source_node`` - an explicit ``--source-node``, already resolved and
-       validated by the CLI verb. Taken as given: re-judging it would need a
-       raise this function has promised not to make.
-    2. The owned manifest (below, claude-only and ownership-proven).
-    3. ``FNO_NODE`` - written at spawn time by the spawner. NOT gated on
-       harness: it is the only origin signal a codex/opencode worker has.
-
-    ``known_ids`` is the caller's live snapshot. When supplied, an ambiently
-    resolved id absent from it degrades to ``None`` rather than stamping an edge
-    that dangles, and the dropped token comes back in ``source_node_dropped``.
-    Every filing path resolves it inside its locked mutator, so the check costs
-    no extra read; omitting it skips the check.
-
-    ``source_cwd`` is the originating SESSION's cwd, which is the key claude
-    transcript dirs are slugged by -- distinct from the node's durable ``cwd``
-    (the canonical project root). The read-back resolver needs the session cwd,
-    so it is persisted separately rather than reusing the node's ``cwd``.
-
-    Ownership of the manifest is proven exactly as ``whoami.find_held_node``
-    does it: the manifest's ``claude_transcript_id`` must equal this process's
-    ``CLAUDE_CODE_SESSION_ID``, so a stale / reused / foreign worktree manifest
-    never leaks a node this session does not hold. Node + plan resolution is
-    claude-only (the only proven transcript-resolver lane); codex/gemini stamp
-    session + harness and degrade the rest.
+    ``source_cwd`` is the originating SESSION's cwd - the key claude
+    transcript dirs are slugged by - kept distinct from the node's durable
+    ``cwd`` (the canonical root) because the read-back resolver needs it.
+    Manifest ownership is proven as ``whoami.find_held_node`` does: the
+    manifest's claude session id must equal this process's, so a stale or
+    foreign worktree manifest never leaks a node this session does not hold.
+    Node + plan resolution is claude-only; other harnesses stamp session +
+    harness and degrade the rest.
     """
     cwd = running_cwd if running_cwd is not None else os.getcwd()
 
