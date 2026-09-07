@@ -1265,33 +1265,30 @@ def live_thread_row_for_cwd(
 
             registry_path = agents_registry_path()
         raw = json.loads(registry_path.read_text(encoding="utf-8"))
+        rows = raw.get("agents") if isinstance(raw, dict) else None
+        if not isinstance(rows, list):
+            return None
+        wanted = os.path.realpath(cwd)
+        matches: list[tuple[str, str]] = []
+        # The whole read lives in the try so a corrupted row (a cwd holding an
+        # embedded NUL raises on realpath) degrades to None, never raises.
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("status") not in OWNERSHIP_LIVE_STATUSES:
+                continue
+            if row.get("substrate") != "thread":
+                continue
+            harness = row.get("harness")
+            session_id = row.get("harness_session_id")
+            if not harness or not session_id:
+                continue
+            row_cwd = row.get("cwd")
+            if not row_cwd or os.path.realpath(str(row_cwd)) != wanted:
+                continue
+            matches.append((str(harness), str(session_id)))
     except Exception:  # noqa: BLE001 - identity must degrade, never crash
         return None
-    rows = raw.get("agents") if isinstance(raw, dict) else None
-    if not isinstance(rows, list):
-        return None
-    wanted = os.path.realpath(cwd)
-    matches: list[tuple[str, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        if row.get("status") not in OWNERSHIP_LIVE_STATUSES:
-            continue
-        if row.get("substrate") != "thread":
-            continue
-        harness = row.get("harness")
-        session_id = row.get("harness_session_id")
-        if not harness or not session_id:
-            continue
-        row_cwd = row.get("cwd")
-        if not row_cwd:
-            continue
-        try:
-            if os.path.realpath(str(row_cwd)) != wanted:
-                continue
-        except (ValueError, OSError):  # malformed row cwd: skip, never raise
-            continue
-        matches.append((str(harness), str(session_id)))
     if len(matches) == 1:
         return matches[0]
     return None
