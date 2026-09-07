@@ -355,6 +355,11 @@ dual_owner_kinds = {
     "merge_cleanup_completed",
     "merge_cleanup_refused",
     "control_plane_tick",
+    # Evals demand: the pr-watch tick's evals leg (Python) is the only
+    # emitter; the rows ride the daemon's journal, so the Rust known-kind
+    # table carries them for acceptance without emitting.
+    "evals_scheduled_run",
+    "evals_stale",
 }
 collisions -= dual_owner_kinds
 if collisions:
