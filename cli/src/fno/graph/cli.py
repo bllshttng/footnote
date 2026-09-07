@@ -4056,6 +4056,19 @@ def cmd_update(
             f"owner={stored_owner} pr={stored_pr} status={stored_status}; "
             f"{ready_effect}"
         )
+    # Earned-success rule, same as unclaim: an open do row holds in_progress
+    # on its own, so a lock clear that did not transition the node refuses
+    # the Updated receipt and names the verb that settles the row.
+    if locked_by == "null" and stored_node.get("status") == "in_progress":
+        from fno.graph.requeue import _wedge_refusal
+        from fno.graph.statuses import is_open_do_row
+
+        _wedge_refusal(
+            "update",
+            stored_node.get("id", task_id),
+            sum(is_open_do_row(r) for r in (stored_node.get("sessions") or [])),
+        )
+
     typer.echo(f"Updated {task_id}")
 
     # Ship provenance: the link just committed (lock released), so stamp the row
@@ -4104,47 +4117,8 @@ def cmd_update(
         )
 
 
-# -- unclaim / release --
-
-
-def _invoking_session_id() -> Optional[str]:
-    """Best-effort id of the session running this command, for the unclaim
-    "is this lockfile mine?" check. None => treat any live holder as foreign
-    (the safe default: never yank a live peer's claim)."""
-    try:
-        from fno.carveout.core import resolve_session_id
-        from fno.graph._intake import repo_root
-
-        # repo_root() returns a str; resolve_session_id() needs a Path (it does
-        # `root / ".fno" / ...`). Without the wrap the TypeError is swallowed
-        # below and this always returns None, disabling the own-claim release.
-        return resolve_session_id(Path(repo_root()))
-    except Exception:
-        return None
-
-
-def _invoking_claim_holder() -> Optional[str]:
-    """Best-effort full holder recorded by the active target manifest.
-
-    Codex uses a unique per-target ``session_id`` for event deduplication while
-    the durable thread id owns its graph/claim lock. Prefer the manifest's
-    explicit ``target_claim_holder``; legacy manifests fall back to the target
-    session id.
-    """
-    try:
-        from fno.graph._intake import repo_root
-
-        state = Path(repo_root()) / ".fno" / "target-state.md"
-        for line in state.read_text(encoding="utf-8").splitlines():
-            if line.lstrip().startswith("target_claim_holder:"):
-                value = line.split(":", 1)[1].strip().strip("\"'")
-                if value and value != "null":
-                    return value
-    except Exception:
-        pass
-
-    sid = _invoking_session_id()
-    return f"target-session:{sid}" if sid else None
+# -- unclaim / release / requeue: the queue-return subject lives in
+# fno.graph.requeue; registration stays here on the backlog app. --
 
 
 @cli.command("unclaim", hidden=True)
@@ -4154,9 +4128,9 @@ def cmd_unclaim(
     ),
 ) -> None:
     """Free a claimed node in one call (graph claim + safe lockfile release)."""
-    from fno.graph.requeue import cmd_unclaim
+    from fno.graph.requeue import _unclaim_node
 
-    cmd_unclaim(task_id)
+    _unclaim_node(task_id)
 
 
 @cli.command("requeue", hidden=True)

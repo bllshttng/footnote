@@ -222,3 +222,53 @@ def test_ac6_requeue_never_clears_a_pr(tmp_graph, claims_root, monkeypatch):
     node = _read(tmp_graph)[0]
     assert node["pr_number"] == 1547
     assert node["status"] == "in_review"
+
+
+# -- review round 1: the mid-verb claim race and the update sibling ------------
+
+
+def test_requeue_aborts_when_claim_lands_mid_verb(tmp_graph, claims_root, monkeypatch):
+    """A manual claim that lands between requeue's read and its clear must
+    survive: the clear aborts instead of yanking a live late claim."""
+    _seed(tmp_graph, [_wedged_node()])
+    _dead_truth(monkeypatch)
+    import fno.graph.store as gs
+    real_mutate = gs.locked_mutate_graph
+
+    def racing_mutate(path, mutator):
+        def injected(entries):
+            for e in entries:
+                if e.get("id") == NODE_ID:
+                    e["locked_by"] = "target-session:late"
+            return mutator(entries)
+        return real_mutate(path, injected)
+
+    monkeypatch.setattr(gs, "locked_mutate_graph", racing_mutate)
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
+    assert result.exit_code != 0
+    assert "target-session:late" in _out(result)
+
+
+def test_update_null_locked_by_refuses_wedge(tmp_graph):
+    """update --locked-by null earns its Updated line the same way unclaim
+    does: an open do row holds in_progress, so the receipt names requeue."""
+    _seed(tmp_graph, [_wedged_node()])
+    result = runner.invoke(app, ["backlog", "update", NODE_ID, "--locked-by", "null"])
+    assert result.exit_code != 0
+    assert "Updated" not in _out(result)
+    assert "in_progress" in _out(result)
+    assert "fno backlog requeue" in _out(result)
+
+
+def test_update_null_locked_by_clears_lock_alone(tmp_graph):
+    """The discrimination case: locked_by alone held the node, so the clear
+    transitions it and the Updated line prints."""
+    _seed(tmp_graph, [_wedged_node(
+        locked_by="target-session:gone",
+        locked_at="2026-09-05T06:00:00Z",
+        sessions=[],
+    )])
+    result = runner.invoke(app, ["backlog", "update", NODE_ID, "--locked-by", "null"])
+    assert result.exit_code == 0, _out(result)
+    assert "Updated" in result.output
+    assert _read(tmp_graph)[0]["status"] == "ready"
