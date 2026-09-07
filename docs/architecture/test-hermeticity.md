@@ -150,7 +150,7 @@ Two resolvers, not every resolver. `claims::global_claims_root` carries the same
 
 The rule needs an instrument, and the instrument needs a control. `scripts/ci/check-state-canary.sh` is both.
 
-`plant` writes a marker graph and a `.canary` file into `$HOME/.fno` and `<checkout>/.fno`, then snapshots a sha256 of every file under both roots. `verify` recomputes and names every added, removed or changed path. The smoke runner brackets its whole run with the pair, on the PARENT `HOME`. The sandbox is what the suite can write. The parent `HOME` is the surface the canary protects. Hand it the sandbox and it measures the wrong root, then passes forever.
+`plant` writes a marker graph and a `.canary` file into `$HOME/.fno` and `<checkout>/.fno`, then snapshots a sha256 of every file under both roots. Symlinks are not followed. The worktree state links were retired, so following finds nothing new. It also reaches the vault and the canonical checkout through `~/.fno/worktrees`. On one dev box that turned 74,515 files into 180,362. `verify` recomputes and names every added, removed or changed path. The smoke runner brackets its whole run with the pair, on the PARENT `HOME`. The sandbox is what the suite can write. The parent `HOME` is the surface the canary protects. Hand it the sandbox and it measures the wrong root, then passes forever.
 
 `self-test` is the positive control, and `guards.yml` runs it on every PR. It plants into a fresh `HOME`, writes ONE BYTE into the planted `graph.json`, and fails unless the inner `verify` goes red naming that file. A canary never shown able to go red is an absence-only success condition, which is the shape this page refuses everywhere else.
 
@@ -158,7 +158,7 @@ This replaces `_real_graph_leak_tripwire`, which watched one file for added node
 
 Three names directly under `<checkout>/.fno` are excluded, because the smoke runner writes them while the canary brackets it. They are `last-test.log`, `preflight-last-failures.txt` and `changed-last-receipt.json`. That is the instrument's own exhaust, not a test reaching operator state. `verify` prints the excluded count every run, so a green resting on a growing ignore list stays visible.
 
-A dev box is skipped, not planted over. When `$HOME/.fno/graph.json` already holds entries, that is a live operator root, and both halves print `state-canary: skipped, live operator root at ~/.fno`. A corrupt graph counts as live too, so a damaged root is never planted over on top of the damage. On CI the runner `HOME` is empty, so the canary runs on every shard.
+A dev box is skipped, not planted over. When `$HOME/.fno/graph.json` already holds entries, that is a live operator root, and both halves print `state-canary: skipped, live operator root at ~/.fno`. A corrupt graph counts as live too, so a damaged root is never planted over on top of the damage. `plant` never overwrites an existing `graph.json`, not even one whose entries list is empty. That file still carries the operator's own `schema_version`, and the walk watches it either way. On CI the runner `HOME` is empty, so the canary runs on every shard.
 
 `locks_dir()` remains deliberately home-anchored and config-free because the bare-python plan stamp uses it before config dependencies load. Hand-built state paths are outside the accessor fence. The state-root lint catches those construction sites until their owning resolver is consolidated.
 
