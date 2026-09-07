@@ -22,6 +22,43 @@ fi
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+# Run the carrier from a COPY, never from the real checkout.
+#
+# The carrier caches at `$SCRIPT_DIR/../.fno/.worktree-stranded-cache.json` and
+# claims its refresh window at `../.fno/.worktree-stranded-refresh-stamp`. Both
+# paths are built from the script's own location, so running the repo's copy
+# writes those two files into the repo's own `.fno`. On a developer box that is
+# the live checkout state root. The poisoned-HOME canary caught exactly this on
+# CI, as ADDED under `<checkout>/.fno`, which is what it is for.
+#
+# Copying is the fix rather than excluding the two names from the canary: they
+# are a hand-built `<root>/.fno/<file>` write, which is the class the canary
+# exists to find, not the instrument's own exhaust.
+#
+# hooks/ carries the carrier and helpers/; scripts/lib/ carries the
+# with-timeout and reconcile-throttle helpers the carrier sources.
+# `.claude-plugin/` comes along so session-start.sh still resolves a plugin
+# root and behaves as it does in the real tree.
+CARRIER_ROOT="$TMP_DIR/carrier-root"
+mkdir -p "$CARRIER_ROOT/scripts"
+cp -R "$REPO_ROOT/hooks" "$CARRIER_ROOT/hooks"
+cp -R "$REPO_ROOT/scripts/lib" "$CARRIER_ROOT/scripts/lib"
+cp -R "$REPO_ROOT/.claude-plugin" "$CARRIER_ROOT/.claude-plugin" 2>/dev/null || true
+# Every hook the test executes moves to the copy, not just the carrier:
+# session-start.sh chains the same carrier, so leaving it pointed at the real
+# tree writes the two files anyway. Measured: repointing the carrier alone left
+# both present in the checkout.
+CARRIER="$CARRIER_ROOT/hooks/worktree-peers-session-start.sh"
+CODEX_WRAPPER="$CARRIER_ROOT/hooks/session-start.sh"
+HEARTBEAT="$CARRIER_ROOT/hooks/claim-heartbeat.sh"
+for _copied in "$CARRIER" "$CODEX_WRAPPER" "$HEARTBEAT"; do
+  if [[ ! -f "$_copied" ]]; then
+    fail "hook copy must exist under the sandbox root: $_copied"
+    exit 1
+  fi
+done
+
 PROJECT="$TMP_DIR/project"
 git init -q "$PROJECT"
 PROJECT_GIT_DIR="$(git -C "$PROJECT" rev-parse --absolute-git-dir)"
