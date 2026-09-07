@@ -9,6 +9,7 @@ Import: from fno.paths_testing import use_tmpdir
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -37,4 +38,38 @@ def use_tmpdir(monkeypatch: object, tmp_path: Path) -> Path:
     # Wire the env var so load_settings() finds the tmp file
     monkeypatch.setenv("FNO_CONFIG", str(settings))  # type: ignore[attr-defined]
 
+    # Calling this fixture IS a root declaration, so say so. It covers the lane
+    # that reproduces a test by importing its module outside pytest, where no
+    # conftest ran and nothing else stamps the pin.
+    if os.environ.get("FNO_TEST_HERMETIC") is None:
+        monkeypatch.setenv("FNO_TEST_HERMETIC", "1")  # type: ignore[attr-defined]
+
+    _assert_state_landed(tmp_state)
+
     return settings
+
+
+def _assert_state_landed(tmp_state: Path) -> None:
+    """Refuse loudly when the declared root did not actually take.
+
+    One assertion, inherited by every caller. The crown family resolved
+    ``graph_json`` past this fixture and overwrote the operator's live graph
+    with a fixture payload. Silence was the whole defect, so this is a receipt,
+    not a comment.
+    """
+    from fno import paths
+
+    resolved = {}
+    for name in ("state_dir", "graph_json"):
+        try:
+            resolved[name] = Path(getattr(paths, name)())
+        except Exception as exc:  # a refused fence is a failed receipt too
+            resolved[name] = Path(f"<{type(exc).__name__}: {exc}>")
+
+    if all(p == tmp_state or tmp_state in p.parents for p in resolved.values()):
+        return
+    raise RuntimeError(
+        "use_tmpdir: resolved state escaped the fixture root. "
+        f"state_dir={resolved['state_dir']} graph_json={resolved['graph_json']} "
+        f"tmp_state={tmp_state}"
+    )

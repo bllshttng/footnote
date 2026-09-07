@@ -57,3 +57,34 @@ def test_distinct_pinnings_in_one_worker_stay_apart(tmp_path: Path, monkeypatch)
     # Second pin in the same process, different FNO_CONFIG: each test must
     # read its own settings in either run order.
     _assert_helper_sees_tmp(tmp_path, monkeypatch)
+
+
+# ---------------------------------------------------------------------------
+# The fixture receipt (x-3d21 change 4)
+# ---------------------------------------------------------------------------
+
+
+def test_use_tmpdir_refuses_when_state_did_not_land(tmp_path: Path, monkeypatch) -> None:
+    """The receipt is the point: an escaped root must be loud, not silent."""
+    import pytest
+
+    from fno import paths
+
+    outside = tmp_path.parent / "outside-the-fixture-root"
+    monkeypatch.setattr(paths, "state_dir", lambda: outside)
+    with pytest.raises(RuntimeError) as excinfo:
+        use_tmpdir(monkeypatch, tmp_path)
+    message = str(excinfo.value)
+    assert str(outside) in message
+    assert str(tmp_path / ".fno") in message
+
+
+def test_use_tmpdir_declares_a_root_when_the_pin_is_absent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Calling the fixture IS a declaration, for the lane with no conftest."""
+    import os
+
+    monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
+    use_tmpdir(monkeypatch, tmp_path)
+    assert os.environ["FNO_TEST_HERMETIC"] == "1"
