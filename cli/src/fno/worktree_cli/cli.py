@@ -193,6 +193,31 @@ def cleanup(
     raise typer.Exit(code=_run_lifecycle(*args))
 
 
+@app.command("cargo-offload")
+def cargo_offload(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Move the caches and leave symlinks at the old paths. Default is dry-run.",
+    ),
+) -> None:
+    """Relocate every crates/<crate>/target cache out of the repo root.
+
+    The repo root is what a harness plugin update copies, and nearly all of
+    its bulk is regenerable cargo build output, so the lever is MOVING the
+    bytes, not deleting them: each tree keeps its own directory under
+    <base>/<repo>/<tree>/<crate> (paths.cargo_targets_base, default
+    ~/.fno/cargo-targets) with a symlink back, so built-binary paths stay
+    valid and sibling builds never share an artifact lock. Trees with a live
+    process are reported and left for the next run. The cleanup sweep follows
+    the symlinks, so relocated caches stay reclaimable.
+    """
+    args = ["cargo-offload"]
+    if apply:
+        args.append("--apply")
+    raise typer.Exit(code=_run_lifecycle(*args))
+
+
 @app.command()
 def archive(
     name: str = typer.Argument(..., help="Worktree branch or path to archive."),

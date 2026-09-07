@@ -128,6 +128,7 @@ class PathsBlock(BaseModel):
     fleet_dir: Optional[str] = None
     postmortems_dir: Optional[str] = None
     worktrees_base: Optional[str] = None
+    cargo_targets_base: Optional[str] = None
     memory_dir: Optional[str] = None
     hook_logs_dir: Optional[str] = None
     inbox_dir: Optional[str] = None
@@ -149,6 +150,7 @@ class PathsBlock(BaseModel):
         "fleet_dir",
         "postmortems_dir",
         "worktrees_base",
+        "cargo_targets_base",
         "memory_dir",
         "hook_logs_dir",
         "inbox_dir",
