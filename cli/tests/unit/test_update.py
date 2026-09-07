@@ -1417,9 +1417,10 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
     result = runner.invoke(app, ["doctor", "update", "--source", str(cli_src)])
     assert result.exit_code == 0 or result.exit_code is None, result.output
 
-    # rust before python
-    assert "cargo" in call_order
-    assert "execvp" in call_order
+    # rust before python. The output carries the leg's own skip line, which is
+    # the only thing that names WHY cargo never ran.
+    assert "cargo" in call_order, result.output
+    assert "execvp" in call_order, result.output
     cargo_idx = call_order.index("cargo")
     execvp_idx = call_order.index("execvp")
     assert cargo_idx < execvp_idx
