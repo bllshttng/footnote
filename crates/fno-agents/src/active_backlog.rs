@@ -720,22 +720,26 @@ fn dispatch_member(
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
 ) -> (MissionDispatch, DispatchFacts) {
-    let mut args = vec!["backlog".to_string(), "advance".to_string()];
-    if member.epic {
+    let (mode, extra): (&str, &[&str]) = if member.epic {
         // --continuation: never reactivate the mission and retire an inactive
         // one, so an operator `--stop` between drain ticks is not undone.
-        args.push("--epic".to_string());
-        args.push(member.id.clone());
-        args.push("--continuation".to_string());
+        ("--epic", &["--continuation"])
     } else {
-        args.push("--loose".to_string());
-        args.push("--project".to_string());
-        args.push(member.id.clone());
-    }
-    args.push("--json".to_string());
+        ("--loose", &[])
+    };
     let out = match retry_etxtbsy(|| {
         fno_cmd(&cfg.fno_bin)
-            .args(&args)
+            .args([
+                // The `backlog advance` argv literal at this indentation is the
+                // seam marker the autonomous-dispatch census greps. Keep the
+                // elements multi-line; `--json` stays last.
+                "backlog",
+                "advance",
+                mode,
+                member.id.as_str(),
+            ])
+            .args(extra)
+            .arg("--json")
             .current_dir(&cfg.cwd)
             .output()
     }) {
