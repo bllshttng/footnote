@@ -3635,8 +3635,8 @@ class ActiveBacklogConfig(BaseModel):
         Consecutive dispatch failures before a node is parked (the circuit
         breaker). Default 3. Reset to zero only on a successful close.
     max_concurrent:
-        In-flight nodes per project per tick. Default 1 (serial, v1). Defined
-        now so v2 parallelism needs no config migration; v1 asserts == 1.
+        GLOBAL ceiling on concurrent converge runs (``backlog advance --epic``)
+        across every mission, never per mission. Default 1 (serial).
     mission: IGNORED (missions are per-epic graph state, never config; ``fno config doctor`` warns when it is set; the live axis is ``fno backlog advance --epic <id>`` / ``--stop``).
     """
 

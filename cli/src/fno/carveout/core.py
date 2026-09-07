@@ -123,10 +123,16 @@ def resolve_session_id(repo_root: Path) -> Optional[str]:
     ``session_id`` fallback), then the ``$CLAUDECODE_SESSION_ID`` env var.
     None means the caller records the
     carve-out unscoped (capture is never lost over a missing session).
+
+    The manifest comes from its owning resolver, never built by hand. A worktree
+    session's lives in the project SPACE, and a hand-built path missed it, filed
+    the carve-out unscoped, and covered nothing at the fidelity gate.
     """
     import os
 
-    state_path = repo_root / ".fno" / "target-state.md"
+    from fno.paths import target_state_path_or_legacy
+
+    state_path = target_state_path_or_legacy(repo_root)
     if state_path.exists():
         try:
             from fno.state.io import read_frontmatter

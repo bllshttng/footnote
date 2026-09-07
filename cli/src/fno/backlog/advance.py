@@ -2090,91 +2090,101 @@ def dispatch_lanes(
         # re-anchored to the worker's lifecycle in target_cli._maybe_reconcile_lane_slot
         # (LD#8) once its target-init claims the node. Both are released on the
         # failure path below.
+        #
+        # Reserve-to-outcome span (x-41f7), mirroring _converge_one: every exit
+        # that is not a dispatch returns the boot-window reservation, so a raise
+        # between acquire and the dispatched receipt cannot strand the bridge.
+        dispatched = False
         try:
-            eff_harness = harness if harness is not None else node.get("provider")
-            resolved_model = _route_resolve.node_model(
-                node, explicit=model, provider=eff_harness, resolve_difficulty=False
-            )
-            # The grid must decide BEFORE the worktree is placed: placement is
-            # harness-keyed (claude-native vs external base), so it has to agree
-            # with the harness the spawn will actually use. Threading the result
-            # into both decisions keeps placement and spawn one decision. A
-            # DECLINE pins too: an unpinned spawn re-consults the grid at the
-            # spawn seam, and a capacity change in between could land the worker
-            # on a harness the worktree was not keyed for.
-            lane_grid_harness, lane_grid_model, lane_grid_why = _grid_lane_for(
-                node, model=resolved_model, provider=eff_harness
-            )
-            lane_placement_harness = _lane_harness(
-                lane_grid_harness or eff_harness, str(root)
-            )
-            worktree = _ensure_lane_worktree(
-                node_id,
-                canonical_root=root,
-                harness=lane_placement_harness,
-            )
-            # A never-policy lane runs in the canonical checkout in place; seeding
-            # a per-lane config.local.toml there would write into canonical .fno.
-            if worktree.resolve() != root.resolve():
-                _seed_lane_local_settings(
-                    worktree, node_id, _base_project_id(root)
+            try:
+                eff_harness = harness if harness is not None else node.get("provider")
+                resolved_model = _route_resolve.node_model(
+                    node, explicit=model, provider=eff_harness, resolve_difficulty=False
                 )
-            _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
-            lane_receipt: dict = {}
-            short_id = _spawn_worker(
-                node_id,
-                str(worktree),
-                slug,
-                model=lane_grid_model or resolved_model,
-                provider=lane_grid_harness or eff_harness,
-                vendor=vendor,
-                # The placement value unconditionally: a grid pick is always a
-                # fixed point of _lane_harness today, and if that ever stops
-                # holding, the raw pick would reopen the split this pins shut.
-                harness=lane_placement_harness,
-                verb=node.get("dispatch_verb"),
-                brief=_brief,
-                node=node,
-                dispatch_reservation=(dispatch_key, dispatch_holder, dispatch_root),
-                caller="dispatch_lanes",
-                events_path=ev_path,
-                receipt=lane_receipt,
-                # The door resolved the grid, so the seam's own consult never
-                # runs and the reason field would be blank on the busiest door.
-                grid_reason=lane_grid_why,
-            )
-        except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
-            # Release BOTH the boot-window reservation and the dispatch-time lane
-            # slot so the node returns to the pool (a later tick re-dispatches it).
-            _safe_release(dispatch_key, dispatch_holder, dispatch_root)
-            _LOG.warning("dispatch_lanes: lane %s skipped: %s", node_id, exc)
-            _skip(str(exc)[:200])
-            continue
+                # The grid must decide BEFORE the worktree is placed: placement is
+                # harness-keyed (claude-native vs external base), so it has to agree
+                # with the harness the spawn will actually use. Threading the result
+                # into both decisions keeps placement and spawn one decision. A
+                # DECLINE pins too: an unpinned spawn re-consults the grid at the
+                # spawn seam, and a capacity change in between could land the worker
+                # on a harness the worktree was not keyed for.
+                lane_grid_harness, lane_grid_model, lane_grid_why = _grid_lane_for(
+                    node, model=resolved_model, provider=eff_harness
+                )
+                lane_placement_harness = _lane_harness(
+                    lane_grid_harness or eff_harness, str(root)
+                )
+                worktree = _ensure_lane_worktree(
+                    node_id,
+                    canonical_root=root,
+                    harness=lane_placement_harness,
+                )
+                # A never-policy lane runs in the canonical checkout in place; seeding
+                # a per-lane config.local.toml there would write into canonical .fno.
+                if worktree.resolve() != root.resolve():
+                    _seed_lane_local_settings(
+                        worktree, node_id, _base_project_id(root)
+                    )
+                _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
+                lane_receipt: dict = {}
+                short_id = _spawn_worker(
+                    node_id,
+                    str(worktree),
+                    slug,
+                    model=lane_grid_model or resolved_model,
+                    provider=lane_grid_harness or eff_harness,
+                    vendor=vendor,
+                    # The placement value unconditionally: a grid pick is always a
+                    # fixed point of _lane_harness today, and if that ever stops
+                    # holding, the raw pick would reopen the split this pins shut.
+                    harness=lane_placement_harness,
+                    verb=node.get("dispatch_verb"),
+                    brief=_brief,
+                    node=node,
+                    dispatch_reservation=(dispatch_key, dispatch_holder, dispatch_root),
+                    caller="dispatch_lanes",
+                    events_path=ev_path,
+                    receipt=lane_receipt,
+                    # The door resolved the grid, so the seam's own consult never
+                    # runs and the reason field would be blank on the busiest door.
+                    grid_reason=lane_grid_why,
+                )
+            except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
+                _LOG.warning("dispatch_lanes: lane %s skipped: %s", node_id, exc)
+                _skip(str(exc)[:200])
+                continue
 
-        # Dispatched. Leave dispatch:<id> to expire by TTL: the worker now owns
-        # (or is acquiring) node:<id> and reconciles its lane slot at target init.
-        _emit(
-            EVENT_DISPATCHED,
-            {
-                "node_id": node_id,
-                "short_id": short_id,
-                "agent_name": _worker_agent_name(node_id, slug),
-                "lane": True,
-                "worktree": str(worktree),
-                "verb": lane_receipt.get("verb", "builtin"),
-                "verb_source": lane_receipt.get("verb_source", "field-absent"),
-                "brief": _brief_tag,
-            },
-            ev_path,
-        )
-        receipts.append(
-            {
-                "node_id": node_id,
-                "status": "dispatched",
-                "short_id": short_id,
-                "worktree": str(worktree),
-            }
-        )
+            # Dispatched. Leave dispatch:<id> to expire by TTL: the worker now
+            # owns (or is acquiring) node:<id> and reconciles its lane slot at
+            # target init. (_skip released the slot on every other exit; the
+            # finally below released the reservation.)
+            _emit(
+                EVENT_DISPATCHED,
+                {
+                    "node_id": node_id,
+                    "short_id": short_id,
+                    "agent_name": _worker_agent_name(node_id, slug),
+                    "lane": True,
+                    "worktree": str(worktree),
+                    "verb": lane_receipt.get("verb", "builtin"),
+                    "verb_source": lane_receipt.get("verb_source", "field-absent"),
+                    "brief": _brief_tag,
+                },
+                ev_path,
+            )
+            receipts.append(
+                {
+                    "node_id": node_id,
+                    "status": "dispatched",
+                    "short_id": short_id,
+                    "worktree": str(worktree),
+                }
+            )
+            dispatched = True
+        finally:
+            if not dispatched:
+                _safe_release(dispatch_key, dispatch_holder, dispatch_root)
+
     if report is not None:
         report["dispatched"] = sum(
             receipt.get("status") == "dispatched" for receipt in receipts
@@ -3731,6 +3741,8 @@ def _converge_one(
     Emits exactly one of advance_dispatched / advance_skipped / advance_failed
     (LD#12) and returns the matching AdvanceResult. Never raises: a spawn failure
     releases the reservation (node stays re-dispatchable) and resolves to failed.
+    Every exit that is not a dispatch releases the reservation (x-41f7), so only
+    a dispatched worker keeps the boot-window bridge.
     """
     node_id = node_meta["id"]
     slug = node_meta.get("slug") or node_meta.get("title")
@@ -3789,66 +3801,75 @@ def _converge_one(
     except Exception as exc:  # noqa: BLE001
         return skip("claim-error", detail=str(exc))
 
+    # Reserve-to-outcome span (x-41f7): every exit that is not a dispatch
+    # returns the boot-window reservation, so a raise between acquire and the
+    # dispatched receipt can no longer strand the bridge (dispatch:x-e882 was
+    # held forever by exactly that shape).
+    dispatched = False
     try:
-        eff_provider = provider if provider is not None else node_meta.get("provider")
-        _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node_meta)
-        spawn_receipt: dict = {}
-        short_id = _spawn_worker(
-            node_id,
-            root,
-            slug,
-            model=_route_resolve.node_model(
-                node_meta, explicit=model, provider=eff_provider, resolve_difficulty=False
-            ),
-            provider=eff_provider,
-            verb=node_meta.get("dispatch_verb"),
-            brief=_brief,
-            node=node_meta,
-            dispatch_reservation=(dispatch_key, holder, dispatch_root),
-            caller="_converge_one",
-            events_path=ev_path,
-            receipt=spawn_receipt,
-        )
-    except SpawnAlreadyRunning:
-        _safe_release(dispatch_key, holder, dispatch_root)
-        return skip("already-claimed")
-    except Exception as exc:  # noqa: BLE001
-        _safe_release(dispatch_key, holder, dispatch_root)
-        return failed(str(exc))
+        try:
+            eff_provider = provider if provider is not None else node_meta.get("provider")
+            _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node_meta)
+            spawn_receipt: dict = {}
+            short_id = _spawn_worker(
+                node_id,
+                root,
+                slug,
+                model=_route_resolve.node_model(
+                    node_meta, explicit=model, provider=eff_provider, resolve_difficulty=False
+                ),
+                provider=eff_provider,
+                verb=node_meta.get("dispatch_verb"),
+                brief=_brief,
+                node=node_meta,
+                dispatch_reservation=(dispatch_key, holder, dispatch_root),
+                caller="_converge_one",
+                events_path=ev_path,
+                receipt=spawn_receipt,
+            )
+        except SpawnAlreadyRunning:
+            return skip("already-claimed")
+        except Exception as exc:  # noqa: BLE001
+            return failed(str(exc))
 
-    _emit(
-        EVENT_DISPATCHED,
-        _tag(
-            {
-                "node_id": node_id,
-                "short_id": short_id,
-                "agent_name": _worker_agent_name(node_id, slug),
-                "cross_project": cross_project,
-                "verb": spawn_receipt.get("verb", "builtin"),
-                "verb_source": spawn_receipt.get("verb_source", "field-absent"),
-                "brief": _brief_tag,
-            }
-        ),
-        ev_path,
-    )
-    if verbose:
-        _scope = f"mission {mission} " if mission else ""
-        _kind = "cross-project" if cross_project else "same-project"
-        print(
-            f"advance: dispatched {_scope}{_kind} {node_id} -> "
-            f"target worker {short_id} (--cwd {root}) "
-            f"(verb={spawn_receipt.get('verb', 'builtin')} "
-            f"source={spawn_receipt.get('verb_source', 'field-absent')} "
-            f"brief={_brief_tag})",
-            file=sys.stderr,
+        _emit(
+            EVENT_DISPATCHED,
+            _tag(
+                {
+                    "node_id": node_id,
+                    "short_id": short_id,
+                    "agent_name": _worker_agent_name(node_id, slug),
+                    "cross_project": cross_project,
+                    "verb": spawn_receipt.get("verb", "builtin"),
+                    "verb_source": spawn_receipt.get("verb_source", "field-absent"),
+                    "brief": _brief_tag,
+                }
+            ),
+            ev_path,
         )
-    return AdvanceResult(
-        "dispatched",
-        EVENT_DISPATCHED,
-        node_id=node_id,
-        short_id=short_id,
-        substrate=spawn_receipt.get("substrate"),
-    )
+        if verbose:
+            _scope = f"mission {mission} " if mission else ""
+            _kind = "cross-project" if cross_project else "same-project"
+            print(
+                f"advance: dispatched {_scope}{_kind} {node_id} -> "
+                f"target worker {short_id} (--cwd {root}) "
+                f"(verb={spawn_receipt.get('verb', 'builtin')} "
+                f"source={spawn_receipt.get('verb_source', 'field-absent')} "
+                f"brief={_brief_tag})",
+                file=sys.stderr,
+            )
+
+        dispatched = True
+        return AdvanceResult(
+            "dispatched",
+            EVENT_DISPATCHED,
+            node_id=node_id,
+            short_id=short_id,
+            substrate=spawn_receipt.get("substrate"),
+        )
+    finally:
+        if not dispatched:
+            _safe_release(dispatch_key, holder, dispatch_root)
 
 
 def _dispatch_one_dependent(

@@ -1146,6 +1146,27 @@ def _fleet_cpu_reading() -> Optional[tuple[float, float]]:
         return None
 
 
+def _spare_pool_suffix(reading: Any) -> str:
+    """Name the Claude Code pre-warm pool when it holds any CPU.
+
+    Measured 2026-09-07: 45 idle `claude bg-spare` processes held 66.5% of a
+    12-CPU machine, and every fno spawn was refused on the load they produced.
+    The refusal named only the fleet, so an hour went into the wrong cause. The
+    pool is not fno's to bound; saying it is there is.
+
+    Kept byte-identical to the Rust twin in `crates/fno-agents/src/spawn_gate.rs`
+    so the two gates cannot make different claims about the same reading.
+    """
+    count = int(getattr(reading, "spare_pool_process_count", 0) or 0)
+    cores = float(getattr(reading, "spare_pool_cpu_cores", 0.0) or 0.0)
+    if count <= 0 or not math.isfinite(cores) or cores < 0:
+        return ""
+    return (
+        f"; the claude spare pool holds {cores:.2f} cores across {count} "
+        "idle pre-warm processes, which fno does not own or bound"
+    )
+
+
 def _footprint_cause_evidence() -> Optional[str]:
     """Read one fail-open fleet footprint for an over-load refusal."""
     try:
@@ -1177,7 +1198,7 @@ def _footprint_cause_evidence() -> Optional[str]:
             "spawn-gate: footprint attributes "
             f"{reading.fleet_cpu_cores:.2f}/{capacity:.2f} cores "
             f"({capacity_share:.1f}% capacity, {measured_share:.1f}% of measured CPU) "
-            "to the fleet"
+            "to the fleet" + _spare_pool_suffix(reading)
         )
     except Exception:
         return None

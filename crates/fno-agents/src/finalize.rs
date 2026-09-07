@@ -3882,6 +3882,7 @@ mod tests {
 
     #[test]
     fn finalize_done_closes_a_sealing_shadow_run() {
+        let _root = crate::paths::DeclaredRoot::declare("finalize_done_closes_a_seali");
         let dir = tempfile::tempdir().unwrap();
         let run = "20260823T060900Z-cx73523-e04109";
         let log = dir.path().join(".fno/run-log.jsonl");
@@ -3910,6 +3911,7 @@ mod tests {
 
     #[test]
     fn finalize_done_is_already_complete_for_an_aborted_shadow_run() {
+        let _root = crate::paths::DeclaredRoot::declare("finalize_done_is_already_com");
         let dir = tempfile::tempdir().unwrap();
         let run = "20260823T060900Z-cx73523-e04109";
         let log = dir.path().join(".fno/run-log.jsonl");

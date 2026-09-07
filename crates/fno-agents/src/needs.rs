@@ -1682,6 +1682,7 @@ mod tests {
 
     #[test]
     fn question_index_is_a_default_source_and_ask_is_folded_as_evidence() {
+        let _root = crate::paths::DeclaredRoot::declare("question_index_is_a_default_");
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().join(".fno");
         let home = AgentsHome::at(state_dir.join("agents"));

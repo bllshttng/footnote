@@ -15070,6 +15070,7 @@ mod tests {
 
     #[test]
     fn retired_require_corroboration_key_still_parses() {
+        let _root = crate::paths::DeclaredRoot::declare("retired_require_corroboratio");
         // The key is retired: origin never gates. A config that still
         // carries it must load clean, and the merged settings keep the
         // fields that still gate.
@@ -18241,8 +18242,33 @@ git_bounded();";
         );
     }
 
+    /// The review-coverage argv the quota tests share, head sha apart.
+    fn review_coverage_args(tmp: &std::path::Path, head: &str, gh: &str) -> Vec<String> {
+        [
+            "review-coverage",
+            "--cwd",
+            tmp.to_str().unwrap(),
+            "--pr",
+            "865",
+            "--head",
+            head,
+            "--events",
+            tmp.join("ev.jsonl").to_str().unwrap(),
+            "--global-events",
+            tmp.join("gev.jsonl").to_str().unwrap(),
+            "--settings",
+            tmp.join("absent.toml").to_str().unwrap(),
+            "--gh-bin",
+            gh,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
     #[test]
     fn review_coverage_pr_failure_stdout_carries_quota_diagnostic() {
+        let _root = crate::paths::DeclaredRoot::declare("review_coverage_pr_failure_s");
         // x-b56a: exit 4 with a known PR persists a schema-gated unknown row,
         // and its stdout must say WHY the read degraded. A bare unknown is
         // indistinguishable from "nobody reviewed this" and sent operators to
@@ -18250,27 +18276,8 @@ git_bounded();";
         let tmp = tempfile::tempdir().unwrap();
         let gh = write_failing_pr_view_gh(tmp.path(), 0, 14 * 60, 0);
         let events = tmp.path().join("ev.jsonl");
-        let global = tmp.path().join("gev.jsonl");
-        let args: Vec<String> = [
-            "review-coverage",
-            "--cwd",
-            tmp.path().to_str().unwrap(),
-            "--pr",
-            "865",
-            "--head",
-            "930c2e9dad5d2dc5ba2deae320070bd86ecfcfc2",
-            "--events",
-            events.to_str().unwrap(),
-            "--global-events",
-            global.to_str().unwrap(),
-            "--settings",
-            tmp.path().join("absent.toml").to_str().unwrap(),
-            "--gh-bin",
-            &gh,
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let args =
+            review_coverage_args(tmp.path(), "930c2e9dad5d2dc5ba2deae320070bd86ecfcfc2", &gh);
         let v = run_exit4_until_decisive(&args);
         assert_eq!(v["coverage"], "unknown");
         assert_eq!(v["graphql_exhausted"], true, "got: {v}");
@@ -18295,31 +18302,14 @@ git_bounded();";
 
     #[test]
     fn review_coverage_pr_failure_healthy_quota_reports_not_exhausted() {
+        let _root = crate::paths::DeclaredRoot::declare("review_coverage_pr_failure_h");
         // The diagnostic must not cry wolf: a gh failure with graphql budget
         // left is an outage, not exhaustion, and stdout saying exhausted=false
         // is what lets a reader stop guessing between the two.
         let tmp = tempfile::tempdir().unwrap();
         let gh = write_failing_pr_view_gh(tmp.path(), 4890, 0, 0);
-        let args: Vec<String> = [
-            "review-coverage",
-            "--cwd",
-            tmp.path().to_str().unwrap(),
-            "--pr",
-            "865",
-            "--head",
-            "deadbeefdeadbeefdeadbeefdeadbeef00000001",
-            "--events",
-            tmp.path().join("ev.jsonl").to_str().unwrap(),
-            "--global-events",
-            tmp.path().join("gev.jsonl").to_str().unwrap(),
-            "--settings",
-            tmp.path().join("absent.toml").to_str().unwrap(),
-            "--gh-bin",
-            &gh,
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let args =
+            review_coverage_args(tmp.path(), "deadbeefdeadbeefdeadbeefdeadbeef00000001", &gh);
         let v = run_exit4_until_decisive(&args);
         assert_eq!(v["graphql_exhausted"], false, "got: {v}");
         assert_eq!(v["graphql_remaining"], 4890);
@@ -18328,6 +18318,7 @@ git_bounded();";
 
     #[test]
     fn review_coverage_pr_failure_verbatim_403_classifies_secondary_via_the_exempt_probe() {
+        let _root = crate::paths::DeclaredRoot::declare("review_coverage_pr_failure_v");
         // The p0 shape on this verb: the failed read's stderr is the
         // MEASURED 2026-08-24 body (no "secondary" anywhere) while the exempt
         // rate_limit endpoint still answers healthy. The classifier is that
@@ -18403,6 +18394,7 @@ git_bounded();";
 
     #[test]
     fn review_coverage_no_pr_secondary_limit_classifies_the_same_way() {
+        let _root = crate::paths::DeclaredRoot::declare("review_coverage_no_pr_second");
         // The pr_num == 0 arm (no --pr passed) shares the classification: a
         // refusal with no PR number gets the same live-bucket verdict (here
         // with the OLD phrase in the stderr - the bucket, not the wording,

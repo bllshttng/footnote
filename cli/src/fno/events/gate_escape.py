@@ -124,14 +124,16 @@ def record_emit_failure(
     # refusal prevented, and writing a fixture-shaped row into it. Measured:
     # events.jsonl absent, `<outside>/.fno/gate_escape_emit_failures.jsonl`
     # present. Refuse here on the same terms; a dropped failure log in a test is
-    # not a loss, because the refusal already printed above.
+    # not a loss, because the refusal already printed above. A REFUSAL holds; a
+    # BROKEN PROBE does not, or an import failure during teardown would cost the
+    # durable row this function exists to keep.
     try:
-        from fno.events import HermeticEscapeError, _refuse_hermetic_escape
+        from fno.hermetic import declared_root
 
-        _refuse_hermetic_escape(Path(log_path))
-    except HermeticEscapeError:
+        declared_root(Path(log_path))
+    except RuntimeError:  # both refusals subclass it; an ImportError does not
         return
-    except Exception:  # noqa: BLE001 - never raise from the telemetry path
+    except Exception:  # noqa: BLE001 - a broken probe still writes the row
         pass
     try:
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)

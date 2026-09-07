@@ -802,6 +802,32 @@ pub fn classify_with_basis_and_exclusivity(
             })
     };
     if is_expired(rec, now) {
+        // Boot-window reservation (x-41f7): every `dispatch:` record names the
+        // DISPATCHING process in its holder and carries that process's pid, so
+        // the recorded pid IS the verdict. The session witness is never
+        // consulted for these records - the recorded session belongs to the
+        // dispatcher and answers a different question, and its liveness kept
+        // ten dead reservations bucket-live while their long-lived king ran
+        // (10 of 10 named a dead pid, all 10 read live, measured 2026-09-07).
+        // The spawn CLI exits at launch by design, so a correctly-read
+        // reservation is short-lived after expiry; that is what a boot window
+        // is. Only the expired arm changes - the unexpired arm below keeps its
+        // Suspect. A refused probe is not a proof of death, so it falls
+        // through to the witness/grace path rather than freeing on pid
+        // evidence we were refused.
+        if rec.key.starts_with("dispatch:")
+            && is_same_machine(&rec.host, rec.machine_id.as_deref())
+            && !rec.pid_unavailable
+            && rec.pid.is_some()
+        {
+            let (live, cause) = liveness_reading(rec, probe);
+            if live {
+                return (ClaimState::Live, cause);
+            }
+            if cause != basis::ACCESS_DENIED {
+                return (ClaimState::Stale, cause);
+            }
+        }
         // Corroborated hybrid: the pid keeps the claim Live only when it was
         // proven to be the holder session's own process. Any other provenance
         // (or a legacy record with no field) is Stale, as a pre-hybrid claim
@@ -2669,7 +2695,8 @@ fn registry_session_pid(session_id: Option<&str>) -> Option<i32> {
     // registry file is replaced by atomic rename, so an unlocked open reads a
     // consistent snapshot; a parse failure degrades to None and the legacy
     // anchor path, never to a wedged renewal.
-    let bytes = std::fs::read(crate::paths::AgentsHome::from_env().registry_json()).ok()?;
+    let home = crate::paths::AgentsHome::from_env_opt()?;
+    let bytes = std::fs::read(home.registry_json()).ok()?;
     let registry: crate::state::Registry = serde_json::from_slice(&bytes).ok()?;
     let pid = registry.entries.iter().find_map(|e| {
         match (e.harness_session_id.as_deref(), e.pid, e.pid_start_time) {
@@ -4894,3 +4921,7 @@ mod tests {
         assert!(read_claim_file(&lockfile(&td, "session:race")).is_ok());
     }
 }
+
+#[cfg(test)]
+#[path = "claims_reservation_tests.rs"]
+mod reservation_tests;
