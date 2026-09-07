@@ -83,6 +83,9 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
     # -- self-inverse: the same verb reverses itself --
     Pair("backlog", "rank", "rank"),
     Pair("backlog", "update", "update"),
+    # requeue releases a dead worker's wedge (open do row + claim); update
+    # --locked-by re-locks the node, returning it to in_progress.
+    Pair("backlog", "requeue", "update"),
     # contain stamps contained_in + parent; its correction is update's
     # --parent null flag, which the contain epilog names verbatim.
     Pair("backlog", "contain", "update"),
@@ -112,7 +115,7 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
         "idea", "intake", "join", "lane-fill", "lanes", "maintain", "migrate-difficulty",
         "migrate-priorities", "migrate-updated-at", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",
-        "rank", "ready", "reconcile", "reconcile-findings", "retro",
+        "rank", "ready", "reconcile", "reconcile-findings", "requeue", "retro",
         "relatedness", "remove", "render-views", "reopen", "reprioritize", "roadmap",
         "session", "status", "stuck-epics", "supersede", "task", "triage",
         "unarchive", "unclaim", "undefer", "undispatched", "unqueue", "unsupersede", "update",
