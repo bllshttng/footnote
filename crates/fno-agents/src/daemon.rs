@@ -4186,6 +4186,15 @@ async fn spawn_codex_thread_lane(
     // spawning client's - a `state_dirs_from_env()` call here would read
     // whatever shell started the daemon, which is the exact mistake the next
     // reader of this function will be tempted to make.
+    //
+    // The same holds for RESOLVING a root rather than reading one. The plan
+    // content directory is not missing from this list and does not need
+    // `provider::plan_content_dir` called here: the Python spawn seam already
+    // computes it for every substrate and publishes it on the env var the
+    // client turns into these params. Adding a resolver here would be a second
+    // answer to one question, and it would shell out to `fno` per spawn from
+    // async code on the daemon every codex worker shares. Pinned by
+    // `test_thread_spawn_seam_publishes_the_plan_dir`.
     let state_dirs: Vec<String> = req
         .params
         .get("state_dirs")
