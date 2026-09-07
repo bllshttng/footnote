@@ -16,9 +16,11 @@ so the per-user global holds shared defaults while each project sets only its
 deltas. With no file, built-in defaults apply. This mirrors the shell reader
 (scripts/lib/config.sh, per-key local->global fallback) and the provider loader.
 
-Cache: load_settings() is cached per-process via functools.lru_cache;
-mid-process edits to settings.yaml do not take effect; the next
-subprocess sees the new value.
+Cache: load_settings() is an uncached wrapper over _load_settings_at(),
+keyed on the declaration (_settings_key: env overrides + HOME + resolved
+repo root). A same-key settings.yaml rewrite needs
+_load_settings_at.cache_clear() to be seen in-process; the next
+subprocess always sees the new value.
 
 Design decisions (locked in 2026-05-14-path-config.md):
   - extra='ignore' for forward compatibility (do NOT change to 'forbid')
@@ -5470,9 +5472,32 @@ def _revoke_unbacked_optouts(raw: dict[str, object]) -> dict[str, object]:
     return result if isinstance(result, dict) else raw
 
 
-@lru_cache(maxsize=1)
-def load_settings() -> SettingsModel:
-    """Load, deep-merge, and cache the settings for the lifetime of this process.
+def _settings_key() -> tuple:
+    """The declaration the settings resolution reads from the process.
+
+    Everything ``_candidate_paths`` consults: the four FNO_ env overrides,
+    ``HOME``, and the resolved repo root (itself keyed on cwd and
+    ``FNO_REPO_ROOT``). Two calls whose key agrees read the same settings
+    by construction; a test that changes any component gets a fresh load
+    with no cache_clear, which retires the per-test clearer registry and
+    the fixture swap (x-3d21 R5).
+    """
+    from fno.paths import resolve_repo_root
+
+    env = os.environ.get
+    return (
+        env("FNO_CONFIG"),
+        env("FNO_GLOBAL_SETTINGS_PATH"),
+        env("FNO_CONFIG_SEARCH_ROOT"),
+        env("FNO_NO_CANONICAL_CONFIG"),
+        env("HOME"),
+        str(resolve_repo_root()),
+    )
+
+
+@lru_cache(maxsize=8)
+def _load_settings_at(key: tuple) -> SettingsModel:
+    """Load, deep-merge, and cache the settings for one declaration ``key``.
 
     Every existing candidate is read and deep-merged, highest priority winning
     key-by-key: $FNO_CONFIG (when set, the only candidate) ->
@@ -5535,6 +5560,17 @@ def load_settings() -> SettingsModel:
 
     raw = _revoke_unbacked_optouts(raw)
     return SettingsModel.model_validate(raw)
+
+
+def load_settings() -> SettingsModel:
+    """Load the settings for the caller's declaration.
+
+    Uncached wrapper: the cache is :func:`_load_settings_at`, keyed on
+    :func:`_settings_key`. Reading the declaration at call time is what
+    makes a changed ``FNO_CONFIG`` (or any other key component) resolve
+    fresh without a cache_clear.
+    """
+    return _load_settings_at(_settings_key())
 
 
 def settings_from_files(paths: list[Path]) -> SettingsModel:

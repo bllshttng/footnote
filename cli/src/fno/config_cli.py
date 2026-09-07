@@ -1210,9 +1210,11 @@ def _check_overridden_writes(results: list) -> None:
 
     from pydantic import BaseModel
 
-    from fno.config import load_settings, resolve_source
+    from fno.config import _load_settings_at, load_settings, resolve_source
 
-    load_settings.cache_clear()
+    # The verb just rewrote a config file at the SAME declaration key; the
+    # keyed cache would serve the pre-write entry without this clear.
+    _load_settings_at.cache_clear()
     root = load_settings()
 
     def _traverse(dotted: str) -> tuple[bool, object]:
@@ -1308,9 +1310,10 @@ def _couple_grant_observer() -> None:
     import sys
 
     try:
-        from fno.config import load_settings
+        from fno.config import _load_settings_at, load_settings
 
-        load_settings.cache_clear()
+        # Same declaration key as the write above; clear the keyed entry.
+        _load_settings_at.cache_clear()
         settings = load_settings()
         am = settings.auto_merge
         armed = bool(am.enabled) and str(am.grant or "none") == "dispatch"

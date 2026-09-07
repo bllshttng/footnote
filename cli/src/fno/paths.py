@@ -29,9 +29,9 @@ if TYPE_CHECKING:
     from fno.config import SettingsModel
 
 
-def _warn_if_foreign_fno_repo_root(resolved: Path) -> None:
+def _warn_if_foreign_fno_repo_root(resolved: Path, cwd: Path) -> None:
     """One-line heads-up when ``FNO_REPO_ROOT`` pins the fno plugin root
-    while the cwd is a *different* git repo.
+    while *cwd* is a *different* git repo.
 
     ``FNO_REPO_ROOT`` is overloaded historically: operators reached for it to
     fix an events-schema-resolution miss, but it ALSO repoints ``fno config
@@ -42,8 +42,9 @@ def _warn_if_foreign_fno_repo_root(resolved: Path) -> None:
     ``FNO_REPO_ROOT`` that way; this warning catches the lingering footgun.
 
     Best-effort and non-fatal: any failure is swallowed so path resolution
-    never breaks. Fires at most once per process (``resolve_repo_root`` is
-    cached), and only when the pinned root is the fno PLUGIN root (by its
+    never breaks. Fires at most once per ``(cwd, pin)`` key
+    (``resolve_repo_root_at`` is cached), and only when the pinned root is
+    the fno PLUGIN root (by its
     marker file, not its directory basename - a clone/worktree can be named
     anything) AND the cwd resolves to a different git repo. (ab-fe825805 change 4)
     """
@@ -56,7 +57,7 @@ def _warn_if_foreign_fno_repo_root(resolved: Path) -> None:
         # out of unit tests that globally stub subprocess.run while resolving
         # paths (resolve_repo_root is on the CLI-wrapper hot path).
         try:
-            Path.cwd().resolve().relative_to(resolved)
+            cwd.resolve().relative_to(resolved)
             return  # cwd within resolved -> same repo
         except (ValueError, OSError):
             pass
@@ -65,6 +66,7 @@ def _warn_if_foreign_fno_repo_root(resolved: Path) -> None:
             capture_output=True,
             text=True,
             check=False,
+            cwd=str(cwd),
             timeout=2,  # diagnostic-only: never block a CLI invocation on a slow FS
         )
         # Defensive reads: in the stubbed-subprocess test contexts above the
@@ -90,21 +92,21 @@ def _warn_if_foreign_fno_repo_root(resolved: Path) -> None:
 
 
 @cache
-def resolve_repo_root() -> Path:
-    """Resolve the repo root for state + artifact path resolution.
+def resolve_repo_root_at(cwd: str, pin: Optional[str]) -> Path:
+    """Resolve the repo root, keyed on its declaration ``(cwd, pin)``.
 
-    Cached once per process. The ``FNO_REPO_ROOT`` env var is read at
-    first call and frozen; changing it mid-process (e.g. in tests) requires
-    ``fno.paths.resolve_repo_root.cache_clear()`` before the next call.
+    The cache keys on the two ambient inputs the resolution reads, so a
+    caller that changes either gets a fresh resolution with no cache_clear:
+    the key IS the declaration.
 
-    Order: ``FNO_REPO_ROOT`` env var, ``git rev-parse --show-toplevel``,
-    then cwd. The env var is the test hook; the git fallback handles
-    users running ``fno`` from a subdirectory; cwd is the last resort.
+    Order: ``pin`` (the ``FNO_REPO_ROOT`` env var, read at call time by the
+    wrapper), ``git rev-parse --show-toplevel``, then cwd. The env var is
+    the test hook; the git fallback handles users running ``fno`` from a
+    subdirectory; cwd is the last resort.
     """
-    env_root = os.environ.get("FNO_REPO_ROOT")
-    if env_root:
-        resolved = Path(env_root).resolve()
-        _warn_if_foreign_fno_repo_root(resolved)
+    if pin:
+        resolved = Path(pin).resolve()
+        _warn_if_foreign_fno_repo_root(resolved, Path(cwd))
         return resolved
     try:
         result = subprocess.run(
@@ -112,12 +114,23 @@ def resolve_repo_root() -> Path:
             capture_output=True,
             text=True,
             check=False,
+            cwd=cwd,
         )
         if result.returncode == 0 and result.stdout.strip():
             return Path(result.stdout.strip()).resolve()
     except (FileNotFoundError, OSError):
         pass
-    return Path.cwd()
+    return Path(cwd)
+
+
+def resolve_repo_root() -> Path:
+    """Resolve the repo root for state + artifact path resolution.
+
+    Uncached wrapper: reads the process declaration (``os.getcwd()`` and
+    ``FNO_REPO_ROOT``) at call time and delegates to the keyed
+    :func:`resolve_repo_root_at`.
+    """
+    return resolve_repo_root_at(os.getcwd(), os.environ.get("FNO_REPO_ROOT"))
 
 
 def resolve_canonical_worktree(
@@ -352,9 +365,12 @@ def migrate_from_checkout(old: Path, new: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
-@cache
 def _settings() -> "SettingsModel":
-    """Load and cache settings for the lifetime of this process."""
+    """Load the settings for the caller's declared root.
+
+    Uncached: the keyed cache lives on ``fno.config._load_settings_at``;
+    a cache here would be keyed on nothing.
+    """
     from fno.config import load_settings
     return load_settings()
 
