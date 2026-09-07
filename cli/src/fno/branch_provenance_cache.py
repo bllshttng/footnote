@@ -45,7 +45,6 @@ def write_cache(repo: Path, rows: list) -> bool:
 
 
 def read_cache(repo: Path) -> list[dict]:
-    """Cached rows, fail-open: any read or parse problem answers []."""
     try:
         data = json.loads((Path(repo) / CACHE_RELPATH).read_text(encoding="utf-8"))
         return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
@@ -64,8 +63,9 @@ def _provenance_roots() -> list[Path]:
 
 
 def _provenance_line(row: dict) -> str:
+    remote = row.get("has_remote")
     parts = [
-        {True: "has remote", False: "no remote"}.get(row.get("has_remote"), "remote unknown"),
+        "has remote" if remote else ("no remote" if remote is False else "remote unknown"),
         f"{row.get('unpushed') or 0} unpushed",
         f"PR #{row['pr_number']}" if row.get("pr_number") else "no PR",
         *(["LIVE"] if row.get("live") else []),
@@ -77,7 +77,6 @@ def _provenance_line(row: dict) -> str:
 
 
 def provenance_lines(roots: list[Path] | None = None) -> list[str]:
-    """The board section, [] on an empty cache; a bad read degrades to omission."""
     try:
         rows = [r for root in (roots if roots is not None else _provenance_roots()) for r in read_cache(root)]
     except Exception:  # noqa: BLE001 - display signal; never break a mutation

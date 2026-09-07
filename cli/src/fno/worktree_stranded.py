@@ -175,11 +175,11 @@ def resolve_node_id(
 
 def _unpushed_batch(
     worktrees: list[tuple[Optional[str], str]],
-) -> dict[str, tuple[int, bool, str, bool]]:
+) -> dict[str, tuple[int, bool, str, Optional[bool]]]:
     """(branch, path) -> (unpushed_count, ok, age, has_remote) via the packaged
-    port of ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh), which
-    exists because an installed wheel carries no ``scripts/`` tree. has_remote
-    is True/False on a resolving/absent ref, None when the probe itself fails."""
+    port of ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh; an installed
+    wheel carries no ``scripts/`` tree). has_remote: True/False resolving/absent,
+    None when the probe itself fails."""
     if not worktrees:
         return {}
     results: dict[str, tuple[int, bool, str, Optional[bool]]] = {}

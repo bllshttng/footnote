@@ -1001,8 +1001,7 @@ def tick() -> None:
                 log.warning("pr-watch: heal phase failed: %s", exc)
 
         set_tick_phase("stranded")
-        # The sweep feeds the board's provenance cache, so it runs whether or
-        # not the recovery lane is armed; the lane only decides who acts.
+        # The sweep feeds the board's provenance cache; the lane only arms acting.
         lane_armed = _wd_lane_armed(settings)
         try:
             left = deadline - (time.monotonic() - started)
@@ -1014,12 +1013,8 @@ def tick() -> None:
             from fno.branch_provenance_cache import write_cache
             from fno.worktree_stranded import STRANDED, UNKNOWN, apply_sweep, sweep
 
-            # "report" mode still classifies (so counts stay honest) but
-            # never pushes or files - the same wake vs report split the
-            # fleet watchdog leg above draws at apply_verdict.
             wake = lane_armed and _wd_wake_armed(settings)
-            changed = False
-            stranded_n = unknown_n = acted_n = failed_n = roots_done = 0
+            changed, stranded_n, unknown_n, acted_n, failed_n, roots_done = False, 0, 0, 0, 0, 0
             for root in _catchup_roots():
                 # Re-check per root, not just once before the loop: a
                 # code-review finding caught that the floor above only
@@ -1055,7 +1050,6 @@ def tick() -> None:
             if changed:
                 from fno.graph.render import render_graph_md
                 from fno.graph.store import read_graph_strict
-
                 render_graph_md(read_graph_strict())
         except _WatchdogBudgetSpent as exc:
             log.info("pr-watch: stranded leg skipped: %s", exc)
