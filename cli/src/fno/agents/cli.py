@@ -4920,12 +4920,9 @@ def cmd_stale_escalate(
 
 @agents_app.command("ping", hidden=True)
 def cmd_ping() -> None:
-    """Health check (placeholder).
+    """Health-check placeholder: defers the real probe to a future story.
 
-    The US4-lifecycle story converts this from a phase-1 stub into an
-    informational message that defers the real probe to a future story.
-    Returns exit 0 so the catalog of ``_NOT_IMPLEMENTED`` markers in
-    ``cli.py`` shrinks to zero without growing a parallel verb surface.
+    Exits 0 so the ``_NOT_IMPLEMENTED`` catalog shrinks without a new verb surface.
     """
     typer.echo("(not yet implemented; planned for a future story)")
 
@@ -5342,7 +5339,4 @@ def harness_probe(
 
 agents_app.add_typer(harness_app, name="harness", hidden=True)
 
-# Late registration: transcript_reads mounts its verbs on the app above and
-# imports agents_app from this module, so it can only load once this module
-# is fully defined (no import cycle).
 from fno.agents import transcript_reads as _transcript_reads  # noqa: E402,F401
