@@ -117,6 +117,10 @@
           },
           {
             "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/operator-capture-nudge.sh"
+          },
+          {
+            "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh done"
           }
         ]
@@ -341,6 +345,10 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id law-session-start --expected using-fno,inject-project-vision,setup-nudge-session-start,frontdoor-nudge-session-start,inject-fno-agent-whoami,worktree-peers-session-start,cache-keepalive-inject,register-session-start,inject-mail-drain-session-start,reconcile-session-start,attest-model,eval-sweep-session-start,groom-self-heal-session-start,outstanding-session-start,spawn-seed-provenance-session-start,law-session-start -- ${CLAUDE_PLUGIN_ROOT}/hooks/law-session-start.sh"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id operator-capture-nudge --expected using-fno,inject-project-vision,setup-nudge-session-start,frontdoor-nudge-session-start,inject-fno-agent-whoami,worktree-peers-session-start,cache-keepalive-inject,register-session-start,inject-mail-drain-session-start,reconcile-session-start,attest-model,eval-sweep-session-start,groom-self-heal-session-start,outstanding-session-start,spawn-seed-provenance-session-start,law-session-start,operator-capture-nudge -- ${CLAUDE_PLUGIN_ROOT}/hooks/operator-capture-nudge.sh"
           }
         ]
       },
