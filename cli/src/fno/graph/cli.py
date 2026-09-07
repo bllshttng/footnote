@@ -8767,12 +8767,7 @@ def _sweep_close_stranded_contained(entries: list[dict]) -> list[str]:
 def _strandable_epic_ids(entries: list[dict]) -> set[str]:
     """Open epics (parents) whose children are ALL done - closeable right now.
 
-    Read-only. The cascade (_cascade_close_parents) only fires on a child-CLOSE
-    event, so an epic whose children were all completed BEFORE this code shipped
-    (or whose last child closed via a path that did not cascade) is stranded:
-    open, all children done, and - now that containers are hidden from
-    next/ready - unreachable for closure. This identifies them so reconcile can
-    self-heal (codex P2 on PR #69).
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph._reconcile import _reopen_outranks_child_closes
 
