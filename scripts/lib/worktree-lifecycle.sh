@@ -639,10 +639,17 @@ _cargo_target_offload() {
             fi
             bytes="$(_cargo_target_bytes "$target")"
             if [[ "$protection" != "-" ]]; then
-                # pids rides last (tail position, like detail): a diagnostic
-                # for a protection verdict, never parsed by consumers.
+                # pid:cmd rides last (tail position, like detail): a
+                # diagnostic for a protection verdict, never parsed by
+                # consumers.
+                local pid_diag="" pd_pid pd_cwd
+                while IFS= read -r pd_pid; do
+                    [[ -z "$pd_pid" ]] && continue
+                    pd_cwd="$(printf '%s\n' "${_WT_CWD_SNAPSHOT:-}" | awk -F '\t' -v p="$pd_pid" '$1 == p { print $2; exit }')"
+                    pid_diag="${pid_diag}${pd_pid}:$(ps -o command= -p "$pd_pid" 2>/dev/null | cut -c1-50)@${pd_cwd:-no-cwd-row},"
+                done <<< "$pids"
                 printf 'cargo-offload protected bytes=%s reason=%s path=%s pids=%s\n' \
-                    "$bytes" "$protection" "$target" "$(printf '%s\n' "$pids" | tr '\n' ',' | sed 's/,$//')"
+                    "$bytes" "$protection" "$target" "${pid_diag%,}"
                 kept=$((kept + 1))
                 continue
             fi
