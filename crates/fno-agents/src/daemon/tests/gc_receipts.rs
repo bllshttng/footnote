@@ -9,7 +9,11 @@ use crate::gc_sweep::{self, GcSummary, GraphRead};
 
 /// A transcript file untouched for `age_secs`, so the activity read answers
 /// a positive quiet past the grace.
-fn quiet_transcript(dir: &std::path::Path, name: &str, age_secs: i64) -> std::path::PathBuf {
+pub(super) fn quiet_transcript(
+    dir: &std::path::Path,
+    name: &str,
+    age_secs: i64,
+) -> std::path::PathBuf {
     use std::io::Write;
     let path = dir.join(name);
     let mut f = std::fs::File::create(&path).unwrap();

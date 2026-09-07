@@ -50,11 +50,20 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             .iter()
             .map(|(id, node)| json!({"id": id, "node": node}))
             .collect();
+        let settled: Vec<Value> = summary
+            .settled_do_rows
+            .iter()
+            .map(|(node, harness, session_id)| {
+                json!({"node": node, "harness": harness, "session_id": session_id})
+            })
+            .collect();
         return format!(
             "{}\n",
             json!({
                 "retired": retired,
                 "pruned": pruned,
+                "settled_do_rows": settled,
+                "settle_refused": pair(&summary.settle_refused),
                 "kept_operator": summary.kept_operator,
                 "kept_crowned": summary.kept_crowned,
                 "kept_not_spawn": pair(&summary.kept_not_spawn),
@@ -86,6 +95,16 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     }
     for (id, path) in &summary.pruned {
         out.push_str(&format!("  pruned {id} (clean and merged: {path})\n"));
+    }
+    let settle_verb = if dry_run { "would settle" } else { "settled" };
+    for (node, harness, session_id) in &summary.settled_do_rows {
+        let _ = harness; // named in the JSON; the text line carries node + session
+        out.push_str(&format!(
+            "  {settle_verb} {session_id} (stale open do row filled on done+merged node: {node})\n"
+        ));
+    }
+    for (node, reason) in &summary.settle_refused {
+        out.push_str(&format!("  settle refused {node} ({reason})\n"));
     }
     for id in &summary.kept_operator {
         out.push_str(&format!("  kept {id} (operator row)\n"));
@@ -181,6 +200,8 @@ mod tests {
         for key in [
             "retired",
             "pruned",
+            "settled_do_rows",
+            "settle_refused",
             "kept_operator",
             "kept_crowned",
             "kept_not_spawn",

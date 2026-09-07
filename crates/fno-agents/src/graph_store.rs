@@ -1270,7 +1270,11 @@ pub fn is_terminal_entry(entry: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn is_open_phase_row(row: &Value, phase: &str) -> bool {
+/// A lifecycle row that is identified (harness + session_id), bounded
+/// (started_at) and not yet closed. Mirrors the Python authority
+/// `statuses.is_open_phase_row` shape for shape, so both legs answer one
+/// question about the same row.
+pub fn is_open_phase_row(row: &Value, phase: &str) -> bool {
     row.get("phase").and_then(Value::as_str) == Some(phase)
         && row
             .get("harness")
@@ -1293,7 +1297,8 @@ fn is_open_phase_row(row: &Value, phase: &str) -> bool {
             .unwrap_or(false)
 }
 
-fn is_open_do_row(row: &Value) -> bool {
+/// Whether a session row is a valid, unfinished `do` window.
+pub fn is_open_do_row(row: &Value) -> bool {
     is_open_phase_row(row, "do")
 }
 

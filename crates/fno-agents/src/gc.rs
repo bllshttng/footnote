@@ -235,8 +235,13 @@ pub fn gc_sweep(
     grace_secs: i64,
     retain_days: u64,
 ) -> gc_sweep::GcSummary {
+    // The settle writes the graph FIRST: the row pass then reads the file it
+    // wrote, so a filled row reads closed and its session falls through to
+    // the ordinary quiet and receipt gates. A refused settle leaves the row
+    // kept under its existing reason.
+    let (settled, refused) = gc_sweep::settle_stale_do_rows(home);
     let store = std::cell::RefCell::new(gc_sweep::HarnessStoreIndex::default());
-    gc_sweep::run(
+    let mut summary = gc_sweep::run(
         home,
         emitter,
         grace_secs,
@@ -249,31 +254,48 @@ pub fn gc_sweep(
         &|e| {
             crate::daemon::rm_take_worktree(e);
         },
-    )
+    );
+    summary.settled_do_rows = settled
+        .into_iter()
+        .map(|row| (row.node, row.harness, row.session_id))
+        .collect();
+    summary.settle_refused = refused;
+    summary
 }
 
 /// `fno agents reap --dry-run`: classify exactly as [`gc_sweep`] does, name
 /// every row under exactly one bucket, mutate nothing - a reaper an operator
 /// cannot rehearse is one they will not run.
 pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSummary {
+    // The settle plan is read-only, and the rehearsal subtracts it from the
+    // graph read so the report shows the outcome the real pass would produce.
+    let planned = gc_sweep::plan_stale_do_rows(home);
+    let read = |h: &AgentsHome| {
+        gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned))
+    };
     // Never emitted to in dry-run mode (the whole write+emit tail is skipped),
     // so an unused placeholder path satisfies the shared signature.
     let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
     let store = std::cell::RefCell::new(gc_sweep::HarnessStoreIndex::default());
-    gc_sweep::run(
+    let mut summary = gc_sweep::run(
         home,
         &emitter,
         grace_secs,
         true,
         0, // dry-run never expires: a rehearsal that pruned would not be one
-        &gc_sweep::read_graph_entries,
+        &read,
         &|e| store.borrow_mut().matches(e),
         &|e| gc_sweep::stop_row_process(home, e),
         &gc_sweep::production_tree_probe,
         &|e| {
             crate::daemon::rm_take_worktree(e);
         },
-    )
+    );
+    summary.settled_do_rows = planned
+        .into_iter()
+        .map(|row| (row.node, row.harness, row.session_id))
+        .collect();
+    summary
 }
 
 // --- the orphan process sweep -----------------------------------------------

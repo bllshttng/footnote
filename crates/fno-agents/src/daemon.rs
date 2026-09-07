@@ -12091,6 +12091,9 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     #[path = "gc_receipts.rs"]
     mod gc_receipts;
 
+    #[path = "gc_settle.rs"]
+    mod gc_settle;
+
     // --- plan_reconcile (US6.9): tri-state, status-aware transitions, budget ---
 
     fn rentry(name: &str, status: AgentStatus, last_reconciled: Option<&str>) -> RegistryEntry {
