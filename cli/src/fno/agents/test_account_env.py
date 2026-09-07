@@ -324,3 +324,89 @@ def test_home_is_a_state_root_key() -> None:
     """The set names the axis; a future key gets added here, not at a call site."""
     assert "HOME" in STATE_ROOT_ENV_KEYS
     assert "CLAUDE_CONFIG_DIR" not in STATE_ROOT_ENV_KEYS
+
+
+# --- AC2-ERR: a pin whose root serves another account -----------------------
+
+MAKERS = {"account_uuid": "acc-makers", "organization_uuid": "org-1"}
+READYRULE = {
+    "account_uuid": "acc-readyrule",
+    "organization_uuid": "org-1",
+    "email": "readyrule@x",
+}
+
+
+def _serves(monkeypatch, principal: dict) -> None:
+    """Make the credential root prove out as ``principal``, offline."""
+    from fno.adapters.providers import binding, managed
+
+    monkeypatch.setattr(binding, "credential_blobs", lambda *_: ["blob"])
+    monkeypatch.setattr(managed, "slot_principal", lambda _b: (principal, None))
+
+
+def test_config_dir_pin_serving_another_account_is_refused(
+    tmp_path: Path, providers_root: Path, monkeypatch
+) -> None:
+    """A login being PRESENT in the dir says nothing about whose login it is."""
+    from fno.adapters.providers import managed
+
+    cfg = tmp_path / "claude-alt"
+    cfg.mkdir()
+    (cfg / ".credentials.json").write_text("{}")
+    repo = _write_settings(
+        tmp_path,
+        [{"id": "makers", "name": "Makers", "harness": "claude",
+          "auth": "managed", "config_dir": str(cfg)}],
+    )
+    managed.write_record_principal("makers", MAKERS, providers_root)
+    _serves(monkeypatch, READYRULE)
+
+    with pytest.raises(AccountResolutionError) as exc:
+        resolve_account_overlay("makers", repo_root=repo, providers_root=providers_root)
+
+    assert "account_identity_mismatch" in str(exc.value)
+    assert "readyrule@x" in str(exc.value)
+
+
+def test_managed_active_pin_serving_another_account_is_refused(
+    tmp_path: Path, providers_root: Path, monkeypatch
+) -> None:
+    """The stamp agrees. An out-of-band `claude /login` is what makes it wrong."""
+    from fno.adapters.providers import managed
+
+    repo = _write_settings(
+        tmp_path,
+        [{"id": "makers", "name": "Makers", "harness": "claude", "auth": "managed"}],
+    )
+    _stamp_active(providers_root, "makers")
+    managed.write_record_principal("makers", MAKERS, providers_root)
+    _serves(monkeypatch, READYRULE)
+
+    with pytest.raises(AccountResolutionError) as exc:
+        resolve_account_overlay("makers", repo_root=repo, providers_root=providers_root)
+
+    assert "account_identity_mismatch" in str(exc.value)
+
+
+def test_an_unprovable_identity_does_not_ground_the_launch(
+    tmp_path: Path, providers_root: Path, monkeypatch
+) -> None:
+    """unknown forbids a receipt naming the account, never the launch itself."""
+    from fno.adapters.providers import binding, managed
+
+    repo = _write_settings(
+        tmp_path,
+        [{"id": "makers", "name": "Makers", "harness": "claude", "auth": "managed"}],
+    )
+    _stamp_active(providers_root, "makers")
+    managed.write_record_principal("makers", MAKERS, providers_root)
+    monkeypatch.setattr(binding, "credential_blobs", lambda *_: ["blob"])
+    monkeypatch.setattr(
+        managed, "slot_principal", lambda _b: (None, "profile-unavailable")
+    )
+
+    ov = resolve_account_overlay(
+        "makers", repo_root=repo, providers_root=providers_root
+    )
+
+    assert ov.lane == "managed-active"

@@ -335,6 +335,19 @@ def _login_present(config_dir: Path) -> bool:
     return out.returncode == 0 and bool(out.stdout.strip())
 
 
+def _refuse_identity_mismatch(record, providers_root: Path, by_id: dict) -> None:
+    """Refuse a pin whose credential root provably serves a different account.
+
+    Only a POSITIVE mismatch refuses. An unreachable profile endpoint must not
+    ground the fleet.
+    """
+    from fno.adapters.providers.binding import MISMATCH, resolve_account_binding
+
+    got = resolve_account_binding(record, root=providers_root, by_id=by_id)
+    if got.status == MISMATCH:
+        raise AccountResolutionError(got.receipt)
+
+
 def resolve_account_overlay(
     account_id: str,
     *,
@@ -380,6 +393,8 @@ def resolve_account_overlay(
                 f"account {account_id!r} config_dir {cfg} holds no claude login "
                 f"(run: CLAUDE_CONFIG_DIR={cfg} claude /login)"
             )
+        # A login being PRESENT says nothing about whose login it is.
+        _refuse_identity_mismatch(record, providers_root, by_id)
         return AccountOverlay(
             account_id, {"CLAUDE_CONFIG_DIR": str(cfg)}, "config-dir"
         )
@@ -418,6 +433,9 @@ def resolve_account_overlay(
             # CLAUDE_CONFIG_DIR (e.g. exported from a prior alt-account session)
             # leak through and silently bill the wrong account. Managed claude
             # accounts materialize into ~/.claude by definition.
+            # An out-of-band `claude /login` leaves the stamp wrong AND
+            # untainted, so the binding asks the slot who it actually serves.
+            _refuse_identity_mismatch(record, providers_root, by_id)
             slot = str(Path.home() / ".claude")
             return AccountOverlay(
                 account_id, {"CLAUDE_CONFIG_DIR": slot}, "managed-active"
