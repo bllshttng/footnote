@@ -187,8 +187,7 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
     out: dict[str, RowTruth] = {}
     for w in workers:
         # The session uuid joins first (x-1379): the registry keys a foreign
-        # claude row by its handle, so the name lookup alone reads None for
-        # exactly the row whose PROGRESS column then rendered `-`.
+        # claude row by its handle, not by this view's first-8-hex label.
         entry = by_session.get(w.session_id or "")
         if entry is None:
             entry = by_name.get(w.name)
@@ -224,10 +223,8 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
 def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     handles, reg_nodes = _registry_maps()
     truth_map = _row_truth(workers)
-    # One retirement read for the whole roster (x-1379). The name passed is
-    # the REGISTRY identity, not the census label: the first-8-hex label
-    # resolves no node, while the handle carries the <prefix>-<node>-<slug>
-    # shape the name fallback reads.
+    # One retirement read for the whole roster (x-1379), keyed by the
+    # REGISTRY identity: the first-8-hex census label resolves no node.
     from fno.agents.retirement import verdicts
 
     registry_ids = [handles.get(w.session_id or "") or w.name for w in workers]
@@ -236,9 +233,8 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     )
     rows = []
     for w in workers:
-        # The served truth for the row; a foreign claude row still gets the
-        # age and the reachability verdict (the handle is enough), it only
-        # misses the PROGRESS verdict.
+        # A foreign claude row (no registry entry) still gets age and reach;
+        # only the PROGRESS verdict needs the entry's harness/route context.
         row_truth = truth_map.get(w.name)
         activity = row_truth.activity if row_truth else w.status
         age = row_truth.age_s if row_truth else None
@@ -541,9 +537,7 @@ def _retirable_lines(rows: list[dict], lanes: list[dict]) -> list[str]:
     for r in rows:
         if not r.get("retire"):
             continue
-        # The lane counter tallies REGISTRY handles, and this row may be
-        # labelled by the first 8 hex, so the join goes through the same
-        # handle the row already carries.
+        # The lane counter tallies REGISTRY handles; join through the handle.
         provider = holder_lane.get(r.get("handle") or r["name"])
         holds = f" holds a {provider} lane" if provider else " holds a lane"
         pr = (r["retire_reason"] or "").rsplit(" ", 1)[-1]
