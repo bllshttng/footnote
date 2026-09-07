@@ -959,6 +959,7 @@ fn dispatch_mission(
     for member in &members {
         let (outcome, facts) = dispatch_member(cfg, breaker, member, pending, journal);
         merged.ready += facts.ready;
+        merged.sync_resolved += facts.sync_resolved;
         if merged.error.is_none() {
             merged.error = facts.error.clone();
         }
@@ -3131,6 +3132,7 @@ mod tests {
         }
         assert_eq!(breaker.consecutive_failures("x-2222"), 0);
         assert!(!record.exists(), "no defer on a skipped child");
+    }
 
     /// A stub `fno` that records every argv, answers `agents worker
     /// blueprint-feed` with `status_json`, and (optionally) fails
