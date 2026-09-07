@@ -800,6 +800,7 @@ mod tests {
 
     #[test]
     fn refuses_an_unsafe_scope_and_names_the_manifest_it_tried() {
+        let _root = crate::paths::DeclaredRoot::declare("kingscope");
         let err = KingQueue::from_manifest_full(
             Path::new("."),
             "../escape",
