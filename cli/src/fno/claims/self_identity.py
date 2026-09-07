@@ -156,7 +156,6 @@ def _fill_spawn_record(owned):
     Guards, in order: a resolved session id short-circuits before the read, a
     fail-closed disposition is never overwritten, and a process carrying ANY
     other family's marker never adopts - cwd is shared by bystanders.
-    ``spawn_record`` stays outside ``_PROVEN_DISPOSITIONS`` (see above).
     """
     if owned.session_id or owned.disposition in {"invalid", "contradiction"}:
         return owned
@@ -188,8 +187,8 @@ _MANIFEST_IDENTITY_FIELDS = (
 #: Dispositions of :class:`fno.harness_identity.OwnedHarnessIdentity` whose
 #: session id is PROVEN by this process's own ancestry. Every other
 #: disposition with an id present is an inherited marker, and an inherited
-#: marker that matches the worktree manifest is a shared anchor, not a self.
-#: ``spawn_record`` is deliberately absent (see :func:`_fill_spawn_record`).
+#: marker matching the worktree manifest is a shared anchor, not a self
+#: (``spawn_record`` stays absent: see :func:`_fill_spawn_record`).
 _PROVEN_DISPOSITIONS = frozenset({"canonical", "proven"})
 
 
