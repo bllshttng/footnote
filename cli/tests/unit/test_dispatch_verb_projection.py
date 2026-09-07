@@ -20,6 +20,7 @@ contents, so a zero can never read as a pass.
 from __future__ import annotations
 
 import json
+import subprocess as real_subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -172,10 +173,20 @@ def _record_spawns(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
             return SimpleNamespace(returncode=0, stdout=repo, stderr="")
         return real_run(cmd, *args, **kwargs)
 
-    # A shim object, not a patch of subprocess.run itself: advance's module
-    # reference is swapped, so the delegation leg still reaches the real
-    # subprocess.run and no other module is touched.
-    monkeypatch.setattr(adv, "subprocess", SimpleNamespace(run=fake_run))
+    # A shim standing in for the module, not a patch of subprocess.run itself:
+    # advance's module reference is swapped, so the delegation leg still
+    # reaches the real subprocess.run and no other module is touched. Every
+    # other attribute (SubprocessError, CompletedProcess, ...) proxies to the
+    # real module so advance's `except subprocess.SubprocessError` handlers
+    # keep working under the swap.
+    class _SubprocessShim:
+        def __getattr__(self, name):
+            return getattr(real_subprocess, name)
+
+        def run(self, *args, **kwargs):
+            return fake_run(*args, **kwargs)
+
+    monkeypatch.setattr(adv, "subprocess", _SubprocessShim())
     return calls
 
 

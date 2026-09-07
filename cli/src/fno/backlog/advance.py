@@ -1429,13 +1429,18 @@ def _spawn_worker(
     node_verb = (verb or "").strip() or None
     # x-0961: "declared nothing" and "declaration eaten by a lossy feed" used
     # to produce a byte-identical dispatch. The `verb` param collapses both to
-    # None; only the node dict carries the difference, so the receipt names it.
-    # A dict without the key at all can only come from a projection that
-    # dropped it - the exact silent loss this names out loud. Canonicalized
-    # the same way the resolver's allowlist rung does, so receipt and command
-    # agree on the spelling.
+    # None; only the node dict carries the difference, so the receipt names it
+    # - and reads the DICT alone, never the verb param, so a caller whose verb
+    # diverges from the dict surfaces as verb=builtin beside verb_source=
+    # declared (the mismatch this field exists to expose) instead of a receipt
+    # that launders the divergence. A dict without the key at all can only
+    # come from a projection that dropped it - the exact silent loss this
+    # names out loud. Canonicalized the same way the resolver's allowlist rung
+    # does, so receipt and command agree on the spelling.
     if isinstance(node, dict) and "dispatch_verb" in node:
-        verb_source = "declared" if node_verb else "none-declared"
+        verb_source = (
+            "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
+        )
     else:
         verb_source = "field-absent"
         print(
@@ -1575,6 +1580,17 @@ def _spawn_worker(
         stderr = (proc.stderr or "").strip()
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
             raise SpawnAlreadyRunning(f"agent {agent_name} already exists")
+        # The --node door's family-2 guard dedups (a peer door won the node
+        # handover, or our released reservation was re-taken mid-launch) by
+        # refusing with already-running. That is the benign skip the caller's
+        # own reservation used to produce, not a spawn failure - including the
+        # race where we handed the reservation over and lost the re-acquire.
+        if (
+            proc.returncode == 2
+            and "node dispatch refused" in stderr
+            and "verdict=already-running" in stderr
+        ):
+            raise SpawnAlreadyRunning(f"door refused {node_id}: {stderr[:120]}")
         raise SpawnError(
             f"fno agents spawn exited {proc.returncode}: "
             f"{(stderr or proc.stdout or '').strip()[:200]}"

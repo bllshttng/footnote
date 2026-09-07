@@ -4544,9 +4544,6 @@ def cmd_next(
         candidates.sort(key=make_selection_sort_key(entries, live_claimed=claimed))
         return candidates
 
-    def _node_summary(e):
-        return _dispatch_node_summary(e)
-
     from fno.backlog.undispatched import (
         ObserverReadError,
         build_selection_divergence_event,
@@ -4683,7 +4680,7 @@ def cmd_next(
                     )
                 except ClaimHeldByOther:
                     continue
-                result[0] = _node_summary(winner)
+                result[0] = _dispatch_node_summary(winner)
                 break
         else:
 
@@ -4693,7 +4690,7 @@ def cmd_next(
                     winner = candidates[0]
                     winner["locked_by"] = claim
                     winner["locked_at"] = datetime.now(timezone.utc).isoformat()
-                    result[0] = _node_summary(winner)
+                    result[0] = _dispatch_node_summary(winner)
                 return entries
 
             locked_mutate_graph(_graph_path(), mutator)
@@ -4705,7 +4702,7 @@ def cmd_next(
             entries = read_graph(_graph_path())
         candidates = _with_observer(_pick_ready(entries), entries)
         if candidates:
-            result[0] = _node_summary(candidates[0])
+            result[0] = _dispatch_node_summary(candidates[0])
 
     if result[0] is None:
         # Zero-silent-starvation receipts ( G1): explain to stderr why
