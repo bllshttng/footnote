@@ -569,10 +569,9 @@ def _guard_state_path(path: Path) -> Path:
     """Judge a resolved state path against the process root declaration.
 
     The rule lives in :func:`fno.hermetic.declared_root` and both fences call
-    it, so the accessor fence and the write fence cannot disagree about what
-    an absent declaration means. A hand-built state path still cannot be
-    reached here; that remaining R4 surface is guarded by the state-path lint
-    rather than by an accessor.
+    it, so they cannot disagree about what an absent declaration means. A
+    hand-built state path still cannot reach here; the state-path lint guards
+    that remaining R4 surface.
     """
     from fno.hermetic import declared_root
 

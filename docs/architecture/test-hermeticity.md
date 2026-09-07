@@ -142,6 +142,8 @@ When `FNO_TEST_HERMETIC=1`, the `fno.paths` state accessors pass their resolved 
 
 The Rust runtime carries the same rule inside the lib crate, and only there. `AgentsHome::from_env` and `durable_spaces_root` refuse the ambient `$HOME` fallback under `cfg!(test)` unless a root is declared, because `cargo test` sandboxes no `HOME`. A test declares one with `paths::DeclaredRoot`, which pins `FNO_SPACES_DIR` and `FNO_AGENTS_HOME` under `std::env::temp_dir()` and restores them on drop.
 
+Two resolvers, not every resolver. `claims::global_claims_root` carries the same `$HOME` fallback and is unfenced, so a bare `cargo test --lib` still creates `$HOME/.fno/claims`. That was measured on 2026-09-07. The poisoned-HOME canary is what catches it, so this page names the gap instead of claiming it closed.
+
 `cfg!(test)` is the stated limit, not an oversight. Integration targets under `crates/fno-agents/tests/` link the lib compiled WITHOUT `cfg(test)`. They get no fence. To them the crate is a dependency, which is the shape production sees. To reach them, the fence must become a runtime check. A runtime check fires in production, where an ambient `$HOME` resolution is the correct answer. So an integration target pins `FNO_AGENTS_HOME` or `FNO_SPACES_DIR` itself. If it does not, nothing refuses.
 
 `locks_dir()` remains deliberately home-anchored and config-free because the bare-python plan stamp uses it before config dependencies load. Hand-built state paths are outside the accessor fence. The state-root lint catches those construction sites until their owning resolver is consolidated.

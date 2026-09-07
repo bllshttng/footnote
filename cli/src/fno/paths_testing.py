@@ -38,13 +38,10 @@ def use_tmpdir(monkeypatch: object, tmp_path: Path) -> Path:
     monkeypatch.setenv("FNO_CONFIG", str(settings))  # type: ignore[attr-defined]
 
     # Calling this fixture IS a root declaration, so say so. It covers the lane
-    # that reproduces a test by importing its module outside pytest, where no
-    # conftest ran and nothing else stamps the pin.
+    # that reproduces a test outside pytest, where no conftest stamps the pin.
     if os.environ.get("FNO_TEST_HERMETIC") is None:
         monkeypatch.setenv("FNO_TEST_HERMETIC", "1")  # type: ignore[attr-defined]
-
     _assert_state_landed(tmp_state)
-
     return settings
 
 
@@ -56,26 +53,23 @@ def _assert_state_landed(tmp_state: Path) -> None:
     Silence was the whole defect, so this is a receipt, not a comment.
     """
     from fno import paths
-
-    def landed(name: str) -> tuple[bool, str]:
-        try:
-            resolved = Path(getattr(paths, name)())
-        except Exception as exc:  # a refused fence is a failed receipt too
-            return False, f"<{type(exc).__name__}: {exc}>"
-        return resolved == tmp_state or tmp_state in resolved.parents, str(resolved)
-
-    checked = {name: landed(name) for name in ("state_dir", "graph_json")}
-    # The probe WARMS the cache, whose key is the declaration and not the file
-    # content, so a caller that overwrites the settings file (the docstring
-    # invites it) would read the warm minimal copy instead.
     from fno.config import _load_settings_at
 
+    shown, escaped = {}, False
+    for name in ("state_dir", "graph_json"):
+        try:
+            p = Path(getattr(paths, name)())
+            shown[name] = str(p)
+            escaped |= p != tmp_state and tmp_state not in p.parents
+        except Exception as exc:  # a refused fence is a failed receipt too
+            shown[name], escaped = f"<{type(exc).__name__}: {exc}>", True
+    # The probe WARMS the cache, whose key is the declaration and not the file
+    # content, so a caller that overwrites the settings file would read the
+    # warm minimal copy instead.
     _load_settings_at.cache_clear()
-    if all(ok for ok, _ in checked.values()):
-        return
-    resolved = {name: shown for name, (_, shown) in checked.items()}
-    raise RuntimeError(
-        "use_tmpdir: resolved state escaped the fixture root. "
-        f"state_dir={resolved['state_dir']} graph_json={resolved['graph_json']} "
-        f"tmp_state={tmp_state}"
-    )
+    if escaped:
+        raise RuntimeError(
+            "use_tmpdir: resolved state escaped the fixture root. "
+            f"state_dir={shown['state_dir']} graph_json={shown['graph_json']} "
+            f"tmp_state={tmp_state}"
+        )

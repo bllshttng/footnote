@@ -1725,22 +1725,22 @@ def _refuse_hermetic_escape(path: Path) -> None:
 
     Scope, stated so the next reader does not overclaim it: this guards
     :func:`append_event` only. ``events/log.py`` and ``agents/events.py`` write
-    journals through their own file handles and do not pass here, so the doc
-    must not say every Python event write funnels through this function.
-
-    The rule itself lives in :func:`fno.hermetic.declared_root`, so this fence
-    and the accessor fence in ``fno.paths`` cannot disagree.
+    journals through their own file handles and do not pass here. The rule
+    itself lives in :func:`fno.hermetic.declared_root`, so this fence and the
+    accessor fence in ``fno.paths`` cannot disagree.
     """
-    from fno.hermetic import declared_root
+    from fno.hermetic import UndeclaredStateRootError, declared_root
 
     try:
         declared_root(path)
-    except HermeticEscapeError as exc:
-        raise HermeticEscapeError(
-            f"append_event refused a journal write outside the test sandbox: "
-            f"{path}. A hermetic run must not touch a live events.jsonl. Pass "
-            "an explicit events_path= under tmp_path, or resolve the journal "
-            "with fno.paths.project_events_json() so FNO_EVENTS_PATH applies."
+    except (HermeticEscapeError, UndeclaredStateRootError) as exc:
+        # Both refusals get the journal's remedy: the undeclared one is a
+        # SIBLING class, so catching only the escape sends the wrong advice.
+        raise type(exc)(
+            f"append_event refused a journal write with no declared root: "
+            f"{path}. Pass an explicit events_path= under tmp_path, or resolve "
+            "the journal with fno.paths.project_events_json() so "
+            f"FNO_EVENTS_PATH applies. ({exc})"
         ) from exc
 
 
