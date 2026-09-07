@@ -5,6 +5,39 @@
 use super::*;
 
 #[test]
+fn keys_modal_legend_lists_severity_glyphs_in_header_order() {
+    // (x-b5d1 AC1) The legend section is generated from the lattice table,
+    // so the modal's rows must equal SEVERITY_ORDER through lattice_glyph,
+    // each with a non-empty label - the same glyphs the header band
+    // counts, in the order the band lists them.
+    let m = super::build_keys_modal();
+    let rows = &m.popup.rows;
+    let start = rows
+        .iter()
+        .position(|r| matches!(r, PopupRow::Header(h) if h == "sideline glyphs"))
+        .expect("the legend section renders in the keys modal");
+    let legend = &rows[start + 1..start + 1 + SEVERITY_ORDER.len()];
+    for (row, &s) in legend.iter().zip(SEVERITY_ORDER.iter()) {
+        match row {
+            PopupRow::Entry {
+                glyph,
+                label,
+                hint: _,
+                enabled: false,
+            } => {
+                assert_eq!(*glyph, lattice_glyph(s).0.to_string());
+                assert!(!label.is_empty(), "{s:?} must carry a label");
+            }
+            other => panic!("legend rows are inert entries, got {other:?}"),
+        }
+    }
+    assert!(matches!(
+        rows.get(start + 1 + SEVERITY_ORDER.len()),
+        Some(PopupRow::Rule) | None
+    ));
+}
+
+#[test]
 fn lattice_glyphs_are_pairwise_distinct_and_single_cell() {
     use LatticeState::*;
     let states = [

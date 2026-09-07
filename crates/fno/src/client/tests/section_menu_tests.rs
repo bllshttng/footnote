@@ -38,11 +38,13 @@ async fn clear_dead_removes_every_dead_row_in_the_section() {
                 harness_session_id: None,
                 name: "dead-a".into(),
                 pane_id: None,
+                measure: false,
             },
             Command::RemoveAgent {
                 harness_session_id: None,
                 name: "dead-b".into(),
                 pane_id: None,
+                measure: false,
             },
         ],
         "only the exited rows are removed"
