@@ -4176,20 +4176,20 @@ def advance_epic(
         _emit(EVENT_MISSION_DEACTIVATED, {"epic_id": canon, "reason": "stop"}, ev_path)
         return AdvanceEpicResult(canon, deactivated=True)
 
-    # Same opt-in gate as advance()/advance_dependents. A live walker owning THIS
-    # repo would pick nodes up itself; the epic-advance verb is the explicit converge tool, so a
-    # global walker is a skip. (Per-child, a foreign-repo walker is handled in
-    # _converge_one's own _walker_live_at.) Unlike the merge-advance path, this
-    # standalone epic verb has no paired advance() call to record the decision, so
-    # emit the skip receipt here or a gated epic advance is silent in the event stream
-    # (codex P2 - LD#12 parity).
+    # Same opt-in gate as advance()/advance_dependents. Unlike the merge-advance
+    # path, this standalone epic verb has no paired advance() call to record the
+    # decision, so emit the skip receipt here or a gated epic advance is silent in
+    # the event stream (codex P2 - LD#12 parity). There is deliberately NO
+    # whole-pass `walker:` guard here (x-7f1f): `_walker_key()` resolves THIS
+    # process's canonical repo root, so one live walker in the epic repo refused
+    # the entire pass, including every child living in a different repository.
+    # `_converge_one` probes `_walker_live_at(root)` per child against that
+    # child's own root, which covers the epic's own repo more accurately and
+    # leaves the other repos reachable.
     armed, rank = _auto_continue_resolve(project_root)
     if not armed:
         _emit(EVENT_SKIPPED, {"reason": "disabled", "mission": canon, "rank": rank}, ev_path)
         return AdvanceEpicResult(canon, error="disabled")
-    if _claim_is_live(_walker_key()):
-        _emit(EVENT_SKIPPED, {"reason": "walker-live", "mission": canon, "rank": rank}, ev_path)
-        return AdvanceEpicResult(canon, error="walker-live")
 
     # All descendants already done -> mission complete: verify the cascade closed
     # the epic, deactivate, emit a no-op receipt. (_container_ids guaranteed at
