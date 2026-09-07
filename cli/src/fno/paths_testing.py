@@ -59,15 +59,17 @@ def _assert_state_landed(tmp_state: Path) -> None:
     """
     from fno import paths
 
-    resolved = {}
-    for name in ("state_dir", "graph_json"):
+    def landed(name: str) -> tuple[bool, str]:
         try:
-            resolved[name] = Path(getattr(paths, name)())
+            resolved = Path(getattr(paths, name)())
         except Exception as exc:  # a refused fence is a failed receipt too
-            resolved[name] = Path(f"<{type(exc).__name__}: {exc}>")
+            return False, f"<{type(exc).__name__}: {exc}>"
+        return resolved == tmp_state or tmp_state in resolved.parents, str(resolved)
 
-    if all(p == tmp_state or tmp_state in p.parents for p in resolved.values()):
+    checked = {name: landed(name) for name in ("state_dir", "graph_json")}
+    if all(ok for ok, _ in checked.values()):
         return
+    resolved = {name: shown for name, (_, shown) in checked.items()}
     raise RuntimeError(
         "use_tmpdir: resolved state escaped the fixture root. "
         f"state_dir={resolved['state_dir']} graph_json={resolved['graph_json']} "
