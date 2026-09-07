@@ -215,16 +215,12 @@ def resolve_slot_via_binary(
     binary = _binary_or_raise()
     rows = _declared_rows(settings)
     lanes_payload = _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else lanes
-    inv_rows = []
-    try:
-        inv_rows = [
-            {"harness": r.harness} for r in (inventory.rows.values() if inventory else [])
-        ]
-    except Exception:  # noqa: BLE001 - an unreadable inventory degrades open
-        inv_rows = []
+    inventory_payload = _inventory_payload(inventory)
     seatable = _thread_seatable(
         [str(r.get("harness", "")) for r in rows.values()]
-        + [str(r.get("harness", "")) for r in inv_rows]
+        + [
+            str(r.get("harness", "")) for r in inventory_payload.get("rows", [])
+        ]
         + [
             str(lane.get("provider", "") or "")
             for lane in (lanes_payload or [])
@@ -250,7 +246,7 @@ def resolve_slot_via_binary(
         "role": role,
         "protected_role": protected_role,
         "model_occupied": model_occupied,
-        "inventory": _inventory_payload(inventory),
+        "inventory": inventory_payload,
     }
     try:
         payload["effort_ok"] = _effort_ok_table(
