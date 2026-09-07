@@ -50,6 +50,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "manifest-for-session",
     "needs",
     "notify-watch",
+    "orphan-reap",
     "feed",
     "ping",
     "pr-heal",
