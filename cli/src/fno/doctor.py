@@ -1171,11 +1171,7 @@ def _post_merge_sync_health() -> dict[str, Any]:
 
 
 def _evals_health() -> dict[str, Any]:
-    """The eval bank's staleness verdict; UNKNOWN never asserts staleness.
-
-    The failure class is DISUSE: the harness is fully built, nothing forced a
-    run, and a 40-day-old 100% rendered like a fresh one. Advisory.
-    """
+    """The eval bank's staleness verdict; UNKNOWN never asserts staleness."""
     try:
         from fno.evals.report import evals_health_summary
         from fno.paths import evals_history

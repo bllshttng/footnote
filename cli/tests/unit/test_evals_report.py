@@ -159,7 +159,6 @@ def test_health_summary_stale_when_newest_regression_old(tmp_path: Path) -> None
     assert summary is not None
     assert summary["stale"] is True
     assert summary["age_days"] == pytest.approx(9.0, abs=0.01)
-    assert summary["newest_regression_ts"] == _ts(_NOW - timedelta(days=9))
     assert summary["never_ran"] is False
 
 

@@ -160,14 +160,10 @@ def evals_health_summary(
     stale_days: Optional[int] = None,
     now: Optional[datetime] = None,
 ) -> Optional[dict[str, Any]]:
-    """One-line evals health for `fno backlog triage health` and `fno doctor`, or None.
+    """One-line evals health for triage health and doctor; the demand row.
 
-    None when no history or no rows (the consumption armor: the report has a
-    real consumer from day one). Never raises. ``stale`` is True when the
-    newest regression-tier run is older than *stale_days* (resolved from
-    ``config.evals.stale_days``, default 7); ``never_ran`` means the history
-    has rows but no regression run: due, not aged. A regression row without
-    a readable ts degrades to ``age_days=None`` - unknown is not fresh.
+    None when no history or no rows. Never raises. Full semantics in
+    docs/evals.md; unknown never asserts staleness.
     """
     if not history_path.exists():
         return None
@@ -185,14 +181,13 @@ def evals_health_summary(
             stale_days = 7
     if now is None:
         now = datetime.now(timezone.utc)
-    reg_ages = [
-        (dt, str(r["ts"]))
+    reg_ts = [
+        _parse_ts(r.get("ts"))
         for r in rows
         if r.get("tier") == "regression"
-        for dt in [_parse_ts(r.get("ts"))]
-        if dt is not None
     ]
-    newest_dt, newest_ts = max(reg_ages, default=(None, None), key=lambda p: p[0])
+    reg_ts = [dt for dt in reg_ts if dt is not None]
+    newest_dt = max(reg_ts, default=None)
     never_ran = reg is None
     age_days = (
         round((now - newest_dt).total_seconds() / 86400, 3)
@@ -204,7 +199,6 @@ def evals_health_summary(
         "regression_pass_rate": reg["pass_rate"] if reg else None,
         "flake_count": len(report["flakes"]),
         "regression_alarm": report["regression_alarm"],
-        "newest_regression_ts": newest_ts,
         "age_days": age_days,
         "stale": stale,
         "never_ran": never_ran,

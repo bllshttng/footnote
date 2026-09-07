@@ -1,7 +1,7 @@
 """Eval-suite worker + demand settings (the ``config.evals`` block).
 
 Its own module because ``config/__init__.py`` is over the shrink-only file
-budget, the same reason the watchdog block lives in ``_watchdog.py``.
+budget; same reason the watchdog block lives in ``_watchdog.py``.
 """
 
 from __future__ import annotations
@@ -16,9 +16,7 @@ _LOG = logging.getLogger(__name__)
 class EvalsBlock(BaseModel):
     """Eval-suite settings: the grading-worker gate plus the demand keys.
 
-    ``enabled`` gates the headless grading-worker spawn and defaults True.
-    ``schedule_days``: days between scheduled regression-tier runs (0 off).
-    ``stale_days``: age at which the newest regression run reads STALE.
+    Keys documented in the generated reference and docs/evals.md.
     """
 
     model_config = ConfigDict(extra="ignore")
