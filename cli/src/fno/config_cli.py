@@ -824,28 +824,52 @@ def _report_deprecated_dispatch_harness() -> None:
 
 
 def _report_band_routing() -> None:
-    """Say when difficulty bands are routing nothing, and why.
+    """Say when difficulty bands and verb slots are routing nothing, and why.
 
-    The grid is config-first: with no declared rows it records
-    ``grid=no-inventory-declared``, so a band is computed and never consulted.
-    ``model_routing.roles`` is a DIFFERENT axis; having it set reads as already on.
+    An unarmed slot and an absent one read the same at every dispatch, which
+    is how the grid stayed inert for weeks. The line names BOTH halves: how
+    many rows the inventory declares, and which dispatched verbs have no lane
+    that resolves. Silent only when at least one verb's slot would take a
+    lane. ``model_routing.roles`` is a DIFFERENT axis; having it set reads as
+    already on.
     """
     from fno import route_resolve
     from fno.config import load_settings
 
     inventory = route_resolve.resolve_inventory()
-    if inventory.declared:
+    try:
+        settings = load_settings()
+    except Exception:  # noqa: BLE001 - an unreadable config reads as absent
+        settings = None
+    try:
+        capacity = route_resolve.runtime_capacity(inventory=inventory)
+    except Exception:  # noqa: BLE001
+        capacity = {}
+    empty_verbs: list[str] = []
+    for verb in route_resolve.SLOT_VERBS:
+        states = route_resolve.slot_states(verb, capacity, inventory=inventory, settings=settings)
+        if not str(states.get("would_take", "")).startswith(
+            f"agents.profiles.{verb}.lanes"
+        ):
+            empty_verbs.append(verb)
+    # Silent only when at least one verb's slot would take a lane right now:
+    # then routing is armed and the unconfigured verbs are a per-verb choice,
+    # not a dead router.
+    if len(empty_verbs) < len(route_resolve.SLOT_VERBS):
         return
     try:
-        roles = getattr(getattr(load_settings(), "model_routing", None), "roles", None)
+        roles = getattr(getattr(settings, "model_routing", None), "roles", None)
     except Exception:  # noqa: BLE001 - the note is a hint on top of the line
         roles = None
+    declared_count = sum(1 for _ in inventory.rows) if inventory.declared else 0
     typer.echo(
-        "band routing inactive: config.routing.models is undeclared, so "
-        "difficulty bands never pick a lane.\n"
+        f"band routing inactive: config.routing.models declares {declared_count} "
+        "row(s), and no verb slot has a lane that resolves: "
+        f"{', '.join(empty_verbs)}\n"
         f"      The built-in rows keep a tier request answerable: "
         f"{', '.join(sorted(inventory.rows)) or 'none'}\n"
-        "      Declare [[routing.models]] rows to activate "
+        "      Declare [[routing.models]] rows plus [agents.profiles.<verb>] "
+        "lanes to activate "
         "(docs/architecture/role-based-model-routing.md)"
         + (
             "\n      Note: model_routing.roles is set, but it routes by ROLE, "

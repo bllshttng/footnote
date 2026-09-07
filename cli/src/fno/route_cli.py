@@ -319,19 +319,35 @@ def inventory_cmd(
     band; it ranks after the banded rows that clear), or ``incomplete`` (no
     --model value). An empty inventory says so: a virgin install routes
     nothing from the grid.
+
+    After the rows, a ``slots`` section answers the question an operator
+    actually opens this verb with - what will a dispatch ride right now: each
+    dispatched verb's declared lanes in order with live capacity, its
+    ``on_exhausted`` terminal, and the lane a spawn would take.
     """
     from fno.agents.harnesses import READABLE_PROVIDERS
-    from fno.route_resolve import resolve_inventory
+    from fno.route_resolve import SLOT_VERBS, resolve_inventory, runtime_capacity, slot_states
 
     inv = resolve_inventory()
+    try:
+        capacity = runtime_capacity(inventory=inv)
+    except Exception:  # noqa: BLE001 - a capacity read never breaks the readout
+        capacity = {}
+    slots = [
+        slot_states(verb, capacity, inventory=inv) for verb in SLOT_VERBS
+    ]
     rows: list[dict[str, str]] = []
     refusals: list[str] = []
     if not inv.rows:
         note = "no inventory declared (config.routing.models is empty); the grid records no-inventory-declared"
         if json_output:
-            typer.echo(json.dumps({"objective": inv.objective, "models": [], "note": note}, indent=2))
+            typer.echo(json.dumps(
+                {"objective": inv.objective, "models": [], "note": note, "slots": slots},
+                indent=2,
+            ))
         else:
             typer.echo(note)
+            _echo_slots(slots)
         return
     for name in sorted(inv.rows):
         row = inv.rows[name]
@@ -359,6 +375,7 @@ def inventory_cmd(
             "objective": inv.objective,
             "prefer_harness": inv.prefer_harness,
             "models": rows,
+            "slots": slots,
         }, indent=2))
     else:
         typer.echo(f"objective={inv.objective}"
@@ -375,8 +392,30 @@ def inventory_cmd(
         typer.echo(_fmt({c: c.upper() for c in cols}))
         for r in rows:
             typer.echo(_fmt(r))
+        _echo_slots(slots)
     for line in refusals:
         typer.echo(f"refused: {line}", err=True)
+
+
+def _echo_slots(slots: list[dict]) -> None:
+    """Print the per-verb slot readout under the row table."""
+    if not slots:
+        return
+    typer.echo("slots:")
+    for slot in slots:
+        lanes = slot.get("lanes") or []
+        if not lanes:
+            typer.echo(f"  {slot['verb']}: {slot['would_take']}")
+            continue
+        lane_text = ", ".join(
+            f"{lane['rung'].rsplit('.', 1)[-1]} {lane['name']} capacity={lane['state']}"
+            for lane in lanes
+        )
+        line = f"  {slot['verb']}: {lane_text}"
+        if slot.get("on_exhausted"):
+            line += f"; on_exhausted={slot['on_exhausted']}"
+        line += f"; would take {slot['would_take']}"
+        typer.echo(line)
 
 
 @route_app.command("env")

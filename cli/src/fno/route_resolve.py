@@ -536,11 +536,79 @@ _SLOT_LANE_FIELDS = (
 )
 _LANE_PASSTHROUGH_FIELDS = ("substrate", "permission_mode", "pane_group")
 _ON_EXHAUSTED = ("queue", "degrade", "refuse")
+#: The verbs fno dispatches, and therefore the slots an operator fills.
+SLOT_VERBS = ("think", "blueprint", "target", "review", "crown")
 
 
 def _lane_field(lane: object, name: str) -> str:
     value = lane.get(name, "") if isinstance(lane, Mapping) else getattr(lane, name, "")
     return value.strip() if isinstance(value, str) else ""
+
+
+def _slot_fold(
+    lanes: Sequence[object],
+    rung_base: str,
+    settings: object,
+    chain: list[str],
+) -> tuple[
+    Optional[list[tuple[str, str]]],
+    Optional[Inventory],
+    dict[str, dict[str, str]],
+]:
+    """Fold a profile's lanes into ``(plan, row-inventory, fields-by-rung)``.
+
+    ``plan`` pairs each lane's config rung with the ``[[routing.models]]`` row
+    name it resolves to (an inline table folds as its own row named by its
+    config path). A config fault appends one ``slot=config`` terminal to
+    ``chain`` and answers ``(None, None, {})``; the walker and the readout
+    both treat that as refuse-by-name.
+    """
+    plan: list[tuple[str, str]] = []
+    fold: list[dict[str, Any]] = []
+    fields_by_rung: dict[str, dict[str, str]] = {}
+    for index, raw in enumerate(lanes):
+        rung = f"{rung_base}.lanes[{index}]"
+        if isinstance(raw, str):
+            if not raw.strip():
+                chain.append(f"slot=config {rung} is an empty lane name")
+                return None, None, {}
+            plan.append((rung, raw.strip()))
+            continue
+        if not isinstance(raw, Mapping) and not hasattr(raw, "provider"):
+            chain.append(
+                f"slot=config {rung} must be a table or a [[routing.models]] row name"
+            )
+            return None, None, {}
+        if isinstance(raw, Mapping):
+            unknown = sorted(set(raw) - set(_SLOT_LANE_FIELDS))
+            if unknown:
+                chain.append(f"slot=config {rung} has unknown field {unknown[0]!r}")
+                return None, None, {}
+            for key, value in raw.items():
+                if not isinstance(value, str):
+                    chain.append(
+                        f"slot=config {rung}.{key} must be a string; got {value!r}"
+                    )
+                    return None, None, {}
+        fields = {key: _lane_field(raw, key) for key in _SLOT_LANE_FIELDS}
+        if not any(fields.values()):
+            chain.append(f"slot=config {rung} is empty")
+            return None, None, {}
+        entry: dict[str, Any] = {"name": rung}
+        for key in _SLOT_LANE_FIELDS:
+            if key == "provider":
+                if fields[key]:
+                    entry["harness"] = fields[key]
+            elif key not in _LANE_PASSTHROUGH_FIELDS and fields[key]:
+                entry[key] = fields[key]
+        fold.append(entry)
+        fields_by_rung[rung] = fields
+        plan.append((rung, rung))
+    try:
+        cfg_rows = list(getattr(getattr(settings, "routing", None), "models", None) or [])
+    except Exception:  # noqa: BLE001
+        cfg_rows = []
+    return plan, inventory_from_rows(cfg_rows + fold, declared=True), fields_by_rung
 
 
 def resolve_slot(
@@ -641,57 +709,14 @@ def resolve_slot(
     # path: a string names a declared ``[[routing.models]]`` row; an inline
     # table folds as its own row named by its config path, with the posture
     # fields (substrate/permission_mode/pane_group) carried beside it.
-    plan: list[tuple[str, str, int]] = []
-    fold: list[dict[str, Any]] = []
-    fields_by_rung: dict[str, dict[str, str]] = {}
-    for index, raw in enumerate(lanes):
-        rung = f"{rung_base}.lanes[{index}]"
-        if isinstance(raw, str):
-            if not raw.strip():
-                chain.append(f"slot=config {rung} is an empty lane name")
-                return None, chain
-            plan.append((rung, raw.strip(), index))
-            continue
-        if not isinstance(raw, Mapping) and not hasattr(raw, "provider"):
-            chain.append(
-                f"slot=config {rung} must be a table or a [[routing.models]] row name"
-            )
-            return None, chain
-        if isinstance(raw, Mapping):
-            unknown = sorted(set(raw) - set(_SLOT_LANE_FIELDS))
-            if unknown:
-                chain.append(
-                    f"slot=config {rung} has unknown field {unknown[0]!r}"
-                )
-                return None, chain
-            for key, value in raw.items():
-                if not isinstance(value, str):
-                    chain.append(
-                        f"slot=config {rung}.{key} must be a string; got {value!r}"
-                    )
-                    return None, chain
-        fields = {key: _lane_field(raw, key) for key in _SLOT_LANE_FIELDS}
-        if not any(fields.values()):
-            chain.append(f"slot=config {rung} is empty")
-            return None, chain
-        entry: dict[str, Any] = {"name": rung}
-        for key in _SLOT_LANE_FIELDS:
-            if key == "provider":
-                if fields[key]:
-                    entry["harness"] = fields[key]
-            elif key not in _LANE_PASSTHROUGH_FIELDS and fields[key]:
-                entry[key] = fields[key]
-        fold.append(entry)
-        fields_by_rung[rung] = fields
-        plan.append((rung, rung, index))
-
-    try:
-        cfg_rows = list(
-            getattr(getattr(settings, "routing", None), "models", None) or []
-        )
-    except Exception:  # noqa: BLE001
-        cfg_rows = []
-    lane_inv = inventory_from_rows(cfg_rows + fold, declared=True)
+    folded = _slot_fold(lanes, rung_base, settings, chain)
+    if folded[0] is None or folded[1] is None:
+        return None, chain
+    plan, lane_inv, fields_by_rung = folded
+    plan = [
+        (rung, row_name, index)
+        for index, (rung, row_name) in enumerate(plan)
+    ]
 
     import os
 
@@ -804,6 +829,77 @@ def resolve_slot(
 
 def _max_band(a: str, b: str) -> str:
     return a if _BAND_RANK.get(a, -1) >= _BAND_RANK.get(b, -1) else b
+
+
+def slot_states(
+    verb: str,
+    capacity: Optional[Mapping[str, object]],
+    *,
+    inventory: Optional[Inventory] = None,
+    settings: object = None,
+) -> dict[str, Any]:
+    """The readout projection of one verb's slot: what is declared and what is
+    live, for ``fno config route inventory`` and ``fno config doctor``.
+
+    An unarmed slot and an absent one printed the same silence at every
+    readout, which is why the grid sat inert for weeks before anyone noticed.
+    This names both halves: the declared lanes in order with each lane's live
+    :func:`row_capacity` state, the ``on_exhausted`` terminal, and - resolved
+    by :func:`resolve_slot` ITSELF, never re-derived here - the lane a spawn
+    would take right now. DISPLAY, never selection: the fold mirrors the
+    selector's so the readout cannot show a lane the selector would refuse.
+    """
+    if settings is None:
+        try:
+            from fno.config import load_settings
+
+            settings = load_settings()
+        except Exception:  # noqa: BLE001 - an unreadable config reads as absent
+            settings = None
+    if inventory is None:
+        inventory = resolve_inventory(settings=settings)
+    profile = None
+    try:
+        profile = (getattr(getattr(settings, "agents", None), "profiles", None) or {}).get(verb)
+    except Exception:  # noqa: BLE001
+        profile = None
+    lanes = getattr(profile, "lanes", None) if profile is not None else None
+    rung_base = f"agents.profiles.{verb}"
+    out: dict[str, Any] = {"verb": verb, "lanes": [], "on_exhausted": "", "would_take": ""}
+    if not lanes:
+        if inventory.declared and inventory.rows:
+            out["would_take"] = f"no lanes; grid over {len(inventory.rows)} rows"
+        else:
+            out["would_take"] = "no lanes; no inventory; harness default"
+        return out
+    raw_exhausted = str(getattr(profile, "on_exhausted", "") or "refuse")
+    on_exhausted = raw_exhausted.strip().lower()
+    out["on_exhausted"] = (
+        on_exhausted if on_exhausted in _ON_EXHAUSTED else f"{raw_exhausted} (invalid)"
+    )
+    chain: list[str] = []
+    folded = _slot_fold(lanes, rung_base, settings, chain)
+    if folded[0] is None:
+        out["would_take"] = chain[-1]
+        return out
+    plan, lane_inv, _fields = folded
+    for rung, row_name in plan:
+        row = lane_inv.rows.get(row_name)
+        if row is None:
+            out["lanes"].append({
+                "rung": rung, "name": row_name, "state": "no-such-row",
+            })
+            continue
+        state, _window = row_capacity(row, capacity)
+        out["lanes"].append({"rung": rung, "name": row_name, "state": state})
+    candidate, slot_chain = resolve_slot(
+        verb, None, capacity, inventory=inventory, settings=settings
+    )
+    if candidate is not None and candidate.get("lane_rung"):
+        out["would_take"] = f"{candidate['lane_rung']} {candidate['lane']}"
+    elif slot_chain:
+        out["would_take"] = slot_chain[-1]
+    return out
 
 
 def harness_accounts(
