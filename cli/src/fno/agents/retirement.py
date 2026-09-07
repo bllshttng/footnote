@@ -1,11 +1,10 @@
 """The single owner of "has this worker's node already shipped" (x-1379).
 
-A king reads ``fno agents top`` while a provider lane is held by workers
-whose nodes already merged. This module is the join between the worker row
-and the graph. Fail-closed on every read it cannot trust: an absence of
-reported doneness is not doneness, because a human decides whether to kill
-a session from this verdict. Doneness is :func:`fno.graph.statuses.node_is_done`
-AND ``merge_status == "merged"`` AND an empty ``additional_prs``.
+The join between a ``fno agents top`` worker row and the graph. Fail-closed
+on every read it cannot trust: an absence of reported doneness is not
+doneness, because a human decides whether to kill a session from this
+verdict. Doneness is :func:`fno.graph.statuses.node_is_done` AND
+``merge_status == "merged"`` AND an empty ``additional_prs``.
 """
 
 from __future__ import annotations
@@ -30,11 +29,10 @@ def resolve_node(
     """Registry ``node`` field first, then the worker name.
 
     The field is authoritative but null on most live rows, so the fallback
-    reads the name's canonical shape ``<prefix>-<node_id>-<slug>``: tokens
-    1 and 2 only, as ``tokens[1:3]`` joined against the full ids, then bare
-    ``tokens[1]`` against a hex index - so a hex-looking slug word such as
-    ``feed`` in ``t-d15a-feed-timeout`` is never read as an id. A bare hex
-    matching two graph ids is ambiguous and resolves to nothing.
+    reads ``<prefix>-<node_id>-<slug>``: tokens 1 and 2 only, ``tokens[1:3]``
+    joined against the full ids, then bare ``tokens[1]`` against a hex index
+    - so a slug word like ``feed`` in ``t-d15a-feed-timeout`` is never read
+    as an id, and a bare hex matching two graph ids resolves to nothing.
     """
     if node_field:
         return node_field, "registry"
@@ -63,12 +61,11 @@ def verdicts(rows: Iterable[tuple[str, Optional[str]]], entries=None) -> dict:
     """``(name, node_field)`` roster -> ``{name: Retirement}``, one graph read.
 
     ``entries`` is the injectable graph (the offline seam, as in
-    ``sweep_rows``); when None the graph is loaded once for the roster. The
-    rule, in order: unresolved node, unknown node, not done, not merged, an
-    open additional PR - only then retire. Rule 5 holds on ANY non-empty
-    ``additional_prs`` without asking GitHub: the graph records no merge
-    state for those PRs and a debug view must not make a network call per
-    row; holding a merged extra PR costs one line a king checks by hand.
+    ``sweep_rows``). The rule, in order: unresolved node, unknown node, not
+    done, not merged, an open additional PR - only then retire. Rule 5 holds
+    on ANY non-empty ``additional_prs`` without asking GitHub: the graph
+    records no merge state for those PRs and a debug view must not make a
+    network call per row; holding a merged extra PR costs one line.
     """
     roster = list(rows)
     if entries is None:
