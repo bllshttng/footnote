@@ -128,11 +128,10 @@ def record_emit_failure(
     # BROKEN PROBE does not, or an import failure during teardown would cost the
     # durable row this function exists to keep.
     try:
-        from fno.events import HermeticEscapeError
-        from fno.hermetic import UndeclaredStateRootError, declared_root
+        from fno.hermetic import declared_root
 
         declared_root(Path(log_path))
-    except (HermeticEscapeError, UndeclaredStateRootError):
+    except RuntimeError:  # both refusals subclass it; an ImportError does not
         return
     except Exception:  # noqa: BLE001 - a broken probe still writes the row
         pass
