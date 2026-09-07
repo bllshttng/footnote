@@ -219,8 +219,8 @@ class SpawnError(RuntimeError):
 
 
 class SpawnQueueRefused(SpawnError):
-    """Exit 78: every configured lane is exhausted; the typed refusal carries
-    the per-lane reasons and, when a reset is known, ``retry_at``."""
+    """Exit 78: every configured lane exhausted; carries per-lane reasons
+    and, when a reset is known, ``retry_at``."""
 
     def __init__(self, message: str, retry_at: Optional[float] = None):
         super().__init__(message)

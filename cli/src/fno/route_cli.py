@@ -389,14 +389,13 @@ def _echo_slots(slots: list[dict]) -> None:
     """Print the per-verb slot readout under the row table."""
     typer.echo("slots: preview (simulated; no launch)")
     for slot in slots:
-        lanes = slot.get("lanes") or []
-        if not lanes:
+        if not slot.get("lanes"):
             typer.echo(f"  {slot['verb']}: {slot['would_take']}")
             continue
         lane_text = ", ".join(
             f"{lane['rung'].rsplit('.', 1)[-1]} {lane['name']} capacity={lane['state']}"
             + (f" identity={lane['identity']}" if lane.get("identity") else "")
-            for lane in lanes
+            for lane in slot["lanes"]
         )
         line = f"  {slot['verb']}: {lane_text}"
         if slot.get("on_exhausted"):

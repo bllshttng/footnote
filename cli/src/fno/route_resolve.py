@@ -459,8 +459,7 @@ def _slot_payload(
     role: Optional[str] = None, protected_role: Optional[str] = None,
     model_occupied: bool = False,
 ) -> dict[str, Any]:
-    """The slot/grid payload: both legs' inputs plus the gather the verb
-    cannot do (config objects, live vendor counts, effort verdicts)."""
+    """The slot/grid payload: both legs' inputs plus the gather the verb cannot do."""
     rows = _declared_rows(settings)
     lanes_payload = _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else lanes
     inventory_payload = _inventory_payload(inventory)

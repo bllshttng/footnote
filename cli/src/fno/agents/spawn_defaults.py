@@ -1240,8 +1240,7 @@ def inject_spawn_defaults(
         slot_receipt.append(("grid", "grid=model-axis-occupied", "routing"))
 
     # A lane is a COMPLETE coordinate: route/model stop at the lane (a codex
-    # lane inheriting a profile-level zai route builds an argv cli.py refuses).
-    # Postures (substrate/permission/account) still fall through.
+    # lane inheriting a zai route builds an argv cli.py refuses); postures fall through.
     _LANE_EXCLUSIVE = ("route", "model")
 
     def field(name: str) -> Tuple[str, Optional[str]]:
