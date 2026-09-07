@@ -740,7 +740,7 @@ def _verb_profile(settings: object, verb: Optional[str]) -> Optional[object]:
 
 def _slot_entry(
     settings: object, verb: Optional[str]
-) -> tuple[object, Optional[object], object]:
+) -> tuple[object, Optional[object], Any]:
     """Settings (a config read never raises), the verb's profile, its lanes."""
     if settings is None:
         try:
