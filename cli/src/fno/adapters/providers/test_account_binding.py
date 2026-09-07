@@ -96,7 +96,6 @@ def test_unpinned_slot_names_the_live_account_not_the_stamp(
     assert got.status == binding.MATCHED
     assert got.matched_record == "readyrule"
     assert got.observed_principal == "acc-readyrule/org-1"
-    assert got.credential_ref == managed.credential_digest(_blob("t-readyrule"))
 
 
 def test_unpinned_slot_reports_ambiguity_when_two_records_claim_the_identity(
@@ -272,7 +271,6 @@ def test_bearer_lane_defers_to_the_per_bearer_verdict(
 
     assert seen == ["tok-abc"]
     assert got.status == binding.MISMATCH
-    assert got.credential_ref == managed.credential_digest("tok-abc")
 
 
 def test_bearer_lane_refuses_a_shared_slot_holding_two_credentials(

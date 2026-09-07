@@ -32,7 +32,6 @@ class AccountBinding:
     observed_principal: str | None = None
     observed_label: str | None = None
     matched_record: str | None = None
-    credential_ref: str | None = None
     observed_at: float = 0.0
     reason: str | None = None
 
@@ -120,23 +119,21 @@ def resolve_account_binding(
 
     if bearer is not None:
         # Ahead of the unbound check below: the bearer lane owns that case.
-        ref = managed.credential_digest(bearer)
         if requested is None:
-            return _at(UNKNOWN, reason="bearer-needs-record", credential_ref=ref)
+            return _at(UNKNOWN, reason="bearer-needs-record")
         try:
             # claude reads the scoped Keychain item and the probe reads the
             # unscoped one, so a proven bearer is still unattributable here.
             if cred_root is None and len(managed.canonical_slot_blobs(harness)) > 1:
-                return _at(AMBIGUOUS, reason="ambiguous-slot", credential_ref=ref)
+                return _at(AMBIGUOUS, reason="ambiguous-slot")
             verdict = managed.bearer_principal_verdict(
                 harness, requested, root, bearer, now=now, ttl=ttl
             )
         except Exception:  # noqa: BLE001 - an unreadable store cannot vouch
-            return _at(UNKNOWN, reason="credential-unreadable", credential_ref=ref)
+            return _at(UNKNOWN, reason="credential-unreadable")
         status = {"match": MATCHED, "mismatch": MISMATCH}.get(verdict, UNKNOWN)
         return _at(
             status,
-            credential_ref=ref,
             matched_record=requested if status == MATCHED else None,
             reason=None if status == MATCHED else verdict,
         )
@@ -156,14 +153,13 @@ def resolve_account_binding(
     if not blobs:
         return _at(UNKNOWN, reason="no-slot-credential")
 
-    observed, label, ref = None, None, None
+    observed, label = None, None
     if len(blobs) == 1:
         cached = managed.cached_slot_principal(harness, root, blobs[0], now=now, ttl=ttl)
         if cached is not None:
             observed, observed_at = cached
-            ref = managed.credential_digest(blobs[0])
     if observed is None:
-        principal, proven, failure = managed.principal_of_blobs(blobs)
+        principal, _proven, failure = managed.principal_of_blobs(blobs)
         if principal is None:
             status = AMBIGUOUS if failure == "ambiguous-slot" else UNKNOWN
             return _at(status, reason=failure or "profile-unavailable")
@@ -171,7 +167,6 @@ def resolve_account_binding(
         if observed is None:
             return _at(UNKNOWN, reason="malformed-profile")
         label = principal.get("email") or principal.get("account_uuid")
-        ref = managed.credential_digest(proven or blobs[0])
         if len(blobs) == 1:
             managed.note_slot_principal(harness, root, observed, blobs[0], now=now)
 
@@ -186,7 +181,6 @@ def resolve_account_binding(
         "observed_principal": observed,
         "observed_label": label,
         "matched_record": matched,
-        "credential_ref": ref,
     }
     if requested is None:
         if len(matches) > 1:
