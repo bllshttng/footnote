@@ -150,7 +150,7 @@ Two resolvers, not every resolver. `claims::global_claims_root` carries the same
 
 The rule needs an instrument, and the instrument needs a control. `scripts/ci/check-state-canary.sh` is both.
 
-`plant` writes a marker graph and a `.canary` file into `$HOME/.fno` and `<checkout>/.fno`, then snapshots a sha256 of every file under both roots. `verify` recomputes and names every added, removed or changed path. The smoke runner brackets its whole run with the pair, on the PARENT `HOME`. The sandbox is what the suite may write. The parent `HOME` is the surface the canary protects, so handing it the sandbox would measure the wrong root and pass forever.
+`plant` writes a marker graph and a `.canary` file into `$HOME/.fno` and `<checkout>/.fno`, then snapshots a sha256 of every file under both roots. `verify` recomputes and names every added, removed or changed path. The smoke runner brackets its whole run with the pair, on the PARENT `HOME`. The sandbox is what the suite can write. The parent `HOME` is the surface the canary protects. Hand it the sandbox and it measures the wrong root, then passes forever.
 
 `self-test` is the positive control, and `guards.yml` runs it on every PR. It plants into a fresh `HOME`, writes ONE BYTE into the planted `graph.json`, and fails unless the inner `verify` goes red naming that file. A canary never shown able to go red is an absence-only success condition, which is the shape this page refuses everywhere else.
 
