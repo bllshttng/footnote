@@ -593,8 +593,7 @@ def verdicts(
     out: list[Verdict] = []
     for row in rows:
         occupants = live_in_tree.get(row.cwd, ())
-        # Only a live occupant reports: a finished row beside one live row is
-        # one session in the tree, not a contention.
+        # Only a live occupant reports; a finished row beside a live one is not contention.
         peers = (
             tuple(sid for sid in occupants if sid != row.row_id)
             if row.row_id in occupants else ()

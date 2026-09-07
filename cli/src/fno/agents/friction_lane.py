@@ -1,8 +1,8 @@
 """The friction lane: reconcile ONE ``[watchdog-friction:*]`` operator
 question to the contended + polling_settled set the sweep measured, riding
 the stale lane's channel. Both verdicts are report-only, so a human is the
-only lane that clears them; one row per finding rebuilds the
-17-percent-signal queue the needs-fold cleanup emptied."""
+only lane that clears them; one row per finding rebuilds the queue the
+needs-fold cleanup emptied."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -41,7 +41,6 @@ def reconcile_friction(pairs, *, root: Path, session_id: "str | None",
 
 
 def run(*, json_out: bool) -> None:
-    """The hidden verb's whole body, beside the fold it drives."""
     import json
 
     from fno.agents import watchdog as wd
