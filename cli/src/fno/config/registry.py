@@ -382,7 +382,7 @@ FIELD_META: dict[str, Meta] = {
         "advanced", "Consecutive dispatch failures before a node is parked."
     ),
     "active_backlog.max_concurrent": Meta(
-        "never", "In-flight nodes per project per tick (v1 == 1)."
+        "never", "Global ceiling on concurrent converge runs across all missions."
     ),
     "active_backlog.mission": Meta(
         "never", "Scope the drain daemon to a single mission's nodes."

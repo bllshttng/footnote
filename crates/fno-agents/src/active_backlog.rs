@@ -52,12 +52,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::Semaphore;
 
 use crate::claims::{self, ClaimState};
 use crate::events::EventEmitter;
@@ -996,6 +997,64 @@ pub struct ResolvedTarget {
     /// mission is skipped by the supervisor.
     #[serde(default)]
     pub mission: Option<String>,
+    /// GLOBAL ceiling on concurrent converge runs across every mission, from
+    /// `config.active_backlog.max_concurrent`. Every target carries the same
+    /// value; the target list is just the daemon's one config channel. An
+    /// older receipt that omits it parses to the serial default of 1.
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: u32,
+}
+
+fn default_max_concurrent() -> u32 {
+    1
+}
+
+/// The drain's ONE converge gate: `max_concurrent` permits shared by every
+/// mission loop.
+///
+/// The cap was declared and read by nothing for a release, so a config saying
+/// 1 ran five concurrent `advance --epic` children (one per active mission) at
+/// 27-38% CPU each and held the machine's load above the spawn gate's refusal
+/// trigger for hours. Holding it here, where the converge runs are launched, is
+/// what makes the declared number bind.
+#[derive(Debug)]
+pub struct ConvergeGate {
+    sem: Semaphore,
+    /// Permits currently issued. `Semaphore` exposes only what is *available*,
+    /// which says nothing about capacity while converges hold permits, so the
+    /// total is tracked here to compute a resize delta.
+    total: AtomicU32,
+}
+
+impl ConvergeGate {
+    pub fn new(cap: u32) -> Self {
+        let cap = cap.max(1);
+        Self {
+            sem: Semaphore::new(cap as usize),
+            total: AtomicU32::new(cap),
+        }
+    }
+
+    /// Re-sync the gate to `cap` so a config change lands without a daemon
+    /// restart. Growing adds permits at once. Shrinking can only forget permits
+    /// that are FREE, so the total records what actually went and the next
+    /// resync retries the remainder as in-flight converges hand theirs back.
+    pub fn resize(&self, cap: u32) {
+        let cap = cap.max(1);
+        let old = self.total.load(Ordering::SeqCst);
+        if cap > old {
+            self.sem.add_permits((cap - old) as usize);
+            self.total.store(cap, Ordering::SeqCst);
+        } else if cap < old {
+            let forgotten = self.sem.forget_permits((old - cap) as usize) as u32;
+            self.total.store(old - forgotten, Ordering::SeqCst);
+        }
+    }
+
+    /// The cap the gate is currently enforcing.
+    pub fn capacity(&self) -> u32 {
+        self.total.load(Ordering::SeqCst)
+    }
 }
 
 /// Shell `fno config active-backlog --json` to discover enabled drain targets.
@@ -1228,6 +1287,9 @@ pub async fn run_supervisor(
     // above, so a sinks-only project fans out without opting into the drain.
     let mut fanout_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
     let recheck = Duration::from_secs(60);
+    // ONE gate for the whole drain: `max_concurrent` bounds concurrent converge
+    // runs across every mission, never per mission.
+    let gate = Arc::new(ConvergeGate::new(1));
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -1238,6 +1300,11 @@ pub async fn run_supervisor(
         fanout_tasks.retain(|_, h| !h.is_finished());
 
         let (targets, resolve_failure) = resolve_targets_report(&fno_bin);
+        // Re-sync the cap every recheck so `fno config set` lands without a
+        // daemon restart. With no targets there is nothing to gate.
+        if let Some(cap) = targets.iter().map(|t| t.max_concurrent).max() {
+            gate.resize(cap);
+        }
         let fanout_targets = resolve_fanout_targets(&fno_bin);
         // `live` keeps the daemon out of idle-exit while ANY supervised work
         // exists - drain OR fanout. A sink-only project (no active_backlog) must
@@ -1289,6 +1356,7 @@ pub async fn run_supervisor(
                     fno_bin.clone(),
                     emitter.clone(),
                     Arc::clone(&shutdown),
+                    Arc::clone(&gate),
                 )));
             }
         }
@@ -1344,6 +1412,7 @@ async fn mission_drain_loop(
     fno_bin: String,
     emitter: EventEmitter,
     shutdown: Arc<AtomicBool>,
+    gate: Arc<ConvergeGate>,
 ) {
     // A malformed target with no mission is filtered by the supervisor before
     // spawn; default to empty so this never panics if one slips through (the
@@ -1385,6 +1454,32 @@ async fn mission_drain_loop(
         };
         let journal = journal_for(&cfg.cwd);
 
+        // Take a converge slot before the tick shells `advance --epic`. A
+        // mission that must wait SAYS so first and then waits its turn: a
+        // skipped mission starves silently, and an unlogged wait reads as one.
+        let permit = match gate.sem.try_acquire() {
+            Ok(p) => p,
+            Err(_) => {
+                crate::tick_ledger::emit_tick(
+                    &journal,
+                    "active_backlog",
+                    "daemon",
+                    0,
+                    Some("converge_cap"),
+                    Some(&format!(
+                        "mission={} queued for 1 of {} converge slot(s)",
+                        cfg.mission,
+                        gate.capacity()
+                    )),
+                    cfg.interval_seconds.max(1),
+                );
+                match gate.sem.acquire().await {
+                    Ok(p) => p,
+                    Err(_) => break,
+                }
+            }
+        };
+
         // The tick is synchronous; offload so the async runtime is never stalled.
         // Move the breaker AND pending set in and hand them back so the streak
         // and in-flight tracking survive the tick.
@@ -1396,7 +1491,10 @@ async fn mission_drain_loop(
             let outcome = mission_drain_tick(&cfg, &mut b, &mut p, &journal);
             (outcome, b, p)
         });
-        match handle.await {
+        let tick_result = handle.await;
+        // Hand the slot back the moment the converge is over, before any wait.
+        drop(permit);
+        match tick_result {
             Ok((outcome, b, p)) => {
                 breaker = b;
                 pending = p;
@@ -2833,5 +2931,198 @@ mod tests {
         }
         assert_eq!(breaker.consecutive_failures("x-2222"), 0);
         assert!(!record.exists(), "no defer on a skipped child");
+    }
+
+    /// A stub `fno` for the converge-cap tests: it answers `config
+    /// active-backlog --json` with `targets_json`, and every `backlog advance
+    /// --epic` writes `S`, holds the slot for 300ms, writes `E`, then prints a
+    /// benign receipt. The S/E log is the positive marker: overlap in it is
+    /// concurrent converge runs measured directly, never a config read.
+    fn stub_fno_converge(
+        dir: &std::path::Path,
+        log: &std::path::Path,
+        targets_json: &str,
+    ) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\n\
+                 if [[ \"$1\" == config && \"$2\" == active-backlog ]]; then \
+                 cat <<'JSON'\n{targets_json}\nJSON\nexit 0; fi\n\
+                 if [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
+                 echo S >> \"{log}\"\nsleep 0.3\necho E >> \"{log}\"\n\
+                 printf '%s' '{{\"epic_id\":\"x-e\",\"deactivated\":false,\"all_done\":false,\"children\":[]}}'\nexit 0; fi\n\
+                 exit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
+    /// One drain target line for the stub's `config active-backlog` receipt.
+    fn converge_target(index: usize, cwd: &std::path::Path, cap: u32) -> String {
+        format!(
+            r#"{{"project":"p{index}","cwd":"{cwd}","interval_seconds":1,"failure_limit":3,"mission":"x-m{index}","max_concurrent":{cap}}}"#,
+            cwd = cwd.display()
+        )
+    }
+
+    /// The greatest number of converge runs that overlapped, replayed from the
+    /// stub's S/E log, plus how many ran at all. A cap enforced as a permanent
+    /// block would show a low overlap AND a low run count, so both are read.
+    fn peak_and_total(log: &std::path::Path) -> (usize, usize) {
+        let mut running = 0usize;
+        let mut peak = 0usize;
+        let mut total = 0usize;
+        for line in journal_lines(log) {
+            match line.trim() {
+                "S" => {
+                    running += 1;
+                    total += 1;
+                    peak = peak.max(running);
+                }
+                "E" => running = running.saturating_sub(1),
+                _ => {}
+            }
+        }
+        (peak, total)
+    }
+
+    /// Run `missions` real [`mission_drain_loop`]s through one shared gate of
+    /// `cap` permits for `run_ms`, then hand back the temp dir so a caller can
+    /// read the journal it wrote.
+    async fn drive_missions(
+        tmp: &std::path::Path,
+        cap: u32,
+        missions: usize,
+        run_ms: u64,
+    ) -> String {
+        std::env::set_var("HOME", tmp);
+        let log = tmp.join("converges.log");
+        let targets: Vec<String> = (0..missions)
+            .map(|i| converge_target(i, tmp, cap))
+            .collect();
+        let fno = stub_fno_converge(&tmp.join("bin"), &log, &format!("[{}]", targets.join(",")));
+
+        let resolved = resolve_targets(&fno);
+        assert_eq!(
+            resolved.len(),
+            missions,
+            "the stub must resolve every mission"
+        );
+        let gate = Arc::new(ConvergeGate::new(cap));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let emitter = EventEmitter::new(tmp.join("emitter.jsonl"), "test");
+        let mut handles = Vec::new();
+        for target in resolved {
+            handles.push(tokio::spawn(mission_drain_loop(
+                target,
+                fno.clone(),
+                emitter.clone(),
+                Arc::clone(&shutdown),
+                Arc::clone(&gate),
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(run_ms)).await;
+        shutdown.store(true, Ordering::SeqCst);
+        for h in handles {
+            let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+        }
+        log.display().to_string()
+    }
+
+    /// The cap is GLOBAL: three missions, one slot, one converge at a time.
+    /// Asserted on overlapping converge runs across consecutive ticks, which is
+    /// what five concurrent `advance --epic` children looked like in the field.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_slot_serializes_every_mission() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let log = drive_missions(tmp.path(), 1, 3, 2500).await;
+        let (peak, total) = peak_and_total(std::path::Path::new(&log));
+        assert!(
+            total >= 3,
+            "every mission must get a turn, saw {total} converge(s)"
+        );
+        assert_eq!(
+            peak, 1,
+            "max_concurrent=1 must admit one converge at a time"
+        );
+    }
+
+    /// The converse, so the cap is not shipped as a permanent block: three slots
+    /// admit three at once, and the fourth mission still runs once one frees.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn three_slots_admit_three_and_queue_the_fourth() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let log = drive_missions(tmp.path(), 3, 4, 2500).await;
+        let (peak, total) = peak_and_total(std::path::Path::new(&log));
+        assert_eq!(
+            peak, 3,
+            "max_concurrent=3 must admit three converges at once"
+        );
+        assert!(
+            total >= 4,
+            "the queued mission must still run, saw {total} converge(s)"
+        );
+    }
+
+    /// A queued mission is visible in the drain receipt rather than silently
+    /// starved: its tick row names the cap it is waiting on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_queued_mission_writes_a_tick_row_naming_the_cap() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        drive_missions(tmp.path(), 1, 2, 1500).await;
+
+        let rows = journal_lines(&tmp.path().join(".fno").join("events.jsonl"));
+        let queued: Vec<&String> = rows
+            .iter()
+            .filter(|l| l.contains("\"skip_reason\":\"converge_cap\""))
+            .collect();
+        assert!(!queued.is_empty(), "a queued mission must write a tick row");
+        assert!(
+            queued[0].contains("queued for 1 of 1 converge slot(s)"),
+            "the row must name the cap: {}",
+            queued[0]
+        );
+        assert!(
+            queued[0].contains("mission=x-m"),
+            "the row must name the mission: {}",
+            queued[0]
+        );
+    }
+
+    #[test]
+    fn resolved_target_defaults_max_concurrent_to_one() {
+        let t: ResolvedTarget = serde_json::from_slice(
+            br#"{"project":"p","cwd":"/repo","interval_seconds":5,"failure_limit":3,"mission":"x-e"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            t.max_concurrent, 1,
+            "an older receipt is serial, not unbounded"
+        );
+    }
+
+    #[test]
+    fn gate_grows_and_shrinks_with_the_config() {
+        let gate = ConvergeGate::new(1);
+        assert_eq!(gate.capacity(), 1);
+        gate.resize(3);
+        assert_eq!(gate.capacity(), 3);
+        let held = gate.sem.try_acquire().unwrap();
+        gate.resize(1);
+        assert_eq!(gate.capacity(), 1);
+        // A shrink can only forget FREE permits; the held one stays issued so
+        // the next resync collects it rather than losing the shrink.
+        gate.resize(0);
+        assert_eq!(gate.capacity(), 1, "zero is clamped to a serial drain");
+        drop(held);
     }
 }
