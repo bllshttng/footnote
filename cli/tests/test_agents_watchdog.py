@@ -24,6 +24,7 @@ from fno.agents.watchdog import (
     GHOST,
     LEAVE,
     REROUTE,
+    SANDBOX_BLOCKED,
     Row,
     STALE,
     TailFacts,
@@ -3402,6 +3403,53 @@ def test_the_advisory_reaches_the_digest():
         "terminal_harness_rows": 0,
     }
     assert "t-worker" in digest_text(payload)
+
+
+def test_codex_sandbox_denial_is_a_reap_verdict(monkeypatch):
+    rows = [Row("cccc3333-0011", "t-sandbox", "working", "x-sandbox", "/tmp/w")]
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
+    [v] = _run(
+        rows,
+        {
+            "cccc3333-0011": _facts(
+                '<help reason="Codex sandbox blocks Git writes" '
+                'evidence=".git/refs/heads/feature/x-sandbox.lock: '
+                'Operation not permitted">'
+            )
+        },
+        claims={"x-sandbox": {"state": "free"}},
+    )
+    assert v.verdict == SANDBOX_BLOCKED
+    assert v.action == "reap"
+    assert "sandbox" in v.basis.lower()
+
+
+@pytest.mark.parametrize(
+    "claims,commit_count,guard_text",
+    [
+        ({"x-sandbox": {"state": "live", "holder": "target-session:other"}}, 0, "claim"),
+        ({"x-sandbox": {"state": "free"}}, 2, "commit"),
+    ],
+)
+def test_codex_sandbox_denial_stays_when_a_guard_holds(
+    monkeypatch, claims, commit_count, guard_text
+):
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: commit_count)
+    rows = [Row("cccc3333-0012", "t-sandbox", "working", "x-sandbox", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {
+            "cccc3333-0012": _facts(
+                '<help reason="Codex sandbox blocks Git writes" '
+                'evidence=".git/refs/heads/feature/x-sandbox.lock: '
+                'Operation not permitted">'
+            )
+        },
+        claims=claims,
+    )
+    assert v.verdict != SANDBOX_BLOCKED
+    assert v.action == "none"
+    assert guard_text in v.basis.lower()
 
 
 # ---------------------------------------------------------------------------

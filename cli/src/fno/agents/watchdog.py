@@ -72,6 +72,7 @@ LEAVE = "leave"
 #: the row surfaces in the digest, which is the whole point: nothing today
 #: notices a live worker on a node no claim covers.
 UNCLAIMED = "unclaimed"
+SANDBOX_BLOCKED = "sandbox-blocked"
 RECOVERABLE = "recoverable"
 #: The keeper lane: a `--only keeper` filter value, not a row verdict -
 #: keepers have no registry row by definition (a claimed keeper is LEAVE).
@@ -95,7 +96,7 @@ SPENT = "spent"
 #: was added (`--only unclaimed` once exited 2 on a live verdict).
 VERDICTS = frozenset({
     GHOST, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE, KEEPER,
-    CONTENDED, POLLING_SETTLED, SILENCE, SPENT,
+    CONTENDED, POLLING_SETTLED, SANDBOX_BLOCKED, SILENCE, SPENT,
 })
 
 _RECOVERY_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd])$", re.IGNORECASE)
@@ -570,9 +571,13 @@ def verdicts(
     silence_after_s: Optional[float] = None,
 ) -> list[Verdict]:
     """One verdict per row, in table precedence (ghost > contended > silence
-    > stale > reroute > wake > leave). ``claim_for(node)`` returns the
-    ``node:<id>`` claim view; ``node_state_for`` returns the graph entry or
-    None. ``silence_after_s`` is None (disabled) unless a caller arms it."""
+    > stale > reroute > sandbox-blocked > wake > leave). Each basis string
+    names the measurement that decided it, so a reader can falsify the call.
+    ``claim_for(node)`` returns the ``node:<id>`` claim view
+    (``{"state", "holder"}``); ``node_state_for`` returns the graph entry or
+    None. ``worktree_check`` defaults to the filesystem linked-worktree read;
+    inject a stub. ``silence_after_s`` is None (disabled) unless a caller
+    arms it."""
     facts_by_row: dict[str, Optional[TailFacts]] = {}
     for row in rows:
         try:
@@ -751,6 +756,91 @@ def _spent_basis(
     return None
 
 
+def _branch_commit_count(cwd: str) -> Optional[int]:
+    """Count commits on the checked-out branch beyond ``origin/main``."""
+    if not cwd:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, "rev-list", "--count", "origin/main..HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return int(proc.stdout.strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _sandbox_denial_text(facts: Optional[TailFacts]) -> Optional[str]:
+    """Return the last distress text only for the Git sandbox signature."""
+    if facts is None:
+        return None
+    text = facts.last_text or facts.tail_text
+    if "Operation not permitted" not in text:
+        return None
+    if re.search(r"(?<![\w.])\.git[/\\]", text) is None:
+        return None
+    return text
+
+
+def _sandbox_blocked_verdict(
+    row: Row,
+    *,
+    facts: Optional[TailFacts],
+    claim_for: Callable[[str], dict],
+) -> Optional[Verdict]:
+    """Classify a Codex Git denial only when both reaping guards are clear."""
+    evidence = _sandbox_denial_text(facts)
+    if evidence is None:
+        return None
+    if not row.node:
+        return Verdict(
+            row.row_id, row.name, row.state, LEAVE,
+            "sandbox denial held: node identity unreadable; no reap", "none",
+        )
+    try:
+        claim = claim_for(row.node)
+    except Exception as exc:  # noqa: BLE001 - unreadable claims never authorize reap
+        return Verdict(
+            row.row_id, row.name, row.state, LEAVE,
+            f"sandbox denial held: claim unreadable ({exc}); no reap", "none",
+        )
+    if claim.get("state") != "free":
+        state = claim.get("state") or "unknown"
+        holder = claim.get("holder") or "unknown"
+        return Verdict(
+            row.row_id, row.name, row.state, LEAVE,
+            f"sandbox denial held: node claim {state} ({holder}); no reap", "none",
+        )
+    commit_count = _branch_commit_count(row.cwd)
+    if commit_count is None:
+        return Verdict(
+            row.row_id, row.name, row.state, LEAVE,
+            "sandbox denial held: branch commit count unreadable; no reap", "none",
+        )
+    if commit_count:
+        return Verdict(
+            row.row_id, row.name, row.state, LEAVE,
+            f"sandbox denial held: branch carries {commit_count} commit(s); no reap",
+            "none",
+        )
+    return Verdict(
+        row.row_id,
+        row.name,
+        row.state,
+        SANDBOX_BLOCKED,
+        f"Codex sandbox blocked Git writes: {evidence}; node claim free; branch commits=0",
+        "reap",
+    )
+
+
 def _verdict_one(
     row: Row,
     *,
@@ -844,6 +934,12 @@ def _verdict_one(
             "429 terminal for this session; waiting for positive provider quorum",
             "none",
         )
+
+    sandbox_verdict = _sandbox_blocked_verdict(
+        row, facts=facts, claim_for=claim_for
+    )
+    if sandbox_verdict is not None:
+        return sandbox_verdict
 
     # wake: blocked or stopped, a transcript exists, and no live 429 window.
     # Every condition is POSITIVE evidence (king ruling 2026-08-17): an age
@@ -2831,7 +2927,10 @@ def _confirm_once(
 #: so bare ``--apply`` stops there; reroute respawns, so it needs
 #: ``--apply-all``. ghost NEVER auto-acts (the remedy is a respawn under a
 #: new id, the operator's call).
-LANES = {"wake": frozenset({WAKE, SILENCE}), "all": frozenset({WAKE, REROUTE, SILENCE})}
+LANES = {
+    "wake": frozenset({WAKE, SILENCE}),
+    "all": frozenset({WAKE, REROUTE, SANDBOX_BLOCKED, SILENCE}),
+}
 
 #: The one silent outcome: the verdict was outside the lane the caller asked
 #: for, so nothing was attempted and there is nothing to report. Every other
@@ -2887,9 +2986,36 @@ def apply_verdict(
             return _apply_reroute(
                 v, cwd=cwd, failover_fn=failover_fn, rotation=rotation
             )
+        if v.verdict == SANDBOX_BLOCKED:
+            return _apply_sandbox_blocked(v, cwd=cwd, runner=runner)
     except (OSError, subprocess.SubprocessError) as exc:
         return "refused", f"{v.verdict} action failed: {exc}"
     return SKIPPED, f"{v.verdict} has no auto-action"
+
+
+def _apply_sandbox_blocked(
+    v: Verdict, *, cwd: str, runner: Callable
+) -> tuple[str, str]:
+    proc = runner(
+        [
+            *_fno(),
+            "agents",
+            "rm",
+            v.row_id,
+            "--force",
+            "--audit-reason",
+            "codex-sandbox-blocked",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+        cwd=cwd or None,
+    )
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return "refused", f"reap exit {proc.returncode}: {tail[-1] if tail else ''}"
+    return "applied", f"reaped {v.name}; Codex sandbox blocked Git writes"
 
 
 def _apply_wake(v: Verdict, *, cwd: str, runner: Callable, agent: str) -> tuple[str, str]:
