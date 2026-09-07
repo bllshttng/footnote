@@ -24,21 +24,33 @@ use std::path::{Path, PathBuf};
 /// and by operators who keep state outside `$HOME`).
 pub const HOME_ENV: &str = "FNO_AGENTS_HOME";
 
-/// Whether this process declared a root. `FNO_TEST_HERMETIC` has the same
+/// Whether a pin value declares a root. `FNO_TEST_HERMETIC` has the same
 /// three states the Python fence reads: `"1"` declares a sandboxed process
 /// root, `"0"` is ambient on purpose, and absent under test is an escaped
-/// reader.
+/// reader. Neither value names a LANE. Nothing in the tree runs on `"0"` as a
+/// lane, because `fno doctor test --ambient dirty` ends at `neutralise`, which
+/// stamps `1`. `"0"` is set per test, to state an ambient read on purpose.
 ///
-/// `"1"` is a CLAIM, not a proof. `fno doctor test rust` makes it true by
+/// A pure function of its input, so the receipt test states the rule without
+/// touching the process environment.
+fn root_declared(pin: Option<&str>) -> bool {
+    matches!(pin, Some("0") | Some("1"))
+}
+
+/// Whether this process declared a root, read from the environment.
+fn test_root_declared() -> bool {
+    root_declared(std::env::var("FNO_TEST_HERMETIC").ok().as_deref())
+}
+
+/// Whether this process CLAIMS a sandbox.
+///
+/// `"1"` is a claim, not a proof. `fno doctor test rust` makes it true by
 /// pinning `HOME` inside a `mktemp` sandbox; a bare `FNO_TEST_HERMETIC=1
 /// cargo test` does not, and there [`fence_declared_root`] refuses the
 /// resolved root instead. That refusal is the point: a process claiming a
 /// sandbox it does not have should hear so, loudly.
-fn test_root_declared() -> bool {
-    matches!(
-        std::env::var("FNO_TEST_HERMETIC").ok().as_deref(),
-        Some("0") | Some("1")
-    )
+fn test_sandbox_claimed() -> bool {
+    std::env::var("FNO_TEST_HERMETIC").ok().as_deref() == Some("1")
 }
 
 /// Refuse an ambient `$HOME` fallback under test, naming the pin to set.
@@ -46,8 +58,12 @@ fn test_root_declared() -> bool {
 /// `cargo test` never sandboxes `HOME`, so a unit test that resolved a state
 /// root through the fallback landed manifests in the operator's real
 /// `~/.fno/spaces`.
-fn refuse_undeclared_home_fallback(pin: &str) {
-    if !cfg!(test) || test_root_declared() {
+///
+/// `declared` is an argument, not an environment read, so the receipt test
+/// constructs the case. Reproducing it by removing the pins process-globally
+/// raced every lock-free state-resolving test in the binary into this panic.
+fn refuse_undeclared_home_fallback(declared: bool, pin: &str) {
+    if !cfg!(test) || declared {
         return;
     }
     panic!(
@@ -62,8 +78,8 @@ fn refuse_undeclared_home_fallback(pin: &str) {
 ///
 /// Both raw and canonical forms of the temp dir are compared: macOS reports it
 /// as `/var/folders/...` while `canonicalize` yields `/private/var/...`.
-fn fence_declared_root(root: &Path) {
-    if !cfg!(test) || std::env::var("FNO_TEST_HERMETIC").ok().as_deref() != Some("1") {
+fn fence_declared_root(claimed: bool, root: &Path) {
+    if !cfg!(test) || !claimed {
         return;
     }
     let tmp = std::env::temp_dir();
@@ -103,15 +119,15 @@ impl AgentsHome {
     pub fn from_env() -> Self {
         if let Some(v) = std::env::var_os(HOME_ENV) {
             let root = PathBuf::from(v);
-            fence_declared_root(&root);
+            fence_declared_root(test_sandbox_claimed(), &root);
             return AgentsHome { root };
         }
-        refuse_undeclared_home_fallback(HOME_ENV);
+        refuse_undeclared_home_fallback(test_root_declared(), HOME_ENV);
         let base = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         let root = base.join(".fno").join("agents");
-        fence_declared_root(&root);
+        fence_declared_root(test_sandbox_claimed(), &root);
         AgentsHome { root }
     }
 
@@ -136,6 +152,27 @@ impl AgentsHome {
     /// Construct rooted at an explicit directory (tests).
     pub fn at(root: impl Into<PathBuf>) -> Self {
         AgentsHome { root: root.into() }
+    }
+
+    /// The shared `registry.json` path, resolved for COMPARISON only.
+    ///
+    /// [`AgentsHome::from_env_opt`] answers `None` when a test declared no
+    /// root, and a caller that only compares a target against the shared file
+    /// then has nothing to compare. That degrade reads as "this is not the
+    /// shared file", which turns a corruption guard OFF instead of narrowing
+    /// it: losing the pin must never widen what a fence permits. This resolves
+    /// the same path [`AgentsHome::from_env`] would and skips the fences,
+    /// because nothing is written through it.
+    pub fn shared_registry_json() -> PathBuf {
+        if let Some(v) = std::env::var_os(HOME_ENV) {
+            return PathBuf::from(v).join("registry.json");
+        }
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".fno")
+            .join("agents")
+            .join("registry.json")
     }
 
     /// The agents root directory.
@@ -427,7 +464,7 @@ pub fn worktree_repo_root(cwd: &Path) -> PathBuf {
 fn spaces_root_dir() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_SPACES_DIR").filter(|v| !v.is_empty()) {
         let root = PathBuf::from(v);
-        fence_declared_root(&root);
+        fence_declared_root(test_sandbox_claimed(), &root);
         return root;
     }
     durable_spaces_root()
@@ -442,14 +479,14 @@ fn durable_spaces_root() -> PathBuf {
         let home = PathBuf::from(&v);
         home.parent().map(|p| p.to_path_buf()).unwrap_or(home)
     } else {
-        refuse_undeclared_home_fallback("FNO_SPACES_DIR");
+        refuse_undeclared_home_fallback(test_root_declared(), "FNO_SPACES_DIR");
         std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .map(|h| PathBuf::from(h).join(".fno"))
             .unwrap_or_else(|| PathBuf::from(".fno"))
     };
     let root = state_root.join("spaces");
-    fence_declared_root(&root);
+    fence_declared_root(test_sandbox_claimed(), &root);
     root
 }
 
@@ -1040,17 +1077,17 @@ mod tests {
     /// The refusal itself: with nothing declared, resolving a state root must
     /// name the pin to set rather than reach the operator's real `~/.fno`.
     /// A bare `cargo test` sandboxes no HOME, so this is the only fence there.
+    ///
+    /// The fence is handed its declaration rather than reached through the
+    /// process environment. Removing the three pins process-globally to
+    /// reproduce the case raced every lock-free state-resolving test in the
+    /// binary into this same panic: `finalize.rs` through `run_log_path` and
+    /// `events_path`, `claude_adopt.rs`, `codex_inject.rs`. None of them take
+    /// `test_env_lock`, and a mutex only guards the tests that hold it.
     #[test]
     #[should_panic(expected = "FNO_SPACES_DIR")]
     fn an_undeclared_root_refuses_and_names_the_pin() {
-        let _lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let _restore = EnvGuard::capture();
-        std::env::remove_var("FNO_SPACES_DIR");
-        std::env::remove_var(HOME_ENV);
-        std::env::remove_var("FNO_TEST_HERMETIC");
-        let _ = space_dir(&std::env::temp_dir());
+        refuse_undeclared_home_fallback(false, "FNO_SPACES_DIR");
     }
 
     /// A claimed sandbox that is not one is refused, not trusted. Nothing in
@@ -1059,28 +1096,26 @@ mod tests {
     #[test]
     #[should_panic(expected = "outside the test sandbox")]
     fn a_claimed_sandbox_that_is_not_one_is_refused() {
-        let _lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let _restore = EnvGuard::capture();
-        std::env::set_var("FNO_TEST_HERMETIC", "1");
-        std::env::set_var(HOME_ENV, "/nonexistent-outside-any-tmpdir/.fno/agents");
-        let _ = AgentsHome::from_env();
+        fence_declared_root(
+            true,
+            Path::new("/nonexistent-outside-any-tmpdir/.fno/agents"),
+        );
     }
 
-    /// `"0"` is a declaration, not a missing one, and it is what the dirty
-    /// ambient lane runs on.
+    /// A declared sandbox that IS one passes the same fence.
     #[test]
-    fn an_ambient_declaration_resolves_without_refusing() {
-        let _lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let _restore = EnvGuard::capture();
-        std::env::remove_var("FNO_SPACES_DIR");
-        std::env::remove_var(HOME_ENV);
-        std::env::set_var("FNO_TEST_HERMETIC", "0");
-        assert!(space_dir(&std::env::temp_dir())
-            .ends_with(space_slug(&worktree_repo_root(&std::env::temp_dir()))));
+    fn a_root_under_the_temp_dir_passes_the_sandbox_fence() {
+        fence_declared_root(true, &std::env::temp_dir().join("fno-fence-ok"));
+    }
+
+    /// `"0"` is a declaration, not a missing one. It is set per test, never by
+    /// a lane: `--ambient dirty` ends at `neutralise`, which stamps `1`.
+    #[test]
+    fn an_ambient_declaration_is_a_declaration() {
+        assert!(root_declared(Some("0")));
+        assert!(root_declared(Some("1")));
+        assert!(!root_declared(None));
+        assert!(!root_declared(Some("")));
     }
 
     /// Mirror of the Python PARITY_SCENARIOS row "foreign-env-root-refuses"
