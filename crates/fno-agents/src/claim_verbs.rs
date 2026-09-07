@@ -495,8 +495,17 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
             if let (Some(pid), Some(start)) = (e.pid, e.pid_start_time) {
                 by_session.insert(sid.to_string(), (pid, start));
             }
+            // The registry's own name contract (state.rs row_for_token): a
+            // name OR any prior alias resolves the row. A handover holder
+            // carries the name from mint time, so a worker renamed inside its
+            // window must still resolve through the alias.
             if !e.name.is_empty() {
                 by_name.insert(e.name.clone(), sid.to_string());
+            }
+            for alias in &e.aliases {
+                if !alias.is_empty() {
+                    by_name.insert(alias.clone(), sid.to_string());
+                }
             }
         }
     }
@@ -844,7 +853,9 @@ mod tests {
         // 2026-09-07). The name join must still resolve - a pid requirement
         // on by_name would hand every thread-worker handover back to the
         // minter - and the Live answer can only come from the worker's
-        // session: rec.session_id names nothing resolvable.
+        // session: rec.session_id names nothing resolvable. The row was
+        // RENAMED after mint, so the holder's original label lives in
+        // aliases and must resolve identically.
         let me = std::process::id();
         with_registry(
             serde_json::json!([
@@ -853,8 +864,7 @@ mod tests {
                     "status": "live",
                     "cwd": "/w",
                     "created_at": "2026-09-07T00:00:00Z",
-                "cwd": "/w",
-                "created_at": "2026-09-07T00:00:00Z",
+                    "aliases": ["w-thread-orig"],
                     "harness_session_id": "s-worker",
                 },
                 {
@@ -862,8 +872,6 @@ mod tests {
                     "status": "live",
                     "cwd": "/w",
                     "created_at": "2026-09-07T00:00:00Z",
-                "cwd": "/w",
-                "created_at": "2026-09-07T00:00:00Z",
                     "harness_session_id": "s-worker",
                     "pid": me,
                     "pid_start_time": own_pid_start(),
@@ -871,11 +879,13 @@ mod tests {
             ]),
             || {
                 let (witness, _drain) = default_session_witness();
-                let rec = witness_rec("spawn-handover:w-thread", "s-king-elsewhere");
-                assert!(matches!(
-                    witness(&rec),
-                    crate::claims::SessionLiveness::Live(_)
-                ));
+                for holder in ["spawn-handover:w-thread", "spawn-handover:w-thread-orig"] {
+                    let rec = witness_rec(holder, "s-king-elsewhere");
+                    assert!(
+                        matches!(witness(&rec), crate::claims::SessionLiveness::Live(_)),
+                        "{holder} must resolve to the worker's session"
+                    );
+                }
             },
         );
     }
