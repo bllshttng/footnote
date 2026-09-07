@@ -14,7 +14,6 @@ _LOG = logging.getLogger(__name__)
 
 class EvalsBlock(BaseModel):
     """Eval-suite settings: the grading-worker gate plus the demand keys.
-
     Keys documented in the generated reference and docs/evals.md.
     """
 
