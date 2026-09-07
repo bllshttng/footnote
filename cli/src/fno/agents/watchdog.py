@@ -1289,13 +1289,11 @@ def silence_rows(roots: "Iterable[Path]") -> tuple[list[Row], list[str]]:
     except Exception as exc:  # noqa: BLE001 - an unreadable registry scopes nothing
         return [], [f"registry unreadable, silence sweep refused: {exc!r}"]
     for e in entries:
-        if getattr(e, "status", None) not in LIVE_STATUSES:
-            continue
-        if getattr(e, "origin", None) != "spawn" or getattr(e, "crown_level", None) is not None:
-            continue
+        live = getattr(e, "status", None) in LIVE_STATUSES
+        spawn = getattr(e, "origin", None) == "spawn" and getattr(e, "crown_level", None) is None
         node = getattr(e, "node", None)
         scope = str(getattr(e, "project_root", "") or getattr(e, "cwd", "") or "")
-        if not node or not scope:
+        if not (live and spawn and node and scope):
             continue
         try:
             resolved = str(Path(scope).resolve())
