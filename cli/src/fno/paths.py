@@ -566,15 +566,16 @@ def resolve_configured_path(
 
 
 def _guard_state_path(path: Path) -> Path:
-    """Refuse a resolved state path outside the hermetic test sandbox."""
-    if os.environ.get("FNO_TEST_HERMETIC") == "1":
-        # Reuse the events fence and its allowed-root calculation. A hand-built
-        # state path still cannot be reached here; that remaining R4 surface is
-        # guarded by the state-path lint rather than by an accessor.
-        from fno.events import _refuse_hermetic_escape
+    """Judge a resolved state path against the process root declaration.
 
-        _refuse_hermetic_escape(path)
-    return path
+    The rule lives in :func:`fno.hermetic.declared_root` and both fences call
+    it, so they cannot disagree about what an absent declaration means. A
+    hand-built state path still cannot reach here; the state-path lint guards
+    that remaining R4 surface.
+    """
+    from fno.hermetic import declared_root
+
+    return declared_root(path)
 
 
 # ---------------------------------------------------------------------------

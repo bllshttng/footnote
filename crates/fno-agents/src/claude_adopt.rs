@@ -477,6 +477,7 @@ mod tests {
 
     #[test]
     fn mint_sets_attached_marker_and_resume_key() {
+        let _root = crate::paths::DeclaredRoot::declare("mint_sets_attached_marker_an");
         let e = mint_adopted_entry(&worker(), "2026-06-27T17:00:00Z");
         assert_eq!(e.name, "cc-a1b2c3d4");
         assert_eq!(e.harness_name(), "claude");
@@ -644,6 +645,7 @@ mod tests {
         let _guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _root = crate::paths::DeclaredRoot::declare_held("adopt_fills_model_and_provid");
         // The full adopt path: the transcript states the model, the route
         // files name its provider, and the row carries both plus a verified
         // basis - the premise the attest-model guard needs.
@@ -676,6 +678,7 @@ mod tests {
 
     #[test]
     fn upsert_refresh_keeps_a_stamped_node() {
+        let _root = crate::paths::DeclaredRoot::declare("upsert_refresh_keeps_a_stamp");
         // A spawn-stamped node survives a re-adopt: adoption observed nothing
         // about the node, so replacing the row must not erase the stamp.
         let dir = std::env::temp_dir().join(format!(
@@ -821,6 +824,7 @@ mod tests {
 
     #[test]
     fn attached_row_is_not_interactive_and_not_one_shot() {
+        let _root = crate::paths::DeclaredRoot::declare("attached_row_is_not_interact");
         // Reconcile must NOT treat an adopted row as a footnote-managed
         // interactive worker, nor settle it as a finished one-shot ask.
         let e = mint_adopted_entry(&worker(), "2026-06-27T17:00:00Z");
@@ -832,6 +836,7 @@ mod tests {
 
     #[test]
     fn upsert_replaces_by_session_uuid() {
+        let _root = crate::paths::DeclaredRoot::declare("upsert_replaces_by_session_u");
         let dir = std::env::temp_dir().join(format!(
             "fno-adopt-upsert-{}-{}",
             std::process::id(),
@@ -865,6 +870,7 @@ mod tests {
 
     #[test]
     fn upsert_refresh_carries_a_declared_delivery_policy_forward() {
+        let _root = crate::paths::DeclaredRoot::declare("upsert_refresh_carries_a_dec");
         // x-e21e: the replace path swaps the WHOLE row for a fresh mint, which
         // would silently revert a session's self-declared bus-only stamp to
         // injectable on re-adopt -- the delivery defect again, one adopt later.

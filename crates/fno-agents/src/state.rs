@@ -1934,7 +1934,15 @@ fn source_ahead_root(
 }
 
 fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateError> {
-    let shared = crate::paths::AgentsHome::from_env().registry_json();
+    // Compare-only resolution, never `from_env_opt`. That accessor answers
+    // `None` when a test declared no root, and this arm used to answer `Ok(())`
+    // from it, which means ALLOW. `source_ahead_root` fires only when the
+    // target IS the shared file, so losing the shared pin did not narrow this
+    // guard, it disabled it: a test that hand-built `$HOME/.fno/agents/
+    // registry.json` from `std::env::var("HOME")` downgraded the operator's
+    // live registry instead of being refused. An undeclared root must refuse,
+    // never pass.
+    let shared = crate::paths::AgentsHome::shared_registry_json();
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let shared = shared.canonicalize().unwrap_or(shared);
     let Ok(exe) = std::env::current_exe() else {
