@@ -1812,7 +1812,12 @@ mod tests {
     /// answer, which is what makes the silent version of this so hard to see.
     #[test]
     fn resolve_thread_posture_refuses_rather_than_degrading() {
-        for mode in ["accept-edits", "bypassPermissions", "danger-full-access", ":never"] {
+        for mode in [
+            "accept-edits",
+            "bypassPermissions",
+            "danger-full-access",
+            ":never",
+        ] {
             let err = resolve_thread_posture(None, Some(mode))
                 .expect_err("an unmappable mode must refuse");
             assert!(
