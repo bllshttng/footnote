@@ -1,7 +1,6 @@
 """Eval-suite worker + demand settings (the ``config.evals`` block).
 
-Its own module because ``config/__init__.py`` is over the shrink-only file
-budget; same reason the watchdog block lives in ``_watchdog.py``.
+Its own module because ``config/__init__.py`` is over the shrink-only budget.
 """
 
 from __future__ import annotations

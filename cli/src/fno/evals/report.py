@@ -181,21 +181,13 @@ def evals_health_summary(
             stale_days = 7
     if now is None:
         now = datetime.now(timezone.utc)
-    reg_ts = [
-        dt
-        for r in rows
-        if r.get("tier") == "regression"
-        for dt in [_parse_ts(r.get("ts"))]
-        if dt is not None
-    ]
+    reg_ts = [_parse_ts(r.get("ts")) for r in rows if r.get("tier") == "regression"]
+    reg_ts = [dt for dt in reg_ts if dt is not None]
     newest_dt = max(reg_ts, default=None)
     never_ran = reg is None
-    age_days = (
-        round((now - newest_dt).total_seconds() / 86400, 3)
-        if newest_dt is not None
-        else None
-    )
-    stale = bool(never_ran is False and age_days is not None and age_days > stale_days)
+    age_days = None if newest_dt is None else round(
+        (now - newest_dt).total_seconds() / 86400, 3)
+    stale = never_ran is False and age_days is not None and age_days > stale_days
     return {
         "regression_pass_rate": reg["pass_rate"] if reg else None,
         "flake_count": len(report["flakes"]),
