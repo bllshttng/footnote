@@ -2925,7 +2925,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     let identity = match mesh_identity_assignments(
         entry.get("name").and_then(Value::as_str).unwrap_or(&name),
         harness,
-        entry.get("fno_id").and_then(Value::as_str),
+        entry.get("node").and_then(Value::as_str),
     ) {
         Ok(a) => a,
         Err(why) => {
@@ -3415,8 +3415,7 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
         // x-0345 W1: same wrapper the resume arm carries. `which_on_path`
         // above deliberately read the UNWRAPPED plan.argv[0]; the wrap
         // happens inside mux_pane_run_argv.
-        let identity = match mesh_identity_assignments(&plan.name, "claude", plan.fno_id.as_deref())
-        {
+        let identity = match mesh_identity_assignments(&plan.name, "claude", plan.node.as_deref()) {
             Ok(a) => a,
             Err(why) => {
                 eprintln!("fno agents recover: {why}; refusing an unattributable pane relaunch");
