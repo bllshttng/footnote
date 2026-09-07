@@ -1447,7 +1447,10 @@ def headroom(
         window = "stale"
         snap = None  # stale snapshot reads as absent (same TTL as read_usage)
 
-    return _headroom_from(snap, rlu, now=now, threshold_pct=threshold_pct, window=window)
+    return _headroom_from(
+        snap, rlu, now=now, threshold_pct=threshold_pct, window=window,
+        lock_at=health.last_error_at if health is not None else None,
+    )
 
 
 def headrooms(
@@ -1487,7 +1490,8 @@ def headrooms(
             window = "stale"
             snap = None
         out[pid] = _headroom_from(
-            snap, rlu, now=now, threshold_pct=threshold_pct, window=window
+            snap, rlu, now=now, threshold_pct=threshold_pct, window=window,
+            lock_at=h.last_error_at if h is not None else None,
         )
     return out
 
@@ -1499,6 +1503,7 @@ def _headroom_from(
     now: float,
     threshold_pct: float,
     window: str = "fresh",
+    lock_at: float | None = None,
 ) -> Headroom:
     """The pure verdict, given an already-resolved snapshot and provider lock.
 
@@ -1509,6 +1514,16 @@ def _headroom_from(
     observation into a launch onto the walled provider. ``window`` carries the
     absent/stale note from the reader so the receipt can name which half spoke.
     """
+    if (
+        rlu is not None
+        and lock_at is not None
+        and snap is not None
+        and snap.probed_at <= lock_at
+    ):
+        # A worker death recorded after the probe is the newer fact: the window
+        # cannot speak for the moment the worker hit the wall, so the reactive
+        # lock decides until it expires or a newer probe replaces it.
+        return Headroom(HeadroomState.EXHAUSTED, rlu, source="lock")
     # A window with no reset can never be "already reset", so the check that
     # exempts a stale window cannot exempt it: it always binds, on percentage
     # alone. That is the whole point of retaining it (x-763a).
