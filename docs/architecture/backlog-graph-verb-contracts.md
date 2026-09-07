@@ -1,3 +1,4 @@
+<!-- style-exception: prose moved verbatim from cli.py docstrings to satisfy the shrink-only file budget; rewriting it here would edit history, not clarify it -->
 # Backlog graph verb contracts
 
 The long design prose behind the backlog graph's close, reopen, supersede,
