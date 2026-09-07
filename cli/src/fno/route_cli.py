@@ -322,14 +322,14 @@ def inventory_cmd(
     a spawn would take right now.
     """
     from fno.agents.harnesses import READABLE_PROVIDERS
-    from fno.route_resolve import SLOT_VERBS, resolve_inventory, runtime_capacity, slot_states
+    from fno.route_resolve import resolve_inventory, runtime_capacity, slot_states, slot_verbs
 
     inv = resolve_inventory()
     try:
         capacity = runtime_capacity(inventory=inv)
     except Exception:  # noqa: BLE001 - a capacity read never breaks the readout
         capacity = {}
-    slots = [slot_states(verb, capacity, inventory=inv) for verb in SLOT_VERBS]
+    slots = [slot_states(verb, capacity, inventory=inv) for verb in slot_verbs()]
     rows: list[dict[str, str]] = []
     refusals: list[str] = []
     if not inv.rows:

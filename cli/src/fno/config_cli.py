@@ -841,7 +841,8 @@ def _report_band_routing() -> None:
     except Exception:  # noqa: BLE001
         capacity = {}
     empty_verbs: list[str] = []
-    for verb in route_resolve.SLOT_VERBS:
+    read_verbs = route_resolve.slot_verbs(settings=settings)
+    for verb in read_verbs:
         states = route_resolve.slot_states(verb, capacity, inventory=inventory, settings=settings)
         if not str(states.get("would_take", "")).startswith(
             f"agents.profiles.{verb}.lanes"
@@ -849,13 +850,17 @@ def _report_band_routing() -> None:
             empty_verbs.append(verb)
     # Silent once any verb's slot would take a lane: routing is armed, and
     # the unconfigured verbs are a per-verb choice, not a dead router.
-    if len(empty_verbs) < len(route_resolve.SLOT_VERBS):
+    if len(empty_verbs) < len(read_verbs):
         return
     try:
         roles = getattr(getattr(settings, "model_routing", None), "roles", None)
     except Exception:  # noqa: BLE001 - the note is a hint on top of the line
         roles = None
-    declared_count = sum(1 for _ in inventory.rows) if inventory.declared else 0
+    declared_count = 0
+    try:
+        declared_count = len(getattr(settings, "routing", None).models or [])
+    except Exception:  # noqa: BLE001 - the count is a display nicety
+        declared_count = 0
     typer.echo(
         f"band routing inactive: config.routing.models declares {declared_count} "
         "row(s), and no verb slot has a lane that resolves: "

@@ -501,103 +501,28 @@ def resolve_grid(
     return None, chain
 
 
-_SLOT_LANE_FIELDS = (
-    "provider", "model", "effort", "substrate", "permission_mode",
-    "route", "account", "pane_group",
-)
-_LANE_PASSTHROUGH_FIELDS = ("substrate", "permission_mode", "pane_group")
 _ON_EXHAUSTED = ("queue", "degrade", "refuse")
-_ON_LOW = ("allow", "prefer_healthy", "skip")
-_ON_UNKNOWN = ("allow", "skip")
-_MISSING = object()
 #: The verbs fno dispatches, and therefore the slots an operator fills.
 SLOT_VERBS = ("think", "blueprint", "target", "review", "crown")
 
 
-def _effective_difficulty(node: Optional[Mapping]) -> tuple[str, str]:
-    """The overlay key for this dispatch's difficulty; missing or odd rounds
-    up to high with the reason, and ``max`` rides the high overlay too
-    (``xhigh`` is an effort value, never a node band)."""
-    raw = node.get("difficulty") if isinstance(node, Mapping) else None
-    if isinstance(raw, str):
-        key = raw.strip().lower()
-        if key in ("low", "medium", "high"):
-            return key, ""
-        return "high", f"difficulty {raw!r} is not low|medium|high; rounds up to high"
-    return "high", "difficulty missing; rounds up to high"
-
-
-def _account_record_vendor(settings: object, account: str) -> str:
-    """The vendor a config.accounts.records entry binds, or '' when unnamed."""
-    if settings is None or not account:
-        return ""
-    try:
-        records = getattr(getattr(settings, "accounts", None), "records", None) or []
-        for record in records:
-            if isinstance(record, Mapping) and record.get("id") == account:
-                route = str(record.get("route", "") or "")
-                return route.replace(",", "/").partition("/")[0].strip()
-    except Exception:  # noqa: BLE001 - an unreadable record refuses nothing
-        return ""
-    return ""
-
-
-def _lane_field(lane: object, name: str) -> str:
-    value = lane.get(name, "") if isinstance(lane, Mapping) else getattr(lane, name, "")
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _slot_fold(
-    lanes: Sequence[object],
-    rung_base: str,
-    settings: object,
-    chain: list[str],
-) -> tuple[Optional[list[tuple[str, str]]], Optional[Inventory], dict[str, dict[str, str]]]:
-    """Fold lanes to ``(plan, row-inventory, inline-fields-by-rung)``.
-
-    A string lane names a declared ``[[routing.models]]`` row; an inline
-    table folds as its own row named by its config path. A config fault
-    appends one ``slot=config`` terminal and answers ``(None, None, {})``.
+def slot_verbs(settings: object = None, inventory: Optional[Inventory] = None) -> list[str]:
+    """Every verb whose slot the readout should show: the dispatched verbs
+    plus any profile that carries lane configuration. A verb armed only
+    through an unlisted profile key must still render, or the doctor would
+    call a half-armed router unarmed.
     """
-    plan: list[tuple[str, str]] = []
-    fold: list[dict[str, Any]] = []
-    fields_by_rung: dict[str, dict[str, str]] = {}
-
-    def _fault(rung: str, why: str) -> tuple[None, None, dict]:
-        chain.append(f"slot=config {rung} {why}")
-        return None, None, {}
-
-    for index, raw in enumerate(lanes):
-        rung = f"{rung_base}.lanes[{index}]"
-        if isinstance(raw, str):
-            if not raw.strip():
-                return _fault(rung, "is an empty lane name")
-            plan.append((rung, raw.strip()))
-            continue
-        if not isinstance(raw, Mapping) and not hasattr(raw, "provider"):
-            return _fault(rung, "must be a table or a [[routing.models]] row name")
-        if isinstance(raw, Mapping):
-            unknown = sorted(set(raw) - set(_SLOT_LANE_FIELDS))
-            if unknown:
-                return _fault(rung, f"has unknown field {unknown[0]!r}")
-            for key, value in raw.items():
-                if not isinstance(value, str):
-                    return _fault(rung, f".{key} must be a string; got {value!r}")
-        fields = {key: _lane_field(raw, key) for key in _SLOT_LANE_FIELDS}
-        if not any(fields.values()):
-            return _fault(rung, "is empty")
-        entry: dict[str, Any] = {"name": rung}
-        for key in _SLOT_LANE_FIELDS:
-            if fields[key] and key not in _LANE_PASSTHROUGH_FIELDS:
-                entry["harness" if key == "provider" else key] = fields[key]
-        fold.append(entry)
-        fields_by_rung[rung] = fields
-        plan.append((rung, rung))
+    verbs = list(SLOT_VERBS)
+    if settings is None:
+        settings, _profile, _lanes = _slot_entry(None, None)
     try:
-        cfg_rows = list(getattr(getattr(settings, "routing", None), "models", None) or [])
-    except Exception:  # noqa: BLE001
-        cfg_rows = []
-    return plan, inventory_from_rows(cfg_rows + fold, declared=True), fields_by_rung
+        profiles = getattr(getattr(settings, "agents", None), "profiles", None) or {}
+        for key in profiles:
+            if key not in verbs and key:
+                verbs.append(str(key))
+    except Exception:  # noqa: BLE001 - a read failure shows the known verbs
+        pass
+    return verbs
 
 
 def resolve_slot(
@@ -618,40 +543,27 @@ def resolve_slot(
 ) -> tuple[Optional[dict[str, Any]], list[str]]:
     """Which lane does this dispatch ride right now: the ONE slot resolver.
 
-    ``agents.profiles.<verb>.lanes`` is the rank: each lane is a
-    ``[[routing.models]]`` row name or an inline table, and the first lane
-    whose posture, vendor cap and per-account capacity pass is the candidate.
-    ``on_exhausted`` names the all-skipped terminal; a command-line lane or
-    ``FNO_SPAWN_GATE=0`` degrades whatever it says. No ``lanes``: fall through
-    to :func:`resolve_grid` unchanged (a node-less spawn answers nothing).
-    A config fault is a ``slot=config`` terminal, never a raise.
+    The selection core is Rust (``fno-agents route-slot``, law d-450caaeb):
+    ``agents.profiles.<verb>.lanes`` is the rank, walked in declared order,
+    and the first lane whose posture, vendor cap, identity and per-account
+    capacity pass is the candidate. ``on_exhausted`` names the all-skipped
+    terminal; a command-line lane or ``FNO_SPAWN_GATE=0`` degrades whatever
+    it says. No ``lanes`` (and no ``by_difficulty`` overlay): fall through to
+    :func:`resolve_grid` unchanged (a node-less spawn answers nothing). The
+    chain strings are the receipt vocabulary and come back verbatim from the
+    verb; a missing or failing binary is a named refusal, never a silent
+    lane-less spawn.
     """
+    import os
+
     settings, profile, lanes = _slot_entry(settings, verb)
     rung_base = f"agents.profiles.{verb}" if verb else "agents.profiles"
-    prefix: list[str] = []
-    overlay: Optional[Mapping] = None
-    by_diff = getattr(profile, "by_difficulty", None) or {}
-    if isinstance(by_diff, Mapping) and by_diff:
-        diff_key, diff_reason = _effective_difficulty(node)
-        candidate_overlay = by_diff.get(diff_key)
-        if isinstance(candidate_overlay, Mapping):
-            overlay = candidate_overlay
-            ovl_lanes = overlay.get("lanes", _MISSING)
-            if ovl_lanes is not _MISSING:
-                if isinstance(ovl_lanes, (list, tuple)) and ovl_lanes:
-                    lanes = ovl_lanes
-                else:
-                    prefix.append(
-                        f"slot=config {rung_base}.by_difficulty.{diff_key}.lanes"
-                        " must be a non-empty list when declared"
-                    )
-                    return None, prefix
-        if diff_reason:
-            prefix.append(f"slot note {rung_base} {diff_reason}")
-    if not lanes:
+    by_diff = getattr(profile, "by_difficulty", None)
+    has_overlay = isinstance(by_diff, Mapping) and bool(by_diff)
+    if not lanes and not has_overlay:
         if node is None:
             return None, []
-        prefix.append(f"slot {rung_base} has no lanes; grid over inventory")
+        prefix = [f"slot {rung_base} has no lanes; grid over inventory"]
         if model_occupied:
             prefix.append("grid=model-axis-occupied")
             return None, prefix
@@ -668,215 +580,27 @@ def resolve_slot(
         )
         return candidate, prefix + grid_chain
 
-    if explicit_model:
-        # An explicit model pin outranks the lanes (operator authority); it
-        # never borrows a lane's harness or capacity. The profile scalars and
-        # defaults answer instead, and the receipt names the override. Config
-        # defaults do NOT outrank lanes; only a typed flag does.
-        return None, prefix + ["slot=model-pin-override (an explicit model outranks the lanes)"]
-
-    chain = prefix + [f"slot {rung_base} lanes walked in declared order"]
-
-    def _policy(name: str, default: str, allowed: tuple[str, ...]) -> str:
-        raw = (
-            overlay.get(name, None)
-            if isinstance(overlay, Mapping) and overlay.get(name) is not None
-            else getattr(profile, name, None)
-        )
-        raw = str(raw or default)
-        value = raw.strip().lower()
-        if value not in allowed:
-            chain.append(
-                f"slot=config {rung_base}.{name} {raw!r} is not one of {'|'.join(allowed)}"
-            )
-            return ""
-        return value
-
-    on_exhausted = _policy("on_exhausted", "refuse", _ON_EXHAUSTED)
-    on_low = _policy("on_low", "prefer_healthy", _ON_LOW) if on_exhausted else ""
-    on_unknown = _policy("on_unknown", "allow", _ON_UNKNOWN) if on_exhausted else ""
-    if not on_exhausted:
-        return None, chain
-
-    plan, lane_inv, fields_by_rung = _slot_fold(lanes, rung_base, settings, chain)
-    if plan is None or lane_inv is None:
-        return None, chain
-
-    import os
-
     gate_bypassed = os.environ.get("FNO_SPAWN_GATE") == "0"
-    from fno.agents.spawn_gate import (
-        ProviderCountUnavailable,
-        provider_lanes_cap,
-        provider_live_count,
-    )
-    from fno.config import provider_limits_table
+    from fno.route_slot_client import RouteSlotUnavailable, resolve_slot_via_binary
 
     try:
-        caps: dict = dict(provider_limits_table(getattr(settings, "agents", None)))
-    except Exception:  # noqa: BLE001 - an unreadable cap table skips no lane
-        caps = {}
-
-    demoted: list[tuple[int, str, str, str]] = []
-    identity_skips: list[str] = []
-    resets_seen: list[float] = []
-
-    def _take(
-        index: int, rung: str, row_name: str, state: str, window: str, note: str = ""
-    ) -> dict[str, Any]:
-        chain.append(
-            f"slot {rung} {row_name} capacity={state}"
-            + (f" window={window}" if window else "")
-            + (f" ({note})" if note else "")
+        return resolve_slot_via_binary(
+            rung_base=rung_base,
+            profile=profile,
+            lanes=lanes,
+            node=node,
+            capacity=capacity,
+            inventory=inventory,
+            settings=settings,
+            substrate=substrate,
+            permission_mode=permission_mode,
+            constrain_harness=constrain_harness,
+            explicit_lane=explicit_lane,
+            explicit_model=explicit_model,
+            gate_bypassed=gate_bypassed,
         )
-        row = lane_inv.rows[row_name]
-        inline = fields_by_rung.get(rung)
-        lane_fields = dict(inline) if inline else {
-            key: value
-            for key, value in (
-                ("provider", row.harness),
-                ("model", row.model),
-                ("effort", row.effort),
-                ("route", row.route),
-                ("account", row.account),
-            )
-            if value
-        }
-        pick: dict[str, Any] = dict(
-            harness=row.harness,
-            model=row.model,
-            lane=row_name,
-            lane_rung=rung,
-            lane_index=index,
-            lane_fields=lane_fields,
-        )
-        if row.effort:
-            pick["effort"] = row.effort
-        # AC6-COORDINATE: the candidate carries the evidence that selected it,
-        # so no downstream door re-derives or contradicts it.
-        pick["evidence"] = {"capacity": state, "window": window}
-        detail = (capacity or {}).get(row.harness)
-        ev = detail.get("evidence") or {} if isinstance(detail, Mapping) else {}
-        if row.account and not row.route:
-            pick["evidence"]["identity"] = ev.get(row.account, "unknown")
-        return pick
-
-    for index, (rung, row_name) in enumerate(plan):
-        row = lane_inv.rows.get(row_name)
-        if row is None:
-            declared = ", ".join(sorted(lane_inv.rows)) or "(none)"
-            chain.append(
-                f"slot=config {rung} names no [[routing.models]] row {row_name!r};"
-                f" declared rows: {declared}; see fno config route inventory"
-            )
-            return None, chain
-        if not _candidate_supported(row.harness, substrate, permission_mode):
-            chain.append(
-                f"slot skip {rung} {row_name} harness {row.harness!r} cannot carry"
-                f" substrate({substrate or '-'}) permission({permission_mode or '-'})"
-            )
-            continue
-        vendor: Optional[str] = None
-        if row.route:
-            vendor = row.route.replace(",", "/").partition("/")[0].strip() or None
-        if row.account and row.route:
-            # The record the account names resolves its OWN launch env; a lane
-            # route contradicting that vendor would check one coordinate and
-            # bill another, so it refuses before anything launches.
-            rec_vendor = _account_record_vendor(settings, row.account)
-            if rec_vendor and vendor and rec_vendor != vendor:
-                chain.append(
-                    f"slot=config {rung} account {row.account!r} resolves vendor"
-                    f" {rec_vendor!r}, contradicting the lane route {row.route!r}"
-                )
-                return None, chain
-        cap = provider_lanes_cap(caps.get(vendor)) if vendor else None
-        if vendor is not None and cap is not None:
-            try:
-                current = provider_live_count(vendor)
-            except ProviderCountUnavailable as exc:
-                if not gate_bypassed:
-                    chain.append(f"slot=provider-count-unavailable {rung} {vendor}: {exc}")
-                    return None, chain
-                chain.append(
-                    f"slot note {rung} {row_name} {vendor} count unavailable ({exc});"
-                    " FNO_SPAWN_GATE=0 keeps the lane"
-                )
-            else:
-                if current >= cap:
-                    chain.append(
-                        f"slot skip {rung} {row_name} provider {vendor} at {current} of {cap}"
-                    )
-                    continue
-        harness_detail = (capacity or {}).get(row.harness)
-        evidence = harness_detail.get("evidence") or {} if isinstance(harness_detail, Mapping) else {}
-        if row.account and not row.route:
-            # A slot-account claim is governed by the attribution owner's
-            # verdict; a vendor route (an API lane) never claimed the slot.
-            ident = evidence.get(row.account, "unknown")
-            if ident == "mismatch":
-                identity_skips.append(rung)
-                chain.append(f"slot skip {rung} {row_name} account_identity_mismatch")
-                continue
-            if ident == "unknown" and on_unknown == "skip":
-                identity_skips.append(rung)
-                chain.append(
-                    f"slot skip {rung} {row_name} account_identity_unknown (on_unknown=skip)"
-                )
-                continue
-        state, window = row_capacity(row, capacity)
-        if state in ("exhausted", "blocked"):
-            detail = (capacity or {}).get(row.harness)
-            resets = detail.get("resets") if isinstance(detail, Mapping) else None
-            if isinstance(resets, Mapping):
-                candidates = [
-                    v for k, v in resets.items()
-                    if isinstance(v, (int, float)) and (not row.account or k == row.account)
-                ]
-                if candidates:
-                    resets_seen.append(float(min(candidates)))
-            chain.append(f"slot skip {rung} {row_name} capacity={state}")
-            continue
-        if state == "low" and on_low == "skip":
-            chain.append(f"slot skip {rung} {row_name} capacity=low (on_low=skip)")
-            continue
-        if state not in ("ok", "low", "available"):
-            if on_unknown == "skip":
-                chain.append(
-                    f"slot skip {rung} {row_name} capacity={state} (on_unknown=skip)"
-                )
-                continue
-            state = "unknown-permitted"
-        if state == "low" and on_low == "prefer_healthy":
-            demoted.append((index, rung, row_name, window))
-            chain.append(
-                f"slot demote {rung} {row_name} capacity=low (on_low=prefer_healthy)"
-            )
-            continue
-        return _take(index, rung, row_name, state, window), chain
-
-    if demoted:
-        index, rung, row_name, window = demoted[0]
-        return (_take(index, rung, row_name, "low", window, "no healthy lane; on_low=prefer_healthy"), chain)
-
-    if explicit_lane or gate_bypassed:
-        why = "the command line already names the lane" if explicit_lane else "FNO_SPAWN_GATE=0"
-        chain.append(f"slot=exhausted degrade ({why})")
-        return None, chain
-    if identity_skips and len(identity_skips) == len(plan):
-        # Every lane lost on identity alone: the fix is the operator's manual
-        # canonical swap, never a login performed by fno.
-        chain.append("slot=manual_account_switch_required")
-        return None, chain
-    if on_exhausted == "queue":
-        import time as _time
-
-        future = [r for r in resets_seen if r > _time.time()]
-        retry = f" retry_at={int(min(future))}" if future else ""
-        chain.append(f"slot=exhausted queue{retry}")
-        return None, chain
-    chain.append(f"slot=exhausted {on_exhausted}")
-    return None, chain
+    except RouteSlotUnavailable as exc:
+        return None, [f"slot=route-slot-unavailable ({exc})"]
 
 
 def _max_band(a: str, b: str) -> str:
@@ -930,6 +654,15 @@ def slot_states(
         "verb": verb, "lanes": [], "on_exhausted": "", "would_take": "",
         "routing": "unarmed",
     }
+    by_diff = getattr(_profile, "by_difficulty", None) or {}
+    if not lanes and isinstance(by_diff, Mapping) and by_diff:
+        # An overlay-only slot is armed: display the high overlay's lanes
+        # (the default effective difficulty); the resolver derives per dispatch.
+        overlay = by_diff.get("high")
+        if isinstance(overlay, Mapping):
+            lanes = overlay.get("lanes")
+            if isinstance(lanes, (list, tuple)) and lanes:
+                out["note"] = "difficulty missing; rounds up to high"
     if not lanes:
         if inventory.declared and inventory.rows:
             out["would_take"] = f"no lanes; grid over {len(inventory.rows)} rows"
@@ -944,10 +677,28 @@ def slot_states(
     out["on_low"] = str(getattr(_profile, "on_low", "") or "prefer_healthy")
     out["on_unknown"] = str(getattr(_profile, "on_unknown", "") or "allow")
     chain: list[str] = []
-    plan, lane_inv, _fields = _slot_fold(lanes, f"agents.profiles.{verb}", settings, chain)
-    if plan is None or lane_inv is None:
-        out["would_take"] = chain[-1]
-        return out
+    rung_base = f"agents.profiles.{verb}"
+    plan: list[tuple[str, str]] = []
+    for index, raw in enumerate(lanes):
+        rung = f"{rung_base}.lanes[{index}]"
+        plan.append((rung, raw.strip() if isinstance(raw, str) else rung))
+    lane_inv = inventory_from_rows(
+        list(inventory.rows.values())
+        + [
+            {
+                "name": rung,
+                "harness": str(raw.get("provider", "") or ""),
+                "model": str(raw.get("model", "") or ""),
+                "route": str(raw.get("route", "") or ""),
+                "account": str(raw.get("account", "") or ""),
+                "effort": str(raw.get("effort", "") or ""),
+            }
+            for index, raw in enumerate(lanes)
+            if isinstance(raw, Mapping)
+            for rung in [f"{rung_base}.lanes[{index}]"]
+        ],
+        declared=True,
+    )
     for rung, row_name in plan:
         row = lane_inv.rows.get(row_name)
         state = "no-such-row" if row is None else row_capacity(row, capacity)[0]

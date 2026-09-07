@@ -42,6 +42,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "help",
     "host",
     "kill-check",
+    "route-slot",
     "list",
     "logs",
     "loop",
@@ -287,6 +288,13 @@ async fn run(args: Vec<String>) -> i32 {
     // kill_criteria.rs doc). Direct dispatch; no daemon RPC.
     if verb == "kill-check" {
         return fno_agents::kill_criteria::run_kill_check(&args[1..]);
+    }
+
+    // `route-slot`: the delivery-slot resolver (see route_slot.rs doc). Direct
+    // dispatch; no daemon RPC. Python's spawn seam, advance and the readouts
+    // send one JSON payload and read {status, candidate, chain} back.
+    if verb == "route-slot" {
+        return fno_agents::route_slot::run_route_slot(&args[1..]);
     }
 
     // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see
