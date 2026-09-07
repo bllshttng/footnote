@@ -4594,14 +4594,15 @@ fn client_compose_draws_scroll_indicator_when_pane_scrolled() {
 #[test]
 fn client_compose_status_row_shows_session_cwd_and_help() {
     // US4 AC4-UI: bottom row carries session name, active squad cwd, and
-    // the `? for keys` affordance; the focused pane's scroll offset joins
-    // it when non-zero (the canonical `[+N]` home).
+    // the `? keys · glyphs` affordance (x-b5d1 named the legend); the
+    // focused pane's scroll offset joins it when non-zero (the canonical
+    // `[+N]` home).
     let mut view = two_pane_view();
     let text = frame_text(&view.compose());
     let bottom = text.lines().last().unwrap().to_string();
     assert!(bottom.contains("main"), "{bottom:?}");
     assert!(bottom.contains("/code/footnote"), "{bottom:?}");
-    assert!(bottom.contains("? for keys"), "{bottom:?}");
+    assert!(bottom.contains("? keys"), "{bottom:?}");
     assert!(!bottom.contains("[+"), "no stale indicator: {bottom:?}");
     // The row is blanked first, so no divider glyphs bleed through the
     // gaps between segments.
@@ -6411,7 +6412,10 @@ async fn a_bound_byte_no_entry_offers_dismisses_without_action() {
             harness_session_id: None,
             name: "w1".into(),
             pane_id: None,
-            measure: false,
+            // The paneless bg row is Unmeasured (no badge, no activity
+            // reading), so the remove measures (x-b5d1): every door that
+            // removes a `?` row skips the stop leg it cannot answer.
+            measure: true,
         }],
         "the remove byte removed the live row in one gesture"
     );
