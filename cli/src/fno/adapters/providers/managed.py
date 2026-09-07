@@ -312,12 +312,6 @@ def canonical_slot_blobs(cli: str) -> list[str]:
     return out
 
 
-def canonical_slot_principal(cli: str) -> tuple[Optional[dict], Optional[str]]:
-    """The one principal the shared slot presents, or a typed failure."""
-    principal, _blob, failure = canonical_slot_identity(cli)
-    return principal, failure
-
-
 def canonical_slot_identity(
     cli: str,
 ) -> tuple[Optional[dict], Optional[str], Optional[str]]:

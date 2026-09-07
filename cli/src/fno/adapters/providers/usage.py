@@ -161,16 +161,10 @@ def _token_from_blob(blob: str | None) -> str | None:
 def _is_active_slot_occupant(record: ProviderRecord) -> bool:
     """True when ``record`` is provably the account in its CLI's shared slot.
 
-    A TAINTED slot fails this check even when the stamp names ``record``. The
-    taint marker exists precisely to say "a pinned session may have overwritten
-    the slot since this stamp was written", so the stamp is no longer proof of
-    what the credential is - and reading it anyway would file account B's usage
-    under account A's id, the one thing this attribution rule exists to prevent.
-    `fno config accounts doctor` reports the taint; until it is cleared the record is
-    UNKNOWN, which is the honest answer rather than a confident wrong one.
-
-    Any store read failure is False too: an unreadable stamp must never let a
-    record borrow another's numbers.
+    A TAINTED slot fails this even when the stamp names ``record``: the taint
+    says a pinned session may have overwritten the slot since, so the stamp is
+    no longer proof. An unreadable store is False for the same reason. Both
+    leave the record UNKNOWN, which beats a confident wrong number.
     """
     try:
         from fno.adapters.providers.managed import (
@@ -189,21 +183,11 @@ def _is_active_slot_occupant(record: ProviderRecord) -> bool:
 def _attributed_credential_dir(record: ProviderRecord) -> tuple[bool, Path | None]:
     """``(probeable, dir)`` - whether a reading for ``record`` is attributable.
 
-    This is the invariant that keeps a probe from reporting one account's usage
-    under another's name: a snapshot is written under a record id only when the
-    bearer that produced it provably belongs to that record. Three shapes
-    qualify, and ``dir`` says where the credential lives:
-
-    - an own ``config_dir`` / ``credentials_source`` -> that dir (scoped only)
-    - a managed record that IS its CLI's active slot occupant -> ``None``,
-      meaning the shared slot (the unscoped Keychain item genuinely is its token)
-    - anything else (a non-active managed record, an api_key record) -> not
-      probeable, so the probe returns None and headroom degrades to UNKNOWN
-
-    The managed store's ``~/.fno/providers/<id>/blob`` is deliberately NOT a
-    source: it is a capture-time copy that goes stale and can duplicate across
-    ids, so a probe reading it would report a dead token's window or another
-    account's usage. Its job is slot materialization, not identity.
+    A snapshot is filed under a record id only when the bearer that produced it
+    provably belongs to that record. Its own dir qualifies; so does the shared
+    slot when this record occupies it (``dir`` is None). Nothing else does, and
+    headroom degrades to UNKNOWN. The managed store's captured blob is never a
+    source: it goes stale and can duplicate across ids.
     """
     own = credential_root(record)
     if own is not None:
@@ -232,8 +216,8 @@ def _load_records() -> dict[str, ProviderRecord]:
 def _shares_the_slot(record: ProviderRecord) -> bool:
     """Only a managed record with no dir of its own rides the shared slot.
 
-    A ``config_dir`` record is attributable without the slot, so neither the
-    taint nor a drifted stamp can affect it and it never enters any repair.
+    A dir of its own is attributable without the slot, so no taint or drifted
+    stamp reaches it and it never enters a repair.
     """
     return record.auth == "managed" and credential_root(record) is None
 
@@ -241,9 +225,8 @@ def _shares_the_slot(record: ProviderRecord) -> bool:
 def _reconcile_slot_once(record: ProviderRecord, now: float) -> bool:
     """Try ONCE to prove the shared slot's identity and repair it. True if it did.
 
-    A REFUSAL is backed off briefly - a slot whose principal matches nothing
-    must not re-hit the profile endpoint on every probe - while never being
-    cached as proof: the backoff only delays the next attempt, it never
+    A refusal is backed off briefly, so a slot matching nothing cannot re-hit
+    the endpoint every probe. Backoff delays the next attempt; it never
     satisfies one.
     """
     if not _shares_the_slot(record):
@@ -267,10 +250,9 @@ def _reconcile_slot_once(record: ProviderRecord, now: float) -> bool:
 def _reconcile_tainted_slot(record: ProviderRecord, now: float) -> bool:
     """Repair a TAINTED slot, the case that used to be terminal.
 
-    A taint made ``_is_active_slot_occupant`` False forever, the probe degraded
-    to None by design, and nothing announced it - a five-day silent outage ended
-    by deleting a marker file by hand. A fresh probe now asks whether the taint
-    is a false positive, and resumes ONLY if identity was proven.
+    A taint made the occupant check False forever and nothing announced it: a
+    five-day silent outage ended by deleting a marker by hand. A fresh probe
+    asks whether the taint is a false positive, and resumes only on proof.
     """
     if not _shares_the_slot(record):
         return False
@@ -287,14 +269,10 @@ def _reconcile_tainted_slot(record: ProviderRecord, now: float) -> bool:
 def _bearer_verdict(record: ProviderRecord, bearer: str, now: float) -> str:
     """May ``bearer``'s usage be filed under ``record``? Checked per credential.
 
-    Deliberately keyed to the bearer rather than to "the slot": the scoped and
-    unscoped Keychain items can hold different accounts, which is why the probe
-    tries several bearers in the first place. A check that proved one credential
-    while the request used another would reintroduce the misattribution it was
-    added to prevent.
-
-    A record with its own dir is attributable by construction and skips this
-    entirely.
+    Keyed to the bearer, not to "the slot": the scoped and unscoped Keychain
+    items can hold different accounts, so proving one credential while the
+    request spends another is the same misattribution by a longer route. A
+    record with its own dir is attributable by construction and skips this.
     """
     if not _shares_the_slot(record):
         return "unsupported"
@@ -412,13 +390,9 @@ def _parse_claude_windows(payload: Any) -> tuple[UsageWindow, ...]:
 def _credential_still_current(record: ProviderRecord, bearer: str) -> bool:
     """Is ``bearer`` still a credential ``record``'s root serves?
 
-    Identity is proven before the usage request, which closes the window on
-    fetching another account's numbers. It does not close the one AFTER the
-    request: a sign-in landing between the proof and the reading would file the
-    old generation's numbers under the new principal. Re-reading the candidate
-    set is what catches that, and ``identity_changed`` is the positive marker
-    that explains the discard - a missing snapshot alone reads identically to a
-    probe that never ran.
+    The proof before the request closes the window on FETCHING another
+    account's numbers. This closes the one after it, where a sign-in would file
+    the old generation's reading under the new principal.
     """
     try:
         return bearer in _claude_bearer_candidates(record)
@@ -436,25 +410,13 @@ def _probe_claude(
     probe would silently fail. A 401/403 skips to the next token; any other
     network error aborts (fail-open None).
 
-    Reports ``unattributed`` rather than ``probe-failed`` when every candidate
-    bearer was REJECTED before the request, because no usage request was ever
-    issued: the fault is a stale or unprovable account binding, not the
-    endpoint. Calling that a probe failure sends an operator to debug a network
-    path that was never used - a confident wrong reason, which is worse than a
-    bare unknown.
-
-    Reports ``credential-rejected`` when the request WAS issued and the
-    endpoint answered 401/403 on every candidate. That is a third thing again,
-    and it used to read ``probe-failed`` - the same slug a DNS failure and a
-    timeout produce, which sends an operator to debug a network path that
-    answered correctly. Measured on this machine: an account whose credential
-    dir resolved, whose single 108-character bearer proved out, and whose usage
-    request returned a clean 401. The repair is a re-login for that config dir,
-    and no amount of network debugging finds it.
-
-    Reports ``identity_changed`` when the credential moved between the identity
-    proof and the reading. The reading is real; the account it belongs to is no
-    longer the one this record names, so it is discarded rather than filed.
+    Four unknowns, kept apart because each sends an operator somewhere else.
+    ``unattributed``: every candidate was refused before the request, so no
+    request was issued and the fault is the binding. ``credential-rejected``:
+    the request went out and the endpoint answered 401/403, so the repair is a
+    re-login, not network debugging. ``identity_changed``: the credential moved
+    between the proof and the reading, so a real reading is discarded rather
+    than filed under the wrong account. ``probe-failed``: everything else.
     """
     unattributable = False
     rejected = False
