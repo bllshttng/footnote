@@ -13,12 +13,8 @@ from fno.worktree_stranded import CLEAN
 CACHE_RELPATH = ".fno/branch-provenance.json"
 
 
-def cache_path(repo: Path) -> Path:
-    return Path(repo) / CACHE_RELPATH
-
-
 def write_cache(repo: Path, rows: list) -> bool:
-    """Persist the non-CLEAN rows atomically; log-and-False on any failure."""
+    """Persist the non-CLEAN rows to <repo>/.fno/branch-provenance.json; log-and-False on any failure."""
     out = [
         {
             "branch": row.facts.get("branch"),
@@ -34,7 +30,7 @@ def write_cache(repo: Path, rows: list) -> bool:
         for row in rows
         if row.klass != CLEAN
     ]
-    target = cache_path(repo)
+    target = Path(repo) / CACHE_RELPATH
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=target.parent, suffix=".tmp")
@@ -50,30 +46,24 @@ def write_cache(repo: Path, rows: list) -> bool:
 def read_cache(repo: Path) -> list[dict]:
     """Cached rows, fail-open: any read or parse problem answers []."""
     try:
-        data = json.loads(cache_path(repo).read_text(encoding="utf-8"))
+        data = json.loads((Path(repo) / CACHE_RELPATH).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     if not isinstance(data, list):
         return []
-    # A valid-JSON list of non-objects must not reach the renderer: the
-    # board's own try/except sits around the READ, not around row formatting.
+    # A list of non-objects must not reach the formatter outside the try.
     return [row for row in data if isinstance(row, dict)]
 
 
 def _provenance_roots() -> list[Path]:
-    """Repo roots that may carry a cache: the sidecar cwds, deduped, on disk."""
+    """Repo roots that may carry a cache: the sidecar cwds, on disk."""
     try:
         from fno.tracker import sidecar as sidecar_store
 
-        sidecars = sidecar_store.load_all()
+        cwds = {str(getattr(sc, "cwd", "")) for sc in sidecar_store.load_all().values()}
     except Exception:  # noqa: BLE001 - display signal; never break a mutation
         return []
-    roots: dict[str, Path] = {}
-    for sc in sidecars.values():
-        cwd = getattr(sc, "cwd", None)
-        if cwd:
-            roots.setdefault(str(cwd), Path(cwd))
-    return [p for p in roots.values() if p.is_dir()]
+    return [Path(c) for c in sorted(cwds) if c and Path(c).is_dir()]
 
 
 def _provenance_line(row: dict) -> str:
@@ -92,15 +82,10 @@ def _provenance_line(row: dict) -> str:
 
 
 def provenance_lines(roots: list[Path] | None = None) -> list[str]:
-    """The Branch Provenance section, [] when there is nothing to report.
-
-    Board rendering runs inside locked_mutate_graph, so a bad read degrades
-    to "section omitted" - the same fail-open contract as the rollup.
-    """
+    """The Branch Provenance section, [] on an empty cache; the board render
+    runs inside locked_mutate_graph, so a bad read degrades to omission."""
     try:
         rows = [r for root in (roots if roots is not None else _provenance_roots()) for r in read_cache(root)]
     except Exception:  # noqa: BLE001 - display signal; never break a mutation
         return []
-    if not rows:
-        return []
-    return ["## Branch Provenance", "", *(_provenance_line(r) for r in rows), ""]
+    return ["## Branch Provenance", "", *(_provenance_line(r) for r in rows), ""] if rows else []

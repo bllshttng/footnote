@@ -192,26 +192,14 @@ def _unpushed_batch(
             capture_output=True,
             text=True,
         )
-        results[p] = (
-            count,
-            ok,
-            age_p.stdout.strip() or "unknown",
-            _has_remote(p, branch),
-        )
+        remote = False
+        if branch:
+            remote = subprocess.run(
+                ["git", "-C", p, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
+                capture_output=True,
+            ).returncode == 0
+        results[p] = (count, ok, age_p.stdout.strip() or "unknown", remote)
     return results
-
-
-def _has_remote(path: str, branch: Optional[str]) -> bool:
-    """Whether refs/remotes/origin/<branch> resolves, off the refs the batch's
-    own fetch just refreshed; a missing ref must never demote a flagged row."""
-    if not branch:
-        return False
-    r = subprocess.run(
-        ["git", "-C", path, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
-        capture_output=True,
-        text=True,
-    )
-    return r.returncode == 0
 
 
 # Port of scripts/lib/worktree-unpushed.sh. FAIL TOWARD KEEP: only a literal
