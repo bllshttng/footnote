@@ -154,6 +154,7 @@ whoami status
 worker
 workspace register-worker
 workspace worktree archive
+workspace worktree cargo-offload
 workspace worktree cleanup
 workspace worktree ensure
 workspace worktree overlap-record

@@ -17,6 +17,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `paths.fleet_dir` | str (optional) | _(none)_ | never | Override path to the megatron fleet dir. |
 | `paths.postmortems_dir` | str (optional) | _(none)_ | never | Override path to the postmortems dir. |
 | `paths.worktrees_base` | str (optional) | _(none)_ | never | Override base dir for worktrees. |
+| `paths.cargo_targets_base` | str (optional) | _(none)_ | never | Where 'worktree cargo-offload' relocates crates/<crate>/target caches (default ~/.fno/cargo-targets). Each tree keeps its own directory under <base>/<repo>/<tree>/; the checkout keeps a symlink, so built-binary paths stay valid. |
 | `paths.memory_dir` | str (optional) | _(none)_ | never | Override path to the memory dir. |
 | `paths.hook_logs_dir` | str (optional) | _(none)_ | never | Override path to hook logs. |
 | `paths.inbox_dir` | str (optional) | _(none)_ | never | Override path to the cross-project messaging inbox dir. |

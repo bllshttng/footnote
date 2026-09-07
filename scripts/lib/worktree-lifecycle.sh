@@ -184,7 +184,30 @@ _wt_pids() {
             print pid
         }
     ' <(ps -Ao pid=,command= 2>/dev/null; printf '%s\n' '__FNO_PS_SNAPSHOT_COMPLETE__') <(printf '%s\n' "$candidates"))"
-    printf '%s\n' "$filtered"
+    # A candidate that is an ANCESTOR of this sweep is the sweep's own
+    # invoker, never a squatter: under pytest-xdist the worker's argv carries
+    # the test's tmp paths and its descendants match pgrep, reading as
+    # processes:2 in a tree nobody is in (CI smoke, 2026-09-07). The chain
+    # walk is bounded: a pid whose ancestry does not reach $$ within 12 hops
+    # is unrelated and stays.
+    local filtered2="" pid_walk hop walk_pid ancestor
+    filtered2=""
+    while IFS= read -r pid_walk; do
+        [[ -z "$pid_walk" ]] && continue
+        ancestor=0
+        walk_pid="$pid_walk"
+        for hop in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            [[ -z "$walk_pid" || "$walk_pid" == "0" || "$walk_pid" == "1" ]] && break
+            if [[ "$walk_pid" == "$$" ]]; then
+                ancestor=1
+                break
+            fi
+            walk_pid="$(ps -o ppid= -p "$walk_pid" 2>/dev/null | tr -d ' ')"
+        done
+        [[ "$ancestor" -eq 1 ]] && continue
+        filtered2="${filtered2}${pid_walk}"$'\n'
+    done <<< "$filtered"
+    printf '%s\n' "$filtered2"
     return "$snapshot_rc"
 }
 
