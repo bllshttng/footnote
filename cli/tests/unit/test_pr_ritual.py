@@ -751,6 +751,42 @@ def test_archive_emits_one_merge_cleanup_request(tmp_path, monkeypatch):
     assert request["request_id"].startswith("merge-cleanup-")
 
 
+def test_mint_binds_node_ids_when_reconcile_closed_nothing(tmp_path, monkeypatch, capsys):
+    # The ship gate closes the node before the ritual runs, so reconcile's
+    # .closed[] is empty and the mint keyed empty node_ids: the reaper held
+    # (no-node-ids) and two mint sites for one merge never folded to one
+    # request id. The mint must run the same recovery leg_reap_rows runs.
+    seen = []
+    monkeypatch.setattr(
+        _events,
+        "_emit_daemon_envelope",
+        lambda kind, data: seen.append((kind, data)),
+    )
+    runner = FakeRunner(branch="feature/x")
+    r = _bare(tmp_path, runner)
+    monkeypatch.setattr(r, "_resolve_origin_slug", lambda: "owner/repo")
+    _patch_sidecar_scan(monkeypatch, [
+        {"id": "fno-abc1", "pr_number": 7, "pr_url": "https://github.com/owner/repo/pull/7"}])
+    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(r.cwd))
+
+    r.leg_archive()
+
+    requests = [data for kind, data in seen if kind == "merge_cleanup_requested"]
+    assert len(requests) == 1
+    assert requests[0]["node_ids"] == ["fno-abc1"]
+    # The request id keys on the bound set: a site minting the same merge with
+    # the ids bound folds to this id; the empty-keyed id never matches it.
+    bound = _events.merge_cleanup_request_id("", 7, "feature/x", str(r.cwd), ["fno-abc1"])
+    assert requests[0]["request_id"] == bound
+    assert _events.merge_cleanup_request_id("", 7, "feature/x", str(r.cwd), []) != bound
+
+    # The ids stay bound, so the reap leg completes instead of skipping.
+    r.leg_reap_rows()
+    out = capsys.readouterr().out
+    assert "step=reap-rows" in out
+    assert "no closed node ids" not in out
+
+
 def test_archive_defer_mints_the_cleanup_request(tmp_path, capsys, monkeypatch):
     # The deferred debt is a fact in the world: the request envelope the
     # daemon's merge reaper consumes after the grace window, so "later" no

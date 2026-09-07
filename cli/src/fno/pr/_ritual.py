@@ -587,6 +587,12 @@ class Ritual:
         """Persist one merge-triggered cleanup request before deferring: the
         shared helper `fno do pr merge` also mints, one fold key for both.
         """
+        if not self.ctx.node_ids:
+            # Dominant path: the ship gate already closed the node, so
+            # reconcile's .closed[] was empty. Recover it HERE, before the
+            # envelope and its request id key on it - leg_reap_rows runs the
+            # same recovery several legs later, too late for this mint.
+            self.ctx.node_ids = self._recover_node_for_pr()
         request_id = emit_merge_cleanup_requested(
             repo=str(self.canon) if self.canon else "",
             project=self.ctx.project,
