@@ -1,19 +1,12 @@
 """``fno agents top`` (x-c5cc): every live worker process with tree RSS.
 
-One table over the SAME union the spawn gate counts (imported from
-``spawn_gate.census`` - never duplicated), so the debugging surface and the
-enforcement surface can never disagree. Python-only by design (LD8): RSS via
-psutil, no daemon involvement, kept out of the Rust client verb list. The cost
-column is the worker's whole process TREE off the resolved session pid
-(:func:`fno.agents.session_procs.tree_rss_mb`, x-3f84 W2) - a row's recorded
-pid alone prices the PTY host on a bg row and misses the per-session MCP
-servers every worker forks.
-
-With ``--subagents`` (x-af92), appends a read-only section listing
-harness-native subagents (sidechain 'limbs') that the pid/registry census
-cannot see. That section is display-only: it never feeds the spawn gate's
-slot count, and a subagent has no mail handle, so it is observable but not
-addressable. See docs/architecture/coordination.md.
+One table over the SAME union the spawn gate counts (``spawn_gate.census``,
+never duplicated), so the debugging surface and the enforcement surface can
+never disagree. Python-only by design (LD8). The cost column is the worker's
+whole process TREE off the resolved session pid (x-3f84 W2) - a recorded pid
+alone prices the PTY host and misses the per-session MCP servers.
+``--subagents`` (x-af92) appends a display-only sidechain section: never
+slot-counted, observable, not addressable.
 """
 from __future__ import annotations
 
@@ -33,26 +26,15 @@ from fno.agents.spawn_gate import LiveWorker, census
 def lane_rows() -> list[dict]:
     """Per-provider lane occupancy against the cap that actually refuses.
 
-    The constraint that governs this fleet was invisible. Measured 2026-09-01:
-    `agents.provider_limits.zai.lanes = 7` was binding (7 live zai rows, a
-    spawn refused there) while machine load sat at 1.3 per CPU, far under the
-    `max_load_per_cpu = 8` trigger - so every machine-capacity surface said
-    "plenty of room" and none of them was the thing saying no.
-
-    Counted by the gate's OWN functions (:func:`provider_live_count`,
-    :func:`provider_lanes_cap`), never by a second walk of the registry. A
-    display that recounted would disagree with the refusal the first time
-    either changed, and a lane display that disagrees with the gate is worse
-    than none.
-
-    A count that cannot be read is reported as unreadable and NEVER as 0. Zero
-    free lanes and an unreadable registry are opposite facts, and the gate
-    itself treats the unreadable case as a refusal (fail-closed), so rendering
-    it as an empty fleet would invert the meaning.
-
-    Providers appear when they carry a configured cap, or when a live row names
-    them (uncapped, `cap: None`) - so a provider quietly running uncapped is
-    visible rather than absent.
+    The constraint that governs this fleet was invisible: measured 2026-09-01
+    the zai lane cap was binding (7 live rows, a spawn refused) while every
+    machine-capacity surface said "plenty of room". Counted by the gate's OWN
+    functions (:func:`provider_live_count`, :func:`provider_lanes_cap`),
+    never a second registry walk - a display that recounts disagrees with the
+    refusal the first time either changes. A count that cannot be read is
+    reported as unreadable, NEVER as 0: the gate treats the unreadable case
+    as a refusal (fail-closed), so an empty fleet would invert the meaning.
+    Providers appear when capped or when a live row names them (`cap: None`).
     """
     from fno.agents.spawn_gate import (
         LIVE_STATUSES,
@@ -125,9 +107,8 @@ def _render_lane_lines(rows: list[dict]) -> list[str]:
 
 def _crown_map() -> dict[str, str]:
     """name -> crown label for crowned registry rows (US9), sourced from
-    :func:`crown_reading` so this view and ``fno whoami`` cannot drift into two
-    renderings of the same fact. Best-effort: a read failure degrades to no
-    crowns rather than breaking the process view."""
+    :func:`crown_reading` so this view and ``fno whoami`` cannot drift.
+    Best-effort: a read failure degrades to no crowns."""
     try:
         from fno.agents.crown import crown_reading
         from fno.agents.registry import load_registry
@@ -142,35 +123,33 @@ def _crown_map() -> dict[str, str]:
         return {}
 
 
-def _registry_handles() -> dict[str, str]:
-    """session uuid -> registry handle. Best-effort, like :func:`_crown_map`.
-
-    `top` labels a foreign claude row with the FIRST 8 hex of the session uuid;
-    the registry handle for that same session is the LAST 8. Same session, two
-    identities, and nothing on screen relates them -- which is how a grep across
-    the two views returned nothing and got read as "all agents are dead".
-    """
+def _registry_maps() -> tuple[dict[str, str], dict[str, Optional[str]]]:
+    """One registry read feeding both session-id joins (x-1379): ``handles``
+    is the session uuid -> handle bridge (a foreign claude row is labelled by
+    the FIRST 8 hex of that uuid, the registry handle is the LAST 8 - the
+    mismatch that once read as "all agents are dead"), ``nodes`` is the
+    handle -> node map the retirement verdict resolves through. Best-effort,
+    like :func:`_crown_map`: a read failure degrades to empty maps."""
     try:
         from fno.agents.registry import load_registry
 
-        return {
-            e.harness_session_id: e.name
-            for e in load_registry()
-            if e.harness_session_id and e.name
-        }
+        handles: dict[str, str] = {}
+        nodes: dict[str, Optional[str]] = {}
+        for e in load_registry():
+            if e.harness_session_id and e.name:
+                handles[e.harness_session_id] = e.name
+            if e.name:
+                nodes[e.name] = e.node
+        return handles, nodes
     except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
-        return {}
+        return {}, {}
 
 
 class RowTruth(NamedTuple):
-    """What one transcript read says about a census row (x-6d89).
-
-    ``reach`` is the verdict the old ``_progress_map`` computed and threw
-    away; rendering it is the whole node. ``progress`` is None exactly when
-    the row has no registry entry (a foreign claude row): judging a refusal
-    needs ``harness`` / ``route_settings_path`` context the row does not
-    carry, while the age and the reachability verdict need only the handle.
-    """
+    """What one transcript read says about a census row (x-6d89): ``reach``
+    is the verdict the old ``_progress_map`` computed and threw away.
+    ``progress`` is None exactly when the row has no registry entry, which
+    alone lacks the harness/route context a refusal verdict needs."""
 
     progress: Optional[str]
     activity: str
@@ -180,20 +159,10 @@ class RowTruth(NamedTuple):
 
 
 def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
-    """name -> :class:`RowTruth`, one transcript read per row, every row.
-
-    This is the surface that showed 8513 MB across 31 live pids with no way
-    to see which of them were parked (specimen 1), so it must show progress
-    beside RSS on the same line -- and the surface that showed a king a
-    process-alive row it read as an owned, drivable session while the
-    transcript had stood down two hours before (x-6d89), so the row must
-    carry the reachability verdict beside it.
-
-    One transcript read per row (``resolve_session_truth``), reused for the
-    reachability verdict, the progress verdict and the activity word -- the
-    same shape ``fno.agents.read`` uses so this view does not pay a second
-    read for the same evidence.
-    """
+    """name -> :class:`RowTruth`, one transcript read per row, every row:
+    progress and the reachability verdict beside RSS (the surface that once
+    showed 8513 MB across 31 live pids with no way to see which were
+    parked), from ONE read, the shape ``fno.agents.read`` uses (x-6d89)."""
     from fno.agents.reachability import (
         classify_progress,
         classify_reachability,
@@ -203,14 +172,23 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
     from fno.agents.registry import load_registry
     from fno.agents.session_truth import resolve_session_truth
 
+    by_name: dict = {}
+    by_session: dict = {}
     try:
-        entries = {e.name: e for e in load_registry()}
+        for e in load_registry():
+            by_name[e.name] = e
+            if e.harness_session_id:
+                by_session[e.harness_session_id] = e
     except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
-        entries = {}
+        pass
 
     out: dict[str, RowTruth] = {}
     for w in workers:
-        entry = entries.get(w.name)
+        # The session uuid joins first (x-1379): the registry keys a foreign
+        # claude row by its handle, not by this view's first-8-hex label.
+        entry = by_session.get(w.session_id or "")
+        if entry is None:
+            entry = by_name.get(w.name)
         truth = resolve_session_truth(w.name)
         truth_state = truth.get("state")
         reach = classify_reachability(
@@ -241,53 +219,49 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
 
 
 def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
-    handles = _registry_handles()
+    handles, reg_nodes = _registry_maps()
     truth_map = _row_truth(workers)
+    # One retirement read for the whole roster (x-1379), keyed by the
+    # REGISTRY identity: the first-8-hex census label resolves no node.
+    from fno.agents.retirement import verdicts
+
+    registry_ids = [handles.get(w.session_id or "") or w.name for w in workers]
+    verdict_map = verdicts(
+        (idn, reg_nodes.get(idn)) for idn in registry_ids
+    )
     rows = []
     for w in workers:
-        # The served truth for the row; a foreign claude row still gets the
-        # age and the reachability verdict (the handle is enough), it only
-        # misses the PROGRESS verdict.
+        # A foreign claude row (no registry entry) still gets age and reach;
+        # only the PROGRESS verdict needs the entry's harness/route context.
         row_truth = truth_map.get(w.name)
         activity = row_truth.activity if row_truth else w.status
         age = row_truth.age_s if row_truth else None
         # Null when this session has no registry row (a foreign claude session
         # that fno never adopted), which is a real answer, not a lookup miss.
         handle = handles.get(w.session_id or "")
-        # The registry keys a foreign claude row by the LAST 8 hex of the
-        # session uuid and this view labels it by the FIRST 8, so the crown
-        # must join through the session id the handle column already
-        # resolves - not through the display name, which reads None for
-        # exactly the row `handle` above exists to bridge.
         reg_name = handle or w.name
+        v = verdict_map.get(reg_name)
         rows.append(
             {
                 "source": w.source,
                 "name": w.name,
                 "handle": handle if handle != w.name else None,
-                # HARNESS, not PROVIDER: the value is `row.harness` (the CLI),
-                # so the old name made a claude-hosted worker on a z.ai route
-                # read as running on claude. Same rename as the list row.
+                # HARNESS, not PROVIDER (the CLI, never the model vendor).
                 "harness": w.harness,
                 "substrate": w.substrate,
-                # The king that spawned this worker (x-3f84 W4): first 8 of the
-                # spawner's session id, None for operator-run / legacy rows.
-                # The column an operator reads to see WHICH king owns the cost.
+                # The king that spawned this worker (x-3f84 W4): which king
+                # owns the cost; None for operator-run / legacy rows.
                 "king": (w.spawned_by or "")[:8] or None,
-                # The process that IS the session (x-3f84 W2): for a bg row the
-                # recorded `w.pid` names the PTY HOST, and this column once
-                # priced the host while the worker's own memory never appeared
-                # in the one view built to show it.
+                # The process that IS the session (x-3f84 W2): a bg row's
+                # recorded pid names the PTY HOST, not the worker.
                 "pid": w.session_pid or w.pid,
                 "rss_mb": tree_rss_mb(w.session_pid or w.pid),
-                # (x-c672, AC7) Served activity from the same single
-                # truth read the progress axis uses, with the measured age in
-                # its own key; the stored token rides `stored_status`.
+                # (x-c672, AC7) Served activity from the one truth read the
+                # progress axis uses; the stored token rides `stored_status`.
                 "status": activity,
                 "status_age_s": age,
                 "stored_status": w.status,
-                # (x-d401) Why `stored_status` is not the registry's token,
-                # when it is not: the contradiction the emitter resolved.
+                # (x-d401) Why `stored_status` is not the registry's token.
                 "status_basis": w.status_basis,
                 # The orthogonal axis beside `status`: null for a foreign
                 # claude row this view has no harness/route context to judge.
@@ -296,6 +270,12 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 # showed, with the basis that says which question it answered.
                 "reach": row_truth.reach if row_truth else None,
                 "reach_basis": row_truth.reach_basis if row_truth else None,
+                # x-1379: has this worker's node already shipped. Null node is
+                # a real answer (unresolvable name), never a lookup miss.
+                "node": v.node if v else None,
+                "node_basis": v.node_basis if v else None,
+                "retire": v.retire if v else False,
+                "retire_reason": v.reason if v else None,
                 "crown": crowns.get(reg_name),  # US9: null when uncrowned
             }
         )
@@ -315,12 +295,8 @@ def _fmt_age(seconds: float) -> str:
 
 
 def _subagent_section() -> dict:
-    """Read-only sidechain rows for the --subagents section (x-af92).
-
-    Returns the rendered rows, any scan warning, and the live threshold so the
-    caller can state the threshold in its header. Carrying the threshold out
-    keeps the verdict definition next to the verdict rather than re-derived.
-    """
+    """Read-only sidechain rows for the --subagents section (x-af92): the
+    rendered rows, any scan warning, and the live threshold for the header."""
     found, warnings = discover_subagents()
     rows = [
         {
@@ -388,26 +364,14 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
     """Difference the last two ``mux_pane_counters`` snapshots in the journals.
 
     THE one reader for per-pane mux counters: ``fno agents top --pane-stats``
-    renders it here, and the spawn gate's pane-vs-bg-session pricing imports
-    this same function rather than growing a second implementation. The mux
-    emits monotonic TOTALS, never rates - the delta over the window between
-    two samples is computed here, per pane.
-
-    Since retention routing (x-add3) the gauge's rows live in the
-    ``.ephemeral`` sibling journal; the main journal still carries rows a
-    pre-routing daemon wrote. Both are scanned, oldest file first, so the
-    deploy window and a sibling rotation (the ``.ephemeral.1`` generation)
-    both yield a sample pair.
-
-    Returns ``{status, rows, born, gone, session, window_s}``. ``status`` is
-    ``ok`` | ``insufficient-samples`` | ``unreadable``; an honest message is
-    always renderable because a missing second sample or a broken journal must
-    never read as "no cost" (the empty-table trap). Samples are grouped by mux
-    session first (the journal interleaves sessions) and differenced within
-    the session whose newest sample is journal-latest. Totals only go up
-    within one server incarnation: a DECREASE on any field means the server
-    restarted on the same socket name and pane ids reset, so that pane is
-    reported born-and-gone rather than differenced into a negative delta.
+    renders it here and the spawn gate's pane-vs-bg-session pricing imports
+    this same function. The mux emits monotonic TOTALS, never rates. Both
+    the main and the ``.ephemeral`` sibling journal (retention routing,
+    x-add3) are scanned, oldest first. Returns ``{status, rows, born, gone,
+    session, window_s}``; a broken journal is ``unreadable``, never an empty
+    table that reads as "no cost". Samples are grouped by mux session and
+    differenced within the journal-latest one; a DECREASE means the server
+    restarted on the same socket name: report born-and-gone, never negative.
     """
     from fno.events import EPHEMERAL_SUFFIX
     from fno.paths import global_events_json
@@ -467,9 +431,8 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
     older, newer = session_events[-2], session_events[-1]
 
     def _pane_map(ev: dict) -> dict:
-        # A row without an integer pane_id is journal noise (the schema makes
-        # pane_id required, but a debug view must never crash on it): skip it
-        # rather than KeyError the whole table.
+        # A row without an integer pane_id is journal noise: skip it rather
+        # than KeyError the whole table.
         return {
             p["pane_id"]: p
             for p in ev.get("data", {}).get("panes", [])
@@ -523,8 +486,7 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
 
 
 def _render_pane_stats_lines(section: dict) -> list[str]:
-    """The human-readable per-pane counter block. Scope-stated even when the
-    news is "cannot say": one sample or an unreadable journal prints its
+    """The human-readable per-pane counter block: "cannot say" prints its
     status line, never an empty table that reads as 'no cost'."""
     out = ["pane counters (mux server; monotonic totals differenced over the window)"]
     if section["status"] != "ok":
@@ -556,16 +518,36 @@ def _render_pane_stats_lines(section: dict) -> list[str]:
     return out
 
 
+def _retirable_lines(rows: list[dict], lanes: list[dict]) -> list[str]:
+    """One line per lane holder whose node already shipped (x-1379).
+
+    The provider comes from the SAME ``lane_rows`` output the LANES block
+    rendered, never recounted. A holder no lane names still gets its line:
+    the verdict is the graph's, not the lane counter's.
+    """
+    holder_lane: dict[str, Optional[str]] = {}
+    for lane_row in lanes:
+        for h in lane_row.get("holders") or []:
+            holder_lane[h] = lane_row.get("provider")
+    out = []
+    for r in rows:
+        if not r.get("retire"):
+            continue
+        # The lane counter tallies REGISTRY handles; join through the handle.
+        provider = holder_lane.get(r.get("handle") or r["name"])
+        holds = f" holds a {provider} lane" if provider else " holds a lane"
+        pr = (r["retire_reason"] or "").rsplit(" ", 1)[-1]
+        merged = f" at PR {pr}" if pr.isdigit() else ""
+        out.append(f"retirable: {r['name']}{holds}; {r['node']} is done, merged{merged}")
+    return out
+
+
 def render_top(
     as_json: bool = False, include_subagents: bool = False, include_pane_stats: bool = False
 ) -> str:
     """Render the union table (or its JSON mirror - same rows, LD: parity).
-
-    ``include_subagents`` appends a read-only sidechain section (x-af92); in
-    JSON it adds a ``subagents`` key and folds the scan warnings in.
-    ``include_pane_stats`` appends the per-pane mux counter deltas (one reader,
-    :func:`pane_counter_rows`).
-    """
+    ``include_subagents`` appends the sidechain section (x-af92);
+    ``include_pane_stats`` appends the per-pane mux counter deltas."""
     c = census()
     rows = _rows(c.workers, _crown_map())
     lanes = lane_rows()
@@ -587,15 +569,19 @@ def render_top(
 
     out: list[str] = []
     out.extend(c.warnings)
-    # Lanes lead. A provider cap refuses spawns that every row below this
-    # block reports as healthy, so burying it under the process table is how
-    # it stayed invisible.
+    # Lanes lead: a provider cap refuses spawns the table below calls healthy.
     if lanes:
         out.extend(_render_lane_lines(lanes))
         out.append("")
+    # The retirable line leads with the lanes (x-1379): the same shape of
+    # fact as a full lane - a cap refusing spawns the table calls healthy.
+    retirable = _retirable_lines(rows, lanes)
+    if retirable:
+        out.extend(retirable)
+        out.append("")
     header = (
         f"{'SOURCE':<7} {'NAME':<24} {'HARNESS':<9} {'SUBSTRATE':<10} "
-        f"{'KING':<9} {'PID':>7} {'RSS_MB':>7} {'PROGRESS':<17} "
+        f"{'KING':<9} {'PID':>7} {'RSS_MB':>7} {'NODE':<8} {'PROGRESS':<17} "
         f"{'REACH':<11} STATUS"
     )
     out.append(header)
@@ -615,6 +601,7 @@ def render_top(
             f"{r['source']:<7} {name_cell:<24} {r['harness']:<9} "
             f"{r['substrate']:<10} {r['king'] or '-':<9} {r['pid'] or '-':>7} "
             f"{r['rss_mb'] if r['rss_mb'] is not None else '-':>7} "
+            f"{r['node'] or '-':<8} "
             f"{r['progress'] or '-':<17} {r['reach'] or '-':<11} {activity}"
             + (f" ({r['status_basis']})" if r.get("status_basis") else "")
         )
@@ -622,7 +609,8 @@ def render_top(
         out.append(f"(+{c.slot_claims} queued headless slot claim(s))")
     out.append(
         "census: PID/RSS are the process at scan time; REACH reads the "
-        "transcript (fno agents truth for the full evidence)"
+        "transcript (fno agents truth for the full evidence); NODE and the "
+        "retirement line read the graph"
     )
     if subagents is not None:
         out.append("")

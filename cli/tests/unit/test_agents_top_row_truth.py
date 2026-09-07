@@ -58,6 +58,11 @@ def patched(monkeypatch):
 
     monkeypatch.setattr(session_truth, "resolve_session_truth", fake_resolve)
     monkeypatch.setattr(registry, "load_registry", lambda: [])
+    # The retirement verdict reads the graph; blanked so a unit test here
+    # never touches the operator's real ~/.fno/graph.json.
+    from fno.agents import retirement
+
+    monkeypatch.setattr(retirement, "verdicts", lambda rows, entries=None: {})
     return state
 
 
@@ -118,6 +123,38 @@ def test_foreign_row_carries_age_and_reach_without_a_registry_entry(patched):
     assert row["progress"] is None
 
 
+def test_foreign_row_progress_joins_registry_through_session_id(
+    patched, monkeypatch
+):
+    """AC4-HP (x-1379): a foreign claude row is labelled by the FIRST 8 hex of
+    the session uuid while the registry entry is keyed by the handle, so the
+    PROGRESS axis joins through the session uuid - the same bridge the crown
+    join already uses - instead of rendering `-` on every such row."""
+    from fno.agents import registry
+    from fno.agents.registry import AgentEntry
+
+    entry = AgentEntry(
+        name="last8reg",
+        cwd="/w",
+        log_path="",
+        harness="claude",
+        harness_session_id="full-session-uuid",
+    )
+    monkeypatch.setattr(registry, "load_registry", lambda: [entry])
+    patched["answers"]["first8row"] = _answer("first8row", "working", 45)
+    (row,) = _rows(
+        patched,
+        [
+            _worker(
+                source="claude",
+                name="first8row",
+                session_id="full-session-uuid",
+            )
+        ],
+    )
+    assert row["progress"] == "advancing"
+
+
 def test_disagreement_is_visible_in_one_rendered_row(patched, monkeypatch):
     """AC3-HP: process alive + transcript stood down, one row says both."""
     import fno.agents.top as top
@@ -173,3 +210,74 @@ def test_one_transcript_read_per_row(patched):
     patched["answers"]["second"] = _answer("second", "stalled", 7426)
     _rows(patched, [_worker(), _worker(name="second")])
     assert sorted(patched["reads"]) == ["second", "t-06f7-row"]
+
+
+def test_retirable_line_renders_under_lanes_and_none_when_empty(
+    patched, monkeypatch
+):
+    """AC3-HP/EDGE (x-1379): a lane holder whose node is done and merged gets
+    its `retirable:` line under LANES; with no retirable row, nothing extra
+    renders. The live fleet rarely carries a retirable holder at scan time,
+    so the positive case is pinned here rather than against the world."""
+    import fno.agents.top as top
+    from fno.agents.retirement import Retirement
+
+    def _render():
+        class _census:
+            warnings: list[str] = []
+            slot_claims = 0
+            workers = [
+                _worker(name="1a2b3c4d", session_id="full-session-uuid")
+            ]
+
+        monkeypatch.setattr(top, "census", lambda: _census)
+        monkeypatch.setattr(
+            top,
+            "lane_rows",
+            lambda: [
+                {"provider": "zai", "cap": 10, "count": 1, "holders": ["t-06f7-row"]}
+            ],
+        )
+        monkeypatch.setattr(top, "tree_rss_mb", lambda pid: 297.0)
+        return top.render_top()
+
+    patched["answers"]["1a2b3c4d"] = _answer("1a2b3c4d", "working", 45)
+    monkeypatch.setattr(
+        top,
+        "_registry_maps",
+        lambda: (
+            {"full-session-uuid": "t-06f7-row"},
+            {"t-06f7-row": "x-06f7"},
+        ),
+    )
+    import fno.agents.retirement as retirement
+
+    monkeypatch.setattr(
+        retirement,
+        "verdicts",
+        lambda rows, entries=None: {
+            "t-06f7-row": Retirement("x-06f7", "name", True, "done+merged PR 1553")
+        },
+    )
+    text = _render()
+    assert (
+        "retirable: 1a2b3c4d holds a zai lane; "
+        "x-06f7 is done, merged at PR 1553"
+    ) in text
+    assert "NODE" in text
+
+    # A merged node with no recorded PR number still renders, without a
+    # bogus "at PR" clause.
+    monkeypatch.setattr(
+        retirement,
+        "verdicts",
+        lambda rows, entries=None: {
+            "t-06f7-row": Retirement("x-06f7", "name", True, "done+merged")
+        },
+    )
+    assert "retirable: 1a2b3c4d holds a zai lane; x-06f7 is done, merged" in (
+        _render()
+    )
+
+    monkeypatch.setattr(retirement, "verdicts", lambda rows, entries=None: {})
+    assert "retirable:" not in _render()

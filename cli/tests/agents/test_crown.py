@@ -460,7 +460,7 @@ def test_top_rows_join_the_crown_through_session_id_when_names_differ(monkeypatc
     from fno.agents.spawn_gate import LiveWorker
 
     monkeypatch.setattr(
-        top, "_registry_handles", lambda: {"full-session-uuid": "last8reg"}
+        top, "_registry_maps", lambda: ({"full-session-uuid": "last8reg"}, {})
     )
     w = LiveWorker(
         source="claude",
