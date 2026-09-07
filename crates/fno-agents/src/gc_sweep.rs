@@ -240,24 +240,48 @@ pub(crate) fn plan_stale_do_rows(home: &AgentsHome) -> Vec<StaleDoRow> {
 /// merged node with no open additional PR there is nothing left to re-open,
 /// and the session provenance (phase, harness, session id, started_at)
 /// survives the retirement question. Returns `(settled, refusals)`; a settle
-/// that cannot write names every row it held, never silent, and retries on
-/// the next sweep. The stamp records `ended_by: "reap-sweep"` because the
+/// that cannot write names the refusal, never silent, and the sweep retries
+/// on its next pass. The stamp records `ended_by: "reap-sweep"` because the
 /// sweep INFERS the end instant rather than observing it.
+///
+/// The read-apply-publish cycle retries a bounded few times before it
+/// refuses: `locked_mutate` refuses over ANY foreign write that landed
+/// between this read and this write (the guard that makes the write
+/// unclobberable), and on a fleet machine one write burst can eat the first
+/// attempt. The fill runs fill-if-absent over a fresh read each attempt, so
+/// a retry never overwrites an `ended_at` another writer just added.
 pub(crate) fn settle_stale_do_rows(home: &AgentsHome) -> (Vec<StaleDoRow>, Vec<(String, String)>) {
     let path = graph_path(home);
-    let base = graph_store::file_content_version(&path);
-    let mut entries = match graph_store::read_defaulted(&path, false) {
-        Ok(entries) => entries,
-        Err(err) => {
-            return (
-                Vec::new(),
-                vec![(String::new(), format!("graph unreadable: {err}"))],
-            )
+    const SETTLE_ATTEMPTS: usize = 5;
+    for attempt in 0..SETTLE_ATTEMPTS {
+        match settle_attempt(&path) {
+            Ok(settled) => return (settled, Vec::new()),
+            Err(SettleRefusal::Retry(err)) if attempt + 1 < SETTLE_ATTEMPTS => {
+                let _ = err;
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            Err(SettleRefusal::Retry(err)) => {
+                let reason =
+                    format!("settle write refused: {err} (after {SETTLE_ATTEMPTS} attempts)");
+                return (Vec::new(), vec![(String::new(), reason)]);
+            }
+            Err(SettleRefusal::Fatal(reason)) => {
+                return (Vec::new(), vec![(String::new(), reason)])
+            }
         }
-    };
+    }
+    unreachable!("every loop arm returns")
+}
+
+/// One read-apply-publish attempt. `Err(Retry(_))` is a lost race a fresh
+/// read may win; `Err(Fatal(_))` is not.
+fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefusal> {
+    let base = graph_store::file_content_version(path);
+    let mut entries = graph_store::read_defaulted(path, false)
+        .map_err(|err| SettleRefusal::Fatal(format!("graph unreadable: {err}")))?;
     let stale = stale_open_do_rows(&entries);
     if stale.is_empty() {
-        return (Vec::new(), Vec::new()); // nothing stale: never touch the file
+        return Ok(Vec::new()); // nothing stale: never touch the file
     }
     let now = crate::daemon::now_rfc3339_like();
     for row in &stale {
@@ -286,7 +310,7 @@ pub(crate) fn settle_stale_do_rows(home: &AgentsHome) -> (Vec<StaleDoRow>, Vec<(
         }
     }
     let outcome = graph_store::locked_mutate(
-        &path,
+        path,
         graph_store::MutateInput {
             entries,
             // No node crosses into a terminal rung here: the closure-release
@@ -298,16 +322,21 @@ pub(crate) fn settle_stale_do_rows(home: &AgentsHome) -> (Vec<StaleDoRow>, Vec<(
         graph_store::DEFAULT_LOCK_TIMEOUT,
     );
     match outcome {
-        Ok(_) => (stale, Vec::new()),
-        Err(err) => {
-            let reason = format!("settle write refused: {err}");
-            let refused = stale
-                .into_iter()
-                .map(|row| (row.node, reason.clone()))
-                .collect();
-            (Vec::new(), refused)
-        }
+        Ok(_) => Ok(stale),
+        // A lost race (the file moved under the snapshot) or a contended
+        // lock: a fresh read may win. Anything else is final.
+        Err(
+            err @ (graph_store::StoreError::Conflict | graph_store::StoreError::LockTimeout(..)),
+        ) => Err(SettleRefusal::Retry(err.to_string())),
+        Err(err) => Err(SettleRefusal::Fatal(format!("settle write refused: {err}"))),
     }
+}
+
+/// Why one settle attempt did not land. A retry is a lost race; a fatal is
+/// a named refusal.
+enum SettleRefusal {
+    Retry(String),
+    Fatal(String),
 }
 
 /// Drop each planned settle from the dry-run graph read, so the rehearsal
