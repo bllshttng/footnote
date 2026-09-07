@@ -701,7 +701,8 @@ def render_top(
         out.append(f"(+{c.slot_claims} queued headless slot claim(s))")
     out.append(
         "census: PID/RSS are the process at scan time; REACH reads the "
-        "transcript; NODE and the retirement line read the graph"
+        "transcript (fno agents truth for the full evidence); NODE and the "
+        "retirement line read the graph"
     )
     if subagents is not None:
         out.append("")
