@@ -162,8 +162,8 @@ def evals_health_summary(
 ) -> Optional[dict[str, Any]]:
     """One-line evals health for triage health and doctor; the demand row.
 
-    None when no history or no rows. Never raises. Full semantics in
-    docs/evals.md; unknown never asserts staleness.
+    None when no history or no rows; never raises; unknown never asserts
+    staleness. Full semantics in docs/evals.md.
     """
     if not history_path.exists():
         return None
@@ -182,11 +182,12 @@ def evals_health_summary(
     if now is None:
         now = datetime.now(timezone.utc)
     reg_ts = [
-        _parse_ts(r.get("ts"))
+        dt
         for r in rows
         if r.get("tier") == "regression"
+        for dt in [_parse_ts(r.get("ts"))]
+        if dt is not None
     ]
-    reg_ts = [dt for dt in reg_ts if dt is not None]
     newest_dt = max(reg_ts, default=None)
     never_ran = reg is None
     age_days = (

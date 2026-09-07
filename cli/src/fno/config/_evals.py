@@ -43,15 +43,13 @@ class EvalsBlock(BaseModel):
             return v
         out = dict(v)
         for key in ("schedule_days", "stale_days"):
-            raw = out.get(key)
             if key not in out:
                 continue
-            ok = not isinstance(raw, bool)
-            if ok:
-                try:
-                    ok = int(raw) >= 0
-                except (TypeError, ValueError):
-                    ok = False
+            raw = out[key]
+            try:
+                ok = not isinstance(raw, bool) and int(raw) >= 0
+            except (TypeError, ValueError):
+                ok = False
             if not ok:
                 _LOG.warning("config.evals.%s=%r invalid; using default", key, raw)
                 out.pop(key)
