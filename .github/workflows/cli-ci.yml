@@ -393,6 +393,13 @@ jobs:
       - name: Decision graduation probes
         run: uv run --project cli python scripts/ci/check-decision-graduation.py
 
+      # A hook committed at 100644 is exec'd by the harness and dies with
+      # "Permission denied", so it silently never runs. Nothing else catches
+      # it: the failure is non-blocking and a nudge that never fires reads
+      # exactly like nothing to report.
+      - name: Hook exec bits
+        run: bash scripts/ci/check-hook-exec-bit.sh
+
   # Keeps the required check named `smoke`. Branch protection and the review
   # gate key on that exact name, so publishing only `smoke-pytest` and
   # `smoke-rest` would make the required check stop appearing rather than fail
