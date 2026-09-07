@@ -364,9 +364,20 @@ def test_no_pin_outside_a_test_process_is_production(monkeypatch):
 
 
 def test_append_event_and_the_accessor_fence_agree_on_an_absent_pin(monkeypatch):
-    """One rule, two fences. A hand-pathed write refuses like an accessor does."""
+    """One rule, two fences. A hand-pathed write refuses like an accessor does.
+
+    Both arms run. Asserting only the write half left the accessor half of the
+    claim resting on an absence, and ``_guard_state_path`` is the fence every
+    state accessor sits behind: a refactor of ``declared_root``'s early-return
+    order would leave a one-armed test green.
+    """
+    from fno import paths
     from fno.hermetic import UndeclaredStateRootError
 
     monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
     with pytest.raises(UndeclaredStateRootError):
         append_event(_event(), _OUTSIDE.with_name("events.jsonl"))
+
+    monkeypatch.setenv("FNO_SPACES_DIR", str(_OUTSIDE.parent / "spaces"))
+    with pytest.raises(UndeclaredStateRootError):
+        paths.spaces_root()

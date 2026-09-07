@@ -54,7 +54,10 @@ def _spawn_sidecar(home_dir: Path) -> tuple[subprocess.Popen, Path]:
     home = home_dir.resolve()
     env = dict(os.environ)
     env["HOME"] = str(home)
-    env.pop("FNO_TEST_HERMETIC", None)
+    # An absent pin is not the opt-out: it declares nothing, and a child that
+    # ever pulls pytest in transitively would then refuse every state accessor.
+    # These children pin HOME into a tmp home already, so "0" states the intent.
+    env["FNO_TEST_HERMETIC"] = "0"
     env.pop("XDG_RUNTIME_DIR", None)
     # Make sure paths.state_dir() points under tmp by removing any
     # project-local settings override.
@@ -211,7 +214,7 @@ class TestSidecarLifecycle:
             # Spawn the second sidecar with the same HOME.
             env = dict(os.environ)
             env["HOME"] = str(short_home.resolve())
-            env.pop("FNO_TEST_HERMETIC", None)
+            env["FNO_TEST_HERMETIC"] = "0"
             env.pop("XDG_RUNTIME_DIR", None)
             proc2 = subprocess.run(
                 [sys.executable, "-m", "fno.mcp.sidecar"],

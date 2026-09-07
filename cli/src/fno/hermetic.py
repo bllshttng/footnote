@@ -542,14 +542,11 @@ class UndeclaredStateRootError(RuntimeError):
 def declared_root(path: Path) -> Path:
     """Judge one resolved state path against the process root declaration.
 
-    ``FNO_TEST_HERMETIC`` has three states and this reads all three. ``"1"``
-    declares a PROCESS root and the path must sit under an allowed root.
-    ``"0"`` is ambient on purpose, the dirty lane's declaration. Absent means
-    nothing was declared: outside a test process that is production, and
-    inside one it is a lane that skipped the conftest chain and is resolving
-    the operator's root in silence. That is what overwrote the live graph on
-    2026-09-06, so it refuses. ``"pytest" in sys.modules`` is the marker: the
-    runner produces it, and it is true at import time.
+    ``FNO_TEST_HERMETIC`` has three states and this reads all three. The rule,
+    and why ``"0"`` names no lane, are in ``docs/architecture/test-hermeticity.md``.
+    Absent under a test runner is the state that refuses: it is a lane that
+    skipped the conftest chain, which overwrote the live graph on 2026-09-06.
+    ``"pytest" in sys.modules`` is its marker, because the runner produces it.
     """
     pin = os.environ.get("FNO_TEST_HERMETIC")
     if pin == "0":
@@ -582,15 +579,14 @@ def declared_root(path: Path) -> Path:
 
 
 def _root_class_of(path: Path) -> str:
-    """The epic's root class for ``path``, from the state-file table."""
+    """The epic's root class for ``path``, from the state-file table.
+
+    The state ROOT has no table row; the table lists files. HOME is read to
+    LABEL a refusal here, never to select a root.
+    """
     from fno.paths import STATE_FILES
 
-    for state_file in STATE_FILES:
-        if state_file.filename == path.name:
-            return state_file.root_class
-    # The state ROOT has no table row; the table lists files. HOME is read to
-    # LABEL a refusal here, never to select a root.
+    named = {f.filename: f.root_class for f in STATE_FILES}
     home = os.environ.get("HOME")
-    if home and (Path(home) == path or Path(home) in path.parents):
-        return "OPERATOR"
-    return "unclassified"
+    under_home = bool(home) and Path(str(home)) in [path, *path.parents]
+    return named.get(path.name, "OPERATOR" if under_home else "unclassified")
