@@ -13,6 +13,11 @@
 # 2026-08-27, one vendor prices a pair 3x cheaper on subscription credits and
 # 18x cheaper on API dollars. And cheap is not a proxy for weak: the cheaper
 # row below also carries more context, more throughput, and less latency.
+#
+# THE SLOT BLOCK. fno owns the SLOTS (the verbs it dispatches); you own the
+# FILL. lanes is RANK: a spawn walks the list in order and takes the first
+# lane whose capacity, vendor cap and posture pass. Uncomment this block and
+# the three rows it names to arm the router with a working lane order.
 
 [routing]
 # One of: cheapest-that-clears (default) | best-available | prefer-harness.
@@ -20,6 +25,60 @@ objective = "cheapest-that-clears"
 # Only read by objective = "prefer-harness": rows on this harness are tried
 # first, and the band is never lowered to stay on it (tier wins, harness breaks ties).
 prefer_harness = "claude"
+
+[agents.profiles.target]
+# The lane names, first-pass-wins. Each names a [[routing.models]] row below.
+lanes = ["flash-zai", "luna-codex", "sonnet-thread"]
+# The all-lanes-skipped terminal: refuse (default; the spawn stops, exit 2)
+# | degrade (the profile scalars and agents.defaults answer) | queue (a
+# typed capacity refusal, exit 78, which a dispatcher reads as capacity).
+on_exhausted = "queue"
+# Difficulty overlays are optional. Each key (low|medium|high) may replace
+# lanes and any policy field; omitted fields inherit this block. The
+# effective difficulty comes from the dispatched node and rounds up to high.
+# [agents.profiles.target.by_difficulty.high]
+# lanes = ["astra-codex", "opus-canonical"]
+# on_low = "skip"        # allow | prefer_healthy (default) | skip
+# on_unknown = "skip"    # allow (default) | skip
+#
+# ROUTING PER VERB. Every verb that dispatches holds its own slot: think,
+# blueprint, target, review, crown. One [agents.profiles.<verb>] block each,
+# same fields; a verb with no block routes by the grid (difficulty x priority
+# over the rows below), a verb WITH a block walks only its lanes. Copy the
+# block per verb and vary the fill - here review degrades instead of queueing.
+# [agents.profiles.review]
+# lanes = ["sonnet-thread", "luna-codex"]
+# on_exhausted = "degrade"
+# [agents.profiles.review.by_difficulty.high]
+# lanes = ["gpt-5.6-sol"]
+
+[[routing.models]]
+# Lane 1: the cheap subscription lane. route names the vendor the quota is
+# spent on; account (a config.accounts.records id, optional) keys capacity to
+# ONE account, so a lockout there skips this lane without walling claude.
+name = "flash-zai"
+harness = "claude"
+model = "glm-5.3-flash[1m]"
+route = "zai/glm-5.3-flash[1m]"
+# account = "zai-main"
+effort = "high"
+
+[[routing.models]]
+# Lane 2: the codex overflow when the cheap lane is capped. effort is
+# harness-shaped and validated against the harness's own surface.
+name = "luna-codex"
+harness = "codex"
+model = "gpt-5.6-luna"
+effort = "xhigh"
+
+[[routing.models]]
+# Lane 3: no band key. An unbanded row is a candidate at every band - it
+# ranks after the banded rows that clear - so a single-model fleet is
+# routable with one declared row. An empty lanes slot left unfilled means
+# the harness default, never route nowhere.
+name = "sonnet-thread"
+harness = "claude"
+model = "sonnet"
 
 [[routing.models]]
 # `name` is the key you and the resolver refer to the row by.
@@ -29,7 +88,8 @@ harness = "claude"
 # The literal --model value passed to that harness.
 model = "glm-5.3"
 # low | medium | high. Omit to let the optional benchmarks snapshot supply a
-# percentile-derived band; a row with neither is UNBANDED and never a candidate.
+# percentile-derived band; a row with neither is UNBANDED: a candidate at
+# every band, ranking after the banded rows that clear.
 band = "medium"
 # Effort is harness-shaped: declare it beside the harness it belongs to.
 # A harness with no effort surface (agy) omits it and the grid injects nothing.

@@ -26,9 +26,23 @@ from types import SimpleNamespace
 
 import pytest
 
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+
 from typer.testing import CliRunner
 
 from fno.backlog import advance as adv
+import subprocess as _subprocess_module
+
+#: The untouched subprocess.run, captured at import time: the route-slot
+#: passthrough in _fake_spawn_run must reach the real binary even while a
+#: test has patched subprocess.run.
+_REAL_SUBPROCESS_RUN = _subprocess_module.run
 from fno.claims.core import acquire_claim, claim_status
 from fno.cli import app
 
@@ -125,6 +139,7 @@ def test_disabled_dispatches_nothing(iso, monkeypatch):
     assert evs[0]["data"]["reason"] == "disabled"
 
 
+@requires_rust
 def test_advance_writes_one_control_plane_tick_row(iso, monkeypatch):
     """x-1b88: every advance call appends exactly one auto_continue arm row,
     carrying the skip reason the decision matrix chose."""
@@ -491,15 +506,25 @@ def _declare_grid_inventory(monkeypatch):
     monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
 
 
-def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
-    """The deferral has a receiving end: an unpinned difficulty node picks its
-    harness/model at the spawn seam via the capacity grid, because the spawned
-    argv's explicit --harness can never trigger the spawn-CLI grid."""
+def _fake_spawn_run(short_id):
+    """Fake only the SPAWN subprocess; the route-slot call rides the real
+    binary (the grid selection it answers is exactly what these tests assert)."""
     captured = {}
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
-        return _FakeProc(stdout='{"short_id": "sid-grid1"}')
+        if "route-slot" in [str(part) for part in cmd]:
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+        return _FakeProc(stdout=f'{{"short_id": "{short_id}"}}')
+
+    return captured, fake_run
+
+
+def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
+    """The deferral has a receiving end: an unpinned difficulty node picks its
+    harness/model at the spawn seam via the capacity grid, because the spawned
+    argv's explicit --harness can never trigger the spawn-CLI grid."""
+    captured, fake_run = _fake_spawn_run("sid-grid1")
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     _declare_grid_inventory(monkeypatch)
@@ -520,11 +545,7 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
 def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
     """An explicit provider (or model) stays operator authority: the grid is a
     default route only."""
-    captured = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        return _FakeProc(stdout='{"short_id": "sid-pin1"}')
+    captured, fake_run = _fake_spawn_run("sid-pin1")
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     monkeypatch.setattr(
@@ -541,6 +562,7 @@ def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
     assert "gpt-5.6-sol" not in cmd
 
 
+@requires_rust
 def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_path):
     """Worktree placement is harness-keyed (claude-native vs external base), so
     the grid must decide BEFORE _ensure_lane_worktree runs: placement and spawn
@@ -569,9 +591,14 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
     monkeypatch.setattr(adv, "_seed_lane_local_settings", lambda *a, **k: None)
     monkeypatch.setattr(adv._autobrief, "resolve_dispatch_brief", lambda n: ("", ""))
     monkeypatch.setattr(adv, "_emit", lambda *a, **k: None)
-    monkeypatch.setattr(
-        adv.subprocess, "run", lambda cmd, **k: _FakeProc(stdout='{"short_id": "s"}')
-    )
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        if "route-slot" in [str(part) for part in cmd]:
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+        return _FakeProc(stdout='{"short_id": "s"}')
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
     _declare_grid_inventory(monkeypatch)
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
@@ -583,6 +610,7 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
     assert captured["harness"] == "codex"
 
 
+@requires_rust
 def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     monkeypatch, tmp_path
 ):
@@ -616,6 +644,8 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
+        if "route-slot" in [str(part) for part in cmd]:
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
         return _FakeProc(stdout='{"short_id": "s"}')
 
     monkeypatch.setattr(adv, "_ensure_lane_worktree", fake_ensure)
@@ -1110,6 +1140,7 @@ def test_spawn_worker_accepts_codex_thread_full_id_receipt(monkeypatch):
     assert identity == "0198c0de-1111-7000-8000-00000000000a"
 
 
+@requires_rust
 def test_spawn_worker_refuses_codex_head8_launch_identity(monkeypatch):
     head8_receipt = (
         '{"name":"tgt-2222aaaa","short_id":"","harness":"codex",'
@@ -1312,6 +1343,7 @@ def test_advance_result_rejects_invalid_pair():
         adv.AdvanceResult("dispatched", "advance_skipped")
 
 
+@requires_rust
 def test_lane_ready_frontier_recovers_observer_miss_and_records_divergence(
     tmp_path, monkeypatch
 ):
@@ -1629,6 +1661,7 @@ def test_dependents_same_project_no_cwd_skips(iso, monkeypatch):
     assert results[0].decision == "skipped" and results[0].reason == "no-cwd"
 
 
+@requires_rust
 def test_dependents_fail_closed_on_unknown_closed_project(iso, monkeypatch):
     """AC1-ERR / Failure Modes: closed_project=None means we cannot classify a
     dependent, so we dispatch NOTHING (prefer that over misrouting a same-project
@@ -2856,3 +2889,49 @@ def test_spawn_worker_still_accepts_a_non_state_root_extra_env(monkeypatch):
         "ab-2222aaaa", "/w", extra_env={"ANTHROPIC_BASE_URL": "https://x"}
     )
     assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://x"
+
+
+@requires_rust
+def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
+    """Placement and spawn must ride the SAME lane: `_grid_lane_for` (the
+    placement door) returns exactly what `resolve_slot` (the spawn door)
+    resolves for the same node. A fork here puts the worktree on one harness
+    and the worker on another."""
+    from fno import route_resolve
+
+    candidate = {
+        "harness": "claude",
+        "model": "glm-5.3-flash",
+        "lane": "flash-zai",
+        "lane_rung": "agents.profiles.target.lanes[0]",
+        "lane_index": 0,
+        "lane_fields": {"provider": "claude", "model": "glm-5.3-flash"},
+    }
+    seen: dict = {}
+
+    def _fake_slot(verb, node, capacity, **kw):
+        seen["verb"] = verb
+        seen["node"] = node
+        seen["role"] = kw.get("role")
+        return candidate, ["slot agents.profiles.target.lanes[0] flash-zai capacity=ok"]
+
+    monkeypatch.setattr(route_resolve, "resolve_slot", _fake_slot)
+    monkeypatch.setattr(
+        route_resolve, "runtime_capacity", lambda **kw: {"claude": "ok"}
+    )
+    monkeypatch.setattr(
+        route_resolve, "resolve_inventory", lambda **kw: route_resolve.Inventory()
+    )
+    node = {"difficulty": "medium", "priority": "p1", "plan_path": "p.md"}
+    harness, model, reason = adv._grid_lane_for(node, model=None, provider=None)
+    assert (harness, model, reason) == ("claude", "glm-5.3-flash", None)
+    assert seen["verb"] == "target"
+    assert seen["role"] is None  # plan_path set -> execution tier
+
+    # a decline keeps the receipt vocabulary: the terminal reason surfaces
+    monkeypatch.setattr(
+        route_resolve, "resolve_slot", lambda *a, **k: (None, ["slot=exhausted queue"])
+    )
+    harness, model, reason = adv._grid_lane_for(node, model=None, provider=None)
+    assert (harness, model) == (None, None)
+    assert reason == "slot=exhausted queue"

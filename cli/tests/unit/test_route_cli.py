@@ -7,6 +7,14 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+
 from fno.agents import model_routing as mr
 from fno.config import ConfigBlock, ModelProvider, ModelRoutingBlock, SettingsModel
 from fno.route_cli import route_app
@@ -319,6 +327,7 @@ def test_inventory_lists_rows_bands_and_verdicts(monkeypatch) -> None:
     assert "unbanded" in res.output
 
 
+@requires_rust
 def test_inventory_json_shape(monkeypatch) -> None:
     _declare(monkeypatch, [
         {"name": "glm-5.3", "harness": "claude", "model": "glm-5.3", "band": "medium"},
@@ -338,6 +347,74 @@ def test_inventory_says_nothing_is_declared(monkeypatch) -> None:
     res = runner.invoke(route_app, ["inventory"])
     assert res.exit_code == 0
     assert "no inventory declared" in res.output
+
+
+_SLOT_ROWS = [
+    {"name": "flash-zai", "harness": "claude", "model": "glm-5.3-flash", "band": "low"},
+    {"name": "luna-codex", "harness": "codex", "model": "gpt-5.6-luna", "band": "low"},
+]
+
+
+def _slot_settings(rows):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        routing=SimpleNamespace(models=rows),
+        agents=SimpleNamespace(profiles={
+            "target": SimpleNamespace(
+                lanes=["flash-zai", "luna-codex"], on_exhausted="queue"
+            )
+        }),
+        model_routing=SimpleNamespace(roles={}),
+    )
+
+
+@requires_rust
+def test_inventory_prints_slots_with_live_capacity(monkeypatch) -> None:
+    """AC4-HP: the slots section names each lane's live capacity state and the
+    lane a spawn would take RIGHT NOW - and the answer moves when capacity
+    moves."""
+    from fno import route_resolve as rr
+
+    _declare(monkeypatch, _SLOT_ROWS)
+    monkeypatch.setattr("fno.config.load_settings", lambda: _slot_settings(_SLOT_ROWS))
+    monkeypatch.setattr(rr, "runtime_capacity", lambda **kw: {})
+    res = runner.invoke(route_app, ["inventory"])
+    assert res.exit_code == 0
+    assert "slots:" in res.output
+    assert "preview (simulated; no launch)" in res.output
+    assert "lanes[0] flash-zai capacity=unknown" in res.output
+    assert "lanes[1] luna-codex capacity=unknown" in res.output
+    assert "on_exhausted=queue" in res.output
+    assert "would take agents.profiles.target.lanes[0] flash-zai" in res.output
+    assert "routing=armed" in res.output
+
+    # the lane whose harness reads exhausted skips; the next lane answers
+    monkeypatch.setattr(
+        rr, "runtime_capacity", lambda **kw: {"claude": "exhausted", "codex": "ok"}
+    )
+    res = runner.invoke(route_app, ["inventory"])
+    assert "lanes[0] flash-zai capacity=exhausted" in res.output
+    assert "would take agents.profiles.target.lanes[1] luna-codex" in res.output
+
+
+@requires_rust
+def test_inventory_json_carries_slots(monkeypatch) -> None:
+    from fno import route_resolve as rr
+
+    _declare(monkeypatch, _SLOT_ROWS)
+    monkeypatch.setattr("fno.config.load_settings", lambda: _slot_settings(_SLOT_ROWS))
+    monkeypatch.setattr(rr, "runtime_capacity", lambda **kw: {})
+    res = runner.invoke(route_app, ["inventory", "--json"])
+    assert res.exit_code == 0
+    payload = json.loads(res.output)
+    target = next(s for s in payload["slots"] if s["verb"] == "target")
+    assert target["would_take"] == "agents.profiles.target.lanes[0] flash-zai"
+    assert target["on_exhausted"] == "queue"
+    assert target["routing"] == "armed"
+    # a verb with no lanes says so, both halves
+    think = next(s for s in payload["slots"] if s["verb"] == "think")
+    assert think["would_take"].startswith("no lanes; grid over ")
 
 
 def test_routing_init_appends_the_sample_commented(tmp_path, monkeypatch) -> None:

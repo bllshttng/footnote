@@ -1999,22 +1999,13 @@ class SpawnDefaultsBlock(BaseModel):
     """Default spawn routing (nested under 'config.agents.defaults').
 
     The bottom-most operator rung of the spawn precedence chain: an explicit
-    CLI flag > these defaults > the built-in (provider: harness-inference then
-    claude). Every bare `fno agents spawn` / `/agent spawn` inherits any field
-    set here, injected field-by-field at the Python dispatch seam. Empty
-    string = unset; an unset field falls through to the built-in exactly as
-    today.
-
-    These defaults reach every spawn that has not pinned a field, including
-    autonomous dispatch (`/target`, think dispatch, backlog advance); an explicit
-    flag always wins. Autonomous dispatch pins its harness and substrate, so
-    setting `provider` here cannot silently reroute the fleet's binary - but a
-    `model` or `effort` set here DOES reach an autonomous worker that left it
-    unpinned, which is the per-stage coordinate the stage table exists to carry.
-
-    No value validation here: config stays a leaf module (x-7fdd, no import
-    from agents/harnesses at load time). Provider is checked against the known
-    set at the spawn seam; effort against the per-provider surface.
+    CLI flag > these defaults > the built-in. Empty string = unset; an unset
+    field falls through to the built-in. These defaults reach every spawn that
+    has not pinned a field, including autonomous dispatch; an explicit flag
+    always wins. No value validation here: config stays a leaf module (x-7fdd,
+    no import from agents/harnesses at load time) - provider is checked
+    against the known set at the spawn seam, effort against the per-provider
+    surface.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -2022,30 +2013,36 @@ class SpawnDefaultsBlock(BaseModel):
     provider: str = ""
     model: str = ""
     effort: str = ""
-    # substrate/permission_mode join the defaultable set (x-3d5b): config-sourced
-    # values degrade open with a warning on provider incompatibility at the spawn
-    # seam; an explicit flag stays fail-closed. Empty = unset, as above.
+    # Config-sourced values degrade open with a warning on provider
+    # incompatibility at the spawn seam; an explicit flag stays fail-closed.
     substrate: str = ""
     permission_mode: str = ""
-    # route/account sit BESIDE the legacy provider field (ruling 4): nothing is
-    # renamed and the legacy field keeps meaning harness. provider could never
-    # carry the full coordinate because it is allowlisted as a harness literal,
-    # so a stage that needed to say zai had no field. route carries vendor/model
-    # as vendor/model (position-carried, forwarded as --route) and so fails
-    # closed on an unknown vendor or a missing key downstream rather than silently
-    # billing the primary; account forwards --account. The names carry no axis
-    # word, so the four-axis guard never reads them as bindings.
+    # route/account sit BESIDE the legacy provider field (ruling 4): provider
+    # keeps meaning harness and is allowlisted as a harness literal, so a
+    # stage that needed to say zai had no field. route carries vendor/model
+    # (forwarded as --route, fail-closed downstream); account forwards
+    # --account. The names carry no axis word, so the four-axis guard never
+    # reads them as bindings.
     route: str = ""
     account: str = ""
 
 
 class SpawnProfileBlock(SpawnDefaultsBlock):
-    """Per-verb overlay plus its strict ordered delivery-lane vocabulary."""
+    """Per-verb overlay plus its strict ordered delivery-lane vocabulary.
+
+    lanes/by_difficulty stay raw: the slot resolver validates and refuses
+    by name, so a malformed list never breaks every config read.
+    """
 
     pane_group: str = ""
-    # Keep lanes raw so a malformed routing list does not make every config
-    # read fail; the spawn seam validates and refuses before launching anything.
     lanes: Any = Field(default_factory=list)
+    # Terminal when every lane is skipped: refuse | degrade | queue (exit 78).
+    on_exhausted: str = "refuse"
+    # Overlays keyed low|medium|high; omitted fields inherit this block.
+    by_difficulty: Any = Field(default_factory=dict)
+    # on_low demotes a low lane behind healthy ones; on_unknown permits.
+    on_low: str = "prefer_healthy"
+    on_unknown: str = "allow"
 
 
 class RoutingModelBlock(BaseModel):

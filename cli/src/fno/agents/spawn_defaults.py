@@ -1,29 +1,19 @@
 """Config-sourced spawn defaults, injected argv-level at the dispatch seam.
 
-Every `fno agents spawn` / `/agent spawn` passes the Python dispatch seam
-(`rust_runtime.make_context`) before the Rust/Python routing fork. Injecting
-`config.agents.defaults` field-by-field on argv HERE covers pane, bg, headless,
-and the Rust route with zero Rust changes (Locked Decision 9).
-
-Precedence per field: explicit CLI flag > `agents.profiles.<verb>` > `agents.
-defaults` > built-in. The profile layer (x-3d5b) is the same block keyed by the
-seed's leading slash-verb, merged over defaults field-wise before injection.
-Fields resolve independently, with ONE exception: the `model` default is provider-
-scoped. A bare scalar `model` with no `provider` is scoped to the harness it was
-written for - the config `provider`, else the builtin default (claude), NOT the
-ambient harness (whose shape the model may not match). A spawn that resolves to a
-DIFFERENT harness (an explicit `-H codex`, OR a codex-ambient session, over a
-claude-shaped `model`) leaves the model to that harness rather than forcing an
-incompatible one. An explicit `-m/--model` always wins. The profile layer
-applies to every spawn carrying a slash-verb seed, including autonomous dispatch
-(`/target`, `/blueprint`): a stage that has not pinned a field inherits it from
-`profiles.<verb>` then `agents.defaults`, so a coordinate set in the stage table
-reaches an autonomous worker. An explicit flag always wins, and a `--role` whose
-lane resolves owns the model, so autonomous dispatch is never rerouted on a field
-it pinned (harness, substrate).
+Every `fno agents spawn` passes this seam before the Rust/Python routing
+fork, so config injection covers pane, bg, headless and the Rust route with
+zero Rust changes (Locked Decision 9). Per field: explicit CLI flag >
+`agents.profiles.<verb>` > `agents.defaults` > built-in; the profile layer
+(x-3d5b) keys on the seed's leading slash-verb and reaches autonomous
+dispatch the same way. The one field-wise exception: a bare scalar `model` is
+scoped to the harness it was written for (the config `provider`, else
+claude), never the ambient harness, and an explicit `-m/--model` always wins.
+A `--role` whose lane resolves owns the model, so a stage table never
+reroutes a field the dispatch pinned.
 """
 from __future__ import annotations
 
+import json
 import random
 import re
 import sys
@@ -839,147 +829,6 @@ def _lane_value(lane: object, name: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _validated_lanes(raw: object, path: str, err: IO[str]) -> list[object]:
-    if raw in (None, []):
-        return []
-    if not isinstance(raw, list) or not raw:
-        print(f"fno agents spawn: config.{path} must be a non-empty list", file=err)
-        raise SystemExit(2)
-    for index, lane in enumerate(raw):
-        lane_path = f"{path}[{index}]"
-        if not isinstance(lane, Mapping) and not hasattr(lane, "provider"):
-            print(f"fno agents spawn: config.{lane_path} must be a table", file=err)
-            raise SystemExit(2)
-        if isinstance(lane, Mapping):
-            unknown = sorted(set(lane) - _LANE_FIELDS)
-            if unknown:
-                print(
-                    f"fno agents spawn: config.{lane_path} has unknown field {unknown[0]!r}",
-                    file=err,
-                )
-                raise SystemExit(2)
-            for key, value in lane.items():
-                if not isinstance(value, str):
-                    print(
-                        f"fno agents spawn: config.{lane_path}.{key} must be a string; got {value!r}",
-                        file=err,
-                    )
-                    raise SystemExit(2)
-        if not any(_lane_value(lane, key) for key in _LANE_FIELDS):
-            print(f"fno agents spawn: config.{lane_path} is empty", file=err)
-            raise SystemExit(2)
-    return list(raw)
-
-
-def _lane_vendor(lane: object) -> Optional[str]:
-    route = _lane_value(lane, "route")
-    if not route:
-        return None
-    normalized = route.replace(",", "/")
-    vendor, sep, _model = normalized.partition("/")
-    return vendor.strip() if sep and vendor.strip() else None
-
-
-def _select_profile_lane(
-    profile: object,
-    verb: str,
-    agents: object,
-    err: IO[str],
-    *,
-    explicit_lane: bool = False,
-) -> tuple[Optional[object], Optional[int]]:
-    """Pick the delivery lane for ``verb`` by round-robin, skipping a capped vendor.
-
-    ``explicit_lane`` says the caller already named the lane on the command line
-    (``--harness``/``-P``/``--route``). It changes ONLY the all-capped terminal.
-    A cap names a VENDOR's concurrency, and a caller who typed
-    ``--harness codex`` is not spending a capped zai lane's budget, so refusing
-    that spawn stops work the cap was never about. With a lane named, the
-    all-capped case degrades to no-lane and the profile/defaults rungs answer.
-    With no lane named, the refusal stands: that terminal is the operator ruling
-    this function exists to carry.
-    """
-    import os
-
-    path = f"agents.profiles.{verb}.lanes"
-    lanes = _validated_lanes(getattr(profile, "lanes", []), path, err)
-    if not lanes:
-        return None, None
-
-    from fno.agents.registry import TERMINAL_STATUSES
-    from fno.agents.spawn_gate import (
-        ProviderCountUnavailable,
-        provider_lanes_cap,
-        provider_live_count,
-    )
-
-    live_rows = [
-        row
-        for row in _read_registry_rows()
-        if getattr(row, "status", "live") not in TERMINAL_STATUSES
-    ]
-    start = len(live_rows) % len(lanes)
-    from fno.config import provider_limits_table
-
-    caps = dict(provider_limits_table(agents))
-    # FNO_SPAWN_GATE=0 is the documented operator/test bypass for live-slot
-    # admission (spawn_gate.run_gate), and its contract is that it never BLOCKS
-    # a spawn. This seam counts the same live rows, so it honors the same
-    # escape - but only on the refusing terminals below. Cap-SKIPPING still
-    # runs: steering a spawn onto a free lane blocks nothing, and dropping it
-    # under the bypass would send every test spawn at a saturated vendor.
-    gate_bypassed = os.environ.get("FNO_SPAWN_GATE") == "0"
-    blocked: list[tuple[str, int, int]] = []
-    for offset in range(len(lanes)):
-        index = (start + offset) % len(lanes)
-        lane = lanes[index]
-        vendor = _lane_vendor(lane)
-        # `.lanes` of the per-provider budget, read through the same helper
-        # the spawn gate uses so lane STEERING and lane REFUSAL cannot disagree.
-        cap = provider_lanes_cap(caps.get(vendor)) if vendor else None
-        if vendor is None or cap is None:
-            # A lane with no routed vendor has no cap to be at. The `vendor is
-            # None` arm is what the guard below actually relies on: it was
-            # implied by `cap is None` and invisible to the type checker, which
-            # is how `provider_live_count(vendor)` came to take a `str | None`.
-            return lane, index
-        try:
-            current = provider_live_count(vendor)
-        except ProviderCountUnavailable as exc:
-            if gate_bypassed:
-                print(
-                    f"fno agents spawn: config.{path}[{index}] provider count "
-                    f"unavailable for {vendor}: {exc}; FNO_SPAWN_GATE=0, so the "
-                    "lane is taken uncapped",
-                    file=err,
-                )
-                return lane, index
-            print(
-                f"fno agents spawn: config.{path}[{index}] provider count unavailable "
-                f"for {vendor}: {exc}; refusing; no worker launched",
-                file=err,
-            )
-            raise SystemExit(2) from exc
-        if current < cap:
-            return lane, index
-        blocked.append((vendor, current, cap))
-        print(f"fno agents spawn: {vendor} lane skipped at {current} of {cap}", file=err)
-
-    details = ", ".join(f"{vendor} {current} of {cap}" for vendor, current, cap in blocked)
-    if explicit_lane or gate_bypassed:
-        why = (
-            "the command line already names the lane"
-            if explicit_lane
-            else "FNO_SPAWN_GATE=0"
-        )
-        print(
-            f"fno agents spawn: every configured lane is at cap ({details}); "
-            f"{why}, so no lane value is applied and the spawn continues",
-            file=err,
-        )
-        return None, None
-    print(f"fno agents spawn: every configured lane is at cap ({details}); refusing; no worker launched", file=err)
-    raise SystemExit(2)
 
 
 # A model string's implied vendor, by prefix or tier word. A pure string
@@ -1151,17 +1000,15 @@ def inject_spawn_defaults(
 ) -> List[str]:
     """Return ``args`` with config spawn-defaults injected where absent.
 
-    Fields resolve field-wise from the merged view `agents.profiles.<verb>` (the
-    seed's leading slash-verb, x-3d5b) over `agents.defaults`, so an explicit CLI
-    flag > profile > defaults > built-in. Only acts on a `spawn` verb
-    (``args[0] == "spawn"``). Returns the input unchanged for any other verb, or
-    when the config load fails (a bad config must never brick spawning). Raises
-    ``SystemExit(2)`` on an unknown config provider (AC5-ERR). Config-sourced
-    effort/substrate/permission_mode degrade open on an incompatible resolved
-    provider (warn, skip); an explicit flag stays fail-closed downstream.
-
-    ``apply_permission_builtin`` (default True) gates the ``SPAWN_PERMISSION_BUILTIN``
-    rung (x-7198); off for a probe that never launches (see ``retask.py``).
+    Only acts on a `spawn` verb; returns the input unchanged for any other
+    verb, or when the config load fails (a bad config must never brick
+    spawning). Raises ``SystemExit(2)`` on an unknown config provider
+    (AC5-ERR) and on a malformed slot; exits 78 on an on_exhausted=queue
+    terminal. Config-sourced effort/substrate/permission_mode degrade open on
+    an incompatible resolved provider (warn, skip); an explicit flag stays
+    fail-closed downstream. ``apply_permission_builtin`` (default True) gates
+    the ``SPAWN_PERMISSION_BUILTIN`` rung (x-7198); off for a probe that
+    never launches (see ``retask.py``).
     """
     out = list(args)
     if not out or out[0] != "spawn":
@@ -1212,31 +1059,188 @@ def inject_spawn_defaults(
                 profile_verb = legacy_verb
     lane: Optional[object] = None
     lane_index: Optional[int] = None
-    if profile is not None and profile_verb is not None:
-        # Scanned BEFORE lane selection: an all-capped refusal must know whether
-        # the caller named the lane themselves, and that fact lives in the argv.
-        # -P/--provider counts: it names the VENDOR, which is the axis a cap is
-        # about, so a caller who typed it is not spending a capped lane's budget
-        # either. `_scan`'s provider slot only reads --harness/-H, and both this
-        # function's docstring and the shipped routing doc promise -P as well.
-        _explicit_lane = bool(
-            _scan(out[1:])[0]
-            or _flag_value(list(out[1:]), "--route") is not None
-            or _flag_value(list(out[1:]), "--provider", "-P") is not None
-        )
-        lane, lane_index = _select_profile_lane(
-            profile, profile_verb, agents, err, explicit_lane=_explicit_lane
-        )
+    slot_candidate: Optional[dict] = None
+    slot_chain: List[str] = []
+    grid_node_entry: Optional[dict] = None
+    # Axis occupancy scanned ONCE, before the slot resolver: a lane named on
+    # the command line changes the all-exhausted terminal (degrade, not
+    # refuse), an occupied model axis stands the no-lanes grid down, and
+    # -P/--provider counts as a named lane (it names the capped VENDOR).
+    has_harness, explicit_harness, has_model, has_effort = _scan(out[1:])
+    explicit_vendor = _flag_value(out[1:], "--provider", "-P")
+    explicit_vendor_present = explicit_vendor is not None
+    explicit_route = _flag_present(out[1:], "--route")
+    role = _role_of(out[1:])
+    _explicit_lane = bool(has_harness or explicit_route or explicit_vendor_present)
+    explicit_substrate = _has_explicit_substrate(out[1:])
+    explicit_permission_value = _flag_value(out[1:], "--permission-mode")
+    if not explicit_permission_value and _has_permission_mode(out[1:]):
+        # --yolo/-Y are the same knob as --permission-mode; the filter must
+        # see them or it can hand a yolo spawn a harness the gate refuses.
+        explicit_permission_value = "yolo"
+    node_id_present = (
+        _flag_value(out[1:], "--node") is not None or bool((env or {}).get("FNO_NODE"))
+    )
 
-    # A lane is a COMPLETE routing coordinate, so the two fields that select
-    # where a worker bills do not fall through to a lower rung when a lane was
-    # chosen. Per-field fallback let a codex-harness lane inherit
-    # `agents.profiles.<verb>.route = "zai/..."`, putting `--harness codex` and
-    # `--route zai/...` in one argv - which cli.py then refuses outright with
-    # "requires the claude harness". That is the exact migration the routing doc
-    # describes: an existing profile-level route plus newly added lanes. The
-    # other fields still fall through, because substrate/permission/account are
-    # postures a lane can legitimately leave to the profile.
+    def _above_defaults(rung: Optional[str]) -> bool:
+        return bool(rung) and rung != "agents.defaults"
+
+    def _scalar_rung(name: str) -> Optional[str]:
+        """Where a field's value would come from with no lane in play."""
+        if profile is not None and (getattr(profile, name, "") or "").strip():
+            return f"agents.profiles.{profile_verb}"
+        if (getattr(defaults, name, "") or "").strip():
+            return "agents.defaults"
+        return None
+
+    lanes_present = bool(
+        profile is not None
+        and (getattr(profile, "lanes", None) or getattr(profile, "by_difficulty", None))
+    )
+    # A profile LANE is atomic (occupies harness/model/effort); a bare FIELD
+    # occupies only its axis. `model_occupied` is the NO-LANE view gating the
+    # grid rung, which resolve_slot runs only when the verb declares no lanes.
+    model_occupied = bool(
+        has_model
+        or explicit_vendor_present
+        or explicit_route
+        or _above_defaults(_scalar_rung("model"))
+        or _above_defaults(_scalar_rung("route"))
+    )
+    slot_receipt: List[Tuple[str, str, str]] = []
+    if lanes_present or not model_occupied:
+        if not model_occupied:
+            grid_node_entry = _grid_node(out[1:], env)
+        capacity: Optional[dict[str, object]] = None
+        _slot_inventory = None
+        if lanes_present or grid_node_entry:
+            try:
+                from fno import route_resolve as _rr
+
+                _slot_inventory = _rr.resolve_inventory()
+                capacity = dict(_rr.runtime_capacity(inventory=_slot_inventory))
+            except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
+                capacity = {}
+        if capacity is not None:
+            # Role comes from plan-presence, not plan quality: a /target on
+            # an unplanned node bills at the planning tier.
+            grid_role: Optional[str] = None
+            if grid_node_entry and verb == "target":
+                grid_role = (
+                    "execution"
+                    if (grid_node_entry.get("plan_path") or "").strip()
+                    else "planning"
+                )
+            elif verb in ("blueprint", "think"):
+                grid_role = "planning"
+            protected_name: Optional[str] = None
+            try:
+                from fno.agents.model_routing import PROTECTED_ROLES as _PROTECTED
+
+                if role and role.strip().lower() in _PROTECTED:
+                    protected_name = role.strip().lower()
+            except Exception:  # noqa: BLE001 - the floor is advisory, never fatal
+                protected_name = None
+            try:
+                from fno import route_resolve as _rr
+
+                slot_candidate, slot_chain = _rr.resolve_slot(
+                    profile_verb,
+                    grid_node_entry,
+                    capacity,
+                    inventory=_slot_inventory,
+                    settings=settings,
+                    substrate=explicit_substrate,
+                    permission_mode=explicit_permission_value,
+                    constrain_harness=(
+                        explicit_harness
+                        or (
+                            (getattr(profile, "provider", "") or "").strip()
+                            if profile is not None
+                            else ""
+                        )
+                    ).strip() or None,
+                    role=grid_role,
+                    protected_role=protected_name,
+                    model_occupied=model_occupied,
+                    explicit_model=has_model,
+                    explicit_lane=_explicit_lane,
+                )
+            except Exception:  # noqa: BLE001 - a routing fault never breaks a spawn
+                slot_candidate = None
+                slot_chain = []
+        # Receipt + refusal seam: the chain's last element is the terminal.
+        for _line in slot_chain:
+            if _line.startswith(("slot skip", "slot note", "slot demote")):
+                print(f"fno agents spawn: {_line}", file=err)
+
+        def _refuse(msg: str) -> None:
+            print(msg, file=err)
+            print("fno agents spawn: refusing; no worker launched", file=err)
+            raise SystemExit(2)
+
+        if slot_chain:
+            _terminal = slot_chain[-1]
+            if _terminal.startswith("slot=config "):
+                _refuse(f"fno agents spawn: {_terminal[len('slot=config '):]}")
+            if _terminal.startswith("slot=provider-count-unavailable "):
+                _rung, _detail = _terminal[
+                    len("slot=provider-count-unavailable "):
+                ].split(" ", 1)
+                _refuse(
+                    f"fno agents spawn: config.{_rung} provider count unavailable"
+                    f" for {_detail}"
+                )
+            if _terminal.startswith("slot=route-slot-unavailable"):
+                _refuse(f"fno agents spawn: {_terminal[len('slot='):]};")
+            if _terminal == "slot=manual_account_switch_required":
+                _refuse(
+                    "fno agents spawn: every lane needs a manual canonical "
+                    "account switch"
+                )
+            if _terminal == "slot=exhausted refuse":
+                _refuse(
+                    "fno agents spawn: every configured lane is exhausted"
+                )
+            if _terminal.startswith("slot=exhausted queue"):
+                _lanes = [
+                    {"name": _p[3], "reason": _p[4] if len(_p) > 4 else "exhausted"}
+                    for _p in (
+                        _line.split(" ", 4)
+                        for _line in slot_chain
+                        if _line.startswith("slot skip ")
+                    )
+                ]
+                _payload: dict = {
+                    "status": "refused",
+                    "reason": "slot_exhausted",
+                    "verb": profile_verb,
+                    "lanes": _lanes,
+                }
+                _retry = _terminal.partition("retry_at=")[2].strip()
+                if _retry:
+                    _payload["retry_at"] = float(_retry)
+                print(json.dumps(_payload))
+                raise SystemExit(78)
+            if slot_candidate is not None and slot_candidate.get("lane_rung"):
+                lane = slot_candidate["lane_fields"]
+                lane_index = slot_candidate["lane_index"]
+                slot_receipt.append(
+                    ("slot", f"{slot_candidate['lane_rung']} {slot_candidate['lane']}", "routing")
+                )
+            elif slot_candidate is None and _terminal.startswith("slot="):
+                slot_receipt.append(("slot", _terminal[len("slot="):], "routing"))
+            else:
+                # The no-lanes grid path: the terminal is the grid's own
+                # vocabulary (no-inventory-declared, no-band-candidate, ...).
+                slot_receipt.append(("grid", _terminal, "routing"))
+    elif node_id_present:
+        # The model axis is taken and the verb declares no lanes: the grid
+        # stands down loudly rather than in silence.
+        slot_receipt.append(("grid", "grid=model-axis-occupied", "routing"))
+
+    # A lane is a COMPLETE coordinate: route/model stop at the lane (a codex
+    # lane inheriting a zai route builds an argv cli.py refuses); postures fall through.
     _LANE_EXCLUSIVE = ("route", "model")
 
     def field(name: str) -> Tuple[str, Optional[str]]:
@@ -1275,115 +1279,18 @@ def inject_spawn_defaults(
     from_config: List[Tuple[str, str, str]] = []
     _resolved: dict = {}
 
-    # The grid is below an explicitly pinned stage profile and above the
-    # bottom defaults. It is evaluated from the node-bearing spawn only; a
-    # node-less spawn has no truthful difficulty or priority input.
-    has_harness, explicit_harness, has_model, has_effort = _scan(out[1:])
-    explicit_vendor = _flag_value(out[1:], "--provider", "-P")
-    explicit_vendor_present = explicit_vendor is not None
-    explicit_route = _flag_present(out[1:], "--route")
-    role = _role_of(out[1:])
-    # Per-axis occupancy (Q1): an explicit flag or a profile field occupies the
-    # axis it names and NOTHING more. A profile LANE is atomic (a complete
-    # coordinate by design, _LANE_EXCLUSIVE) and occupies all three; a bare
-    # profile FIELD does not - `[agents.profiles.target] provider = "codex"`
-    # pins the harness axis and the grid still chooses model and effort within
-    # codex. A pinned vendor (-P) or route owns the model axis (the route
-    # carries vendor/model), so the grid stands down there with a named reason
-    # instead of silently. The grid sits BELOW a profile and ABOVE
-    # agents.defaults, so only a profile-sourced field (rung above defaults)
-    # occupies - a defaults-rung model is something the grid may override.
-    lane_selected = lane is not None
-
-    def _above_defaults(rung: Optional[str]) -> bool:
-        return bool(rung) and rung != "agents.defaults"
-
-    model_occupied = bool(
-        has_model
-        or explicit_vendor_present
-        or explicit_route
-        or _above_defaults(model_rung)
-        or _above_defaults(route_rung)
-        or lane_selected
+    effort_occupied = bool(
+        has_effort or _above_defaults(_scalar_rung("effort")) or lane is not None
     )
-    effort_occupied = bool(has_effort or _above_defaults(effort_rung) or lane_selected)
-    # A pinned substrate or permission-mode constrains which harness the argv
-    # can legally carry (thread needs the harness's journey-proven lane,
-    # claude only today; a mapped --permission-mode is claude-only off pane),
-    # so they FILTER the grid's candidate set rather than cancelling the
-    # decision: a flag on an unrelated axis never silently stands routing down.
-    explicit_substrate = _has_explicit_substrate(out[1:])
-    explicit_permission_value = _flag_value(out[1:], "--permission-mode")
-    if not explicit_permission_value and _has_permission_mode(out[1:]):
-        # --yolo/-Y are the same knob as --permission-mode (see
-        # _has_permission_mode), so the grid's permission filter must see them
-        # too or it can hand a yolo spawn a harness the spawn gate refuses.
-        explicit_permission_value = "yolo"
-    node_id_present = (
-        _flag_value(out[1:], "--node") is not None or bool((env or {}).get("FNO_NODE"))
+    # A grid-branch candidate (no lane_rung) is an atomic harness/model/effort
+    # TRIPLE injected below; a lane candidate feeds field() instead, one rung
+    # per field with the seam's compatibility checks intact.
+    grid_candidate: Optional[dict[str, str]] = (
+        slot_candidate
+        if slot_candidate is not None and not slot_candidate.get("lane_rung")
+        else None
     )
-    grid_candidate: Optional[dict[str, str]] = None
-    _grid_chain: List[str] = []
-    grid_node_entry: Optional[dict] = None
-    if not model_occupied:
-        try:
-            from fno import route_resolve
-
-            grid_node_entry = _grid_node(out[1:], env)
-            if grid_node_entry:
-                # ONE inventory resolution shared by the capacity read and the
-                # grid resolve; resolving twice would pay the config-plus-
-                # snapshot disk read twice on the dispatch hot path.
-                _grid_inventory = route_resolve.resolve_inventory()
-                capacity: dict[str, object] = dict(
-                    route_resolve.runtime_capacity(inventory=_grid_inventory)
-                )
-                # The planning/execution role comes from plan-presence, never
-                # plan quality: a /target on an unplanned node does planning
-                # work and bills at the planning tier (grill-3). `verb` is the
-                # profile key already resolved above - the same rule.
-                grid_role: Optional[str] = None
-                if verb in ("blueprint", "think"):
-                    grid_role = "planning"
-                elif verb == "target":
-                    grid_role = (
-                        "execution" if (grid_node_entry.get("plan_path") or "").strip()
-                        else "planning"
-                    )
-                protected_name: Optional[str] = None
-                try:
-                    from fno.agents.model_routing import PROTECTED_ROLES as _PROTECTED
-
-                    if role and role.strip().lower() in _PROTECTED:
-                        protected_name = role.strip().lower()
-                except Exception:  # noqa: BLE001 - the floor is advisory, never fatal
-                    protected_name = None
-                grid_candidate, _grid_chain = route_resolve.resolve_grid(
-                    grid_node_entry.get("difficulty"),
-                    grid_node_entry.get("priority"),
-                    capacity,
-                    constrain_harness=(
-                        explicit_harness
-                        or (cfg_harness if _above_defaults(provider_rung) else "")
-                        or ""
-                    ).strip() or None,
-                    substrate=explicit_substrate,
-                    permission_mode=explicit_permission_value,
-                    role=grid_role,
-                    protected_role=protected_name,
-                    inventory=_grid_inventory,
-                )
-        except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
-            grid_candidate = None
-            _grid_chain = []
-    if grid_node_entry is not None or (model_occupied and node_id_present):
-        # The grid SPEAKS on every path (t1.3): a candidate fires loudly, and
-        # an inert grid says why - no-inventory-declared, constrained-empty,
-        # model-axis-occupied - so an absence never reads as an answer.
-        terminal = _grid_chain[-1] if _grid_chain else "grid=unavailable"
-        if model_occupied:
-            terminal = "grid=model-axis-occupied"
-        from_config.append(("grid", terminal, "routing"))
+    from_config.extend(slot_receipt)
     if not (
         cfg_harness or cfg_model or cfg_effort or cfg_substrate or cfg_permission
         or cfg_route or cfg_account or cfg_pane_group

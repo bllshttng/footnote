@@ -473,13 +473,12 @@ def _resolved_vendor(node: Optional[dict], grid_harness: Optional[str] = None) -
 
 
 def routing_for(node: Optional[dict]) -> dict:
-    """What the capacity grid resolves for ``node``, and from which inputs.
+    """What the slot resolver picks for ``node``, and from which inputs.
 
-    The chain is RECOVERED, not constructed: `route_resolve.resolve_grid`
+    The chain is RECOVERED, not constructed: `route_resolve.resolve_slot`
     already returns ``(candidate, chain)`` whose last element is its terminal
-    reason, and `advance._grid_lane_for` throws it away as ``_chain``. The
-    strings are the existing receipt vocabulary and are surfaced verbatim -
-    reformatting them would fork it.
+    reason. The strings are the existing receipt vocabulary and are surfaced
+    verbatim - reformatting them would fork it.
     """
     if node is None:
         return {"chain": [], "candidate": None, "inputs": {}}
@@ -497,9 +496,9 @@ def routing_for(node: Optional[dict]) -> dict:
     try:
         inventory = route_resolve.resolve_inventory()
         capacity = dict(route_resolve.runtime_capacity(inventory=inventory))
-        candidate, chain = route_resolve.resolve_grid(
-            node.get("difficulty"),
-            node.get("priority"),
+        candidate, chain = route_resolve.resolve_slot(
+            "target",
+            node,
             capacity,
             role=role,
             inventory=inventory,

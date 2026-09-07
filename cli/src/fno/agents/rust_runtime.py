@@ -268,9 +268,11 @@ RUST_CLIENT_VERBS = frozenset(
         "graph-get",
         "bash-census",
         "session-start-bytes",
-        # Orphan-crown sweep for `fno agents court`: daemon-free read invoked
-        # directly by the court render, never via `fno agents` routing.
+        # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
         "court-orphans",
+        # The delivery-slot resolver: payload JSON in, the answer out; Python
+        # calls it via fno.route_slot_client (keeps the parity test in sync).
+        "route-slot",
     }
 )
 
@@ -475,6 +477,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts (x-997a); invoked directly by `fno doctor bash-census`.",
     "session-start-bytes": "Session-start preamble byte total (x-997a); invoked directly by `fno doctor`'s session-start byte report.",
     "court-orphans": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents court`, not `fno agents` routing.",
+    "route-slot": "Delivery-slot resolver: JSON payload on stdin, the {candidate, chain} answer on stdout; invoked by fno.route_slot_client, not `fno agents` routing.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other

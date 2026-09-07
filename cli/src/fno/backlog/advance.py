@@ -218,6 +218,33 @@ class SpawnError(RuntimeError):
     """``fno agents spawn`` failed for a reason that leaves the node re-dispatchable."""
 
 
+class SpawnQueueRefused(SpawnError):
+    """Exit 78: every configured lane exhausted; carries per-lane reasons
+    and, when a reset is known, ``retry_at``."""
+
+    def __init__(self, message: str, retry_at: Optional[float] = None):
+        super().__init__(message)
+        self.retry_at = retry_at
+
+
+def _slot_queue_retry_at(stdout: str) -> Optional[float]:
+    """The ``retry_at`` from the seam's typed queue-refusal JSON, if any."""
+    for line in reversed((stdout or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+        except Exception:  # noqa: BLE001 - not JSON, keep scanning
+            continue
+        if isinstance(data, dict) and data.get("reason") == "slot_exhausted":
+            try:
+                return float(data.get("retry_at", ""))  # absent reads as unset
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Seams (subprocess to the public CLI; patched in unit tests)
 # ---------------------------------------------------------------------------
@@ -1446,6 +1473,12 @@ def _spawn_worker(
         stderr = (proc.stderr or "").strip()
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
             raise SpawnAlreadyRunning(f"agent {agent_name} already exists")
+        if proc.returncode == 78:
+            # Typed capacity refusal: persist a defer; hand retry_at to the skip.
+            raise SpawnQueueRefused(
+                f"slot queue refused: {(stderr or proc.stdout or '').strip()[:200]}",
+                retry_at=_slot_queue_retry_at(proc.stdout or ""),
+            )
         # The --node door's family-2 guard dedups (a peer door won the node
         # handover, or our released reservation was re-taken mid-launch) by
         # refusing with already-running. That is the benign skip the caller's
@@ -1615,7 +1648,13 @@ def _base_project_id(canonical_root: Path) -> str:
 def _grid_lane_for(
     node: Optional[dict], *, model: Optional[str], provider: Optional[str]
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """``(harness, model, decline_reason)`` the capacity grid picks for an UNPINNED spawn.
+    """``(harness, model, decline_reason)`` the slot resolver picks for an UNPINNED spawn.
+
+    On a decline the reason is the chain's own terminal, verbatim: rewording
+    it forks the receipt vocabulary. Receipts only, never refusing (Locked
+    10). Deliberately ONE function: tests monkeypatch this name, and a caller
+    that reached past it would bypass every patch. Placement and spawn both
+    compose verb ``target`` through here so the two agree on one lane.
 
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
@@ -1634,9 +1673,9 @@ def _grid_lane_for(
         role: Optional[str] = None
         if not (node.get("plan_path") or "").strip():
             role = "planning"
-        candidate, chain = route_resolve.resolve_grid(
-            node.get("difficulty"),
-            node.get("priority"),
+        candidate, chain = route_resolve.resolve_slot(
+            "target",
+            node,
             capacity,
             role=role,
             inventory=inventory,
@@ -3291,6 +3330,26 @@ def advance(
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
         return skip("already-claimed", node_id=node_id)
+    except SpawnQueueRefused as exc:
+        # Every lane exhausted: persist the defer (backlog owner), skip on the horizon.
+        _safe_release(dispatch_key, holder, dispatch_root)
+        reset = int(exc.retry_at) if exc.retry_at else "unknown"
+        proc = subprocess.run(
+            [*_subprocess_util.fno_py_cmd(), "backlog", "defer", node_id,
+             "--reason", f"slot-queue: every configured lane exhausted; retry_at={reset}"],
+            cwd=node_cwd or None,
+            capture_output=True,
+            text=True,
+        )
+        return skip(
+            "slot-queue-deferred",
+            node_id=node_id,
+            retry_at=exc.retry_at,
+            detail=(
+                f"deferred={'yes' if proc.returncode == 0 else 'no'}"
+                f" retry_at={exc.retry_at or '-'}"
+            ),
+        )
     except Exception as exc:  # noqa: BLE001
         _safe_release(dispatch_key, holder, dispatch_root)
         return failed(node_id, str(exc))

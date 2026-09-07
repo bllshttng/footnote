@@ -1,21 +1,12 @@
 """Dispatch-time model resolution: the config-first router's read side.
 
 The declared inventory (``config.routing.models``) is the PRIMARY routing
-surface: nothing built-in is authoritative, so adding a model, a provider or a
-harness is a config edit, and a stranger's install never inherits this
-machine's fleet. The OpenRouter snapshot is OPTIONAL enrichment: it may supply
-a percentile that derives a band for a row whose ``band`` the operator left
-unset, and it can never make the grid inert. A virgin install declares no
-inventory; the grid records ``grid=no-inventory-declared`` and injects
-nothing, byte-identical to today's behaviour minus the silence.
-
-Full precedence (Locked Decision 1), now per AXIS rather than per spawn: an
-explicit flag or a profile field occupies the axis it names and nothing more,
-so ``[agents.profiles.target] provider = "codex"`` pins the harness and the
-grid still chooses model and effort within codex.
-    dispatch --model > task ``model:`` > task ``difficulty:`` > plan ``model:`` >
-    plan ``difficulty:`` > provider default (``--role`` routing / provider-rotation
-    combos live downstream and only fire when nothing above resolves a model).
+surface: adding a model, provider or harness is a config edit. The snapshot
+is OPTIONAL enrichment and can never make the grid inert; a virgin install
+records ``grid=no-inventory-declared`` and injects nothing. Axis rule: an
+explicit flag or profile field occupies the axis it names and nothing more
+(``--model > task > plan > provider default``). Fields:
+docs/architecture/role-based-model-routing.md.
 """
 from __future__ import annotations
 
@@ -30,6 +21,7 @@ from fno.adapters.providers import benchmarks as bm
 # the STRONGEST reachable model rather than the cheapest that clears, because
 # max semantics invert the cheapest-clearing rule.
 _BAND_FLOOR = {"low": 50, "medium": 70, "high": 90, "max": 95}
+_BAND_RANK = {"low": 0, "medium": 1, "high": 2, "max": 3}
 
 # Static fallback order per tier (no snapshot -> no percentiles to compare):
 # requested band first, then higher bands (they clear the minimum), then lower
@@ -44,30 +36,25 @@ _STATIC_FALLTHROUGH = {
     "low": ["low", "medium", "high"],
 }
 
-_GRID_CANDIDATES = {
-    "high": ["claude-opus-5", "gpt-5.6-sol"],
-    "medium": ["claude-sonnet-5", "glm-5.3[1m]", "gpt-5.6-terra"],
-    "low": ["glm-4.7", "claude-haiku-4-5", "gpt-5.6-luna"],
-}
 # Strong end of the band vocabulary; the round-up ruling resolves absent or
 # uncertain difficulty here, never to the cheap end. `max` ranks above `high`
 # so the band vocabulary here is the SAME one `_BAND_FLOOR` admits: a declared
 # max row must not fall through to rank -1.
-_BAND_RANK = {"low": 0, "medium": 1, "high": 2, "max": 3}
-_STRONG_BAND = "high"
 _OBJECTIVES = ("cheapest-that-clears", "best-available", "prefer-harness")
-_PLANNING_BAND = "high"
 
 # Aggregation order for a harness's accounts: MAX over headroom. ok > low >
 # unknown > exhausted. Unknown outranks exhausted because exhaustion is only
 # true when EVERY account says so (M2/t2.1): one silent account never walls a
-# harness another account can still serve.
+# harness another account can still serve. The MAX aggregate is the
+# HARNESS-WIDE answer and is correct for a row that names no account; a row
+# that names an account gets that account's own answer from the detail map.
 _CAPACITY_RANK = {"ok": 3, "available": 3, "low": 2, "unknown": 1, "exhausted": 0, "blocked": 0}
 
 
 @dataclasses.dataclass(frozen=True)
 class InventoryRow:
-    """One resolved inventory row. ``band`` is "" when unbanded."""
+    """One resolved inventory row; ``band`` is "" when unbanded (a candidate
+    at every band, ranked after the banded rows that clear)."""
 
     name: str
     harness: str
@@ -86,26 +73,17 @@ class InventoryRow:
 
     def accounts(self) -> list[str]:
         """The account record id whose quota this row spends, if named.
-
-        ``route`` deliberately contributes nothing: it names a VENDOR lane
-        (``zai/glm-5.3``), and ``provider_health``/``usage`` are keyed by
-        ``config.accounts.records`` id. A vendor string can never match a key,
-        so folding it into the account set would add a pseudo-account whose
-        permanent UNKNOWN dilutes a real account's live lock in the MAX
-        aggregate - the one shape this change exists to kill.
+        ``route`` names a VENDOR lane, not an account: folding it in would
+        add a pseudo-account whose permanent UNKNOWN dilutes a real
+        account's live lock in the MAX aggregate.
         """
         return [self.account] if self.account else []
 
 
 @dataclasses.dataclass(frozen=True)
 class Inventory:
-    """The resolved inventory plus its objective (the objective is config-owned).
-
-    ``rows`` is the built-in fallback table overridden and extended by config.
-    ``declared`` says whether CONFIG named any row, which ``rows`` alone can no
-    longer answer now that the fallback seeds it. The grid reads ``declared``:
-    a virgin install still injects nothing.
-    """
+    """The resolved inventory plus its config-owned objective. ``declared``
+    says whether CONFIG named any row: a virgin install injects nothing."""
 
     rows: dict[str, InventoryRow] = dataclasses.field(default_factory=dict)
     objective: str = _OBJECTIVES[0]
@@ -141,15 +119,9 @@ def inventory_from_rows(
     snapshot: Optional[dict] = None,
     declared: bool = True,
 ) -> Inventory:
-    """Fold declared rows into an :class:`Inventory`.
-
-    Rows are keyed by ``name``; a later row of the same name overrides per
-    field and the fields it did not name keep the earlier row's value (the
-    merge precedent from ``model_routing._DEFAULT_PROVIDERS``). Band
-    resolution per row: the row's own ``band``, else a snapshot percentile
-    against ``_BAND_FLOOR``, else unbanded. An unbanded row is never a grid
-    candidate and is named by ``fno doctor route`` when asked for.
-    """
+    """Fold declared rows into an :class:`Inventory` (later rows of one name
+    override per field). Band: the row's own, else a percentile against
+    ``_BAND_FLOOR``, else unbanded."""
     folded: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for row in rows:
@@ -205,18 +177,8 @@ def inventory_from_rows(
 
 def _builtin_rows() -> list[dict[str, Any]]:
     """The built-in table as inventory rows: a FALLBACK, never the authority.
-
-    Config overrides and extends these. `inventory_from_rows` folds per name
-    and per field, so a config row naming an existing model replaces only the
-    fields it names, and a new name is simply added. That is the same merge
-    `model_routing._DEFAULT_PROVIDERS` uses, and it is what keeps adding a
-    model a config edit rather than a Python edit.
-
-    A model the table lists in two bands (`gpt-5.6-sol` is in both `max` and
-    `high`) keeps the STRONGEST one, picked by rank here rather than by the
-    order rows happen to be emitted in. One row per name, so the fold has no
-    same-name ordering to depend on.
-    """
+    One row per name, the strongest band winning; config overrides per field
+    and extends by name."""
     from fno.adapters.providers import benchmarks as _bm
 
     strongest: dict[str, str] = {}
@@ -248,11 +210,8 @@ def resolve_inventory(
     settings: object = None,
     snapshot: Optional[dict] = None,
 ) -> Inventory:
-    """Read the declared inventory from config (empty when nothing is declared).
-
-    Never raises on a config problem: an unloadable config is an EMPTY
-    inventory (the grid records ``no-inventory-declared``), not a dead spawn.
-    """
+    """Read the declared inventory from config. Never raises: an unloadable
+    config is an EMPTY inventory, not a dead spawn."""
     try:
         if settings is None:
             from fno.config import load_settings
@@ -273,245 +232,360 @@ def resolve_inventory(
         return Inventory()
 
 
-def _order_candidates(
-    candidates: list[InventoryRow], inventory: Inventory
-) -> list[InventoryRow]:
-    """Order candidates by the declared objective. Never lowers the band: the
-    band admission already happened before this runs."""
-    objective = inventory.objective
-    if objective == "best-available":
-        return sorted(candidates, key=lambda r: (-r.rank, -(r.percentile or -1.0), r.name))
-    if objective == "prefer-harness":
-        preferred = inventory.prefer_harness
-        # Tier wins, harness is a tiebreaker within a tier: stable partition by
-        # the preferred harness, band-descending inside each partition.
-        return sorted(
-            candidates,
-            key=lambda r: (
-                0 if r.harness == preferred else 1,
-                -r.rank,
-                -(r.percentile or -1.0),
-                r.name,
-            ),
-        )
-    # cheapest-that-clears: declared cost first (by cost), then the percentile
-    # proxy for rows that declare none (the snapshot carries no cost column);
-    # a row with neither signal is cheapest at the WEAKEST band that still
-    # clears, never the strongest (that is best-available's job).
-    def _cheapest_key(r: InventoryRow) -> tuple:
-        if r.cost_per_mtok_in is not None:
-            return (0, r.cost_per_mtok_in, r.rank, r.name)
-        if r.percentile is not None:
-            return (1, r.percentile, r.rank, r.name)
-        return (2, 0, r.rank, r.name)
-
-    return sorted(candidates, key=_cheapest_key)
 
 
-def _candidate_supported(
-    harness: str, substrate: Optional[str], permission_mode: Optional[str]
-) -> bool:
-    """Whether a pinned substrate / permission mode can legally ride ``harness``.
-
-    Posture flags FILTER the candidate set (t3.2); they never cancel the
-    routing decision. Mirrors the spawn parser's own gates: thread needs the
-    harness's journey-proven lane (its spawn claim reads native), a mapped
-    permission mode is claude's on every substrate and a non-claude harness's
-    only on the pane lane. An unset substrate reads as the spawn parser's own
-    default (pane), so a lone permission pin does not filter out non-claude
-    rows the gate would accept. An unknown harness degrades open (kept) so
-    the spawn's own gate, which names the value, stays the authority on
-    refusal.
-    """
-    sub = (substrate or "").strip()
-    if sub == "bg":
-        sub = "thread"
-    if sub == "thread":
-        try:
-            from fno.agents.harness_map import thread_seatable
-
-            if not thread_seatable(harness):
-                return False
-        except Exception:  # noqa: BLE001 - unknown harness keeps the candidate
-            pass
-    mode = (permission_mode or "").strip()
-    if mode:
-        # "" (unset) is pane here for the same reason _permission_mappable
-        # takes the parser's pane default: only a NON-pane substrate narrows.
-        if harness != "claude" and sub not in ("", "pane"):
-            return False
-    return True
 
 
-def _harness_installed(harness: str) -> bool:
-    """Whether a harness fno can drive is named. Degrades open (True) on an
-    unreadable roster so the spawn's own gate, which names the value, keeps the
-    authority to refuse."""
+
+
+
+
+
+
+
+
+#: The verbs fno dispatches, and therefore the slots an operator fills.
+SLOT_VERBS = ("think", "blueprint", "target", "review", "crown")
+
+
+def slot_verbs(settings: object = None, inventory: Optional[Inventory] = None) -> list[str]:
+    """Every verb the readout should show: the dispatched verbs plus any
+    profile carrying lane configuration."""
+    verbs = list(SLOT_VERBS)
+    if settings is None:
+        settings, _profile, _lanes = _slot_entry(None, None)
+    try:
+        profiles = getattr(getattr(settings, "agents", None), "profiles", None) or {}
+        for key in profiles:
+            if key not in verbs and key:
+                verbs.append(str(key))
+    except Exception:  # noqa: BLE001 - a read failure shows the known verbs
+        pass
+    return verbs
+
+
+def resolve_slot(
+    verb: Optional[str],
+    node: Optional[dict],
+    capacity: Optional[Mapping[str, object]],
+    *,
+    inventory: Optional[Inventory] = None,
+    settings: object = None,
+    substrate: Optional[str] = None,
+    permission_mode: Optional[str] = None,
+    constrain_harness: Optional[str] = None,
+    role: Optional[str] = None,
+    protected_role: Optional[str] = None,
+    model_occupied: bool = False,
+    explicit_model: bool = False,
+    explicit_lane: bool = False,
+) -> tuple[Optional[dict[str, Any]], list[str]]:
+    """Which lane does this dispatch ride right now: the ONE slot resolver.
+    Selection is Rust (``fno-agents route-slot``); chain strings come back
+    verbatim, and a missing or failing binary is a named refusal."""
+    import os
+
+    settings, profile, lanes = _slot_entry(settings, verb)
+    rung_base = f"agents.profiles.{verb}" if verb else "agents.profiles"
+    by_diff = getattr(profile, "by_difficulty", None)
+    has_overlay = isinstance(by_diff, Mapping) and bool(by_diff)
+    if not lanes and not has_overlay and node is None:
+        return None, []
+
+    gate_bypassed = os.environ.get("FNO_SPAWN_GATE") == "0"
+    from fno.route_slot_client import RouteSlotUnavailable, route_slot_call
+
+    try:
+        return _answer(route_slot_call(_slot_payload(
+            rung_base=rung_base, profile=profile, lanes=lanes, node=node,
+            capacity=capacity, inventory=inventory, settings=settings,
+            substrate=substrate, permission_mode=permission_mode,
+            constrain_harness=constrain_harness, explicit_lane=explicit_lane,
+            explicit_model=explicit_model, gate_bypassed=gate_bypassed,
+            role=role, protected_role=protected_role,
+            model_occupied=model_occupied,
+        )), "candidate")
+    except RouteSlotUnavailable as exc:
+        return None, [f"slot=route-slot-unavailable ({exc})"]
+
+
+
+
+
+def _answer(out: dict[str, Any], key: str) -> tuple[Any, list[str]]:
+    """The verb's named field plus its chain, lines coerced verbatim."""
+    return out.get(key), [str(line) for line in (out.get("chain") or [])]
+
+
+def _profile_fields(profile: Optional[object]) -> dict[str, Any]:
+    by_diff = getattr(profile, "by_difficulty", None)
+    return {
+        **{k: str(getattr(profile, k, "") or "")
+           for k in ("on_exhausted", "on_low", "on_unknown")},
+        "by_difficulty": by_diff if isinstance(by_diff, Mapping) else {},
+    }
+
+
+_DECLARED_FIELDS = ("harness", "model", "route", "account", "band", "effort")
+
+
+def _declared_rows(settings: object) -> dict[str, Any]:
+    """The CONFIG-declared rows exactly (never the built-in fallback)."""
+    try:
+        models = getattr(getattr(settings, "routing", None), "models", None) or []
+        rows = [r for r in models if isinstance(r, Mapping)]
+    except Exception:  # noqa: BLE001 - an unreadable config reads as empty
+        return {}
+    return {
+        name: {"name": name, **{f: str(r.get(f, "") or "").strip() for f in _DECLARED_FIELDS}}
+        for r in rows
+        if (name := str(r.get("name", "") or "").strip())
+    }
+
+
+def _lanes_payload(lanes: Any) -> list[Any]:
+    """Lane entries as JSON; profile lane objects serialize by the verb's own fields."""
+    fields = ("provider", "model", "effort", "substrate", "permission_mode",
+              "route", "account", "pane_group")
+    out: list[Any] = []
+    for lane in lanes or []:
+        if isinstance(lane, Mapping):
+            out.append(dict(lane))
+        elif hasattr(lane, "provider") or hasattr(lane, "model"):
+            out.append({k: str(getattr(lane, k, "") or "") for k in fields})
+        else:
+            out.append(lane)
+    return out
+
+
+def _inventory_payload(inventory: Optional[Any]) -> dict[str, Any]:
+    """The resolved inventory as JSON: rows in declared order plus objective."""
+    if inventory is None:
+        return {}
+    try:
+        return {
+            "declared": bool(getattr(inventory, "declared", False)),
+            "objective": str(getattr(inventory, "objective", "") or "cheapest-that-clears"),
+            "prefer_harness": str(getattr(inventory, "prefer_harness", "") or ""),
+            # asdict: the verb reads fields by name; a key it ignores is harmless.
+            "rows": [dataclasses.asdict(r) for r in inventory.rows.values()],
+        }
+    except Exception:  # noqa: BLE001 - an unreadable inventory grids on defaults
+        return {}
+
+
+def _thread_seatable(harnesses: list[str]) -> dict[str, bool]:
+    try:
+        from fno.agents.harness_map import thread_seatable
+
+        return {h: bool(thread_seatable(h)) for h in dict.fromkeys(harnesses)}
+    except Exception:  # noqa: BLE001 - unknown harness degrades open
+        return {h: True for h in dict.fromkeys(harnesses)}
+
+
+def _harness_installed_table(harnesses: list[str]) -> dict[str, bool]:
     try:
         from fno.agents.harnesses import READABLE_PROVIDERS
 
-        return harness in READABLE_PROVIDERS
-    except Exception:  # noqa: BLE001 - degrade open
-        return True
+        return {h: h in READABLE_PROVIDERS for h in dict.fromkeys(harnesses)}
+    except Exception:  # noqa: BLE001 - an unreadable roster degrades open
+        return {h: True for h in dict.fromkeys(harnesses)}
 
 
-def _capacity_state(value: object) -> tuple[str, str]:
-    """(state, window-note) from a capacity entry: a bare state string, or the
-    detailed mapping ``runtime_capacity`` produces."""
-    if isinstance(value, Mapping):
-        state = str(value.get("state", "") or "unknown").lower()
-        return state, str(value.get("window", "") or "")
-    return str(value or "unknown").lower(), ""
+def _effort_ok_table(rows: list[Mapping[str, Any]]) -> dict[str, dict[str, bool]]:
+    """Which (harness, effort) pairs survive ``effort_tokens``; the verb only consumes verdicts."""
+    out: dict[str, dict[str, bool]] = {}
+    for row in rows:
+        harness, effort = str(row.get("harness", "") or ""), str(row.get("effort", "") or "")
+        if not harness or not effort.strip():
+            continue
+        try:
+            from fno.agents.mux_spawn import effort_tokens
+
+            effort_tokens(harness, effort)
+            verdict = True
+        except Exception:  # noqa: BLE001 - an unusable effort surface is omitted
+            verdict = False
+        out.setdefault(harness, {})[effort] = verdict
+    return out
 
 
-def resolve_grid(
-    difficulty: Optional[str],
-    priority: Optional[str],
+def _vendor_tables(settings: object, rows: dict[str, Any], lanes: list[Any]) -> dict[str, Any]:
+    """Vendor caps and live counts for every vendor the rows or inline lanes name by ``route``."""
+    caps: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    errors: dict[str, str] = {}
+    try:
+        from fno.agents.spawn_gate import (
+            ProviderCountUnavailable, provider_lanes_cap, provider_live_count,
+        )
+        from fno.config import provider_limits_table
+
+        table = dict(provider_limits_table(getattr(settings, "agents", None)))
+        routes = [str(row.get("route", "") or "") for row in rows.values()]
+        routes += [str(lane.get("route", "") or "") for lane in lanes if isinstance(lane, Mapping)]
+        vendors = sorted({r.replace(",", "/").partition("/")[0].strip()
+                          for r in routes if r.strip()} - {""})
+        for vendor in vendors:
+            cap = provider_lanes_cap(table.get(vendor))
+            if cap is None:
+                continue
+            caps[vendor] = int(cap)
+            try:
+                counts[vendor] = int(provider_live_count(vendor))
+            except ProviderCountUnavailable as exc:
+                errors[vendor] = str(exc)
+    except Exception:  # noqa: BLE001 - an unreadable cap table caps no lane
+        pass
+    return {"vendor_caps": caps, "vendor_counts": counts, "vendor_count_errors": errors}
+
+
+def _account_record_vendors(settings: object) -> dict[str, str]:
+    try:
+        return {
+            str(r["id"]): str(r.get("route", "") or "").replace(",", "/").partition("/")[0].strip()
+            for r in getattr(getattr(settings, "accounts", None), "records", None) or []
+            if isinstance(r, Mapping) and r.get("id") and str(r.get("route", "") or "").strip()
+        }
+    except Exception:  # noqa: BLE001 - an unreadable registry contradicts nothing
+        return {}
+
+
+def _slot_payload(
+    *, rung_base: str, profile: Optional[object], lanes: Any, node: Optional[Mapping],
+    capacity: Optional[Mapping[str, object]], inventory: Optional[Any], settings: object,
+    substrate: Optional[str], permission_mode: Optional[str], constrain_harness: Optional[str],
+    explicit_lane: bool, explicit_model: bool, gate_bypassed: bool,
+    role: Optional[str] = None, protected_role: Optional[str] = None,
+    model_occupied: bool = False,
+) -> dict[str, Any]:
+    """The slot/grid payload: both legs' inputs plus the gather the verb cannot do."""
+    rows = _declared_rows(settings)
+    lanes_payload = _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else lanes
+    inventory_payload = _inventory_payload(inventory)
+    inv_rows = inventory_payload.get("rows", [])
+    payload: dict[str, Any] = {
+        "rung_base": rung_base,
+        "lanes_raw": lanes_payload,
+        "declared_rows": rows,
+        "profile": _profile_fields(profile),
+        "node": {"difficulty": (node or {}).get("difficulty"),
+                 "priority": (node or {}).get("priority")} if node else None,
+        "capacity": dict(capacity or {}),
+        "substrate": substrate,
+        "permission_mode": permission_mode,
+        "constrain_harness": constrain_harness,
+        "explicit_lane": explicit_lane,
+        "explicit_model": explicit_model,
+        "gate_bypassed": gate_bypassed,
+        "thread_seatable": _thread_seatable(
+            [str(r.get("harness", "")) for r in rows.values()]
+            + [str(r.get("harness", "")) for r in inv_rows]
+            + [str(lane.get("provider", "") or "") for lane in (lanes_payload or [])
+               if isinstance(lane, Mapping)]
+        ),
+        "account_record_vendors": _account_record_vendors(settings),
+        "role": role,
+        "protected_role": protected_role,
+        "model_occupied": model_occupied,
+        "inventory": inventory_payload,
+    }
+    try:
+        payload["effort_ok"] = _effort_ok_table(inv_rows)
+    except Exception:  # noqa: BLE001 - an unusable effort table omits nothing
+        payload["effort_ok"] = {}
+    try:
+        payload["harness_installed"] = _harness_installed_table(
+            [str(r.get("harness", "") or "") for r in inv_rows])
+    except Exception:  # noqa: BLE001 - an unreadable roster degrades open
+        payload["harness_installed"] = {}
+    payload.update(_vendor_tables(
+        settings, rows, lanes_payload if isinstance(lanes_payload, list) else []))
+    return payload
+
+
+def _slot_entry(
+    settings: object, verb: Optional[str]
+) -> tuple[object, Optional[object], Any]:
+    """Settings (a config read never raises), the verb's profile, its lanes."""
+    if settings is None:
+        try:
+            from fno.config import load_settings
+
+            settings = load_settings()
+        except Exception:  # noqa: BLE001 - an unreadable config reads as absent
+            settings = None
+    profile = None
+    if verb and settings is not None:
+        try:
+            profiles = getattr(getattr(settings, "agents", None), "profiles", None) or {}
+            profile = profiles.get(verb)
+        except Exception:  # noqa: BLE001
+            profile = None
+    lanes = getattr(profile, "lanes", None) if profile is not None else None
+    return settings, profile, lanes
+
+
+def slot_states(
+    verb: str,
     capacity: Optional[Mapping[str, object]],
     *,
-    constrain_harness: Optional[str] = None,
-    substrate: Optional[str] = None,
-    permission_mode: Optional[str] = None,
-    role: Optional[str] = None,
-    protected_role: Optional[str] = None,
     inventory: Optional[Inventory] = None,
     settings: object = None,
-    snapshot: Optional[dict] = None,
-) -> tuple[Optional[dict[str, str]], list[str]]:
-    """Join intrinsic difficulty and priority with a live capacity snapshot.
-
-    The grid is a default route only. ``capacity`` is supplied by the runtime
-    seam so this resolver never reads accounts or the network; an explicit
-    flag or profile field occupies its axis and the grid fills the rest
-    (``constrain_harness`` = the harness axis is taken; it still picks model
-    and effort within it). Unknown capacity PERMITS a candidate and records
-    ``capacity=unknown-permitted``; only a positive ``exhausted``/``blocked``
-    marker removes one. Returns ``(candidate|None, chain)``; the chain's last
-    element is the terminal reason the caller receipts on every path.
-    """
-    inv = inventory if inventory is not None else resolve_inventory(
-        settings=settings, snapshot=snapshot
+) -> dict[str, Any]:
+    """Readout of one verb's slot: lanes, policy lines, and would_take - the
+    verb's own answer. Display, never selection."""
+    settings, _profile, lanes = _slot_entry(settings, verb)
+    if inventory is None:
+        inventory = resolve_inventory(settings=settings)
+    out: dict[str, Any] = {
+        "verb": verb, "lanes": [], "on_exhausted": "", "would_take": "",
+        "routing": "unarmed",
+    }
+    by_diff = getattr(_profile, "by_difficulty", None) or {}
+    if not lanes and isinstance(by_diff, Mapping) and by_diff:
+        # An overlay-only slot is armed: display the high overlay's lanes
+        # (the default effective difficulty); the resolver derives per dispatch.
+        overlay = by_diff.get("high")
+        if isinstance(overlay, Mapping):
+            lanes = overlay.get("lanes")
+    rung_base = f"agents.profiles.{verb}"
+    payload = _slot_payload(
+        rung_base=rung_base, profile=_profile, lanes=lanes, node=None,
+        capacity=capacity, inventory=inventory, settings=settings,
+        substrate=None, permission_mode=None, constrain_harness=None,
+        explicit_lane=False, explicit_model=False, gate_bypassed=False,
     )
-    band = (difficulty or "").strip().lower()
-    prio = (priority or "p2").strip().lower()
-    # Round up under uncertainty: an absent or unmapped difficulty resolves to
-    # the strong band, never the cheap one (the failure is asymmetric).
-    band = band if band in _BAND_FLOOR else _STRONG_BAND
-    chain = [f"grid difficulty({band}) priority({prio})"]
-    if prio not in {"p0", "p1", "p2", "p3"}:
-        chain.append("grid=invalid-input")
-        return None, chain
-    # Reads `declared`, not `rows`: the built-in fallback seeds rows, and the
-    # grid stays config-first on purpose. A virgin install injects nothing and
-    # says so, exactly as before the fallback existed.
-    if not inv.declared or not inv.rows:
-        chain.append("grid=no-inventory-declared")
-        return None, chain
+    payload["mode"] = "states"
+    states: dict[str, Any] = {}
+    try:
+        from fno.route_slot_client import route_slot_call
 
-    # p0 gets the high-urgency band, p3 intentionally prefers the low-cost
-    # band; p1/p2 preserve the filer's intrinsic difficulty. The planning role
-    # floors at the strong end: a session that will blueprint first bills at
-    # the planning tier, and a plan is what earns the cheap execution tier.
-    candidate_band = "high" if prio == "p0" else "low" if prio == "p3" else band
-    if (role or "").strip().lower() == "planning":
-        candidate_band = _max_band(candidate_band, _PLANNING_BAND)
-        chain.append(f"grid role(planning) floors band({_PLANNING_BAND})")
-    if protected_role:
-        from fno.agents.model_routing import PROTECTED_ROLE_FLOOR
-
-        floor = PROTECTED_ROLE_FLOOR
-        candidate_band = _max_band(candidate_band, floor)
-        inv = dataclasses.replace(inv, objective="best-available")
-        chain.append(f"grid protected-role({protected_role}) floor={floor}")
-
-    rows = list(inv.rows.values())
-    if constrain_harness:
-        rows = [r for r in rows if r.harness == constrain_harness]
-        chain.append(f"grid constrained to harness({constrain_harness})")
-    before_filters = len(rows)
-    rows = [
-        r for r in rows
-        if _candidate_supported(r.harness, substrate, permission_mode)
+        states = route_slot_call(payload)
+    except Exception as exc:  # noqa: BLE001 - a missing verb degrades the readout
+        states = {"would_take": f"slot=route-slot-unavailable ({exc})"}
+    for key in ("on_exhausted", "on_low", "on_unknown", "would_take", "routing"):
+        if key in states:
+            out[key] = states[key]
+    # The difficulty note is the verb's vocabulary: take it back verbatim.
+    for line in states.get("chain") or []:
+        note_prefix = f"slot note {rung_base} "
+        if line.startswith(note_prefix):
+            out["note"] = line[len(note_prefix):]
+    out["lanes"] = [
+        {k: str(e.get(k, "" if k != "state" else "unknown"))
+         for k in ("rung", "name", "state")}
+        | {k: str(e[k]) for k in ("identity", "source") if e.get(k)}
+        for e in states.get("lane_states") or []
     ]
-    if substrate or permission_mode:
-        if not rows and before_filters:
-            chain.append("grid=constrained-empty")
-            return None, chain
-        chain.append(
-            f"grid filtered by substrate({substrate or '-'}) permission({permission_mode or '-'})"
-        )
-
-    # A declared row whose harness fno cannot drive REFUSES by name (AC3-ERR):
-    # an uninstalled harness is a fact the receipt must carry, not an absence
-    # silently skipped from the candidate list.
-    installed: list[InventoryRow] = []
-    for r in rows:
-        if not r.harness or not r.model or _harness_installed(r.harness):
-            installed.append(r)
-        else:
-            chain.append(f"grid refuses {r.name}: harness {r.harness!r} not installed")
-    rows = installed
-
-    # Tier wins: a row is a candidate when its band meets or exceeds the
-    # requested floor. UNBANDED rows never qualify (no declared band, no
-    # snapshot percentile) and are named when asked for via doctor route. No
-    # degrade below the floor here, unlike resolve_tier: the grid's round-up
-    # ruling would be undone by quietly handing strong work to a weak row, so
-    # an empty tier falls through to the operator's own defaults instead.
-    floor_rank = _BAND_RANK[candidate_band]
-    clearing = [r for r in rows if r.rank >= floor_rank and r.harness and r.model]
-    if not clearing:
-        chain.append("grid=no-band-candidate")
-        return None, chain
-
-    for row in _order_candidates(clearing, inv):
-        state, window = _capacity_state((capacity or {}).get(row.harness, "unknown"))
-        if state in ("exhausted", "blocked"):
-            chain.append(f"grid skip {row.harness}/{row.name} capacity={state}")
-            continue
-        if state not in ("ok", "low", "available"):
-            state = "unknown-permitted"
-        chain.append(
-            f"grid candidate {row.harness}/{row.name} capacity={state}"
-            + (f" window={window}" if window else "")
-        )
-        out = {"harness": row.harness, "model": row.model}
-        effort = row.effort
-        if effort:
-            try:
-                from fno.agents.mux_spawn import effort_tokens
-
-                effort_tokens(row.harness, effort)
-            except Exception:  # noqa: BLE001 - no effort surface: inject nothing
-                chain.append(f"grid effort omitted (no surface on {row.harness})")
-                effort = ""
-        if effort:
-            out["effort"] = effort
-            chain.append(f"grid effort({effort})")
-        return out, chain
-    # Reaching here means every candidate was skipped on a positive
-    # exhausted/blocked marker (unknown permits and returns in-loop).
-    chain.append("grid=no-available-candidate")
-    return None, chain
-
-
-def _max_band(a: str, b: str) -> str:
-    return a if _BAND_RANK.get(a, -1) >= _BAND_RANK.get(b, -1) else b
+    return out
 
 
 def harness_accounts(
     harness: str, *, settings: object = None, inventory: Optional[Inventory] = None
 ) -> list[str]:
-    """Expand a harness to the ACCOUNT record ids reachable through it.
-
-    Quota is a property of an ACCOUNT at a vendor; a harness is a client that
-    can speak for several accounts. The direction is deliberate (M2): expand
-    the harness to its accounts and aggregate, never fold records to harnesses.
-    The account set is a UNION: every registered ``config.accounts.records``
-    entry bound to the harness is reachable through it (one healthy account
-    means the harness is usable), plus any inventory row ``account`` / ``route``
-    vendor the records list does not already name.
-    """
+    """Expand a harness to the ACCOUNT record ids reachable through it:
+    registered records plus inventory-row accounts."""
     inv = inventory if inventory is not None else resolve_inventory(settings=settings)
     accounts: list[str] = []
     for row in inv.rows.values():
@@ -536,22 +610,36 @@ def harness_accounts(
     return list(dict.fromkeys(accounts))
 
 
+def _identity_evidence(harness: str, accounts: list[str]) -> dict[str, str]:
+    """proven|mismatch per account, from the attribution owner alone: the
+    active slot's record id is ``proven``, any other named account on a proven
+    slot is ``mismatch``. No owner answer reads unknown. Never reads
+    credentials itself."""
+    try:
+        from fno.adapters.providers.managed import (
+            active_slot_id,
+            slot_tainted,
+            store_root,
+        )
+
+        active = active_slot_id(harness)
+        if not active or slot_tainted(harness, store_root()):
+            return {}
+        return {a: ("proven" if a == active else "mismatch") for a in accounts}
+    except Exception:  # noqa: BLE001 - an unreadable owner reads as unknown
+        return {}
+
+
 def runtime_capacity(
     providers: tuple[str, ...] = ("claude", "codex", "gemini", "opencode"),
     *,
     settings: object = None,
     inventory: Optional[Inventory] = None,
 ) -> dict[str, object]:
-    """Cached harness capacity: expand each harness to its accounts, read each
-    account's headroom, aggregate MAX.
-
-    A harness is ``ok`` if ANY account reachable through it is ok, ``exhausted``
-    only if EVERY account is exhausted, ``unknown`` when no account answers.
-    Every harness NAMED by a declared row is covered alongside ``providers``,
-    so an agy or custom-harness row is never silently unprobed. The value is a
-    detail mapping ``{state, window, accounts}``; bare state strings (the old
-    shape) still resolve via :func:`_capacity_state`. Never probes, never
-    touches the network, and reads the state file ONCE for all accounts.
+    """Harness capacity: per-account headroom aggregated MAX (exhausted only
+    if EVERY account is); a proven active slot account IS the aggregate. The
+    value is ``{state, window, accounts, evidence, resets}``. Never probes,
+    never touches the network.
     """
     try:
         from fno.adapters.providers.runtime_state import headrooms
@@ -564,32 +652,36 @@ def runtime_capacity(
         for harness in harnesses:
             accounts = harness_accounts(harness, settings=settings, inventory=inv)
             detail: dict[str, str] = {}
+            resets: dict[str, object] = {}
             best: Optional[str] = None
             window = "absent"
             for account, verdict in headrooms(accounts).items():
                 state = verdict.state.value
                 detail[account] = state
+                resets[account] = verdict.resets_at
                 if best is None or _CAPACITY_RANK.get(state, 1) > _CAPACITY_RANK.get(best, 1):
                     best = state
                     window = verdict.source or "unknown"
+            evidence = _identity_evidence(harness, accounts)
+            proven = [a for a, v in evidence.items() if v == "proven"]
+            if proven and detail.get(proven[0]):
+                best = detail[proven[0]]
+                window = f"identity:{proven[0]}"
+            elif evidence and not proven and any(v == "mismatch" for v in evidence.values()):
+                best = "unknown"
+                window = "identity-unproven"
             out[harness] = {
                 "state": best or "unknown",
                 "window": window,
                 "accounts": detail,
+                "evidence": evidence,
+                "resets": resets,
             }
         return out
     except Exception:  # noqa: BLE001 - unknown capacity never breaks dispatch
         return {}
 
 
-def _scoped_rows(
-    inventory: Inventory, provider: Optional[str]
-) -> list[InventoryRow]:
-    """Inventory rows a tier may pick from, scoped to one harness when asked."""
-    return [
-        r for r in inventory.rows.values()
-        if r.harness and r.model and (provider is None or r.harness == provider)
-    ]
 
 
 def resolve_tier(
@@ -600,57 +692,19 @@ def resolve_tier(
     inventory: Optional[Inventory] = None,
     settings: object = None,
 ) -> tuple[Optional[str], list[str]]:
-    """Resolve a tier to a concrete declared model. Returns ``(model, chain)``.
+    """Resolve a tier to a concrete declared model, scoped to one harness when
+    asked. The band math lives on ``fno-agents route-slot``; never raises."""
+    from fno.route_slot_client import RouteSlotUnavailable, route_slot_call
 
-    ``provider`` scopes the candidate set to one harness (Locked Decision 1): a
-    band left empty by the filter falls through the remaining bands within the
-    same harness, then to None (provider default) - never a foreign-harness
-    model. ``model`` is None when nothing resolves (the caller uses the
-    provider default). ``chain`` records each step so the receipt shows how the
-    choice (or fallback) was reached. Never raises, never hits the network.
-    """
-    band = (tier or "").strip().lower()
-    chain = [f"tier({band})"]
-    if provider:
-        chain.append(f"provider({provider})")
-    if band not in _BAND_FLOOR:
-        chain.append("unknown-tier -> provider default")
-        return None, chain
-    if inventory is not None:
-        # The caller handed us the inventory. An empty one is an answer, not a
-        # gap: honor it rather than reaching past the caller for a fleet it did
-        # not name.
-        if not inventory.rows:
-            chain.append("no declared inventory -> provider default")
-            return None, chain
-        inv = inventory
-    else:
-        # The built-in fallback seeds this, so a tier request still names a
-        # model on an install that declares nothing - review level resolves one
-        # for every level, and answering None would drop `/code-review` to the
-        # provider default everywhere. Config overrides and extends the seed.
-        inv = resolve_inventory(settings=settings, snapshot=snapshot)
-        if not inv.rows:
-            chain.append("no declared inventory -> provider default")
-            return None, chain
-
-    rows = _scoped_rows(inv, provider)
-    floor_rank = _BAND_RANK[band]
-    clearing = [r for r in rows if r.rank >= floor_rank]
-    if clearing:
-        row = _order_candidates(clearing, inv)[0]
-        chain.append(f"inventory band(>={band}) -> {row.name}")
-        return row.model, chain
-    below = [r for r in rows if 0 <= r.rank < floor_rank]
-    if below:
-        # Degrade, never block: fall to the best available below the floor.
-        best = max(below, key=lambda r: (r.rank, r.percentile or -1.0))
-        chain.append(f"inventory band(>={band}) empty -> degrade -> {best.name}")
-        return best.model, chain
-    chain.append("inventory has no reachable model -> provider default")
-    return None, chain
-
-
+    inv = inventory if inventory is not None else resolve_inventory(
+        settings=settings, snapshot=snapshot
+    )
+    try:
+        return _answer(route_slot_call(
+            {"mode": "tier", "tier": tier, "provider": provider,
+             "inventory": _inventory_payload(inv)}), "model")
+    except RouteSlotUnavailable:
+        return None, ["tier=route-slot-unavailable"]
 
 
 def resolve_dispatch_model(
@@ -664,16 +718,8 @@ def resolve_dispatch_model(
     provider: Optional[str] = None,
     inventory: Optional[Inventory] = None,
 ) -> tuple[Optional[str], str, list[str]]:
-    """Apply the full precedence chain. Returns ``(model, decision_source, chain)``.
-
-    ``model`` is None only when everything falls through to the provider default.
-    ``decision_source`` is the receipt vocabulary
-    (``explicit`` / ``task-pin`` / ``task-difficulty(<band>)`` / ``plan-default`` /
-    ``plan-difficulty(<band>)`` / ``provider-default(no-difficulty)``).
-    ``provider`` scopes band
-    resolution to one harness; pins (``explicit`` / ``task_model`` / ``plan_model``)
-    bypass the filter - operator authority outranks routing (Locked Decision 4).
-    """
+    """Apply the full precedence chain; ``(model, decision_source, chain)``.
+    Pins bypass the band filter - operator authority outranks routing."""
     if explicit:
         return explicit, "explicit", ["explicit"]
     if task_model:
@@ -702,21 +748,9 @@ def node_model(
     resolve_difficulty: bool = True,
     inventory: Optional[Inventory] = None,
 ) -> Optional[str]:
-    """Concrete ``--model`` for a node/task at the spawn seam, or None for default.
-
-    Reads the node's own ``model`` pin and ``difficulty`` band and applies
-    the precedence with an optional dispatch-time ``explicit`` override.
-    ``provider`` scopes band resolution to the spawn harness so a band never
-    yields a cross-harness ``<provider> --model <foreign>`` pick. When ``provider`` is
-    None it defaults to ``claude`` - the bg substrate's own spawn default (see
-    ``advance._spawn_worker``: ``(provider or "").strip() or "claude"``, NOT the
-    ambient/invoking harness. A bg worker is always claude regardless of which
-    harness dispatched it, so scoping by the invoking harness would resolve a
-    codex model for a claude spawn (Locked Decision 3 intent: scope the incident
-    bg-default lane, which is claude). Strictly non-fatal: any resolution error
-    degrades to the explicit override or the node's raw ``model`` pin so a routing
-    hiccup never breaks a spawn (Locked Decision 10).
-    """
+    """Concrete ``--model`` for a node at the spawn seam, or None for default.
+    Strictly non-fatal: an error degrades to the explicit override or the
+    node's raw pin."""
     try:
         model, _source, _chain = resolve_dispatch_model(
             explicit=explicit,

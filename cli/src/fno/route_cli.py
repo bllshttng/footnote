@@ -311,26 +311,29 @@ def inventory_cmd(
 ) -> None:
     """What can this installation reach: every declared routing row.
 
-    One row per declared model with its resolved band (row band, else a
-    snapshot-derived percentile, else unbanded) and a reachability verdict:
-    ``ok`` (a known harness can invoke it), ``not-installed`` (the named
-    harness is not one fno can drive; the row refuses BY NAME on stderr rather
-    than silently vanishing from routing), ``unbanded`` (never a grid
-    candidate), or ``incomplete`` (no --model value). An empty inventory says
-    so: a virgin install routes nothing from the grid.
+    One row per declared model with its resolved band and a reachability
+    verdict: ``ok`` | ``not-installed`` (refused BY NAME, never dropped) |
+    ``unbanded`` (a candidate at every band) | ``incomplete`` (no --model).
+    Then a ``slots`` section: each verb's lanes, live capacity, would_take.
     """
     from fno.agents.harnesses import READABLE_PROVIDERS
-    from fno.route_resolve import resolve_inventory
+    from fno.route_resolve import resolve_inventory, runtime_capacity, slot_states, slot_verbs
 
     inv = resolve_inventory()
+    capacity = runtime_capacity(inventory=inv)  # never raises
+    slots = [slot_states(verb, capacity, inventory=inv) for verb in slot_verbs()]
     rows: list[dict[str, str]] = []
     refusals: list[str] = []
     if not inv.rows:
         note = "no inventory declared (config.routing.models is empty); the grid records no-inventory-declared"
         if json_output:
-            typer.echo(json.dumps({"objective": inv.objective, "models": [], "note": note}, indent=2))
+            typer.echo(json.dumps(
+                {"objective": inv.objective, "models": [], "note": note, "slots": slots},
+                indent=2,
+            ))
         else:
             typer.echo(note)
+            _echo_slots(slots)
         return
     for name in sorted(inv.rows):
         row = inv.rows[name]
@@ -358,6 +361,7 @@ def inventory_cmd(
             "objective": inv.objective,
             "prefer_harness": inv.prefer_harness,
             "models": rows,
+            "slots": slots,
         }, indent=2))
     else:
         typer.echo(f"objective={inv.objective}"
@@ -374,8 +378,29 @@ def inventory_cmd(
         typer.echo(_fmt({c: c.upper() for c in cols}))
         for r in rows:
             typer.echo(_fmt(r))
+        _echo_slots(slots)
     for line in refusals:
         typer.echo(f"refused: {line}", err=True)
+
+
+def _echo_slots(slots: list[dict]) -> None:
+    """Print the per-verb slot readout under the row table."""
+    typer.echo("slots: preview (simulated; no launch)")
+    for slot in slots:
+        if not slot.get("lanes"):
+            typer.echo(f"  {slot['verb']}: {slot['would_take']}")
+            continue
+        lane_text = ", ".join(
+            f"{lane['rung'].rsplit('.', 1)[-1]} {lane['name']} capacity={lane['state']}"
+            + (f" identity={lane['identity']}" if lane.get("identity") else "")
+            for lane in slot["lanes"]
+        )
+        line = f"  {slot['verb']}: {lane_text}"
+        if slot.get("on_exhausted"):
+            line += f"; on_exhausted={slot['on_exhausted']}"
+        line += f"; would take {slot['would_take']}"
+        line += f"; routing={slot.get('routing', 'unarmed')}"
+        typer.echo(line)
 
 
 @route_app.command("env")
