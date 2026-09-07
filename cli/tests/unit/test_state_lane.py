@@ -6,6 +6,7 @@ import pytest
 
 from fno.test_cmd import (
     STATE_LEAK_CANARY,
+    _is_state_control,
     _parse_smoke_args,
     _populate_state,
     _state_both_exit,
@@ -73,3 +74,17 @@ def test_state_both_exit_green_only_when_control_fires_and_diff_is_canary_only()
     assert _state_both_exit(0, [], "passed", "failed") == 1
     # A red clean lane is red, whatever the diff says.
     assert _state_both_exit(3, [canary], "passed", "failed") == 3
+    # The filesystem canary refused in a lane. That lane may be the populated
+    # one, whose rc is discarded by design, so the flag is the only carrier.
+    assert _state_both_exit(0, [canary], "passed", "failed", True) == 1
+
+
+def test_the_control_matcher_does_not_accept_a_wiring_testcase():
+    control = "tests.unit.test_state_canary::test_state_canary_detects_populated_state"
+    wiring = "tests.unit.test_state_canary_wiring::test_the_verb_reaches_the_script_verbatim"
+
+    assert _is_state_control(control)
+    # A substring match on "test_state_canary" accepts this, and under parallel
+    # execution its passing verdict is then read as the control's.
+    assert not _is_state_control(wiring)
+    assert _is_state_control(control + "[param]")

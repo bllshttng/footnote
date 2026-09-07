@@ -107,7 +107,10 @@ for root in roots:
             except OSError:
                 # An unreadable file is a real state, not a skip: record it so
                 # a file that becomes unreadable during the run still reads as
-                # changed rather than vanishing quietly.
+                # changed rather than vanishing quietly. verify refuses on the
+                # marker rather than comparing it, because two unreadable reads
+                # of the SAME file compare equal, and a test can rewrite a
+                # write-only file between them with nothing to see.
                 rows.append(("UNREADABLE", path))
                 continue
             rows.append((digest.hexdigest(), path))
@@ -223,13 +226,22 @@ before, _ = load(sys.argv[1])
 after, excluded = load(sys.argv[2])
 
 violations = 0
+# An unreadable file carries no content evidence on either side, so it can
+# never support "unchanged". Two UNREADABLE markers for one path compare EQUAL,
+# so without this a test rewriting a write-only file reads as untouched. Report
+# it once and keep it out of the content comparison below.
+unreadable = {n for n, d in before.items() if d == "UNREADABLE"}
+unreadable |= {n for n, d in after.items() if d == "UNREADABLE"}
+for name in sorted(unreadable):
+    print(f"state-canary: UNREADABLE {name}", file=sys.stderr)
+    violations += 1
 for name in sorted(set(after) - set(before)):
     print(f"state-canary: ADDED {name}", file=sys.stderr)
     violations += 1
 for name in sorted(set(before) - set(after)):
     print(f"state-canary: REMOVED {name}", file=sys.stderr)
     violations += 1
-for name in sorted(set(before) & set(after)):
+for name in sorted((set(before) & set(after)) - unreadable):
     if before[name] != after[name]:
         print(f"state-canary: CHANGED {name}", file=sys.stderr)
         violations += 1
