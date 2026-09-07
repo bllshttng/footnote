@@ -8,11 +8,14 @@ drain count, which is why they live here instead of dying with the board.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 
-def compile_scope_ids(scope: str, entries: list[dict], *, resolve=None) -> set[str]:
-    """Compile a canonical crown scope into the graph node ids it contains."""
+def _compile(
+    scope: str, entries: list, resolve: Optional[Callable]
+) -> tuple[str, set[str]]:
+    """(canonical key, member node ids) for a crown scope."""
     from fno.agents.crown import _canonical_project, resolve_crown, split_scope
 
     resolver = resolve or resolve_crown
@@ -32,10 +35,10 @@ def compile_scope_ids(scope: str, entries: list[dict], *, resolve=None) -> set[s
                 )
             ids.add(root_id)
             ids.update(descendants_of(entries, root_id))
-        return ids
+        return canonical, ids
 
     projects = set(split_scope(canonical))
-    return {
+    ids = {
         str(row["id"])
         for row in entries
         if isinstance(row, dict)
@@ -43,6 +46,42 @@ def compile_scope_ids(scope: str, entries: list[dict], *, resolve=None) -> set[s
         and (_canonical_project(str(row.get("project") or "")) or row.get("project"))
         in projects
     }
+    return canonical, ids
+
+
+def compile_scope_ids(scope: str, entries: list[dict], *, resolve=None) -> set[str]:
+    """Compile a canonical crown scope into the graph node ids it contains."""
+    return _compile(scope, entries, resolve)[1]
+
+
+@dataclass(frozen=True)
+class TerritoryMembership:
+    """One territory read (x-e221 AC1/AC4): the canonical scope key and the
+    graph node ids it contains, or an EXPLICIT unknown. `state="unknown"` can
+    never be read as an empty territory: a consumer that cannot compile the
+    scope stops with `reason`, it does not treat the scope as drained or
+    unbounded."""
+
+    state: str  # "ok" | "unknown"
+    key: Optional[str] = None
+    ids: frozenset = frozenset()
+    reason: str = ""
+
+
+def territory_membership(
+    scope: str, entries: list, *, resolve=None
+) -> TerritoryMembership:
+    """The territory-key + membership result dispatch/capacity readers share.
+
+    The raising `compile_scope_ids` stays for its existing callers; this is
+    the sum-type form: an uncompilable scope or unreadable graph comes back
+    as `state="unknown"` naming why, never as an empty id set.
+    """
+    try:
+        key, ids = _compile(scope, entries, resolve)
+    except (ValueError, KeyError, TypeError) as exc:
+        return TerritoryMembership(state="unknown", reason=str(exc))
+    return TerritoryMembership(state="ok", key=key, ids=frozenset(ids))
 
 
 def scope_undelivered(scope: str, entries: list, resolver: Optional[Callable] = None) -> int:

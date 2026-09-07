@@ -359,6 +359,9 @@ pub fn reap_receipt_retain_days(cwd: &Path) -> u64 {
 /// Default global cap on concurrent live worker processes (union of the fno
 /// registry and claude's daemon roster). Matches the Pydantic default.
 pub const DEFAULT_MAX_LIVE: u32 = 3;
+/// The per-territory team cap default (x-e221): max live node-working workers
+/// under ONE crown scope. The machine ceiling stays [`DEFAULT_MAX_LIVE`].
+pub const DEFAULT_MAX_LIVE_PER_TERRITORY: u32 = 4;
 /// Default available-RAM floor (GB) for spawn preflight. `<= 0` disables.
 pub const DEFAULT_MIN_FREE_GB: f64 = 4.0;
 /// Default load factor at which spawn preflight stops trusting load average and
@@ -390,6 +393,17 @@ pub fn max_live(cwd: &Path) -> u32 {
     match resolve_agents_value(cwd, "max_live").and_then(|raw| raw.parse::<u32>().ok()) {
         Some(v) if v >= 1 => v,
         _ => DEFAULT_MAX_LIVE,
+    }
+}
+
+/// Resolve `agents.max_live_per_territory` (x-e221), default
+/// [`DEFAULT_MAX_LIVE_PER_TERRITORY`] — never 0, which would wall off a scope.
+pub fn territory_max_live(cwd: &Path) -> u32 {
+    match resolve_agents_value(cwd, "max_live_per_territory")
+        .and_then(|raw| raw.parse::<u32>().ok())
+    {
+        Some(v) if v >= 1 => v,
+        _ => DEFAULT_MAX_LIVE_PER_TERRITORY,
     }
 }
 

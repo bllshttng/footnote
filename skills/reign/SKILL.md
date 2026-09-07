@@ -75,8 +75,9 @@ Confirm the goal with `/hooks`. The loop was already confirmed by `CronList` abo
 
 What the loop prompt runs every interval and what you run by hand at any time.
 
-Read `fno inbox board --json`, `fno agents court --json`, `fno agents status --json`. The board read defaults to this crown's manifest, so its rows are your scope; `--state <path>` reads outside it. Print, one line each:
+Read `fno inbox board --json`, `fno agents court --json`, `fno agents status --json`, `fno config active-backlog-territories --json`. The board read defaults to this crown's manifest, so its rows are your scope; `--state <path>` reads outside it. Print, one line each:
 
+- territory rows: scope, live/cap, blueprinter handle, kingless or the holder name. A row reading `membership=unknown` or `live=unknown` is a machine-reported blind spot: name its scope in every escalation about it. The blueprinter is machinery-owned; you feed it nothing and reset nothing - a blind or absent one is an operator ask.
 - open PR count
 - PRs with a free claim and no driver
 - blocked rows and what on

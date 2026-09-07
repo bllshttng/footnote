@@ -1403,3 +1403,145 @@ class TestReignTyped:
 
         assert _reign_typed_message("brief", None, None, False) == ("brief", False)
         assert _reign_typed_message("brief", 2, "epic-x", True) == ("brief", False)
+
+
+# --- the per-territory team cap (x-e221) --------------------------------------
+
+
+def _census_with_nodes(nodes):
+    c = spawn_gate.LiveCensus()
+    c.live_row_nodes = list(nodes)
+    return c
+
+
+def test_territory_cap_refuses_at_the_cap(monkeypatch):
+    monkeypatch.setattr(
+        spawn_gate,
+        "_territory_of_node",
+        lambda node: ("x-epic", frozenset({"x-a", "x-b", "x-c", "x-d", "x-new"})),
+    )
+    c = _census_with_nodes(["x-a", "x-b", "x-c", "x-d", None, "x-other"])
+    with pytest.raises(spawn_gate.GateRefused) as err:
+        spawn_gate._check_territory_cap("x-new", c, 4)
+    receipt = err.value.receipt or {}
+    assert receipt.get("reason") == "territory_cap"
+    assert receipt.get("territory") == "x-epic"
+    assert receipt.get("current_count") == 4
+
+
+def test_other_territory_headroom_is_untouched(monkeypatch):
+    # Rows working nodes OUTSIDE the spawning node's territory never consume
+    # its cap - territories are independent below the machine ceiling.
+    monkeypatch.setattr(
+        spawn_gate,
+        "_territory_of_node",
+        lambda node: ("x-mine", frozenset({"x-mine-1", "x-new"})),
+    )
+    c = _census_with_nodes(["x-a", "x-b", "x-c", "x-d"])
+    spawn_gate._check_territory_cap("x-new", c, 4)  # no raise
+
+
+def test_territory_unknown_refuses_closed(monkeypatch):
+    # An unreadable graph / absent node is an explicit refusal: an unknown
+    # attribution must never silently disappear from the count.
+    monkeypatch.setattr(spawn_gate, "_territory_of_node", lambda node: None)
+    with pytest.raises(spawn_gate.GateRefused) as err:
+        spawn_gate._check_territory_cap("x-ghost", _census_with_nodes([]), 4)
+    receipt = err.value.receipt or {}
+    assert receipt.get("reason") == "territory_unknown"
+    assert receipt.get("node") == "x-ghost"
+
+
+def test_nodeless_spawn_skips_the_team_cap(monkeypatch):
+    # Machinery (kings, blueprinters, ad-hoc panes) works no node: the team
+    # cap is out of scope for it, not unknown.
+    called = []
+    monkeypatch.setattr(spawn_gate, "_territory_of_node", lambda n: called.append(n))
+    spawn_gate._check_territory_cap(None, _census_with_nodes([]), 4)
+    assert called == []
+
+
+def test_machinery_rows_never_count_against_the_team(monkeypatch):
+    monkeypatch.setattr(
+        spawn_gate,
+        "_territory_of_node",
+        lambda node: ("x-epic", frozenset({"x-1", "x-2"})),
+    )
+    # Five live rows but only two work in-scope nodes; the None rows are
+    # kings/blueprinters and the x-out row is another territory.
+    c = _census_with_nodes([None, "x-1", None, "x-2", "x-out"])
+    spawn_gate._check_territory_cap("x-1-new", c, 4)  # no raise
+
+
+def _territory_fixture_world(tmp_path, monkeypatch, sc):
+    """Wire the shared agreement fixture into the Python gate's reads."""
+    import json as _json
+
+    graph = tmp_path / "graph.json"
+    graph.write_text(_json.dumps({"entries": sc["graph"]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    rows = []
+    for r in sc["registry"]:
+        rows.append(
+            AgentEntry(
+                name=r["name"],
+                harness="claude",
+                cwd="/tmp",
+                log_path="/tmp/log",
+                status=r["status"],
+                pid=os.getpid() if r.get("pid") == "self" else None,
+                node=r.get("node"),
+            )
+        )
+    if sc.get("crown_scope"):
+        rows.append(
+            AgentEntry(
+                name="fixture-king",
+                harness="claude",
+                cwd="/tmp",
+                log_path="/tmp/log",
+                status="busy",
+                pid=os.getpid(),
+                crown_scope=sc["crown_scope"],
+                crown_level=2,
+            )
+        )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+    return sc
+
+
+def test_territory_cap_agrees_with_rust_gate_fixture(tmp_path, monkeypatch):
+    import json as _json
+
+    fixture_path = Path(__file__).resolve().parents[2] / (
+        "tests/agents/fixtures/spawn_gate_territory_agreement.json"
+    )
+    fixture = _json.loads(fixture_path.read_text())
+    for sc in fixture["scenarios"]:
+        _territory_fixture_world(tmp_path, monkeypatch, sc)
+        state = spawn_gate._territory_of_node(sc["node"])
+        cap = sc["territory_cap"]
+        if state is None:
+            got = "territory_unknown"
+        else:
+            scope, members = state
+            rows = load_registry_rows()
+            live_nodes = [r.node for r in rows if r.node]
+            count = sum(1 for n in live_nodes if n in members)
+            cap_hit = (
+                count >= cap
+                and sc["expect"]["verdict"] == "territory_cap"
+                and sc["expect"].get("territory") == scope
+                and sc["expect"].get("count") == count
+            )
+            got = "territory_cap" if cap_hit else "ok"
+        assert got.split(":")[0] == sc["expect"]["verdict"], (
+            f"scenario {sc['name']}: got {got}, want {sc['expect']['verdict']}"
+        )
+
+
+def load_registry_rows():
+    from fno.agents.registry import load_registry
+
+    return load_registry()
+

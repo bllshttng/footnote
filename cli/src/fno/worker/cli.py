@@ -45,6 +45,34 @@ def blueprint(
         typer.echo(f"next_step: {result['next_step']}")
 
 
+@cli.command("blueprint-feed")
+def blueprint_feed(
+    ctx: typer.Context,
+    scope: str = typer.Option(..., "--scope", help="Territory scope (canonical crown scope or project)."),
+    deliver: bool = typer.Option(
+        False, "--deliver", help="Mail each due idea to the standing worker as /fno:blueprint <id>."
+    ),
+    repair: Optional[str] = typer.Option(
+        None, "--repair", help="Record a refusal/repair reason; the ideas stay preserved."
+    ),
+) -> None:
+    """One territory's blueprinter feed: status, delivery, or repair receipt."""
+    from fno.worker.blueprint import blueprint_feed as _feed
+
+    result = _feed(scope, deliver=deliver, repair=repair)
+
+    if _json_mode(ctx):
+        typer.echo(json.dumps(result))
+    else:
+        typer.echo(f"action: {result.get('action')}")
+        typer.echo(f"scope: {result.get('scope')}")
+        for idea in result.get("ideas", []):
+            typer.echo(f"idea: {idea['id']} ({idea['rung']})")
+        worker = result.get("worker")
+        if worker:
+            typer.echo(f"worker: {worker['name']} live={worker['live']}")
+
+
 @cli.command()
 def ship(
     ctx: typer.Context,

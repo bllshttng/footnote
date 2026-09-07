@@ -1,10 +1,10 @@
-"""Unit tests for active-backlog drain-target resolution (x-a4dc K2).
+"""Unit tests for active-backlog drain-target resolution (x-a4dc K2, x-e221).
 
-resolve_drain_targets() returns one DrainTarget per ACTIVE MISSION - an epic with
-``mission_active=true`` - across all projects, gated by config.active_backlog +
-resolved against the workspace project->path map. It must be fully fail-safe (a
-config or graph fault yields no targets, never raises) and consult the graph, not
-the retired per-project enable model.
+resolve_drain_targets() returns one DrainTarget per TERRITORY - a live crown
+scope, plus one rung-1 territory per workspace project no live project-rung
+crown rules - in scope order, gated by config.active_backlog. It must be fully
+fail-safe (a config, registry, or graph fault yields no targets, never raises)
+and the crown list seeds the mission list, not the reverse.
 """
 from __future__ import annotations
 
@@ -13,10 +13,11 @@ import pytest
 import fno.active_backlog as ab
 
 
-def _patch(monkeypatch, *, enabled=True, interval="5m", failure_limit=3, missions, paths):
-    """Wire a fake settings + active-mission set + workspace map.
+def _patch(monkeypatch, *, enabled=True, interval="5m", failure_limit=3, crowns=(), epics=None, paths=None):
+    """Wire a fake settings + live-crown set + workspace map.
 
-    ``missions`` is the list of active-mission epic dicts _active_missions returns.
+    ``crowns`` is the list of (scope, level) tuples _live_crowns returns.
+    ``epics`` maps epic id -> project for the _epic_project read.
     """
     from fno.config import ActiveBacklogConfig
 
@@ -25,8 +26,11 @@ def _patch(monkeypatch, *, enabled=True, interval="5m", failure_limit=3, mission
     class _Settings:
         active_backlog = cfg
 
-    monkeypatch.setattr(ab, "_workspace_paths", lambda **_: paths)
-    monkeypatch.setattr(ab, "_active_missions", lambda: missions)
+    monkeypatch.setattr(ab, "_workspace_paths", lambda **_: paths or {})
+    monkeypatch.setattr(ab, "_live_crowns", lambda **_: [
+        {"scope": scope, "level": level} for scope, level in crowns
+    ])
+    monkeypatch.setattr(ab, "_epic_project", lambda epic_id: (epics or {}).get(epic_id))
     import fno.config as cfgmod
 
     # load_settings is imported inside resolve_drain_targets; patch at source.
@@ -34,87 +38,105 @@ def _patch(monkeypatch, *, enabled=True, interval="5m", failure_limit=3, mission
     return cfg
 
 
-def _mission(epic_id, project):
-    return {"id": epic_id, "project": project, "mission_active": True}
-
-
 def test_disabled_yields_no_targets(monkeypatch):
-    _patch(
-        monkeypatch,
-        enabled=False,
-        missions=[_mission("x-epic", "footnote")],
-        paths={"footnote": "/repo/footnote"},
-    )
+    _patch(monkeypatch, enabled=False, crowns=[("x-epic", 2)], epics={"x-epic": "footnote"},
+           paths={"footnote": "/repo/footnote"})
     assert ab.resolve_drain_targets() == []
 
 
-def test_no_active_missions_yields_no_targets(monkeypatch):
-    # Enabled config, but nothing to drain: an enabled daemon with zero active
-    # missions resolves to no targets (the mission is the unit of work now).
-    _patch(monkeypatch, missions=[], paths={"footnote": "/repo/footnote"})
-    assert ab.resolve_drain_targets() == []
+def test_no_crowns_yields_one_kingless_territory_per_workspace(monkeypatch):
+    # Enabled config, no crowns anywhere: every workspace project still drains
+    # its loose nodes as a kingless rung-1 territory (machinery does not need
+    # a king to dispatch).
+    _patch(monkeypatch, crowns=[], paths={"footnote": "/repo/footnote"})
+    targets = ab.resolve_drain_targets()
+    assert len(targets) == 1
+    t = targets[0]
+    assert t.scope == "footnote"
+    assert t.rung == 1
+    assert t.kingless is True
+    assert t.members == ("footnote",)
+    assert t.mission is None
 
 
-def test_one_target_per_active_mission_in_id_order(monkeypatch):
+def test_one_target_per_crown_scope_in_scope_order(monkeypatch):
     _patch(
         monkeypatch,
-        missions=[_mission("x-bbb", "readyrule"), _mission("x-aaa", "footnote")],
+        crowns=[("readyrule", 1), ("x-bbb", 2)],
+        epics={"x-bbb": "footnote"},
         paths={"footnote": "/repo/footnote", "readyrule": "/repo/readyrule"},
     )
     targets = ab.resolve_drain_targets()
-    # Sorted by epic id, one per mission, each carrying its epic on `mission`.
-    assert [t.mission for t in targets] == ["x-aaa", "x-bbb"]
-    assert [t.project for t in targets] == ["footnote", "readyrule"]
-    assert [t.cwd for t in targets] == ["/repo/footnote", "/repo/readyrule"]
-    assert all(t.interval_seconds == 300 for t in targets)
+    # Sorted by scope; the rung-1 crown rules readyrule so readyrule gets no
+    # extra kingless territory, while footnote's loose nodes still drain
+    # (the rung-2 crown over x-bbb rules x-bbb's descendants, not footnote's
+    # parentless nodes).
+    assert [t.scope for t in targets] == ["footnote", "readyrule", "x-bbb"]
+    assert [t.rung for t in targets] == [1, 1, 2]
+    assert [t.kingless for t in targets] == [True, False, False]
+    assert [t.mission for t in targets] == [None, None, "x-bbb"]
+    assert targets[2].members == ("x-bbb",)
 
 
-def test_mission_epic_without_workspace_path_is_skipped(monkeypatch):
-    # No workspace cwd to root the loop -> skip that mission, keep the others.
+def test_multi_epic_crown_groups_members_on_one_target(monkeypatch):
     _patch(
         monkeypatch,
-        missions=[_mission("x-ghost", "unmapped"), _mission("x-ok", "footnote")],
+        crowns=[("x-a,x-b", 2)],
+        epics={"x-a": "footnote", "x-b": "unmapped"},
         paths={"footnote": "/repo/footnote"},
     )
     targets = ab.resolve_drain_targets()
-    assert [t.mission for t in targets] == ["x-ok"]
-    assert targets[0].cwd == "/repo/footnote"
+    # footnote's loose territory still exists beside the crowned one; the
+    # crown is ONE target carrying both member epics.
+    assert [t.scope for t in targets] == ["footnote", "x-a,x-b"]
+    t = targets[1]
+    assert t.members == ("x-a", "x-b")
+    assert t.mission == "x-a"
+    assert t.kingless is False
+    # Rooted at the FIRST member epic's project; the converge core fans out
+    # across projects at dispatch time.
+    assert t.project == "footnote"
+    assert t.cwd == "/repo/footnote"
 
 
-def test_per_project_disabled_mission_is_skipped(monkeypatch):
-    # enabled={proj: bool}: a mission whose epic lives in an explicitly-disabled
+def test_multi_epic_crown_without_workspace_root_is_skipped(monkeypatch):
+    # No workspace cwd to root the first member epic -> skip that territory.
+    _patch(
+        monkeypatch,
+        crowns=[("x-ghost,x-a", 2)],
+        epics={"x-ghost": "unmapped", "x-a": "footnote"},
+        paths={"footnote": "/repo/footnote"},
+    )
+    targets = ab.resolve_drain_targets()
+    assert [t.scope for t in targets] == ["footnote"]  # the kingless loose one
+
+
+def test_per_project_disabled_territory_is_skipped(monkeypatch):
+    # enabled={proj: bool}: a territory rooted in an explicitly-disabled
     # project does not drain, even though any_enabled() is true for the daemon.
     _patch(
         monkeypatch,
         enabled={"footnote": True, "readyrule": False},
-        missions=[_mission("x-fno", "footnote"), _mission("x-rr", "readyrule")],
+        crowns=[("readyrule", 1)],
         paths={"footnote": "/repo/footnote", "readyrule": "/repo/readyrule"},
     )
     targets = ab.resolve_drain_targets()
-    assert [t.mission for t in targets] == ["x-fno"]
+    assert [t.scope for t in targets] == ["footnote"]
     assert [t.project for t in targets] == ["footnote"]
 
 
 def test_invalid_interval_disables_everything(monkeypatch):
-    _patch(
-        monkeypatch,
-        interval="0s",
-        missions=[_mission("x-epic", "footnote")],
-        paths={"footnote": "/repo/footnote"},
-    )
+    _patch(monkeypatch, interval="0s", crowns=[("x-epic", 2)],
+           epics={"x-epic": "footnote"}, paths={"footnote": "/repo/footnote"})
     assert ab.resolve_drain_targets() == []
 
 
 def test_failure_limit_propagates(monkeypatch):
-    _patch(
-        monkeypatch,
-        failure_limit=5,
-        missions=[_mission("x-epic", "footnote")],
-        paths={"footnote": "/repo/footnote"},
-    )
-    t = ab.resolve_drain_targets()[0]
+    _patch(monkeypatch, failure_limit=5, crowns=[("x-epic", 2)],
+           epics={"x-epic": "footnote"}, paths={"footnote": "/repo/footnote"})
+    t = next(x for x in ab.resolve_drain_targets() if x.scope == "x-epic")
     assert t.failure_limit == 5
-    assert t.mission == "x-epic"
+    assert t.scope == "x-epic"
     assert t.interval_seconds == 300
 
 
@@ -125,56 +147,74 @@ def test_load_settings_fault_yields_empty(monkeypatch):
         raise RuntimeError("settings exploded")
 
     monkeypatch.setattr(cfgmod, "load_settings", _boom)
-    monkeypatch.setattr(ab, "_active_missions", lambda: [_mission("x-epic", "footnote")])
+    monkeypatch.setattr(ab, "_live_crowns", lambda **_: [])
     monkeypatch.setattr(ab, "_workspace_paths", lambda: {"footnote": "/repo/footnote"})
     assert ab.resolve_drain_targets() == []
 
 
-def test_active_missions_read_fault_yields_empty(monkeypatch):
-    # The real _active_missions must degrade to no missions on a graph read
-    # fault, never propagate (the daemon stays alive on a corrupt/absent graph).
-    import fno.graph.store as store
+def test_live_crowns_read_fault_yields_empty(monkeypatch):
+    # The real _live_crowns must degrade to no crowns on a registry read
+    # fault, never propagate (the daemon stays alive on an unreadable registry).
+    import fno.agents.registry as registry
 
     def _boom(*_a, **_k):
-        raise RuntimeError("graph exploded")
+        raise RuntimeError("registry exploded")
 
-    monkeypatch.setattr(store, "read_graph", _boom)
-    assert ab._active_missions() == []
-
-
-def test_active_missions_non_list_graph_yields_empty(monkeypatch):
-    # A malformed graph that read_graph returns as a non-iterable (e.g. None)
-    # must degrade to no missions, never raise on the comprehension.
-    import fno.graph.store as store
-
-    monkeypatch.setattr(store, "read_graph", lambda *_a, **_k: None)
-    assert ab._active_missions() == []
+    monkeypatch.setattr(registry, "load_registry", _boom)
+    assert ab._live_crowns() == []
 
 
-def test_strict_target_resolution_propagates_mission_read_fault(monkeypatch):
-    _patch(monkeypatch, missions=[], paths={"footnote": "/repo/footnote"})
+def test_live_crowns_dedups_and_orders_canonical_scopes(monkeypatch):
+    # Two live rows holding the same scope (one per harness) resolve to ONE
+    # territory; scopes come back canonical-ordered.
+    import fno.agents.registry as registry
+
+    class _Row:
+        def __init__(self, scope, level, status="live", name=""):
+            self.crown_scope = scope
+            self.crown_level = level
+            self.status = status
+            self.name = name
+
+    monkeypatch.setattr(
+        registry, "load_registry",
+        lambda: [
+            _Row("x-b", 2),
+            _Row("x-a,x-b", 2),
+            _Row("x-dead", 1, status="exited"),
+        ],
+    )
+    crowns = ab._live_crowns()
+    assert crowns == [
+        {"scope": "x-a,x-b", "level": 2, "holder": ""},
+        {"scope": "x-b", "level": 2, "holder": ""},
+    ]
+
+
+def test_strict_target_resolution_propagates_crown_read_fault(monkeypatch):
+    _patch(monkeypatch, crowns=[], paths={"footnote": "/repo/footnote"})
 
     def _boom(*, strict=False):
-        raise RuntimeError("mission read failed")
+        raise RuntimeError("crown read failed")
 
-    monkeypatch.setattr(ab, "_active_missions", _boom)
-    with pytest.raises(RuntimeError, match="mission read failed"):
+    monkeypatch.setattr(ab, "_live_crowns", _boom)
+    with pytest.raises(RuntimeError, match="crown read failed"):
         ab.resolve_drain_targets(strict=True)
 
 
 def test_as_dicts_shape(monkeypatch):
-    _patch(
-        monkeypatch,
-        missions=[_mission("x-epic", "footnote")],
-        paths={"footnote": "/repo/footnote"},
-    )
+    _patch(monkeypatch, crowns=[("x-epic", 2)], epics={"x-epic": "footnote"},
+           paths={"footnote": "/repo/footnote"})
     dicts = ab.drain_targets_as_dicts()
-    assert dicts == [
-        {
-            "project": "footnote",
-            "cwd": "/repo/footnote",
-            "interval_seconds": 300,
-            "failure_limit": 3,
-            "mission": "x-epic",
-        }
-    ]
+    crowned = next(d for d in dicts if d["scope"] == "x-epic")
+    assert crowned == {
+        "project": "footnote",
+        "cwd": "/repo/footnote",
+        "interval_seconds": 300,
+        "failure_limit": 3,
+        "mission": "x-epic",
+        "scope": "x-epic",
+        "rung": 2,
+        "kingless": False,
+        "members": ["x-epic"],
+    }

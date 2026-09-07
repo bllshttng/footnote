@@ -1,6 +1,6 @@
 //! Config/path resolution and crown-scope compilation (king/lane.py, projects/resolve.py).
 use super::s_str;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -125,6 +125,19 @@ pub(crate) fn compile_scope_ids(
     entries: &[Value],
     projects: &Result<HashMap<String, String>, String>,
 ) -> Result<HashSet<String>, String> {
+    compile_territory(scope, entries, projects).map(|(_, ids)| ids)
+}
+
+/// The territory-key + membership read (x-e221 AC1): the canonical scope key
+/// alongside the ids it contains. `Err` is the explicit unknown - a scope
+/// that is neither a configured project nor a graph epic - never an empty
+/// territory, so a capacity/board reader that gets `Err` stops instead of
+/// reading the scope as drained or unbounded.
+pub(crate) fn compile_territory(
+    scope: &str,
+    entries: &[Value],
+    projects: &Result<HashMap<String, String>, String>,
+) -> Result<(String, HashSet<String>), String> {
     let canonical_scope = |scopes: &[String]| {
         let mut sorted: Vec<String> = scopes.to_vec();
         sorted.sort();
@@ -275,7 +288,7 @@ pub(crate) fn compile_scope_ids(
                 frontier.extend(next.iter().copied());
             }
         }
-        return Ok(ids);
+        return Ok((canonical, ids));
     }
 
     let project_set: HashSet<String> = canonical
@@ -294,7 +307,7 @@ pub(crate) fn compile_scope_ids(
             ids.insert(id.to_string());
         }
     }
-    Ok(ids)
+    Ok((canonical, ids))
 }
 
 /// King manifest frontmatter fields (king/state.parse_manifest): an unreadable
@@ -326,6 +339,7 @@ pub(crate) fn parse_manifest(path: &Path) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     fn node(id: &str, status: &str, priority: &str) -> Value {
         json!({"id": id, "slug": id, "status": status, "priority": priority, "type": "feature"})
     }
@@ -406,6 +420,26 @@ mod tests {
         ];
         let projects = Ok(HashMap::new());
         let err = compile_scope_ids("e-1,n-1", &entries, &projects).unwrap_err();
+        assert!(err.contains("not an epic"), "{err}");
+    }
+
+    #[test]
+    fn territory_membership_returns_the_canonical_key_with_the_ids() {
+        let entries = vec![
+            json!({"id": "x-epic", "type": "epic", "status": "ready", "priority": "p1"}),
+            json!({"id": "x-ch1d", "parent": "x-epic", "status": "ready", "priority": "p1"}),
+        ];
+        let projects = Ok(HashMap::new());
+        let (key, ids) = compile_territory("x-epic", &entries, &projects).unwrap();
+        assert_eq!(key, "x-epic");
+        assert!(ids.contains("x-epic") && ids.contains("x-ch1d"));
+    }
+
+    #[test]
+    fn territory_membership_err_is_the_explicit_unknown_not_an_empty_set() {
+        let entries = vec![node("x-aaaa", "ready", "p1")];
+        let projects = Ok(HashMap::new());
+        let err = compile_territory("x-aaaa", &entries, &projects).unwrap_err();
         assert!(err.contains("not an epic"), "{err}");
     }
 }
