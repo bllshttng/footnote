@@ -31,7 +31,7 @@ Setup links shared state from canonical: vault symlink, per-file `.fno/` state, 
 
 The removal contract, missing until 174 trees piled up (74 GB). Three buckets, one trigger, one gate:
 
-- **DIRTY** - never touched by any automatic path. Report only. One exception, because footnote makes the dirt: `setup-worktree.sh` symlinks the canonical checkout's shared state into every worktree, and those names are gitignored at the repo root only, so a nested copy (`cli/.agents`) reads untracked. The gate discounts a symlink whose target is one of the paths setup writes, answers `reason=setup-links`, and names every path it discounted. One modified tracked file, or one untracked path setup did not write, and the tree is kept.
+- **DIRTY** - never touched by any automatic path. Report only. One exception, because footnote makes the dirt. `setup-worktree.sh` symlinks the canonical checkout's shared state into every worktree. Those names are gitignored at the repo root only. So a nested copy such as `cli/.agents` reads untracked. The gate discounts a symlink that points at a path setup writes. It answers `reason=setup-links` and names each discounted path. One modified tracked file keeps the tree. One untracked path setup did not write keeps the tree.
 - **clean + unmerged** - never auto-pruned. Report the branch so a human judges (open PR or abandoned work).
 - **clean + merged** - prune the TREE, keep the BRANCH. The tree is a checkout. The branch is the work.
 - **Trigger: MERGE, never node-done.** A done node can sit on an unmerged branch whose only checkout is that tree. The post-merge ritual is the home.
