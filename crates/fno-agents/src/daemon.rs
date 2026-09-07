@@ -2741,7 +2741,6 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // it shells to runs ps + a kill, so it never runs on the core loop.
     let orphan_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut last_orphan_sweep = Instant::now();
-    let orphan_sweep_fno_bin = std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string());
     // Dead-row GC gate (x-ef7f): its dormant check shells out to the truth
     // probe, so it gets the same one-in-flight discipline as the sweeps beside
     // it rather than running inline in the select arm.
@@ -2814,7 +2813,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 }
                 // Reap any worker that exited since the last tick so it never
                 // lingers as a zombie under the long-lived daemon.
-                reap_zombies();
+                crate::orphan_reap::reap_daemon_children();
                 // Screen-manifest scrape sweep (the badge-lattice fallback
                 // rung): subprocesses + file IO, so it runs off-loop under
                 // spawn_blocking behind the one-in-flight gate.
@@ -2911,26 +2910,16 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         consume_merge_cleanup_requests(&home, &roots, &emitter);
                     });
                 }
-                // Orphaned-test-binary reap (the cargo lane): `reap_zombies`
-                // above only ever sees the daemon's OWN children - an orphaned
-                // deps/ test binary at ppid 1 holding hundreds of zombie
-                // corpses is invisible to waitpid(-1). The verb owns detection
-                // (CACHEDIR.TAG-confirmed) and the kill; this arm only runs it
-                // at the ORPHAN_SWEEP_SECS cadence, one-in-flight, off-loop,
-                // like the sweeps beside it.
-                if last_orphan_sweep.elapsed() >= ORPHAN_SWEEP_SECS
-                    && !orphan_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst)
-                {
-                    last_orphan_sweep = Instant::now();
-                    let flag = Arc::clone(&orphan_sweep_in_flight);
-                    let fno_bin = orphan_sweep_fno_bin.clone();
-                    let home = ctx.home.clone();
-                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
-                    tokio::task::spawn_blocking(move || {
-                        let _gate = SweepGate(flag);
-                        orphan_reap_sweep(&fno_bin, &home, &emitter);
-                    });
-                }
+                // Orphaned-test-binary reap: the waitpid sweep above only ever
+                // sees the daemon's OWN children; a wedged deps/ test binary at
+                // ppid 1 holding zombie corpses is invisible to waitpid(-1), and
+                // this arm is what reaches that shape. The whole arm - cadence,
+                // gate, kill, events - lives in crate::orphan_reap.
+                crate::orphan_reap::maybe_sweep(
+                    &mut last_orphan_sweep,
+                    &orphan_sweep_in_flight,
+                    ctx.home.events_jsonl(),
+                );
                 // Terminal-stop sweep (x-fcbf): exit fire-and-forget `claude --bg`
                 // workers finalize marked terminal, so a shipped bg /target frees
                 // its slot instead of parking at an idle prompt forever. Spawned
@@ -3192,7 +3181,7 @@ async fn serve_connection(ctx: Arc<Ctx>, mut stream: UnixStream) {
 /// daemon's whole life. `gc_sweep` and the scrape sweep both shell out and
 /// parse the output, so this is not hypothetical. A guard clears the gate on
 /// the unwind path too.
-struct SweepGate(Arc<std::sync::atomic::AtomicBool>);
+pub(crate) struct SweepGate(pub(crate) Arc<std::sync::atomic::AtomicBool>);
 
 impl Drop for SweepGate {
     fn drop(&mut self) {
@@ -5647,54 +5636,6 @@ async fn read_worker_snapshot(sock: &std::path::Path) -> Option<String> {
     let resp = crate::protocol::read_response(&mut conn).await.ok()?;
     resp.result()
         .and_then(|r| r.get("text").and_then(|t| t.as_str()).map(String::from))
-}
-
-/// Cadence of the orphaned-test-binary reap sweep.
-const ORPHAN_SWEEP_SECS: Duration = Duration::from_secs(300);
-
-/// Run the footprint verb's orphan-reap lane once: the verb detects (ppid 1 +
-/// a deps-binary argv[0], confirmed by a CACHEDIR.TAG in the owning target
-/// dir), applies the min-elapsed guard, and kills. The daemon only throttles
-/// to [`ORPHAN_SWEEP_SECS`] and emits one event per pid the verb reaped.
-fn orphan_reap_sweep(fno_bin: &str, home: &AgentsHome, emitter: &EventEmitter) {
-    let output = match std::process::Command::new(fno_bin)
-        .args(["doctor", "footprint", "--reap-orphans", "--apply", "--json"])
-        .env("FNO_AGENTS_HOME", home.root())
-        .output()
-    {
-        Ok(output) => output,
-        // A missing fno on PATH is a steady state, not a daemon event.
-        Err(_) => return,
-    };
-    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
-        return;
-    };
-    let Some(orphans) = payload
-        .get("orphan_test_binaries")
-        .and_then(|value| value.as_array())
-    else {
-        return;
-    };
-    for orphan in orphans {
-        if orphan.get("reaped").and_then(|value| value.as_bool()) == Some(true) {
-            let _ = emitter.emit("orphan_test_binary_reaped", orphan);
-        }
-    }
-}
-
-/// Non-blocking reap of any exited worker child the daemon spawned, so a worker
-/// that exits while the daemon lives never lingers as a `<defunct>` zombie. The
-/// daemon spawns nothing but workers, so a `waitpid(-1, WNOHANG)` sweep is safe.
-fn reap_zombies() {
-    loop {
-        let mut status: libc::c_int = 0;
-        // SAFETY: waitpid with WNOHANG only reaps already-exited children and
-        // returns 0 (none ready) or -1 (no children) without blocking.
-        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if pid <= 0 {
-            break;
-        }
-    }
 }
 
 /// Map a truth probe onto the wire value `list` renders.

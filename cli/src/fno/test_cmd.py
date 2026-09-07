@@ -34,7 +34,6 @@ import posixpath
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -47,6 +46,7 @@ from xml.etree import ElementTree
 import click
 
 from fno.hermetic import neutralise, poison
+from fno.test_runner import run_suite_bounded, test_timeout_seconds, wait_or_kill_group
 
 _TAIL_LINES = 40
 
@@ -297,77 +297,6 @@ def _child_env(root: Path) -> dict:
     return env
 
 
-def _test_timeout_seconds() -> int:
-    """The wall-clock bound for one suite run: FNO_TEST_TIMEOUT_SECONDS wins,
-    then ``config.test.timeout_seconds``, else 1800."""
-    raw = os.environ.get("FNO_TEST_TIMEOUT_SECONDS")
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            pass
-        else:
-            if value > 0:
-                return value
-    try:
-        from fno.config import load_settings
-
-        value = int(load_settings().test.timeout_seconds)
-    except Exception:  # noqa: BLE001 - a broken settings value degrades to default
-        return 1800
-    return value if value > 0 else 1800
-
-
-def _kill_group(proc: subprocess.Popen) -> None:
-    """SIGKILL the run's whole process group, then reap the leader.
-
-    ProcessLookupError is the TOCTOU window where the child exited between
-    the timeout and getpgid; wait() reaps it. PermissionError is NOT caught:
-    start_new_session makes us own the group so it is near-impossible, and
-    if it ever surfaces a loud crash beats a wedged proc.wait() with no kill.
-    """
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except ProcessLookupError:
-        pass  # the group is already gone; nothing to kill
-    proc.wait()
-
-
-def _wait_or_kill_group(proc: subprocess.Popen, timeout: int) -> tuple[int, bool]:
-    """Wait up to ``timeout``; past it, kill the GROUP and reap.
-
-    Returns ``(rc, killed)``. On any other exception (Ctrl-C included: the
-    child runs in its own session and would otherwise outlive the SIGINT
-    with all its grandchildren) the group is killed before re-raising.
-    """
-    try:
-        return proc.wait(timeout=timeout), False
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)
-        return (proc.returncode if proc.returncode is not None else 124), True
-    except BaseException:
-        _kill_group(proc)
-        raise
-
-
-def _run_suite_bounded(cmd: Sequence[str], env: Mapping[str, str], timeout: int, **kw) -> int:
-    """Run cmd in its own process group; kill the GROUP on timeout or interrupt.
-
-    Killing cargo alone orphans the deps/ test binary it exec'd - the measured
-    shape: a deps binary at ppid 1 for 3h07m holding 227 zombies. The group is
-    the unit because cargo execs the test binary in place. (The smoke lane's
-    ``_run_bounded`` below is the same discipline with a DEVNULL contract.)
-    """
-    proc = subprocess.Popen(cmd, env=env, start_new_session=True, **kw)
-    rc, killed = _wait_or_kill_group(proc, timeout)
-    if killed:
-        sys.stderr.write(
-            f"fno doctor test: TIMEOUT after {timeout}s; process group killed\n"
-        )
-        return 124
-    return rc
-
-
 def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
     """Run each command with output captured to `log`; print the terse verdict.
 
@@ -375,7 +304,7 @@ def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
     looks stalled - a watcher can `tail -f` the log. Returns the first non-zero
     child exit code, else 0.
     """
-    timeout = _test_timeout_seconds()
+    timeout = test_timeout_seconds()
     rc = 0
     with open(log, "w", encoding="utf-8") as fh:
         for cmd in cmds:
@@ -386,7 +315,7 @@ def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
             fh.write(f"$ {' '.join(map(str, cmd))}\n")
             fh.flush()
             try:
-                rc_cmd = _run_suite_bounded(
+                rc_cmd = run_suite_bounded(
                     cmd, env, timeout, stdout=fh, stderr=subprocess.STDOUT
                 )
             except OSError as exc:
@@ -437,7 +366,7 @@ def _run(args: Sequence[str], stream: bool = False) -> int:
     cmd = [interp, "-m", "pytest", *pytest_args]
     if stream:
         try:
-            return _run_suite_bounded(cmd, env, _test_timeout_seconds())
+            return run_suite_bounded(cmd, env, test_timeout_seconds())
         except OSError as exc:
             # FileNotFoundError (missing) AND PermissionError (present but not
             # executable) are both OSError; either means we could not run it.
@@ -507,7 +436,7 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
     else:
         base = ["cargo", "test", "-q"]
     cap_tail: list[str] = []
-    timeout = _test_timeout_seconds()
+    timeout = test_timeout_seconds()
     if threads is None:
         sys.stdout.write(
             f"fno doctor test rust: lanes {lanes_note}; runner default parallelism; timeout {timeout}s\n"
@@ -540,7 +469,7 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
     if stream:
         for cmd in cmds:
             try:
-                rc = _run_suite_bounded(cmd, env, timeout)
+                rc = run_suite_bounded(cmd, env, timeout)
             except OSError as exc:
                 sys.stderr.write(f"fno doctor test: failed to run {cmd[0]}: {exc}\n")
                 return 127
@@ -2096,7 +2025,7 @@ def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) ->
     trap) and exits 127, measuring nothing. start_new_session makes the child a
     group leader so killpg reaches its grandchildren too, since a shell harness
     spawns subprocesses a direct SIGKILL would orphan. The wait/kill ladder is
-    shared with the suite runner (`_wait_or_kill_group`).
+    shared with the suite runner (`wait_or_kill_group`).
     """
     start = time.monotonic()
     proc = subprocess.Popen(
@@ -2104,7 +2033,7 @@ def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) ->
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    rc, killed = _wait_or_kill_group(proc, kill_bound_s)
+    rc, killed = wait_or_kill_group(proc, kill_bound_s)
     return rc, time.monotonic() - start, killed
 
 

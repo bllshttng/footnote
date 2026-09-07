@@ -116,6 +116,7 @@ pub mod nudge;
 pub mod opencode_ask;
 pub mod opencode_serve;
 pub mod operator_notice;
+pub mod orphan_reap;
 pub mod osc;
 pub mod pane_keeper;
 pub mod pane_relaunch;

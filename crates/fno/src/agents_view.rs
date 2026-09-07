@@ -2958,7 +2958,6 @@ impl ReaderState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pty::ChildGuard;
 
     // The parked-fork-child test family lives in its own module;
     // this file is shrink-only under the file-budget gate.
@@ -2976,7 +2975,7 @@ mod tests {
     /// set - the reboot case, the exact respawn the fix removes.
     #[test]
     fn stale_live_attach_ids_flags_a_dead_pid_claiming_working() {
-        let mut child = ChildGuard::spawn(&mut std::process::Command::new("true"));
+        let mut child = crate::pty::ChildGuard::spawn(&mut std::process::Command::new("true"));
         let pid = child.id();
         child.wait_now();
         let raw = reg(&format!(
@@ -3029,7 +3028,7 @@ mod tests {
             stale_live_attach_ids(&no_pid).is_empty(),
             "no pid -> not stale"
         );
-        let mut child = ChildGuard::spawn(&mut std::process::Command::new("true"));
+        let mut child = crate::pty::ChildGuard::spawn(&mut std::process::Command::new("true"));
         let pid = child.id();
         child.wait_now();
         let codex = reg(&format!(
