@@ -188,12 +188,14 @@ _wt_pids() {
         }
     ' <(printf '%s\n' "$ps_snap") <(printf '%s\n' "$candidates"))"
     # A candidate that is an ANCESTOR of this sweep is the sweep's own
-    # invoker, never a squatter: under pytest-xdist the worker's argv carries
-    # the test's tmp paths and its pgrep matches read as phantom processes in
-    # a tree nobody is in (CI smoke, 2026-09-07). Walk UP from $$ through the
+    # invoker, never a squatter: under pytest-xdist the worker and controller
+    # argv carry the test's tmp paths and read as phantom processes in a tree
+    # nobody is in (CI smoke, 2026-09-07). Walk UP from $$ through the
     # snapshot's ppid map and drop any candidate on that chain; walking up
     # from the CANDIDATE finds only its own ancestors and can never reach $$,
-    # a descendant. A pid missing from the snapshot ends the walk.
+    # a descendant. A DESCENDANT with its own cwd inside the tree is a real
+    # occupant (the battery pins this), so it stays. A pid missing from the
+    # snapshot ends the walk.
     local mine="" walk_pid hop pid_keep
     walk_pid="$$"
     for hop in 1 2 3 4 5 6 7 8 9 10 11 12; do
@@ -637,7 +639,10 @@ _cargo_target_offload() {
             fi
             bytes="$(_cargo_target_bytes "$target")"
             if [[ "$protection" != "-" ]]; then
-                printf 'cargo-offload protected bytes=%s reason=%s path=%s\n' "$bytes" "$protection" "$target"
+                # pids rides last (tail position, like detail): a diagnostic
+                # for a protection verdict, never parsed by consumers.
+                printf 'cargo-offload protected bytes=%s reason=%s path=%s pids=%s\n' \
+                    "$bytes" "$protection" "$target" "$(printf '%s\n' "$pids" | tr '\n' ',' | sed 's/,$//')"
                 kept=$((kept + 1))
                 continue
             fi

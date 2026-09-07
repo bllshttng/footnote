@@ -7,11 +7,9 @@ from pathlib import Path
 import pytest
 
 from fno.worktree_paths import (
-    WorktreePolicyError,
     _validate_component,
     legacy_worktree_path,
     resolve_project_id,
-    resolve_worktree_policy,
     worktree_base,
     worktree_path,
 )

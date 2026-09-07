@@ -26,17 +26,16 @@ def _make_repo(path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def _sole_config(tmp_path_factory, monkeypatch):
-    """FNO_CONFIG is the sole config candidate; an empty file = defaults only."""
+    """FNO_CONFIG is the sole config candidate; an empty file = defaults only.
+
+    No settings-cache clearing: resolve_worktree_policy reads the raw config
+    per call, and a sibling test's stub of the settings loader must not
+    decide whether these cache attributes exist.
+    """
     iso = tmp_path_factory.mktemp("iso") / "config.toml"
     iso.write_text("")
     monkeypatch.setenv("FNO_CONFIG", str(iso))
-    from fno import config as _config
-    from fno import paths as _paths
-    _config.load_settings.cache_clear()
-    _paths._settings.cache_clear()
     yield
-    _config.load_settings.cache_clear()
-    _paths._settings.cache_clear()
 
 
 # ----------------------------------------------------------------------
