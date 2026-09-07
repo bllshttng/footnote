@@ -20,6 +20,7 @@ import typer
 
 from fno.agents import watchdog
 from fno.agents.watchdog import (
+    CONTENDED,
     GHOST,
     LEAVE,
     REROUTE,
@@ -101,6 +102,94 @@ def test_healthy_injectable_row_is_leave():
     # the generic no-lane line. The basis states what was measured either
     # way, never "reachable" - nothing here probes reachability.
     assert "does not owe a move" in v.basis
+
+
+def _linked_worktree_dir(tmp_path, name: str) -> str:
+    """A stand-in linked worktree: a directory whose ``.git`` is a FILE, which
+    is the one marker ``_is_linked_worktree`` reads."""
+    wt = tmp_path / name
+    wt.mkdir()
+    (wt / ".git").write_text("gitdir: /tmp/elsewhere/main\n")
+    return str(wt)
+
+
+def test_two_live_rows_in_one_worktree_are_contended(tmp_path):
+    wt = _linked_worktree_dir(tmp_path, "w1")
+    a = Row("aaaa1111-0000", "w1", "working", None, wt)
+    b = Row("bbbb2222-0000", "w2", "working", None, wt)
+    vs = _run(
+        [a, b],
+        {"aaaa1111-0000": _facts("still on it"),
+         "bbbb2222-0000": _facts("still on it")},
+    )
+    assert [v.verdict for v in vs] == [CONTENDED, CONTENDED]
+    assert "2 live sessions" in vs[0].basis
+    assert "bbbb2222-0000" in vs[0].basis
+    assert "aaaa1111-0000" in vs[1].basis
+
+
+def test_one_live_row_in_a_worktree_is_not_contended(tmp_path):
+    wt = _linked_worktree_dir(tmp_path, "w1")
+    [v] = _run(
+        [Row("aaaa1111-0000", "w1", "working", None, wt)],
+        {"aaaa1111-0000": _facts("still on it")},
+    )
+    assert v.verdict == LEAVE
+
+
+def test_finished_peer_does_not_contend_the_tree(tmp_path):
+    wt = _linked_worktree_dir(tmp_path, "w1")
+    a = Row("aaaa1111-0000", "w1", "working", None, wt)
+    b = Row("bbbb2222-0000", "w2", "stopped", None, wt)
+    vs = _run(
+        [a, b],
+        # The peer is quiet past QUIET_AFTER_S with a finished tail, which is
+        # the positive not-in-the-tree reading; the live row must not report
+        # contention against it.
+        {"aaaa1111-0000": _facts("still on it"),
+         "bbbb2222-0000": _facts(FINISHED_TAIL, age_min=30)},
+    )
+    assert all(v.verdict == LEAVE for v in vs)
+
+
+def test_shared_checkout_is_coordination_not_contention(tmp_path):
+    shared = tmp_path / "canonical"
+    shared.mkdir()  # no .git file: a shared checkout, not a linked worktree
+    a = Row("aaaa1111-0000", "w1", "working", None, str(shared))
+    b = Row("bbbb2222-0000", "w2", "working", None, str(shared))
+    vs = _run(
+        [a, b],
+        {"aaaa1111-0000": _facts("still on it"),
+         "bbbb2222-0000": _facts("still on it")},
+    )
+    assert all(v.verdict == LEAVE for v in vs)
+
+
+def test_ghost_outranks_contended_and_still_counts_as_occupant(tmp_path):
+    wt = _linked_worktree_dir(tmp_path, "w1")
+    ghost = Row("aaaa1111-0000", "w1", "working", None, wt)
+    live = Row("bbbb2222-0000", "w2", "working", None, wt)
+    vs = _run([ghost, live], {"bbbb2222-0000": _facts("still on it")})
+    assert vs[0].verdict == GHOST
+    # The unreadable tail counts as occupied, so the live peer still reports
+    # the tree it is actually sharing.
+    assert vs[1].verdict == CONTENDED
+    assert "aaaa1111-0000" in vs[1].basis
+
+
+def test_contended_never_acts_at_any_apply_level(tmp_path):
+    wt = _linked_worktree_dir(tmp_path, "w1")
+    a = Row("aaaa1111-0000", "w1", "working", None, wt)
+    b = Row("bbbb2222-0000", "w2", "working", None, wt)
+    [v, _] = _run(
+        [a, b],
+        {"aaaa1111-0000": _facts("still on it"),
+         "bbbb2222-0000": _facts("still on it")},
+    )
+    assert v.verdict == CONTENDED
+    outcome, detail = apply_verdict(v, lanes="all")
+    assert outcome == watchdog.SKIPPED
+    assert "outside" in detail
 
 
 def test_single_sgt_429_is_report_only_until_provider_quorum():
