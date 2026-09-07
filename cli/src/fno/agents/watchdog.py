@@ -585,17 +585,12 @@ def verdicts(
         except Exception:  # noqa: BLE001 - a failed read is never a verdict
             facts_by_row[row.row_id] = None
 
-    # A row only earns REROUTE by appearing in an already-quorum-confirmed
-    # breaker (_breakers() in provider_outage.py refuses to emit one below
-    # policy.quorum distinct rows) - never from this row's own 429 alone.
     quorum_row_ids = frozenset(
         row_id
         for breaker in (provider_outages or {}).get("breakers") or []
         for row_id in breaker.get("row_ids") or []
     )
 
-    # Contention reads the TREE, not the row: occupied is the default and a
-    # shared checkout is coordination, not contention (fleet-watchdog.md).
     worktree_check = worktree_check or _is_linked_worktree
     live_in_tree: dict[str, list[str]] = {}
     for row in rows:
@@ -611,7 +606,6 @@ def verdicts(
     out: list[Verdict] = []
     for row in rows:
         occupants = live_in_tree.get(row.cwd, ())
-        # Only a live occupant reports; a finished row beside a live one is not contention.
         peers = (
             tuple(sid for sid in occupants if sid != row.row_id)
             if row.row_id in occupants else ()
@@ -626,7 +620,6 @@ def verdicts(
             peers=peers,
             silence_after_s=silence_after_s,
         )
-        # polling_settled upgrades a LEAVE like unclaimed: liveness outranks waste.
         if verdict.verdict == LEAVE:
             facts = facts_by_row.get(row.row_id)
             if facts is not None:
@@ -641,11 +634,6 @@ def verdicts(
                         ),
                         action="report",
                     )
-        # The unclaimed advisory upgrades a LEAVE HERE, not at a leave return
-        # (there are four, and guarding one left the healthy common case
-        # uncovered). Only LEAVE: every other verdict says something louder,
-        # and burying it under a record-keeping note trades real signal for
-        # an advisory.
         if verdict.verdict == LEAVE:
             unclaimed_basis = _unclaimed_node_basis(row, claim_for, node_state_for)
             if unclaimed_basis:
@@ -870,7 +858,6 @@ def _verdict_one(
     silence_after_s: Optional[float] = None,
 ) -> Verdict:
 
-    # ghost: claims working/blocked, no transcript resolves for the id.
     if facts is None and row.state in _GHOST_STATES:
         basis = (
             f"no transcript for {row.row_id}"
@@ -879,7 +866,6 @@ def _verdict_one(
         )
         return _verdict(row, GHOST, basis, "report")
 
-    # contended: below ghost (liveness outranks a tree fact), report-only.
     if peers:
         return _verdict(
             row, CONTENDED,
@@ -908,9 +894,6 @@ def _verdict_one(
     if facts is not None:
         window, reset_epoch, stamp = rate_limit_window(facts.records, now_s)
 
-    # stale: the hard age ceiling, BEFORE the 429 window math - a date-less
-    # reset stamp's time-of-day reading is garbage on an old tail and would
-    # poison reroute below.
     facts_age_s: Optional[float] = None
     if facts is not None and facts.last_event_epoch is not None:
         facts_age_s = max(0.0, now_s - facts.last_event_epoch)
@@ -926,16 +909,10 @@ def _verdict_one(
                 "report",
             )
 
-    # reroute: blocked on a 429 whose window has NOT opened. A single 429 is
-    # terminal for this session but is not provider-wide authority: the
-    # durable fold requires quorum rows before a migration lane may act.
-    # Waking bounces (proved twice by hand).
     if (
         row.state == "blocked"
         and window == "live"
         and reset_epoch is not None
-        # A tail with no parsed timestamp skips the age ceiling above; the
-        # louder lane must not be the laxer one on a row of unknown age.
         and facts is not None
         and facts.last_event_epoch is not None
     ):
@@ -958,11 +935,6 @@ def _verdict_one(
     if sandbox_verdict is not None:
         return sandbox_verdict
 
-    # wake: blocked or stopped, a transcript exists, and no live 429 window.
-    # Every condition is POSITIVE evidence (king ruling 2026-08-17): an age
-    # under the ceiling, a parseable last event, and classify_tail
-    # ``stalled`` - silent while still owing its next move. "No 429 in tail"
-    # is an absence and never a wake reason.
     if row.state in _WAKE_STATES and facts is not None:
         if facts.last_event_epoch is None:
             return _verdict(row, LEAVE,
@@ -1307,12 +1279,7 @@ def _polling_basis(
 
 
 def _ledger_nodes() -> dict[str, str]:
-    """``{claude session id -> node id}`` from the execution ledger - the
-    machine-written join for a canonical-checkout worker with no worktree
-    manifest, where names are ambiguous (the ``t-`` shorthand strips the
-    dash; the name-join trap). Each entry names its node in
-    ``graph_node_id``; ``title`` is free text and joins nothing. A miss
-    degrades to no node, which condemns nothing."""
+    """Join canonical-checkout sessions to machine-written graph node ids."""
     from fno import paths
     from fno.graph.types import normalize_graph_node_id
 
@@ -1329,11 +1296,6 @@ def _ledger_nodes() -> dict[str, str]:
         node = normalize_graph_node_id(e.get("graph_node_id"))
         if not node:
             continue
-        # `sessions` is the plural spelling; older entries record a single
-        # `session_id`, and a bare string under either key must not be
-        # SPREAD (that maps one node onto every character of the id).
-        # ledger_join.py guards both shapes; this join is worthless if it
-        # silently drops the rows that one keeps.
         raw = e.get("sessions") or e.get("session_id") or []
         for sid in ([raw] if isinstance(raw, str) else raw):
             if sid and isinstance(sid, str):
@@ -1342,29 +1304,16 @@ def _ledger_nodes() -> dict[str, str]:
 
 
 def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]]:
-    """Enumerate the fleet from ``claude agents --json --all`` joined to the
-    registry for recorded identity. Node identity is the registry's spawn-time
-    stamp first, then a linked-worktree manifest, then the session-keyed ledger
-    for legacy or unstamped rows. All three are machine-written; never parse a
-    node from the row name."""
+    """Enumerate Claude and non-Claude live rows with machine-written identity."""
     from fno.agents.harnesses.claude import claude_agents_rows
     from fno.agents.registry import load_registry
     from fno.recovery import _node_id_from_worktree
 
-    # A caller running INSIDE a bounded tick spends its remaining budget,
-    # never this lane's own: the tick's wall-clock deadline is the shorter of
-    # the two, and blowing it exits 75 and kills every later leg. Unbounded
-    # callers (the manual sweep) get the full fleet budget.
     budget = ROSTER_TIMEOUT_S if timeout is None else max(1.0, min(timeout, ROSTER_TIMEOUT_S))
     probe_started = time.time()
     raw, warnings = claude_agents_rows(timeout=budget)
     elapsed = time.time() - probe_started
     if elapsed > budget * ROSTER_HEADROOM:
-        # A fixed budget measured against a GROWING fleet fails silently on
-        # the day the fleet outgrows it: the probe times out, the sweep reads
-        # zero rows, and the refusal reads as a broken fleet rather than a
-        # budget that needs raising. Nothing else warns, so the approach to
-        # the line has to be the thing that speaks.
         warnings = [
             *warnings,
             f"{HEADROOM_WARNING_PREFIX}took {elapsed:.1f}s of its {budget:.0f}s "
@@ -1386,36 +1335,21 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
                 by_sid[str(sid)] = entry
     except Exception:  # noqa: BLE001 - registry read miss degrades to claude rows
         by_sid = {}
-    # None = not read yet; a read that maps nothing must not re-read the
-    # multi-megabyte ledger once per manifest-less row.
     ledger_nodes: Optional[dict[str, str]] = None
     out: list[Row] = []
     unmapped_states: set[str] = set()
     skipped_no_sid = 0
     for r in raw:
-        # Both spellings: claude renamed `short_id`/`status` once already,
-        # which is why the sibling parser resolves every field through
-        # aliases. A rename here zeroes the roster and fires the refusal on
-        # every tick, with a warning that blames the instrument.
         sid = str(r.get("sessionId") or r.get("session_id") or "")
         if not sid:
-            # A row carrying only claude's 8-hex short id can never resolve a
-            # transcript, a claim, or a ledger row - carrying it forward reads
-            # a live session as a ghost. Skipped loudly, never classified.
             skipped_no_sid += 1
             continue
         match: Any = by_sid.get(sid)
         name = str(getattr(match, "name", None) or r.get("name") or sid)
         cwd = str(r.get("cwd") or getattr(match, "cwd", "") or "")
-        # For an unstamped legacy row, the manifest is per-ROW identity only
-        # when the cwd is that row's own linked worktree. On a shared checkout
-        # every session reads the SAME graph_node_id, so only the session-keyed
-        # ledger is a truthful fallback; a miss condemns nothing.
         state, state_warning = _row_state(r)
         if state_warning:
             unmapped_states.add(state_warning)
-        # The registry stamp is the spawn-time identity for this exact row.
-        # Manifest and ledger reads remain fallbacks for legacy/unstamped rows.
         node = getattr(match, "node", None)
         if node is None and _is_linked_worktree(cwd):
             node = _node_id_from_worktree(cwd)
@@ -1431,9 +1365,6 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             cwd=cwd,
             agent="claude",
         ))
-    # The Claude roster is a harness-specific instrument. Registry rows are
-    # the authoritative fallback for other harnesses, especially Codex thread
-    # workers whose app-server has no row in `claude agents --json --all`.
     from fno.agents.spawn_gate import LIVE_STATUSES
 
     seen_row_ids = {row.row_id for row in out}
@@ -1449,10 +1380,6 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             or getattr(entry, "short_id", None)
         )
         if not row_id:
-            # Same discipline as the claude roster above: a row carrying only
-            # a name can never resolve a transcript or a claim. Falling back
-            # to the name would silently drop a same-named live row at the
-            # dedup below, so it is skipped loudly instead.
             skipped_nonclaude_no_id += 1
             continue
         if str(row_id) in seen_row_ids:
@@ -2315,10 +2242,6 @@ def run_sweep(
         rows_provider() if rows_provider is not None
         else fleet_rows(timeout=roster_timeout)
     )
-    # ONE transcript read per row per tick: the shared parse below feeds both
-    # the outage evidence collector and the tail classifier. The defect this
-    # replaces read and parsed every transcript twice per tick - once per
-    # consumer - which was pure cost on the hottest path in the sweep.
     entries_by_row: dict[str, Optional[list[dict]]] = {}
     if provider_outage_fn is None and rows_provider is None:
         for row in rows:
@@ -2371,23 +2294,15 @@ def run_sweep(
         def graph_fn() -> dict[str, dict] | _Unreadable:
             return index
 
-    # Passing the sentinel through instead would read as "no claim" and "no
-    # node state", which is exactly what the swallowed exception used to say.
     def claim_for(node: str) -> dict:
         return _answered(claim_fn(node))
 
     def node_state_for(node: str) -> Optional[dict]:
         return _answered(graph_fn()).get(node)
 
-    # ONE graph read serves every row, so one failed read turns the whole fleet
-    # STALE. The per-row verdicts stay honest; this names the single cause once
-    # instead of leaving it to be inferred from N identical bases.
     graph_state = graph_fn()
     if isinstance(graph_state, _Unreadable):
         warnings = [*warnings, f"graph unreadable for every row: {graph_state.detail}"]
-    # The PR-state reader only arms on the fully-production path: a test that
-    # forgets a PR stub gets a silent lane, never a subprocess against its
-    # fixtures. Memoized per distinct (cwd, PR) so rows share one read.
     base_pr_state = pr_state_fn
     if base_pr_state is None and rows_provider is None and transcript_fn is None:
         base_pr_state = _production_pr_state
