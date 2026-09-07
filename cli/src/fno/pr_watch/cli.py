@@ -708,6 +708,51 @@ def tick() -> None:
                                         "detail": detail,
                                     },
                                 )
+                        # SILENCE lane, same tick, same budget discipline
+                        # (x-c624): the registry read directly, scoped to
+                        # this project - fleet_rows never carries a codex or
+                        # opencode row, so it cannot see the stuck worker the
+                        # operator asked about. `_apply_silence` emits its
+                        # own `watchdog_applied`/`watchdog_refused` (drive
+                        # attempt count, or the end+redispatch receipt), so
+                        # this loop only counts `acted` - a second emit here
+                        # would double the event for the same action.
+                        silence_left = deadline - (time.monotonic() - started)
+                        if silence_left < _WAKE_APPLY_FLOOR_S:
+                            log.warning(
+                                "pr-watch: watchdog silence budget spent (%.1fs "
+                                "left for the next tick)", silence_left,
+                            )
+                        else:
+                            try:
+                                silence_vs, silence_rows_out = _wd.silence_verdicts(
+                                    roots, now_s=now,
+                                )
+                            except Exception as exc:  # noqa: BLE001 - a broken lane never aborts the tick
+                                log.warning("pr-watch: silence sweep failed: %s", exc)
+                                silence_vs, silence_rows_out = [], []
+                            for silence_v, silence_row in zip(silence_vs, silence_rows_out):
+                                if silence_v.verdict != _wd.SILENCE:
+                                    continue
+                                if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
+                                    log.warning(
+                                        "pr-watch: watchdog silence budget spent, "
+                                        "%s left for the next tick", silence_v.row_id,
+                                    )
+                                    break
+                                try:
+                                    _wd.apply_verdict(
+                                        silence_v, lanes="wake",
+                                        cwd=silence_row.cwd,
+                                        node=str(silence_row.node or ""),
+                                    )
+                                except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
+                                    log.warning(
+                                        "pr-watch: silence apply crashed for %s: %s",
+                                        silence_v.row_id, exc,
+                                    )
+                                acted += 1
+
                         recovery_scans = []
                         recovery_roots_done = 0
                         for recovery_root in roots:

@@ -4580,7 +4580,7 @@ event_types:
           description: "The measurement that decided the verdict (e.g. 'no transcript for <id>', 'node <id> done', '429 resets 18:48:21Z, 8m out')."
 
   - name: watchdog_applied
-    description: "The fleet watchdog executed a verdict's action: a wake whose message landed in the recipient transcript, a redispatch, or a stop+rm on a clean worktree."
+    description: "The fleet watchdog executed a verdict's action: a wake whose message landed in the recipient transcript, a redispatch, a stop+rm on a clean worktree, or a silence-lane drive or end."
     sources: [daemon]
     data:
       required: [row_id, verdict, detail]
@@ -4590,10 +4590,19 @@ event_types:
           description: "The row's recorded session id."
         verdict:
           type: string
-          description: "wake | reroute | reap | retire."
+          description: "wake | reroute | reap | retire | silence."
         detail:
           type: string
           description: "What was done, including the mechanism's receipt."
+        action:
+          type: string
+          description: "silence lane only: drive | end (x-c624)."
+        attempt:
+          type: integer
+          description: "silence lane, action=drive only: this drive's 1-based attempt number against recovery.max_nudges."
+        redispatch:
+          type: string
+          description: "silence lane, action=end only: the last line `fno backlog advance` printed when the node was handed back."
 
   - name: watchdog_refused
     description: "The fleet watchdog declined to act on a verdict: a resume that never verified, a message absent from the transcript after a 'successful' wake, a dirty worktree blocking a reap, or a redispatch that declined. The reason is named."

@@ -23,6 +23,9 @@ Order is precedence. The top row wins.
 | `wake` | any of `working`, `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and no live 429 window | `<state> <n>m silent, last 429 window passed` |
 | `leave` | everything else, including every healthy injectable row | `state <s>, last turn <n>m ago, no lane applies` |
 | `polling_settled` | a leave row whose tail asserts a PR `MERGED` or `CLOSED` and then issues two or more further PR-status reads, with the live state read confirming the PR terminal now | `<n> PR-status reads of #<pr> after the tail read it <state>` |
+| `silence` | a registry row scoped to THIS project (`origin: spawn`, no crown, `project_root` under a report root), an open node, and a transcript quiet past `recovery.idle_threshold_seconds` (default 900s) | `open node <id>, transcript quiet <n>m` |
+
+`silence` is a separate row source from every verdict above it: `silence_rows()` reads the registry directly, scoped to the project, instead of `fleet_rows()`'s claude-roster join - the only way a codex or opencode row not in `claude agents --json` reaches this lane. It is checked ABOVE the `stale` ceiling on purpose: a row silent past twelve hours is exactly the "we may never find out" case the lane exists to catch, not one to hand to the report-only bucket.
 
 `stale` is the needs-human bucket. It is checked before the 429 window math on purpose. The reset stamp carries no date, so on a tail older than the ceiling its time-of-day reading is garbage. That reading must not poison reroute. The ceiling is twelve hours, not a day. That is the parser's own resolution, because a date-less stamp is unambiguous for only half a day. A session stopped for two months has a dead node, a stale branch, and a context describing a repository that has moved. Waking it is not recovery. `stale` never auto-acts at any apply level.
 
@@ -55,6 +58,7 @@ Actions delegate. The watchdog owns the decision, never the mechanism.
 | `reroute` | `fno.recovery._default_failover`: rotate the provider, stop first, then respawn in the same worktree. A bare redispatch would respawn onto the same capped account, so with no alternate armed the lane refuses and names the outcome rather than looping the fleet on the dead account |
 | `ghost` | report only |
 | `stale`, `contended`, `polling_settled` | report only, at every apply level |
+| `silence` | drive first (`fno agents resume`, same mechanism as `wake`, up to `recovery.max_nudges` attempts counted since the row's last transcript write - a fresh write resets the count). Past the cap, END only when `recovery.watchdog.end_after_drives` is true (default false, so a fresh install drives and reports, never stops a session): `fno agents stop` (falling back to `fno mux pane kill` on a pane-row refusal), force-release the node claim, `fno agents rm`, then hand the node back through `fno backlog advance` - never a direct respawn, so the grid picks the thread or harness |
 
 ## The friction verdicts and their one question
 

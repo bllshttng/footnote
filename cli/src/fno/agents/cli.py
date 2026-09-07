@@ -4655,6 +4655,57 @@ def cmd_watchdog(
             )
         return
 
+    if only == wd.SILENCE:
+        # The silence lane's own row source (fleet_rows never sees it: it is
+        # the registry read directly, scoped to this project - x-c624).
+        from fno.agents import unfinished_work as _uw
+
+        roots = _uw.report_roots()
+        verdicts_out, rows = wd.silence_verdicts(roots, now_s=now)
+        pairs = [
+            (v, r) for v, r in zip(verdicts_out, rows) if v.verdict == wd.SILENCE
+        ]
+        if json_out:
+            from datetime import datetime, timezone
+
+            payload = {
+                "generated_at": datetime.fromtimestamp(now, tz=timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+                "lane": wd.SILENCE,
+                "verdicts": [
+                    {**v._asdict(), "drives": wd.silence_drive_count(v, now_s=now)}
+                    for v, _r in pairs
+                ],
+            }
+            if apply or apply_all:
+                results = []
+                lanes = "all" if apply_all else "wake"
+                for v, row in pairs:
+                    outcome, detail = wd.apply_verdict(
+                        v, lanes=lanes, cwd=row.cwd, node=str(row.node or "")
+                    )
+                    results.append({"row_id": v.row_id, "verdict": v.verdict,
+                                    "outcome": outcome, "detail": detail})
+                payload["results"] = results
+            sys.stdout.write(json.dumps(payload) + "\n")
+            sys.stdout.flush()
+            return
+        for v, _r in pairs:
+            typer.echo(
+                f"{v.name:34} {v.verdict:8} drives={wd.silence_drive_count(v, now_s=now)} {v.basis}"
+            )
+        typer.echo(f"{len(pairs)} row(s)")
+        if apply or apply_all:
+            lanes = "all" if apply_all else "wake"
+            for v, row in pairs:
+                outcome, detail = wd.apply_verdict(
+                    v, lanes=lanes, cwd=row.cwd, node=str(row.node or "")
+                )
+                line = f"{outcome:9} {v.name:34} {detail}"
+                print(line, file=sys.stderr if outcome != "applied" else sys.stdout)
+        return
+
     if only is None and not apply and not apply_all:
         # The default surface: the unfinished-work report. Session verdicts
         # (and their counts) are recovery internals behind --apply/--only,

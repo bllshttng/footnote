@@ -24,6 +24,10 @@ class WatchdogBlock(BaseModel):
     enabled: bool = False
     mode: Literal["report", "wake", "handoff"] = "report"
     mail_to: str = ""
+    #: Arms the SILENCE lane's end step (x-c624). False (default) drives and
+    #: reports a row past `recovery.max_nudges`, never stopping it - a fresh
+    #: install must not end a session on an operator who never opted in.
+    end_after_drives: bool = False
 
 
 def coerce_legacy(data: object) -> object:
