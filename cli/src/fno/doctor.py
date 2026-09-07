@@ -1170,27 +1170,6 @@ def _post_merge_sync_health() -> dict[str, Any]:
         return {"state": "unknown", "stale": False, "behind": None, "detail": ""}
 
 
-def _evals_health() -> dict[str, Any]:
-    """The eval bank's staleness verdict; UNKNOWN never asserts staleness."""
-    try:
-        from fno.evals.report import evals_health_summary
-        from fno.paths import evals_history
-
-        s = evals_health_summary(evals_history())
-    except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
-        s = None
-    if s is None or s["never_ran"] or s["age_days"] is None:
-        return {"state": "unknown", "stale": False, "age_days": None,
-                "detail": "no regression-tier run on record"}
-    age = s["age_days"]
-    return {
-        "state": "stale" if s["stale"] else "fresh",
-        "stale": bool(s["stale"]),
-        "age_days": age,
-        "detail": f"newest regression run {int(age)}d old",
-    }
-
-
 def _source_checkout_sync(source: Optional[Path]) -> dict[str, Any]:
     """Measure whether the resolved source checkout is behind local ``origin/main``.
 
@@ -2485,17 +2464,18 @@ def _emit_human(
         )
 
     # Evals demand: a red row is an escalation, never a gate; silent when fresh.
-    ev = result.get("evals") or {}
-    if ev.get("stale"):
+    ev = result.get("evals")
+    if ev is None or ev.get("never_ran") or ev.get("age_days") is None:
+        detail = "no eval history" if ev is None else "no regression-tier run on record"
+        out(
+            f"fno doctor: evals UNKNOWN ({detail}); "
+            "run `fno doctor evals run --tier regression -y`."
+        )
+    elif ev.get("stale"):
         out(
             f"fno doctor: evals STALE - the newest regression-tier run is "
-            f"{int(ev.get('age_days') or 0)}d old; run "
+            f"{int(ev['age_days'])}d old; run "
             "`fno doctor evals run --tier regression -y`."
-        )
-    elif ev.get("state") == "unknown":
-        out(
-            f"fno doctor: evals UNKNOWN ({ev.get('detail') or 'no eval history'}); "
-            "run `fno doctor evals run --tier regression -y`."
         )
 
     agents = result.get("launch_agents") or {}
@@ -4062,7 +4042,13 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     result["groom"] = _groom_health()
     result["archive_id_collisions"] = _archive_id_collisions()
     result["post_merge_sync"] = _post_merge_sync_health()
-    result["evals"] = _evals_health()
+    try:
+        from fno.evals.report import evals_health_summary
+        from fno.paths import evals_history
+
+        result["evals"] = evals_health_summary(evals_history())
+    except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
+        result["evals"] = None
     result["source_checkout_sync"] = _source_checkout_sync(src)
     result["launch_agents"] = _launch_agent_failures()
 
