@@ -1,6 +1,6 @@
 # Fleet watchdog
 
-`fno agents watchdog` runs outside every session and decides, per fleet row, one of three things: wake it, reroute it, or leave it. A leg on the `pr_watch` tick can do the same on a cadence behind `config.recovery.watchdog`. The classifier lives in `cli/src/fno/agents/watchdog.py`. It is pure over injected inputs, so tests need no live fleet. Row retirement is NOT this module's question: the Rust daemon's sweep retires a row when its work is done and its transcript is quiet, and `fno agents reap` runs that same sweep by hand.
+`fno agents watchdog` runs outside every session and decides, per fleet row, one of three things: wake it, reroute it, or leave it - and reports friction (contention, settled-PR polling) it never acts on. A leg on the `pr_watch` tick can do the same on a cadence behind `config.recovery.watchdog`. The classifier lives in `cli/src/fno/agents/watchdog.py`. It is pure over injected inputs, so tests need no live fleet. Row retirement is NOT this module's question: the Rust daemon's sweep retires a row when its work is done and its transcript is quiet, and `fno agents reap` runs that same sweep by hand.
 
 The STATUS word a roster surface renders is served activity, never liveness. `fno agents list` and `fno agents top` both use it. `writing` means the transcript moved inside ten minutes. `quiet` means it is older. `parked` means the tail closed a promise. `orphaned` means a falsifier fired. `unknown` means no probe answered. The measured age rides beside the word. The old `live` token is gone. No decision keys on this word. Retirement reads the reverse join and the quiet grace. The lanes read their own probes.
 
@@ -17,10 +17,12 @@ Order is precedence. The top row wins.
 | Verdict | Condition | Basis it prints |
 |---------|-----------|-----------------|
 | `ghost` | state is `working` or `blocked` (both of claude's spellings for each, folded through the harness map) and no transcript resolves for the row's recorded id | `no transcript for <id>` |
+| `contended` | the row is itself a live occupant of a linked worktree holding another live occupant | `worktree <path> holds <n> live sessions, peers <ids>` |
 | `stale` | a wake-state row past the wake ceiling | `<state> <n>h old, past the 12h wake ceiling, needs a human` |
 | `reroute` | state `blocked` and the transcript tail carries a 429 whose reset window has not opened | `429 resets <utc>, <n>m out` |
 | `wake` | any of `working`, `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and no live 429 window | `<state> <n>m silent, last 429 window passed` |
 | `leave` | everything else, including every healthy injectable row | `state <s>, last turn <n>m ago, no lane applies` |
+| `polling_settled` | a leave row whose tail asserts a PR `MERGED` or `CLOSED` and then issues two or more further PR-status reads, with the live state read confirming the PR terminal now | `<n> PR-status reads of #<pr> after the tail read it <state>` |
 
 `stale` is the needs-human bucket. It is checked before the 429 window math on purpose. The reset stamp carries no date, so on a tail older than the ceiling its time-of-day reading is garbage. That reading must not poison reroute. The ceiling is twelve hours, not a day. That is the parser's own resolution, because a date-less stamp is unambiguous for only half a day. A session stopped for two months has a dead node, a stale branch, and a context describing a repository that has moved. Waking it is not recovery. `stale` never auto-acts at any apply level.
 
@@ -52,6 +54,15 @@ Actions delegate. The watchdog owns the decision, never the mechanism.
 | `wake` | `fno agents resume <id>`, then content confirmation in the transcript |
 | `reroute` | `fno.recovery._default_failover`: rotate the provider, stop first, then respawn in the same worktree. A bare redispatch would respawn onto the same capped account, so with no alternate armed the lane refuses and names the outcome rather than looping the fleet on the dead account |
 | `ghost` | report only |
+| `stale`, `contended`, `polling_settled` | report only, at every apply level |
+
+## The friction verdicts and their one question
+
+`contended` reads the TREE, not the row: two live occupants of one linked worktree is a fact no row-lane below it can see. Occupied is the default - `finished_with_the_tree` needs the positive quiet-plus-done reading, so an unreadable tail counts as occupied, because guessing wrong costs somebody's uncommitted work. A shared checkout is coordination, not contention; only linked worktrees tally, and only a row that is itself a live occupant reports, so one finished row beside one live row is one session in the tree. It sits below `ghost` because a liveness fact outranks a tree fact, and above every row-lane because contention is the one reading that changes what acting on the row would mean.
+
+`polling_settled` is scoped to the unambiguous case: the tail asserts a PR reached `MERGED` or `CLOSED` (a tool result's JSON) and then issues two or more further status reads. A poll after the answer arrived is waste in every reading. A cadence alone never fires, because `fno do pr wait` is the sanctioned CI-watch pattern and one command whose internal polling never reaches the transcript; a transcript-level repeat really is the agent re-asking. Reads before the settle marker do not count - without the marker there is no honest "after the state was reached" count. The live state read (`fno do pr info` in the row's own checkout, one subprocess per real finding) confirms the PR is terminal now; unreadable is UNKNOWN, and UNKNOWN produces no verdict and attests nothing. Like `contended` it upgrades only a `leave`, so every liveness lane outranks it.
+
+Both verdicts need a human to clear them, and the surface is ONE reconciled `[watchdog-friction:*]` operator question (`fno agents friction-escalate`, hidden, driven by the daemon like `stale-escalate`): same measured set is a duplicate, a changed set supersedes, an empty set closes. The fold is `cli/src/fno/agents/friction_lane.py` riding the same `reconcile_channel` the stale lane uses. One question, not one row per finding: the needs-fold cleanup measured that queue at 17 percent signal, six of twelve rows test fixtures, and a producer that appends per finding rebuilds it.
 
 ## Resume: what re-entry can actually restore
 
@@ -136,3 +147,5 @@ The sweep enumerates from `claude agents --json --all` and joins registry identi
 ## What this does not replace
 
 `fno.recovery` keeps its own job: provider failover on swap-class deaths and close-surfacing for finished-but-lingering sessions. The watchdog adds the transcript-truth decisions recovery never had: wake on a passed 429 window and the ghost flag. `claude_agents_rows` (`--all`) is the one enumeration both read, so stopped rows are never invisible to either. Row retirement lives in the Rust daemon's sweep (`crates/fno-agents/src/gc.rs`, `gc_sweep.rs`), keyed by the reverse join through `node.sessions[]`.
+
+A fleet-watching agent was proposed and refused. The proposal's load-bearing argument was that "a verb answers when someone runs it", and that fails here: this sweep already runs on a cadence (`config.recovery.watchdog` rides the pr_watch tick), so nobody has to remember to run it, and its findings already push (mail digest, events, reconciled operator questions). A second watcher would restate the decision table and both its traps in a new component, which is the duplication the port law exists to refuse. The two lanes this module gained for that proposal - `contended` and `polling_settled`, with their one reconciled question - are the shape any future friction detector takes: extend the table, never propose a new watcher.
