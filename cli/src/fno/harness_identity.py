@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 from fno.harness_names import KNOWN_HARNESSES
@@ -1226,3 +1228,71 @@ def current_session_ids(env: Optional[Mapping[str, str]] = None) -> set[str]:
     if canonical.disposition == "complete" and canonical.session_id:
         ids.add(canonical.session_id)
     return ids
+
+
+# --- The agents-registry spawn record as an identity source (x-e882) --------
+
+#: Row statuses under which a session still owns its identity: a
+#: harness_session_id held by such a row is provably not another acquiring
+#: session's. Declared in this platform leaf, which both the agents registry
+#: and the spawn-record reader import, so the two layers cannot drift: a
+#: status the registry treats as ownership-releasing must release it for
+#: identity adoption too.
+OWNERSHIP_LIVE_STATUSES = frozenset(
+    {"spawning", "ready", "idle", "busy", "live", "restarting"}
+)
+
+
+def live_thread_row_for_cwd(
+    cwd: str, registry_path: Optional[Path] = None
+) -> Optional[tuple[str, str]]:
+    """The ``(harness, session_id)`` of the ONE live thread row holding ``cwd``.
+
+    A codex thread worker owns no process: every thread is a WebSocket client
+    of the one shared ``codex app-server`` daemon on the machine, so N workers
+    share one pid and the process-tree walk cannot name a thread's session id.
+    The spawn record can - the daemon writes the row (harness, session id, cwd)
+    before the worker's first turn. The key is the caller's own cwd: fno
+    allocates one worktree per worker and codex assigns each thread that cwd,
+    so a sibling thread running the same lookup returns its own row, not a
+    victim's.
+
+    Exactly one ownership-live ``substrate: thread`` row with a non-empty
+    harness and session id at this cwd answers. Zero matches AND two or more
+    matches return None - ambiguity refuses, it never picks. An absent,
+    unreadable, or alien-shape registry also returns None and raises nothing,
+    the same degrade contract as every other registry reader.
+    """
+    if not cwd:
+        return None
+    try:
+        if registry_path is None:
+            from fno.paths import agents_registry_path
+
+            registry_path = agents_registry_path()
+        raw = json.loads(registry_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - identity must degrade, never crash
+        return None
+    rows = raw.get("agents") if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        return None
+    wanted = os.path.realpath(cwd)
+    matches: list[tuple[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("status") not in OWNERSHIP_LIVE_STATUSES:
+            continue
+        if row.get("substrate") != "thread":
+            continue
+        harness = row.get("harness")
+        session_id = row.get("harness_session_id")
+        if not harness or not session_id:
+            continue
+        row_cwd = row.get("cwd")
+        if not row_cwd or os.path.realpath(str(row_cwd)) != wanted:
+            continue
+        matches.append((str(harness), str(session_id)))
+    if len(matches) == 1:
+        return matches[0]
+    return None

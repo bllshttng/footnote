@@ -1516,9 +1516,9 @@ def _is_identity_token(value: object) -> bool:
 # identity: a harness_session_id held here is provably NOT another acquiring
 # session's. Terminal/exit statuses (orphaned, failed, exited, permanent_dead)
 # release ownership, so an id last held by an exited row is free to claim.
-_OWNERSHIP_LIVE_STATUSES = frozenset(
-    {"spawning", "ready", "idle", "busy", "live", "restarting"}
-)
+# Declared in fno.harness_identity so the cwd-keyed spawn-record reader (which
+# claims, L1, may import) shares this exact set instead of a drifting copy.
+from fno.harness_identity import OWNERSHIP_LIVE_STATUSES as _OWNERSHIP_LIVE_STATUSES
 
 
 def live_row_holding_session_id(
