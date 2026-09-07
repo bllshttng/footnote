@@ -1370,12 +1370,12 @@ def _doctor_findings() -> list[dict]:
         # other one and leaves a stamp that is wrong AND untainted, so nothing
         # downstream hesitates. Asking the slot who it actually serves is what
         # turns that into a finding instead of silently wrong billing.
-        findings.extend(_slot_identity_findings(harness_kind))
+        findings.extend(_slot_identity_findings(harness_kind, config.by_id))
 
     return findings
 
 
-def _slot_identity_findings(harness_kind: str) -> list[dict]:
+def _slot_identity_findings(harness_kind: str, by_id: dict) -> list[dict]:
     """Identity findings for one CLI's shared slot, from the shared binding.
 
     The same read the launch paths and the usage probe make, so doctor cannot
@@ -1406,7 +1406,7 @@ def _slot_identity_findings(harness_kind: str) -> list[dict]:
         return []
 
     bound = managed.identity_key(managed.record_principal(stamped, root))
-    got = resolve_account_binding(None, harness=harness_kind, root=root)
+    got = resolve_account_binding(None, harness=harness_kind, root=root, by_id=by_id)
     if got.status == AMBIGUOUS and got.reason == "ambiguous-slot":
         return _finding("ambiguous-slot", (
             "the slot's stored credentials belong to different accounts (a stale "

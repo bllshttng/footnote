@@ -1,14 +1,10 @@
 """The one effective-account answer every claude launch and usage reader shares.
 
-A path says where a credential is meant to be. A stamp says who put it there.
-Neither says who the credential presents as, so the four readers that each
-decided identity for themselves could disagree and still print a receipt naming
-an account. This joins the evidence ``managed`` already collects to the
-credential root a launch will actually read. It proves nothing new.
-
-``mismatch`` is a positive observation and refuses. ``unknown`` never refuses:
-an unreachable profile endpoint must not ground the fleet. What ``unknown``
-forbids is a receipt naming an account as served.
+A path says where a credential is meant to be and a stamp says who put it
+there. Neither says who the credential presents as, so four readers deciding
+identity for themselves could disagree and each still name an account. This
+joins the evidence ``managed`` already collects to the credential root a launch
+will read. See docs/provider-rotation.md, the effective-account binding.
 """
 from __future__ import annotations
 
@@ -34,9 +30,9 @@ UNKNOWN_RECEIPT = "account_identity_unknown"
 class AccountBinding:
     """Who the credential serving this launch provably belongs to.
 
-    ``credential_root`` is ``None`` for the shared ``~/.claude`` slot, which is
-    a location and not an identity. ``credential_ref`` is a digest, so a caller
-    names the credential generation without a token reaching a receipt or disk.
+    ``credential_root`` is ``None`` for the shared ``~/.claude`` slot, a
+    location and not an identity. ``credential_ref`` is a digest, so a caller
+    names the credential generation without a token reaching disk.
     """
 
     harness: str
@@ -65,11 +61,7 @@ class AccountBinding:
             or self.observed_principal
             or "an unproven account"
         )
-        where = (
-            str(self.credential_root)
-            if self.credential_root
-            else "the shared ~/.claude slot"
-        )
+        where = str(self.credential_root or "the shared ~/.claude slot")
         if self.status == MISMATCH:
             return (
                 f"{MISMATCH_RECEIPT}: {self.requested_record!r} is pinned, but "
@@ -77,8 +69,10 @@ class AccountBinding:
                 "pin the record whose identity it is"
             )
         if self.status == MATCHED:
-            served = self.matched_record or self.requested_record
-            return f"account_identity_matched: {where} serves {served}"
+            return (
+                "account_identity_matched: "
+                f"{where} serves {self.matched_record or self.requested_record}"
+            )
         if self.status == AMBIGUOUS:
             return (
                 f"{UNKNOWN_RECEIPT}: {where} is ambiguous ({self.reason}); whichever "
@@ -106,11 +100,9 @@ def credential_blobs(harness: str, root: Path | None) -> list[str]:
     A dir of its own reads the Keychain item SCOPED to it plus its own
     ``.credentials.json``, never the unscoped item, which belongs to whoever
     occupies the shared slot. Its transcript folders may symlink anywhere;
-    neither source read here is a transcript.
-
-    Raises ``managed.KeychainError`` when a source could not be READ. Shrinking
-    the candidate set on a denied read is how an unambiguous-looking slot ends
-    up holding two accounts.
+    neither source read here is a transcript. A source that could not be READ
+    raises: shrinking the candidate set on a denied read is how an
+    unambiguous-looking slot ends up holding two accounts.
     """
     if harness != "claude":
         return []
@@ -130,15 +122,6 @@ def credential_blobs(harness: str, root: Path | None) -> list[str]:
     return out
 
 
-def _records() -> dict[str, ProviderRecord]:
-    try:
-        from fno.adapters.providers.loader import load_providers
-
-        return load_providers().by_id
-    except Exception:  # noqa: BLE001 - identity must never break on a config read
-        return {}
-
-
 def resolve_account_binding(
     record: ProviderRecord | None,
     *,
@@ -153,10 +136,9 @@ def resolve_account_binding(
 
     ``record=None`` asks who is signed in right now, independently of the
     active-slot label: the label is what an out-of-band ``claude /login`` leaves
-    wrong and untainted. ``bearer`` narrows the question to one exact
-    credential, which is what a usage probe needs.
-
-    Never raises and never writes a record. Every failure is a typed ``unknown``.
+    wrong and untainted. ``bearer`` narrows it to one exact credential, which is
+    what a usage probe needs. Never raises, never writes a record; every failure
+    is a typed ``unknown``.
     """
     now = time.time() if now is None else now
     root = root or managed.store_root()
@@ -173,7 +155,7 @@ def resolve_account_binding(
     if harness != "claude":
         return _at(UNKNOWN, reason="unsupported-harness")
     if record is not None and record.auth == "api_key":
-        # An API key is its own access path. The ambient subscription is not
+        # An API key is its own access path; the ambient subscription is not
         # what it bills, so its principal is not the question asked here.
         return _at(UNKNOWN, reason="api-key-route")
     if bearer is not None:
@@ -217,7 +199,7 @@ def resolve_account_binding(
 
     matches = sorted(
         rid
-        for rid, other in (by_id if by_id is not None else _records()).items()
+        for rid, other in (by_id or {}).items()
         if other.harness == harness
         and managed.identity_key(managed.record_principal(rid, root)) == observed
     )
