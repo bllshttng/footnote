@@ -18242,6 +18242,30 @@ git_bounded();";
         );
     }
 
+    /// The review-coverage argv the quota tests share, head sha apart.
+    fn review_coverage_args(tmp: &std::path::Path, head: &str, gh: &str) -> Vec<String> {
+        [
+            "review-coverage",
+            "--cwd",
+            tmp.to_str().unwrap(),
+            "--pr",
+            "865",
+            "--head",
+            head,
+            "--events",
+            tmp.join("ev.jsonl").to_str().unwrap(),
+            "--global-events",
+            tmp.join("gev.jsonl").to_str().unwrap(),
+            "--settings",
+            tmp.join("absent.toml").to_str().unwrap(),
+            "--gh-bin",
+            gh,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
     #[test]
     fn review_coverage_pr_failure_stdout_carries_quota_diagnostic() {
         let _root = crate::paths::DeclaredRoot::declare("review_coverage_pr_failure_s");
@@ -18252,27 +18276,8 @@ git_bounded();";
         let tmp = tempfile::tempdir().unwrap();
         let gh = write_failing_pr_view_gh(tmp.path(), 0, 14 * 60, 0);
         let events = tmp.path().join("ev.jsonl");
-        let global = tmp.path().join("gev.jsonl");
-        let args: Vec<String> = [
-            "review-coverage",
-            "--cwd",
-            tmp.path().to_str().unwrap(),
-            "--pr",
-            "865",
-            "--head",
-            "930c2e9dad5d2dc5ba2deae320070bd86ecfcfc2",
-            "--events",
-            events.to_str().unwrap(),
-            "--global-events",
-            global.to_str().unwrap(),
-            "--settings",
-            tmp.path().join("absent.toml").to_str().unwrap(),
-            "--gh-bin",
-            &gh,
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let args =
+            review_coverage_args(tmp.path(), "930c2e9dad5d2dc5ba2deae320070bd86ecfcfc2", &gh);
         let v = run_exit4_until_decisive(&args);
         assert_eq!(v["coverage"], "unknown");
         assert_eq!(v["graphql_exhausted"], true, "got: {v}");
@@ -18303,26 +18308,8 @@ git_bounded();";
         // is what lets a reader stop guessing between the two.
         let tmp = tempfile::tempdir().unwrap();
         let gh = write_failing_pr_view_gh(tmp.path(), 4890, 0, 0);
-        let args: Vec<String> = [
-            "review-coverage",
-            "--cwd",
-            tmp.path().to_str().unwrap(),
-            "--pr",
-            "865",
-            "--head",
-            "deadbeefdeadbeefdeadbeefdeadbeef00000001",
-            "--events",
-            tmp.path().join("ev.jsonl").to_str().unwrap(),
-            "--global-events",
-            tmp.path().join("gev.jsonl").to_str().unwrap(),
-            "--settings",
-            tmp.path().join("absent.toml").to_str().unwrap(),
-            "--gh-bin",
-            &gh,
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let args =
+            review_coverage_args(tmp.path(), "deadbeefdeadbeefdeadbeefdeadbeef00000001", &gh);
         let v = run_exit4_until_decisive(&args);
         assert_eq!(v["graphql_exhausted"], false, "got: {v}");
         assert_eq!(v["graphql_remaining"], 4890);

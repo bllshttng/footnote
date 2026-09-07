@@ -535,11 +535,6 @@ def poison(env: Optional[Mapping[str, str]] = None, fixtures: Optional[Path] = N
     return out
 
 
-# ---------------------------------------------------------------------------
-# The declared-root rule (x-3d21 R4)
-# ---------------------------------------------------------------------------
-
-
 class UndeclaredStateRootError(RuntimeError):
     """A state path resolved under a test runner with no root declared."""
 
@@ -547,26 +542,16 @@ class UndeclaredStateRootError(RuntimeError):
 def declared_root(path: Path) -> Path:
     """Judge one resolved state path against the process root declaration.
 
-    ``FNO_TEST_HERMETIC`` has three states and this is the only place that
-    reads all three:
+    ``FNO_TEST_HERMETIC`` has three states and this reads all three. ``"1"``
+    declares a PROCESS root and the path must sit under an allowed root.
+    ``"0"`` is ambient on purpose, the dirty lane's declaration. Absent means
+    nothing was declared: outside a test process that is production, and
+    inside one it is an escaped reader, a lane that skipped the conftest chain
+    resolving the operator's root in silence. That is what overwrote the live
+    graph on 2026-09-06, so it refuses.
 
-    ``"1"``
-        A PROCESS root is declared. The path must sit under an allowed root
-        (``fno.events._hermetic_allowed_roots``) or the write is refused.
-    ``"0"``
-        Ambient on purpose - the ``--ambient dirty`` lane and the handful of
-        tests that assert unsuppressed production behaviour. The path passes.
-    absent
-        Nothing declared. Outside a test process that is production and the
-        path passes untouched. Inside one it is an ESCAPED READER: a lane that
-        skipped the conftest chain (a REPL reproduction, ``--noconftest``, a
-        script importing a test helper) resolving the operator's root in
-        silence. That is what overwrote the live graph on 2026-09-06, so it
-        refuses instead.
-
-    ``"pytest" in sys.modules`` is the positive marker. The runner itself
-    produces it, no conftest has to stamp it, and it is true at import time,
-    which ``PYTEST_CURRENT_TEST`` is not.
+    ``"pytest" in sys.modules`` is the positive marker. The runner produces it
+    and it is true at import time, which ``PYTEST_CURRENT_TEST`` is not.
     """
     pin = os.environ.get("FNO_TEST_HERMETIC")
     if pin == "0":
@@ -576,8 +561,7 @@ def declared_root(path: Path) -> Path:
 
     from fno.events import HermeticEscapeError, _hermetic_allowed_roots
 
-    # ONLY the realpath is judged, for the reason the events fence records: a
-    # symlink inside the sandbox can resolve to a live journal outside it.
+    # Realpath only: a symlink inside the sandbox can resolve to live state.
     resolved = Path(os.path.realpath(path))
     roots = _hermetic_allowed_roots()
     if any(resolved == root or root in resolved.parents for root in roots):
@@ -585,10 +569,9 @@ def declared_root(path: Path) -> Path:
 
     if pin == "1":
         raise HermeticEscapeError(
-            f"refused a state path outside the test sandbox: {path}. "
-            "A hermetic run must not touch live state. Pass an explicit path "
-            "under tmp_path, or resolve it with a fno.paths accessor so the "
-            "sandbox pins apply."
+            f"refused a state path outside the test sandbox: {path}. Pass an "
+            "explicit path under tmp_path, or resolve it with a fno.paths "
+            "accessor so the sandbox pins apply."
         )
     raise UndeclaredStateRootError(
         f"fno resolved a state path under a test runner with no declared "
@@ -607,9 +590,8 @@ def _root_class_of(path: Path) -> str:
     for state_file in STATE_FILES:
         if state_file.filename == path.name:
             return state_file.root_class
-    # The state ROOT itself has no table row - the table lists files. HOME is
-    # read here to LABEL a refusal, never to select a root, which is the whole
-    # distinction the epic draws.
+    # The state ROOT has no table row; the table lists files. HOME is read to
+    # LABEL a refusal here, never to select a root.
     home = os.environ.get("HOME")
     if home and (Path(home) == path or Path(home) in path.parents):
         return "OPERATOR"

@@ -1729,8 +1729,7 @@ def _refuse_hermetic_escape(path: Path) -> None:
     must not say every Python event write funnels through this function.
 
     The rule itself lives in :func:`fno.hermetic.declared_root`, so this fence
-    and the accessor fence in ``fno.paths`` agree on all three declaration
-    states; this wrapper only re-words the refusal for a journal write.
+    and the accessor fence in ``fno.paths`` cannot disagree.
     """
     from fno.hermetic import declared_root
 
