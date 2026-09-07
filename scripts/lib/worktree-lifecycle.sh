@@ -627,10 +627,22 @@ _cargo_target_offload() {
                 printf 'cargo-offload would-move bytes=%s path=%s dest=%s\n' "$bytes" "$target" "$dest"
                 continue
             fi
-            if mkdir -p "$(dirname "$dest")" && mv -- "$target" "$dest" && ln -s "$dest" "$target"; then
-                printf 'cargo-offload moved bytes=%s path=%s dest=%s\n' "$bytes" "$target" "$dest"
-                moved=$((moved + 1))
-                moved_bytes=$((moved_bytes + bytes))
+            if mkdir -p "$(dirname "$dest")" && mv -- "$target" "$dest"; then
+                # A concurrent cargo can recreate the path between the mv and
+                # the ln. An empty recreation yields to rmdir (nothing written
+                # yet, nothing lost); anything else, or a failed link, undoes
+                # the move so the tree is exactly as it was.
+                if ln -s "$dest" "$target" \
+                    || { rmdir -- "$target" 2>/dev/null && ln -s "$dest" "$target"; }; then
+                    printf 'cargo-offload moved bytes=%s path=%s dest=%s\n' "$bytes" "$target" "$dest"
+                    moved=$((moved + 1))
+                    moved_bytes=$((moved_bytes + bytes))
+                else
+                    # Undo: the bytes go back, the tree is as it was.
+                    mv -- "$dest" "$target" 2>/dev/null || true
+                    printf 'cargo-offload kept bytes=%s reason=move-failed path=%s dest=%s\n' "$bytes" "$target" "$dest"
+                    kept=$((kept + 1))
+                fi
             else
                 printf 'cargo-offload kept bytes=%s reason=move-failed path=%s dest=%s\n' "$bytes" "$target" "$dest"
                 kept=$((kept + 1))
