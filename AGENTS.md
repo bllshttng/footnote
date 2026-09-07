@@ -107,6 +107,7 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 - **Lifecycle:** `intake -> triage -> ready/next -> done`. Side states: `blocked`, `deferred` (`defer`/`undefer`), `superseded`.
 - **Priority:** `p0`..`p3` (default `p2`); orthogonal to `--size S|M|L`.
 - **Editing:** `fno backlog update <id>` in place (`--details`, `--domain`, `--size`, `--priority`, ...). Never recreate via `idea` (dupes).
+- **Operator asks:** file what the OPERATOR asked for with `fno backlog idea "..." --source-kind operator_request` (or `capture promote --source-kind operator_request`), so an operator ask never reads as a worker's own idea; `fno inbox operator status|list|ack` is the derived queue + receipt for operator turns.
 - **Subtasks:** `fno backlog contain <owner> <id>...` folds existing nodes into a feature with no plan. They stay on the board, never dispatch alone, and close on the owner's merge. Never defer to mean contained.
 - **Board == work order:** non-Done cards share a rank suffix (live-epic children before epics, then priority, then created_at); project lane is a board-only display prefix; `rank <id> --top` orders, never dispatches; `_kanban_column` is the sole column authority. [backlog-board-ordering](docs/architecture/backlog-board-ordering.md).
 - **Hygiene:** `fno backlog groom` (daily pass), `triage health [--check]`, `maintain [--apply]`, `reconcile` (auto-fires on SessionStart), `advance` (merge-triggered auto-continue, opt-in).
