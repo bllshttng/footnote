@@ -70,7 +70,7 @@ def _close_question(qid: str, answer: str, root: Path, *, lane: str = "stale") -
 def reconcile_channel(
     pairs, *, root: Path, session_id: "str | None", cwd: Path,
     marker: str, subject: str, identities: "list[str]",
-    question: "Callable[[str], str]", ask: "Callable[[str], str]",
+    question, ask,
 ) -> "tuple[str, str]":
     """Reconcile ONE durable ``[<marker>:<key>]`` operator question to the
     measured ``pairs``: same set is a duplicate, a changed set supersedes,
