@@ -1329,6 +1329,25 @@ impl RegistryEntry {
         }
     }
 
+    /// Thread-ref back-fill, the Rust mirror of the same rule in Python's
+    /// `load_registry`. A claude thread row is minted before its session uuid
+    /// exists, so `fno_id` lands empty and no write site ever fills it: the
+    /// observation seam back-fills `harness_session_id` and `short_id` and
+    /// stops there. For a thread row the two ids are the same value, so adopt
+    /// the session id at load. A row that HAS a thread ref keeps it, because a
+    /// branch is minted with its own and a succession keeps its stable one.
+    /// Both readers must agree: Python answers `fno agents retask`, Rust
+    /// answers the `fno mux pane ls --json` rows retask joins against.
+    pub fn backfill_fno_id(&mut self) {
+        if self.fno_id.as_deref().is_none_or(str::is_empty) {
+            if let Some(sid) = self.harness_session_id.as_deref() {
+                if !sid.is_empty() {
+                    self.fno_id = Some(sid.to_string());
+                }
+            }
+        }
+    }
+
     /// v9 transport-key backfill (x-1b1e), the Rust mirror of Python's
     /// `load_registry` popping the removed `claude_short_id` into `short_id`.
     /// Applied at load, before [`validate_single_live_ref`]: a legacy row's
@@ -1749,6 +1768,11 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
     for entry in &mut reg.entries {
         entry.migrate_provider_semantics(reg.schema_version);
         entry.backfill_harness_aliases();
+        // Thread-ref back-fill: a row that learned its session id after spawn
+        // has learned its thread ref at the same moment. Runs after the
+        // harness back-fill above, which is what resolves harness_session_id
+        // on a legacy row.
+        entry.backfill_fno_id();
         // v9 transport-key backfill (x-1b1e): move a legacy row's
         // `claude_short_id` into `short_id`. A conflicting pair keeps `short_id`
         // and warns once (never silently prefers the legacy value).
