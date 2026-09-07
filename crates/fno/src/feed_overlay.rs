@@ -68,18 +68,27 @@ impl std::fmt::Display for FeedError {
     }
 }
 
-/// The projection's stderr, one line, short enough for the overlay footer.
-/// Empty stderr degrades to the exit's own spelling so the line never dangles.
+/// The projection's stderr, first line, capped for the overlay footer. The
+/// ONE shaping rule for stderr in this file: both failure renders go through
+/// it, so an Exit line and a Malformed line cannot drift apart.
+fn stderr_first_line(stderr: &[u8], none_label: &str) -> String {
+    std::str::from_utf8(stderr)
+        .ok()
+        .and_then(|text| text.lines().next())
+        .filter(|line| !line.is_empty())
+        .unwrap_or(none_label)
+        .chars()
+        .take(160)
+        .collect()
+}
+
+/// The Exit variant's stderr note; a stderr that says nothing (empty, or not
+/// text at all) degrades to the exit's own spelling so the line never dangles.
 fn stderr_note(stderr: &[u8], status: &std::process::ExitStatus) -> String {
-    match std::str::from_utf8(stderr) {
-        Ok(text) => text
-            .lines()
-            .next()
-            .unwrap_or("no stderr")
-            .chars()
-            .take(160)
-            .collect(),
-        Err(_) => format!("{status}"),
+    if std::str::from_utf8(stderr).is_ok() {
+        stderr_first_line(stderr, "no stderr")
+    } else {
+        format!("{status}")
     }
 }
 
@@ -115,10 +124,10 @@ pub async fn feed_now(since_epoch: &str) -> FoldResult {
 
 fn parse_feed(stdout: &[u8], stderr: &[u8]) -> Result<Vec<FeedItem>, FeedError> {
     serde_json::from_slice::<Vec<FeedItem>>(stdout).map_err(|e| {
-        FeedError::Malformed(match std::str::from_utf8(stderr) {
-            Ok(text) => format!("{e}; stderr: {}", text.lines().next().unwrap_or("none")),
-            Err(_) => e.to_string(),
-        })
+        FeedError::Malformed(format!(
+            "{e}; stderr: {}",
+            stderr_first_line(stderr, "none")
+        ))
     })
 }
 
