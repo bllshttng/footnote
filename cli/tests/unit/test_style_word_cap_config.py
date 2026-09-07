@@ -57,13 +57,6 @@ def _load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str):
     return config_mod.load_settings()
 
 
-@pytest.fixture(autouse=True)
-def _clear_settings_cache():
-    from fno import config as config_mod
-
-    yield
-
-
 # --- the pure surface --------------------------------------------------------
 
 

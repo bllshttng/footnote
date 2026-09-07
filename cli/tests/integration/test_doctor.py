@@ -348,18 +348,11 @@ def test_check_worktree_policy_scans_repo_local(
         "[[work.workspaces.default.projects]]\nname = \"repo\"\nworktre = \"never\"\n"
     )
 
-    # Stub resolve_repo_root to point at our fake repo. It carries a .cache_clear
-    # so the local teardown fixture (which clears the real lru_cache) doesn't trip
-    # over a bare function replacement.
-    class _StubRepoRoot:
-        @staticmethod
-        def cache_clear() -> None:
-            return None
+    # Stub resolve_repo_root to point at our fake repo.
+    def _stub_repo_root() -> Path:
+        return repo
 
-        def __call__(self) -> Path:
-            return repo
-
-    monkeypatch.setattr(_paths, "resolve_repo_root", _StubRepoRoot())
+    monkeypatch.setattr(_paths, "resolve_repo_root", _stub_repo_root)
     problems = check_worktree_policy()
     assert len(problems) == 1 and "worktre" in problems[0]
 

@@ -85,7 +85,7 @@ not this repo. Unset FNO_REPO_ROOT unless that is intended.
 
 It is best-effort (swallows all errors, never blocks resolution), the git probe
 carries a 2s timeout so it cannot hang a CLI invocation on a slow filesystem, and
-it fires at most once per process (`resolve_repo_root` is `@cache`-d).
+it fires at most once per (cwd, pin) key (`resolve_repo_root_at` is `@cache`-d on that pair).
 
 ## Files
 

@@ -80,15 +80,6 @@ def _isolate(
     from fno import config as config_mod
 
     import fno.graph._constants as gc
-    import fno.paths as paths_mod
-
-    for cache in ("_settings", "resolve_repo_root"):
-        maybe = getattr(paths_mod, cache, None)
-        if maybe is not None:
-            try:
-                maybe.cache_clear()  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
     for attr in ("GRAPH_JSON", "GRAPH_MD", "GRAPH_HTML", "GRAPH_ARCHIVE_JSON"):
         try:
             delattr(gc, attr)
