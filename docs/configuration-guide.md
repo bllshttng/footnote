@@ -101,6 +101,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `target.defaults.no_external` | bool | `false` | never | Session-input default: skip external review (size-profile driven). |
 | `target.defaults.no_docs` | bool | `false` | never | Session-input default: skip docs (size-profile driven). |
 | `target.defaults.max_iterations` | int | `40` | advanced | Session-input default: max pipeline iterations. |
+| `test.timeout_seconds` | int | `1800` | never |  |
 | `agents.single_flight_ttl_seconds` | int | `10` | advanced | Seconds a single-flight answer counts as fresh (default 10). Callers arriving inside the window read one child's stdout instead of each spawning their own; the latch is keyed on the normalized argv, so two `do pr wait` calls for different PRs stay two flights. |
 | `agents.single_flight_join_budget_seconds` | int | `30` | advanced | Seconds a later caller waits for the in-flight holder's answer before running its own (default 30). Set over the 23.2 s worst-measured roster read: load is when the latch has to hold. An exhausted budget spawns and says so, because a latch that can wedge a caller is worse than the fan-out it prevents. |
 | `agents.orphan_reap_after_seconds` | int | `5400` | advanced | Age at which an fno child that init inherited is reaped (default 5400). Three times `do pr wait --timeout 30m`, the longest detached child allowed to be running. The sweep also needs parent pid 1 and a pid no registry row names live. |
