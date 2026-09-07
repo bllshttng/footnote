@@ -297,7 +297,7 @@ printf '301\n'
 EOF
 cat > "$STUBDIR/ps" <<'EOF'
 #!/usr/bin/env bash
-printf '301 holder\n'
+printf '301 1 holder sleep 301\n'
 EOF
 chmod +x "$STUBDIR/lsof" "$STUBDIR/pgrep" "$STUBDIR/ps"
 WT="$STUBDIR/wt"; mkdir -p "$WT"

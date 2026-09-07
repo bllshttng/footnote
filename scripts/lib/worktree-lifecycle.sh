@@ -212,20 +212,29 @@ _wt_pids() {
     # empty one (sandbox denies ps, or a stub prints nothing) proves nothing,
     # so every candidate is kept (the battery's empty-ps pin).
     ps_rows="$(awk -v m="__FNO_PS_SNAPSHOT_COMPLETE__" '$0 == m { exit } NF { c++ } END { print c + 0 }' <<< "$ps_snap")"
-    local filtered2="" in_ps in_cwd
+    local filtered2="" pid_keep ps_cmd in_cwd
     if [[ "$ps_rows" -gt 0 ]]; then
         while IFS= read -r pid_keep; do
             [[ -z "$pid_keep" ]] && continue
             printf '%s\n' "$mine" | grep -qx "$pid_keep" && continue
-            in_ps=0
-            awk -v want="$pid_keep" '$1 == want { found=1 } END { exit !found }' <<< "$ps_snap" && in_ps=1
+            ps_cmd="$(awk -v want="$pid_keep" '
+                $1 == want { $1 = ""; $2 = ""; sub(/^[\t ]+/, ""); print; exit }
+            ' <<< "$ps_snap")"
+            # A zombie keeps its ps row but owns no fds, no cwd, no mmap: it
+            # cannot hold build artifacts. An empty command column reads the
+            # same way (dead between enumeration and this snapshot).
+            if [[ -n "$ps_cmd" && "$ps_cmd" != *defunct* ]]; then
+                filtered2="${filtered2}${pid_keep}"$'\n'
+                continue
+            fi
+            # No live ps row: keep only on a cwd-snapshot sighting, proof the
+            # process was anchored in the tree when lsof ran.
             in_cwd=0
             printf '%s\n' "${_WT_CWD_SNAPSHOT:-}" \
                 | awk -F '\t' -v want="$pid_keep" '$1 == want { found=1 } END { exit !found }' && in_cwd=1
-            if [[ "$in_ps" -ne 1 && "$in_cwd" -ne 1 ]]; then
-                continue
+            if [[ "$in_cwd" -eq 1 ]]; then
+                filtered2="${filtered2}${pid_keep}"$'\n'
             fi
-            filtered2="${filtered2}${pid_keep}"$'\n'
         done <<< "$filtered"
     else
         filtered2="$filtered"
