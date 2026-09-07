@@ -4675,9 +4675,31 @@ event_types:
         detail:
           type: string
           description: "What was done, including the mechanism's receipt."
+        outcome:
+          type: string
+          description: "The apply outcome word this event was built from."
+
+  - name: watchdog_partial
+    description: "The fleet watchdog's action HALF landed: the fleet changed but the verdict did not complete. A reroute that rotated the provider without spawning a replacement, or a reap that stopped the session but failed the rm, lands here. It is never a refusal - a refusal says nothing changed, and a reader who acts on that leaves a rotated provider or a stopped session unattended."
+    sources: [daemon]
+    data:
+      required: [row_id, verdict, detail]
+      properties:
+        row_id:
+          type: string
+          description: "The row's recorded session id."
+        verdict:
+          type: string
+          description: "wake | reroute | reap | retire."
+        detail:
+          type: string
+          description: "What landed, what did not, and what to re-check."
+        outcome:
+          type: string
+          description: "The apply outcome word this event was built from."
 
   - name: watchdog_refused
-    description: "The fleet watchdog declined to act on a verdict: a resume that never verified, a message absent from the transcript after a 'successful' wake, a dirty worktree blocking a reap, or a redispatch that declined. The reason is named."
+    description: "The fleet watchdog declined to act on a verdict and NOTHING changed: a resume that never verified, a message absent from the transcript after a 'successful' wake, a dirty worktree blocking a reap, a reroute held because the provider already rotated this sweep, or a redispatch that declined. The reason is named. A half-landed action is watchdog_partial, never this."
     sources: [daemon]
     data:
       required: [row_id, verdict, detail]
@@ -4691,6 +4713,9 @@ event_types:
         detail:
           type: string
           description: "The named reason the action was refused."
+        outcome:
+          type: string
+          description: "The apply outcome word this event was built from."
 
   - name: watchdog_unfinished_work_scan
     description: "The unfinished-work report completed one scan. This is the freshness-bearing positive marker: it fires on every complete scan even when all four dimensions measured zero, because absence of findings is measured evidence, not a skipped read. An incomplete scan fires it with complete=false and names the unknown dimensions."
