@@ -2,7 +2,8 @@
 //! lifecycle, newest first, one deep link per row. The render moved-module
 //! idiom matches `needs_view.rs`; the data comes from
 //! [`crate::feed_overlay::feed_now`], which shells the `fno-agents feed`
-//! projection off the UI loop under the shared 800ms cap.
+//! projection off the UI loop and renders a typed reason when it fails
+//! (x-d15a), never one generic sentence for five causes.
 //!
 //! The deep link is the sideline's own path, not a new one: a row that joins
 //! a live roster row resolves through `agent_hit` exactly as a sideline click
@@ -21,7 +22,9 @@ use crate::feed_overlay::FeedItem;
 pub(crate) struct FeedOverlay {
     pub(crate) items: Vec<FeedItem>,
     pub(crate) sel: usize,
-    pub(crate) degraded: bool,
+    /// The typed fold failure, if the last fold failed. `Some` renders its
+    /// reason verbatim; a success fold clears it.
+    pub(crate) error: Option<crate::feed_overlay::FeedError>,
     pub(crate) inflight: bool,
     pub(crate) want: bool,
     pub(crate) gen: u64,
@@ -34,7 +37,7 @@ pub(crate) fn open_overlay(prior: Option<FeedOverlay>, gen: u64) -> FeedOverlay 
     FeedOverlay {
         items: prior.map(|f| f.items).unwrap_or_default(),
         sel: 0,
-        degraded: false,
+        error: None,
         inflight: false,
         want: true,
         gen,
@@ -76,11 +79,14 @@ pub(crate) fn feed_overlay_lines(o: &FeedOverlay) -> Vec<String> {
     }
     // The empty notice only when the fold has SETTLED empty: "no activity"
     // beside a still-running fold is a claim the fold has not earned yet.
-    if o.items.is_empty() && !o.degraded && !o.inflight {
+    if o.items.is_empty() && o.error.is_none() && !o.inflight {
         lines.push(pad_to("   no activity in the last 24h", ANSWER_OVERLAY_W));
     }
-    let footer = if o.degraded {
-        "   feed unavailable - fno agents feed failed".to_string()
+    let footer = if let Some(e) = &o.error {
+        // The typed reason renders verbatim (x-d15a): a timeout names its
+        // budget, an admission refusal its slot count. pad_to truncates a
+        // long stderr tail; the cause still leads the line.
+        pad_to(&format!("   {e}"), ANSWER_OVERLAY_W)
     } else if o.inflight && o.items.is_empty() {
         "   folding...".to_string()
     } else if o.items.len() >= 200 {
