@@ -826,3 +826,14 @@ event, so an epic whose children were all completed BEFORE this code shipped
 open, all children done, and - now that containers are hidden from
 next/ready - unreachable for closure. This identifies them so reconcile can
 self-heal.
+
+## _sweep_close_done_epics
+
+Close every open epic whose children are all done (self-heal/migration).
+
+Idempotent, mutating, run inside a close mutator. Repeats to a fixpoint so a
+freshly-closed epic heals ITS parent too (grandparent chains). Returns the
+ids it closed so the caller can auto-continue their dependents. Reconcile
+runs this so pre-existing stranded all-done epics heal on the next reconcile
+pass - going forward the cascade prevents new ones, so this is a no-op once
+migrated.

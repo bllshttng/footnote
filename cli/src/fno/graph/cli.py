@@ -8774,7 +8774,6 @@ def _sweep_close_stranded_contained(entries: list[dict]) -> list[str]:
 
 def _strandable_epic_ids(entries: list[dict]) -> set[str]:
     """Open epics (parents) whose children are ALL done - closeable right now.
-
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph._reconcile import _reopen_outranks_child_closes
@@ -8801,13 +8800,7 @@ def _strandable_epic_ids(entries: list[dict]) -> set[str]:
 
 def _sweep_close_done_epics(entries: list[dict]) -> list[str]:
     """Close every open epic whose children are all done (self-heal/migration).
-
-    Idempotent, mutating, run inside a close mutator. Repeats to a fixpoint so a
-    freshly-closed epic heals ITS parent too (grandparent chains). Returns the
-    ids it closed so the caller can auto-continue their dependents. Reconcile
-    runs this so pre-existing stranded all-done epics (codex P2 on PR #69) heal
-    on the next reconcile pass - going forward the cascade prevents new ones, so
-    this is a no-op once migrated.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     id_to_entry = {
         e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
