@@ -452,8 +452,27 @@ impl HarnessContract {
     /// no code edit here. Kept identical to `thread_lane` in
     /// `harness_map.py` so the two runtimes cannot disagree about lanes the
     /// way LOOP_PARTICIPATION is pinned across them.
+    ///
+    /// Two independent signals answer `attach`: a declared
+    /// `interactive_attach` form (a CLI attach subcommand fno can shell out
+    /// to), OR `features.attach` reading `native` (fno can reach a live
+    /// session some other way - a daemon-owned process, a keeper-hosted
+    /// portal - even with no such subcommand). This split exists for a
+    /// harness that ships no attach subcommand at all, yet has a real,
+    /// working thread destination reached through the daemon-kept lane - a
+    /// fact its own `features.attach` claim already records (x-df08). A row
+    /// with no `features.attach` stanza reads as absent, never as a claim,
+    /// so this never promotes a row silently.
     pub fn thread_lane(&self, harness: &str) -> Result<&'static str, ContractError> {
         let caps = self.capabilities(harness)?;
+        if caps
+            .features
+            .get("attach")
+            .map(|claim| claim.state.as_str())
+            == Some("native")
+        {
+            return Ok("attach");
+        }
         let kind = |lane: &str| {
             caps.resume_strategy
                 .forms
@@ -1088,9 +1107,14 @@ mod tests {
         let lane = |h: &str| contract.thread_lane(h).unwrap();
         assert_eq!(lane("claude"), "attach");
         assert_eq!(lane("codex"), "attach");
+        // opencode ships no `opencode attach <id>` subcommand
+        // (interactive_attach reads unsupported), but dispatch_opencode_serve
+        // is a real, working thread destination reached through the
+        // daemon-kept lane - the row's own features.attach claim already
+        // says so (x-df08).
+        assert_eq!(lane("opencode"), "attach");
         assert_eq!(lane("agy"), "keeper");
         assert_eq!(lane("gemini"), "keeper");
-        assert_eq!(lane("opencode"), "keeper");
         assert_eq!(lane("pi"), "keeper");
     }
 
