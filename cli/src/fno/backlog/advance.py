@@ -3335,13 +3335,10 @@ def advance(
         # Every configured lane is exhausted: persist the queue state on the
         # node (the backlog defer owner), then skip with the reset horizon.
         _safe_release(dispatch_key, holder, dispatch_root)
-        defer_reason = (
-            f"slot-queue: every configured lane exhausted; retry_at="
-            f"{int(exc.retry_at) if exc.retry_at else 'unknown'}"
-        )
+        reset = int(exc.retry_at) if exc.retry_at else "unknown"
         proc = subprocess.run(
             [*_subprocess_util.fno_py_cmd(), "backlog", "defer", node_id,
-             "--reason", defer_reason],
+             "--reason", f"slot-queue: every configured lane exhausted; retry_at={reset}"],
             cwd=node_cwd or None,
             capture_output=True,
             text=True,

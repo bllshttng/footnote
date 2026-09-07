@@ -28,7 +28,7 @@ def _binary_or_raise():
     return binary
 
 
-def _route_slot_call(payload: dict[str, Any]) -> dict[str, Any]:
+def route_slot_call(payload: dict[str, Any]) -> dict[str, Any]:
     """One subprocess round-trip: JSON payload in, parsed JSON answer out."""
     import os
 
@@ -54,7 +54,3 @@ def _route_slot_call(payload: dict[str, Any]) -> dict[str, Any]:
             print(json.dumps({"payload": payload}), flush=True)
 
 
-def route_slot_call(payload: dict[str, Any]) -> dict[str, Any]:
-    """The whole verb answer ({status, candidate|model|lane_states, chain});
-    the caller unpacks the leg it asked for."""
-    return _route_slot_call(payload)
