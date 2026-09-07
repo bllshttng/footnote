@@ -15,7 +15,7 @@ import json
 import subprocess
 from typing import Any, Mapping, Optional
 
-from fno.rust_binary import resolve_binary
+from fno.rust_binary import find_dev_binary, resolve_binary
 
 
 class RouteSlotUnavailable(RuntimeError):
@@ -31,22 +31,26 @@ def _profile_fields(profile: Optional[object]) -> dict[str, Any]:
     return out
 
 
-def _declared_rows(inventory: Optional[Any]) -> dict[str, Any]:
+def _declared_rows(settings: object) -> dict[str, Any]:
+    """The CONFIG-declared rows exactly (never the built-in fallback): the
+    pre-port fold read ``settings.routing.models`` and the slot walks only
+    rows the operator named."""
     rows: dict[str, Any] = {}
-    if inventory is None:
-        return rows
     try:
-        for name, row in inventory.rows.items():
-            rows[name] = {
-                "name": name,
-                "harness": row.harness,
-                "model": row.model,
-                "route": row.route,
-                "account": row.account,
-                "band": row.band,
-                "effort": row.effort,
-            }
-    except Exception:  # noqa: BLE001 - an unreadable inventory reads as empty
+        for row in getattr(getattr(settings, "routing", None), "models", None) or []:
+            if isinstance(row, Mapping):
+                name = str(row.get("name", "") or "").strip()
+                if name:
+                    rows[name] = {
+                        "name": name,
+                        "harness": str(row.get("harness", "") or "").strip(),
+                        "model": str(row.get("model", "") or "").strip(),
+                        "route": str(row.get("route", "") or "").strip(),
+                        "account": str(row.get("account", "") or "").strip(),
+                        "band": str(row.get("band", "") or "").strip(),
+                        "effort": str(row.get("effort", "") or "").strip(),
+                    }
+    except Exception:  # noqa: BLE001 - an unreadable config reads as empty
         return {}
     return rows
 
@@ -63,8 +67,12 @@ def _thread_seatable(harnesses: list[str]) -> dict[str, bool]:
     return out
 
 
-def _vendor_tables(settings: object, rows: dict[str, Any]) -> dict[str, Any]:
-    """Vendor caps and live counts, gathered once for the whole lane list."""
+def _vendor_tables(
+    settings: object, rows: dict[str, Any], lanes: list[Any]
+) -> dict[str, Any]:
+    """Vendor caps and live counts, gathered once for the whole lane list.
+    Vendors come from BOTH spellings: declared rows and inline lane tables
+    (an inline lane's own ``route`` names its vendor)."""
     caps: dict[str, int] = {}
     counts: dict[str, int] = {}
     errors: dict[str, str] = {}
@@ -77,10 +85,16 @@ def _vendor_tables(settings: object, rows: dict[str, Any]) -> dict[str, Any]:
         from fno.config import provider_limits_table
 
         table = dict(provider_limits_table(getattr(settings, "agents", None)))
+        routes = [str(row.get("route", "") or "") for row in rows.values()]
+        routes += [
+            str(lane.get("route", "") or "")
+            for lane in lanes
+            if isinstance(lane, Mapping)
+        ]
         vendors = sorted({
-            str(row.get("route", "") or "").replace(",", "/").partition("/")[0].strip()
-            for row in rows.values()
-            if str(row.get("route", "") or "").strip()
+            route.replace(",", "/").partition("/")[0].strip()
+            for route in routes
+            if route.strip()
         } - {""})
         for vendor in vendors:
             cap = provider_lanes_cap(table.get(vendor))
@@ -110,6 +124,25 @@ def _account_record_vendors(settings: object) -> dict[str, str]:
     return out
 
 
+def _lanes_payload(lanes: Any) -> list[Any]:
+    """Lane entries as JSON: dicts pass through; pre-built profile lane
+    objects serialize by their known attributes (their vocabulary is the same
+    ``SLOT_LANE_FIELDS`` table the verb validates against)."""
+    fields = (
+        "provider", "model", "effort", "substrate", "permission_mode",
+        "route", "account", "pane_group",
+    )
+    out: list[Any] = []
+    for lane in lanes or []:
+        if isinstance(lane, Mapping):
+            out.append(dict(lane))
+        elif hasattr(lane, "provider") or hasattr(lane, "model"):
+            out.append({k: str(getattr(lane, k, "") or "") for k in fields})
+        else:
+            out.append(lane)
+    return out
+
+
 def resolve_slot_via_binary(
     *,
     rung_base: str,
@@ -134,17 +167,20 @@ def resolve_slot_via_binary(
     """
     import os
 
-    binary = resolve_binary()
+    # A dev checkout's own build outranks any installed copy: testing against
+    # a stale PATH binary would resolve lanes with last release's vocabulary.
+    binary = find_dev_binary() or resolve_binary()
     if binary is None:
         raise RouteSlotUnavailable(
             "the fno-agents binary was not found; reinstall fno,"
             " run `fno doctor update --rust`, or set FNO_AGENTS_BIN"
         )
-    rows = _declared_rows(inventory)
+    rows = _declared_rows(settings)
     seatable = _thread_seatable([str(r.get("harness", "")) for r in rows.values()])
+    lanes_payload = _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else []
     payload: dict[str, Any] = {
         "rung_base": rung_base,
-        "lanes_raw": lanes if isinstance(lanes, (list, tuple)) else [],
+        "lanes_raw": lanes_payload,
         "declared_rows": rows,
         "profile": _profile_fields(profile),
         "node": {"difficulty": (node or {}).get("difficulty")} if node else None,
@@ -158,7 +194,7 @@ def resolve_slot_via_binary(
         "thread_seatable": seatable,
         "account_record_vendors": _account_record_vendors(settings),
     }
-    payload.update(_vendor_tables(settings, rows))
+    payload.update(_vendor_tables(settings, rows, lanes_payload))
     try:
         proc = subprocess.run(
             [str(binary), "route-slot"],

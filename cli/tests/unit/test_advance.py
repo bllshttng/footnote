@@ -26,6 +26,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+
 from typer.testing import CliRunner
 
 from fno.backlog import advance as adv
@@ -125,6 +133,7 @@ def test_disabled_dispatches_nothing(iso, monkeypatch):
     assert evs[0]["data"]["reason"] == "disabled"
 
 
+@requires_rust
 def test_advance_writes_one_control_plane_tick_row(iso, monkeypatch):
     """x-1b88: every advance call appends exactly one auto_continue arm row,
     carrying the skip reason the decision matrix chose."""
@@ -541,6 +550,7 @@ def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
     assert "gpt-5.6-sol" not in cmd
 
 
+@requires_rust
 def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_path):
     """Worktree placement is harness-keyed (claude-native vs external base), so
     the grid must decide BEFORE _ensure_lane_worktree runs: placement and spawn
@@ -583,6 +593,7 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
     assert captured["harness"] == "codex"
 
 
+@requires_rust
 def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     monkeypatch, tmp_path
 ):
@@ -1110,6 +1121,7 @@ def test_spawn_worker_accepts_codex_thread_full_id_receipt(monkeypatch):
     assert identity == "0198c0de-1111-7000-8000-00000000000a"
 
 
+@requires_rust
 def test_spawn_worker_refuses_codex_head8_launch_identity(monkeypatch):
     head8_receipt = (
         '{"name":"tgt-2222aaaa","short_id":"","harness":"codex",'
@@ -1312,6 +1324,7 @@ def test_advance_result_rejects_invalid_pair():
         adv.AdvanceResult("dispatched", "advance_skipped")
 
 
+@requires_rust
 def test_lane_ready_frontier_recovers_observer_miss_and_records_divergence(
     tmp_path, monkeypatch
 ):
@@ -1629,6 +1642,7 @@ def test_dependents_same_project_no_cwd_skips(iso, monkeypatch):
     assert results[0].decision == "skipped" and results[0].reason == "no-cwd"
 
 
+@requires_rust
 def test_dependents_fail_closed_on_unknown_closed_project(iso, monkeypatch):
     """AC1-ERR / Failure Modes: closed_project=None means we cannot classify a
     dependent, so we dispatch NOTHING (prefer that over misrouting a same-project
@@ -2858,6 +2872,7 @@ def test_spawn_worker_still_accepts_a_non_state_root_extra_env(monkeypatch):
     assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://x"
 
 
+@requires_rust
 def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
     """Placement and spawn must ride the SAME lane: `_grid_lane_for` (the
     placement door) returns exactly what `resolve_slot` (the spawn door)

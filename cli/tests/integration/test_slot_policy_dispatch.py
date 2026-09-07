@@ -16,6 +16,14 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+
 from fno.agents.spawn_defaults import inject_spawn_defaults
 from fno.cli import app
 
@@ -103,6 +111,7 @@ def test_queue_refusal_is_typed_and_names_retry_at(monkeypatch, capsys):
     assert {"name": "flash-x", "reason": "capacity=exhausted"} in payload["lanes"]
 
 
+@requires_rust
 def test_exhausted_slot_persists_defer_and_the_retry_selects(
     monkeypatch, tmp_graph
 ):

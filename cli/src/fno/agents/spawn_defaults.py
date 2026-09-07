@@ -1189,6 +1189,13 @@ def inject_spawn_defaults(
                     file=err,
                 )
                 raise SystemExit(2)
+            if _terminal.startswith("slot=route-slot-unavailable"):
+                print(
+                    f"fno agents spawn: {_terminal[len('slot='):]};"
+                    " refusing; no worker launched",
+                    file=err,
+                )
+                raise SystemExit(2)
             if _terminal == "slot=manual_account_switch_required":
                 print(
                     "fno agents spawn: every lane needs a manual canonical "

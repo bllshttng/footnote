@@ -11,6 +11,14 @@ import json
 
 import pytest
 
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+
 from fno.agents.spawn_defaults import inject_spawn_defaults, resolve_lane_vendor
 
 
@@ -623,6 +631,7 @@ def test_ac3_hp_namespace_stripped_key():
         assert out[out.index("--model") + 1] == "fable", seed
 
 
+@requires_rust
 def test_profile_lanes_walk_in_declared_order(monkeypatch):
     """The lanes list IS the rank: lane 0 is tried first on every spawn, and
     the live row count plays no part in where the walk starts."""
@@ -645,6 +654,7 @@ def test_profile_lanes_walk_in_declared_order(monkeypatch):
         assert "agents.profiles.target.lanes[0]" in err.getvalue()
 
 
+@requires_rust
 def test_profile_lanes_skip_capped_vendor(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
     import fno.agents.spawn_gate as spawn_gate
@@ -667,6 +677,7 @@ def test_profile_lanes_skip_capped_vendor(monkeypatch):
     assert "agents.profiles.target.lanes[1]" in err.getvalue()
 
 
+@requires_rust
 def test_profile_only_lane_at_cap_refuses(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
     import fno.agents.spawn_gate as spawn_gate
@@ -691,6 +702,7 @@ def test_profile_only_lane_at_cap_refuses(monkeypatch):
     assert "zai" in err.getvalue() and "2 of 2" in err.getvalue()
 
 
+@requires_rust
 def test_profile_capped_lane_refuses_when_count_unavailable(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
     import fno.agents.spawn_gate as spawn_gate
@@ -719,6 +731,7 @@ def test_profile_capped_lane_refuses_when_count_unavailable(monkeypatch):
     assert "registry incomplete" in err.getvalue()
 
 
+@requires_rust
 def test_profile_lane_unknown_harness_refuses(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
 
@@ -734,6 +747,7 @@ def test_profile_lane_unknown_harness_refuses(monkeypatch):
     assert "agents.profiles.target.lanes[0].provider" in err.getvalue()
 
 
+@requires_rust
 def test_profile_lane_injects_pane_group(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
 
@@ -1586,6 +1600,7 @@ class TestLinkIdentityIncludesTheAccountAxis:
         ]})["L"]
         assert sd.link_id(a) != sd.link_id(b)
 
+    @requires_rust
     def test_an_unpinned_link_keeps_the_bare_identity(self) -> None:
         from fno.agents import spawn_defaults as sd
 
@@ -1746,6 +1761,7 @@ def test_typed_cross_vendor_model_still_warns_and_proceeds():
     assert "refusing to spawn" not in msg
 
 
+@requires_rust
 def test_injected_model_matching_the_lane_is_silent():
     # The negative on the refusal path: an injected model whose vendor MATCHES
     # the lane is the ordinary case and must neither warn nor refuse. Without
@@ -1788,6 +1804,7 @@ def test_injected_cross_vendor_model_with_explicit_route_proceeds():
     assert out[0] == "spawn"
 
 
+@requires_rust
 def test_lane_vendor_resolves_unrouted_harness_from_final_argv():
     assert resolve_lane_vendor(["codex", "-C", "/tmp/workspace"]) == "openai"
 
@@ -1851,6 +1868,7 @@ def test_refused_mismatch_event_names_the_config_key_that_supplied_the_model(
     ]
 
 
+@requires_rust
 def test_capped_lane_does_not_refuse_a_spawn_that_names_its_own_lane(monkeypatch):
     """A cap names a VENDOR's concurrency. A caller who typed --harness codex is
     not spending the capped zai lane's budget, so refusing that spawn stops work
@@ -1941,6 +1959,7 @@ _SLOT_ROWS = [
 ]
 
 
+@requires_rust
 def test_string_lane_names_an_inventory_row(monkeypatch):
     """A lane may be the NAME of a [[routing.models]] row: the row's harness,
     model and access path ride as one coordinate."""
@@ -1957,6 +1976,7 @@ def test_string_lane_names_an_inventory_row(monkeypatch):
     assert "applied slot=agents.profiles.target.lanes[0] flash-x (routing)" in err.getvalue()
 
 
+@requires_rust
 def test_lane_on_exhausted_account_is_skipped_for_the_next_lane(monkeypatch):
     """AC3-HP: the lane whose account is dead skips; the sibling lane on the
     healthy account answers."""
@@ -2043,6 +2063,7 @@ def test_on_exhausted_degrade_names_the_degrade_in_the_receipt(monkeypatch):
     assert "applied slot=exhausted degrade" in err.getvalue()
 
 
+@requires_rust
 def test_unknown_lane_name_refuses_by_name(monkeypatch):
     """AC3-ERR: a lane naming no declared row refuses with exit 2, naming the
     lane path, the missing row, and the declared row names."""
@@ -2065,6 +2086,7 @@ def test_unknown_lane_name_refuses_by_name(monkeypatch):
     assert "fno config route inventory" in msg
 
 
+@requires_rust
 def test_inline_lane_still_selects(monkeypatch):
     """The inline-table lane spelling keeps working after the port: sugar over
     the same resolver, never a second leg."""
@@ -2082,6 +2104,7 @@ def test_inline_lane_still_selects(monkeypatch):
     assert "agents.profiles.target.lanes[0]" in err.getvalue()
 
 
+@requires_rust
 def test_verb_with_no_lanes_falls_to_the_grid(monkeypatch):
     """A profile without lanes changes nothing: the capacity grid over the
     whole inventory answers, exactly as before the slot resolver existed."""
@@ -2105,6 +2128,7 @@ def test_verb_with_no_lanes_falls_to_the_grid(monkeypatch):
     assert "applied grid=grid candidate codex/sol-x capacity=ok" in err.getvalue()
 
 
+@requires_rust
 def test_lane_validation_refusals_run_on_real_dict_lanes(monkeypatch):
     """Live config lanes arrive as raw TOML dicts, not objects. Every other lane
     test builds objects, which take the getattr branch, so the Mapping-only
@@ -2228,6 +2252,7 @@ def test_config_pane_group_skips_on_a_glued_short_placement_flag(monkeypatch):
     assert "-x" in err.getvalue()
 
 
+@requires_rust
 def test_capped_lane_escape_also_honours_the_vendor_flag(monkeypatch):
     """A cap names a VENDOR, and -P names the vendor, so a caller who typed it is
     not spending a capped lane's budget. Both this function's docstring and the
@@ -2251,6 +2276,7 @@ def test_capped_lane_escape_also_honours_the_vendor_flag(monkeypatch):
     assert out  # the spawn continues rather than exiting 2
 
 
+@requires_rust
 def test_a_selected_lane_does_not_inherit_a_route_it_never_named(monkeypatch):
     """A lane is a COMPLETE routing coordinate. Per-field fallback let a codex
     lane inherit the profile's zai route, producing `--harness codex --route
@@ -2288,6 +2314,7 @@ def test_missing_difficulty_takes_the_high_overlay(monkeypatch):
     assert "difficulty missing; rounds up to high" in err.getvalue()
 
 
+@requires_rust
 def test_low_difficulty_overlay_replaces_lanes(monkeypatch):
     """AC6-DIFFICULTY: a low node rides the low overlay's lanes."""
     monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
@@ -2330,6 +2357,7 @@ def test_invalid_difficulty_rounds_up_to_high(monkeypatch):
     assert "difficulty 'urgent' is not low|medium|high" in err.getvalue()
 
 
+@requires_rust
 def test_overlay_omitted_fields_inherit_the_base_slot(monkeypatch):
     """AC6-DIFFICULTY: an overlay that only names a policy keeps the base
     lanes; the policy is live on them."""
@@ -2361,6 +2389,7 @@ _LOW_FLASH_HEALTHY_CODEX = [
 ]
 
 
+@requires_rust
 def test_on_low_prefer_healthy_demotes_low_behind_healthy(monkeypatch):
     """AC6-LOW: the default policy demotes a low lane behind a healthy one."""
     monkeypatch.setattr(
@@ -2384,6 +2413,7 @@ def test_on_low_prefer_healthy_demotes_low_behind_healthy(monkeypatch):
     assert "slot demote agents.profiles.target.lanes[0] flash-x capacity=low" in err.getvalue()
 
 
+@requires_rust
 def test_on_low_prefer_healthy_takes_the_demoted_lane_when_all_low(monkeypatch):
     """AC6-LOW: no healthy lane anywhere: the first low lane still serves."""
     monkeypatch.setattr(
@@ -2408,6 +2438,7 @@ def test_on_low_prefer_healthy_takes_the_demoted_lane_when_all_low(monkeypatch):
     assert "applied slot=agents.profiles.target.lanes[0] flash-x (routing)" in err.getvalue()
 
 
+@requires_rust
 def test_on_unknown_skip_excludes_unknown_lanes_and_refuses(monkeypatch):
     """AC6-UNKNOWN: with skip, an unproven observation never serves."""
     monkeypatch.setenv("FNO_SPAWN_GATE", "1")
@@ -2427,6 +2458,7 @@ def test_on_unknown_skip_excludes_unknown_lanes_and_refuses(monkeypatch):
     assert "capacity=unknown (on_unknown=skip)" in err.getvalue()
 
 
+@requires_rust
 def test_overlay_with_explicit_empty_lanes_refuses_as_malformed(monkeypatch):
     """AC6-DIFFICULTY: an explicitly empty overlay lane list is malformed, not
     an invitation to open the global inventory."""
@@ -2470,6 +2502,7 @@ _IDENTITY_ROWS = [
 ]
 
 
+@requires_rust
 def test_identity_mismatch_pin_is_always_excluded(monkeypatch):
     """AC6-PIN: the slot proves makers is active; a readyrule pin is a
     mismatch and never serves, whatever on_unknown allows."""
@@ -2498,6 +2531,7 @@ def test_identity_mismatch_pin_is_always_excluded(monkeypatch):
     assert "account_identity_mismatch" in err.getvalue()
 
 
+@requires_rust
 def test_identity_unknown_is_governed_by_on_unknown(monkeypatch):
     """AC6-IDENTITY: an unproven slot claim is excluded under skip and named
     under the default allow."""
@@ -2533,6 +2567,7 @@ def test_identity_unknown_is_governed_by_on_unknown(monkeypatch):
     assert "account_identity_unknown (on_unknown=skip)" in err2.getvalue()
 
 
+@requires_rust
 def test_vendor_route_lane_never_claims_the_slot(monkeypatch):
     """AC6-IDENTITY: an API lane with its own account and route skips the
     identity gate; the slot occupant is not its business."""
@@ -2585,6 +2620,7 @@ def test_proven_account_owns_the_harness_aggregate(monkeypatch):
     cap = rc(providers=("claude",))
     assert cap["claude"]["state"] == "exhausted"
     assert cap["claude"]["window"] == "identity:makers"
+@requires_rust
 def test_lane_coordinate_forwards_route_and_account(monkeypatch):
     """AC6-COORDINATE: a named row's vendor route and account constraint ride
     the launch argv; the coordinate is not discarded after the capacity check."""
@@ -2628,6 +2664,7 @@ def test_record_route_contradiction_refuses(monkeypatch):
     assert "contradicting the lane route 'zai/glm-5.3'" in err.getvalue()
 
 
+@requires_rust
 def test_explicit_model_pin_overrides_the_lanes(monkeypatch):
     """AC6-COORDINATE: a typed --model outranks the slot, receipt names the
     override, and no lane harness is borrowed for the foreign model."""

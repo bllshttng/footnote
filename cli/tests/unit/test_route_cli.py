@@ -7,6 +7,14 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+
 from fno.agents import model_routing as mr
 from fno.config import ConfigBlock, ModelProvider, ModelRoutingBlock, SettingsModel
 from fno.route_cli import route_app
@@ -319,6 +327,7 @@ def test_inventory_lists_rows_bands_and_verdicts(monkeypatch) -> None:
     assert "unbanded" in res.output
 
 
+@requires_rust
 def test_inventory_json_shape(monkeypatch) -> None:
     _declare(monkeypatch, [
         {"name": "glm-5.3", "harness": "claude", "model": "glm-5.3", "band": "medium"},
@@ -360,6 +369,7 @@ def _slot_settings(rows):
     )
 
 
+@requires_rust
 def test_inventory_prints_slots_with_live_capacity(monkeypatch) -> None:
     """AC4-HP: the slots section names each lane's live capacity state and the
     lane a spawn would take RIGHT NOW - and the answer moves when capacity
@@ -388,6 +398,7 @@ def test_inventory_prints_slots_with_live_capacity(monkeypatch) -> None:
     assert "would take agents.profiles.target.lanes[1] luna-codex" in res.output
 
 
+@requires_rust
 def test_inventory_json_carries_slots(monkeypatch) -> None:
     from fno import route_resolve as rr
 

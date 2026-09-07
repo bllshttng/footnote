@@ -38,7 +38,7 @@ fn effective_difficulty(node_difficulty: Option<&str>) -> (String, Option<String
             other => (
                 "high".to_string(),
                 Some(format!(
-                    "difficulty {other:?} is not low|medium|high; rounds up to high"
+                    "difficulty '{other}' is not low|medium|high; rounds up to high"
                 )),
             ),
         },
@@ -110,7 +110,7 @@ fn fold(
                     .filter(|k| !SLOT_LANE_FIELDS.contains(&k.as_str()))
                     .collect();
                 if let Some(first) = unknown.first() {
-                    return Err(fault(&rung, format!("has unknown field {first:?}")));
+                    return Err(fault(&rung, format!("has unknown field '{first}'")));
                 }
                 for (k, v) in table {
                     if !v.is_string() {
@@ -176,39 +176,41 @@ fn row_capacity(row: &Value, harness_detail: Option<&Value>) -> (String, String)
         Some(d) => d,
         None => return ("unknown".to_string(), String::new()),
     };
-    match () {
-        _ if account.is_empty() => {
-            let state = detail
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_lowercase();
-            let state = match state.as_str() {
-                "ok" | "low" | "exhausted" | "blocked" => state,
-                _ => "unknown".to_string(),
-            };
-            let window = detail
-                .get("window")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            (state, window)
+    // A capacity entry is either the detailed mapping runtime_capacity
+    // produces or a bare state string; both are admitted. A named account
+    // missing from the detail reads unknown, never the harness-wide best.
+    if account.is_empty() {
+        let (state, window) = match detail.as_object() {
+            Some(obj) => (
+                obj.get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                obj.get("window").and_then(Value::as_str).unwrap_or(""),
+            ),
+            None => (detail.as_str().unwrap_or("unknown"), ""),
+        };
+        let mut s = state.trim().to_lowercase();
+        if s.is_empty() {
+            s = "unknown".to_string();
         }
-        _ => {
-            let state = detail
-                .get("accounts")
-                .and_then(|a| a.get(&account))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .trim()
-                .to_lowercase();
-            let window = detail
-                .get("window")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            (state, window)
+        (s, window.to_string())
+    } else {
+        let mut state = detail
+            .get("accounts")
+            .and_then(|a| a.get(&account))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .trim()
+            .to_lowercase();
+        if state.is_empty() {
+            state = "unknown".to_string();
         }
+        let window = detail
+            .get("window")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        (state, window)
     }
 }
 
@@ -287,6 +289,7 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
 
     let mut lanes_raw = lanes_raw_value;
     let mut prefix: Vec<Value> = Vec::new();
+    let mut overlay_fields: Map<String, Value> = Map::new();
     if let Some(bd) = by_difficulty_obj.filter(|bd| !bd.is_empty()) {
         let (diff_key, diff_reason) = {
             let node_difficulty = payload
@@ -298,10 +301,10 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
         let overlay = bd.get(&diff_key);
         let overlay_obj = overlay.and_then(Value::as_object);
         if let Some(ovl) = overlay_obj {
-            for allowed_field in ["lanes", "on_exhausted", "on_low", "on_unknown"] {
-                if !ovl.contains_key(allowed_field) {
+            for key in ovl.keys() {
+                if !["lanes", "on_exhausted", "on_low", "on_unknown"].contains(&key.as_str()) {
                     chain.push(json!(format!(
-                        "slot=config {rung_base}.by_difficulty.{diff_key} has unknown field {allowed_field:?}"
+                        "slot=config {rung_base}.by_difficulty.{diff_key} has unknown field {key:?}"
                     )));
                     return none(chain);
                 }
@@ -317,6 +320,7 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
                     }
                 }
             }
+            overlay_fields = ovl.clone();
         }
         if let Some(reason) = diff_reason {
             prefix.push(json!(format!("slot note {rung_base} {reason}")));
@@ -354,13 +358,10 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
     )));
 
     // Policy resolution with named refusals; an out-of-enum value is a
-    // config fault, never a silent permissive coercion.
+    // config fault, never a silent permissive coercion. The selected
+    // overlay's policy field outranks the base profile's; both validated.
     let mut policy = |name: &str, default: &str, enum_values: &[&str]| -> Option<String> {
-        let overlay_value = profile
-            .get("by_difficulty")
-            .and_then(Value::as_object)
-            .and_then(|bd| bd.get("high"))
-            .and_then(|o| o.get(name));
+        let overlay_value = overlay_fields.get(name);
         let raw = overlay_value
             .or_else(|| profile.get(name))
             .and_then(Value::as_str)
@@ -439,7 +440,7 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
                     sorted_rows.join(", ")
                 };
                 chain.push(json!(format!(
-                    "slot=config {rung} names no [[routing.models]] row {row_name:?}; declared rows: {declared}; see fno config route inventory"
+                    "slot=config {rung} names no [[routing.models]] row '{row_name}'; declared rows: {declared}; see fno config route inventory"
                 )));
                 return none(chain);
             }
@@ -480,7 +481,7 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
                 {
                     if rec_vendor != vendor_name {
                         chain.push(json!(format!(
-                            "slot=config {rung} account {account:?} resolves vendor {rec_vendor:?}, contradicting the lane route {route:?}"
+                            "slot=config {rung} account '{account}' resolves vendor '{rec_vendor}', contradicting the lane route '{route}'"
                         )));
                         return none(chain);
                     }
@@ -683,10 +684,7 @@ fn pick(
     window: &str,
     note: &str,
 ) -> Value {
-    let mut line = format!(
-        "slot {} capacity={state}",
-        lane_label(rung, row_name),
-    );
+    let mut line = format!("slot {} capacity={state}", lane_label(rung, row_name),);
     if !window.is_empty() {
         line.push_str(&format!(" window={window}"));
     }

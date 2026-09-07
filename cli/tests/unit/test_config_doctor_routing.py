@@ -15,6 +15,14 @@ from __future__ import annotations
 import pytest
 import typer
 
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+
 from fno.config_cli import _report_band_routing
 
 
@@ -80,6 +88,7 @@ def test_undeclared_inventory_names_the_gap(monkeypatch):
     assert "routing.models" in text
 
 
+@requires_rust
 def test_declared_inventory_with_a_resolving_lane_prints_nothing(monkeypatch):
     """AC4 silence needs an ARMED slot: a declared row PLUS a verb lane that
     resolves it. A declared inventory with no lanes still says so."""
@@ -96,6 +105,7 @@ def test_declared_inventory_with_a_resolving_lane_prints_nothing(monkeypatch):
     assert not [line for line in out if "band routing inactive" in line]
 
 
+@requires_rust
 def test_doctor_names_verbs_with_empty_slots(monkeypatch):
     """AC4-EDGE: the line names BOTH halves - the declared inventory count and
     every dispatched verb whose slot has no lane."""
