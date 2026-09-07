@@ -241,9 +241,518 @@ fn allowed(value: &str, enum_values: &[&str]) -> bool {
     enum_values.contains(&value)
 }
 
+const BAND_RANK_KEYS: [&str; 4] = ["low", "medium", "high", "max"];
+
+/// A row's strength rank; a band outside the vocabulary (including unbanded)
+/// ranks -1, below every banded row.
+fn band_rank(band: &str) -> i64 {
+    BAND_RANK_KEYS
+        .iter()
+        .position(|k| *k == band)
+        .map(|i| i as i64)
+        .unwrap_or(-1)
+}
+
+/// One grid/tier candidate row as the payload's `inventory.rows` array carries
+/// it (declared order preserved by the caller).
+#[derive(Clone)]
+struct InvRow {
+    name: String,
+    harness: String,
+    model: String,
+    band: String,
+    percentile: Option<f64>,
+    cost: Option<f64>,
+    effort: String,
+    raw: Value,
+}
+
+fn inv_row(v: &Value) -> InvRow {
+    let band = row_value(v, "band").to_lowercase();
+    InvRow {
+        name: row_value(v, "name"),
+        harness: row_value(v, "harness"),
+        model: row_value(v, "model"),
+        percentile: v.get("percentile").and_then(Value::as_f64),
+        cost: v.get("cost_per_mtok_in").and_then(Value::as_f64),
+        effort: row_value(v, "effort"),
+        band,
+        raw: v.clone(),
+    }
+}
+
+/// The declared objective orders candidates; it never lowers a band. Ties
+/// break on name so the order is a fact, not an accident.
+fn order_candidates(mut rows: Vec<InvRow>, objective: &str, prefer_harness: &str) -> Vec<InvRow> {
+    // Python's `-(pct or -1.0)`: a missing percentile and a 0.0 both read
+    // as -1.0, so a weakest-snapshot row never outranks an unnamed one.
+    let pct = |r: &InvRow| match r.percentile {
+        None | Some(0.0) => -1.0f64,
+        Some(p) => p,
+    };
+    match objective {
+        "best-available" => rows.sort_by(|a, b| {
+            band_rank(&b.band)
+                .cmp(&band_rank(&a.band))
+                .then(pct(b).total_cmp(&pct(a)))
+                .then(a.name.cmp(&b.name))
+        }),
+        "prefer-harness" => rows.sort_by(|a, b| {
+            let pa: i32 = if a.harness == prefer_harness { 0 } else { 1 };
+            let pb: i32 = if b.harness == prefer_harness { 0 } else { 1 };
+            pa.cmp(&pb)
+                .then(band_rank(&b.band).cmp(&band_rank(&a.band)))
+                .then(pct(b).total_cmp(&pct(a)))
+                .then(a.name.cmp(&b.name))
+        }),
+        // cheapest-that-clears: declared cost first, the percentile proxy
+        // second, then the weakest-clearing rule.
+        _ => rows.sort_by(|a, b| {
+            let group = |r: &InvRow| {
+                if r.cost.is_some() {
+                    0
+                } else if r.percentile.is_some() {
+                    1
+                } else {
+                    2
+                }
+            };
+            let (ga, gb) = (group(a), group(b));
+            if ga != gb {
+                return ga.cmp(&gb);
+            }
+            let inner = |x: &InvRow, y: &InvRow| -> std::cmp::Ordering {
+                if let (Some(ca), Some(cb)) = (x.cost, y.cost) {
+                    return ca.total_cmp(&cb);
+                }
+                if let (Some(pa), Some(pb)) = (x.percentile, y.percentile) {
+                    return pa.total_cmp(&pb);
+                }
+                std::cmp::Ordering::Equal
+            };
+            inner(a, b)
+                .then(band_rank(&a.band).cmp(&band_rank(&b.band)))
+                .then(a.name.cmp(&b.name))
+        }),
+    }
+    rows
+}
+
+/// The no-lanes fallthrough: difficulty and priority join the declared
+/// inventory under a live capacity snapshot. Receipts are the Python
+/// resolver's, verbatim.
+fn grid_leg(payload: &Value, rung_base: &str, chain: &mut Vec<Value>) -> Value {
+    let capacity = payload.get("capacity").cloned().unwrap_or(json!({}));
+    let node = payload.get("node").cloned().unwrap_or(Value::Null);
+    let band_raw = node
+        .get("difficulty")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+    let band = if BAND_RANK_KEYS.contains(&band_raw.as_str()) {
+        band_raw
+    } else {
+        // Round up under uncertainty: the failure is asymmetric.
+        "high".to_string()
+    };
+    let prio = node
+        .get("priority")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "p2".to_string());
+    chain.push(json!(format!("grid difficulty({band}) priority({prio})")));
+    if !["p0", "p1", "p2", "p3"].contains(&prio.as_str()) {
+        chain.push(json!("grid=invalid-input"));
+        return none(chain.clone());
+    }
+    let inventory = payload.get("inventory").cloned().unwrap_or(json!({}));
+    let declared = inventory
+        .get("declared")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let inv_rows: Vec<Value> = inventory
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !declared || inv_rows.is_empty() {
+        chain.push(json!("grid=no-inventory-declared"));
+        return none(chain.clone());
+    }
+    // p0 bills at the strong band, p3 prefers the cheap one; the planning
+    // role floors at the strong end because a plan earns the cheap tier.
+    let mut candidate_band = if prio == "p0" {
+        "high".to_string()
+    } else if prio == "p3" {
+        "low".to_string()
+    } else {
+        band.clone()
+    };
+    let mut objective = inventory
+        .get("objective")
+        .and_then(Value::as_str)
+        .unwrap_or("cheapest-that-clears")
+        .to_string();
+    let role = payload
+        .get("role")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+    if role == "planning" {
+        candidate_band = "high".to_string();
+        chain.push(json!("grid role(planning) floors band(high)"));
+    }
+    let protected_role = payload
+        .get("protected_role")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(prot) = protected_role {
+        let floor = payload
+            .get("protected_role_floor")
+            .and_then(Value::as_str)
+            .unwrap_or("high");
+        if band_rank(&candidate_band) < band_rank(floor) {
+            candidate_band = floor.to_string();
+        }
+        objective = "best-available".to_string();
+        chain.push(json!(format!("grid protected-role({prot}) floor={floor}")));
+    }
+    let substrate = payload.get("substrate").and_then(Value::as_str);
+    let permission_mode = payload.get("permission_mode").and_then(Value::as_str);
+    let constrain = payload
+        .get("constrain_harness")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let mut rows: Vec<InvRow> = Vec::new();
+    for raw in &inv_rows {
+        let r = inv_row(raw);
+        if let Some(h) = constrain {
+            if r.harness != h {
+                continue;
+            }
+        }
+        rows.push(r);
+    }
+    if let Some(h) = constrain {
+        chain.push(json!(format!("grid constrained to harness({h})")));
+    }
+    let before_filters = rows.len();
+    let thread_seatable = payload.get("thread_seatable").cloned().unwrap_or(json!({}));
+    rows.retain(|r| candidate_supported(&r.harness, substrate, permission_mode, &thread_seatable));
+    if substrate.map_or(false, |s| !s.trim().is_empty())
+        || permission_mode.map_or(false, |s| !s.trim().is_empty())
+    {
+        if rows.is_empty() && before_filters > 0 {
+            chain.push(json!("grid=constrained-empty"));
+            return none(chain.clone());
+        }
+        chain.push(json!(format!(
+            "grid filtered by substrate({}) permission({})",
+            substrate.unwrap_or("-"),
+            permission_mode.unwrap_or("-"),
+        )));
+    }
+    // A declared row whose harness fno cannot drive REFUSES by name; it is a
+    // fact the receipt carries, never a silent skip.
+    let installed = payload
+        .get("harness_installed")
+        .cloned()
+        .unwrap_or(json!({}));
+    let mut keep: Vec<InvRow> = Vec::new();
+    for r in rows {
+        let ok = r.harness.is_empty()
+            || r.model.is_empty()
+            || installed
+                .get(&r.harness)
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+        if ok {
+            keep.push(r);
+        } else {
+            chain.push(json!(format!(
+                "grid refuses {}: harness '{}' not installed",
+                r.name, r.harness
+            )));
+        }
+    }
+    let floor_rank = band_rank(&candidate_band);
+    let mut clearing: Vec<InvRow> = keep
+        .iter()
+        .filter(|r| {
+            band_rank(&r.band) >= floor_rank && !r.harness.is_empty() && !r.model.is_empty()
+        })
+        .cloned()
+        .collect();
+    let unbanded: Vec<InvRow> = keep
+        .iter()
+        .filter(|r| r.band.is_empty() && !r.harness.is_empty() && !r.model.is_empty())
+        .cloned()
+        .collect();
+    if clearing.is_empty() && unbanded.is_empty() {
+        chain.push(json!("grid=no-band-candidate"));
+        return none(chain.clone());
+    }
+    let prefer = inventory
+        .get("prefer_harness")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    clearing = order_candidates(clearing, &objective, &prefer);
+    let effort_ok = payload.get("effort_ok").cloned().unwrap_or(json!({}));
+    for row in clearing.iter().chain(unbanded.iter()) {
+        let detail = capacity.get(&row.harness);
+        let (mut state, window) = row_capacity(&row.raw, detail);
+        if state == "exhausted" || state == "blocked" {
+            chain.push(json!(format!(
+                "grid skip {}/{} capacity={state}",
+                row.harness, row.name
+            )));
+            continue;
+        }
+        if state != "ok" && state != "low" && state != "available" {
+            state = "unknown-permitted".to_string();
+        }
+        let mut line = format!(
+            "grid candidate {}/{} capacity={state}",
+            row.harness, row.name
+        );
+        if !window.is_empty() {
+            line.push_str(&format!(" window={window}"));
+        }
+        if row.band.is_empty() {
+            line.push_str(" band=unbanded");
+        }
+        chain.push(json!(line));
+        let mut out = Map::new();
+        out.insert("harness".into(), json!(row.harness));
+        out.insert("model".into(), json!(row.model));
+        let mut effort = row.effort.clone();
+        if !effort.is_empty() {
+            let valid = effort_ok
+                .get(&row.harness)
+                .and_then(|m| m.get(&effort))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !valid {
+                chain.push(json!(format!(
+                    "grid effort omitted (no surface on {})",
+                    row.harness
+                )));
+                effort = String::new();
+            }
+        }
+        if !effort.is_empty() {
+            out.insert("effort".into(), json!(effort));
+            chain.push(json!(format!("grid effort({effort})")));
+        }
+        return json!({
+            "status": "pick",
+            "candidate": Value::Object(out),
+            "chain": chain,
+        });
+    }
+    // Every candidate was skipped on a positive exhausted/blocked marker.
+    chain.push(json!("grid=no-available-candidate"));
+    none(chain.clone())
+}
+
+/// Tier resolution: a band to a concrete declared model, scoped to one
+/// harness when asked. Degrades below the floor rather than blocking.
+fn tier_leg(payload: &Value) -> Value {
+    let mut chain: Vec<Value> = Vec::new();
+    let band = payload
+        .get("tier")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+    chain.push(json!(format!("tier({band})")));
+    let provider = payload
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(p) = provider {
+        chain.push(json!(format!("provider({p})")));
+    }
+    if !BAND_RANK_KEYS.contains(&band.as_str()) {
+        chain.push(json!("unknown-tier -> provider default"));
+        return tier_none(chain);
+    }
+    let inventory = payload.get("inventory").cloned().unwrap_or(json!({}));
+    let inv_rows: Vec<Value> = inventory
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if inv_rows.is_empty() {
+        chain.push(json!("no declared inventory -> provider default"));
+        return tier_none(chain);
+    }
+    let rows: Vec<InvRow> = inv_rows
+        .iter()
+        .map(inv_row)
+        .filter(|r| {
+            !r.harness.is_empty()
+                && !r.model.is_empty()
+                && provider.map_or(true, |p| r.harness == p)
+        })
+        .collect();
+    let floor_rank = band_rank(&band);
+    let mut clearing: Vec<InvRow> = rows
+        .iter()
+        .filter(|r| band_rank(&r.band) >= floor_rank)
+        .cloned()
+        .collect();
+    let objective = inventory
+        .get("objective")
+        .and_then(Value::as_str)
+        .unwrap_or("cheapest-that-clears");
+    let prefer = inventory
+        .get("prefer_harness")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !clearing.is_empty() {
+        clearing = order_candidates(clearing, objective, prefer);
+        let row = &clearing[0];
+        chain.push(json!(format!("inventory band(>={band}) -> {}", row.name)));
+        return tier_pick(&row.model, chain);
+    }
+    let below: Vec<InvRow> = rows
+        .iter()
+        .filter(|r| band_rank(&r.band) >= 0 && band_rank(&r.band) < floor_rank)
+        .cloned()
+        .collect();
+    if let Some(best) = below.iter().max_by(|a, b| {
+        let pct = |r: &InvRow| match r.percentile {
+            None | Some(0.0) => -1.0f64,
+            Some(p) => p,
+        };
+        band_rank(&a.band)
+            .cmp(&band_rank(&b.band))
+            .then(pct(a).total_cmp(&pct(b)))
+    }) {
+        chain.push(json!(format!(
+            "inventory band(>={band}) empty -> degrade -> {}",
+            best.name
+        )));
+        return tier_pick(&best.model, chain);
+    }
+    chain.push(json!(
+        "inventory has no reachable model -> provider default"
+    ));
+    tier_none(chain)
+}
+
+fn tier_pick(model: &str, chain: Vec<Value>) -> Value {
+    json!({"status": "pick", "model": model, "chain": chain})
+}
+
+fn tier_none(chain: Vec<Value>) -> Value {
+    json!({"status": "none", "model": Value::Null, "chain": chain})
+}
+
+/// The readout leg: every planned lane's live capacity state, for display.
+/// No selection, no terminal; a lane naming no row reads no-such-row.
+fn states_leg(payload: &Value) -> Value {
+    let rung_base = payload
+        .get("rung_base")
+        .and_then(Value::as_str)
+        .unwrap_or("agents.profiles");
+    let capacity = payload.get("capacity").cloned().unwrap_or(json!({}));
+    let profile = payload.get("profile").cloned().unwrap_or(Value::Null);
+    let lanes_raw = payload.get("lanes_raw").cloned().unwrap_or(json!([]));
+    let mut chain: Vec<Value> = Vec::new();
+    let mut lanes_raw = lanes_raw;
+    let mut prefix: Vec<Value> = Vec::new();
+    if let Some(bd) = profile
+        .get("by_difficulty")
+        .and_then(Value::as_object)
+        .filter(|bd| !bd.is_empty())
+    {
+        let (diff_key, diff_reason) = {
+            let node_difficulty = payload
+                .get("node")
+                .and_then(|n| n.get("difficulty"))
+                .and_then(Value::as_str);
+            effective_difficulty(node_difficulty)
+        };
+        if let Some(ovl) = bd.get(&diff_key).and_then(Value::as_object) {
+            for key in ovl.keys() {
+                if !["lanes", "on_exhausted", "on_low", "on_unknown"].contains(&key.as_str()) {
+                    chain.push(json!(format!(
+                        "slot=config {rung_base}.by_difficulty.{diff_key} has unknown field {key:?}"
+                    )));
+                    return json!({"status": "states", "lane_states": [], "chain": chain});
+                }
+            }
+            if let Some(ovl_lanes) = ovl.get("lanes") {
+                match ovl_lanes.as_array() {
+                    Some(arr) if !arr.is_empty() => lanes_raw = Value::Array(arr.clone()),
+                    _ => {
+                        chain.push(json!(format!(
+                            "slot=config {rung_base}.by_difficulty.{diff_key}.lanes must be a non-empty list when declared"
+                        )));
+                        return json!({"status": "states", "lane_states": [], "chain": chain});
+                    }
+                }
+            }
+        }
+        if let Some(reason) = diff_reason {
+            prefix.push(json!(format!("slot note {rung_base} {reason}")));
+        }
+    }
+    let lanes_arr = lanes_raw.as_array().cloned().unwrap_or_default();
+    let declared_rows = payload
+        .get("declared_rows")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let (plan, rows, _fields) = match fold(rung_base, &lanes_arr, &declared_rows) {
+        Ok(f) => f,
+        Err(line) => {
+            chain.push(json!(line));
+            return json!({"status": "states", "lane_states": [], "chain": chain});
+        }
+    };
+    let mut lane_states = Vec::new();
+    for (rung, row_name) in &plan {
+        let row = rows.get(row_name);
+        let (state, window) = match row {
+            None => ("no-such-row".to_string(), String::new()),
+            Some(r) => {
+                let harness = row_value(r, "harness");
+                let (s, w) = row_capacity(r, capacity.get(&harness));
+                (s, w)
+            }
+        };
+        lane_states.push(json!({
+            "rung": rung,
+            "name": row_name,
+            "state": state,
+            "window": window,
+        }));
+    }
+    chain.extend(prefix);
+    json!({
+        "status": "states",
+        "lane_states": lane_states,
+        "chain": chain,
+    })
+}
+
 /// The resolver core: payload in, `{status, candidate, chain}` out.
 pub fn resolve_slot_payload(payload: &Value) -> Value {
     let mut chain: Vec<Value> = Vec::new();
+    let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
+    if mode == "tier" {
+        return tier_leg(payload);
+    }
+    if mode == "states" {
+        return states_leg(payload);
+    }
     let rung_base = payload
         .get("rung_base")
         .and_then(Value::as_str)
@@ -336,8 +845,28 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
         return none(chain);
     }
 
-    // An explicit model pin outranks the lanes; it never borrows a lane's
-    // harness. Config defaults do NOT outrank lanes; only a typed flag does.
+    chain.extend(prefix);
+    if lanes_arr.is_empty() {
+        // A lane-less verb grids instead: the model axis reads occupied there
+        // and the grid stands down; an explicit model pin never reaches the
+        // lanes here, so the grid's own occupied flag governs.
+        chain.push(json!(format!(
+            "slot {rung_base} has no lanes; grid over inventory"
+        )));
+        if payload
+            .get("model_occupied")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            chain.push(json!("grid=model-axis-occupied"));
+            return none(chain);
+        }
+        return grid_leg(&payload, rung_base, &mut chain);
+    }
+
+    // An explicit model pin outranks the lanes (operator authority); it never
+    // borrows a lane's harness or capacity. Config defaults do NOT outrank
+    // lanes; only a typed flag does.
     if payload
         .get("explicit_model")
         .and_then(Value::as_bool)
@@ -348,11 +877,6 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
         ));
         return none(chain);
     }
-    if lanes_arr.is_empty() {
-        return none(chain); // no slot configured; the caller grids or answers none
-    }
-
-    chain.extend(prefix);
     chain.push(json!(format!(
         "slot {rung_base} lanes walked in declared order"
     )));
@@ -842,6 +1366,115 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect()
+    }
+
+    #[test]
+    fn grid_picks_the_first_clearing_candidate() {
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": [], "node": {"difficulty": "high", "priority": "p2"},
+            "model_occupied": false,
+            "inventory": {"declared": true, "objective": "cheapest-that-clears",
+                          "prefer_harness": "", "rows": [
+                {"name": "flash", "harness": "claude", "model": "glm", "band": "low"},
+                {"name": "sonnet", "harness": "claude", "model": "sonnet", "band": "high"},
+            ]},
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["model"], "sonnet");
+        let chain = chain_of(&out);
+        assert_eq!(chain[1], "grid difficulty(high) priority(p2)");
+        assert!(chain
+            .iter()
+            .any(|l| l == "grid candidate claude/sonnet capacity=ok window=w"));
+    }
+
+    #[test]
+    fn grid_refuses_undeclared_inventory_and_bad_priority() {
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": [], "node": {"difficulty": "high", "priority": "p2"},
+            "inventory": {"declared": false, "rows": []},
+        })));
+        assert!(chain_of(&out).contains(&"grid=no-inventory-declared".to_string()));
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": [],
+            "node": {"difficulty": "high", "priority": "p9"},
+            "inventory": {"declared": true, "rows": [
+                {"name": "r", "harness": "claude", "model": "m", "band": "high"}]},
+        })));
+        assert!(chain_of(&out).contains(&"grid=invalid-input".to_string()));
+    }
+
+    #[test]
+    fn grid_p3_prefers_the_low_band_and_unbanded_ranks_last() {
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": [], "node": {"difficulty": "high", "priority": "p3"},
+            "inventory": {"declared": true, "objective": "cheapest-that-clears",
+                          "rows": [
+                {"name": "unb", "harness": "claude", "model": "m-unb"},
+                {"name": "lowrow", "harness": "claude", "model": "m-low", "band": "low"},
+            ]},
+        })));
+        assert_eq!(out["candidate"]["model"], "m-low");
+        // The unbanded row was walked first in declared order and skipped on
+        // the band, so its receipt never prints; the picked low row prints.
+        let chain = chain_of(&out);
+        assert!(chain
+            .iter()
+            .any(|l| l.contains("grid candidate claude/lowrow capacity=ok window=w")));
+    }
+
+    #[test]
+    fn grid_exhausted_candidates_are_skipped_and_the_terminal_names_it() {
+        let out = resolve_slot_payload(&payload(json!({
+            "lanes_raw": [], "node": {"difficulty": "low", "priority": "p2"},
+            "capacity": {"claude": {"state": "exhausted", "window": "lock",
+                                    "accounts": {}, "evidence": {}, "resets": {}}},
+            "inventory": {"declared": true, "rows": [
+                {"name": "r", "harness": "claude", "model": "m", "band": "low"}]},
+        })));
+        assert_eq!(out["status"], "none");
+        assert_eq!(
+            chain_of(&out).last().unwrap(),
+            "grid=no-available-candidate"
+        );
+    }
+
+    #[test]
+    fn tier_resolves_degrades_and_falls_through() {
+        let inv = json!({"rows": [
+            {"name": "lowrow", "harness": "claude", "model": "m-low", "band": "low"},
+            {"name": "highrow", "harness": "claude", "model": "m-high", "band": "high"},
+        ]});
+        let out = resolve_slot_payload(&json!({"mode": "tier", "tier": "high", "inventory": inv}));
+        assert_eq!(out["model"], "m-high");
+        let out = resolve_slot_payload(&json!({"mode": "tier", "tier": "max", "inventory": inv}));
+        assert_eq!(out["model"], "m-high");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("empty -> degrade -> highrow")));
+        let out =
+            resolve_slot_payload(&json!({"mode": "tier", "tier": "banana", "inventory": inv}));
+        assert_eq!(out["model"], Value::Null);
+        assert!(chain_of(&out).contains(&"unknown-tier -> provider default".to_string()));
+    }
+
+    #[test]
+    fn states_readout_lists_every_lane() {
+        let out = resolve_slot_payload(&json!({
+            "mode": "states",
+            "rung_base": "agents.profiles.target",
+            "lanes_raw": ["flash-x", "ghost-x"],
+            "declared_rows": {"flash-x": {"name": "flash-x", "harness": "claude",
+                                          "model": "glm", "account": "zai-main"}},
+            "capacity": {"claude": {"state": "ok", "window": "w",
+                                    "accounts": {"zai-main": "exhausted"},
+                                    "evidence": {}, "resets": {}}},
+        }));
+        assert_eq!(out["status"], "states");
+        let states = out["lane_states"].as_array().unwrap();
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0]["state"], "exhausted");
+        assert_eq!(states[1]["state"], "no-such-row");
     }
 
     #[test]

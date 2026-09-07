@@ -37,6 +37,12 @@ requires_rust = pytest.mark.skipif(
 from typer.testing import CliRunner
 
 from fno.backlog import advance as adv
+import subprocess as _subprocess_module
+
+#: The untouched subprocess.run, captured at import time: the route-slot
+#: passthrough in _fake_spawn_run must reach the real binary even while a
+#: test has patched subprocess.run.
+_REAL_SUBPROCESS_RUN = _subprocess_module.run
 from fno.claims.core import acquire_claim, claim_status
 from fno.cli import app
 
@@ -500,15 +506,25 @@ def _declare_grid_inventory(monkeypatch):
     monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
 
 
-def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
-    """The deferral has a receiving end: an unpinned difficulty node picks its
-    harness/model at the spawn seam via the capacity grid, because the spawned
-    argv's explicit --harness can never trigger the spawn-CLI grid."""
+def _fake_spawn_run(short_id):
+    """Fake only the SPAWN subprocess; the route-slot call rides the real
+    binary (the grid selection it answers is exactly what these tests assert)."""
     captured = {}
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
-        return _FakeProc(stdout='{"short_id": "sid-grid1"}')
+        if "route-slot" in [str(part) for part in cmd]:
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+        return _FakeProc(stdout=f'{{"short_id": "{short_id}"}}')
+
+    return captured, fake_run
+
+
+def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
+    """The deferral has a receiving end: an unpinned difficulty node picks its
+    harness/model at the spawn seam via the capacity grid, because the spawned
+    argv's explicit --harness can never trigger the spawn-CLI grid."""
+    captured, fake_run = _fake_spawn_run("sid-grid1")
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     _declare_grid_inventory(monkeypatch)
@@ -529,11 +545,7 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
 def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
     """An explicit provider (or model) stays operator authority: the grid is a
     default route only."""
-    captured = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        return _FakeProc(stdout='{"short_id": "sid-pin1"}')
+    captured, fake_run = _fake_spawn_run("sid-pin1")
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     monkeypatch.setattr(
@@ -579,9 +591,14 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
     monkeypatch.setattr(adv, "_seed_lane_local_settings", lambda *a, **k: None)
     monkeypatch.setattr(adv._autobrief, "resolve_dispatch_brief", lambda n: ("", ""))
     monkeypatch.setattr(adv, "_emit", lambda *a, **k: None)
-    monkeypatch.setattr(
-        adv.subprocess, "run", lambda cmd, **k: _FakeProc(stdout='{"short_id": "s"}')
-    )
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        if "route-slot" in [str(part) for part in cmd]:
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+        return _FakeProc(stdout='{"short_id": "s"}')
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
     _declare_grid_inventory(monkeypatch)
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
@@ -627,6 +644,8 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
+        if "route-slot" in [str(part) for part in cmd]:
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
         return _FakeProc(stdout='{"short_id": "s"}')
 
     monkeypatch.setattr(adv, "_ensure_lane_worktree", fake_ensure)

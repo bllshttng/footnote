@@ -143,6 +143,70 @@ def _lanes_payload(lanes: Any) -> list[Any]:
     return out
 
 
+def _inventory_payload(inventory: Optional[Any]) -> dict[str, Any]:
+    """The resolved inventory as JSON: rows in declared order, the objective,
+    the prefer-harness tiebreaker, and whether CONFIG named anything."""
+    if inventory is None:
+        return {}
+    try:
+        rows = [
+            {
+                "name": r.name,
+                "harness": r.harness,
+                "model": r.model,
+                "route": r.route,
+                "account": r.account,
+                "band": r.band,
+                "percentile": r.percentile,
+                "effort": r.effort,
+                "cost_per_mtok_in": r.cost_per_mtok_in,
+            }
+            for r in inventory.rows.values()
+        ]
+        return {
+            "declared": bool(getattr(inventory, "declared", False)),
+            "objective": str(getattr(inventory, "objective", "") or "cheapest-that-clears"),
+            "prefer_harness": str(getattr(inventory, "prefer_harness", "") or ""),
+            "rows": rows,
+        }
+    except Exception:  # noqa: BLE001 - an unreadable inventory grids on defaults
+        return {}
+
+
+def _harness_installed_table(harnesses: list[str]) -> dict[str, bool]:
+    out: dict[str, bool] = {}
+    for harness in dict.fromkeys(harnesses):
+        try:
+            from fno.agents.harnesses import READABLE_PROVIDERS
+
+            out[harness] = harness in READABLE_PROVIDERS
+        except Exception:  # noqa: BLE001 - an unreadable roster degrades open
+            out[harness] = True
+    return out
+
+
+def _effort_ok_table(rows: list[Mapping[str, Any]]) -> dict[str, dict[str, bool]]:
+    """Which (harness, effort) pairs survive ``effort_tokens``: the vocabulary
+    stays owned by the harness surface code; the verb only consumes verdicts."""
+    out: dict[str, dict[str, bool]] = {}
+    pairs = {
+        (str(r.get("harness", "") or ""), str(r.get("effort", "") or ""))
+        for r in rows
+        if str(r.get("effort", "") or "").strip()
+    }
+    for harness, effort in pairs:
+        if not harness:
+            continue
+        try:
+            from fno.agents.mux_spawn import effort_tokens
+
+            effort_tokens(harness, effort)
+            out.setdefault(harness, {})[effort] = True
+        except Exception:  # noqa: BLE001 - an unusable effort surface is omitted
+            out.setdefault(harness, {})[effort] = False
+    return out
+
+
 def resolve_slot_via_binary(
     *,
     rung_base: str,
@@ -158,12 +222,18 @@ def resolve_slot_via_binary(
     explicit_lane: bool,
     explicit_model: bool,
     gate_bypassed: bool,
+    role: Optional[str] = None,
+    protected_role: Optional[str] = None,
+    model_occupied: bool = False,
 ) -> tuple[Optional[dict], list[str]]:
     """Call ``fno-agents route-slot`` and return its ``(candidate, chain)``.
 
-    Raises :class:`RouteSlotUnavailable` when the binary is missing, fails, or
-    answers malformed JSON; the caller turns that into a named refusal rather
-    than a silent lane-less spawn.
+    The payload carries BOTH legs: the slot walk (lanes, policies, posture)
+    and the grid inputs (node difficulty/priority, role, the resolved
+    inventory) so the verb answers the one-slot-or-grid question in one call.
+    Raises :class:`RouteSlotUnavailable` when the binary is missing, fails,
+    or answers malformed JSON; the caller turns that into a named refusal
+    rather than a silent lane-less spawn.
     """
     import os
 
@@ -176,14 +246,30 @@ def resolve_slot_via_binary(
             " run `fno doctor update --rust`, or set FNO_AGENTS_BIN"
         )
     rows = _declared_rows(settings)
-    seatable = _thread_seatable([str(r.get("harness", "")) for r in rows.values()])
-    lanes_payload = _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else []
+    lanes_payload = _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else lanes
+    inv_rows = []
+    try:
+        inv_rows = [
+            {"harness": r.harness} for r in (inventory.rows.values() if inventory else [])
+        ]
+    except Exception:  # noqa: BLE001 - an unreadable inventory degrades open
+        inv_rows = []
+    seatable = _thread_seatable(
+        [str(r.get("harness", "")) for r in rows.values()]
+        + [str(r.get("harness", "")) for r in inv_rows]
+        + [
+            str(lane.get("provider", "") or "")
+            for lane in (lanes_payload or [])
+            if isinstance(lane, Mapping)
+        ]
+    )
     payload: dict[str, Any] = {
         "rung_base": rung_base,
         "lanes_raw": lanes_payload,
         "declared_rows": rows,
         "profile": _profile_fields(profile),
-        "node": {"difficulty": (node or {}).get("difficulty")} if node else None,
+        "node": {"difficulty": (node or {}).get("difficulty"),
+                 "priority": (node or {}).get("priority")} if node else None,
         "capacity": dict(capacity or {}),
         "substrate": substrate,
         "permission_mode": permission_mode,
@@ -193,8 +279,37 @@ def resolve_slot_via_binary(
         "gate_bypassed": gate_bypassed,
         "thread_seatable": seatable,
         "account_record_vendors": _account_record_vendors(settings),
+        "role": role,
+        "protected_role": protected_role,
+        "model_occupied": model_occupied,
+        "inventory": _inventory_payload(inventory),
     }
-    payload.update(_vendor_tables(settings, rows, lanes_payload))
+    try:
+        payload["effort_ok"] = _effort_ok_table(
+            payload["inventory"].get("rows", [])
+        )
+    except Exception:  # noqa: BLE001 - an unusable effort table omits nothing
+        payload["effort_ok"] = {}
+    try:
+        payload["harness_installed"] = _harness_installed_table([
+            str(r.get("harness", "") or "")
+            for r in payload["inventory"].get("rows", [])
+        ])
+    except Exception:  # noqa: BLE001 - an unreadable roster degrades open
+        payload["harness_installed"] = {}
+    payload.update(
+        _vendor_tables(
+            settings, rows, lanes_payload if isinstance(lanes_payload, list) else []
+        )
+    )
+    out = _route_slot_call(binary, payload)
+    return out.get("candidate"), [str(line) for line in (out.get("chain") or [])]
+
+
+def _route_slot_call(binary: object, payload: dict[str, Any]) -> dict[str, Any]:
+    """One subprocess round-trip: JSON payload in, parsed JSON answer out."""
+    import os
+
     try:
         proc = subprocess.run(
             [str(binary), "route-slot"],
@@ -211,10 +326,57 @@ def resolve_slot_via_binary(
         )
     try:
         out = json.loads(proc.stdout)
-        candidate = out.get("candidate")
-        chain = out.get("chain")
-    except (ValueError, AttributeError) as exc:
+    except ValueError as exc:
         raise RouteSlotUnavailable(f"fno-agents route-slot bad output: {exc}") from exc
     if os.environ.get("FNO_ROUTE_SLOT_DEBUG"):
         print(json.dumps({"payload": payload, "out": out}), flush=True)
-    return candidate, [str(line) for line in (chain or [])]
+    return out
+
+
+def route_tier_via_binary(
+    tier: Optional[str],
+    provider: Optional[str],
+    inventory: Optional[Any],
+) -> tuple[Optional[str], list[str]]:
+    """Tier resolution on the verb: returns ``(model, chain)``."""
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        raise RouteSlotUnavailable(
+            "the fno-agents binary was not found; reinstall fno,"
+            " run `fno doctor update --rust`, or set FNO_AGENTS_BIN"
+        )
+    payload = {"mode": "tier", "tier": tier, "provider": provider,
+               "inventory": _inventory_payload(inventory)}
+    out = _route_slot_call(binary, payload)
+    return out.get("model"), [str(line) for line in (out.get("chain") or [])]
+
+
+def route_states_via_binary(
+    *,
+    rung_base: str,
+    profile: Optional[object],
+    lanes: Any,
+    node: Optional[Mapping],
+    capacity: Optional[Mapping[str, object]],
+    settings: object,
+) -> tuple[list[dict], list[str]]:
+    """Per-lane capacity states for the readout: returns ``(states, chain)``."""
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        raise RouteSlotUnavailable(
+            "the fno-agents binary was not found; reinstall fno,"
+            " run `fno doctor update --rust`, or set FNO_AGENTS_BIN"
+        )
+    rows = _declared_rows(settings)
+    lanes_payload = _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else lanes
+    payload = {
+        "mode": "states",
+        "rung_base": rung_base,
+        "lanes_raw": lanes_payload,
+        "declared_rows": rows,
+        "profile": _profile_fields(profile),
+        "node": {"difficulty": (node or {}).get("difficulty")} if node else None,
+        "capacity": dict(capacity or {}),
+    }
+    out = _route_slot_call(binary, payload)
+    return out.get("lane_states") or [], [str(line) for line in (out.get("chain") or [])]

@@ -2028,25 +2028,19 @@ class SpawnDefaultsBlock(BaseModel):
 
 
 class SpawnProfileBlock(SpawnDefaultsBlock):
-    """Per-verb overlay plus its strict ordered delivery-lane vocabulary."""
+    """Per-verb overlay plus its strict ordered delivery-lane vocabulary.
+
+    lanes/by_difficulty stay raw: the slot resolver validates and refuses
+    by name, so a malformed list never breaks every config read.
+    """
 
     pane_group: str = ""
-    # Keep lanes raw so a malformed routing list does not make every config
-    # read fail; the spawn seam validates and refuses before launching anything.
     lanes: Any = Field(default_factory=list)
-    # The declared terminal when EVERY lane is skipped: refuse (default) stops
-    # the spawn; degrade lets the profile scalars answer; queue emits the
-    # typed exit-78 capacity refusal. An out-of-enum value refuses at the
-    # spawn seam by name rather than coercing to a terminal nobody named.
+    # Terminal when every lane is skipped: refuse | degrade | queue (exit 78).
     on_exhausted: str = "refuse"
-    # Difficulty overlays keyed low|medium|high (operator amendment): each may
-    # replace lanes and the policy fields; omitted fields inherit this block.
-    # Raw like lanes: the slot resolver validates and refuses by name.
+    # Overlays keyed low|medium|high; omitted fields inherit this block.
     by_difficulty: Any = Field(default_factory=dict)
-    # on_low governs a low-capacity observation (prefer_healthy demotes the
-    # low lane behind healthy ones); on_unknown governs stale, absent or
-    # unproven observations. Defaults keep a single-lane install behaving as
-    # before: low still serves, unknown permits.
+    # on_low demotes a low lane behind healthy ones; on_unknown permits.
     on_low: str = "prefer_healthy"
     on_unknown: str = "allow"
 
