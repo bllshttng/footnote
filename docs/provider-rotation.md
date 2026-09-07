@@ -195,6 +195,12 @@ bounded indeterminate-state receipt before exiting with the interrupt status.
 No in-session credential swap is possible.
 A `claude` process reads `CLAUDE_CONFIG_DIR` once at launch, so every account switch happens at a process boundary, and the only useful moment to choose is just before one starts.
 
+### Probe health is not worker health
+
+Probe authentication and worker authentication are separate facts. A quota probe can fail to read or authenticate its bearer. This proves only that the probe credential was not usable. It says nothing about whether a worker can start on the account.
+
+A spawned Claude worker authenticates from the account's `CLAUDE_CONFIG_DIR` at process launch. Therefore a probe authentication failure is `UNKNOWN` account headroom, not `EXHAUSTED`. Do not use it as evidence that a spawn on that account will fail. Only a fresh usage window or worker failure provides a positive account-health marker.
+
 ### The prerequisite: an account that participates in quota survival needs its own `config_dir`
 
 ```bash
