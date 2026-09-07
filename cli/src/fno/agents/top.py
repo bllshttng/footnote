@@ -163,8 +163,7 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
     """name -> :class:`RowTruth`, one transcript read per row, every row:
     progress and the reachability verdict beside RSS (the surface that once
     showed 8513 MB across 31 live pids with no way to see which were
-    parked), from ONE ``resolve_session_truth`` read, the shape
-    ``fno.agents.read`` uses (x-6d89)."""
+    parked), from ONE read, the shape ``fno.agents.read`` uses (x-6d89)."""
     from fno.agents.reachability import (
         classify_progress,
         classify_reachability,
@@ -573,9 +572,7 @@ def render_top(
 
     out: list[str] = []
     out.extend(c.warnings)
-    # Lanes lead. A provider cap refuses spawns that every row below this
-    # block reports as healthy, so burying it under the process table is how
-    # it stayed invisible.
+    # Lanes lead: a provider cap refuses spawns the table below calls healthy.
     if lanes:
         out.extend(_render_lane_lines(lanes))
         out.append("")

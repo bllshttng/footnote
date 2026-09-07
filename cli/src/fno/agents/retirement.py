@@ -3,8 +3,7 @@
 The join between a ``fno agents top`` worker row and the graph. Fail-closed
 on every read it cannot trust: an absence of reported doneness is not
 doneness, because a human decides whether to kill a session from this
-verdict. Doneness is :func:`fno.graph.statuses.node_is_done` AND
-``merge_status == "merged"`` AND an empty ``additional_prs``.
+verdict. Doneness is node_is_done AND merged AND no additional_prs.
 """
 
 from __future__ import annotations
@@ -64,8 +63,8 @@ def verdicts(rows: Iterable[tuple[str, Optional[str]]], entries=None) -> dict:
     ``sweep_rows``). The rule, in order: unresolved node, unknown node, not
     done, not merged, an open additional PR - only then retire. Rule 5 holds
     on ANY non-empty ``additional_prs`` without asking GitHub: the graph
-    records no merge state for those PRs and a debug view must not make a
-    network call per row; holding a merged extra PR costs one line.
+    records no merge state for those PRs and a per-row network call is not
+    a debug view's to make; holding a merged extra PR costs one line.
     """
     roster = list(rows)
     if entries is None:
