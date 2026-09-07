@@ -782,6 +782,12 @@ class OwnedHarnessIdentity:
                      even the harness is proven, both are ``None``. Never guesses
                      by precedence.
     * ``empty``    - no marker present.
+    * ``spawn_record`` - the session id came from the cwd-keyed agents-registry
+                     spawn record (a codex thread worker, whose lane shares
+                     one daemon pid and gives the walk nothing to find), not
+                     from a marker the walk proved. Set only when the walk
+                     returned no session id at all and the record's harness
+                     agrees with, or fills, the resolved one.
 
     ``markers_present`` carries every marker seen (with its value) and
     ``rejected`` the ids a live row already owns, so an ambiguous resolve can be

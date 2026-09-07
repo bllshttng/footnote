@@ -142,3 +142,184 @@ def test_scrub_helper_covers_the_marker_set():
     """Positive control for the resolver tests below: the scrub loop names real
     markers, so a clean-env test cannot pass because it deleted nothing."""
     assert len(HARNESS_SESSION_MARKERS) > 0
+
+
+# --- The resolver fill -------------------------------------------------------
+
+from fno.claims.self_identity import resolve_self_identity  # noqa: E402
+from fno.claims import session_pid as _session_pid  # noqa: E402
+
+_REAL_RESOLVE_HARNESS = _session_pid.resolve_session_harness
+
+_SID_A = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+_SID_B = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae5"
+_SID_C = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae6"
+
+
+def _scrub_env(monkeypatch):
+    for marker, _ in HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    for name in (
+        "FNO_HARNESS_NAME",
+        "FNO_HARNESS_SESSION_ID",
+        "FNO_SESSION_HARNESS",
+        "FNO_SESSION_PID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_two_thread_workers_resolve_two_different_ids(tmp_path, monkeypatch):
+    """The node's discriminating case, pinned: one shared app-server pid, two
+    live thread workers, two different session ids. Each cwd resolves to its
+    OWN row's identity with the spawn_record disposition."""
+    rows, cwd_a, cwd_b, sid_a, sid_b = _two_worker_rows(tmp_path)
+    _write_registry(tmp_path, monkeypatch, rows)
+    _scrub_env(monkeypatch)
+
+    monkeypatch.chdir(cwd_a)
+    ident_a = resolve_self_identity()
+    monkeypatch.chdir(cwd_b)
+    ident_b = resolve_self_identity()
+
+    assert ident_a.harness == "codex" and ident_b.harness == "codex"
+    assert ident_a.session_id == sid_a
+    assert ident_b.session_id == sid_b
+    assert ident_a.session_id != ident_b.session_id
+    assert ident_a.disposition == ident_b.disposition == "spawn_record"
+
+
+def test_proven_ambient_identity_wins_and_the_registry_is_not_consulted(
+    tmp_path, monkeypatch
+):
+    """A proven claude identity whose cwd happens to match a live thread row is
+    returned unchanged: the resolved session id short-circuits before the
+    registry is read, so no proven identity launders into codex."""
+    use_tmpdir(monkeypatch, tmp_path)
+    here = tmp_path / "operator-shell"
+    here.mkdir()
+    _write_registry(tmp_path, monkeypatch, [_thread_row("worker", str(here), _SID_A)])
+    _scrub_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", _SID_B)
+    monkeypatch.setattr(_session_pid, "resolve_session_harness", lambda from_pid=None: "claude")
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda env=None: (_SID_B, "process"),
+    )
+
+    monkeypatch.chdir(here)
+    # Booby-trap the registry read: if the fill ever ran past the
+    # session-id short-circuit, this raises and fails the test.
+    monkeypatch.setattr(
+        "fno.claims.self_identity.live_thread_row_for_cwd",
+        lambda cwd: (_ for _ in ()).throw(AssertionError("registry read past short-circuit")),
+    )
+    ident = resolve_self_identity()
+
+    assert ident.harness == "claude"
+    assert ident.session_id == _SID_B
+    assert ident.session_id != _SID_A
+    assert ident.disposition == "single"
+
+
+def test_no_matching_row_is_byte_identical_to_the_legacy_answer(tmp_path, monkeypatch):
+    rows, _cwd_a, cwd_b, _sid_a, _sid_b = _two_worker_rows(tmp_path)
+    _write_registry(tmp_path, monkeypatch, rows)
+    _scrub_env(monkeypatch)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    monkeypatch.chdir(elsewhere)
+    ident = resolve_self_identity()
+
+    assert ident.harness is None
+    assert ident.session_id is None
+    assert ident.disposition == "empty"
+
+
+def test_harness_contradiction_leaves_the_answer_untouched(tmp_path, monkeypatch):
+    """A resolved claude harness with no provable id disagrees with the codex
+    row at this cwd; the walk is authoritative on contradiction, so the answer
+    stays ambiguous rather than adopting the record's id."""
+    cwd_a = tmp_path / "worker-a"
+    cwd_a.mkdir()
+    _write_registry(tmp_path, monkeypatch, [_thread_row("worker", str(cwd_a), _SID_A)])
+    _scrub_env(monkeypatch)
+    # A proven claude family whose two markers disagree on the id resolves to
+    # ambiguous with the harness kept and the id dropped - the only shape that
+    # reaches the fill with a non-empty harness and no session id.
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", _SID_B)
+    monkeypatch.setenv("CLAUDE_SESSION_ID", _SID_C)
+    monkeypatch.setattr(
+        _session_pid, "resolve_session_harness", lambda from_pid=None: "claude"
+    )
+
+    monkeypatch.chdir(cwd_a)
+    ident = resolve_self_identity()
+
+    assert ident.harness == "claude"
+    assert ident.session_id is None
+    assert ident.disposition == "ambiguous"
+
+
+def test_agreeing_unproven_codex_harness_adopts_the_record_id(tmp_path, monkeypatch):
+    """The real thread-worker shell shape: ambient codex markers the walk cannot
+    prove (a sibling could have written them), resolving to a proven harness
+    with no provable id. The cwd-keyed record supplies the id - the record, not
+    the marker, is the ground, so this is not the circular fill x-0bb9 bars."""
+    cwd_a = tmp_path / "worker-a"
+    cwd_a.mkdir()
+    _write_registry(tmp_path, monkeypatch, [_thread_row("worker", str(cwd_a), _SID_A)])
+    _scrub_env(monkeypatch)
+    monkeypatch.setenv("CODEX_THREAD_ID", _SID_B)
+    monkeypatch.setenv("CODEX_SESSION_ID", _SID_C)
+
+    monkeypatch.chdir(cwd_a)
+    ident = resolve_self_identity()
+
+    assert ident.harness == "codex"
+    assert ident.session_id == _SID_A
+    assert ident.disposition == "spawn_record"
+
+
+def test_exited_rows_do_not_fill_the_resolver(tmp_path, monkeypatch):
+    cwd_a = tmp_path / "worker-a"
+    cwd_a.mkdir()
+    _write_registry(
+        tmp_path,
+        monkeypatch,
+        [_thread_row("worker", str(cwd_a), _SID_A, status="exited")],
+    )
+    _scrub_env(monkeypatch)
+
+    monkeypatch.chdir(cwd_a)
+    ident = resolve_self_identity()
+
+    assert ident.session_id is None
+    assert ident.disposition == "empty"
+
+
+def test_resolve_owned_identity_verb_stamps_the_spawn_record(tmp_path, monkeypatch):
+    """The production path end to end: init's manifest stamper verb answers
+    HARNESS=codex SESSION_ID=<row id> for a thread worker standing in its own
+    worktree - the answer whose absence stamped harness=unknown and refused
+    the worker's node claim."""
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+
+    rows, cwd_a, _cwd_b, sid_a, _sid_b = _two_worker_rows(tmp_path)
+    _write_registry(tmp_path, monkeypatch, rows)
+    _scrub_env(monkeypatch)
+
+    monkeypatch.chdir(cwd_a)
+    result = CliRunner().invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in result.stdout.splitlines()
+        if "=" in line
+    }
+    assert fields["HARNESS"] == "codex"
+    assert fields["SESSION_ID"] == sid_a
+    assert fields["DISPOSITION"] == "spawn_record"
+    assert fields["COLLISION"] == ""
