@@ -2,11 +2,14 @@
 name: pr
 description: "Drive a PR through its lifecycle. Routes to create (open a PR via a routed pr-create worker), check (poll for external review and implement it), or merged (the post-merge ritual). Use when: 'create pr', 'open pr', 'submit pr', 'check pr', 'get review', 'post merge', 'process the merged PR'."
 argument-hint: "<create|check|merged>  (create: opens a PR; check: [PR#]; merged: [PR#])  - a mode is required, there is no default"
-requires:
-  binaries:
-    - "fno >= 0.1"
-    - "gh >= 2.0"
-    - "git >= 2.0"
+metadata:
+  requires:
+    binaries:
+      - "fno >= 0.1"
+      - "gh >= 2.0"
+      - "git >= 2.0"
+    harness:
+      - subagent_dispatch
 ---
 
 # PR

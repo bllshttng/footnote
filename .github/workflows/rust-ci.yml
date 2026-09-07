@@ -227,11 +227,12 @@ jobs:
         # The ONE freshness gate for every build-generated copy. build.rs
         # regenerates the capability copies, the merge-posture copy,
         # events_limits.toml, and the registry-schema copy on every build;
-        # `fno doctor harness-matrix --write` renders the capability doc. A
-        # committed copy that drifted from its source (a hand edit, a
-        # forgotten rebuild) shows up here as a dirty tree - which is the
-        # wrong-merge class the retired *-fresh.sh scripts checked, at one
-        # step instead of four.
+        # `fno doctor harness-matrix --write` renders the capability doc (and
+        # the verb doc, whose own cheap freshness step lives in guards.yml
+        # because it also reads skills/*/SKILL.md). A committed copy that
+        # drifted from its source (a hand edit, a forgotten rebuild) shows up
+        # here as a dirty tree - which is the wrong-merge class the retired
+        # *-fresh.sh scripts checked, at one step instead of four.
         run: |
           # fno-py, not fno: the project env's console script is fno-py and a
           # bare `fno` on PATH is a stale installed tool, not this checkout.

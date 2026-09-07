@@ -2,6 +2,10 @@
 name: reign
 description: "The tenured king: stay active over a territory for days. Crowned once, check in on a schedule, drive with levers, park rather than die. Composes king-for-a-day (the one-wave pass) with a self-injected beat. Use when: 'reign over <scope>', 'stay king over <epic>', 'keep driving this territory'."
 argument-hint: "<scope> [--once]"
+metadata:
+  requires:
+    harness:
+      - loop
 ---
 
 <!-- style-exception: monitor cadences and verb spellings are load-bearing literals -->

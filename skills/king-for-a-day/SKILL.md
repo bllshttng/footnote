@@ -2,6 +2,11 @@
 name: king-for-a-day
 description: "Encode-before-exit ritual for an episodic orchestrator: read the track, write the wave plan, encode it into the graph, kick off, abdicate. You are crowned over one scope, you rule it once, the crown expires. Use when: 'crown me on <epic>', 'orchestrate the backlog', 'plan the next wave', 'king for a day on <epic>'."
 argument-hint: "<epic-id>"
+metadata:
+  requires:
+    harness:
+      - loop
+      - spawn
 ---
 
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->

@@ -2,10 +2,11 @@
 name: execute
 description: "Execute a plan. Routes between a lightweight single-session executor (flat, default) and full wave orchestration (waves, alias operator). Use when: 'do this plan', 'execute the plan', 'run the waves'."
 argument-hint: "[flat|waves|operator] <plan-path>"
-requires:
-  binaries:
-    - "fno >= 0.1"
-    - "git >= 2.0"
+metadata:
+  requires:
+    binaries:
+      - "fno >= 0.1"
+      - "git >= 2.0"
 ---
 
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->

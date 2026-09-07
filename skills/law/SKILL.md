@@ -4,9 +4,9 @@ description: "Record a durable project law from chat in one step."
 argument-hint: "<plain-language ruling>"
 metadata:
   internal: false
-requires:
-  binaries:
-    - "fno >= 0.3.1"
+  requires:
+    binaries:
+      - "fno >= 0.3.1"
 ---
 
 # Law
