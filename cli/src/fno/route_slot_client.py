@@ -27,36 +27,29 @@ def _profile_fields(profile: Optional[object]) -> dict[str, Any]:
 
 def _declared_rows(settings: object) -> dict[str, Any]:
     """The CONFIG-declared rows exactly (never the built-in fallback)."""
-    rows: dict[str, Any] = {}
+    fields = ("harness", "model", "route", "account", "band", "effort")
     try:
+        out: dict[str, Any] = {}
         for row in getattr(getattr(settings, "routing", None), "models", None) or []:
-            if isinstance(row, Mapping):
-                name = str(row.get("name", "") or "").strip()
-                if name:
-                    rows[name] = {
-                        "name": name,
-                        "harness": str(row.get("harness", "") or "").strip(),
-                        "model": str(row.get("model", "") or "").strip(),
-                        "route": str(row.get("route", "") or "").strip(),
-                        "account": str(row.get("account", "") or "").strip(),
-                        "band": str(row.get("band", "") or "").strip(),
-                        "effort": str(row.get("effort", "") or "").strip(),
-                    }
+            if not isinstance(row, Mapping):
+                continue
+            name = str(row.get("name", "") or "").strip()
+            if name:
+                out[name] = {"name": name, **{
+                    f: str(row.get(f, "") or "").strip() for f in fields
+                }}
+        return out
     except Exception:  # noqa: BLE001 - an unreadable config reads as empty
         return {}
-    return rows
 
 
 def _thread_seatable(harnesses: list[str]) -> dict[str, bool]:
-    out: dict[str, bool] = {}
-    for harness in dict.fromkeys(harnesses):
-        try:
-            from fno.agents.harness_map import thread_seatable
+    try:
+        from fno.agents.harness_map import thread_seatable
 
-            out[harness] = bool(thread_seatable(harness))
-        except Exception:  # noqa: BLE001 - unknown harness degrades open
-            continue
-    return out
+        return {h: bool(thread_seatable(h)) for h in dict.fromkeys(harnesses)}
+    except Exception:  # noqa: BLE001 - unknown harness degrades open
+        return {h: True for h in dict.fromkeys(harnesses)}
 
 
 def _vendor_tables(
@@ -89,30 +82,27 @@ def _vendor_tables(
         } - {""})
         for vendor in vendors:
             cap = provider_lanes_cap(table.get(vendor))
-            if cap is not None:
-                caps[vendor] = int(cap)
-                try:
-                    counts[vendor] = int(provider_live_count(vendor))
-                except ProviderCountUnavailable as exc:
-                    errors[vendor] = str(exc)
+            if cap is None:
+                continue
+            caps[vendor] = int(cap)
+            try:
+                counts[vendor] = int(provider_live_count(vendor))
+            except ProviderCountUnavailable as exc:
+                errors[vendor] = str(exc)
     except Exception:  # noqa: BLE001 - an unreadable cap table caps no lane
-        return {"vendor_caps": caps, "vendor_counts": counts, "vendor_count_errors": errors}
+        pass
     return {"vendor_caps": caps, "vendor_counts": counts, "vendor_count_errors": errors}
 
 
 def _account_record_vendors(settings: object) -> dict[str, str]:
-    out: dict[str, str] = {}
     try:
-        records = getattr(getattr(settings, "accounts", None), "records", None) or []
-        for record in records:
-            if isinstance(record, Mapping):
-                route = str(record.get("route", "") or "")
-                vendor = route.replace(",", "/").partition("/")[0].strip()
-                if record.get("id") and vendor:
-                    out[str(record["id"])] = vendor
+        return {
+            str(r["id"]): str(r.get("route", "") or "").replace(",", "/").partition("/")[0].strip()
+            for r in getattr(getattr(settings, "accounts", None), "records", None) or []
+            if isinstance(r, Mapping) and r.get("id") and str(r.get("route", "") or "").strip()
+        }
     except Exception:  # noqa: BLE001 - an unreadable registry contradicts nothing
         return {}
-    return out
 
 
 def _lanes_payload(lanes: Any) -> list[Any]:

@@ -1173,43 +1173,35 @@ def inject_spawn_defaults(
         for _line in slot_chain:
             if _line.startswith(("slot skip", "slot note", "slot demote")):
                 print(f"fno agents spawn: {_line}", file=err)
+
+        def _refuse(msg: str) -> None:
+            print(msg, file=err)
+            print("fno agents spawn: refusing; no worker launched", file=err)
+            raise SystemExit(2)
+
         if slot_chain:
             _terminal = slot_chain[-1]
             if _terminal.startswith("slot=config "):
-                print(f"fno agents spawn: {_terminal[len('slot=config '):]}", file=err)
-                print("fno agents spawn: refusing; no worker launched", file=err)
-                raise SystemExit(2)
+                _refuse(f"fno agents spawn: {_terminal[len('slot=config '):]}")
             if _terminal.startswith("slot=provider-count-unavailable "):
                 _rung, _detail = _terminal[
                     len("slot=provider-count-unavailable "):
                 ].split(" ", 1)
-                print(
+                _refuse(
                     f"fno agents spawn: config.{_rung} provider count unavailable"
-                    f" for {_detail}; refusing; no worker launched",
-                    file=err,
+                    f" for {_detail}"
                 )
-                raise SystemExit(2)
             if _terminal.startswith("slot=route-slot-unavailable"):
-                print(
-                    f"fno agents spawn: {_terminal[len('slot='):]};"
-                    " refusing; no worker launched",
-                    file=err,
-                )
-                raise SystemExit(2)
+                _refuse(f"fno agents spawn: {_terminal[len('slot='):]};")
             if _terminal == "slot=manual_account_switch_required":
-                print(
+                _refuse(
                     "fno agents spawn: every lane needs a manual canonical "
-                    "account switch; refusing; no worker launched",
-                    file=err,
+                    "account switch"
                 )
-                raise SystemExit(2)
             if _terminal == "slot=exhausted refuse":
-                print(
-                    "fno agents spawn: every configured lane is exhausted; "
-                    "refusing; no worker launched",
-                    file=err,
+                _refuse(
+                    "fno agents spawn: every configured lane is exhausted"
                 )
-                raise SystemExit(2)
             if _terminal.startswith("slot=exhausted queue"):
                 _lanes = [
                     {"name": _p[3], "reason": _p[4] if len(_p) > 4 else "exhausted"}
