@@ -2,20 +2,13 @@
 
 The declared inventory (``config.routing.models``) is the PRIMARY routing
 surface: nothing built-in is authoritative, so adding a model, a provider or a
-harness is a config edit, and a stranger's install never inherits this
-machine's fleet. The OpenRouter snapshot is OPTIONAL enrichment: it may supply
-a percentile that derives a band for a row whose ``band`` the operator left
-unset, and it can never make the grid inert. A virgin install declares no
-inventory; the grid records ``grid=no-inventory-declared`` and injects
-nothing, byte-identical to today's behaviour minus the silence.
-
-Full precedence (Locked Decision 1), now per AXIS rather than per spawn: an
-explicit flag or a profile field occupies the axis it names and nothing more,
-so ``[agents.profiles.target] provider = "codex"`` pins the harness and the
-grid still chooses model and effort within codex.
-    dispatch --model > task ``model:`` > task ``difficulty:`` > plan ``model:`` >
-    plan ``difficulty:`` > provider default (``--role`` routing / provider-rotation
-    combos live downstream and only fire when nothing above resolves a model).
+harness is a config edit. The OpenRouter snapshot is OPTIONAL enrichment and
+can never make the grid inert; a virgin install records
+``grid=no-inventory-declared`` and injects nothing. Per AXIS (Locked
+Decision 1): an explicit flag or a profile field occupies the axis it names
+and nothing more - ``dispatch --model > task model > task difficulty >
+plan model > plan difficulty > provider default``. Field semantics:
+docs/architecture/role-based-model-routing.md.
 """
 from __future__ import annotations
 
@@ -86,12 +79,9 @@ class InventoryRow:
     def accounts(self) -> list[str]:
         """The account record id whose quota this row spends, if named.
 
-        ``route`` deliberately contributes nothing: it names a VENDOR lane
-        (``zai/glm-5.3``), and ``provider_health``/``usage`` are keyed by
-        ``config.accounts.records`` id. A vendor string can never match a key,
-        so folding it into the account set would add a pseudo-account whose
-        permanent UNKNOWN dilutes a real account's live lock in the MAX
-        aggregate - the one shape this change exists to kill.
+        ``route`` deliberately contributes nothing: it names a VENDOR lane,
+        and folding it in would add a pseudo-account whose permanent UNKNOWN
+        dilutes a real account's live lock in the MAX aggregate.
         """
         return [self.account] if self.account else []
 
@@ -313,15 +303,11 @@ def _candidate_supported(
 ) -> bool:
     """Whether a pinned substrate / permission mode can legally ride ``harness``.
 
-    Posture flags FILTER the candidate set (t3.2); they never cancel the
-    routing decision. Mirrors the spawn parser's own gates: thread needs the
-    harness's journey-proven lane (its spawn claim reads native), a mapped
-    permission mode is claude's on every substrate and a non-claude harness's
-    only on the pane lane. An unset substrate reads as the spawn parser's own
-    default (pane), so a lone permission pin does not filter out non-claude
-    rows the gate would accept. An unknown harness degrades open (kept) so
-    the spawn's own gate, which names the value, stays the authority on
-    refusal.
+    Posture flags FILTER the candidate set; they never cancel the decision.
+    Mirrors the spawn parser's own gates: thread needs the harness's
+    journey-proven lane, a mapped permission mode is claude's off pane. An
+    unset substrate reads as pane; an unknown harness degrades open so the
+    spawn's own gate keeps the authority to refuse.
     """
     sub = (substrate or "").strip()
     if sub == "bg":
@@ -399,16 +385,14 @@ def resolve_grid(
     settings: object = None,
     snapshot: Optional[dict] = None,
 ) -> tuple[Optional[dict[str, str]], list[str]]:
-    """Join intrinsic difficulty and priority with a live capacity snapshot.
+    """Join difficulty and priority with a live capacity snapshot.
 
-    The grid is a default route only. ``capacity`` is supplied by the runtime
-    seam so this resolver never reads accounts or the network; an explicit
-    flag or profile field occupies its axis and the grid fills the rest
-    (``constrain_harness`` = the harness axis is taken; it still picks model
-    and effort within it). Unknown capacity PERMITS a candidate and records
-    ``capacity=unknown-permitted``; only a positive ``exhausted``/``blocked``
-    marker removes one. Returns ``(candidate|None, chain)``; the chain's last
-    element is the terminal reason the caller receipts on every path.
+    The grid is a default route only: ``capacity`` arrives from the runtime
+    seam (never accounts, never the network), an occupied axis stands it down,
+    unknown capacity PERMITS (``capacity=unknown-permitted``) and only a
+    positive ``exhausted``/``blocked`` marker removes a candidate. Returns
+    ``(candidate|None, chain)``; the chain's last element is the terminal the
+    caller receipts on every path.
     """
     inv = inventory if inventory is not None else resolve_inventory(
         settings=settings, snapshot=snapshot
@@ -838,13 +822,9 @@ def harness_accounts(
 ) -> list[str]:
     """Expand a harness to the ACCOUNT record ids reachable through it.
 
-    Quota is a property of an ACCOUNT at a vendor; a harness is a client that
-    can speak for several accounts. The direction is deliberate (M2): expand
-    the harness to its accounts and aggregate, never fold records to harnesses.
-    The account set is a UNION: every registered ``config.accounts.records``
-    entry bound to the harness is reachable through it (one healthy account
-    means the harness is usable), plus any inventory row ``account`` / ``route``
-    vendor the records list does not already name.
+    Quota is a property of an ACCOUNT; a harness is a client that can speak
+    for several. The set is a UNION: registered records bound to the harness
+    plus inventory-row accounts.
     """
     inv = inventory if inventory is not None else resolve_inventory(settings=settings)
     accounts: list[str] = []
@@ -877,15 +857,11 @@ def runtime_capacity(
     inventory: Optional[Inventory] = None,
 ) -> dict[str, object]:
     """Cached harness capacity: expand each harness to its accounts, read each
-    account's headroom, aggregate MAX.
-
-    A harness is ``ok`` if ANY account reachable through it is ok, ``exhausted``
-    only if EVERY account is exhausted, ``unknown`` when no account answers.
-    Every harness NAMED by a declared row is covered alongside ``providers``,
-    so an agy or custom-harness row is never silently unprobed. The value is a
-    detail mapping ``{state, window, accounts}``; bare state strings (the old
-    shape) still resolve via :func:`_capacity_state`. Never probes, never
-    touches the network, and reads the state file ONCE for all accounts.
+    account's headroom, aggregate MAX (ok if ANY account is ok, exhausted only
+    if EVERY account is). Every harness NAMED by a declared row is probed
+    alongside ``providers``. The value is a detail mapping
+    ``{state, window, accounts}``; bare state strings still resolve via
+    :func:`_capacity_state`. Never probes, never touches the network.
     """
     try:
         from fno.adapters.providers.runtime_state import headrooms
@@ -936,12 +912,10 @@ def resolve_tier(
 ) -> tuple[Optional[str], list[str]]:
     """Resolve a tier to a concrete declared model. Returns ``(model, chain)``.
 
-    ``provider`` scopes the candidate set to one harness (Locked Decision 1): a
-    band left empty by the filter falls through the remaining bands within the
-    same harness, then to None (provider default) - never a foreign-harness
-    model. ``model`` is None when nothing resolves (the caller uses the
-    provider default). ``chain`` records each step so the receipt shows how the
-    choice (or fallback) was reached. Never raises, never hits the network.
+    ``provider`` scopes the candidate set to one harness: a band the filter
+    empties falls through the remaining bands within the same harness, then to
+    None (provider default) - never a foreign-harness model. Never raises,
+    never hits the network.
     """
     band = (tier or "").strip().lower()
     chain = [f"tier({band})"]
@@ -1000,13 +974,9 @@ def resolve_dispatch_model(
 ) -> tuple[Optional[str], str, list[str]]:
     """Apply the full precedence chain. Returns ``(model, decision_source, chain)``.
 
-    ``model`` is None only when everything falls through to the provider default.
-    ``decision_source`` is the receipt vocabulary
-    (``explicit`` / ``task-pin`` / ``task-difficulty(<band>)`` / ``plan-default`` /
-    ``plan-difficulty(<band>)`` / ``provider-default(no-difficulty)``).
-    ``provider`` scopes band
-    resolution to one harness; pins (``explicit`` / ``task_model`` / ``plan_model``)
-    bypass the filter - operator authority outranks routing (Locked Decision 4).
+    ``model`` is None only when everything falls through to the provider
+    default. Pins (``explicit`` / ``task_model`` / ``plan_model``) bypass the
+    band filter - operator authority outranks routing (Locked Decision 4).
     """
     if explicit:
         return explicit, "explicit", ["explicit"]
@@ -1038,18 +1008,11 @@ def node_model(
 ) -> Optional[str]:
     """Concrete ``--model`` for a node/task at the spawn seam, or None for default.
 
-    Reads the node's own ``model`` pin and ``difficulty`` band and applies
-    the precedence with an optional dispatch-time ``explicit`` override.
-    ``provider`` scopes band resolution to the spawn harness so a band never
-    yields a cross-harness ``<provider> --model <foreign>`` pick. When ``provider`` is
-    None it defaults to ``claude`` - the bg substrate's own spawn default (see
-    ``advance._spawn_worker``: ``(provider or "").strip() or "claude"``, NOT the
-    ambient/invoking harness. A bg worker is always claude regardless of which
-    harness dispatched it, so scoping by the invoking harness would resolve a
-    codex model for a claude spawn (Locked Decision 3 intent: scope the incident
-    bg-default lane, which is claude). Strictly non-fatal: any resolution error
-    degrades to the explicit override or the node's raw ``model`` pin so a routing
-    hiccup never breaks a spawn (Locked Decision 10).
+    Reads the node's ``model`` pin and ``difficulty`` band under the full
+    precedence, with ``provider`` scoping bands to the spawn harness: None
+    means ``claude`` - the bg substrate's own spawn default, NOT the ambient
+    harness. Strictly non-fatal: any resolution error degrades to the explicit
+    override or the node's raw ``model`` pin (Locked Decision 10).
     """
     try:
         model, _source, _chain = resolve_dispatch_model(
