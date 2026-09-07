@@ -1684,7 +1684,9 @@ mod tests {
         assert_eq!(out["on_low"], "prefer_healthy");
         assert_eq!(out["on_unknown"], "allow");
         assert!(out["would_take"]
-            .as_str().unwrap().contains("must be a non-empty list"));
+            .as_str()
+            .unwrap()
+            .contains("must be a non-empty list"));
         // A fold fault (lane names nothing declared) keeps them too.
         let out = resolve_slot_payload(&json!({
             "mode": "states",

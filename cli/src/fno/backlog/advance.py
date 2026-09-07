@@ -1474,8 +1474,7 @@ def _spawn_worker(
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
             raise SpawnAlreadyRunning(f"agent {agent_name} already exists")
         if proc.returncode == 78:
-            # The slot's typed capacity refusal: persist a defer through the
-            # backlog owner and hand retry_at to the dispatcher's skip.
+            # Typed capacity refusal: persist a defer; hand retry_at to the skip.
             raise SpawnQueueRefused(
                 f"slot queue refused: {(stderr or proc.stdout or '').strip()[:200]}",
                 retry_at=_slot_queue_retry_at(proc.stdout or ""),
@@ -3332,8 +3331,7 @@ def advance(
         _safe_release(dispatch_key, holder, dispatch_root)
         return skip("already-claimed", node_id=node_id)
     except SpawnQueueRefused as exc:
-        # Every configured lane is exhausted: persist the queue state on the
-        # node (the backlog defer owner), then skip with the reset horizon.
+        # Every lane exhausted: persist the defer (backlog owner), skip on the horizon.
         _safe_release(dispatch_key, holder, dispatch_root)
         reset = int(exc.retry_at) if exc.retry_at else "unknown"
         proc = subprocess.run(

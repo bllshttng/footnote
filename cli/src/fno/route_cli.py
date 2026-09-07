@@ -312,11 +312,9 @@ def inventory_cmd(
     """What can this installation reach: every declared routing row.
 
     One row per declared model with its resolved band and a reachability
-    verdict: ``ok`` | ``not-installed`` (refused BY NAME on stderr, never
-    silently dropped) | ``unbanded`` (a candidate at every band) |
-    ``incomplete`` (no --model value). After the rows, a ``slots`` section
-    names each verb's lanes, their live capacity, and the lane a spawn
-    would take right now.
+    verdict: ``ok`` | ``not-installed`` (refused BY NAME, never dropped) |
+    ``unbanded`` (a candidate at every band) | ``incomplete`` (no --model).
+    Then a ``slots`` section: each verb's lanes, live capacity, would_take.
     """
     from fno.agents.harnesses import READABLE_PROVIDERS
     from fno.route_resolve import resolve_inventory, runtime_capacity, slot_states, slot_verbs

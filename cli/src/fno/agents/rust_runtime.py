@@ -268,8 +268,7 @@ RUST_CLIENT_VERBS = frozenset(
         "graph-get",
         "bash-census",
         "session-start-bytes",
-        # Orphan-crown sweep for `fno agents court`: daemon-free read invoked
-        # directly by the court render, never via `fno agents` routing.
+        # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
         "court-orphans",
         # The delivery-slot resolver: payload JSON in, the answer out; Python
         # calls it via fno.route_slot_client (keeps the parity test in sync).
