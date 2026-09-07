@@ -238,9 +238,8 @@ def _slot_queue_retry_at(stdout: str) -> Optional[float]:
         except Exception:  # noqa: BLE001 - not JSON, keep scanning
             continue
         if isinstance(data, dict) and data.get("reason") == "slot_exhausted":
-            value = data.get("retry_at")
             try:
-                return float(value) if value is not None else None
+                return float(data.get("retry_at"))
             except (TypeError, ValueError):
                 return None
     return None
@@ -1652,21 +1651,11 @@ def _grid_lane_for(
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """``(harness, model, decline_reason)`` the slot resolver picks for an UNPINNED spawn.
 
-    On a pick the reason is ``None``; on a decline the harness and model are
-    ``None`` and the reason names WHY - the chain's own terminal, surfaced
-    verbatim because rewording it would fork the receipt vocabulary. The
-    reason is for RECEIPTS, never for refusing: routing degrades and never
-    blocks a spawn (Locked 10), and an empty inventory is a config gap, not a
-    capacity failure.
-
-    Deliberately ONE function rather than a wrapper: tests monkeypatch this
-    name, and an internal caller that reached past it would silently bypass
-    every such patch. Verb ``target``: this is the DISPATCH door, and the
-    spawn seam composes the same verb from the same profile, so placement and
-    spawn agree on one lane. Only a fully unpinned spawn defers here; unknown
-    capacity falls back to the caller's defaults. Dispatch sites that make
-    HARNESS-KEYED decisions before spawning (lane worktree placement) must
-    call this first and thread the result through both decisions.
+    On a decline the reason is the chain's own terminal, verbatim: rewording
+    it forks the receipt vocabulary. Receipts only, never refusing (Locked
+    10). Deliberately ONE function: tests monkeypatch this name, and a caller
+    that reached past it would bypass every patch. Placement and spawn both
+    compose verb ``target`` through here so the two agree on one lane.
 
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
