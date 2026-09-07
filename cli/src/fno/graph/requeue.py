@@ -200,16 +200,7 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
         typer.echo(f"requeue: {node_id} still reads in_progress after settling ({remaining} open do row(s) remain).", err=True)
         raise typer.Exit(code=1)
 
-    settled = [
-        {
-            "harness": r.get("harness"),
-            "session_id": r.get("session_id"),
-            "state": truth.get("state"),
-            "last_event_at": truth.get("last_event_at"),
-            "age": _humanize_age(truth.get("last_activity_age_s")),
-        }
-        for r, truth in pairs
-    ]
+    settled = [{"harness": r.get("harness"), "session_id": r.get("session_id"), "state": truth.get("state"), "last_event_at": truth.get("last_event_at"), "age": _humanize_age(truth.get("last_activity_age_s"))} for r, truth in pairs]
     receipt = {"node_id": node_id, "status_before": status_before, "status_after": status_after, "settled": settled}
     if json_out:
         typer.echo(json.dumps(receipt, sort_keys=True))
