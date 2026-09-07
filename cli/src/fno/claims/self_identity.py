@@ -33,11 +33,10 @@ def resolve_self_identity(
 
     The spawn record is a separate, narrower source that fills a session id
     ancestry structurally cannot supply: a codex thread worker owns no process
-    (N thread workers are WebSocket clients of the ONE shared app-server
-    daemon, so N workers share one pid), and the daemon-written registry row,
-    keyed by this process's own cwd, is the only per-worker identity the lane
-    has. See :func:`_fill_spawn_record`, which runs after the walk and never
-    overwrites a session id the walk proved.
+    (N thread workers share the ONE app-server daemon pid), and the
+    daemon-written registry row, keyed by this process's own cwd, is the only
+    per-worker identity the lane has. See :func:`_fill_spawn_record`, which
+    runs after the walk and never overwrites a proven session id.
 
     A self-set marker does NOT belong here, and the attempt is worth recording
     because it looks correct. ``CLAUDECODE`` is written by the claude binary at
@@ -154,23 +153,12 @@ def _fill_spawn_record(owned):
     """Fill a session id the walk could not supply from the cwd-keyed spawn
     record (x-e882).
 
-    A codex thread worker owns no process - N thread workers are WebSocket
-    clients of the ONE shared app-server daemon - so ancestry is structurally
-    silent for the whole lane. The daemon writes each thread's spawn record
-    (harness, session id, cwd) before its first turn, and the record is keyed
-    by the caller's own cwd, so a sibling thread's lookup returns the sibling's
-    own row. Order is the whole guard: a resolved session id short-circuits
-    before the registry is read (an operator's claude session standing in a
-    thread worker's worktree keeps its own identity), and a resolved harness
-    that DISAGREES with the record leaves the answer untouched (the walk is
-    authoritative on contradiction). No matching record changes nothing, so
-    every non-thread answer stays byte-identical.
-
-    The adopted answer carries its own ``spawn_record`` disposition, and that
-    value is deliberately absent from ``_PROVEN_DISPOSITIONS``: the record
-    proves ownership for the worker its cwd names, but a record-carried id
-    that also matches the worktree manifest is still a shared anchor for
-    task-holder resolution.
+    Order is the whole guard: a resolved session id short-circuits before the
+    registry is read, a resolved harness that DISAGREES with the record leaves
+    the answer untouched, and no matching record changes nothing, so every
+    non-thread answer stays byte-identical. ``spawn_record`` stays outside
+    ``_PROVEN_DISPOSITIONS``: the record proves ownership for the worker its
+    cwd names, but the manifest shared-anchor check stays armed for it.
     """
     if owned.session_id:
         return owned
@@ -200,9 +188,7 @@ _MANIFEST_IDENTITY_FIELDS = (
 #: session id is PROVEN by this process's own ancestry. Every other
 #: disposition with an id present is an inherited marker, and an inherited
 #: marker that matches the worktree manifest is a shared anchor, not a self.
-#: ``spawn_record`` is deliberately absent: the cwd-keyed record proves
-#: ownership for the worker its cwd names, but the manifest-anchor check stays
-#: armed for it (see :func:`_fill_spawn_record`).
+#: ``spawn_record`` is deliberately absent (see :func:`_fill_spawn_record`).
 _PROVEN_DISPOSITIONS = frozenset({"canonical", "proven"})
 
 

@@ -783,10 +783,8 @@ class OwnedHarnessIdentity:
                      by precedence.
     * ``empty``    - no marker present.
     * ``spawn_record`` - the session id came from the cwd-keyed agents-registry
-                     spawn record (a codex thread worker, whose lane shares
-                     one daemon pid and gives the walk nothing to find), not
-                     from a marker the walk proved. Set only when the walk
-                     returned no session id at all and the record's harness
+                     spawn record (a codex thread worker), set only when the
+                     walk returned no session id and the record's harness
                      agrees with, or fills, the resolved one.
 
     ``markers_present`` carries every marker seen (with its value) and
@@ -1240,10 +1238,8 @@ def current_session_ids(env: Optional[Mapping[str, str]] = None) -> set[str]:
 
 #: Row statuses under which a session still owns its identity: a
 #: harness_session_id held by such a row is provably not another acquiring
-#: session's. Declared in this platform leaf, which both the agents registry
-#: and the spawn-record reader import, so the two layers cannot drift: a
-#: status the registry treats as ownership-releasing must release it for
-#: identity adoption too.
+#: session's. Declared in this platform leaf so the agents registry and the
+#: spawn-record reader cannot drift.
 OWNERSHIP_LIVE_STATUSES = frozenset(
     {"spawning", "ready", "idle", "busy", "live", "restarting"}
 )
@@ -1255,19 +1251,16 @@ def live_thread_row_for_cwd(
     """The ``(harness, session_id)`` of the ONE live thread row holding ``cwd``.
 
     A codex thread worker owns no process: every thread is a WebSocket client
-    of the one shared ``codex app-server`` daemon on the machine, so N workers
-    share one pid and the process-tree walk cannot name a thread's session id.
-    The spawn record can - the daemon writes the row (harness, session id, cwd)
-    before the worker's first turn. The key is the caller's own cwd: fno
-    allocates one worktree per worker and codex assigns each thread that cwd,
-    so a sibling thread running the same lookup returns its own row, not a
-    victim's.
+    of the one shared ``codex app-server`` daemon, so N workers share one pid
+    and the process-tree walk cannot name a thread's session id. The spawn
+    record can - the daemon writes the row before the worker's first turn,
+    keyed by the cwd fno named at spawn (one worktree per worker), so a
+    sibling thread's lookup returns its own row.
 
     Exactly one ownership-live ``substrate: thread`` row with a non-empty
-    harness and session id at this cwd answers. Zero matches AND two or more
-    matches return None - ambiguity refuses, it never picks. An absent,
-    unreadable, or alien-shape registry also returns None and raises nothing,
-    the same degrade contract as every other registry reader.
+    harness and session id answers. Zero and two-plus matches return None -
+    ambiguity refuses, it never picks. An absent, unreadable, or alien-shape
+    registry returns None and raises nothing, the usual degrade contract.
     """
     if not cwd:
         return None
