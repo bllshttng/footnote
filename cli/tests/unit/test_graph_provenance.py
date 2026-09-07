@@ -548,16 +548,16 @@ def test_explicit_source_node_outranks_a_stale_snapshot(tmp_path, monkeypatch):
 
 def test_build_backlog_node_stamps_ambient(monkeypatch):
     """AC-HP (2.1): _build_backlog_node merges ambient provenance with no caller arg."""
-    import fno.graph.cli as gcli
+    import fno.graph.node_builder as nb
 
-    monkeypatch.setattr(gcli, "_session_provenance", lambda cwd=None, **_kw: {
+    monkeypatch.setattr(nb, "_session_provenance", lambda cwd=None, **_kw: {
         "source_session_id": "S",
         "source_harness": "claude",
         "source_cwd": "/wt/sess",
         "source_node_id": "ab-parent01",
         "source_plan_path": "plan.md",
     })
-    node = gcli._build_backlog_node(title="child", difficulty=None)
+    node = nb._build_backlog_node(title="child", difficulty=None)
     assert node["source_session_id"] == "S"
     assert node["source_harness"] == "claude"
     assert node["source_cwd"] == "/wt/sess"
