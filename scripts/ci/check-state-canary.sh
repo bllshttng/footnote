@@ -32,6 +32,19 @@
 # would be a file plant creates and verify then reads as added, so the
 # instrument would flag itself.
 #
+# Three paths directly under <checkout>/.fno are excluded BY NAME, because the
+# smoke runner writes them while the canary brackets it. They are the
+# instrument's own exhaust, not a test reaching operator state:
+#
+#   last-test.log               cli/src/fno/test_cmd.py:255
+#   preflight-last-failures.txt cli/src/fno/test_cmd.py SMOKE_FAILURE_RECORD_DEFAULT
+#   changed-last-receipt.json   cli/src/fno/test_cmd.py CHANGED_RECEIPT_DEFAULT
+#
+# The list is by exact basename, at the checkout root only, and verify prints
+# how many it excluded. A green that rests on a growing ignore list is the
+# failure this whole script refuses, so the count is on screen every run. The
+# same names under $HOME/.fno are NOT excluded; there they would be a finding.
+#
 # Run: bash scripts/ci/check-state-canary.sh {plant|verify|self-test}
 
 set -uo pipefail
@@ -60,8 +73,16 @@ import hashlib
 import os
 import sys
 
+# The smoke runner's own bookkeeping, at the checkout root only. See the header.
+RUNNER_OWNED = {
+    "last-test.log",
+    "preflight-last-failures.txt",
+    "changed-last-receipt.json",
+}
+
 roots, snapshot = sys.argv[1:3], os.path.realpath(sys.argv[3])
-rows, seen = [], set()
+checkout_root = os.path.realpath(roots[1])
+rows, seen, excluded = [], set(), 0
 for root in roots:
     if not os.path.isdir(root):
         continue
@@ -71,6 +92,9 @@ for root in roots:
             real = os.path.realpath(path)
             # The snapshot is not part of the population it measures.
             if real == snapshot or real in seen:
+                continue
+            if name in RUNNER_OWNED and os.path.realpath(dirpath) == checkout_root:
+                excluded += 1
                 continue
             seen.add(real)
             digest = hashlib.sha256()
@@ -85,6 +109,7 @@ for root in roots:
                 rows.append(("UNREADABLE", path))
                 continue
             rows.append((digest.hexdigest(), path))
+print(f"#excluded {excluded}")
 print("\n".join(f"{h}  {p}" for h, p in sorted(rows, key=lambda r: r[1])))
 PY
 }
@@ -132,7 +157,7 @@ cmd_plant() {
     snapshot_now
   } >"$SNAPSHOT"
   local n
-  n=$(($(wc -l <"$SNAPSHOT") - 1))
+  n=$(($(wc -l <"$SNAPSHOT") - 2))
   echo "state-canary: planted, $n file(s) snapshotted"
 }
 
@@ -161,22 +186,22 @@ cmd_verify() {
 import sys
 
 
-def load(path, skip_header):
-    rows = {}
+def load(path):
+    rows, excluded = {}, 0
     with open(path, encoding="utf-8") as fh:
-        lines = fh.read().splitlines()
-    if skip_header:
-        lines = lines[1:]
-    for line in lines:
-        if not line.strip():
-            continue
-        digest, _, name = line.partition("  ")
-        rows[name] = digest
-    return rows
+        for line in fh.read().splitlines():
+            if not line.strip() or line == "PLANTED":
+                continue
+            if line.startswith("#excluded "):
+                excluded = int(line.split()[1])
+                continue
+            digest, _, name = line.partition("  ")
+            rows[name] = digest
+    return rows, excluded
 
 
-before = load(sys.argv[1], skip_header=True)
-after = load(sys.argv[2], skip_header=False)
+before, _ = load(sys.argv[1])
+after, excluded = load(sys.argv[2])
 
 violations = 0
 for name in sorted(set(after) - set(before)):
@@ -197,7 +222,10 @@ if violations:
         file=sys.stderr,
     )
     raise SystemExit(1)
-print(f"state-canary: ok, {len(after)} file(s) checked, none added, removed or changed")
+print(
+    f"state-canary: ok, {len(after)} file(s) checked, "
+    f"{excluded} runner-owned path(s) excluded, none added, removed or changed"
+)
 PY
   rc=$?
   rm -f "$after"
