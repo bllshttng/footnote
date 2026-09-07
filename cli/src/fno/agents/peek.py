@@ -475,6 +475,25 @@ def recent_records(
     raise ObserveUnsupported(agent)
 
 
+def newest_assistant_text(path: Path) -> Optional[str]:
+    """Newest assistant turn's text from one claude- or codex-shaped JSONL.
+
+    The one transcript read for callers that hold a PATH but no agent
+    (loopcheck's distress leg routes here, x-6aca: its former in-process
+    parser read claude shape only, so every codex rollout read as
+    assistant-free and no codex distress reached a parent). The two record
+    parsers are shape-disjoint per line, so trying both loses nothing. None
+    when the file yields no assistant turn.
+    """
+    records = _records_from_jsonl(
+        path, None, lambda rec: _parse_claude_record(rec) or _parse_codex_record(rec)
+    )
+    for rec in reversed(records):
+        if rec.role == "assistant":
+            return rec.text
+    return None
+
+
 # --------------------------------------------------------------------------
 # Status-stream fast-path (US4) — dual-envelope, opportunistic
 # --------------------------------------------------------------------------

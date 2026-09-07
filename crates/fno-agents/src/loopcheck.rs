@@ -1014,35 +1014,46 @@ fn extract_help_distress(text: &str) -> Option<HelpDistress> {
     None
 }
 
-/// The NEWEST assistant entry's text from a transcript, or None. The
-/// distress parse's transcript-only fallback (agy / opencode stop hooks carry
-/// no `last_assistant_message` payload). Newest-entry-only mirrors the
-/// intent read's newest-entry rule for `watching`: an older entry's distress
-/// was handled at its own stop.
-fn newest_assistant_text(transcript_path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(transcript_path).ok()?;
-    for line in content.lines().rev() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let role = val
-            .pointer("/message/role")
-            .or_else(|| val.get("role"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if role != "assistant" {
-            continue;
-        }
-        let text = extract_assistant_text(&val);
-        if !text.is_empty() {
-            return Some(text);
-        }
+/// The NEWEST assistant entry's text from a transcript, read through the one
+/// transcript reader that speaks both harness shapes (`fno agents
+/// newest-assistant-text`, peek's parsers). The distress parse's
+/// transcript-only fallback (agy / opencode / codex stop hooks carry no
+/// `last_assistant_message` payload). The in-process parser this replaced
+/// resolved the speaker via /message/role and a top-level role alone, so a
+/// codex rollout (payload.role, content[].output_text) read as
+/// assistant-free on every line and no codex distress ever reached a parent
+/// (x-6aca); routing through the reader deletes that second parser instead
+/// of teaching it the codex shape. Newest-entry-only mirrors the intent
+/// read's newest-entry rule for `watching`: an older entry's distress was
+/// handled at its own stop. Fail-quiet None on a missing fno, a timeout, or
+/// an empty answer - the same degrade an unreadable transcript always had.
+/// `fno_bin` comes from the caller (`loopcheck_fno_bin()`) so the read is
+/// hermetically testable with a stub script.
+fn newest_assistant_text_via_reader(
+    fno_bin: &str,
+    transcript_path: &Path,
+    cwd: &Path,
+) -> Option<String> {
+    let args = [
+        "agents",
+        "newest-assistant-text",
+        "--transcript",
+        transcript_path.to_str()?,
+    ];
+    let out = bounded_read(
+        std::ffi::OsStr::new(fno_bin),
+        &args,
+        cwd,
+        "newest_assistant_text",
+        std::time::Duration::from_secs(10),
+    )
+    .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
     }
-    None
 }
 
 /// True when the project log already carries a `blocked` row for this run
@@ -8591,9 +8602,9 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // NEWEST entry only on the transcript fallback (mirroring the intent
     // read's newest-entry rule for watching): a distress in an older entry
     // was handled at that entry's own stop, and re-reading it here would
-    // re-fire it. The fallback matters because the agy and opencode stop
-    // hooks are transcript-only invocations - `last_assistant_message` is
-    // always absent there (codex round on PR 1282) - and the emitter must
+    // re-fire it. The fallback matters because the agy, opencode, and codex
+    // stop hooks are transcript-only invocations - `last_assistant_message`
+    // is always absent there (codex round on PR 1282) - and the emitter must
     // not silently not exist on those harnesses.
     let node_id = scan_manifest_field(&manifest_content, "graph_node_id").or_else(|| {
         scan_manifest_field(&manifest_content, "target_claim_key")
@@ -8601,7 +8612,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     });
     let distress_text: Option<String> = last_assistant_message
         .clone()
-        .or_else(|| newest_assistant_text(&transcript_path));
+        .or_else(|| newest_assistant_text_via_reader(&loopcheck_fno_bin(), &transcript_path, &cwd));
     if let Some(distress) = distress_text.as_deref().and_then(extract_help_distress) {
         emit_help_distress_blocked(
             &project_events,
@@ -16259,27 +16270,57 @@ mod tests {
     }
 
     #[test]
-    fn newest_assistant_text_reads_the_newest_entry_only() {
-        // The transcript-only fallback (agy / opencode stop hooks carry no
-        // last_assistant_message payload): the distress parse must still see
-        // the newest assistant text, and only the newest.
+    fn distress_flows_from_reader_output_to_a_blocked_row() {
+        // x-6aca regression, Rust half: the transcript fallback must feed
+        // extract_help_distress and land a blocked row. The stub pins the
+        // seam contract: `agents newest-assistant-text --transcript <path>`
+        // with the newest assistant text on stdout. The codex record SHAPE
+        // itself is pinned on the Python side, in the reader that now owns
+        // this parse (cli/tests/agents/test_peek.py); a rollout whose
+        // payload.role is assistant and whose last message carries the tag
+        // produces exactly this stdout.
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let older = serde_json::json!({
-            "message": {"role": "assistant", "content": "<help reason=\"old wall\">"}
-        });
-        let newer = serde_json::json!({
-            "message": {"role": "assistant", "content": "still working"}
-        });
-        let user = serde_json::json!({"message": {"role": "user", "content": "go"}});
-        std::fs::write(&path, format!("{older}\n{user}\n{newer}\n")).unwrap();
-        assert_eq!(
-            newest_assistant_text(&path).as_deref(),
-            Some("still working"),
-            "the NEWEST assistant entry wins, not the newest distress-bearing one"
+        let transcript = tmp.path().join("rollout-2026-09-06T00-00-00-cx-1.jsonl");
+        std::fs::write(&transcript, "rollout bytes the stub vouches for\n").unwrap();
+        let stub = write_exec(
+            tmp.path(),
+            "fno",
+            "#!/bin/sh\n[ \"$1\" = agents ] && [ \"$2\" = newest-assistant-text ] && [ \"$3\" = --transcript ] && [ -f \"$4\" ] || exit 42\nprintf '%s' '<help reason=\"worktree-init-blocked\" evidence=\"Unable to create .git/refs/heads lock: Operation not permitted\">'\n",
         );
-        let absent = tmp.path().join("absent.jsonl");
-        assert_eq!(newest_assistant_text(&absent), None);
+        let text =
+            newest_assistant_text_via_reader(stub.to_str().unwrap(), &transcript, tmp.path());
+        let distress = text.as_deref().and_then(extract_help_distress);
+        assert_eq!(
+            distress.as_ref().map(|d| d.reason.as_str()),
+            Some("worktree-init-blocked"),
+            "the reader's answer must reach the distress parse"
+        );
+        // The row the parent actually reads (the same emit the stop fire makes).
+        let project = tmp.path().join("events.jsonl");
+        let global = tmp.path().join("global.jsonl");
+        assert!(append_blocked_event(
+            &project,
+            &global,
+            "cx-run",
+            Some("x-6aca"),
+            &distress.unwrap()
+        ));
+        let row: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+        assert_eq!(row["type"], serde_json::json!("blocked"));
+        assert_eq!(
+            row["data"]["reason"],
+            serde_json::json!("worktree-init-blocked")
+        );
+        assert_eq!(row["node"], serde_json::json!("x-6aca"));
+        // No reader answer (missing binary, empty stdout): fail-quiet None,
+        // the same degrade an unreadable transcript always had.
+        let text = newest_assistant_text_via_reader(
+            tmp.path().join("no-such-fno").to_str().unwrap(),
+            &transcript,
+            tmp.path(),
+        );
+        assert_eq!(text, None);
     }
 
     #[test]

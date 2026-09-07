@@ -4361,6 +4361,26 @@ def cmd_truth(
         raise typer.Exit(code=13)
 
 
+@agents_app.command("newest-assistant-text", hidden=True)
+def cmd_newest_assistant_text(
+    transcript: str = typer.Option(
+        ..., "--transcript", help="Path to a claude or codex JSONL transcript."
+    ),
+) -> None:
+    """Print the newest assistant turn's text from one transcript file.
+
+    loopcheck's distress read routes here instead of keeping its own parser:
+    this is the one reader that speaks both harness shapes (x-6aca). Exit 1
+    when the file yields no assistant text.
+    """
+    from fno.agents.peek import newest_assistant_text
+
+    text = newest_assistant_text(Path(transcript))
+    if not text:
+        raise typer.Exit(code=1)
+    sys.stdout.write(text)
+
+
 def _run_unfinished_report(
     *,
     now: float,

@@ -20,6 +20,7 @@ from fno.agents.peek import (
     _codex_rollout_path,
     _emit_record,
     _read_complete_lines,
+    newest_assistant_text,
     peek,
     recent_records,
 )
@@ -444,6 +445,88 @@ def test_peek_reader_codex(tmp_path, monkeypatch):
     )
     recs = recent_records("codex", "cx-999", "/tmp/proj", 10, codex_sessions_dir=tmp_path)
     assert [(r.role, r.text) for r in recs] == [("user", "ping")]
+
+
+def test_newest_assistant_text_reads_codex_rollout_help_tag(tmp_path):
+    """x-6aca regression: a codex rollout whose final assistant message
+    carries a help tag is readable. loopcheck's former in-process parser
+    resolved the speaker via /message/role and a top-level role, and a codex
+    rollout puts both under payload, so every line read as assistant-free and
+    no codex distress ever reached a parent."""
+    rollout = tmp_path / "rollout-2026-09-06T00-00-00-cx-1.jsonl"
+    rollout.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "cx-1", "cwd": "/tmp/proj"}}),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "run the target"}]},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "branch created, continuing"}]},
+                    }
+                ),
+                # task_complete rides event_msg, which is not a message record:
+                # the reader must skip it and keep scanning for the newest
+                # assistant turn.
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "task_complete", "last_agent_message": "done"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": '<help reason="worktree-init-blocked" evidence="Unable to create .git/refs/heads/feature/x-6aca.lock: Operation not permitted"> no source edits occurred'}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    text = newest_assistant_text(rollout)
+    assert text is not None
+    assert 'reason="worktree-init-blocked"' in text
+
+
+def test_newest_assistant_text_reads_the_newest_entry_only(tmp_path):
+    """The NEWEST assistant turn wins, not the newest distress-bearing one;
+    an older entry's distress was handled at its own stop."""
+    path = tmp_path / "t.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                _assistant('<help reason="old wall">'),
+                _user("go"),
+                _assistant("still working"),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert newest_assistant_text(path) == "still working"
+
+
+def test_newest_assistant_text_none_without_an_assistant_turn(tmp_path):
+    """User-only, empty, and absent files all read as no answer (None), which
+    the caller treats as fail-quiet."""
+    user_only = tmp_path / "user-only.jsonl"
+    user_only.write_text(_user("go") + "\n", encoding="utf-8")
+    assert newest_assistant_text(user_only) is None
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert newest_assistant_text(empty) is None
+    assert newest_assistant_text(tmp_path / "absent.jsonl") is None
 
 
 # --------------------------------------------------------------------------
