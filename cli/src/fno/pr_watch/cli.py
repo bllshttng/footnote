@@ -304,10 +304,10 @@ class _WatchdogBudgetSpent(Exception):
 _WAKE_APPLY_FLOOR_S = 200
 
 
-def _wd_apply_and_emit(wd, verdict, *, cwd: str, label: str) -> str:
+def _wd_apply_and_emit(wd, verdict, *, cwd: str, agent: str, label: str) -> str:
     """Apply a wake-lane verdict (wake or silence) and emit the receipt."""
     try:
-        outcome, detail = wd.apply_verdict(verdict, lanes="wake", cwd=cwd)
+        outcome, detail = wd.apply_verdict(verdict, lanes="wake", cwd=cwd, agent=agent)
     except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
         outcome, detail = "refused", f"{label} crashed: {exc!r}"
     wd.emit_event(
@@ -706,7 +706,7 @@ def tick() -> None:
                                         "%s left for the next tick", verdict.row_id,
                                     )
                                     continue
-                                _wd_apply_and_emit(_wd, verdict, cwd=row.cwd, label="wake")
+                                _wd_apply_and_emit(_wd, verdict, cwd=row.cwd, agent=row.agent, label="wake")
                                 acted += 1
                         # SILENCE lane (x-c624): registry-scoped rows fleet_rows misses.
                         if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
@@ -723,7 +723,10 @@ def tick() -> None:
                                 if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
                                     log.warning("pr-watch: watchdog silence budget spent")
                                     break
-                                _wd_apply_and_emit(_wd, silence_v, cwd=silence_row.cwd, label="silence drive")
+                                _wd_apply_and_emit(
+                                    _wd, silence_v, cwd=silence_row.cwd,
+                                    agent=silence_row.agent, label="silence drive",
+                                )
                                 acted += 1
 
                         recovery_scans = []

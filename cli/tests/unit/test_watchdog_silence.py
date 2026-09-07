@@ -10,6 +10,7 @@ Ending a row past a drive cap and handing it back through
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from fno.agents import watchdog
 from fno.agents.watchdog import (
@@ -120,6 +121,7 @@ def test_silence_verdict_classifies_a_codex_row(monkeypatch, tmp_path):
     monkeypatch.setattr(registry_mod, "load_registry", lambda: [row])
 
     rows, _warnings = watchdog.silence_rows([tmp_path])
+    assert rows[0].agent == "codex"
     [v] = verdicts(
         rows,
         transcript_for=lambda sid: _facts(20),
@@ -143,7 +145,7 @@ def test_apply_silence_delegates_to_apply_wake(monkeypatch):
                 "open node x-1, transcript quiet 20m", "drive")
     calls = []
 
-    def fake_wake(vv, *, cwd, runner):
+    def fake_wake(vv, *, cwd, runner, agent="claude"):
         calls.append((vv, cwd))
         return "applied", "woke worker-1; message confirmed in transcript"
 
@@ -154,3 +156,26 @@ def test_apply_silence_delegates_to_apply_wake(monkeypatch):
     assert outcome == "applied", detail
     assert len(calls) == 1
     assert calls[0] == (v, "/repo")
+
+
+def test_apply_wake_threads_agent_to_transcript_reads(monkeypatch):
+    """AC-CODEX: a silence-driven codex row's wake confirmation resolves the
+    codex transcript store, not claude's - the bug review found: _apply_wake
+    used to hardcode agent='claude' on every tail read."""
+    v = Verdict("thread-9", "codex-worker", "working", SILENCE,
+                "open node x-9, transcript quiet 20m", "drive")
+    seen_agents = []
+
+    def fake_tail_facts(row_id, cwd, *, agent="claude", **kw):
+        seen_agents.append(agent)
+        return None
+
+    monkeypatch.setattr(watchdog, "tail_facts", fake_tail_facts)
+    monkeypatch.setattr(watchdog, "_fno", lambda: ["fno"])
+
+    def runner(argv, **kw):
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    watchdog._apply_wake(v, cwd="/repo", runner=runner, agent="codex")
+
+    assert seen_agents and all(a == "codex" for a in seen_agents)
