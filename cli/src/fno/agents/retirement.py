@@ -1,16 +1,11 @@
 """The single owner of "has this worker's node already shipped" (x-1379).
 
-A king reads ``fno agents top``, sees a provider lane at its cap, and reports
-the next node parked on capacity - while the lane is held by workers whose
-nodes already merged. Both halves of that fact existed; nothing joined them.
-This module is the join, and every renderer imports it rather than growing a
-second spelling of the rule.
-
-The verdict is fail-closed on every read it cannot trust: an absence of
-reported doneness is not doneness, because a human decides whether to kill a
-session from this verdict. Doneness is :func:`fno.graph.statuses.node_is_done`
-AND ``merge_status == "merged"`` AND an empty ``additional_prs`` - a node with
-an open additional PR is live work, whatever its main PR did.
+A king reads ``fno agents top`` while a provider lane is held by workers
+whose nodes already merged. This module is the join between the worker row
+and the graph. Fail-closed on every read it cannot trust: an absence of
+reported doneness is not doneness, because a human decides whether to kill
+a session from this verdict. Doneness is :func:`fno.graph.statuses.node_is_done`
+AND ``merge_status == "merged"`` AND an empty ``additional_prs``.
 """
 
 from __future__ import annotations
@@ -32,15 +27,14 @@ class Retirement(NamedTuple):
 def resolve_node(
     name: str, node_field: Optional[str], ids: set
 ) -> tuple[Optional[str], Optional[str]]:
-    """Resolve a worker's node: the registry ``node`` field first, then the name.
+    """Registry ``node`` field first, then the worker name.
 
-    The registry field is authoritative but null on most live rows (the mint
-    path fills it in over time), so the fallback reads the worker NAME, whose
-    canonical shape is ``<prefix>-<node_id>-<slug>``. Only tokens 1 and 2 are
-    consulted, as ``tokens[1:3]`` joined against the full id set, then bare
-    ``tokens[1]`` against a hex index of the ids - so a hex-looking slug word
-    such as ``feed`` in ``t-d15a-feed-timeout`` is never read as an id. A bare
-    hex that matches two graph ids is ambiguous and resolves to nothing.
+    The field is authoritative but null on most live rows, so the fallback
+    reads the name's canonical shape ``<prefix>-<node_id>-<slug>``: tokens
+    1 and 2 only, as ``tokens[1:3]`` joined against the full ids, then bare
+    ``tokens[1]`` against a hex index - so a hex-looking slug word such as
+    ``feed`` in ``t-d15a-feed-timeout`` is never read as an id. A bare hex
+    matching two graph ids is ambiguous and resolves to nothing.
     """
     if node_field:
         return node_field, "registry"
@@ -69,13 +63,12 @@ def verdicts(rows: Iterable[tuple[str, Optional[str]]], entries=None) -> dict:
     """``(name, node_field)`` roster -> ``{name: Retirement}``, one graph read.
 
     ``entries`` is the injectable graph (the offline seam, as in
-    ``sweep_rows``); when None the graph is loaded once for the whole roster.
-    The rule, in order: unresolved node, unknown node, not done, not merged,
-    an open additional PR - and only then retire. Rule 5 holds on ANY
-    non-empty ``additional_prs`` without asking GitHub: the graph never
-    records a merge state for those PRs, a debug view must not make a network
-    call per row, and the cost of holding a merged extra PR is one line a
-    king checks by hand against the cost of one wrong kill.
+    ``sweep_rows``); when None the graph is loaded once for the roster. The
+    rule, in order: unresolved node, unknown node, not done, not merged, an
+    open additional PR - only then retire. Rule 5 holds on ANY non-empty
+    ``additional_prs`` without asking GitHub: the graph records no merge
+    state for those PRs and a debug view must not make a network call per
+    row; holding a merged extra PR costs one line a king checks by hand.
     """
     roster = list(rows)
     if entries is None:

@@ -1,18 +1,14 @@
 """``fno agents top`` (x-c5cc): every live worker process with tree RSS.
 
-One table over the SAME union the spawn gate counts (imported from
-``spawn_gate.census`` - never duplicated), so the debugging surface and the
-enforcement surface can never disagree. Python-only by design (LD8): RSS via
-psutil, no daemon involvement, kept out of the Rust client verb list. The cost
-column is the worker's whole process TREE off the resolved session pid
+One table over the SAME union the spawn gate counts (``spawn_gate.census``,
+never duplicated), so the debugging surface and the enforcement surface can
+never disagree. Python-only by design (LD8): RSS via psutil, no daemon. The
+cost column is the worker's whole process TREE off the resolved session pid
 (:func:`fno.agents.session_procs.tree_rss_mb`, x-3f84 W2) - a row's recorded
-pid alone prices the PTY host on a bg row and misses the per-session MCP
-servers every worker forks.
+pid alone prices the PTY host and misses the per-session MCP servers.
 
-With ``--subagents`` (x-af92), appends a read-only section listing
-harness-native subagents (sidechain 'limbs') that the pid/registry census
-cannot see. That section is display-only: it never feeds the spawn gate's
-slot count, and a subagent has no mail handle, so it is observable but not
+``--subagents`` (x-af92) appends a display-only sidechain section the
+pid/registry census cannot see: never slot-counted, observable, not
 addressable. See docs/architecture/coordination.md.
 """
 from __future__ import annotations
@@ -33,26 +29,16 @@ from fno.agents.spawn_gate import LiveWorker, census
 def lane_rows() -> list[dict]:
     """Per-provider lane occupancy against the cap that actually refuses.
 
-    The constraint that governs this fleet was invisible. Measured 2026-09-01:
-    `agents.provider_limits.zai.lanes = 7` was binding (7 live zai rows, a
-    spawn refused there) while machine load sat at 1.3 per CPU, far under the
-    `max_load_per_cpu = 8` trigger - so every machine-capacity surface said
-    "plenty of room" and none of them was the thing saying no.
-
-    Counted by the gate's OWN functions (:func:`provider_live_count`,
-    :func:`provider_lanes_cap`), never by a second walk of the registry. A
-    display that recounted would disagree with the refusal the first time
-    either changed, and a lane display that disagrees with the gate is worse
-    than none.
-
-    A count that cannot be read is reported as unreadable and NEVER as 0. Zero
-    free lanes and an unreadable registry are opposite facts, and the gate
-    itself treats the unreadable case as a refusal (fail-closed), so rendering
-    it as an empty fleet would invert the meaning.
-
-    Providers appear when they carry a configured cap, or when a live row names
-    them (uncapped, `cap: None`) - so a provider quietly running uncapped is
-    visible rather than absent.
+    The constraint that governs this fleet was invisible: measured 2026-09-01
+    the zai lane cap was binding (7 live rows, a spawn refused) while every
+    machine-capacity surface said "plenty of room". Counted by the gate's OWN
+    functions (:func:`provider_live_count`, :func:`provider_lanes_cap`),
+    never a second registry walk - a display that recounts disagrees with the
+    refusal the first time either changes. A count that cannot be read is
+    reported as unreadable, NEVER as 0: the gate treats the unreadable case
+    as a refusal (fail-closed), so an empty fleet would invert the meaning.
+    Providers appear when they carry a configured cap, or when a live row
+    names them (uncapped, `cap: None`).
     """
     from fno.agents.spawn_gate import (
         LIVE_STATUSES,
@@ -143,14 +129,12 @@ def _crown_map() -> dict[str, str]:
 
 
 def _registry_maps() -> tuple[dict[str, str], dict[str, Optional[str]]]:
-    """One registry read feeding both session-id joins. Best-effort, like
-    :func:`_crown_map`: a read failure degrades to empty maps rather than
-    breaking the process view.
-
-    ``handles`` is the session uuid -> registry handle bridge; ``nodes`` is
-    the handle -> backlog-node map the retirement verdict resolves through
-    (x-1379). One read, so the node join adds no second walk of the registry.
-    """
+    """One registry read feeding both session-id joins (x-1379): ``handles``
+    is the session uuid -> handle bridge (a foreign claude row is labelled by
+    the FIRST 8 hex of that uuid, the registry handle is the LAST 8 - the
+    mismatch that once read as "all agents are dead"), ``nodes`` is the
+    handle -> node map the retirement verdict resolves through. Best-effort,
+    like :func:`_crown_map`: a read failure degrades to empty maps."""
     try:
         from fno.agents.registry import load_registry
 
@@ -164,17 +148,6 @@ def _registry_maps() -> tuple[dict[str, str], dict[str, Optional[str]]]:
         return handles, nodes
     except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
         return {}, {}
-
-
-def _registry_handles() -> dict[str, str]:
-    """session uuid -> registry handle. Best-effort, like :func:`_crown_map`.
-
-    `top` labels a foreign claude row with the FIRST 8 hex of the session uuid;
-    the registry handle for that same session is the LAST 8. Same session, two
-    identities, and nothing on screen relates them -- which is how a grep across
-    the two views returned nothing and got read as "all agents are dead".
-    """
-    return _registry_maps()[0]
 
 
 class RowTruth(NamedTuple):
@@ -197,17 +170,12 @@ class RowTruth(NamedTuple):
 def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
     """name -> :class:`RowTruth`, one transcript read per row, every row.
 
-    This is the surface that showed 8513 MB across 31 live pids with no way
-    to see which of them were parked (specimen 1), so it must show progress
-    beside RSS on the same line -- and the surface that showed a king a
-    process-alive row it read as an owned, drivable session while the
-    transcript had stood down two hours before (x-6d89), so the row must
-    carry the reachability verdict beside it.
-
-    One transcript read per row (``resolve_session_truth``), reused for the
-    reachability verdict, the progress verdict and the activity word -- the
-    same shape ``fno.agents.read`` uses so this view does not pay a second
-    read for the same evidence.
+    The surface that showed 8513 MB across 31 live pids with no way to see
+    which were parked, and that showed a king a process-alive row while the
+    transcript had stood down two hours before (x-6d89): progress and the
+    reachability verdict render beside RSS on the same line, from ONE
+    ``resolve_session_truth`` read per row - the same shape ``fno.agents.read``
+    uses, so this view never pays a second read for the same evidence.
     """
     from fno.agents.reachability import (
         classify_progress,
@@ -230,11 +198,9 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
 
     out: dict[str, RowTruth] = {}
     for w in workers:
-        # The session uuid joins first (x-1379): a foreign claude row is
-        # labelled by the FIRST 8 hex of that uuid while the registry keys it
-        # by the handle, so a name lookup reads None for exactly the row this
-        # bridge exists to reach - and the PROGRESS column rendered `-` on
-        # every such row before it.
+        # The session uuid joins first (x-1379): the registry keys a foreign
+        # claude row by its handle, so the name lookup alone reads None for
+        # exactly the row whose PROGRESS column then rendered `-`.
         entry = by_session.get(w.session_id or "")
         if entry is None:
             entry = by_name.get(w.name)
@@ -270,12 +236,10 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
 def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     handles, reg_nodes = _registry_maps()
     truth_map = _row_truth(workers)
-    # One retirement read for the whole roster (x-1379): the graph is loaded
-    # once inside verdicts, fed by the node fields the pass above already
-    # carried up. The name passed is the REGISTRY identity (the handle), not
-    # the census label: a foreign claude row is labelled by the first 8 hex,
-    # which resolves no node, while its handle carries the
-    # <prefix>-<node>-<slug> shape the name fallback reads.
+    # One retirement read for the whole roster (x-1379). The name passed is
+    # the REGISTRY identity, not the census label: the first-8-hex label
+    # resolves no node, while the handle carries the <prefix>-<node>-<slug>
+    # shape the name fallback reads.
     from fno.agents.retirement import verdicts
 
     registry_ids = [handles.get(w.session_id or "") or w.name for w in workers]
@@ -437,24 +401,19 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
     THE one reader for per-pane mux counters: ``fno agents top --pane-stats``
     renders it here, and the spawn gate's pane-vs-bg-session pricing imports
     this same function rather than growing a second implementation. The mux
-    emits monotonic TOTALS, never rates - the delta over the window between
-    two samples is computed here, per pane.
+    emits monotonic TOTALS, never rates; the delta over the window between
+    two samples is computed here, per pane. Since retention routing (x-add3)
+    the gauge's rows live in the ``.ephemeral`` sibling journal; both files
+    are scanned, oldest first, so a deploy window or a sibling rotation still
+    yields a sample pair.
 
-    Since retention routing (x-add3) the gauge's rows live in the
-    ``.ephemeral`` sibling journal; the main journal still carries rows a
-    pre-routing daemon wrote. Both are scanned, oldest file first, so the
-    deploy window and a sibling rotation (the ``.ephemeral.1`` generation)
-    both yield a sample pair.
-
-    Returns ``{status, rows, born, gone, session, window_s}``. ``status`` is
-    ``ok`` | ``insufficient-samples`` | ``unreadable``; an honest message is
-    always renderable because a missing second sample or a broken journal must
-    never read as "no cost" (the empty-table trap). Samples are grouped by mux
-    session first (the journal interleaves sessions) and differenced within
-    the session whose newest sample is journal-latest. Totals only go up
-    within one server incarnation: a DECREASE on any field means the server
-    restarted on the same socket name and pane ids reset, so that pane is
-    reported born-and-gone rather than differenced into a negative delta.
+    Returns ``{status, rows, born, gone, session, window_s}``; ``status`` is
+    ``ok`` | ``insufficient-samples`` | ``unreadable`` - a broken journal must
+    never read as "no cost" (the empty-table trap). Samples are grouped by
+    mux session first and differenced within the session whose newest sample
+    is journal-latest. A DECREASE on any field means the server restarted on
+    the same socket name and pane ids reset: report born-and-gone, never a
+    negative delta.
     """
     from fno.events import EPHEMERAL_SUFFIX
     from fno.paths import global_events_json
@@ -606,11 +565,9 @@ def _render_pane_stats_lines(section: dict) -> list[str]:
 def _retirable_lines(rows: list[dict], lanes: list[dict]) -> list[str]:
     """One line per lane holder whose node already shipped (x-1379).
 
-    The provider is read from the SAME ``lane_rows`` output the LANES block
-    rendered, never recounted: a display that recounted would disagree with
-    the refusal the first time the two walked the registry differently. A
-    holder no lane names still gets its line - the verdict is the graph's,
-    not the lane counter's.
+    The provider comes from the SAME ``lane_rows`` output the LANES block
+    rendered, never recounted. A holder no lane names still gets its line:
+    the verdict is the graph's, not the lane counter's.
     """
     holder_lane: dict[str, Optional[str]] = {}
     for lane_row in lanes:
@@ -668,9 +625,8 @@ def render_top(
     if lanes:
         out.extend(_render_lane_lines(lanes))
         out.append("")
-    # The retirable line sits with the lanes (x-1379): a retirable holder is
-    # the same shape of fact as a full lane - a cap refusing spawns the table
-    # below reports as healthy - so it leads for the reason the lanes lead.
+    # The retirable line leads with the lanes (x-1379): the same shape of
+    # fact as a full lane - a cap refusing spawns the table calls healthy.
     retirable = _retirable_lines(rows, lanes)
     if retirable:
         out.extend(retirable)
