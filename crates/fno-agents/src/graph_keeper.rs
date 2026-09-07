@@ -1350,25 +1350,9 @@ fn session_reap_open(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let is_open = |r: &Value, phase: &str| -> bool {
-        r.get("phase").and_then(Value::as_str) == Some(phase)
-            && r.get("harness")
-                .and_then(Value::as_str)
-                .map(|h| !h.trim().is_empty())
-                .unwrap_or(false)
-            && r.get("session_id")
-                .and_then(Value::as_str)
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false)
-            && r.get("started_at")
-                .and_then(Value::as_str)
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false)
-            && !r
-                .as_object()
-                .map(|o| o.contains_key("ended_at"))
-                .unwrap_or(false)
-    };
+    // The crate's one openness predicate (graph_store::is_open_phase_row,
+    // mirroring the Python authority); the closure keeps the call-site shape.
+    let is_open = |r: &Value, phase: &str| graph_store::is_open_phase_row(r, phase);
     let mut row_removed = false;
     let mut kept: Vec<Value> = rows.clone();
     if remove_do {

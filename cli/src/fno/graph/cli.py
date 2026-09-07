@@ -6406,7 +6406,7 @@ def cmd_session_reap_open(
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
-    """Reap one exact open session row after the observer proves session death."""
+    """Reap one exact open session row after the observer proves session death; the reap sweep settles a done+merged node's open do row on its own, so this verb is the hand path for every other case, including a node still in flight."""
     from fno.graph.fuzzy import resolve_node
     from fno.graph.statuses import is_open_do_row, is_open_phase_row
     from fno.graph.store import reap_open_session_record, read_graph

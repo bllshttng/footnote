@@ -1,15 +1,22 @@
 //! The retirement sweep (x-c672): one pass, stop then drop.
 //!
 //! The pure row policy is `gc::gc_decide`; the pure tree policy is
-//! `gc::tree_action`. This module owns the I/O around them: the graph read
-//! that feeds the reverse join, the served transcript mtime, the confirmed
+//! `gc::tree_action`. This module owns their I/O: the settle
+//! (`settle_stale_do_rows`) writes the graph first, the row pass reads what it
+//! wrote; then the graph read that feeds the reverse join, the served transcript mtime, the confirmed
 //! stop of a held process, the reap receipt every removal stages before the
 //! row drops, the registry write under its `created_at` TOCTOU guard, and the
 //! worktree prune for a clean-and-merged tree.
 //!
-//! Retirement never touches the graph (`reap_node_session` is not called: a
-//! done node has no open row to settle, and one that does keeps the row under
-//! `open do row on done node`), never removes the session from its harness's
+//! The settle (`settle_stale_do_rows`) writes the graph before the row pass:
+//! an open do row on a done, merged node with no open additional PR has
+//! nothing left to re-open, so the sweep fills `ended_at` and KEEPS the row -
+//! the session provenance (phase, harness, session id, started_at) survives,
+//! stamped `ended_by: "reap-sweep"` because the sweep infers the end instant
+//! rather than observing it. A row the settle cannot fill on a node still in
+//! flight keeps under `open do row on done node`.
+//!
+//! Retirement never removes the session from its harness's
 //! store, and never deletes a branch. The node's `sessions[]` row and the
 //! transcript survive the retirement, so `fno agents resume` still opens the
 //! session afterwards.
@@ -60,6 +67,11 @@ pub struct GcSummary {
     /// `(id, node)`: all named nodes done, but one carries an OPEN do row
     /// for this session (Locked Decision 1).
     pub kept_open_do_row: Vec<(String, String)>,
+    /// `(node, harness, session_id)` for every stale open do row this pass
+    /// FILLED. The row stays; only `ended_at` and `ended_by` are added.
+    pub settled_do_rows: Vec<(String, String, String)>,
+    /// `(node, reason)`: the settle write refused. Named, never silent.
+    pub settle_refused: Vec<(String, String)>,
     /// `(id, worktree path)`: the row retired, its tree is dirty and stays.
     pub kept_dirty: Vec<(String, String)>,
     /// `(id, worktree path)`: the row retired, the branch never merged and
@@ -99,14 +111,21 @@ struct RetireOrder {
     worktree: Option<String>,
 }
 
+/// The state root's graph file: the one `read_graph_entries` reads (plus the
+/// advisory archive) and the one the settle writes under the lock.
+pub(crate) fn graph_path(home: &AgentsHome) -> PathBuf {
+    let state_root = home.root().parent().unwrap_or(home.root());
+    state_root.join("graph.json")
+}
+
 /// Read the working graph plus the archive and build the reverse-join index
 /// and the open-do map. The archive is advisory (a read failure contributes
 /// nothing); the WORKING graph failing to parse is `None` and the sweep keeps
 /// every row as `graph unreadable`. A missing graph file is an empty graph
 /// (every row reads `no provenance`), matching the Python read seam.
 pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
+    let graph_path = graph_path(home);
     let state_root = home.root().parent().unwrap_or(home.root());
-    let graph_path = state_root.join("graph.json");
     let read = |path: &std::path::Path| -> Result<Vec<Value>, ()> {
         match std::fs::read(path) {
             Ok(raw) => serde_json::from_slice::<Value>(&raw)
@@ -137,17 +156,7 @@ pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
             let Some(sid) = sid.filter(|s| !s.is_empty()) else {
                 continue;
             };
-            let open = row.get("phase").and_then(Value::as_str) == Some("do")
-                && row
-                    .get("started_at")
-                    .and_then(Value::as_str)
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false)
-                && !row
-                    .as_object()
-                    .map(|o| o.contains_key("ended_at"))
-                    .unwrap_or(false);
-            if open {
+            if graph_store::is_open_do_row(row) {
                 open_do
                     .entry(sid.to_ascii_lowercase())
                     .or_default()
@@ -156,6 +165,194 @@ pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
         }
     }
     Some(GraphRead { index, open_do })
+}
+
+/// One open do row the sweep may settle: its node is done, GitHub-confirmed
+/// merged, and carries no additional PR whose outcome nothing recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleDoRow {
+    pub node: String,
+    pub harness: String,
+    pub session_id: String,
+}
+
+/// Every open do row sitting on a settled node. Every clause is a positive
+/// marker: `status == "done"`; `merge_status == "merged"`, a field written
+/// only when a caller resolved MERGED from `gh`, so its absence has two
+/// explanations and neither is asserted here; and no `additional_prs` entry
+/// at all - the graph records no per-entry merge state for an additional PR,
+/// so any additional PR holds the row.
+pub(crate) fn stale_open_do_rows(entries: &[Value]) -> Vec<StaleDoRow> {
+    let mut stale = Vec::new();
+    for entry in entries {
+        let Some(node_id) = graph_store::entry_id(entry) else {
+            continue;
+        };
+        if entry.get("status").and_then(Value::as_str) != Some("done") {
+            continue;
+        }
+        if entry.get("merge_status").and_then(Value::as_str) != Some("merged") {
+            continue;
+        }
+        let holds_pr = entry
+            .get("additional_prs")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        if holds_pr {
+            continue;
+        }
+        for row in entry
+            .get("sessions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if graph_store::is_open_do_row(row) {
+                stale.push(StaleDoRow {
+                    node: node_id.to_string(),
+                    harness: row
+                        .get("harness")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    session_id: row
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                });
+            }
+        }
+    }
+    stale
+}
+
+/// The dry-run settle plan: every stale open do row a real pass would fill.
+/// Reads the graph; writes nothing.
+pub(crate) fn plan_stale_do_rows(home: &AgentsHome) -> Vec<StaleDoRow> {
+    match graph_store::read_defaulted(&graph_path(home), false) {
+        Ok(entries) => stale_open_do_rows(&entries),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Fill `ended_at` on every stale open do row and KEEP the row: on a done,
+/// merged node with no open additional PR there is nothing left to re-open,
+/// and the session provenance (phase, harness, session id, started_at)
+/// survives the retirement question. Returns `(settled, refusals)`; a settle
+/// that cannot write names the refusal, never silent, and the sweep retries
+/// on its next pass. The stamp records `ended_by: "reap-sweep"` because the
+/// sweep INFERS the end instant rather than observing it.
+///
+/// The read-apply-publish cycle retries a bounded few times before it
+/// refuses: `locked_mutate` refuses over ANY foreign write that landed
+/// between this read and this write (the guard that makes the write
+/// unclobberable), and on a fleet machine one write burst can eat the first
+/// attempt. The fill runs fill-if-absent over a fresh read each attempt, so
+/// a retry never overwrites an `ended_at` another writer just added.
+pub(crate) fn settle_stale_do_rows(home: &AgentsHome) -> (Vec<StaleDoRow>, Vec<(String, String)>) {
+    let path = graph_path(home);
+    const SETTLE_ATTEMPTS: usize = 5;
+    for attempt in 0..SETTLE_ATTEMPTS {
+        match settle_attempt(&path) {
+            Ok(settled) => return (settled, Vec::new()),
+            Err(SettleRefusal::Retry(err)) if attempt + 1 < SETTLE_ATTEMPTS => {
+                let _ = err;
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            Err(SettleRefusal::Retry(err)) => {
+                let reason =
+                    format!("settle write refused: {err} (after {SETTLE_ATTEMPTS} attempts)");
+                return (Vec::new(), vec![(String::new(), reason)]);
+            }
+            Err(SettleRefusal::Fatal(reason)) => {
+                return (Vec::new(), vec![(String::new(), reason)])
+            }
+        }
+    }
+    unreachable!("every loop arm returns")
+}
+
+/// One read-apply-publish attempt. `Err(Retry(_))` is a lost race a fresh
+/// read may win; `Err(Fatal(_))` is not.
+fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefusal> {
+    let base = graph_store::file_content_version(path);
+    let mut entries = graph_store::read_defaulted(path, false)
+        .map_err(|err| SettleRefusal::Fatal(format!("graph unreadable: {err}")))?;
+    let stale = stale_open_do_rows(&entries);
+    if stale.is_empty() {
+        return Ok(Vec::new()); // nothing stale: never touch the file
+    }
+    let now = crate::daemon::now_rfc3339_like();
+    for row in &stale {
+        let Some(entry) = entries
+            .iter_mut()
+            .find(|e| graph_store::entry_id(e) == Some(row.node.as_str()))
+        else {
+            continue;
+        };
+        let Some(sessions) = entry.get_mut("sessions").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for session in sessions.iter_mut() {
+            let matches = graph_store::is_open_do_row(session)
+                && session.get("harness").and_then(Value::as_str) == Some(row.harness.as_str())
+                && session.get("session_id").and_then(Value::as_str)
+                    == Some(row.session_id.as_str());
+            if matches {
+                if let Some(obj) = session.as_object_mut() {
+                    obj.entry("ended_at".to_string())
+                        .or_insert_with(|| Value::String(now.clone()));
+                    obj.entry("ended_by".to_string())
+                        .or_insert_with(|| Value::String("reap-sweep".into()));
+                }
+            }
+        }
+    }
+    let outcome = graph_store::locked_mutate(
+        path,
+        graph_store::MutateInput {
+            entries,
+            // No node crosses into a terminal rung here: the closure-release
+            // and board-render gates have nothing to do.
+            canonical_path: None,
+            base_version: Some(base),
+            plan_rungs: None,
+        },
+        graph_store::DEFAULT_LOCK_TIMEOUT,
+    );
+    match outcome {
+        Ok(_) => Ok(stale),
+        // A lost race (the file moved under the snapshot) or a contended
+        // lock: a fresh read may win. Anything else is final.
+        Err(
+            err @ (graph_store::StoreError::Conflict | graph_store::StoreError::LockTimeout(..)),
+        ) => Err(SettleRefusal::Retry(err.to_string())),
+        Err(err) => Err(SettleRefusal::Fatal(format!("settle write refused: {err}"))),
+    }
+}
+
+/// Why one settle attempt did not land. A retry is a lost race; a fatal is
+/// a named refusal.
+enum SettleRefusal {
+    Retry(String),
+    Fatal(String),
+}
+
+/// Drop each planned settle from the dry-run graph read, so the rehearsal
+/// reports the outcome the real pass would produce: a planned row no longer
+/// counts open.
+pub(crate) fn without_settled(mut graph: GraphRead, planned: &[StaleDoRow]) -> GraphRead {
+    for row in planned {
+        let key = row.session_id.to_ascii_lowercase();
+        if let Some(nodes) = graph.open_do.get_mut(&key) {
+            nodes.retain(|n| n != &row.node);
+            if nodes.is_empty() {
+                graph.open_do.remove(&key);
+            }
+        }
+    }
+    graph
 }
 
 /// Stop a retiring row's held process from a sync caller. The stop is async,
