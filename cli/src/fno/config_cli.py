@@ -840,16 +840,15 @@ def _report_band_routing() -> None:
         capacity = route_resolve.runtime_capacity(inventory=inventory)
     except Exception:  # noqa: BLE001
         capacity = {}
-    empty_verbs: list[str] = []
     read_verbs = route_resolve.slot_verbs(settings=settings)
-    for verb in read_verbs:
-        states = route_resolve.slot_states(verb, capacity, inventory=inventory, settings=settings)
-        if not str(states.get("would_take", "")).startswith(
-            f"agents.profiles.{verb}.lanes"
-        ):
-            empty_verbs.append(verb)
     # Silent once any verb's slot would take a lane: routing is armed, and
     # the unconfigured verbs are a per-verb choice, not a dead router.
+    empty_verbs = [
+        verb for verb in read_verbs
+        if not str(route_resolve.slot_states(
+            verb, capacity, inventory=inventory, settings=settings
+        ).get("would_take", "")).startswith(f"agents.profiles.{verb}.lanes")
+    ]
     if len(empty_verbs) < len(read_verbs):
         return
     try:

@@ -240,7 +240,7 @@ def _slot_queue_retry_at(stdout: str) -> Optional[float]:
         if isinstance(data, dict) and data.get("reason") == "slot_exhausted":
             value = data.get("retry_at")
             try:
-                return float(value) if value is not None else None
+                return float(value)
             except (TypeError, ValueError):
                 return None
     return None
