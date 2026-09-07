@@ -620,7 +620,10 @@ def _retirable_lines(rows: list[dict], lanes: list[dict]) -> list[str]:
     for r in rows:
         if not r.get("retire"):
             continue
-        lane = holder_lane.get(r["name"])
+        # The lane counter tallies REGISTRY handles, and this row may be
+        # labelled by the first 8 hex, so the join goes through the same
+        # handle the row already carries.
+        lane = holder_lane.get(r.get("handle") or r["name"])
         holds = f" holds a {lane} lane" if lane else " holds a lane"
         pr = (r["retire_reason"] or "").rsplit(" ", 1)[-1]
         out.append(f"retirable: {r['name']}{holds}; {r['node']} is done, merged at PR {pr}")

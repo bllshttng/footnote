@@ -226,7 +226,9 @@ def test_retirable_line_renders_under_lanes_and_none_when_empty(
         class _census:
             warnings: list[str] = []
             slot_claims = 0
-            workers = [_worker()]
+            workers = [
+                _worker(name="1a2b3c4d", session_id="full-session-uuid")
+            ]
 
         monkeypatch.setattr(top, "census", lambda: _census)
         monkeypatch.setattr(
@@ -239,9 +241,14 @@ def test_retirable_line_renders_under_lanes_and_none_when_empty(
         monkeypatch.setattr(top, "tree_rss_mb", lambda pid: 297.0)
         return top.render_top()
 
-    patched["answers"]["t-06f7-row"] = _answer("t-06f7-row", "working", 45)
+    patched["answers"]["1a2b3c4d"] = _answer("1a2b3c4d", "working", 45)
     monkeypatch.setattr(
-        top, "_registry_maps", lambda: ({}, {"t-06f7-row": "x-06f7"})
+        top,
+        "_registry_maps",
+        lambda: (
+            {"full-session-uuid": "t-06f7-row"},
+            {"t-06f7-row": "x-06f7"},
+        ),
     )
     import fno.agents.retirement as retirement
 
@@ -254,7 +261,7 @@ def test_retirable_line_renders_under_lanes_and_none_when_empty(
     )
     text = _render()
     assert (
-        "retirable: t-06f7-row holds a zai lane; "
+        "retirable: 1a2b3c4d holds a zai lane; "
         "x-06f7 is done, merged at PR 1553"
     ) in text
     assert "NODE" in text
