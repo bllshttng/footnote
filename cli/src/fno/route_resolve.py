@@ -299,31 +299,247 @@ def resolve_slot(
         return None, []
 
     gate_bypassed = os.environ.get("FNO_SPAWN_GATE") == "0"
-    from fno.route_slot_client import RouteSlotUnavailable, resolve_slot_via_binary
+    from fno.route_slot_client import RouteSlotUnavailable, route_slot
 
     try:
-        return resolve_slot_via_binary(
-            rung_base=rung_base,
-            profile=profile,
-            lanes=lanes,
-            node=node,
-            capacity=capacity,
-            inventory=inventory,
-            settings=settings,
-            substrate=substrate,
-            permission_mode=permission_mode,
-            constrain_harness=constrain_harness,
-            explicit_lane=explicit_lane,
-            explicit_model=explicit_model,
-            gate_bypassed=gate_bypassed,
-            role=role,
-            protected_role=protected_role,
+        return route_slot(_slot_payload(
+            rung_base=rung_base, profile=profile, lanes=lanes, node=node,
+            capacity=capacity, inventory=inventory, settings=settings,
+            substrate=substrate, permission_mode=permission_mode,
+            constrain_harness=constrain_harness, explicit_lane=explicit_lane,
+            explicit_model=explicit_model, gate_bypassed=gate_bypassed,
+            role=role, protected_role=protected_role,
             model_occupied=model_occupied,
-        )
+        ))
     except RouteSlotUnavailable as exc:
         return None, [f"slot=route-slot-unavailable ({exc})"]
 
 
+
+
+
+def _profile_fields(profile: Optional[object]) -> dict[str, Any]:
+    by_diff = getattr(profile, "by_difficulty", None)
+    return {
+        **{k: str(getattr(profile, k, "") or "")
+           for k in ("on_exhausted", "on_low", "on_unknown")},
+        "by_difficulty": by_diff if isinstance(by_diff, Mapping) else {},
+    }
+
+
+_DECLARED_FIELDS = ("harness", "model", "route", "account", "band", "effort")
+
+
+def _declared_rows(settings: object) -> dict[str, Any]:
+    """The CONFIG-declared rows exactly (never the built-in fallback)."""
+    try:
+        models = getattr(getattr(settings, "routing", None), "models", None) or []
+        rows = [r for r in models if isinstance(r, Mapping)]
+    except Exception:  # noqa: BLE001 - an unreadable config reads as empty
+        return {}
+    return {
+        name: {"name": name, **{f: str(r.get(f, "") or "").strip() for f in _DECLARED_FIELDS}}
+        for r in rows
+        if (name := str(r.get("name", "") or "").strip())
+    }
+
+
+def _lanes_payload(lanes: Any) -> list[Any]:
+    """Lane entries as JSON: dicts pass through; profile lane objects
+    serialize by the verb's own field vocabulary."""
+    fields = ("provider", "model", "effort", "substrate", "permission_mode",
+              "route", "account", "pane_group")
+    out: list[Any] = []
+    for lane in lanes or []:
+        if isinstance(lane, Mapping):
+            out.append(dict(lane))
+        elif hasattr(lane, "provider") or hasattr(lane, "model"):
+            out.append({k: str(getattr(lane, k, "") or "") for k in fields})
+        else:
+            out.append(lane)
+    return out
+
+
+def _inventory_payload(inventory: Optional[Any]) -> dict[str, Any]:
+    """The resolved inventory as JSON: rows in declared order plus objective."""
+    if inventory is None:
+        return {}
+    try:
+        return {
+            "declared": bool(getattr(inventory, "declared", False)),
+            "objective": str(getattr(inventory, "objective", "") or "cheapest-that-clears"),
+            "prefer_harness": str(getattr(inventory, "prefer_harness", "") or ""),
+            "rows": [
+                {"name": r.name, "harness": r.harness, "model": r.model,
+                 "route": r.route, "account": r.account, "band": r.band,
+                 "percentile": r.percentile, "effort": r.effort,
+                 "cost_per_mtok_in": r.cost_per_mtok_in}
+                for r in inventory.rows.values()
+            ],
+        }
+    except Exception:  # noqa: BLE001 - an unreadable inventory grids on defaults
+        return {}
+
+
+def _thread_seatable(harnesses: list[str]) -> dict[str, bool]:
+    try:
+        from fno.agents.harness_map import thread_seatable
+
+        return {h: bool(thread_seatable(h)) for h in dict.fromkeys(harnesses)}
+    except Exception:  # noqa: BLE001 - unknown harness degrades open
+        return {h: True for h in dict.fromkeys(harnesses)}
+
+
+def _harness_installed_table(harnesses: list[str]) -> dict[str, bool]:
+    try:
+        from fno.agents.harnesses import READABLE_PROVIDERS
+
+        return {h: h in READABLE_PROVIDERS for h in dict.fromkeys(harnesses)}
+    except Exception:  # noqa: BLE001 - an unreadable roster degrades open
+        return {h: True for h in dict.fromkeys(harnesses)}
+
+
+def _effort_ok_table(rows: list[Mapping[str, Any]]) -> dict[str, dict[str, bool]]:
+    """Which (harness, effort) pairs survive ``effort_tokens``; the verb only
+    consumes verdicts."""
+    out: dict[str, dict[str, bool]] = {}
+    for row in rows:
+        harness = str(row.get("harness", "") or "")
+        effort = str(row.get("effort", "") or "")
+        if not harness or not effort.strip():
+            continue
+        try:
+            from fno.agents.mux_spawn import effort_tokens
+
+            effort_tokens(harness, effort)
+            out.setdefault(harness, {})[effort] = True
+        except Exception:  # noqa: BLE001 - an unusable effort surface is omitted
+            out.setdefault(harness, {})[effort] = False
+    return out
+
+
+def _vendor_tables(
+    settings: object, rows: dict[str, Any], lanes: list[Any]
+) -> dict[str, Any]:
+    """Vendor caps and live counts for every vendor the rows or inline
+    lanes name by ``route``."""
+    caps: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    errors: dict[str, str] = {}
+    try:
+        from fno.agents.spawn_gate import (
+            ProviderCountUnavailable,
+            provider_lanes_cap,
+            provider_live_count,
+        )
+        from fno.config import provider_limits_table
+
+        table = dict(provider_limits_table(getattr(settings, "agents", None)))
+        routes = [str(row.get("route", "") or "") for row in rows.values()]
+        routes += [
+            str(lane.get("route", "") or "")
+            for lane in lanes
+            if isinstance(lane, Mapping)
+        ]
+        for vendor in sorted({
+            route.replace(",", "/").partition("/")[0].strip()
+            for route in routes
+            if route.strip()
+        } - {""}):
+            cap = provider_lanes_cap(table.get(vendor))
+            if cap is None:
+                continue
+            caps[vendor] = int(cap)
+            try:
+                counts[vendor] = int(provider_live_count(vendor))
+            except ProviderCountUnavailable as exc:
+                errors[vendor] = str(exc)
+    except Exception:  # noqa: BLE001 - an unreadable cap table caps no lane
+        pass
+    return {"vendor_caps": caps, "vendor_counts": counts, "vendor_count_errors": errors}
+
+
+def _account_record_vendors(settings: object) -> dict[str, str]:
+    try:
+        return {
+            str(r["id"]): str(r.get("route", "") or "").replace(",", "/").partition("/")[0].strip()
+            for r in getattr(getattr(settings, "accounts", None), "records", None) or []
+            if isinstance(r, Mapping) and r.get("id") and str(r.get("route", "") or "").strip()
+        }
+    except Exception:  # noqa: BLE001 - an unreadable registry contradicts nothing
+        return {}
+
+
+def _slot_payload(
+    *,
+    rung_base: str,
+    profile: Optional[object],
+    lanes: Any,
+    node: Optional[Mapping],
+    capacity: Optional[Mapping[str, object]],
+    inventory: Optional[Any],
+    settings: object,
+    substrate: Optional[str],
+    permission_mode: Optional[str],
+    constrain_harness: Optional[str],
+    explicit_lane: bool,
+    explicit_model: bool,
+    gate_bypassed: bool,
+    role: Optional[str] = None,
+    protected_role: Optional[str] = None,
+    model_occupied: bool = False,
+) -> dict[str, Any]:
+    """The slot/grid payload: both legs' inputs plus the gather the verb
+    cannot do (config objects, live vendor counts, effort verdicts)."""
+    rows = _declared_rows(settings)
+    lanes_payload = _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else lanes
+    inventory_payload = _inventory_payload(inventory)
+    inv_rows = inventory_payload.get("rows", [])
+    payload: dict[str, Any] = {
+        "rung_base": rung_base,
+        "lanes_raw": lanes_payload,
+        "declared_rows": rows,
+        "profile": _profile_fields(profile),
+        "node": {"difficulty": (node or {}).get("difficulty"),
+                 "priority": (node or {}).get("priority")} if node else None,
+        "capacity": dict(capacity or {}),
+        "substrate": substrate,
+        "permission_mode": permission_mode,
+        "constrain_harness": constrain_harness,
+        "explicit_lane": explicit_lane,
+        "explicit_model": explicit_model,
+        "gate_bypassed": gate_bypassed,
+        "thread_seatable": _thread_seatable(
+            [str(r.get("harness", "")) for r in rows.values()]
+            + [str(r.get("harness", "")) for r in inv_rows]
+            + [
+                str(lane.get("provider", "") or "")
+                for lane in (lanes_payload or [])
+                if isinstance(lane, Mapping)
+            ]
+        ),
+        "account_record_vendors": _account_record_vendors(settings),
+        "role": role,
+        "protected_role": protected_role,
+        "model_occupied": model_occupied,
+        "inventory": inventory_payload,
+    }
+    try:
+        payload["effort_ok"] = _effort_ok_table(inv_rows)
+    except Exception:  # noqa: BLE001 - an unusable effort table omits nothing
+        payload["effort_ok"] = {}
+    try:
+        payload["harness_installed"] = _harness_installed_table([
+            str(r.get("harness", "") or "") for r in inv_rows
+        ])
+    except Exception:  # noqa: BLE001 - an unreadable roster degrades open
+        payload["harness_installed"] = {}
+    payload.update(
+        _vendor_tables(
+            settings, rows, lanes_payload if isinstance(lanes_payload, list) else []
+        )
+    )
+    return payload
 
 
 def _verb_profile(settings: object, verb: Optional[str]) -> Optional[object]:
@@ -392,16 +608,17 @@ def slot_states(
     out["on_unknown"] = str(getattr(_profile, "on_unknown", "") or "allow")
     rung_base = f"agents.profiles.{verb}"
     try:
-        from fno.route_slot_client import route_states_via_binary
+        from fno.route_slot_client import route_states
 
-        lane_states, states_chain = route_states_via_binary(
-            rung_base=rung_base,
-            profile=_profile,
-            lanes=lanes,
-            node=None,
-            capacity=capacity,
-            settings=settings,
-        )
+        lane_states, states_chain = route_states({
+            "mode": "states",
+            "rung_base": rung_base,
+            "lanes_raw": _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else lanes,
+            "declared_rows": _declared_rows(settings),
+            "profile": _profile_fields(_profile),
+            "node": None,
+            "capacity": dict(capacity or {}),
+        })
     except Exception:  # noqa: BLE001 - a missing verb degrades the readout
         lane_states, states_chain = [], []
     # Rungs, identity, source and the difficulty note are the verb's
@@ -546,13 +763,14 @@ def resolve_tier(
 ) -> tuple[Optional[str], list[str]]:
     """Resolve a tier to a concrete declared model, scoped to one harness when
     asked. The band math lives on ``fno-agents route-slot``; never raises."""
-    from fno.route_slot_client import RouteSlotUnavailable, route_tier_via_binary
+    from fno.route_slot_client import RouteSlotUnavailable, route_tier
 
     inv = inventory if inventory is not None else resolve_inventory(
         settings=settings, snapshot=snapshot
     )
     try:
-        return route_tier_via_binary(tier, provider, inv)
+        return route_tier({"mode": "tier", "tier": tier, "provider": provider,
+                           "inventory": _inventory_payload(inv)})
     except RouteSlotUnavailable:
         return None, ["tier=route-slot-unavailable"]
 

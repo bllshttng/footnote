@@ -40,6 +40,17 @@ on_exhausted = "queue"
 # lanes = ["astra-codex", "opus-canonical"]
 # on_low = "skip"        # allow | prefer_healthy (default) | skip
 # on_unknown = "skip"    # allow (default) | skip
+#
+# ROUTING PER VERB. Every verb that dispatches holds its own slot: think,
+# blueprint, target, review, crown. One [agents.profiles.<verb>] block each,
+# same fields; a verb with no block routes by the grid (difficulty x priority
+# over the rows below), a verb WITH a block walks only its lanes. Copy the
+# block per verb and vary the fill - here review degrades instead of queueing.
+# [agents.profiles.review]
+# lanes = ["sonnet-thread", "luna-codex"]
+# on_exhausted = "degrade"
+# [agents.profiles.review.by_difficulty.high]
+# lanes = ["gpt-5.6-sol"]
 
 [[routing.models]]
 # Lane 1: the cheap subscription lane. route names the vendor the quota is
