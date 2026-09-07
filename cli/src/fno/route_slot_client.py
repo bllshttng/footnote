@@ -210,8 +210,6 @@ def resolve_slot_via_binary(
     missing, fails, or answers malformed JSON - a named refusal, never a
     silent lane-less spawn.
     """
-    import os
-
     binary = _binary_or_raise()
     rows = _declared_rows(settings)
     lanes_payload = _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else lanes
