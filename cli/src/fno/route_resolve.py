@@ -44,11 +44,6 @@ _STATIC_FALLTHROUGH = {
     "low": ["low", "medium", "high"],
 }
 
-_GRID_CANDIDATES = {
-    "high": ["claude-opus-5", "gpt-5.6-sol"],
-    "medium": ["claude-sonnet-5", "glm-5.3[1m]", "gpt-5.6-terra"],
-    "low": ["glm-4.7", "claude-haiku-4-5", "gpt-5.6-luna"],
-}
 # Strong end of the band vocabulary; the round-up ruling resolves absent or
 # uncertain difficulty here, never to the cheap end. `max` ranks above `high`
 # so the band vocabulary here is the SAME one `_BAND_FLOOR` admits: a declared
@@ -372,15 +367,12 @@ def _capacity_state(value: object) -> tuple[str, str]:
 def row_capacity(
     row: InventoryRow, capacity: Optional[Mapping[str, object]]
 ) -> tuple[str, str]:
-    """(state, window-note) THIS row reads from a runtime capacity snapshot.
+    """(state, window-note) THIS row reads from the runtime capacity snapshot.
 
-    Quota locks out at the ACCOUNT, so a row that names one reads that
-    account's own answer from the detail mapping ``runtime_capacity``
-    produces (``{state, window, accounts: {id: state}}``); an account the
-    snapshot does not name reads ``unknown`` (permitted). A row naming no
-    account reads the harness-wide MAX aggregate, which stays the correct
-    answer for it: the aggregate says whether ANY account on the harness can
-    serve, and an unnamed row spends whichever does.
+    A row naming an account reads that account's own answer from the detail
+    mapping; an account the snapshot does not name reads ``unknown``
+    (permitted). A row naming no account reads the harness-wide MAX
+    aggregate, the correct answer for it.
     """
     value = (capacity or {}).get(row.harness, "unknown")
     if not row.account:
@@ -390,8 +382,6 @@ def row_capacity(
         if isinstance(accounts, Mapping):
             state = str(accounts.get(row.account) or "unknown").lower()
             return state, str(value.get("window", "") or "")
-    # No per-account detail behind the row's named account: the honest answer
-    # for THAT account is unknown, never the harness-wide best.
     return "unknown", ""
 
 
@@ -550,57 +540,45 @@ def _slot_fold(
     rung_base: str,
     settings: object,
     chain: list[str],
-) -> tuple[
-    Optional[list[tuple[str, str]]],
-    Optional[Inventory],
-    dict[str, dict[str, str]],
-]:
-    """Fold a profile's lanes into ``(plan, row-inventory, fields-by-rung)``.
+) -> tuple[Optional[list[tuple[str, str]]], Optional[Inventory], dict[str, dict[str, str]]]:
+    """Fold lanes to ``(plan, row-inventory, inline-fields-by-rung)``.
 
-    ``plan`` pairs each lane's config rung with the ``[[routing.models]]`` row
-    name it resolves to (an inline table folds as its own row named by its
-    config path). A config fault appends one ``slot=config`` terminal to
-    ``chain`` and answers ``(None, None, {})``; the walker and the readout
-    both treat that as refuse-by-name.
+    A string lane names a declared ``[[routing.models]]`` row; an inline
+    table folds as its own row named by its config path. A config fault
+    appends one ``slot=config`` terminal to ``chain`` and answers
+    ``(None, None, {})``.
     """
     plan: list[tuple[str, str]] = []
     fold: list[dict[str, Any]] = []
     fields_by_rung: dict[str, dict[str, str]] = {}
+
+    def _fault(rung: str, why: str) -> tuple[None, None, dict]:
+        chain.append(f"slot=config {rung} {why}")
+        return None, None, {}
+
     for index, raw in enumerate(lanes):
         rung = f"{rung_base}.lanes[{index}]"
         if isinstance(raw, str):
             if not raw.strip():
-                chain.append(f"slot=config {rung} is an empty lane name")
-                return None, None, {}
+                return _fault(rung, "is an empty lane name")
             plan.append((rung, raw.strip()))
             continue
         if not isinstance(raw, Mapping) and not hasattr(raw, "provider"):
-            chain.append(
-                f"slot=config {rung} must be a table or a [[routing.models]] row name"
-            )
-            return None, None, {}
+            return _fault(rung, "must be a table or a [[routing.models]] row name")
         if isinstance(raw, Mapping):
             unknown = sorted(set(raw) - set(_SLOT_LANE_FIELDS))
             if unknown:
-                chain.append(f"slot=config {rung} has unknown field {unknown[0]!r}")
-                return None, None, {}
+                return _fault(rung, f"has unknown field {unknown[0]!r}")
             for key, value in raw.items():
                 if not isinstance(value, str):
-                    chain.append(
-                        f"slot=config {rung}.{key} must be a string; got {value!r}"
-                    )
-                    return None, None, {}
+                    return _fault(rung, f".{key} must be a string; got {value!r}")
         fields = {key: _lane_field(raw, key) for key in _SLOT_LANE_FIELDS}
         if not any(fields.values()):
-            chain.append(f"slot=config {rung} is empty")
-            return None, None, {}
+            return _fault(rung, "is empty")
         entry: dict[str, Any] = {"name": rung}
         for key in _SLOT_LANE_FIELDS:
-            if key == "provider":
-                if fields[key]:
-                    entry["harness"] = fields[key]
-            elif key not in _LANE_PASSTHROUGH_FIELDS and fields[key]:
-                entry[key] = fields[key]
+            if fields[key] and key not in _LANE_PASSTHROUGH_FIELDS:
+                entry["harness" if key == "provider" else key] = fields[key]
         fold.append(entry)
         fields_by_rung[rung] = fields
         plan.append((rung, rung))
@@ -628,36 +606,16 @@ def resolve_slot(
 ) -> tuple[Optional[dict[str, Any]], list[str]]:
     """Which lane does this dispatch ride right now: the ONE slot resolver.
 
-    The question used to have four answerers - the spawn seam's round-robin
-    lane selector, the spawn seam's grid call, advance's placement grid, and
-    explain's routing section - and none of them read capacity per lane. This
-    function is the one answerer. The verb's ``agents.profiles.<verb>`` owns
-    the KEY (a verb is what fno dispatches); ``[[routing.models]]`` rows own
-    the BODY (harness, model, effort, route, account - the declared economics).
-
-    Returns ``(candidate, chain)`` like :func:`resolve_grid`; the chain's last
-    element is the terminal reason the caller receipts.
-
-    - ``lanes`` non-empty: walk IN DECLARED ORDER (the list is the rank). A
-      lane skips when the pinned substrate/permission cannot ride its
-      harness, when its routed vendor sits at ``agents.provider_limits``, or
-      when :func:`row_capacity` reads ``exhausted``/``blocked``; every skip
-      appends one ``slot skip`` chain line naming the lane and the reason.
-      The first lane that passes is the candidate, which carries
-      ``harness``/``model``/``effort`` plus ``lane``/``lane_rung`` and, for an
-      inline lane table, its passthrough fields under ``lane_fields``.
-    - every lane skipped: ``on_exhausted`` decides the terminal -
-      ``refuse`` (default), ``degrade`` (the profile scalars answer as
-      before), or ``queue`` (a typed capacity refusal; the spawn seam exits
-      78 on it). A lane named on the command line (``explicit_lane``) or
-      ``FNO_SPAWN_GATE=0`` degrades whatever the config says.
-    - no ``lanes``: fall through to :func:`resolve_grid` over the whole
-      inventory (band, role floor, objective), unchanged, exactly as before
-      this resolver existed. A node-less spawn still answers nothing: there
-      is no truthful difficulty input.
-    - a config fault (unknown row name, malformed lane, out-of-enum
-      ``on_exhausted``) is a ``slot=config`` terminal, never a raise: the
-      spawn seam refuses on it by name, and read-side callers degrade.
+    ``agents.profiles.<verb>.lanes`` is the rank. Each lane is a
+    ``[[routing.models]]`` row name or an inline table; the first lane whose
+    posture, vendor cap and per-account capacity pass is the candidate
+    (``harness``/``model``/``effort`` plus ``lane``/``lane_rung`` and the
+    passthrough ``lane_fields``). ``on_exhausted`` names the all-skipped
+    terminal; a command-line lane or ``FNO_SPAWN_GATE=0`` degrades whatever
+    it says. No ``lanes``: fall through to :func:`resolve_grid` unchanged
+    (a node-less spawn answers nothing). A config fault is a ``slot=config``
+    terminal, never a raise. Returns ``(candidate, chain)`` like
+    :func:`resolve_grid`.
     """
     if settings is None:
         try:
@@ -705,12 +663,7 @@ def resolve_slot(
         )
         return None, chain
 
-    # Fold BOTH lane spellings into InventoryRows so there is one selection
-    # path: a string names a declared ``[[routing.models]]`` row; an inline
-    # table folds as its own row named by its config path, with the posture
-    # fields (substrate/permission_mode/pane_group) carried beside it.
-    folded = _slot_fold(lanes, rung_base, settings, chain)
-    plan, lane_inv, fields_by_rung = folded
+    plan, lane_inv, fields_by_rung = _slot_fold(lanes, rung_base, settings, chain)
     if plan is None or lane_inv is None:
         return None, chain
 
@@ -748,24 +701,22 @@ def resolve_slot(
             continue
         vendor: Optional[str] = None
         if row.route:
-            head = row.route.replace(",", "/").partition("/")[0].strip()
-            vendor = head or None
+            vendor = row.route.replace(",", "/").partition("/")[0].strip() or None
         cap = provider_lanes_cap(caps.get(vendor)) if vendor else None
         if vendor is not None and cap is not None:
             try:
                 current = provider_live_count(vendor)
             except ProviderCountUnavailable as exc:
-                if gate_bypassed:
-                    chain.append(
-                        f"slot note {rung} {row_name} provider count "
-                        f"unavailable for {vendor}: {exc}; FNO_SPAWN_GATE=0, "
-                        "so the lane is taken uncapped"
-                    )
-                else:
+                if not gate_bypassed:
                     chain.append(
                         f"slot=provider-count-unavailable {rung} {vendor}: {exc}"
                     )
                     return None, chain
+                chain.append(
+                    f"slot note {rung} {row_name} provider count unavailable "
+                    f"for {vendor}: {exc}; FNO_SPAWN_GATE=0, so the lane is "
+                    "taken uncapped"
+                )
             else:
                 if current >= cap:
                     chain.append(
@@ -783,20 +734,18 @@ def resolve_slot(
             f"slot {rung} {row_name} capacity={state}"
             + (f" window={window}" if window else "")
         )
-        if rung in fields_by_rung:
-            lane_fields = dict(fields_by_rung[rung])
-        else:
-            lane_fields = {
-                key: value
-                for key, value in (
-                    ("provider", row.harness),
-                    ("model", row.model),
-                    ("effort", row.effort),
-                    ("route", row.route),
-                    ("account", row.account),
-                )
-                if value
-            }
+        inline = fields_by_rung.get(rung)
+        lane_fields = dict(inline) if inline else {
+            key: value
+            for key, value in (
+                ("provider", row.harness),
+                ("model", row.model),
+                ("effort", row.effort),
+                ("route", row.route),
+                ("account", row.account),
+            )
+            if value
+        }
         pick: dict[str, Any] = {
             "harness": row.harness,
             "model": row.model,
@@ -832,16 +781,11 @@ def slot_states(
     inventory: Optional[Inventory] = None,
     settings: object = None,
 ) -> dict[str, Any]:
-    """The readout projection of one verb's slot: what is declared and what is
-    live, for ``fno config route inventory`` and ``fno config doctor``.
-
-    An unarmed slot and an absent one printed the same silence at every
-    readout, which is why the grid sat inert for weeks before anyone noticed.
-    This names both halves: the declared lanes in order with each lane's live
-    :func:`row_capacity` state, the ``on_exhausted`` terminal, and - resolved
-    by :func:`resolve_slot` ITSELF, never re-derived here - the lane a spawn
-    would take right now. DISPLAY, never selection: the fold mirrors the
-    selector's so the readout cannot show a lane the selector would refuse.
+    """The readout projection of one verb's slot for the inventory and doctor
+    verbs: declared lanes in order with live :func:`row_capacity` states, the
+    ``on_exhausted`` terminal, and - resolved by :func:`resolve_slot` ITSELF,
+    never re-derived here - the lane a spawn would take right now. Display,
+    never selection.
     """
     if settings is None:
         try:

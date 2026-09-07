@@ -1111,14 +1111,12 @@ def inject_spawn_defaults(
         return None
 
     lanes_present = bool(profile is not None and getattr(profile, "lanes", None))
-    # A profile LANE is atomic (a complete coordinate by design) and occupies
-    # the harness/model/effort axes when it answers; a bare profile FIELD
-    # occupies only the axis it names. `model_occupied` here is the NO-LANE
-    # view: it gates the grid rung, which resolve_slot runs only when the
-    # verb declares no lanes. The grid is evaluated from a node-bearing spawn
-    # only (a node-less spawn has no truthful difficulty or priority input);
-    # a lane-bearing profile is the exception - its lanes answer regardless,
-    # and they need capacity to do it.
+    # A profile LANE is atomic and occupies the harness/model/effort axes when
+    # it answers; a bare profile FIELD occupies only the axis it names.
+    # `model_occupied` here is the NO-LANE view: it gates the grid rung, which
+    # resolve_slot runs only when the verb declares no lanes. The grid is
+    # evaluated from a node-bearing spawn only; a lane-bearing profile is the
+    # exception - its lanes answer regardless, and need capacity to do it.
     model_occupied = bool(
         has_model
         or explicit_vendor_present
@@ -1239,11 +1237,7 @@ def inject_spawn_defaults(
                 lane = slot_candidate["lane_fields"]
                 lane_index = slot_candidate["lane_index"]
                 slot_receipt.append(
-                    (
-                        "slot",
-                        f"{slot_candidate['lane_rung']} {slot_candidate['lane']}",
-                        "routing",
-                    )
+                    ("slot", f"{slot_candidate['lane_rung']} {slot_candidate['lane']}", "routing")
                 )
             elif slot_candidate is None and _terminal.startswith("slot="):
                 slot_receipt.append(("slot", _terminal[len("slot="):], "routing"))
@@ -1256,14 +1250,11 @@ def inject_spawn_defaults(
         # stands down loudly rather than in silence.
         slot_receipt.append(("grid", "grid=model-axis-occupied", "routing"))
 
-    # A lane is a COMPLETE routing coordinate, so the two fields that select
-    # where a worker bills do not fall through to a lower rung when a lane was
-    # chosen. Per-field fallback let a codex-harness lane inherit
-    # `agents.profiles.<verb>.route = "zai/..."`, putting `--harness codex` and
-    # `--route zai/...` in one argv - which cli.py then refuses outright with
-    # "requires the claude harness". That is the exact migration the routing doc
-    # describes: an existing profile-level route plus newly added lanes. The
-    # other fields still fall through, because substrate/permission/account are
+    # A lane is a COMPLETE routing coordinate, so route and model do not fall
+    # through to a lower rung when a lane was chosen: per-field fallback let a
+    # codex-harness lane inherit a profile-level zai route, putting `--harness
+    # codex` and `--route zai/...` in one argv, which cli.py refuses outright.
+    # The other fields still fall through: substrate/permission/account are
     # postures a lane can legitimately leave to the profile.
     _LANE_EXCLUSIVE = ("route", "model")
 
