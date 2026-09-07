@@ -44,6 +44,10 @@ def test_codex_disagreeing_ids_register_no_row(tmp_path: Path) -> None:
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HOME": str(tmp_path),
+        # A hand-built env inherits no conftest pin, so it declares nothing.
+        # HOME is already a sandbox here; say so, or the SessionStart chain
+        # writes its stranded cache into the real checkout .fno.
+        "FNO_TEST_HERMETIC": "1",
         "CLAUDE_PROJECT_DIR": str(tmp_path),
         "CODEX_PLUGIN_ROOT": str(ROOT),
         "CODEX_THREAD_ID": "thread-wins",
@@ -70,6 +74,10 @@ def test_codex_same_value_dup_registers_once(tmp_path: Path) -> None:
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HOME": str(tmp_path),
+        # A hand-built env inherits no conftest pin, so it declares nothing.
+        # HOME is already a sandbox here; say so, or the SessionStart chain
+        # writes its stranded cache into the real checkout .fno.
+        "FNO_TEST_HERMETIC": "1",
         "CLAUDE_PROJECT_DIR": str(tmp_path),
         "CODEX_PLUGIN_ROOT": str(ROOT),
         "CODEX_THREAD_ID": "same-id",
@@ -98,6 +106,10 @@ def test_shared_codex_session_start_registers_thread_once(tmp_path: Path) -> Non
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HOME": str(tmp_path),
+        # A hand-built env inherits no conftest pin, so it declares nothing.
+        # HOME is already a sandbox here; say so, or the SessionStart chain
+        # writes its stranded cache into the real checkout .fno.
+        "FNO_TEST_HERMETIC": "1",
         "FNO_PLATFORM": "codex",
         "CODEX_THREAD_ID": "shared-thread",
         "UV_CAPTURE": str(capture),
@@ -132,6 +144,10 @@ def test_shared_session_start_does_not_duplicate_claude_registration(
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HOME": str(tmp_path),
+        # A hand-built env inherits no conftest pin, so it declares nothing.
+        # HOME is already a sandbox here; say so, or the SessionStart chain
+        # writes its stranded cache into the real checkout .fno.
+        "FNO_TEST_HERMETIC": "1",
         "FNO_PLATFORM": "claude",
         "CLAUDE_PLUGIN_ROOT": str(ROOT),
         "CLAUDE_SESSION_ID": "claude-direct-hook-owns-registration",
@@ -184,6 +200,10 @@ def test_spawned_worker_restamps_without_consulting_the_optin_knob(tmp_path: Pat
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HOME": str(tmp_path),
+        # A hand-built env inherits no conftest pin, so it declares nothing.
+        # HOME is already a sandbox here; say so, or the SessionStart chain
+        # writes its stranded cache into the real checkout .fno.
+        "FNO_TEST_HERMETIC": "1",
         "CLAUDE_PROJECT_DIR": str(tmp_path),
         "CLAUDE_PLUGIN_ROOT": str(ROOT),
         "CLAUDE_CODE_SESSION_ID": "08054b1d-a907-47ab-a3d2-4a1e7a87eb4e",
@@ -220,6 +240,10 @@ def test_hand_started_session_still_gated_on_the_optin_knob(tmp_path: Path) -> N
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HOME": str(tmp_path),
+        # A hand-built env inherits no conftest pin, so it declares nothing.
+        # HOME is already a sandbox here; say so, or the SessionStart chain
+        # writes its stranded cache into the real checkout .fno.
+        "FNO_TEST_HERMETIC": "1",
         "CLAUDE_PROJECT_DIR": str(tmp_path),
         "CLAUDE_PLUGIN_ROOT": str(ROOT),
         "CLAUDE_CODE_SESSION_ID": "0718619e-2527-4bba-9cc0-5e493313240c",

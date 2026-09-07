@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Claude Code WorktreeCreate hook: canonical conductor location.
+# Claude Code WorktreeCreate hook: resolver-driven location.
 #
-# Creates the worktree at `~/conductor/workspaces/<repo>/<name>` (repo name
-# from the canonical checkout's directory basename) rather than at Claude
-# Code's default `.claude/worktrees/<name>`, then runs `setup-worktree.sh`
-# inside it.
+# Creates the worktree where `fno agents workspace worktree policy` resolves
+# (external -> <base>/<repo>/<name>, else Claude Code's default
+# `.claude/worktrees/<name>`), then runs `setup-worktree.sh` inside it.
 #
 # Wiring (pick one; do NOT pick both for the same repo - hooks merge in
 # parallel and matching hooks are run concurrently, which races):
@@ -15,11 +14,9 @@
 #      project to its canonical conductor location.
 #
 #   2. Plugin-level (for fno-ecosystem projects): the fno
-#      plugin's WorktreeCreate hook at `hooks/worktree-setup.sh` does the
-#      same redirect when `worktree.use_conductor_canonical: true` is set
-#      in `.fno/settings.yaml`. Prefer this over wiring this script
-#      because the plugin hook also handles dep install, env copy, and
-#      verification in one pass.
+#      plugin's WorktreeCreate hook at `hooks/worktree-setup.sh` resolves
+#      the same policy and handles dep install, env copy, and verification
+#      in one pass. Prefer this over wiring this script.
 #
 # See .claude/rules/worktrees.md for the full reconciliation table.
 #
@@ -66,32 +63,38 @@ MAIN_REPO="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null |
 REPO_NAME="$(basename "$MAIN_REPO")"
 
 # Policy gate before any path decision: `never` means this project's working
-# tree IS the product, so the answer is no worktree at all.
+# tree IS the product, so the answer is no worktree at all. The SAME resolver
+# call also yields the base, so this hook and `worktree ensure` can never
+# disagree on where a worktree lives (x-f96e).
 #
 # Refusal shape matters: a NON-ZERO exit makes Claude Code fall back to its
 # default worktree flow, which creates the worktree we are refusing. The
 # supported abort is exit 0 with NOTHING on stdout ("no successful output").
 # Fails open on anything but an affirmative `never` - this is the interactive
 # path and a stale fno must not break it.
+WT_POLICY=""
+WT_BASE=""
 if command -v fno >/dev/null 2>&1; then
-    WT_POLICY="$( (fno agents workspace worktree policy --repo "$MAIN_REPO" 2>/dev/null || fno workspace worktree policy --repo "$MAIN_REPO" 2>/dev/null) | head -1 | tr -d '[:space:]')"
+    # stdout is exactly two clean lines (policy word, base=<path>); the
+    # resolver's deprecation notes go to stderr, never parsed here.
+    _POLICY_OUT="$( (fno agents workspace worktree policy --repo "$MAIN_REPO" 2>/dev/null || fno workspace worktree policy --repo "$MAIN_REPO" 2>/dev/null) || true)"
+    WT_POLICY="$(printf '%s\n' "$_POLICY_OUT" | head -1 | tr -d '[:space:]')"
+    WT_BASE="$(printf '%s\n' "$_POLICY_OUT" | sed -n 's/^base=//p' | head -1)"
     if [ "$WT_POLICY" = "never" ]; then
         echo "worktree.policy=never for $REPO_NAME: refusing to create a worktree; work in place on the canonical checkout." >&2
         exit 0
     fi
 fi
 
-# Base comes from config, never a hardcoded allocator: this script is wired
-# user-globally into repos that have their own worktrees_base (or none).
-WT_BASE=""
-if command -v fno >/dev/null 2>&1; then
-    WT_BASE="$(fno config get config.paths.worktrees_base 2>/dev/null || true)"
-    [ "$WT_BASE" = "null" ] && WT_BASE=""
+# Location comes from the RESOLVED policy, never a raw config read: external
+# relocates to the resolved base (an explicit config.paths.worktrees_base is
+# sufficient on its own, x-f96e), anything else stays at Claude Code's own
+# gitignored location. The base is already expanded by the resolver.
+if [ "$WT_POLICY" = "external" ] && [ -n "$WT_BASE" ]; then
+    WORKTREE_PATH="$WT_BASE/$REPO_NAME/$NAME"
+else
+    WORKTREE_PATH="$MAIN_REPO/.claude/worktrees/$NAME"
 fi
-WT_BASE="${WT_BASE/#\~/$HOME}"
-[ -n "$WT_BASE" ] || WT_BASE="$MAIN_REPO/.claude/worktrees"
-WORKTREE_PATH="$WT_BASE/$REPO_NAME/$NAME"
-[ "$WT_BASE" = "$MAIN_REPO/.claude/worktrees" ] && WORKTREE_PATH="$WT_BASE/$NAME"
 BRANCH_NAME="worktree-$NAME"
 
 echo "=== Creating worktree at $WORKTREE_PATH ===" >&2

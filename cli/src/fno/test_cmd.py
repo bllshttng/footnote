@@ -938,6 +938,45 @@ def _smoke_env(root: Path) -> dict:
     return env
 
 
+def _state_canary_snapshot() -> str:
+    """Snapshot path for this process, so two runs on one box never share one.
+
+    plant and verify run in the SAME process, so the pid keys both halves. CI
+    gives each shard its own runner and would not collide anyway; a developer
+    running two checkouts at once would.
+    """
+    return str(Path(tempfile.gettempdir()) / f"fno-state-canary.{os.getpid()}.snapshot")
+
+
+def _run_state_canary(root: Path, verb: str) -> int:
+    """Run scripts/ci/check-state-canary.sh on the PARENT HOME.
+
+    Deliberately NOT under _smoke_env: the sandbox is what the suite is allowed
+    to write, and the parent HOME is the surface the canary exists to protect.
+    Handing it the sandbox would measure the wrong root and pass forever.
+
+    A missing script is fatal on verify and non-fatal on plant. A verify that
+    cannot run must never read as a green; that is the absence-reads-as-success
+    failure this runner refuses everywhere else.
+
+    Not to be confused with _state_canary_status, which reads the state-lane
+    junit and answers a different question.
+    """
+    script = root / "scripts" / "ci" / "check-state-canary.sh"
+    if not script.is_file():
+        if verb == "verify":
+            sys.stderr.write(
+                f"smoke: {script} is missing - cannot verify the operator state "
+                "root was untouched, refusing to call this green\n"
+            )
+            return 1
+        return 0
+    env = dict(os.environ)
+    env["FNO_STATE_CANARY_SNAPSHOT"] = _state_canary_snapshot()
+    proc = subprocess.run(["bash", str(script), verb], cwd=str(root), env=env)
+    return proc.returncode
+
+
 def _read_failure_record(path: str, known: set[str]) -> set[str]:
     """Recorded step names that still exist in the registry (corrupt -> drop)."""
     try:
@@ -1959,10 +1998,15 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         _preserve_claim_door(root, env)
         _scrub_target_bins(root)
 
+    # The canary brackets the whole run: plant before the first step, verify
+    # after the last. Both halves sit around the single _execute_steps call
+    # site, so this is one pair rather than a per-step hook.
+    _run_state_canary(root, "plant")
     results, first_rc = _execute_steps(
         root, env, [steps[i] for i in selected], keep_going,
         pytest_shard=shard_spec if shard_total > 1 else "",
     )
+    canary_rc = _run_state_canary(root, "verify")
     # Journey/rust/bash steps leak keepers via CLI subprocesses no conftest reaches.
     from fno.graph.store import sweep_orphaned_keepers
 
@@ -1981,7 +2025,12 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         print(f"  {s:6} {d:4.0f}s  {n}", flush=True)
 
     _write_failure_record(failure_record, [n for n, s, _ in results if s == "fail"])
-    return 1 if failed else 0
+    if canary_rc != 0 and not failed:
+        sys.stderr.write(
+            "smoke: every step passed but the state canary refused - a step "
+            "wrote to the operator state root. The run is NOT green.\n"
+        )
+    return 1 if (failed or canary_rc != 0) else 0
 
 
 # --census-deferred: stop _DISCOVERY_DEFERRED from silently holding green

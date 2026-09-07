@@ -261,6 +261,17 @@ jobs:
           bash scripts/ci/check-disposable-rm.sh
           bash tests/ci/test-check-disposable-rm.sh
 
+      # The state canary's own positive control. `verify` is not run here: it
+      # needs a planted HOME with a suite run between plant and verify, and the
+      # smoke runner owns that bracket. `self-test` is self-contained and cheap,
+      # and it is what makes the canary's green mean anything: it plants into a
+      # fresh HOME, writes one byte into the planted graph.json, and fails
+      # unless the inner verify goes red naming that file.
+      - name: State canary self-test (positive control)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-state-canary.sh self-test
+
       # From autonomy-registry.yml.
       - name: autonomy registry ratchet
         if: ${{ !cancelled() }}

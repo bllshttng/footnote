@@ -297,7 +297,7 @@ printf '301\n'
 EOF
 cat > "$STUBDIR/ps" <<'EOF'
 #!/usr/bin/env bash
-printf '301 holder\n'
+printf '301 1 holder sleep 301\n'
 EOF
 chmod +x "$STUBDIR/lsof" "$STUBDIR/pgrep" "$STUBDIR/ps"
 WT="$STUBDIR/wt"; mkdir -p "$WT"
@@ -309,6 +309,37 @@ if [[ "$SNAPSHOT_RC" -ne 0 && "$PIDS_RC" -ne 0 && "$FOUND" == "301" ]]; then
     pass "unreadable cwd snapshot fails closed and preserves argv candidates"
 else
     fail "unreadable cwd snapshot" "snapshot_rc=$SNAPSHOT_RC pids_rc=$PIDS_RC found=[$FOUND]"
+fi
+rm -rf "$STUBDIR"
+
+# 5g. A child of this sweep carrying the sweep's own command line is the
+# command-substitution subshell running _wt_pids, not an occupant (CI smoke
+# 2026-09-07: pid 6327, bash <script-path>, live ps row, no cwd row). A child
+# with a DIFFERENT command line stays: that is a real squatter.
+STUBDIR=$(mktemp -d -t ps-subshell-stub.XXXXXX)
+cat > "$STUBDIR/lsof" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$STUBDIR/pgrep" <<'EOF'
+#!/usr/bin/env bash
+printf '701\n702\n'
+EOF
+cat > "$STUBDIR/ps" <<EOF
+#!/usr/bin/env bash
+printf '$$ $PPID bash $0\n'
+printf '701 $$ bash $0\n'
+printf '702 1 sleep 300\n'
+EOF
+chmod +x "$STUBDIR/lsof" "$STUBDIR/pgrep" "$STUBDIR/ps"
+WT="$STUBDIR/wt"; mkdir -p "$WT"
+eval "$(sed -n '/^_wt_refresh_cwd_snapshot()/,/^}/p; /^_wt_pids()/,/^}/p' "$LIFECYCLE")"
+PATH="$STUBDIR:$PATH" _wt_refresh_cwd_snapshot
+FOUND=$(PATH="$STUBDIR:$PATH" _wt_pids "$WT")
+if [[ "$FOUND" == "702" ]]; then
+    pass "sweep's own subshell dropped, real child kept"
+else
+    fail "subshell self-drop" "want [702], got [$FOUND]"
 fi
 rm -rf "$STUBDIR"
 

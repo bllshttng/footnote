@@ -47,6 +47,8 @@ prefix = "fno"
 # postmortems_dir = <unset>   # optional; no default
 # Override base dir for worktrees.
 # worktrees_base = <unset>   # optional; no default
+# Where 'worktree cargo-offload' relocates crates/<crate>/target caches (default ~/.fno/cargo-targets). Each tree keeps its own directory under <base>/<repo>/<tree>/; the checkout keeps a symlink, so built-binary paths stay valid.
+# cargo_targets_base = <unset>   # optional; no default
 # Override path to the memory dir.
 # memory_dir = <unset>   # optional; no default
 # Override path to hook logs.
