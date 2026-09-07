@@ -336,6 +336,32 @@ def test_codex_yolo_code_spawn_skips_bounded_grant_refusal(
     assert called
 
 
+def test_codex_full_auto_still_requires_a_git_grant(monkeypatch, tmp_path) -> None:
+    from fno.cli import app
+
+    monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: None)
+    result = CliRunner().invoke(
+        app,
+        [
+            "agents",
+            "spawn",
+            "$fno:target x-f370",
+            "--harness",
+            "codex",
+            "--substrate",
+            "thread",
+            "--cwd",
+            str(tmp_path),
+            "--permission-mode",
+            "full-auto",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "resolved git grant" in result.output
+
+
 def test_agents_help_falls_through_when_opted_in(monkeypatch) -> None:
     """`fno agents --help` stays on the Python help even with the env set."""
     from fno.cli import app

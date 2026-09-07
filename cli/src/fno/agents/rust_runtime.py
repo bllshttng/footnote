@@ -602,7 +602,7 @@ def _is_bounded_codex_code_spawn(args: Sequence[str]) -> bool:
     ):
         return False
     permission_mode = (_spawn_flag_value(args, "--permission-mode") or "").strip().lower()
-    return permission_mode not in {"yolo", "bypasspermissions", "full-auto"}
+    return permission_mode not in {"yolo", "bypasspermissions"}
 
 
 def _codex_git_grant_for_spawn(args: Sequence[str]) -> str:

@@ -3443,6 +3443,31 @@ def test_codex_sandbox_denial_in_user_text_is_not_reaped(monkeypatch):
     assert v.action == "none"
 
 
+def test_codex_response_item_is_normalized_for_distress_reads():
+    facts = watchdog._facts_from_entries(
+        [
+            {
+                "timestamp": "2026-08-16T18:40:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": ".git/refs/heads/feature/x.lock: Operation not permitted",
+                        }
+                    ],
+                },
+            }
+        ],
+        40,
+    )
+    assert facts is not None
+    assert facts.last_role == "assistant"
+    assert "Operation not permitted" in facts.last_text
+
+
 @pytest.mark.parametrize(
     "claims,commit_count,guard_text",
     [

@@ -787,6 +787,10 @@ def _sandbox_denial_text(facts: Optional[TailFacts]) -> Optional[str]:
     text = facts.last_text or facts.tail_text
     if "Operation not permitted" not in text:
         return None
+    if re.search(r"<help[>\s]", text) is None:
+        return None
+    if "evidence=" not in text:
+        return None
     if re.search(r"(?<![\w.])\.git[/\\]", text) is None:
         return None
     return text
@@ -1101,6 +1105,7 @@ def _facts_from_entries(
         return None
     windowed: list[tuple[Optional[float], str, Optional[str], tuple]] = []
     for record in entries:
+        record = _normalize_transcript_record(record)
         text = _record_text(record)
         msg = record.get("message")
         role = msg.get("role") if isinstance(msg, dict) else None
@@ -1128,6 +1133,22 @@ def _facts_from_entries(
         records, last_epoch, " ".join(t for _, t in records),
         last_role, last_text, pr_polls,
     )
+
+
+def _normalize_transcript_record(record: dict) -> dict:
+    """Map Codex response items onto the message shape used by this reader."""
+    if record.get("type") != "response_item":
+        return record
+    payload = record.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != "message":
+        return record
+    return {
+        **record,
+        "message": {
+            "role": payload.get("role"),
+            "content": payload.get("content"),
+        },
+    }
 
 
 def tail_facts(
@@ -1194,7 +1215,8 @@ def _record_text(e: dict) -> str:
         parts = [
             p.get("text", "")
             for p in content
-            if isinstance(p, dict) and p.get("type") == "text"
+            if isinstance(p, dict)
+            and p.get("type") in {"text", "input_text", "output_text"}
         ]
     if not parts and isinstance(e.get("text"), str):
         parts = [e["text"]]
@@ -1396,6 +1418,7 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             state=state,
             node=node,
             cwd=cwd,
+            agent="claude",
         ))
     # The Claude roster is a harness-specific instrument. Registry rows are
     # the authoritative fallback for other harnesses, especially Codex thread
