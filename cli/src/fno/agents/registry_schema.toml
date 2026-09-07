@@ -16,4 +16,10 @@
 # keeps "who spawned this row, whose share pays for it", and the adoption
 # grantor moves here, so crowning can never re-attribute a row's cost.
 # Rationale lives beside the column in state.rs / registry.py.
-version = 28
+# v29: additive `resolved_sandbox` / `granted_writable_roots` - what a codex
+# thread row's sandbox RESOLVED to server-side, and the roots it carries onto
+# every turn. v19's `sandbox_posture` records the REQUEST, which a resume
+# re-applies; the request and the outcome disagree on this lane, so a row that
+# carries only the request cannot answer what the worker could write.
+# Rationale lives beside the column in state.rs / registry.py.
+version = 29

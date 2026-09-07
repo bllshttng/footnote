@@ -184,6 +184,19 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // Same writer-protection rationale as v22-v25: a pre-v27 writer accepts the
 // unknown keys and erases them on its next read-modify-write. Accepted set
 // widens to 1..=27.
+//
+// v28 (x-5283) adds `adopted_by_session` - the session that VOUCHED for an
+// adopted row, split out so `spawned_by_session` keeps one meaning and
+// crowning cannot re-attribute a row's cost.
+//
+// v29 adds `resolved_sandbox` / `granted_writable_roots` - what a codex thread
+// row's sandbox RESOLVED to server-side and the roots it carries, beside the
+// `sandbox_posture` REQUEST that v19 already records. The pair is the record
+// this lane lacked: a resume applies the request, so a row that carries only
+// the request cannot answer what the worker could write, and its absence read
+// the same as a full-access thread. Same additive-optional writer-protection
+// rationale as v22-v28: a pre-v29 writer accepts the unknown keys and erases
+// them on its next read-modify-write. Accepted set widens to 1..=29.
 // Rendered by build.rs from src/registry_schema.toml (the version's single
 // owner); see that file for the bump protocol.
 include!(concat!(env!("OUT_DIR"), "/registry_schema.rs"));
@@ -999,6 +1012,25 @@ pub struct RegistryEntry {
     /// x-5283 LD3: the session that VOUCHED for an adopted row (X3 passthrough).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopted_by_session: Option<String>,
+    /// The sandbox posture the codex app-server RESOLVED for a thread row, in
+    /// the server's own spelling (`"workspaceWrite"`, `"dangerFullAccess"`),
+    /// or `"unknown"` when `thread/start` reported no sandbox (schema v29).
+    ///
+    /// Distinct from `sandbox_posture`, which records what the spawn REQUESTED
+    /// and is what `thread/resume` re-applies. The two disagree in practice: a
+    /// `yolo` thread asks for full access and the app-server can still keep its
+    /// workspaceWrite default, so a row carrying only the request answers the
+    /// wrong question for anyone asking what the worker could actually write.
+    /// `None` on every non-thread row and on rows predating the column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_sandbox: Option<String>,
+    /// The writable roots a codex thread row carries onto every `turn/start`
+    /// (schema v29). Empty on every other row. Recorded beside
+    /// `resolved_sandbox` because the posture alone does not say what the
+    /// worker reached: `workspaceWrite` plus the repo state roots and
+    /// `workspaceWrite` alone are different workers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub granted_writable_roots: Vec<String>,
     /// v9 backfill-only (x-1b1e): the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into

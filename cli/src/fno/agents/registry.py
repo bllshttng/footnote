@@ -275,6 +275,12 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # Same additive-optional writer-protection rationale as v11-v25: asdict emits
 # the key on every written row, so a pre-v27 reader must reject the store on
 # version rather than TypeError on the unknown kwarg.
+# v29: additive `resolved_sandbox` / `granted_writable_roots` - the RESOLVED
+# codex thread posture and the roots that row carries, beside the v19
+# `sandbox_posture` REQUEST. Same additive-optional writer-protection
+# rationale as v27/v28: asdict emits the keys on every written row, so a
+# pre-v29 reader must reject the store on version rather than TypeError on the
+# unknown kwarg.
 # v28 (x-5283): additive `adopted_by_session` - the session that VOUCHED for
 # an adopted row; `spawned_by_session` keeps one meaning, so crowning cannot
 # re-attribute a row's cost. Same writer-protection rationale as v27.
@@ -420,6 +426,18 @@ class AgentEntry:
     # x-5283 LD3: adoption is VOUCHING, not spawning; the grantor lives here
     # so ``spawned_by_*`` keeps one meaning. Additive-optional (schema v28).
     adopted_by_session: Optional[str] = None
+    # v29: what the codex app-server RESOLVED for a thread row, in its own
+    # spelling ("workspaceWrite", "dangerFullAccess"), or "unknown" when
+    # thread/start reported no sandbox. Distinct from ``sandbox_posture``,
+    # which is the REQUEST a resume re-applies: a yolo thread asks for full
+    # access and the app-server can still keep its workspaceWrite default, so
+    # a row carrying only the request answers the wrong question. Recorded as
+    # an explicit "unknown" rather than an absent key, because absence read the
+    # same as a full-access thread and that ambiguity already cost one
+    # investigation a day. ``granted_writable_roots`` is the roots that row
+    # carries onto every turn; the posture alone does not say what it reached.
+    resolved_sandbox: Optional[str] = None
+    granted_writable_roots: list[str] = field(default_factory=list)
     # x-42c5: the CAUSE of the spawn, distinct from spawned_by_* above (which
     # identify WHO called `fno agents spawn`, not WHY). An automated dispatcher
     # sets FNO_SPAWN_TRIGGER before shelling out so the subprocess's own

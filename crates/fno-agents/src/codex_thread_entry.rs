@@ -88,8 +88,10 @@ pub(crate) fn build_codex_thread_entry(
         route_settings_path: None,
         fno_id: Some(session_id.clone()),
         delivery_policy: None,
-        // v19: the launch posture is the resume posture. The doc's old warning
-        // that "a registry row records no sandbox posture" died here.
+        // v19: the posture the spawn REQUESTED, which is what `thread/resume`
+        // re-applies across a daemon restart. Derived from `yolo` on purpose:
+        // it answers "what did we ask for", and the resume lane needs the
+        // request, not the outcome.
         sandbox_posture: Some(
             if yolo {
                 "danger-full-access"
@@ -98,6 +100,15 @@ pub(crate) fn build_codex_thread_entry(
             }
             .to_string(),
         ),
+        // v29: the posture the server RESOLVED, beside the request above. The
+        // two disagree and that is the whole reason this column exists: a
+        // `yolo` thread asks for full access and the app-server can keep its
+        // workspaceWrite default, so `sandbox_posture` alone answers what we
+        // wanted rather than what the worker got. Always `Some`: an absent
+        // key read the same as a full-access thread, and that ambiguity is
+        // what this record ends.
+        resolved_sandbox: Some(driver.resolved_sandbox_posture().to_string()),
+        granted_writable_roots: driver.granted_writable_roots().to_vec(),
         ..RegistryEntry::new(
             Some(session_id),
             Lineage::captured((parent_session, parent_harness, parent_cwd)),
