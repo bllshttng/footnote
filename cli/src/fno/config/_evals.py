@@ -25,8 +25,7 @@ class EvalsBlock(BaseModel):
     @field_validator("enabled", mode="before")
     @classmethod
     def _coerce_enabled(cls, v: object) -> bool:
-        # Lazy: the helper lives in the package module, which imports this
-        # block at startup - a module-level import here would be circular.
+        # Lazy import: the package module imports this block at startup.
         from fno.config import _coerce_bool_default_true
 
         return _coerce_bool_default_true(v)
@@ -37,7 +36,7 @@ class EvalsBlock(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _sanitize_days(cls, v: object) -> object:
-        """Drop a bad day value so the default applies; never break load."""
+        """Drop a bad day value so the default applies; never break load_settings()."""
         if not isinstance(v, dict):
             return v
         out = dict(v)
