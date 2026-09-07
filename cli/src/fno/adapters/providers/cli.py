@@ -250,26 +250,24 @@ _MANUAL_SWITCH = (
 )
 
 
-def _identity_by_record(records, now: float) -> dict:
-    """The effective-account verdict per claude record, keyed by record id.
+def _identity_for(record, by_id: dict, now: float):
+    """The effective-account verdict for one claude record, or None.
 
-    From the same binding the launch paths use, so the usage surface cannot
-    name an account a spawn would refuse.
+    From the same binding the launch paths use, so the usage surface cannot name
+    an account a spawn would refuse. Called only for a record that HAS an
+    observation to attribute: resolving it for every configured record turned a
+    local display into one profile call per record.
     """
     from fno.adapters.providers.binding import resolve_account_binding
 
-    by_id = {r.id: r for r in records}
-    out: dict = {}
-    for record in records:
-        if record.harness != "claude":
-            continue
-        try:
-            out[record.id] = resolve_account_binding(
-                record, root=managed.store_root(), by_id=by_id, now=now
-            )
-        except Exception:  # noqa: BLE001 - a report never fails on an identity read
-            continue
-    return out
+    if record.harness != "claude":
+        return None
+    try:
+        return resolve_account_binding(
+            record, root=managed.store_root(), by_id=by_id, now=now
+        )
+    except Exception:  # noqa: BLE001 - a report never fails on an identity read
+        return None
 
 
 def _add_identity(entry: dict, got) -> None:
@@ -343,7 +341,7 @@ def usage_providers(
     now = _time.time()
     quota = load_quota_config(repo_root=_get_repo_root())
     ttl = quota.probe_ttl_seconds
-    identities = _identity_by_record(config.records, now)
+    identities: dict = {}
 
     out: dict[str, object] = {}
     for record in config.records:
@@ -380,7 +378,8 @@ def usage_providers(
         if obs.persisted is False:
             # Additive: the reading is good, only its cache write lost the race.
             entry["persisted"] = False
-        _add_identity(entry, identities.get(record.id))
+        identities[record.id] = _identity_for(record, config.by_id, now)
+        _add_identity(entry, identities[record.id])
         out[record.id] = entry
 
     if json_output:
