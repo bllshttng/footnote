@@ -138,6 +138,8 @@ The R5 guard walks every `lru_cache` and `cache` decorator under `cli/src/fno`. 
 
 When `FNO_TEST_HERMETIC=1`, the `fno.paths` state accessors pass their resolved paths through the existing events hermetic fence. A path outside the temporary allowed roots raises `HermeticEscapeError` with the path and remediation. The check judges the resolved path, so a symlink inside the sandbox cannot redirect a write to a live journal.
 
+## A declared root or a refusal
+
 `FNO_TEST_HERMETIC` has three states and `fno.hermetic.declared_root` reads all three. `1` declares a sandboxed process root. `0` is ambient on purpose, and is set PER TEST by the handful of tests asserting production behavior. No lane runs on it. `--ambient dirty` builds its child env as `neutralise(poison(E))`. `poison` never touches the pin, and `neutralise` stamps `1` unconditionally. So the dirty lane runs pinned, like the clean one. Absent means nothing was declared. Under a test runner that refuses with `UndeclaredStateRootError`, naming the path, its root class and the three ways to declare. The marker for "under a test runner" is `pytest` in `sys.modules`, because the runner itself produces it and it is true at import time, which `PYTEST_CURRENT_TEST` is not. Both pytest trees declare a process root in-process already, at `cli/tests/conftest.py` and `cli/src/fno/conftest.py`, so the refusal only meets a lane that skipped the conftest chain. Production never meets it.
 
 The Rust runtime carries the same rule inside the lib crate, and only there. `AgentsHome::from_env` and `durable_spaces_root` refuse the ambient `$HOME` fallback under `cfg!(test)` unless a root is declared, because `cargo test` sandboxes no `HOME`. A test declares one with `paths::DeclaredRoot`, which pins `FNO_SPACES_DIR` and `FNO_AGENTS_HOME` under `std::env::temp_dir()` and restores them on drop.
@@ -145,6 +147,18 @@ The Rust runtime carries the same rule inside the lib crate, and only there. `Ag
 Two resolvers, not every resolver. `claims::global_claims_root` carries the same `$HOME` fallback and is unfenced, so a bare `cargo test --lib` still creates `$HOME/.fno/claims`. That was measured on 2026-09-07. The poisoned-HOME canary is what catches it, so this page names the gap instead of claiming it closed.
 
 `cfg!(test)` is the stated limit, not an oversight. Integration targets under `crates/fno-agents/tests/` link the lib compiled WITHOUT `cfg(test)`. They get no fence. To them the crate is a dependency, which is the shape production sees. To reach them, the fence must become a runtime check. A runtime check fires in production, where an ambient `$HOME` resolution is the correct answer. So an integration target pins `FNO_AGENTS_HOME` or `FNO_SPACES_DIR` itself. If it does not, nothing refuses.
+
+The rule needs an instrument, and the instrument needs a control. `scripts/ci/check-state-canary.sh` is both.
+
+`plant` writes a marker graph and a `.canary` file into `$HOME/.fno` and `<checkout>/.fno`, then snapshots a sha256 of every file under both roots. `verify` recomputes and names every added, removed or changed path. The smoke runner brackets its whole run with the pair, on the PARENT `HOME`. The sandbox is what the suite may write. The parent `HOME` is the surface the canary protects, so handing it the sandbox would measure the wrong root and pass forever.
+
+`self-test` is the positive control, and `guards.yml` runs it on every PR. It plants into a fresh `HOME`, writes ONE BYTE into the planted `graph.json`, and fails unless the inner `verify` goes red naming that file. A canary never shown able to go red is an absence-only success condition, which is the shape this page refuses everywhere else.
+
+This replaces `_real_graph_leak_tripwire`, which watched one file for added node ids, on CI only. That shape cannot see a truncation. On 2026-09-06 a run cut a 2297-node graph to a single 64-byte entry, which adds no node id, so the tripwire passed. A content hash over every file catches an added, a removed and a changed file alike. Coverage does not narrow: CI runs every pytest shard through `fno doctor test smoke`, which is exactly where the bracket sits.
+
+Three names directly under `<checkout>/.fno` are excluded, because the smoke runner writes them while the canary brackets it. They are `last-test.log`, `preflight-last-failures.txt` and `changed-last-receipt.json`. That is the instrument's own exhaust, not a test reaching operator state. `verify` prints the excluded count every run, so a green resting on a growing ignore list stays visible.
+
+A dev box is skipped, not planted over. When `$HOME/.fno/graph.json` already holds entries, that is a live operator root, and both halves print `state-canary: skipped, live operator root at ~/.fno`. A corrupt graph counts as live too, so a damaged root is never planted over on top of the damage. On CI the runner `HOME` is empty, so the canary runs on every shard.
 
 `locks_dir()` remains deliberately home-anchored and config-free because the bare-python plan stamp uses it before config dependencies load. Hand-built state paths are outside the accessor fence. The state-root lint catches those construction sites until their owning resolver is consolidated.
 
