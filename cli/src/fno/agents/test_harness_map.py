@@ -431,12 +431,18 @@ def test_explicit_bg_resolves_where_the_spawn_claim_is_native(unseated):
 
 
 def test_thread_lane_is_derived_from_the_attach_declaration():
-    """Lane A where interactive_attach declares a form; lane B where only
-    interactive_resume does. The selector reads the capability contract, so
-    a new row lands in its lane with no code edit."""
+    """Lane A where interactive_attach declares a form, or features.attach
+    reads native; lane B where only interactive_resume does. The selector
+    reads the capability contract, so a new row lands in its lane with no
+    code edit."""
     assert thread_lane("claude") == "attach"
     assert thread_lane("codex") == "attach"
-    for harness in ("pi", "opencode", "agy", "gemini"):
+    # opencode ships no `opencode attach <id>` subcommand (interactive_attach
+    # reads unsupported), but dispatch_opencode_serve is a real, working
+    # thread destination reached through the daemon-kept lane - the row's
+    # own features.attach claim already says so (x-df08).
+    assert thread_lane("opencode") == "attach"
+    for harness in ("pi", "agy", "gemini"):
         assert thread_lane(harness) == "keeper", harness
 
 
