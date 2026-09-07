@@ -24,10 +24,10 @@ def _graph_path():
     return _cli_graph_path()
 
 
-def _read_node(node_id: str) -> Optional[dict]:
+def _read_node(node_id: str, graph_path) -> Optional[dict]:
     from fno.graph.store import read_graph
 
-    return next((e for e in read_graph(_graph_path()) if e.get("id") == node_id), None)
+    return next((e for e in read_graph(graph_path) if e.get("id") == node_id), None)
 
 
 def _invoking_session_id() -> Optional[str]:
@@ -142,7 +142,7 @@ def _unclaim_node(task_id: str) -> None:
     node_id = resolved_id or task_id
     lock_note = _release_node_lockfile(node_id)
 
-    after = _read_node(node_id)
+    after = _read_node(node_id, _graph_path())
     if (after or {}).get("status") == "in_progress":
         _wedge_refusal("unclaim", node_id, sum(is_open_do_row(r) for r in ((after or {}).get("sessions") or [])))
 
@@ -194,7 +194,7 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
     _clear_locked_by(node_id, expect_locked_by=row.get("locked_by"))
     _release_node_lockfile(node_id)
 
-    after = _read_node(node_id)
+    after = _read_node(node_id, _graph_path())
     status_after = (after or {}).get("status")
     remaining = sum(is_open_do_row(r) for r in ((after or {}).get("sessions") or []))
     if after is None or status_after == "in_progress":
