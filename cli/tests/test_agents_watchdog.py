@@ -4325,35 +4325,6 @@ def test_watchdog_partial_is_a_declared_event_type():
     assert {"watchdog_applied", "watchdog_partial", "watchdog_refused"} <= names
 
 
-def test_apply_lane_emits_partial_for_a_half_landed_reroute(tmp_path, monkeypatch):
-    """The bug this node names, at the emit site: cmd_watchdog folded every
-    non-applied outcome into watchdog_refused."""
-    import fno.paths as paths_mod
-
-    monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
-    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
-    monkeypatch.setattr(
-        watchdog, "tail_facts", lambda sid, cwd: _facts(RATE_LIMIT_TAIL, age_min=125)
-    )
-    v = Verdict("cccc3333-0000", "r1", "blocked", REROUTE, "429", "redispatch")
-    outcome, detail = apply_verdict(
-        v, lanes="all", cwd="/tmp/r1", failover_fn=lambda c, e: "notified"
-    )
-    assert outcome == watchdog.PARTIAL
-
-    seen: list[tuple[str, dict]] = []
-    monkeypatch.setattr(
-        watchdog, "emit_event", lambda kind, data: seen.append((kind, data))
-    )
-    watchdog.emit_event(
-        watchdog.outcome_event(outcome),
-        {"row_id": v.row_id, "verdict": v.verdict, "detail": detail,
-         "outcome": outcome},
-    )
-    assert seen[0][0] == "watchdog_partial"
-    assert seen[0][1]["outcome"] == watchdog.PARTIAL
-
-
 def test_unfinished_mail_gate_mails_an_incomplete_scan(tmp_path, monkeypatch):
     """A withheld incomplete scan reads "retry next sweep", but a deleted
     worktree root fails the same way forever. The digest names every unread

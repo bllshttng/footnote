@@ -2742,7 +2742,12 @@ def unfinished_mail_gate(
     sweep", but the common cause is a worktree root that was deleted, which
     fails the same way forever, so the lane went permanently mute while its
     findings kept printing to stdout under exit 0. The digest names every
-    unread dimension and its warning, so the reader sees the shortfall."""
+    unread dimension and its warning, so the reader sees the shortfall.
+
+    The change gate keys on finding identity alone, so a later COMPLETE scan
+    finding exactly the same set sends nothing: the caveat is never retracted
+    by mail. That is the cheaper half of the trade - keying completeness into
+    the signature would re-mail an unchanged finding set on every flip."""
     from fno.agents.unfinished_work import snapshot_digest, snapshot_signature
 
     if not to:
