@@ -163,8 +163,7 @@ def evals_health_summary(
 ) -> Optional[dict[str, Any]]:
     """One-line evals health for triage health and doctor; the demand row.
 
-    None when no history or no rows; never raises; unknown never asserts
-    staleness. Full semantics in docs/evals.md.
+    None when no history or no rows; never raises. Semantics in docs/evals.md.
     """
     if not history_path.exists():
         return None

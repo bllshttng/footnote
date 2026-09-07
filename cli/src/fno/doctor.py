@@ -2467,10 +2467,8 @@ def _emit_human(
     ev = result.get("evals")
     if ev is None or ev.get("never_ran") or ev.get("age_days") is None:
         detail = "no eval history" if ev is None else "no regression-tier run on record"
-        out(
-            f"fno doctor: evals UNKNOWN ({detail}); "
-            "run `fno doctor evals run --tier regression -y`."
-        )
+        out(f"fno doctor: evals UNKNOWN ({detail}); "
+            "run `fno doctor evals run --tier regression -y`.")
     elif ev.get("stale"):
         out(
             f"fno doctor: evals STALE - the newest regression-tier run is "
