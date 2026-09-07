@@ -298,6 +298,53 @@ def test_exited_rows_do_not_fill_the_resolver(tmp_path, monkeypatch):
     assert ident.disposition == "empty"
 
 
+def test_cross_family_markers_stay_fail_closed(tmp_path, monkeypatch):
+    """A process carrying two families' markers standing in a thread worker's
+    worktree is a bystander, not the worker: a malformed or contradictory
+    answer is never overwritten by the record, whatever disposition the walk
+    returned."""
+    cwd_a = tmp_path / "worker-a"
+    cwd_a.mkdir()
+    _write_registry(tmp_path, monkeypatch, [_thread_row("worker", str(cwd_a), _SID_A)])
+    _scrub_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", _SID_B)
+    monkeypatch.setenv("CODEX_THREAD_ID", _SID_C)
+
+    monkeypatch.chdir(cwd_a)
+    ident = resolve_self_identity()
+
+    assert ident.session_id is None
+    assert ident.disposition != "spawn_record"
+
+
+def test_foreign_legacy_marker_blocks_adoption(tmp_path, monkeypatch):
+    """A legacy claude marker beside a codex marker reads single-family to the
+    canonical parse but two-family in markers_present; the families-agreement
+    guard uses the full marker set, so the record is not adopted."""
+    cwd_a = tmp_path / "worker-a"
+    cwd_a.mkdir()
+    _write_registry(tmp_path, monkeypatch, [_thread_row("worker", str(cwd_a), _SID_A)])
+    _scrub_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_SESSION_ID", _SID_B)
+    monkeypatch.setenv("CODEX_THREAD_ID", _SID_C)
+
+    monkeypatch.chdir(cwd_a)
+    ident = resolve_self_identity()
+
+    assert ident.session_id is None
+    assert ident.disposition != "spawn_record"
+
+
+def test_row_cwd_with_embedded_nul_degrades_to_none(tmp_path, monkeypatch):
+    """A corrupted row cwd must not break the raises-nothing contract."""
+    cwd_a = tmp_path / "worker-a"
+    cwd_a.mkdir()
+    _write_registry(
+        tmp_path, monkeypatch, [_thread_row("worker", "/tmp/bad" + chr(0) + "dir", _SID_A)]
+    )
+    assert live_thread_row_for_cwd(str(cwd_a)) is None
+
+
 def test_resolve_owned_identity_verb_stamps_the_spawn_record(tmp_path, monkeypatch):
     """The production path end to end: init's manifest stamper verb answers
     HARNESS=codex SESSION_ID=<row id> for a thread worker standing in its own

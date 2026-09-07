@@ -663,10 +663,11 @@ async fn a_seeded_codex_thread_spawn_drives_its_own_seed_only() {
 /// held an Arc clone), so the `interrupt == "interrupted"` assert fails
 /// there.
 ///
-/// It also pins the ownership claim this lane exists for. The row's pid
-/// is the SHARED daemon's, and that daemon is still running after the
-/// stop. The assertion used to be the opposite (the pid must be GONE),
-/// which is what owning a private app-server per worker looked like.
+/// It also pins the ownership claim this lane exists for. The row records
+/// `pid: None` (it owns no process; the SHARED daemon, still running after
+/// the stop, owns the thread). The assertion used to be the opposite (the
+/// pid must be GONE), which is what owning a private app-server per worker
+/// looked like.
 #[tokio::test(flavor = "current_thread")]
 async fn codex_thread_stop_interrupts_and_stamps_exited_without_killing_the_daemon() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::long(), async {

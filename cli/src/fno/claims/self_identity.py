@@ -154,18 +154,22 @@ def _fill_spawn_record(owned):
     record (x-e882).
 
     Order is the whole guard: a resolved session id short-circuits before the
-    registry is read, a resolved harness that DISAGREES with the record leaves
-    the answer untouched, no matching record changes nothing. ``spawn_record``
-    stays outside ``_PROVEN_DISPOSITIONS``: the manifest shared-anchor check
-    stays armed for record-carried ids.
+    registry is read, a fail-closed disposition (malformed or contradictory
+    input) is never overwritten, and a process carrying ANY other family's
+    marker never adopts - the record key is cwd, which bystanders share.
+    ``spawn_record`` stays outside ``_PROVEN_DISPOSITIONS``: the manifest
+    shared-anchor check stays armed for record-carried ids.
     """
-    if owned.session_id:
+    if owned.session_id or owned.disposition in {"invalid", "contradiction"}:
         return owned
     row = live_thread_row_for_cwd(os.getcwd())
     if row is None:
         return owned
     harness, session_id = row
     if owned.harness and owned.harness != harness:
+        return owned
+    marker_families = {h for _m, h, _v in owned.markers_present}
+    if marker_families - {harness}:
         return owned
     return replace(
         owned, harness=harness, session_id=session_id, disposition="spawn_record"

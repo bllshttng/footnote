@@ -1284,7 +1284,12 @@ def live_thread_row_for_cwd(
         if not harness or not session_id:
             continue
         row_cwd = row.get("cwd")
-        if not row_cwd or os.path.realpath(str(row_cwd)) != wanted:
+        if not row_cwd:
+            continue
+        try:
+            if os.path.realpath(str(row_cwd)) != wanted:
+                continue
+        except (ValueError, OSError):  # malformed row cwd: skip, never raise
             continue
         matches.append((str(harness), str(session_id)))
     if len(matches) == 1:
