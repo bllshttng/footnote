@@ -86,6 +86,14 @@ def test_read_cache_fails_open(tmp_path):
     assert read_cache(tmp_path) == []  # malformed
     cache_path(tmp_path).write_text('{"a": 1}')
     assert read_cache(tmp_path) == []  # wrong shape entirely
+    cache_path(tmp_path).write_text("[1, 2]")
+    assert read_cache(tmp_path) == []  # a list of non-objects is not rows
+
+
+def test_read_cache_drops_non_object_rows(tmp_path):
+    cache_path(tmp_path).parent.mkdir()
+    cache_path(tmp_path).write_text('[{"node": "x-1"}, 7, "junk"]')
+    assert read_cache(tmp_path) == [{"node": "x-1"}]
 
 
 def test_write_overwrites_never_appends(tmp_path):

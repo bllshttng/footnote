@@ -268,7 +268,7 @@ def _provenance_line(row: dict) -> str:
     signals a king needs to answer 'do we pick this back up'."""
     node = row.get("node")
     label = f"**{node}**" if node else "*(unmapped)*"
-    branch = row.get("branch") or "(no branch)"
+    branch = row.get("branch") or "no branch"
     parts = [
         "no remote" if not row.get("has_remote") else "has remote",
         f"{row.get('unpushed') or 0} unpushed",

@@ -104,4 +104,8 @@ def read_cache(repo: Path) -> list[dict]:
         data = json.loads(cache_path(repo).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    return data if isinstance(data, list) else []
+    if not isinstance(data, list):
+        return []
+    # A valid-JSON list of non-objects must not reach the renderer: the
+    # board's own try/except sits around the READ, not around row formatting.
+    return [row for row in data if isinstance(row, dict)]
