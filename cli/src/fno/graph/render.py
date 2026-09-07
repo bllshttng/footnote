@@ -298,7 +298,6 @@ def render_graph_md(
 
     # Before the Obsidian footer: the kanban:settings block must stay last.
     from fno.branch_provenance_cache import provenance_lines
-
     lines.extend(provenance_lines())
 
     if obsidian:

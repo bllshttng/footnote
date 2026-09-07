@@ -47,7 +47,6 @@ def read_cache(repo: Path) -> list[dict]:
     """Cached rows, fail-open: any read or parse problem answers []."""
     try:
         data = json.loads((Path(repo) / CACHE_RELPATH).read_text(encoding="utf-8"))
-        # The isinstance guard keeps a JSON list of non-objects off the formatter.
         return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
     except (OSError, ValueError):
         return []
