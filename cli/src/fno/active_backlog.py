@@ -393,7 +393,7 @@ def territory_rows(*, strict: bool = False) -> list[dict]:
         from fno.graph.store import read_graph
         from fno import paths as _paths
 
-        entries = read_graph(str(_paths.graph_json()))
+        entries = read_graph(_paths.graph_json())
         if not isinstance(entries, list):
             entries = []
     except Exception:  # noqa: BLE001 - an unreadable graph reads as unknown

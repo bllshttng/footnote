@@ -127,7 +127,7 @@ def _territory(scope: str) -> Optional[dict]:
 def _read_entries() -> list[dict]:
     from fno.graph.store import read_graph
 
-    return read_graph(str(paths.graph_json()))
+    return read_graph(paths.graph_json())
 
 
 def _is_terminal(row: dict) -> bool:
@@ -271,9 +271,10 @@ def blueprint_feed(
         for idea in ideas:
             ok, detail = _mail_deliver(worker["name"], idea["id"])
             record["fed"][idea["id"]] = {"at": _iso(now), "ok": ok}
-            (delivered if ok else failed).append(
-                idea["id"] if ok else {"id": idea["id"], "reason": detail}
-            )
+            if ok:
+                delivered.append(idea["id"])
+            else:
+                failed.append({"id": idea["id"], "reason": detail})
         _write_record(key, record)
         return {
             "action": "deliver",
