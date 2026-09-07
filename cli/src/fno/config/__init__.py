@@ -2046,6 +2046,13 @@ class SpawnProfileBlock(SpawnDefaultsBlock):
     # Keep lanes raw so a malformed routing list does not make every config
     # read fail; the spawn seam validates and refuses before launching anything.
     lanes: Any = Field(default_factory=list)
+    # The declared terminal when EVERY lane is skipped (capped vendor,
+    # exhausted account, unsupported posture): refuse (default) stops the
+    # spawn; degrade lets the profile scalars and agents.defaults answer;
+    # queue emits a typed capacity refusal (exit 78) so a dispatcher reads it
+    # as capacity, not config. An out-of-enum value refuses at the spawn seam
+    # by name rather than coercing to a terminal nobody named.
+    on_exhausted: str = "refuse"
 
 
 class RoutingModelBlock(BaseModel):

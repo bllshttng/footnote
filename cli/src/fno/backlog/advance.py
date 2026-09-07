@@ -1615,7 +1615,23 @@ def _base_project_id(canonical_root: Path) -> str:
 def _grid_lane_for(
     node: Optional[dict], *, model: Optional[str], provider: Optional[str]
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """``(harness, model, decline_reason)`` the capacity grid picks for an UNPINNED spawn.
+    """``(harness, model, decline_reason)`` the slot resolver picks for an UNPINNED spawn.
+
+    On a pick the reason is ``None``; on a decline the harness and model are
+    ``None`` and the reason names WHY - the chain's own terminal, surfaced
+    verbatim because rewording it would fork the receipt vocabulary. The
+    reason is for RECEIPTS, never for refusing: routing degrades and never
+    blocks a spawn (Locked 10), and an empty inventory is a config gap, not a
+    capacity failure.
+
+    Deliberately ONE function rather than a wrapper: tests monkeypatch this
+    name, and an internal caller that reached past it would silently bypass
+    every such patch. Verb ``target``: this is the DISPATCH door, and the
+    spawn seam composes the same verb from the same profile, so placement and
+    spawn agree on one lane. Only a fully unpinned spawn defers here; unknown
+    capacity falls back to the caller's defaults. Dispatch sites that make
+    HARNESS-KEYED decisions before spawning (lane worktree placement) must
+    call this first and thread the result through both decisions.
 
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
@@ -1634,9 +1650,9 @@ def _grid_lane_for(
         role: Optional[str] = None
         if not (node.get("plan_path") or "").strip():
             role = "planning"
-        candidate, chain = route_resolve.resolve_grid(
-            node.get("difficulty"),
-            node.get("priority"),
+        candidate, chain = route_resolve.resolve_slot(
+            "target",
+            node,
             capacity,
             role=role,
             inventory=inventory,

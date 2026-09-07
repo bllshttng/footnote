@@ -2856,3 +2856,48 @@ def test_spawn_worker_still_accepts_a_non_state_root_extra_env(monkeypatch):
         "ab-2222aaaa", "/w", extra_env={"ANTHROPIC_BASE_URL": "https://x"}
     )
     assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://x"
+
+
+def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
+    """Placement and spawn must ride the SAME lane: `_grid_lane_for` (the
+    placement door) returns exactly what `resolve_slot` (the spawn door)
+    resolves for the same node. A fork here puts the worktree on one harness
+    and the worker on another."""
+    from fno import route_resolve
+
+    candidate = {
+        "harness": "claude",
+        "model": "glm-5.3-flash",
+        "lane": "flash-zai",
+        "lane_rung": "agents.profiles.target.lanes[0]",
+        "lane_index": 0,
+        "lane_fields": {"provider": "claude", "model": "glm-5.3-flash"},
+    }
+    seen: dict = {}
+
+    def _fake_slot(verb, node, capacity, **kw):
+        seen["verb"] = verb
+        seen["node"] = node
+        seen["role"] = kw.get("role")
+        return candidate, ["slot agents.profiles.target.lanes[0] flash-zai capacity=ok"]
+
+    monkeypatch.setattr(route_resolve, "resolve_slot", _fake_slot)
+    monkeypatch.setattr(
+        route_resolve, "runtime_capacity", lambda **kw: {"claude": "ok"}
+    )
+    monkeypatch.setattr(
+        route_resolve, "resolve_inventory", lambda **kw: route_resolve.Inventory()
+    )
+    node = {"difficulty": "medium", "priority": "p1", "plan_path": "p.md"}
+    harness, model, reason = adv._grid_lane_for(node, model=None, provider=None)
+    assert (harness, model, reason) == ("claude", "glm-5.3-flash", None)
+    assert seen["verb"] == "target"
+    assert seen["role"] is None  # plan_path set -> execution tier
+
+    # a decline keeps the receipt vocabulary: the terminal reason surfaces
+    monkeypatch.setattr(
+        route_resolve, "resolve_slot", lambda *a, **k: (None, ["slot=exhausted queue"])
+    )
+    harness, model, reason = adv._grid_lane_for(node, model=None, provider=None)
+    assert (harness, model) == (None, None)
+    assert reason == "slot=exhausted queue"

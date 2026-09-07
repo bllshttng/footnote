@@ -7,6 +7,7 @@ no-surface provider while an explicit --effort stays fail-closed downstream.
 from __future__ import annotations
 
 import io
+import json
 
 import pytest
 
@@ -15,7 +16,7 @@ from fno.agents.spawn_defaults import inject_spawn_defaults, resolve_lane_vendor
 
 class _Defaults:
     def __init__(self, provider="", model="", effort="", substrate="", permission_mode="",
-                 route="", account="", pane_group="", lanes=None):
+                 route="", account="", pane_group="", lanes=None, on_exhausted=""):
         self.provider = provider
         self.model = model
         self.effort = effort
@@ -28,6 +29,7 @@ class _Defaults:
             _Defaults(**lane) if isinstance(lane, dict) else lane
             for lane in (lanes or [])
         ]
+        self.on_exhausted = on_exhausted
 
 
 class _Settings:
@@ -617,19 +619,17 @@ def test_ac3_hp_namespace_stripped_key():
         assert out[out.index("--model") + 1] == "fable", seed
 
 
-def test_profile_lanes_round_robin_from_live_row_count(monkeypatch):
+def test_profile_lanes_walk_in_declared_order(monkeypatch):
+    """The lanes list IS the rank: lane 0 is tried first on every spawn, and
+    the live row count plays no part in where the walk starts."""
     import fno.agents.spawn_defaults as spawn_defaults
 
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
     lanes = [
         _lane("codex", effort="high", substrate="pane", permission_mode="yolo"),
         _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
     ]
-    for live_count, expected_harness, expected_rung in (
-        (0, "codex", "lanes[0]"),
-        (1, "claude", "lanes[1]"),
-        (2, "codex", "lanes[0]"),
-        (3, "claude", "lanes[1]"),
-    ):
+    for live_count in (0, 1, 2, 3):
         monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda n=live_count: [object()] * n)
         err = io.StringIO()
         out = _inject(
@@ -637,8 +637,8 @@ def test_profile_lanes_round_robin_from_live_row_count(monkeypatch):
             err=err,
             profiles={"target": {"lanes": lanes}},
         )
-        assert out[out.index("--harness") + 1] == expected_harness
-        assert expected_rung in err.getvalue()
+        assert out[out.index("--harness") + 1] == "codex"
+        assert "agents.profiles.target.lanes[0]" in err.getvalue()
 
 
 def test_profile_lanes_skip_capped_vendor(monkeypatch):
@@ -646,6 +646,7 @@ def test_profile_lanes_skip_capped_vendor(monkeypatch):
     import fno.agents.spawn_gate as spawn_gate
 
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [object()])
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
     monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
     err = io.StringIO()
     out = _inject(
@@ -653,13 +654,13 @@ def test_profile_lanes_skip_capped_vendor(monkeypatch):
         err=err,
         max_lanes={"zai": 2},
         profiles={"target": {"lanes": [
-            _lane("codex", permission_mode="yolo"),
             _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
+            _lane("codex", permission_mode="yolo"),
         ]}},
     )
     assert out[out.index("--harness") + 1] == "codex"
-    assert "zai lane skipped at 2 of 2" in err.getvalue()
-    assert "agents.profiles.target.lanes[0]" in err.getvalue()
+    assert "provider zai at 2 of 2" in err.getvalue()
+    assert "agents.profiles.target.lanes[1]" in err.getvalue()
 
 
 def test_profile_only_lane_at_cap_refuses(monkeypatch):
@@ -1881,6 +1882,7 @@ def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(monkeypatch):
 
     monkeypatch.setenv("FNO_SPAWN_GATE", "0")
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
     monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
     err = io.StringIO()
 
@@ -1895,7 +1897,7 @@ def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(monkeypatch):
         ]}},
     )
     assert out[out.index("--harness") + 1] == "codex"
-    assert "zai lane skipped at 2 of 2" in err.getvalue()
+    assert "provider zai at 2 of 2" in err.getvalue()
 
     # Only lane capped: no refusal under the bypass.
     err2 = io.StringIO()
@@ -1910,33 +1912,228 @@ def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(monkeypatch):
     assert "FNO_SPAWN_GATE=0" in err2.getvalue()
 
 
+class _Routing:
+    def __init__(self, models):
+        self.models = models
+
+
+def _slot_settings(rows, profiles):
+    """Settings whose DECLARED routing inventory is exactly ``rows``.
+
+    String lanes resolve against ``settings.routing.models`` - the declared
+    rows - never the built-in fallback, so the fake must carry the rows the
+    lanes name.
+    """
+    s = _Settings(profiles=profiles)
+    s.routing = _Routing(rows)
+    return s
+
+
+_SLOT_ROWS = [
+    {"name": "flash-x", "harness": "claude", "model": "glm-5.3-flash",
+     "band": "low", "account": "zai-main"},
+    {"name": "sonnet-x", "harness": "claude", "model": "claude-sonnet-5",
+     "band": "medium"},
+]
+
+
+def test_string_lane_names_an_inventory_row(monkeypatch):
+    """A lane may be the NAME of a [[routing.models]] row: the row's harness,
+    model and access path ride as one coordinate."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(_SLOT_ROWS, {"target": {"lanes": ["flash-x"]}}),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--harness") + 1] == "claude"
+    assert out[out.index("--model") + 1] == "glm-5.3-flash"
+    assert "applied slot=agents.profiles.target.lanes[0] flash-x (routing)" in err.getvalue()
+
+
+def test_lane_on_exhausted_account_is_skipped_for_the_next_lane(monkeypatch):
+    """AC3-HP: the lane whose account is dead skips; the sibling lane on the
+    healthy account answers."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "exhausted"}}},
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS, {"target": {"lanes": ["flash-x", "sonnet-x"]}}
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "claude-sonnet-5"
+    assert "capacity=exhausted" in err.getvalue()
+
+
+def test_on_exhausted_queue_exits_78_with_typed_refusal(monkeypatch, capsys):
+    """AC3-EDGE: every lane exhausted + on_exhausted=queue exits 78 with the
+    typed capacity refusal - the shape a dispatcher reads as capacity, not
+    config."""
+    # The hermetic suite sets FNO_SPAWN_GATE=0, and that escape degrades
+    # instead of refusing; opt back in or this asserts nothing.
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    both_dead = [
+        dict(_SLOT_ROWS[0]),
+        dict(_SLOT_ROWS[1], account="claude-main"),
+    ]
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {
+            "claude": {
+                "state": "exhausted",
+                "accounts": {"zai-main": "exhausted", "claude-main": "exhausted"},
+            }
+        },
+    )
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            settings=_slot_settings(
+                both_dead,
+                {"target": {"lanes": ["flash-x", "sonnet-x"], "on_exhausted": "queue"}},
+            ),
+            stderr=io.StringIO(),
+            env={},
+        )
+    assert exc.value.code == 78
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "slot_exhausted"
+    assert receipt["verb"] == "target"
+    assert [lane["name"] for lane in receipt["lanes"]] == ["flash-x", "sonnet-x"]
+    assert all("exhausted" in lane["reason"] for lane in receipt["lanes"])
+
+
+def test_on_exhausted_degrade_names_the_degrade_in_the_receipt(monkeypatch):
+    """on_exhausted=degrade: the profile scalars answer as before, and the
+    receipt says the slot terminal was the reason."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "exhausted"}}},
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS,
+            {
+                "target": {
+                    "lanes": ["flash-x"],
+                    "on_exhausted": "degrade",
+                    "model": "fallback-m",
+                }
+            },
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "fallback-m"
+    assert "applied slot=exhausted degrade" in err.getvalue()
+
+
+def test_unknown_lane_name_refuses_by_name(monkeypatch):
+    """AC3-ERR: a lane naming no declared row refuses with exit 2, naming the
+    lane path, the missing row, and the declared row names."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            settings=_slot_settings(
+                _SLOT_ROWS, {"target": {"lanes": ["ghost-x"]}}
+            ),
+            stderr=err,
+            env={},
+        )
+    assert exc.value.code == 2
+    msg = err.getvalue()
+    assert "agents.profiles.target.lanes[0]" in msg
+    assert "'ghost-x'" in msg
+    assert "flash-x" in msg and "sonnet-x" in msg
+    assert "fno config route inventory" in msg
+
+
+def test_inline_lane_still_selects(monkeypatch):
+    """The inline-table lane spelling keeps working after the port: sugar over
+    the same resolver, never a second leg."""
+    import fno.agents.spawn_defaults as spawn_defaults
+
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err,
+        profiles={"target": {"lanes": [_lane("codex", effort="high")]}},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert "agents.profiles.target.lanes[0]" in err.getvalue()
+
+
+def test_verb_with_no_lanes_falls_to_the_grid(monkeypatch):
+    """A profile without lanes changes nothing: the capacity grid over the
+    whole inventory answers, exactly as before the slot resolver existed."""
+    _declare_inventory(monkeypatch, _two_harness_rows())
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": "exhausted", "codex": "ok"},
+    )
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "--node", "x-grid2", "hi"],
+        err=err,
+        profiles={"target": {"substrate": "bg"}},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    # the chain's terminal is the grid's own pick line; the seam receipts it
+    assert "applied grid=grid candidate codex/sol-x capacity=ok" in err.getvalue()
+
+
 def test_lane_validation_refusals_run_on_real_dict_lanes(monkeypatch):
     """Live config lanes arrive as raw TOML dicts, not objects. Every other lane
     test builds objects, which take the getattr branch, so the Mapping-only
     unknown-field and non-string refusals were never executed."""
-    import fno.agents.spawn_defaults as spawn_defaults
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
 
-    err = io.StringIO()
-    with pytest.raises(SystemExit) as exc:
-        spawn_defaults._validated_lanes(
-            [_lane("claude", nonsense="x")], "agents.profiles.target.lanes", err
-        )
-    assert exc.value.code == 2
-    assert "unknown field 'nonsense'" in err.getvalue()
+    def _raw_lane_settings(lanes):
+        prof = type("P", (), {"lanes": lanes})()
+        return type(
+            "S",
+            (),
+            {"agents": type(
+                "A", (), {"defaults": _Defaults(), "profiles": {"target": prof},
+                          "max_lanes": {}}
+            )},
+        )()
 
-    err2 = io.StringIO()
-    with pytest.raises(SystemExit) as exc2:
-        spawn_defaults._validated_lanes(
-            [{"provider": 7}], "agents.profiles.target.lanes", err2
-        )
-    assert exc2.value.code == 2
-    assert "must be a string" in err2.getvalue()
-
-    err3 = io.StringIO()
-    with pytest.raises(SystemExit) as exc3:
-        spawn_defaults._validated_lanes([{}], "agents.profiles.target.lanes", err3)
-    assert exc3.value.code == 2
-    assert "is empty" in err3.getvalue()
+    for lanes, fragment in (
+        ([{"provider": "claude", "nonsense": "x"}], "unknown field 'nonsense'"),
+        ([{"provider": 7}], "must be a string"),
+        ([{}], "is empty"),
+    ):
+        err = io.StringIO()
+        with pytest.raises(SystemExit) as exc:
+            inject_spawn_defaults(
+                ["spawn", "--name", "w", "/fno:target x-1"],
+                settings=_raw_lane_settings(lanes),
+                stderr=err,
+                env={},
+            )
+        assert exc.value.code == 2, fragment
+        assert fragment in err.getvalue()
+        assert "no worker launched" in err.getvalue()
 
 
 def test_config_pane_group_degrades_open_beside_an_explicit_split(monkeypatch):
