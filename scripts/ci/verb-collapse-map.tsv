@@ -107,6 +107,7 @@ agents worker review	T1	agents worker review	0
 agents worker ship	T1	agents worker ship	2
 agents workspace register-worker	T1	agents workspace register-worker	1
 agents workspace worktree archive	T1	agents workspace worktree archive	4
+agents workspace worktree cargo-offload	T1	agents workspace worktree cargo-offload	0
 agents workspace worktree cleanup	T1	agents workspace worktree cleanup	15
 agents workspace worktree ensure	T1	agents workspace worktree ensure	24
 agents workspace worktree overlap-record	T1	agents workspace worktree overlap-record	3
@@ -558,6 +559,7 @@ worker reconcile	T1	worker reconcile	0
 worker review	T1	worker review	0
 worker ship	T1	worker ship	2
 worktree archive	T1	worktree archive	2
+worktree cargo-offload	T1	worktree cargo-offload	0
 worktree cleanup	T1	worktree cleanup	6
 worktree ensure	T1	worktree ensure	30
 worktree overlap-record	T1	worktree overlap-record	3
