@@ -836,10 +836,7 @@ def _report_band_routing() -> None:
         settings = load_settings()
     except Exception:  # noqa: BLE001 - an unreadable config reads as absent
         settings = None
-    try:
-        capacity = route_resolve.runtime_capacity(inventory=inventory)
-    except Exception:  # noqa: BLE001
-        capacity = {}
+    capacity = route_resolve.runtime_capacity(inventory=inventory)  # never raises
     read_verbs = route_resolve.slot_verbs(settings=settings)
     # Silent once any verb's slot would take a lane: routing is armed, and
     # the unconfigured verbs are a per-verb choice, not a dead router.
@@ -855,12 +852,8 @@ def _report_band_routing() -> None:
         roles = getattr(getattr(settings, "model_routing", None), "roles", None)
     except Exception:  # noqa: BLE001 - the note is a hint on top of the line
         roles = None
-    declared_count = 0
-    try:
-        routing = getattr(settings, "routing", None)
-        declared_count = len(getattr(routing, "models", None) or [])
-    except Exception:  # noqa: BLE001 - the count is a display nicety
-        declared_count = 0
+    routing = getattr(settings, "routing", None)
+    declared_count = len(getattr(routing, "models", None) or [])
     typer.echo(
         f"band routing inactive: config.routing.models declares {declared_count} "
         "row(s), and no verb slot has a lane that resolves: "

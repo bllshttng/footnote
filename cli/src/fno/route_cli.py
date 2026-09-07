@@ -322,10 +322,7 @@ def inventory_cmd(
     from fno.route_resolve import resolve_inventory, runtime_capacity, slot_states, slot_verbs
 
     inv = resolve_inventory()
-    try:
-        capacity = runtime_capacity(inventory=inv)
-    except Exception:  # noqa: BLE001 - a capacity read never breaks the readout
-        capacity = {}
+    capacity = runtime_capacity(inventory=inv)  # never raises
     slots = [slot_states(verb, capacity, inventory=inv) for verb in slot_verbs()]
     rows: list[dict[str, str]] = []
     refusals: list[str] = []

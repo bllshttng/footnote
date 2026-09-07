@@ -18,8 +18,7 @@ class RouteSlotUnavailable(RuntimeError):
 
 
 def _binary_or_raise():
-    """The dev checkout's own build outranks any installed copy: testing
-    against a stale PATH binary would resolve with last release's vocabulary."""
+    """The dev checkout's own build outranks any stale installed copy."""
     binary = find_dev_binary() or resolve_binary()
     if binary is None:
         raise RouteSlotUnavailable(
