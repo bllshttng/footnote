@@ -141,3 +141,63 @@ def test_configblock_default_has_disabled_active_backlog():
     cfg = ConfigBlock()
     assert isinstance(cfg.active_backlog, ActiveBacklogConfig)
     assert cfg.active_backlog.enabled is False
+
+
+# ---------------------------------------------------------------------------
+# x-7f1f task 2.2: active_backlog.mission is IGNORED. The mission-scoped drain
+# resolves one target per ACTIVE mission (an epic with mission_active=true);
+# the config key selects nothing and survives parseable for one release, with
+# `fno config doctor` naming the live axis when it is set.
+# ---------------------------------------------------------------------------
+
+
+def _pin_global(monkeypatch, tmp_path, body):
+    glob = tmp_path / "global-config.toml"
+    glob.write_text(body, encoding="utf-8")
+    monkeypatch.delenv("FNO_CONFIG", raising=False)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(glob))
+    from fno import config as config_mod
+
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+    return glob
+
+
+def test_doctor_warns_on_active_backlog_mission(monkeypatch, tmp_path):
+    glob = _pin_global(
+        monkeypatch, tmp_path, '[active_backlog]\nmission = "x-5317"\n'
+    )
+    out: list[str] = []
+    import typer
+
+    monkeypatch.setattr(typer, "echo", lambda m, **k: out.append(m))
+    from fno.config_cli import _report_deprecated_active_backlog_mission
+
+    _report_deprecated_active_backlog_mission()
+    text = "\n".join(out)
+    assert str(glob) in text
+    assert "IGNORES" in text
+    assert "fno backlog advance --epic" in text
+    assert "fno config unset active_backlog.mission" in text
+
+
+def test_doctor_silent_when_mission_unset_or_empty(monkeypatch, tmp_path):
+    _pin_global(
+        monkeypatch, tmp_path, '[active_backlog]\nenabled = true\nmission = ""\n'
+    )
+    out: list[str] = []
+    import typer
+
+    monkeypatch.setattr(typer, "echo", lambda m, **k: out.append(m))
+    from fno.config_cli import _report_deprecated_active_backlog_mission
+
+    _report_deprecated_active_backlog_mission()
+    assert out == []
+
+
+def test_mission_key_stays_parseable_but_is_documented_ignored():
+    # The key parses for one release (an old config never fails the load) and
+    # nothing in the drain branches on it: resolve_drain_targets derives its
+    # missions from the graph's mission_active field, not this field.
+    b = ActiveBacklogConfig(enabled=True, mission="x-5317")
+    assert b.any_enabled() is True
+    assert b.mission == "x-5317"

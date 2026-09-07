@@ -3631,9 +3631,7 @@ class ActiveBacklogConfig(BaseModel):
     max_concurrent:
         In-flight nodes per project per tick. Default 1 (serial, v1). Defined
         now so v2 parallelism needs no config migration; v1 asserts == 1.
-    mission:
-        Optional mission id; when set, the daemon drains only that mission's
-        nodes and never drifts into the general backlog.
+    mission: IGNORED (missions are per-epic graph state, never config; ``fno config doctor`` warns when it is set; the live axis is ``fno backlog advance --epic <id>`` / ``--stop``).
     """
 
     model_config = ConfigDict(extra="ignore")

@@ -169,6 +169,10 @@ class AdvanceResult:
     node_id: Optional[str] = None
     short_id: Optional[str] = None
     detail: Optional[str] = None
+    # Resolved substrate of the launch ("bg" | "thread" | "headless"); set on
+    # dispatched results only. "headless" is synchronous: the worker already
+    # ran and released its claim before this result exists.
+    substrate: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Make an invalid (decision, event) combination a loud construction
@@ -1318,6 +1322,7 @@ def _spawn_worker(
     caller: str = "unknown",
     events_path: Optional[Path] = None,
     grid_reason: Optional[str] = None,
+    receipt: Optional[dict] = None,
 ) -> str:
     """Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
 
@@ -1586,6 +1591,13 @@ def _spawn_worker(
         },
         events_path,
     )
+    if receipt is not None:
+        # Filled from the same values the EVENT_SPAWNED row carries, so the
+        # row and the receipt cannot disagree (the row has no harness-
+        # independent form; prov is what it records).
+        receipt.update(
+            {"short_id": launch_identity, "substrate": substrate, "harness": prov}
+        )
     return launch_identity
 
 
@@ -3594,6 +3606,26 @@ def _walker_live_at(project_root: str) -> bool:
         return False
 
 
+def _converge_gate(child: dict, root: str) -> Optional[str]:
+    """The pre-spawn refusal reason for one child, or None to dispatch.
+
+    The two gates ``_converge_one`` applied inline, extracted so the
+    ``--explain --epic`` preview runs the SAME classifier against the SAME
+    child and cannot describe a selection the drain would not make (x-7f1f).
+    """
+    # The spawned worker runs in the target repo, not this one. If that project
+    # already has a live walker, let it claim the node - spawning here would launch
+    # a second target into that repo (codex P2). Checked at the target root because
+    # its walker claim lives under that root's .fno/claims.
+    if _walker_live_at(root):
+        return "walker-live"
+    # Already being worked? Same liveness gate as advance() step 4. This is what
+    # makes epic-advance idempotent (AC1-EDGE): a re-run finds the first pass's workers
+    # holding node:<id> and dispatches nothing, WITHOUT depending on the 3-min
+    # dispatch TTL still being live.
+    return _node_dispatch_block_reason(child["id"], root)
+
+
 def _converge_one(
     node_meta: dict,
     root: str,
@@ -3653,20 +3685,12 @@ def _converge_one(
             "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
         )
 
-    # The spawned worker runs in the target repo, not this one. If that project
-    # already has a live walker, let it claim the node - spawning here would launch
-    # a second target into that repo (codex P2). Checked at the target root because
-    # its walker claim lives under that root's .fno/claims.
-    if _walker_live_at(root):
-        return skip("walker-live")
-
-    # Already being worked? Same liveness gate as advance() step 4. This is what
-    # makes epic-advance idempotent (AC1-EDGE): a re-run finds the first pass's workers
-    # holding node:<id> and dispatches nothing, WITHOUT depending on the 3-min
-    # dispatch TTL still being live.
-    block_reason = _node_dispatch_block_reason(node_id, root)
-    if block_reason:
-        return skip(block_reason)
+    # The pre-spawn gates, shared verbatim with the --explain preview
+    # (_converge_gate): a live walker in the target repo, then the node-claim
+    # liveness gate.
+    gate = _converge_gate(node_meta, root)
+    if gate:
+        return skip(gate)
 
     from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim
 
@@ -3691,6 +3715,7 @@ def _converge_one(
     try:
         eff_provider = provider if provider is not None else node_meta.get("provider")
         _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node_meta)
+        spawn_receipt: dict = {}
         short_id = _spawn_worker(
             node_id,
             root,
@@ -3704,6 +3729,7 @@ def _converge_one(
             node=node_meta,
             caller="_converge_one",
             events_path=ev_path,
+            receipt=spawn_receipt,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -3733,7 +3759,13 @@ def _converge_one(
             f"target worker {short_id} (--cwd {root}) (brief={_brief_tag})",
             file=sys.stderr,
         )
-    return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
+    return AdvanceResult(
+        "dispatched",
+        EVENT_DISPATCHED,
+        node_id=node_id,
+        short_id=short_id,
+        substrate=spawn_receipt.get("substrate"),
+    )
 
 
 def _dispatch_one_dependent(
@@ -3940,48 +3972,6 @@ def _ready_leaf_children(epic_id: str) -> list[dict]:
     return [n for n in nodes if isinstance(n, dict) and n.get("id")]
 
 
-def _live_workers_by_project() -> dict[str, int]:
-    """Count occupied per-project lanes to seed max_lanes.
-
-    max_lanes is a per-project concurrency cap, so a project that already has a
-    worker occupies a lane and the epic advance must count it before deciding how many
-    MORE to dispatch. Counts BOTH live/suspect ``node:<id>`` claims (a running
-    worker) AND live/suspect ``dispatch:<id>`` reservations (the boot-window
-    bridge a just-dispatched worker holds before it owns node:<id>) - else an
-    immediate rerun during that boot window would under-count the lane and
-    over-dispatch a second same-project child past the cap (codex P2). Deduped by
-    node id so a child holding both claims counts once. Best-effort: any read
-    fault degrades to an empty map (no seed), never blocks the pass.
-    """
-    counts: dict[str, int] = {}
-    try:
-        from fno.claims.core import list_claims
-        from fno.claims.io import global_claims_root
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json
-
-        root = global_claims_root()
-        occupied: set[str] = set()
-        for prefix in ("node:", "dispatch:"):
-            for claim in list_claims(prefix=prefix, include_stale=False, root=root):
-                key = claim.get("key")
-                if isinstance(key, str):
-                    occupied.add(key.removeprefix(prefix))
-        if not occupied:
-            return counts
-        by_id = {
-            e["id"]: e for e in read_graph(graph_json())
-            if isinstance(e, dict) and isinstance(e.get("id"), str)
-        }
-        for nid in occupied:
-            proj = (by_id.get(nid) or {}).get("project")
-            if proj:
-                counts[proj] = counts.get(proj, 0) + 1
-    except Exception:  # noqa: BLE001 - a live-count read must never block the epic advance
-        return counts
-    return counts
-
-
 def _binding_provider() -> Optional[str]:
     """The configured provider with the least lane headroom, or None.
 
@@ -4156,20 +4146,20 @@ def advance_epic(
         _emit(EVENT_MISSION_DEACTIVATED, {"epic_id": canon, "reason": "stop"}, ev_path)
         return AdvanceEpicResult(canon, deactivated=True)
 
-    # Same opt-in gate as advance()/advance_dependents. A live walker owning THIS
-    # repo would pick nodes up itself; the epic-advance verb is the explicit converge tool, so a
-    # global walker is a skip. (Per-child, a foreign-repo walker is handled in
-    # _converge_one's own _walker_live_at.) Unlike the merge-advance path, this
-    # standalone epic verb has no paired advance() call to record the decision, so
-    # emit the skip receipt here or a gated epic advance is silent in the event stream
-    # (codex P2 - LD#12 parity).
+    # Same opt-in gate as advance()/advance_dependents. Unlike the merge-advance
+    # path, this standalone epic verb has no paired advance() call to record the
+    # decision, so emit the skip receipt here or a gated epic advance is silent in
+    # the event stream (codex P2 - LD#12 parity). There is deliberately NO
+    # whole-pass `walker:` guard here (x-7f1f): `_walker_key()` resolves THIS
+    # process's canonical repo root, so one live walker in the epic repo refused
+    # the entire pass, including every child living in a different repository.
+    # `_converge_one` probes `_walker_live_at(root)` per child against that
+    # child's own root, which covers the epic's own repo more accurately and
+    # leaves the other repos reachable.
     armed, rank = _auto_continue_resolve(project_root)
     if not armed:
         _emit(EVENT_SKIPPED, {"reason": "disabled", "mission": canon, "rank": rank}, ev_path)
         return AdvanceEpicResult(canon, error="disabled")
-    if _claim_is_live(_walker_key()):
-        _emit(EVENT_SKIPPED, {"reason": "walker-live", "mission": canon, "rank": rank}, ev_path)
-        return AdvanceEpicResult(canon, error="walker-live")
 
     # All descendants already done -> mission complete: verify the cascade closed
     # the epic, deactivate, emit a no-op receipt. (_container_ids guaranteed at
