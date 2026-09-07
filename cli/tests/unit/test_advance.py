@@ -1220,6 +1220,47 @@ def test_converge_one_spawn_failure_leaves_receipt_empty(monkeypatch, tmp_path):
     assert result.substrate is None
 
 
+def test_converge_one_releases_reservation_when_outcome_is_not_dispatched(
+    monkeypatch, tmp_path
+):
+    """AC9-HP (x-41f7): a raise between a SUCCESSFUL spawn and the dispatched
+    receipt still returns the boot-window reservation. Spawn done, outcome not
+    a dispatch, is the exact span that held dispatch:x-e882 forever."""
+    _converge_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        adv, "_spawn_worker", lambda node_id, root, slug, **kwargs: "sid"
+    )
+    real_emit = adv._emit
+
+    def raise_after_spawn(event, data, path):
+        if event == adv.EVENT_DISPATCHED:
+            raise RuntimeError("journal unwritable")
+        real_emit(event, data, path)
+
+    monkeypatch.setattr(adv, "_emit", raise_after_spawn)
+    with pytest.raises(RuntimeError):
+        adv._converge_one(
+            {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
+        )
+    key = "dispatch:ab-1111aaaa"
+    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+
+
+def test_converge_one_dispatched_keeps_the_reservation(monkeypatch, tmp_path):
+    """AC10-EDGE: a dispatch keeps the reservation - the boot-window bridge
+    until the worker owns node:<id>."""
+    _converge_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        adv, "_spawn_worker", lambda node_id, root, slug, **kwargs: "sid"
+    )
+    result = adv._converge_one(
+        {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
+    )
+    assert result.decision == "dispatched"
+    key = "dispatch:ab-1111aaaa"
+    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "live"
+
+
 # ---------------------------------------------------------------------------
 # cmd_advance: the `fno backlog advance` CLI verb
 # ---------------------------------------------------------------------------
