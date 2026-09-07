@@ -215,6 +215,7 @@ _wt_pids() {
             _WT_PIDS_DIAG="${_WT_PIDS_DIAG}${pid_keep}:no-ps@${cwd_row:-no-cwd-row},"
         done <<< "$filtered"
         _WT_PIDS_DIAG="ps-rc=${ps_rc} rows=0 ${_WT_PIDS_DIAG%,}"
+        printf '%s\n' "$_WT_PIDS_DIAG" >&2
         printf '%s\n' "$filtered2"
         return "$snapshot_rc"
     fi
@@ -289,8 +290,10 @@ _wt_pids() {
         _WT_PIDS_DIAG="${_WT_PIDS_DIAG}${kp}:${kcmd:0:60}@${kcwd:0:60},"
     done <<< "$kept_info"
     # The row count rides inside the diagnostic: _wt_pids normally runs in a
-    # command substitution, and globals it sets die with that subshell.
+    # command substitution, and globals it sets die with that subshell. The
+    # stderr copy is what the parent actually reads.
     _WT_PIDS_DIAG="ps-rows=${ps_rows} ${_WT_PIDS_DIAG%,}"
+    printf '%s\n' "$_WT_PIDS_DIAG" >&2
     printf '%s\n' "$filtered2"
     return "$snapshot_rc"
 }
