@@ -832,9 +832,38 @@ fn dispatch_mission(
     }
     let mut new_ids = Vec::new();
     for child in &receipt.children {
-        if child.decision != "dispatched" {
-            // A skipped row means "not now" and never touches the breaker.
-            continue;
+        match child.decision.as_str() {
+            "dispatched" => {}
+            "failed" => {
+                // A spawn failure is a real failure: before x-7f1f a failed
+                // child never entered pending, so failure_limit never tripped
+                // and the drain retried the node forever. Feed the SAME
+                // map_outcome policy with the row's reason; it never enters
+                // pending. A skipped row means "not now" and must never touch
+                // the breaker (walker-live, lane-cap, already-claimed, ...).
+                let message = if child.reason.is_empty() {
+                    "advance reported the spawn failed".to_string()
+                } else {
+                    format!("advance reported the spawn failed: {}", child.reason)
+                };
+                let ur = UnitResult {
+                    unit_id: child.node_id.clone(),
+                    evidence: Evidence {
+                        reason: TerminationReason::NoProgress,
+                        message: message.clone(),
+                    },
+                    close: CloseOutcome::Parked(message),
+                };
+                map_outcome(
+                    cfg,
+                    breaker,
+                    journal,
+                    &TerminationReason::NoProgress,
+                    Some(&ur),
+                );
+                continue;
+            }
+            _ => continue,
         }
         // Synchronous (headless) dispatch: subprocess.run returned only after
         // the one-shot worker finished and released its claim, so there is
@@ -2706,5 +2735,66 @@ mod tests {
             vec!["x-a"]
         );
         assert_eq!(breaker.consecutive_failures("x-a"), 0);
+    }
+
+    #[test]
+    fn failed_child_feeds_the_circuit_breaker() {
+        // Before x-7f1f a failed child never entered pending, so failure_limit
+        // never tripped and the drain retried the node forever. Three
+        // consecutive failed receipts at failure_limit 3 defer exactly once.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("record");
+        let fno = stub_fno_advance_and_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-1111","decision":"failed","reason":"daemon unreachable"}]}"#,
+            r#"{}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let defers = || -> usize {
+            std::fs::read_to_string(&record)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.contains("backlog defer x-1111"))
+                .count()
+        };
+        let mut pending = Vec::new();
+
+        for _ in 0..3 {
+            mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+        }
+        assert_eq!(defers(), 1, "exactly one defer at failure_limit=3");
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("active_backlog_parked")));
+    }
+
+    #[test]
+    fn skipped_child_never_touches_the_breaker() {
+        // walker-live, lane-cap, already-claimed, no-project, unmapped-project
+        // all arrive as skips: "not now", not "this node is broken". Ten ticks
+        // must leave the streak at zero and fire no defer.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("record");
+        let fno = stub_fno_advance_and_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-2222","decision":"skipped","reason":"lane-cap"}]}"#,
+            r#"{}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        for _ in 0..10 {
+            mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+        }
+        assert_eq!(breaker.consecutive_failures("x-2222"), 0);
+        assert!(!record.exists(), "no defer on a skipped child");
     }
 }
