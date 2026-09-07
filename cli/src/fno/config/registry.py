@@ -287,6 +287,7 @@ FIELD_META: dict[str, Meta] = {
     "target.defaults.no_external": Meta("never", "Session-input default: skip external review (size-profile driven)."),
     "target.defaults.no_docs": Meta("never", "Session-input default: skip docs (size-profile driven)."),
     "target.defaults.max_iterations": Meta("advanced", "Session-input default: max pipeline iterations."),
+    "test.timeout_seconds": Meta("never", "Wall-clock bound for one suite run under `fno doctor test`; on expiry the run's whole process group is killed, so the deps test binary cargo exec'd dies with it (default 1800)."),
     # --- config.agents.* ---
     "agents.a2a.auto": Meta("advanced", "Allow agents to auto-open agent-to-agent threads."),
     "agents.a2a.turn_ceiling": Meta("advanced", "Max turns in an agent-to-agent thread."),

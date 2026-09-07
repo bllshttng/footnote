@@ -1584,3 +1584,6 @@ def test_capacity_verdict_names_its_axis_and_deciding_numbers(monkeypatch):
     shown = runner.invoke(app, ["doctor", "footprint", "--cause-only"])
     assert "verdict: over on load_1m (110.4 against 96.0)" in shown.output
     assert "a separate axis - it did not decide the verdict" in shown.output
+
+
+# ---------------------------------------------------------------------------

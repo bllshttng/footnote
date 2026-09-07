@@ -335,6 +335,23 @@ pub fn retire_grace_secs(cwd: &Path) -> u64 {
     .unwrap_or(DEFAULT_RETIRE_GRACE_SECS)
 }
 
+/// Default orphan-reap age guard: 15 minutes. Every measured zombie-leak
+/// specimen was over three hours old; a younger deps binary may be a live run.
+pub const DEFAULT_ORPHAN_MIN_ELAPSED_SECS: u64 = 900;
+
+/// Resolve `test.orphan_min_elapsed_seconds` for the orphan-reap sweep, same
+/// precedence + fail-open degrade as [`retire_grace_secs`].
+pub fn orphan_min_elapsed_secs(cwd: &Path) -> u64 {
+    resolve(cwd, |t| {
+        t.get("test")?
+            .as_table()?
+            .get("orphan_min_elapsed_seconds")?
+            .as_integer()
+            .and_then(|i| u64::try_from(i).ok())
+    })
+    .unwrap_or(DEFAULT_ORPHAN_MIN_ELAPSED_SECS)
+}
+
 /// Resolve `agents.reap_receipts.retain_days` for the GC sweep's receipt
 /// expiry, same precedence + fail-open degrade as [`retire_grace_secs`]:
 /// an unparseable value degrades to the default rather than deleting every

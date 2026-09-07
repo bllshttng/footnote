@@ -13,15 +13,20 @@ def test_bare_run_uses_capped_loadgroup_parallelism(tmp_path, monkeypatch):
     class _Proc:
         returncode = 0
 
-    def fake_run(cmd, env=None, **kwargs):
-        captured["cmd"] = cmd
-        return _Proc()
+    class _GroupProc:
+        # The stream runner spawns through Popen in its own process group;
+        # a fake here must answer wait() like a real exit.
+        def __init__(self, cmd, env=None, **kwargs):
+            captured["cmd"] = cmd
+
+        def wait(self, timeout=None):
+            return 0
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / "cli" / "src" / "fno").mkdir(parents=True)
     (tmp_path / "cli" / "src" / "fno" / "__init__.py").write_text("")
     monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: sys.executable)
-    monkeypatch.setattr(test_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(test_cmd.subprocess, "Popen", _GroupProc)
 
     assert test_cmd._run([]) == 0
     assert captured["cmd"][1:9] == [
@@ -41,15 +46,20 @@ def test_bare_run_keeps_explicit_xdist_settings(tmp_path, monkeypatch):
     class _Proc:
         returncode = 0
 
-    def fake_run(cmd, env=None, **kwargs):
-        captured["cmd"] = cmd
-        return _Proc()
+    class _GroupProc:
+        # The stream runner spawns through Popen in its own process group;
+        # a fake here must answer wait() like a real exit.
+        def __init__(self, cmd, env=None, **kwargs):
+            captured["cmd"] = cmd
+
+        def wait(self, timeout=None):
+            return 0
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / "cli" / "src" / "fno").mkdir(parents=True)
     (tmp_path / "cli" / "src" / "fno" / "__init__.py").write_text("")
     monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: sys.executable)
-    monkeypatch.setattr(test_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(test_cmd.subprocess, "Popen", _GroupProc)
 
     assert test_cmd._run(["-n", "1", "--maxprocesses=2", "--dist", "loadscope"]) == 0
     cmd = captured["cmd"]

@@ -2506,6 +2506,21 @@ event_types:
         pid:
           type: integer
 
+  - name: orphan_test_binary_reaped
+    description: "An orphaned cargo deps/ test binary (parentless or holding 20+ zombie children, CACHEDIR.TAG-confirmed) was SIGKILLed by the daemon's 300s reap sweep, past the config.test.orphan_min_elapsed_seconds age guard. The payload is the reap row: pid, command, zombie count, elapsed_seconds."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        pid:
+          type: integer
+        command:
+          type: string
+        zombies:
+          type: integer
+        elapsed_seconds:
+          type: integer
+
   - name: agent_row_reaped
     description: "An agent-view row was retired by the retirement sweep or `fno agents reap`: the session's WORK is done on every node its sessions[] names (the reverse join) and its transcript has been quiet past agents.retire_grace_s. basis names that verdict. The held process is stopped first, a resumable receipt is written before the row drops, and the node's sessions[] row and the harness transcript survive, so resumable is always true and `fno agents resume` still opens the session. For a convention-named target/reconcile worker, node_id plus termination_event make a pre-claim death durable; no-termination retirements also emit node_failed for failure-streak accounting (x-5c08). Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
     sources: [daemon]

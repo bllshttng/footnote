@@ -50,6 +50,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "manifest-for-session",
     "needs",
     "notify-watch",
+    "orphan-reap",
     "feed",
     "ping",
     "pr-heal",
@@ -129,6 +130,16 @@ async fn run(args: Vec<String>) -> i32 {
 
     if matches!(verb, "manifest-eval") {
         return fno_agents::manifest::run_manifest_eval(&args[1..]);
+    }
+
+    // `orphan-reap` is the hidden reap lever for orphaned cargo test binaries:
+    // the daemon's 300s sweep and a human on a wedged box both run
+    // it binary-direct. Same `matches!` treatment as `mail-inject` so it stays
+    // out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the routable-verb
+    // parity guard - it reads one ps snapshot and prints, it is not an
+    // `fno agents` verb.
+    if matches!(verb, "orphan-reap") {
+        return fno_agents::orphan_reap::run_orphan_reap(&args[1..]);
     }
 
     // `reentry-plan` is the INTERNAL machine resolver behind every

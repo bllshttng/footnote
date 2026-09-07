@@ -256,6 +256,10 @@ no_docs = false
 # Session-input default: max pipeline iterations.
 max_iterations = 40
 
+[test]
+# Wall-clock bound for one suite run under `fno doctor test`; on expiry the run's whole process group is killed, so the deps test binary cargo exec'd dies with it (default 1800).
+timeout_seconds = 1800
+
 [agents]
 # Seconds a single-flight answer counts as fresh (default 10). Callers arriving inside the window read one child's stdout instead of each spawning their own; the latch is keyed on the normalized argv, so two `do pr wait` calls for different PRs stay two flights.
 single_flight_ttl_seconds = 10

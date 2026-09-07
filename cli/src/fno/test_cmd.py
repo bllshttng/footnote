@@ -34,7 +34,6 @@ import posixpath
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -47,6 +46,7 @@ from xml.etree import ElementTree
 import click
 
 from fno.hermetic import neutralise, poison
+from fno.test_runner import run_suite_bounded, test_timeout_seconds, wait_or_kill_group
 
 _TAIL_LINES = 40
 
@@ -304,19 +304,25 @@ def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
     looks stalled - a watcher can `tail -f` the log. Returns the first non-zero
     child exit code, else 0.
     """
+    timeout = test_timeout_seconds()
     rc = 0
     with open(log, "w", encoding="utf-8") as fh:
         for cmd in cmds:
-            print(f"running: {' '.join(map(str, cmd))} | log: {log}", flush=True)
+            print(
+                f"running: {' '.join(map(str, cmd))} | log: {log} | timeout: {timeout}s",
+                flush=True,
+            )
             fh.write(f"$ {' '.join(map(str, cmd))}\n")
             fh.flush()
             try:
-                proc = subprocess.run(cmd, env=env, stdout=fh, stderr=subprocess.STDOUT)
+                rc_cmd = run_suite_bounded(
+                    cmd, env, timeout, stdout=fh, stderr=subprocess.STDOUT
+                )
             except OSError as exc:
                 sys.stderr.write(f"fno doctor test: failed to run {cmd[0]}: {exc}\n")
                 return 127
-            if proc.returncode != 0:
-                rc = proc.returncode
+            if rc_cmd != 0:
+                rc = rc_cmd
                 break  # first failure wins; its output is the log tail
     if rc == 0:
         lines = [ln.rstrip() for ln in _tail(log, 5) if ln.strip()]
@@ -360,13 +366,12 @@ def _run(args: Sequence[str], stream: bool = False) -> int:
     cmd = [interp, "-m", "pytest", *pytest_args]
     if stream:
         try:
-            proc = subprocess.run(cmd, env=env)  # inherit stdio; no pipe, no mask
+            return run_suite_bounded(cmd, env, test_timeout_seconds())
         except OSError as exc:
             # FileNotFoundError (missing) AND PermissionError (present but not
             # executable) are both OSError; either means we could not run it.
             sys.stderr.write(f"fno doctor test: failed to run interpreter {interp}: {exc}\n")
             return 127
-        return proc.returncode
     return _run_captured([cmd], env, _log_path(root))
 
 
@@ -431,18 +436,23 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
     else:
         base = ["cargo", "test", "-q"]
     cap_tail: list[str] = []
+    timeout = test_timeout_seconds()
     if threads is None:
-        sys.stdout.write(f"fno doctor test rust: lanes {lanes_note}; runner default parallelism\n")
+        sys.stdout.write(
+            f"fno doctor test rust: lanes {lanes_note}; runner default parallelism; timeout {timeout}s\n"
+        )
     elif override:
         sys.stdout.write(
-            f"fno doctor test rust: lanes {lanes_note}; user parallelism flag wins, cap not applied\n"
+            f"fno doctor test rust: lanes {lanes_note}; user parallelism flag wins, cap not applied; timeout {timeout}s\n"
         )
     else:
         if nextest:
             base = [*base, "--test-threads", str(threads)]
         else:
             cap_tail = ["--", "--test-threads", str(threads)]
-        sys.stdout.write(f"fno doctor test rust: lanes {lanes_note}; test threads capped at {threads}\n")
+        sys.stdout.write(
+            f"fno doctor test rust: lanes {lanes_note}; test threads capped at {threads}; timeout {timeout}s\n"
+        )
 
     if "--manifest-path" in cargo_args:
         cmds = [[*base, *cargo_args]]
@@ -457,16 +467,15 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
 
     env = _child_env(root)
     if stream:
-        rc = 0
         for cmd in cmds:
             try:
-                proc = subprocess.run(cmd, env=env)
+                rc = run_suite_bounded(cmd, env, timeout)
             except OSError as exc:
                 sys.stderr.write(f"fno doctor test: failed to run {cmd[0]}: {exc}\n")
                 return 127
-            if proc.returncode != 0:
-                return proc.returncode
-        return rc
+            if rc != 0:
+                return rc
+        return 0
     return _run_captured(cmds, env, _log_path(root))
 
 
@@ -2015,7 +2024,8 @@ def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) ->
     + os.killpg, never the `timeout` binary: that is absent on macOS (a recorded
     trap) and exits 127, measuring nothing. start_new_session makes the child a
     group leader so killpg reaches its grandchildren too, since a shell harness
-    spawns subprocesses a direct SIGKILL would orphan.
+    spawns subprocesses a direct SIGKILL would orphan. The wait/kill ladder is
+    shared with the suite runner (`wait_or_kill_group`).
     """
     start = time.monotonic()
     proc = subprocess.Popen(
@@ -2023,31 +2033,7 @@ def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) ->
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    try:
-        rc = proc.wait(timeout=kill_bound_s)
-        killed = False
-    except subprocess.TimeoutExpired:
-        # ProcessLookupError is the TOCTOU window where the child exited between
-        # the timeout and getpgid; wait() reaps it. PermissionError is NOT caught:
-        # start_new_session makes us own the group so it is near-impossible, and
-        # if it ever surfaces a loud crash beats a wedged proc.wait() with no kill.
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
-        rc = proc.returncode if proc.returncode is not None else 124
-        killed = True
-    except KeyboardInterrupt:
-        # The harness runs in its own session (start_new_session), so it does not
-        # share the terminal's SIGINT and would outlive a Ctrl-C with all its
-        # grandchildren. Kill the group before re-raising so nothing is orphaned.
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
-        raise
+    rc, killed = wait_or_kill_group(proc, kill_bound_s)
     return rc, time.monotonic() - start, killed
 
 

@@ -59,6 +59,7 @@ from pydantic import (
 from fno.config import _watchdog
 from fno.config._auto_heal import AutoHealBlock
 from fno.config._sweeps import ReapReceiptsBlock, SweepKeys
+from fno.config._test import TestBlock
 from fno.config._watchdog import WatchdogBlock
 from fno.config_io import _apply_search_ceiling as _apply_search_ceiling
 from fno.config_io import _deep_merge as _deep_merge
@@ -4493,10 +4494,9 @@ class ConfigBlock(BaseModel):
     # probe list would make cloning a repo remote code execution.
     done_probes: list[str] = Field(default_factory=list)
     target: TargetConfig = Field(default_factory=TargetConfig)
+    test: TestBlock = Field(default_factory=TestBlock)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
-    process_admission: ProcessAdmissionBlock = Field(
-        default_factory=ProcessAdmissionBlock
-    )
+    process_admission: ProcessAdmissionBlock = Field(default_factory=ProcessAdmissionBlock)
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)
     routing: RoutingBlock = Field(default_factory=RoutingBlock)
     sideline: SidelineBlock = Field(default_factory=SidelineBlock)
