@@ -59,6 +59,8 @@ fn entry(name: &str, harness: &str, sid: Option<&str>) -> RegistryEntry {
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
+        resolved_sandbox: None,
+        granted_writable_roots: Vec::new(),
         origin: None,
         spawn_trigger: None,
         liveness: None,

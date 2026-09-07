@@ -318,6 +318,28 @@ pub fn parse_resolved_sandbox(raw: &str) -> Option<Value> {
         .cloned()
 }
 
+/// The posture name the server reported, read WITHOUT the workspaceWrite
+/// filter [`parse_resolved_sandbox`] applies.
+///
+/// That filter answers `None` for two different worlds - a full-access thread
+/// and a response that carried no `sandbox` at all - which is fine where it is
+/// used (there is nothing to echo either way) and wrong for a RECORD. A row
+/// that omits the posture leaves the reader inferring which world it was, and
+/// this lane already cost one investigation a day on exactly that ambiguity.
+/// So the record gets the name the server used, or [`SANDBOX_POSTURE_UNKNOWN`].
+pub fn parse_resolved_sandbox_type(raw: &str) -> Option<String> {
+    serde_json::from_str::<Value>(raw)
+        .ok()?
+        .pointer("/result/sandbox/type")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+/// Recorded when `thread/start` reported no sandbox at all. An explicit value,
+/// never an absent key: absence is not evidence.
+pub const SANDBOX_POSTURE_UNKNOWN: &str = "unknown";
+
 pub fn parse_thread_start_response(raw: &str) -> Result<(String, String), ThreadStartError> {
     let value: Value = serde_json::from_str(raw).map_err(|_| ThreadStartError::InvalidResponse)?;
     if let Some(error) = value.get("error") {
@@ -448,6 +470,10 @@ pub struct CodexThread {
     /// every per-turn override so the grant widens the roots and changes
     /// nothing else. `None` when the thread is not `workspaceWrite`.
     resolved_sandbox: Option<Value>,
+    /// The posture name the server reported, unfiltered, for the registry row.
+    /// `None` only until `thread/start` answers; recorded as
+    /// [`SANDBOX_POSTURE_UNKNOWN`] when the response named no sandbox.
+    resolved_sandbox_type: Option<String>,
     current_turn_id: Option<String>,
 }
 
@@ -512,6 +538,7 @@ impl CodexThread {
             state_dirs.to_vec()
         };
         driver.resolved_sandbox = parse_resolved_sandbox(&response);
+        driver.resolved_sandbox_type = parse_resolved_sandbox_type(&response);
         Ok(driver)
     }
 
@@ -565,6 +592,7 @@ impl CodexThread {
             state_dirs.to_vec()
         };
         driver.resolved_sandbox = parse_resolved_sandbox(&response);
+        driver.resolved_sandbox_type = parse_resolved_sandbox_type(&response);
         Ok(driver)
     }
 
@@ -611,6 +639,7 @@ impl CodexThread {
             effort: None,
             state_dirs: Vec::new(),
             resolved_sandbox: None,
+            resolved_sandbox_type: None,
             current_turn_id: None,
         })
     }
@@ -896,6 +925,22 @@ impl CodexThread {
 
     pub fn cwd(&self) -> &Path {
         &self.cwd
+    }
+
+    /// The posture the server RESOLVED for this thread, for the registry row.
+    /// Distinct from the posture the spawn REQUESTED: a `yolo` thread asks for
+    /// `danger-full-access` and the app-server can still keep its
+    /// workspaceWrite default, so the two disagree and the row must not report
+    /// the request as if it were the outcome.
+    pub fn resolved_sandbox_posture(&self) -> &str {
+        self.resolved_sandbox_type
+            .as_deref()
+            .unwrap_or(SANDBOX_POSTURE_UNKNOWN)
+    }
+
+    /// The writable roots this thread carries onto every `turn/start`.
+    pub fn granted_writable_roots(&self) -> &[String] {
+        &self.state_dirs
     }
 
     /// The pid of the app-server SERVING this thread, which is the shared
@@ -1793,6 +1838,36 @@ mod tests {
         let full = r#"{"id":1,"result":{"sandbox":{"type":"dangerFullAccess"}}}"#;
         assert!(parse_resolved_sandbox(full).is_none());
         assert!(parse_resolved_sandbox(r#"{"id":1,"result":{}}"#).is_none());
+    }
+
+    /// The RECORD's read is unfiltered, and that is the whole difference from
+    /// `parse_resolved_sandbox` above. That one answers `None` for a
+    /// full-access thread AND for a response naming no sandbox, which is fine
+    /// where it is used (nothing to echo either way) and useless in a row: the
+    /// reader cannot tell which world produced the blank. Asserting the
+    /// full-access spelling POSITIVELY is the point - a test that only checked
+    /// the workspaceWrite arm would pass against the filtered reader too.
+    #[test]
+    fn resolved_sandbox_type_is_read_unfiltered_for_the_record() {
+        let bounded =
+            r#"{"id":1,"result":{"sandbox":{"type":"workspaceWrite","writableRoots":[]}}}"#;
+        assert_eq!(
+            parse_resolved_sandbox_type(bounded).as_deref(),
+            Some("workspaceWrite")
+        );
+        let full = r#"{"id":1,"result":{"sandbox":{"type":"dangerFullAccess"}}}"#;
+        assert_eq!(
+            parse_resolved_sandbox_type(full).as_deref(),
+            Some("dangerFullAccess")
+        );
+        // The filtered reader collapses this arm; the record's must not.
+        assert!(parse_resolved_sandbox(full).is_none());
+        // Only a response that named NO sandbox is genuinely unknown.
+        assert_eq!(parse_resolved_sandbox_type(r#"{"id":1,"result":{}}"#), None);
+        assert_eq!(
+            parse_resolved_sandbox_type(r#"{"id":1,"result":{"sandbox":{"type":""}}}"#),
+            None
+        );
     }
 
     /// `thread/start` keeps the SCALAR field and its exact spelling. The

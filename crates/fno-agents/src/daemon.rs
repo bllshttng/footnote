@@ -12449,6 +12449,62 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert_eq!(modeled.account_record_id.as_deref(), Some("default"));
     }
 
+    /// The RESOLVED posture is a separate column from the REQUESTED one, and
+    /// the yolo row is where that matters: the spawn asks for full access and
+    /// this fake, like the real app-server on the measurement that opened this
+    /// lane, reports no sandbox at all. A row that carried only
+    /// `sandbox_posture` would answer "danger-full-access" to the question
+    /// "what could this worker write", which is the misread the column ends.
+    ///
+    /// The fake models no sandbox on purpose, so `unknown` is the branch it
+    /// can prove. It is asserted as a VALUE, never as a missing key: an absent
+    /// field reads the same as a full-access thread, and that ambiguity is the
+    /// defect, not the record of it.
+    #[test]
+    fn build_codex_thread_entry_records_the_resolved_posture_and_its_roots() {
+        let worktree = tempfile::tempdir().unwrap();
+        let _guard = crate::path_test_guard();
+        let granted = worktree.path().join("state-root");
+        std::fs::create_dir_all(&granted).unwrap();
+        let granted_s = granted.to_string_lossy().into_owned();
+        let start = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on({
+                let granted_s = granted_s.clone();
+                let cwd = worktree.path().to_path_buf();
+                async move {
+                    let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+                        crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-r"),
+                    );
+                    crate::codex_thread::CodexThread::start_with_state_dirs(
+                        cwd,
+                        None,
+                        false,
+                        None,
+                        &[granted_s],
+                    )
+                    .await
+                    .expect("bounded thread starts")
+                }
+            });
+        let entry = build_codex_thread_entry("t", worktree.path(), &start, None, None, true, None);
+        // The request says full access...
+        assert_eq!(entry.sandbox_posture.as_deref(), Some("danger-full-access"));
+        // ...and the record says what actually came back, explicitly.
+        assert_eq!(
+            entry.resolved_sandbox.as_deref(),
+            Some(crate::codex_thread::SANDBOX_POSTURE_UNKNOWN)
+        );
+        // The roots the thread carries onto every turn survive onto the row.
+        assert!(
+            entry.granted_writable_roots.contains(&granted_s),
+            "granted roots {:?} must name {granted_s}",
+            entry.granted_writable_roots
+        );
+    }
+
     #[test]
     fn build_codex_thread_entry_stamps_the_request_node() {
         let worktree = tempfile::tempdir().unwrap();
