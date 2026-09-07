@@ -10830,10 +10830,8 @@ async fn attach_and_run(
     // x-4433: the activity feed leg, the needs fold's exact shape - off the UI
     // loop, gen-tagged, one fold in flight; a result for a closed/superseded
     // overlay is discarded.
-    let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel::<(
-        u64,
-        Result<Vec<crate::feed_overlay::FeedItem>, crate::feed_overlay::FeedError>,
-    )>();
+    let (feed_tx, mut feed_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, crate::feed_overlay::FoldResult)>();
 
     // x-f730 task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
@@ -11527,8 +11525,7 @@ async fn attach_and_run(
                                 f.sel = 0;
                                 f.error = None;
                             }
-                            // Fold failed: keep prior rows visible, render the
-                            // typed reason (x-d15a), never one generic string.
+                            // Keep prior rows visible; render the typed reason.
                             Err(e) => f.error = Some(e),
                         }
                         if let Err(e) = compositor.draw(&view.compose()) {

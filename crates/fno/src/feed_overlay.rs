@@ -83,9 +83,12 @@ fn stderr_note(stderr: &[u8], status: &std::process::ExitStatus) -> String {
     }
 }
 
+/// One fold result, as it travels the client's single-flight channel.
+pub type FoldResult = Result<Vec<FeedItem>, FeedError>;
+
 /// Run the feed projection, `Err` carrying the typed reason on any failure.
 /// An empty feed is `Ok(vec![])` - a real answer, not a failure.
-pub async fn feed_now(since_epoch: &str) -> Result<Vec<FeedItem>, FeedError> {
+pub async fn feed_now(since_epoch: &str) -> FoldResult {
     let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
     command
         .args([
