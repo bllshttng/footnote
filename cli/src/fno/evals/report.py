@@ -179,9 +179,13 @@ def evals_health_summary(
             stale_days = 7
     if now is None:
         now = datetime.now(timezone.utc)
-    reg_ts = [_parse_ts(r.get("ts")) for r in rows if r.get("tier") == "regression"]
-    reg_ts = [dt for dt in reg_ts if dt is not None]
-    newest_dt = max(reg_ts, default=None)
+    reg_ts = [
+        dt
+        for r in rows
+        if r.get("tier") == "regression"
+        and (dt := _parse_ts(r.get("ts"))) is not None
+    ]
+    newest_dt = max(reg_ts) if reg_ts else None
     never_ran = reg is None
     age_days = None if newest_dt is None else round(
         (now - newest_dt).total_seconds() / 86400, 3)

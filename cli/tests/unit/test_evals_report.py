@@ -209,7 +209,7 @@ def test_health_summary_stale_days_resolves_from_config(
     class _Settings:
         evals = _Evals()
 
-    monkeypatch.setattr("fno.config.load_settings", lambda: _Settings())
+    monkeypatch.setattr("fno.evals.report.load_settings", lambda: _Settings())
     hp = tmp_path / "h.jsonl"
     _history.append_row(hp, {**_row("r", "regression", True), "ts": _ts(_NOW - timedelta(days=3))})
     summary = evals_health_summary(hp, now=_NOW)
