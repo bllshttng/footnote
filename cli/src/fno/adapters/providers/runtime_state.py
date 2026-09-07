@@ -1520,9 +1520,8 @@ def _headroom_from(
         and snap is not None
         and snap.probed_at <= lock_at
     ):
-        # A worker death recorded after the probe is the newer fact: the window
-        # cannot speak for the moment the worker hit the wall, so the reactive
-        # lock decides until it expires or a newer probe replaces it.
+        # A death recorded after the probe is the newer fact; the window cannot
+        # speak for it. The lock decides until a newer probe replaces it.
         return Headroom(HeadroomState.EXHAUSTED, rlu, source="lock")
     # A window with no reset can never be "already reset", so the check that
     # exempts a stale window cannot exempt it: it always binds, on percentage

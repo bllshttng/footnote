@@ -1477,12 +1477,7 @@ class TestLockAuthoritativeHeadroom:
             resets_at=now + 9 * 3600,
         )
         write_usage_snapshot(
-            UsageSnapshot(
-                provider_id="acct",
-                windows=(UsageWindow("5h", 9.0, now + 3600),),
-                probed_at=now + 1,
-                source="quota-endpoint",
-            ),
+            UsageSnapshot("acct", (UsageWindow("5h", 9.0, now + 3600),), now + 1, "probe"),
             now=now + 1,
         )
         verdict = headroom("acct", now=now + 1)

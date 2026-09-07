@@ -42,11 +42,8 @@ def probe_recorder(monkeypatch: pytest.MonkeyPatch):
         )
     monkeypatch.setattr(runtime_state, "refresh_usage", fake_refresh)
     monkeypatch.setattr(
-        runtime_state,
-        "refresh_usage_detailed",
-        lambda provider_id, **kw: runtime_state.UsageRefresh(
-            fake_refresh(provider_id, **kw)
-        ),
+        runtime_state, "refresh_usage_detailed",
+        lambda pid, **kw: runtime_state.UsageRefresh(fake_refresh(pid, **kw)),
     )
     return calls
 
@@ -108,11 +105,8 @@ class TestObserveSplitsLookingFromActing:
                 source="quota-endpoint",
             )
         monkeypatch.setattr(
-            runtime_state,
-            "refresh_usage_detailed",
-            lambda provider_id, **kw: runtime_state.UsageRefresh(
-                fake_refresh(provider_id, **kw)
-            ),
+            runtime_state, "refresh_usage_detailed",
+            lambda pid, **kw: runtime_state.UsageRefresh(fake_refresh(pid, **kw)),
         )
         sig = evaluate_quota_signal("zai", now=1000.0, repo_root=tmp_path)
         assert sig.state is HeadroomState.EXHAUSTED
@@ -150,9 +144,8 @@ class TestObserveSplitsLookingFromActing:
             resets_at=now + 3600,
         )
         monkeypatch.setattr(
-            runtime_state,
-            "refresh_usage_detailed",
-            lambda *args, **kwargs: UsageRefresh(None, "credential-rejected"),
+            runtime_state, "refresh_usage_detailed",
+            lambda *a, **kw: UsageRefresh(None, "credential-rejected"),
         )
         sig = evaluate_quota_signal("p1", priority="p2", now=now, repo_root=tmp_path)
         assert sig.state is HeadroomState.UNKNOWN
