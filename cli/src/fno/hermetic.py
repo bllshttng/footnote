@@ -38,6 +38,7 @@ Docs: ``docs/architecture/test-hermeticity.md``.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -45,8 +46,10 @@ from fno.harness_identity import AMBIENT_IDENTITY_ENV
 
 __all__ = [
     "AMBIENT_LEAK_CANARY",
+    "UndeclaredStateRootError",
     "ambient_names",
     "classify",
+    "declared_root",
     "neutralise",
     "poison",
 ]
@@ -530,3 +533,84 @@ def poison(env: Optional[Mapping[str, str]] = None, fixtures: Optional[Path] = N
     # The simulated missed channel. See AMBIENT_LEAK_CANARY.
     out[AMBIENT_LEAK_CANARY] = "fno-poison-canary"
     return out
+
+
+# ---------------------------------------------------------------------------
+# The declared-root rule (x-3d21 R4)
+# ---------------------------------------------------------------------------
+
+
+class UndeclaredStateRootError(RuntimeError):
+    """A state path resolved under a test runner with no root declared."""
+
+
+def declared_root(path: Path) -> Path:
+    """Judge one resolved state path against the process root declaration.
+
+    ``FNO_TEST_HERMETIC`` has three states and this is the only place that
+    reads all three:
+
+    ``"1"``
+        A PROCESS root is declared. The path must sit under an allowed root
+        (``fno.events._hermetic_allowed_roots``) or the write is refused.
+    ``"0"``
+        Ambient on purpose - the ``--ambient dirty`` lane and the handful of
+        tests that assert unsuppressed production behaviour. The path passes.
+    absent
+        Nothing declared. Outside a test process that is production and the
+        path passes untouched. Inside one it is an ESCAPED READER: a lane that
+        skipped the conftest chain (a REPL reproduction, ``--noconftest``, a
+        script importing a test helper) resolving the operator's root in
+        silence. That is what overwrote the live graph on 2026-09-06, so it
+        refuses instead.
+
+    ``"pytest" in sys.modules`` is the positive marker. The runner itself
+    produces it, no conftest has to stamp it, and it is true at import time,
+    which ``PYTEST_CURRENT_TEST`` is not.
+    """
+    pin = os.environ.get("FNO_TEST_HERMETIC")
+    if pin == "0":
+        return path
+    if pin != "1" and "pytest" not in sys.modules:
+        return path
+
+    from fno.events import HermeticEscapeError, _hermetic_allowed_roots
+
+    # ONLY the realpath is judged, for the reason the events fence records: a
+    # symlink inside the sandbox can resolve to a live journal outside it.
+    resolved = Path(os.path.realpath(path))
+    roots = _hermetic_allowed_roots()
+    if any(resolved == root or root in resolved.parents for root in roots):
+        return path
+
+    if pin == "1":
+        raise HermeticEscapeError(
+            f"refused a state path outside the test sandbox: {path}. "
+            "A hermetic run must not touch live state. Pass an explicit path "
+            "under tmp_path, or resolve it with a fno.paths accessor so the "
+            "sandbox pins apply."
+        )
+    raise UndeclaredStateRootError(
+        f"fno resolved a state path under a test runner with no declared "
+        f"root: {path} (root class: {_root_class_of(path)}). Ambient position "
+        "never selects a root. Declare one of three ways: "
+        "FNO_TEST_HERMETIC=1 (a sandboxed process root), "
+        "FNO_TEST_HERMETIC=0 (ambient on purpose), or "
+        "fno.paths_testing.use_tmpdir(monkeypatch, tmp_path) in the test."
+    )
+
+
+def _root_class_of(path: Path) -> str:
+    """The epic's root class for ``path``, from the state-file table."""
+    from fno.paths import STATE_FILES
+
+    for state_file in STATE_FILES:
+        if state_file.filename == path.name:
+            return state_file.root_class
+    # The state ROOT itself has no table row - the table lists files. HOME is
+    # read here to LABEL a refusal, never to select a root, which is the whole
+    # distinction the epic draws.
+    home = os.environ.get("HOME")
+    if home and (Path(home) == path or Path(home) in path.parents):
+        return "OPERATOR"
+    return "unclassified"

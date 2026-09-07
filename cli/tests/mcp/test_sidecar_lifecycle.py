@@ -510,7 +510,7 @@ class TestMcpSendCli:
         # Point the verb's default socket resolution at the spawned sidecar.
         home = short_home.resolve()
         monkeypatch.setenv("HOME", str(home))
-        monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
+        monkeypatch.setenv("FNO_TEST_HERMETIC", "0")
         monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
         monkeypatch.delenv("FNO_CONFIG_DIR", raising=False)
         monkeypatch.chdir(home)
