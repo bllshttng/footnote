@@ -721,11 +721,10 @@ def test_branch_provenance_renders_cached_rows_incl_unmapped(tmp_path, monkeypat
     unmapped branch is exactly the interesting case, rendered, never dropped."""
     import json
 
-    from fno.branch_provenance_cache import cache_path
-
     repo = tmp_path / "repo"
-    cache_path(repo).parent.mkdir(parents=True)
-    cache_path(repo).write_text(json.dumps(_cache_rows()))
+    cache_file = repo / ".fno" / "branch-provenance.json"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text(json.dumps(_cache_rows()))
     monkeypatch.setattr("fno.branch_provenance_cache._provenance_roots", lambda: [repo])
 
     output = tmp_path / "graph.md"

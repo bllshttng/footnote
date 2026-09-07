@@ -47,12 +47,10 @@ def read_cache(repo: Path) -> list[dict]:
     """Cached rows, fail-open: any read or parse problem answers []."""
     try:
         data = json.loads((Path(repo) / CACHE_RELPATH).read_text(encoding="utf-8"))
+        # The isinstance guard keeps a JSON list of non-objects off the formatter.
+        return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
     except (OSError, ValueError):
         return []
-    if not isinstance(data, list):
-        return []
-    # A list of non-objects must not reach the formatter outside the try.
-    return [row for row in data if isinstance(row, dict)]
 
 
 def _provenance_roots() -> list[Path]:
@@ -72,18 +70,16 @@ def _provenance_line(row: dict) -> str:
         "no remote" if not row.get("has_remote") else "has remote",
         f"{row.get('unpushed') or 0} unpushed",
         f"PR #{row['pr_number']}" if row.get("pr_number") else "no PR",
+        *(["LIVE"] if row.get("live") else []),
+        f"newest commit {row.get('age') or 'unknown'}",
     ]
-    if row.get("live"):
-        parts.append("LIVE")
-    parts.append(f"newest commit {row.get('age') or 'unknown'}")
     node = row.get("node")
     label = f"**{node}**" if node else "*(unmapped)*"
     return f"- {label} ({row.get('branch') or 'no branch'}): {', '.join(parts)}"
 
 
 def provenance_lines(roots: list[Path] | None = None) -> list[str]:
-    """The Branch Provenance section, [] on an empty cache; the board render
-    runs inside locked_mutate_graph, so a bad read degrades to omission."""
+    """The board section, [] on an empty cache; a bad read degrades to omission."""
     try:
         rows = [r for root in (roots if roots is not None else _provenance_roots()) for r in read_cache(root)]
     except Exception:  # noqa: BLE001 - display signal; never break a mutation

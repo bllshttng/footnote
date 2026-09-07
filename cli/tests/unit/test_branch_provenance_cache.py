@@ -6,11 +6,16 @@ contract: only non-CLEAN rows are stored, and every read failure degrades
 to "no section".
 """
 import json
+from pathlib import Path
 
 import pytest
 
-from fno.branch_provenance_cache import CACHE_RELPATH, cache_path, provenance_lines, read_cache, write_cache
+from fno.branch_provenance_cache import CACHE_RELPATH, provenance_lines, read_cache, write_cache
 from fno.worktree_stranded import CLEAN, STRANDED, Row
+
+
+def cache_path(repo):
+    return Path(repo) / CACHE_RELPATH
 
 
 def _row(klass, node, unpushed, age, **facts):
@@ -102,10 +107,6 @@ def test_write_failure_never_raises(tmp_path):
     blocker.write_text("occupied")
     assert write_cache(blocker, [_stranded()]) is False
     assert read_cache(blocker) == []
-
-
-def test_cache_path_shape(tmp_path):
-    assert cache_path(tmp_path) == tmp_path / ".fno" / "branch-provenance.json"
 
 
 @pytest.mark.parametrize("klass", ["UNKNOWN", "LIVE", "PR_OPEN", "ABANDONED", "SHIPPED"])
