@@ -266,5 +266,18 @@ def test_retirable_line_renders_under_lanes_and_none_when_empty(
     ) in text
     assert "NODE" in text
 
+    # A merged node with no recorded PR number still renders, without a
+    # bogus "at PR" clause.
+    monkeypatch.setattr(
+        retirement,
+        "verdicts",
+        lambda rows, entries=None: {
+            "t-06f7-row": Retirement("x-06f7", "name", True, "done+merged")
+        },
+    )
+    assert "retirable: 1a2b3c4d holds a zai lane; x-06f7 is done, merged" in (
+        _render()
+    )
+
     monkeypatch.setattr(retirement, "verdicts", lambda rows, entries=None: {})
     assert "retirable:" not in _render()

@@ -626,7 +626,8 @@ def _retirable_lines(rows: list[dict], lanes: list[dict]) -> list[str]:
         provider = holder_lane.get(r.get("handle") or r["name"])
         holds = f" holds a {provider} lane" if provider else " holds a lane"
         pr = (r["retire_reason"] or "").rsplit(" ", 1)[-1]
-        out.append(f"retirable: {r['name']}{holds}; {r['node']} is done, merged at PR {pr}")
+        merged = f" at PR {pr}" if pr.isdigit() else ""
+        out.append(f"retirable: {r['name']}{holds}; {r['node']} is done, merged{merged}")
     return out
 
 
