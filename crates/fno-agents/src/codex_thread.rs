@@ -233,6 +233,25 @@ fn sandbox_policy_with_roots(resolved: Option<&Value>, state_dirs: &[String]) ->
     policy
 }
 
+/// The roots the thread lane carries onto every `turn/start`: the caller's
+/// state dirs plus the repo's git common dir, resolved by the same resolver
+/// the exec lane grants with. Both postures carry them. A `yolo` thread asks
+/// for `danger-full-access` on `thread/start`, but the server keeps its
+/// workspaceWrite default, and withholding the policy does not lift a sandbox -
+/// it keeps whatever the server already had, `.git` read-only included.
+///
+/// Fail-open like the exec lane's grant: an unresolvable root is skipped, so
+/// resolution can never break the spawn.
+fn granted_roots(cwd: &Path, state_dirs: &[String]) -> Vec<String> {
+    let mut roots = state_dirs.to_vec();
+    if let Some(git_dir) = crate::provider::git_common_dir(cwd) {
+        if !roots.iter().any(|root| root == &git_dir) {
+            roots.push(git_dir);
+        }
+    }
+    roots
+}
+
 /// `turn/start` takes a whole `sandboxPolicy` object, never a `writableRoots`
 /// delta, so the policy is built FROM the thread's own resolved posture
 /// (`resolved`) with only the roots widened. Hand-building the object instead
@@ -477,9 +496,9 @@ impl CodexThread {
         Self::start_with_state_dirs(cwd, model, yolo, effort, &[]).await
     }
 
-    /// [`CodexThread::start`] plus the state-root grant this thread carries on
-    /// every turn (x-f22f). `yolo` drops the roots: that posture is already
-    /// `danger-full-access`, so a workspaceWrite policy would narrow it.
+    /// [`CodexThread::start`] plus the roots this thread carries on every turn
+    /// ([`granted_roots`]). Both postures carry them; only the `thread/start`
+    /// scalar differs.
     pub async fn start_with_state_dirs(
         cwd: impl Into<PathBuf>,
         model: Option<&str>,
@@ -506,11 +525,7 @@ impl CodexThread {
         driver.effort = effort
             .filter(|effort| !effort.is_empty())
             .map(str::to_string);
-        driver.state_dirs = if yolo {
-            Vec::new()
-        } else {
-            state_dirs.to_vec()
-        };
+        driver.state_dirs = granted_roots(&cwd, state_dirs);
         driver.resolved_sandbox = parse_resolved_sandbox(&response);
         Ok(driver)
     }
@@ -559,11 +574,7 @@ impl CodexThread {
         driver.effort = effort
             .filter(|effort| !effort.is_empty())
             .map(str::to_string);
-        driver.state_dirs = if yolo {
-            Vec::new()
-        } else {
-            state_dirs.to_vec()
-        };
+        driver.state_dirs = granted_roots(&cwd, state_dirs);
         driver.resolved_sandbox = parse_resolved_sandbox(&response);
         Ok(driver)
     }
