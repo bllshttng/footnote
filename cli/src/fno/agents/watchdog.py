@@ -2765,10 +2765,8 @@ def apply_verdict(
     failover_fn: Optional[Callable[[Any, Any], str]] = None,
     rotation: Optional[RotationBudget] = None,
 ) -> tuple[str, str]:
-    """Execute one verdict inside ``lanes`` ("wake" | "all"). Only ``SKIPPED``
-    (outside the lane) is silent; every other word is news. Mechanisms delegate
-    (resume for wake and silence; recovery._redispatch for reroute), run with
-    ``cwd``/``agent`` set to the row's worktree/harness (x-c624)."""
+    """Execute one verdict inside ``lanes`` ("wake" | "all"); only ``SKIPPED`` is
+    silent. wake/silence resume with ``cwd``/``agent`` set; reroute uses recovery._redispatch."""
     if v.verdict not in LANES.get(lanes, frozenset()):
         return SKIPPED, f"{v.verdict} outside {lanes} lane"
     try:

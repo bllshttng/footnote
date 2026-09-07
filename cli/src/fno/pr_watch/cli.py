@@ -305,7 +305,6 @@ _WAKE_APPLY_FLOOR_S = 200
 
 
 def _wd_apply_and_emit(wd, verdict, *, cwd: str, agent: str, label: str) -> str:
-    """Apply a wake-lane verdict (wake or silence) and emit the receipt."""
     try:
         outcome, detail = wd.apply_verdict(verdict, lanes="wake", cwd=cwd, agent=agent)
     except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
