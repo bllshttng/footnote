@@ -266,6 +266,7 @@ _wt_pids() {
                     p = ppidbypid[p]
                 }
                 walked = 1
+                selfcmd = cmdbypid[self]
             }
             if ($0 == "-") next
             cwdbypid[$1] = $2
@@ -274,6 +275,13 @@ _wt_pids() {
         stage == 3 {
             pid = $1
             if (pid in mine) next
+            # A child of the sweep carrying the same command line as the
+            # sweep itself is the command-substitution subshell running this
+            # very check (CI smoke 2026-09-07, pid 6327: bash <script-path>):
+            # it lives for the whole function, so its ps row is live, and it
+            # forked after the cwd snapshot, so no cwd row can clear it. A
+            # real occupant has a different command line or another parent.
+            if (ppidbypid[pid] == self && cmdbypid[pid] == selfcmd) next
             cmd = cmdbypid[pid]
             if (cmd != "" && cmd !~ /defunct/) {
                 print pid "\t" cmd "\t-"
