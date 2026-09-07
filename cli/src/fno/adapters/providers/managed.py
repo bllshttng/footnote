@@ -231,18 +231,6 @@ def _read_slot_blob(cli: str, config_dir: Path | None = None) -> Optional[str]:
     return _read_claude_blob(cfg, shared=cfg == default_cfg)
 
 
-def read_canonical_slot_blob(cli: str) -> Optional[str]:
-    """The credential a reader of the SHARED slot gets, ignoring ambient overrides.
-
-    ``_read_slot_blob`` honors ``CLAUDE_CONFIG_DIR``, which is right for an
-    operator verb writing the slot and wrong for an identity read: a worker
-    pinned to another account exports it, and reconciliation would then prove
-    the pinned account and stamp it onto the canonical slot.
-    """
-    blobs = canonical_slot_blobs(cli)
-    return blobs[0] if blobs else None
-
-
 # `security find-generic-password` exits 44 for errSecItemNotFound (verified on
 # darwin 25.3). Any OTHER nonzero status is a read that FAILED - denied, locked
 # keychain, a broken tool - which is a different thing entirely.
@@ -1007,12 +995,6 @@ def tainting_writers(
     return [(pid, None) for pid in pids if isinstance(pid, int)]
 
 
-def tainting_pids(cli: str, root: Path) -> Optional[tuple[int, ...]]:
-    """Just the pids from :func:`tainting_writers`, or None when unrecorded."""
-    writers = tainting_writers(cli, root)
-    return None if writers is None else tuple(pid for pid, _started in writers)
-
-
 def taint_writers_still_live(cli: str, root: Path) -> list[str]:
     """Sessions that could still rewrite the slot with a DIFFERENT credential.
 
@@ -1210,47 +1192,6 @@ def write_record_principal(record_id: str, principal: dict, root: Path | None = 
     meta["principal"] = principal
     meta["principal_at"] = _utc_now_iso()
     _atomic_write_private(_meta_path(record_id, root), json.dumps(meta, indent=2))
-
-
-def capture_record_principal(
-    record: ProviderRecord,
-    blob: Optional[str] = None,
-    root: Path | None = None,
-    *,
-    force: bool = False,
-) -> Optional[dict]:
-    """Best-effort: prove and store ``record``'s principal from its credential.
-
-    Called where footnote KNOWS which account a blob belongs to (register, and
-    the tail of a verified switch), so the binding is established while the
-    answer is certain. Never raises and never blocks its caller: a record with
-    no bound principal is simply unmatchable later, and reconciliation refuses
-    loudly instead of guessing.
-
-    ``force`` re-binds an already-bound record. Register sets it (re-registering
-    an id is how an operator rebinds it to a different account); switch does
-    not, so a routine switch of an already-bound record costs no network call.
-    """
-    if record.harness != "claude":
-        return None
-    if not force and record_principal(record.id, root) is not None:
-        return None
-    material = blob if blob is not None else read_blob(record.id, root)
-    principal, _failure = slot_principal(material)
-    if principal is None:
-        if force:
-            # Re-registering an id points it at whatever is signed in NOW, while
-            # `write_snapshot` deliberately preserves the previous principal for
-            # capture-before-overwrite. Leaving that binding here would claim the
-            # new credential belongs to the old account - a confident lie is
-            # worse than an unmatchable record, so drop it.
-            _clear_record_principal(record.id, root)
-        return None
-    try:
-        write_record_principal(record.id, principal, root)
-    except OSError:
-        return None
-    return principal
 
 
 def _clear_record_principal(record_id: str, root: Path | None = None) -> None:
