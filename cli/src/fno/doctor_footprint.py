@@ -674,6 +674,13 @@ def _payload(
         "load_ceiling": getattr(load_snapshot, "load_ceiling", None),
         "load_cpu_count": getattr(load_snapshot, "load_cpu_count", None),
         "spawn_load_status": getattr(load_snapshot, "spawn_load_status", "unavailable"),
+        # The Claude Code background daemon's idle pre-warm pool. Outside the
+        # fleet numbers above on purpose - fno neither owns nor bounds it - but
+        # measured, because it can hold most of the machine whose load refuses
+        # every fno spawn.
+        "spare_pool_process_count": reading.spare_pool_process_count,
+        "spare_pool_cpu_cores": reading.spare_pool_cpu_cores,
+        "spare_pool_rss_gb": reading.spare_pool_rss_gb,
         "top": [
             {
                 "cpu_percent": cpu_percent,
@@ -803,6 +810,13 @@ def _emit_result(
                 f"({reading.direct_process_count} direct, roster unavailable)"
             )
         typer.echo(f"transient calls: {reading.transient_call_count}")
+        if reading.spare_pool_process_count:
+            typer.echo(
+                f"claude spare pool: {reading.spare_pool_process_count} processes, "
+                f"{reading.spare_pool_cpu_cores:.2f} cores, "
+                f"{reading.spare_pool_rss_gb:.1f}GB (idle pre-warm, not fleet; "
+                "never sweep it - a bg spawn is claimed from it)"
+            )
         if reading.attribution_gap is not None:
             typer.echo(
                 f"attribution gap: {reading.attribution_gap} "

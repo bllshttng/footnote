@@ -64,6 +64,11 @@ class DrainTarget:
     interval_seconds: int
     failure_limit: int
     mission: Optional[str]
+    #: Global ceiling on concurrent converge runs across ALL missions, not a
+    #: per-mission budget. Every target carries the same value because the
+    #: daemon holds one gate for the whole drain; it rides on the target only
+    #: because the target list is the daemon's one config channel.
+    max_concurrent: int = 1
 
 
 def _workspace_paths(*, strict: bool = False) -> dict[str, str]:
@@ -165,6 +170,7 @@ def resolve_drain_targets(*, strict: bool = False) -> list[DrainTarget]:
                 interval_seconds=interval,
                 failure_limit=cfg.failure_limit,
                 mission=epic["id"],
+                max_concurrent=cfg.max_concurrent,
             )
         )
     return targets
@@ -231,6 +237,7 @@ def drain_targets_as_dicts() -> list[dict]:
             "interval_seconds": t.interval_seconds,
             "failure_limit": t.failure_limit,
             "mission": t.mission,
+            "max_concurrent": t.max_concurrent,
         }
         for t in resolve_drain_targets()
     ]

@@ -411,7 +411,7 @@ enabled = false
 interval = "5m"
 # Consecutive dispatch failures before a node is parked.
 failure_limit = 3
-# In-flight nodes per project per tick (v1 == 1).
+# Global ceiling on concurrent converge runs across all missions.
 max_concurrent = 1
 # Scope the drain daemon to a single mission's nodes.
 # mission = <unset>   # optional; no default

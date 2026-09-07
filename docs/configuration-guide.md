@@ -163,7 +163,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `active_backlog.enabled` | bool \| dict[str, bool] | `false` | advanced | Always-on backlog drain: true (every project) or a per-project map. |
 | `active_backlog.interval` | str | `5m` | advanced | Poll-floor cadence for the drain daemon (e.g. 5m, 30s). |
 | `active_backlog.failure_limit` | int | `3` | advanced | Consecutive dispatch failures before a node is parked. |
-| `active_backlog.max_concurrent` | int | `1` | never | In-flight nodes per project per tick (v1 == 1). |
+| `active_backlog.max_concurrent` | int | `1` | never | Global ceiling on concurrent converge runs across all missions. |
 | `active_backlog.mission` | str (optional) | _(none)_ | never | Scope the drain daemon to a single mission's nodes. |
 | `parallel.max_lanes` | int | `1` | advanced | Deprecated and ignored: the epic advance's width derives from spawn-gate headroom (agents.max_live, provider lanes). The key stays parseable for one release; delete it from config. |
 | `auto_merge.enabled` | bool | `false` | always | Auto-merge a PR once CI is green AND the review posture is satisfied. There is no 'external review' step unless the review posture demands one: with review.posture below self_review (the floor) the merge refuses and names the rung to set. Read review.posture for what the rung requires before enabling this. |
