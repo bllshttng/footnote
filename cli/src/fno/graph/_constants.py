@@ -134,6 +134,31 @@ _NODE_ID_EXTRACT_RE = re.compile(r"\b" + NODE_ID_BODY + r"\b")
 # it so a near-exhausted ID space raises rather than spinning forever.
 _MINT_MAX_ATTEMPTS = 10_000
 
+# Where a node came from, shared by every writer of ``source_kind``. The four
+# original values map to their push channel: organic is the unset default,
+# from_inbox is mail, from_observation is an agent noticing, from_supervisor is
+# a crown filing. operator_request marks a node the OPERATOR asked for - no
+# pre-existing value meant that, so an operator ask landed as organic and read
+# the same as a worker filing its own idea.
+SOURCE_KINDS = frozenset(
+    {"organic", "from_inbox", "from_observation", "from_supervisor", "operator_request"}
+)
+SOURCE_KIND_DEFAULT = "organic"
+
+
+def validate_source_kind(value: str) -> str:
+    """Return ``value`` when it is in the vocabulary; raise ``ValueError`` else.
+
+    One validator for every writer (``new``, ``idea``, ``capture promote``),
+    so the legal set and the error text cannot drift apart.
+    """
+    if value not in SOURCE_KINDS:
+        raise ValueError(
+            f"invalid --source-kind {value!r}. "
+            f"Must be one of: {', '.join(sorted(SOURCE_KINDS))}"
+        )
+    return value
+
 
 def is_wellformed_node_id(s: object) -> bool:
     """True when ``s`` is a syntactically valid node id (legacy or configured).

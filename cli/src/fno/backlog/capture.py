@@ -644,13 +644,18 @@ def _create_graph_node(
     domain: str = "code",
     graph_path: Optional[Path] = None,
     blocks_everything: bool = False,
+    source_kind: str = "organic",
 ) -> str:
     """Create a plan-less idea node on the graph; return its ab-id.
 
     Reuses the canonical node-build path so a schema addition shows up here
     too. Imported lazily to avoid the import cycle (graph.cli imports this
     module at load to register the subapp)."""
-    from fno.graph._constants import mint_node_id, validate_priority_write
+    from fno.graph._constants import (
+        mint_node_id,
+        validate_priority_write,
+        validate_source_kind,
+    )
     from fno.graph._intake import detect_project_from_settings
     from fno.graph.cli import _build_backlog_node, _graph_path
     from fno.graph.store import locked_mutate_graph
@@ -658,6 +663,10 @@ def _create_graph_node(
     gpath = graph_path or _graph_path()
     try:
         validate_priority_write(priority, blocks_everything=blocks_everything)
+    except ValueError as exc:
+        raise InboxValidationError(str(exc)) from exc
+    try:
+        validate_source_kind(source_kind)
     except ValueError as exc:
         raise InboxValidationError(str(exc)) from exc
     resolved_cwd = os.getcwd()
@@ -676,6 +685,7 @@ def _create_graph_node(
             domain=domain,
             project=project,
             cwd=resolved_cwd,
+            source_kind=source_kind,
             known_ids={e.get("id") for e in entries},
         )
         node["id"] = new_id
@@ -694,6 +704,7 @@ def promote_item(
     difficulty: Optional[str],
     blocks_everything: bool = False,
     graph_path: Optional[Path] = None,
+    source_kind: str = "organic",
 ) -> dict:
     """Promote an inbox item to a graph node and strike its checkbox.
 
@@ -755,6 +766,7 @@ def promote_item(
             difficulty=difficulty,
             graph_path=graph_path,
             blocks_everything=blocks_everything,
+            source_kind=source_kind,
         )
 
         new_line = f"- [x] {fu_id} - {m.group(3)} -> {node_id}"
@@ -1631,8 +1643,23 @@ def cmd_promote(
     priority: Optional[str] = typer.Option(None, "--priority", help="Override node priority (else inherits the item's)."),
     difficulty: Optional[str] = typer.Option(None, "--difficulty", help="Intrinsic work difficulty: low|medium|high."),
     blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
+    source_kind: str = typer.Option(
+        "organic",
+        "--source-kind",
+        help=(
+            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
+            "Keeps the item's origin when it becomes a node."
+        ),
+    ),
 ) -> None:
     """Promote an inbox item to a graph node (idempotent)."""
+    try:
+        from fno.graph._constants import validate_source_kind
+
+        validate_source_kind(source_kind)
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1)
     if difficulty is None:
         if not sys.stdin.isatty():
             from fno.graph._constants import DIFFICULTY_HELP
@@ -1653,6 +1680,7 @@ def cmd_promote(
             _inbox_path(), fu_id, priority=priority,
             difficulty=difficulty,
             blocks_everything=blocks_everything,
+            source_kind=source_kind,
         )
     except InboxValidationError as exc:
         typer.echo(f"error: {exc}", err=True)

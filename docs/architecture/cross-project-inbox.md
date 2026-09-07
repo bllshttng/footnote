@@ -70,7 +70,7 @@ The system rides on two storage layers that already existed for related but dist
 **graph.json** stays the source of truth for *work*. A new graph entry represents a feature that should ship. The plan adds four nullable provenance fields to every entry so the work can carry a "where did this come from" trail:
 
 ```yaml
-source_kind: organic | from_inbox | from_observation | from_supervisor
+source_kind: organic | from_inbox | from_observation | from_supervisor | operator_request
 source_project: example-pipeline            # who told us about it
 source_session_id: 20260504T235919Z-...      # target session that produced the heads-up
 source_inbox_msg: msg-a4f1b2                 # the inbox message that triggered triage

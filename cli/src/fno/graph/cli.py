@@ -25,6 +25,7 @@ import typer
 
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.tombstones import tombstone_group_cls
+from fno.graph._constants import SOURCE_KIND_DEFAULT, validate_source_kind
 from fno.graph.rank import cmd_rank as _cmd_rank
 
 cli = typer.Typer(
@@ -1004,6 +1005,13 @@ def _build_backlog_node(
     source_node: Optional[str] = None,
     known_ids: Optional[set] = None,
     out: Optional[dict] = None,
+    source_kind: str = SOURCE_KIND_DEFAULT,
+    source: Optional[str] = None,
+    source_project: Optional[str] = None,
+    source_inbox_msg: Optional[str] = None,
+    artifact_url: Optional[str] = None,
+    completion_note: Optional[str] = None,
+    source_session_id: Optional[str] = None,
 ) -> _NodeFields:
     """Build a backlog node dict shared by ``cmd_add`` and ``cmd_idea``.
 
@@ -1021,6 +1029,11 @@ def _build_backlog_node(
     live snapshot.
     """
     from fno.graph._constants import ID_PREFIX  # noqa: F401
+
+    # Chokepoint validation: the vocabulary is enforced where the field is
+    # written, so a new writer cannot mint an out-of-vocabulary value even if
+    # it skips its own CLI-level check.
+    validate_source_kind(source_kind)
 
     # Parent-edge provenance (x-30f6): stamped from the running session's env +
     # manifest, or from an explicit --source-node. Centralized here so
@@ -1062,7 +1075,13 @@ def _build_backlog_node(
         "pr_url": None,
         "merge_status": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "source_session_id": prov["source_session_id"],
+        "source": source,
+        "source_kind": source_kind,
+        "source_project": source_project,
+        "source_inbox_msg": source_inbox_msg,
+        "artifact_url": artifact_url,
+        "completion_note": completion_note,
+        "source_session_id": source_session_id or prov["source_session_id"],
         "source_harness": prov["source_harness"],
         "source_cwd": prov["source_cwd"],
         "source_node_id": prov["source_node_id"],
@@ -1238,6 +1257,7 @@ def _create_node_impl(
     batch: Optional[str] = None,
     tags: Optional[list[str]] = None,
     source_node: Optional[str] = None,
+    source_kind: str = SOURCE_KIND_DEFAULT,
     related: Optional[list[str]] = None,
     evidence: Optional[str] = None,
     require_difficulty: bool = False,
@@ -1291,6 +1311,12 @@ def _create_node_impl(
             f"Error: invalid type '{type_}'. Must be one of: {', '.join(sorted(VALID_NODE_TYPES))}",
             err=True,
         )
+        raise typer.Exit(code=1)
+
+    try:
+        validate_source_kind(source_kind)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1)
 
     if details is not None and description is not None:
@@ -1359,6 +1385,7 @@ def _create_node_impl(
             batch=batch,
             tags=resolved_tags,
             source_node=resolved_source_node,
+            source_kind=source_kind,
             known_ids=live_ids,
             out=capture_meta,
         )
@@ -1566,6 +1593,14 @@ def cmd_add(
             "ambient capture. Refuses if it does not resolve."
         ),
     ),
+    source_kind: str = typer.Option(
+        SOURCE_KIND_DEFAULT,
+        "--source-kind",
+        help=(
+            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
+            "Mark an operator ask with operator_request."
+        ),
+    ),
     related: Optional[List[str]] = typer.Option(
         None,
         "--related",
@@ -1594,6 +1629,7 @@ def cmd_add(
         batch=batch,
         tags=tag,
         source_node=source_node,
+        source_kind=source_kind,
         related=related,
         evidence=evidence,
         require_difficulty=True,
@@ -1745,6 +1781,14 @@ def cmd_idea(
         help=(
             "Origin node this filing came out of (id, slug, or bare hex). Overrides "
             "ambient capture. Refuses if it does not resolve."
+        ),
+    ),
+    source_kind: str = typer.Option(
+        SOURCE_KIND_DEFAULT,
+        "--source-kind",
+        help=(
+            "organic|from_inbox|from_observation|from_supervisor|operator_request. "
+            "Mark an operator ask with operator_request."
         ),
     ),
     related: Optional[List[str]] = typer.Option(
@@ -1961,6 +2005,7 @@ def cmd_idea(
         batch=batch,
         tags=tag,
         source_node=source_node,
+        source_kind=source_kind,
         related=related,
         evidence=evidence,
         require_difficulty=True,
@@ -14356,6 +14401,14 @@ def cmd_find(
     domain: Optional[str] = typer.Option(None, "--domain", "-d", help="Filter by domain"),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project"),
     status: Optional[str] = typer.Option(None, "--status", "-s", help="Filter by status"),
+    source_kind: Optional[str] = typer.Option(
+        None,
+        "--source-kind",
+        help=(
+            "Filter by origin: organic|from_inbox|from_observation|from_supervisor|"
+            "operator_request. operator_request lists the operator's own asks."
+        ),
+    ),
     use_fts: bool = typer.Option(
         False,
         "--fts",
@@ -14440,6 +14493,10 @@ def cmd_find(
         if project is not None and e.get("project") != project:
             return False
         if status is not None and e.get("status") != status:
+            return False
+        # A node written before this field existed carries the organic default,
+        # so the filter reads the resolved value, never a missing key.
+        if source_kind is not None and (e.get("source_kind") or SOURCE_KIND_DEFAULT) != source_kind:
             return False
         return True
 
@@ -14533,7 +14590,7 @@ def cmd_new(
     source_kind: str = typer.Option(
         "organic",
         "--source-kind",
-        help="organic|from_inbox|from_observation|from_supervisor",
+        help="organic|from_inbox|from_observation|from_supervisor|operator_request",
     ),
     source_project: Optional[str] = typer.Option(
         None, "--source-project", help="Source project name"
@@ -14559,13 +14616,10 @@ def cmd_new(
     from fno.graph.fuzzy import suggest_domain
     from fno.graph.store import read_graph, locked_mutate_graph
 
-    _VALID_SOURCE_KINDS = {"organic", "from_inbox", "from_observation", "from_supervisor"}
-    if source_kind not in _VALID_SOURCE_KINDS:
-        typer.echo(
-            f"Error: invalid --source-kind '{source_kind}'. "
-            f"Must be one of: {', '.join(sorted(_VALID_SOURCE_KINDS))}",
-            err=True,
-        )
+    try:
+        validate_source_kind(source_kind)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1)
 
     _validate_priority_or_exit(priority, blocks_everything=blocks_everything)
@@ -14625,57 +14679,22 @@ def cmd_new(
         live_ids = {e.get("id") for e in es}
         new_id = mint_node_id(live_ids)
         new_id_holder[0] = new_id
-        # This verb builds its node inline rather than through
-        # _build_backlog_node, so ambient origin capture has to be wired
-        # explicitly or `new` stays the one creation path outside the contract.
-        prov = _session_provenance(known_ids=live_ids)
-        node = {
-            "id": new_id,
-            "parent": None,
-            "title": title,
-            "type": "feature",
-            "project": resolved_project,
-            "cwd": resolved_cwd,
-            "priority": priority,
-            "blocks_everything": blocks_everything,
-            "difficulty": difficulty,
-            "difficulty_history": [
-                {
-                    "value": difficulty,
-                    "source": "filed",
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                }
-            ],
-            "domain": domain,
-            "blocked_by": [],
-            "session_id": None,
-            "locked_at": None,
-            "completed_at": None,
-            "has_brief": False,
-            "roadmap_id": None,
-            "vision_path": None,
-            "details": None,
-            "size": None,
-            "batch": None,
-            "cost_usd": None,
-            "cost_sessions": [],
-            "plan_path": None,
-            "pr_number": None,
-            "pr_url": None,
-            "merge_status": None,
-            "artifact_url": None,
-            "completion_note": None,
-            "source": "fno-new",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "source_kind": source_kind,
-            "source_project": source_project,
-            "source_session_id": source_session_id or prov["source_session_id"],
-            "source_harness": prov["source_harness"],
-            "source_cwd": prov["source_cwd"],
-            "source_node_id": prov["source_node_id"],
-            "source_plan_path": prov["source_plan_path"],
-            "source_inbox_msg": source_inbox_msg,
-        }
+        node = _build_backlog_node(
+            title=title,
+            project=resolved_project,
+            cwd=resolved_cwd,
+            priority=priority,
+            blocks_everything=blocks_everything,
+            difficulty=difficulty,
+            domain=domain,
+            source_kind=source_kind,
+            source="fno-new",
+            source_project=source_project,
+            source_inbox_msg=source_inbox_msg,
+            source_session_id=source_session_id,
+            known_ids=live_ids,
+        )
+        node["id"] = new_id
         es.append(node)
         return es
 
