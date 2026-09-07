@@ -15070,6 +15070,7 @@ mod tests {
 
     #[test]
     fn retired_require_corroboration_key_still_parses() {
+        let _root = crate::paths::DeclaredRoot::declare("retired_require_corroboratio");
         // The key is retired: origin never gates. A config that still
         // carries it must load clean, and the merged settings keep the
         // fields that still gate.
@@ -18243,6 +18244,7 @@ git_bounded();";
 
     #[test]
     fn review_coverage_pr_failure_stdout_carries_quota_diagnostic() {
+        let _root = crate::paths::DeclaredRoot::declare("review_coverage_pr_failure_s");
         // x-b56a: exit 4 with a known PR persists a schema-gated unknown row,
         // and its stdout must say WHY the read degraded. A bare unknown is
         // indistinguishable from "nobody reviewed this" and sent operators to
@@ -18295,6 +18297,7 @@ git_bounded();";
 
     #[test]
     fn review_coverage_pr_failure_healthy_quota_reports_not_exhausted() {
+        let _root = crate::paths::DeclaredRoot::declare("review_coverage_pr_failure_h");
         // The diagnostic must not cry wolf: a gh failure with graphql budget
         // left is an outage, not exhaustion, and stdout saying exhausted=false
         // is what lets a reader stop guessing between the two.
@@ -18328,6 +18331,7 @@ git_bounded();";
 
     #[test]
     fn review_coverage_pr_failure_verbatim_403_classifies_secondary_via_the_exempt_probe() {
+        let _root = crate::paths::DeclaredRoot::declare("review_coverage_pr_failure_v");
         // The p0 shape on this verb: the failed read's stderr is the
         // MEASURED 2026-08-24 body (no "secondary" anywhere) while the exempt
         // rate_limit endpoint still answers healthy. The classifier is that
@@ -18403,6 +18407,7 @@ git_bounded();";
 
     #[test]
     fn review_coverage_no_pr_secondary_limit_classifies_the_same_way() {
+        let _root = crate::paths::DeclaredRoot::declare("review_coverage_no_pr_second");
         // The pr_num == 0 arm (no --pr passed) shares the classification: a
         // refusal with no PR number gets the same live-bucket verdict (here
         // with the OLD phrase in the stderr - the bucket, not the wording,

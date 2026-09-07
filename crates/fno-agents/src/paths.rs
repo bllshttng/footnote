@@ -24,6 +24,65 @@ use std::path::{Path, PathBuf};
 /// and by operators who keep state outside `$HOME`).
 pub const HOME_ENV: &str = "FNO_AGENTS_HOME";
 
+/// Whether this process declared a root. `FNO_TEST_HERMETIC` has the same
+/// three states the Python fence reads: `"1"` declares a sandboxed process
+/// root (the runner pins `HOME` inside it, so the fallback is declared), `"0"`
+/// is ambient on purpose, and absent under test is an escaped reader.
+fn test_root_declared() -> bool {
+    matches!(
+        std::env::var("FNO_TEST_HERMETIC").ok().as_deref(),
+        Some("0") | Some("1")
+    )
+}
+
+/// Refuse an ambient `$HOME` fallback under test, naming the pin to set.
+///
+/// `cargo test` never sandboxes `HOME`, so a unit test that resolved a state
+/// root through the fallback landed manifests in the operator's real
+/// `~/.fno/spaces`.
+fn refuse_undeclared_home_fallback(pin: &str) {
+    if !cfg!(test) || test_root_declared() {
+        return;
+    }
+    panic!(
+        "fno-agents resolved a state root from $HOME under test with no \
+         declared root. Set {pin} to a directory under std::env::temp_dir(), \
+         or FNO_TEST_HERMETIC=0 to declare an ambient run on purpose."
+    );
+}
+
+/// Refuse a declared root outside the temp dir when the process root is
+/// sandboxed, the way the Python accessor fence refuses one.
+///
+/// Both raw and canonical forms of the temp dir are compared: macOS reports it
+/// as `/var/folders/...` while `canonicalize` yields `/private/var/...`.
+fn fence_declared_root(root: &Path) {
+    if !cfg!(test) || std::env::var("FNO_TEST_HERMETIC").ok().as_deref() != Some("1") {
+        return;
+    }
+    let tmp = std::env::temp_dir();
+    let tmp_forms = [
+        std::fs::canonicalize(&tmp).unwrap_or_else(|_| tmp.clone()),
+        tmp,
+    ];
+    let root_forms = [
+        std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
+        root.to_path_buf(),
+    ];
+    if root_forms
+        .iter()
+        .any(|r| tmp_forms.iter().any(|t| r.starts_with(t)))
+    {
+        return;
+    }
+    panic!(
+        "fno-agents resolved the state root {} outside the test sandbox while \
+         FNO_TEST_HERMETIC=1 declares one. A hermetic run must not touch live \
+         state; pin the root under std::env::temp_dir().",
+        root.display()
+    );
+}
+
 /// Resolved `~/.fno/agents/` root and the paths under it.
 #[derive(Debug, Clone)]
 pub struct AgentsHome {
@@ -37,16 +96,31 @@ impl AgentsHome {
     /// home — it degrades to a relative tree.
     pub fn from_env() -> Self {
         if let Some(v) = std::env::var_os(HOME_ENV) {
-            return AgentsHome {
-                root: PathBuf::from(v),
-            };
+            let root = PathBuf::from(v);
+            fence_declared_root(&root);
+            return AgentsHome { root };
         }
+        refuse_undeclared_home_fallback(HOME_ENV);
         let base = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        AgentsHome {
-            root: base.join(".fno").join("agents"),
+        let root = base.join(".fno").join("agents");
+        fence_declared_root(&root);
+        AgentsHome { root }
+    }
+
+    /// The resolved root, or `None` when a test process declared none.
+    ///
+    /// For callers that only COMPARE a path against the shared root. Under
+    /// test with nothing declared there IS no shared root to compare against,
+    /// and inventing one out of ambient `$HOME` is the read this epic bars. A
+    /// caller that actually resolves state still refuses through
+    /// [`AgentsHome::from_env`].
+    pub fn from_env_opt() -> Option<Self> {
+        if cfg!(test) && std::env::var_os(HOME_ENV).is_none() && !test_root_declared() {
+            return None;
         }
+        Some(Self::from_env())
     }
 
     /// Construct rooted at an explicit directory (tests).
@@ -342,7 +416,9 @@ pub fn worktree_repo_root(cwd: &Path) -> PathBuf {
 /// cross-language wire format).
 fn spaces_root_dir() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_SPACES_DIR").filter(|v| !v.is_empty()) {
-        return PathBuf::from(v);
+        let root = PathBuf::from(v);
+        fence_declared_root(&root);
+        return root;
     }
     durable_spaces_root()
 }
@@ -356,12 +432,15 @@ fn durable_spaces_root() -> PathBuf {
         let home = PathBuf::from(&v);
         home.parent().map(|p| p.to_path_buf()).unwrap_or(home)
     } else {
+        refuse_undeclared_home_fallback("FNO_SPACES_DIR");
         std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .map(|h| PathBuf::from(h).join(".fno"))
             .unwrap_or_else(|| PathBuf::from(".fno"))
     };
-    state_root.join("spaces")
+    let root = state_root.join("spaces");
+    fence_declared_root(&root);
+    root
 }
 
 /// The nearest ancestor of `path` that is a checkout root, or None. A pure
@@ -519,6 +598,81 @@ pub fn migrate_from_checkout(old: &Path, new: &Path) -> bool {
         }
     }
     true
+}
+
+/// One test's declared state root: `FNO_SPACES_DIR` and `FNO_AGENTS_HOME`
+/// pinned under `std::env::temp_dir()`, restored on drop.
+///
+/// This is the Rust half of the three declarations. `cargo test` sandboxes no
+/// `HOME`, so a test that resolves a state root without one of these pins
+/// reaches the operator's live `~/.fno` - which is how loop_king unit tests
+/// landed king manifests in it.
+///
+/// The directory name carries the pid AND a sequence: two tests sharing a
+/// pid-only name raced each other's cleanup. The process-wide env lock is held
+/// for the guard's lifetime, so a test holding one must not take that lock
+/// itself.
+#[cfg(test)]
+pub(crate) struct DeclaredRoot {
+    root: PathBuf,
+    _env: Option<std::sync::MutexGuard<'static, ()>>,
+    spaces: Option<std::ffi::OsString>,
+    agents: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl DeclaredRoot {
+    pub(crate) fn declare(tag: &str) -> Self {
+        let env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Self::pin(tag, Some(env))
+    }
+
+    /// For a test that already holds the env lock. Taking it twice deadlocks.
+    pub(crate) fn declare_held(tag: &str) -> Self {
+        Self::pin(tag, None)
+    }
+
+    fn pin(tag: &str, env: Option<std::sync::MutexGuard<'static, ()>>) -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+
+        let root = std::env::temp_dir().join(format!(
+            "{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).ok();
+        let held = Self {
+            spaces: std::env::var_os("FNO_SPACES_DIR"),
+            agents: std::env::var_os(HOME_ENV),
+            root,
+            _env: env,
+        };
+        std::env::set_var("FNO_SPACES_DIR", &held.root);
+        std::env::set_var(HOME_ENV, held.root.join("agents"));
+        held
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.root
+    }
+}
+
+#[cfg(test)]
+impl Drop for DeclaredRoot {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.root).ok();
+        match &self.spaces {
+            Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+            None => std::env::remove_var("FNO_SPACES_DIR"),
+        }
+        match &self.agents {
+            Some(v) => std::env::set_var(HOME_ENV, v),
+            None => std::env::remove_var(HOME_ENV),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -843,6 +997,7 @@ mod tests {
     struct EnvGuard {
         spaces: Option<std::ffi::OsString>,
         home: Option<std::ffi::OsString>,
+        hermetic: Option<std::ffi::OsString>,
     }
 
     impl EnvGuard {
@@ -850,6 +1005,7 @@ mod tests {
             Self {
                 spaces: std::env::var_os("FNO_SPACES_DIR"),
                 home: std::env::var_os(HOME_ENV),
+                hermetic: std::env::var_os("FNO_TEST_HERMETIC"),
             }
         }
     }
@@ -864,7 +1020,42 @@ mod tests {
                 Some(v) => std::env::set_var(HOME_ENV, v),
                 None => std::env::remove_var(HOME_ENV),
             }
+            match &self.hermetic {
+                Some(v) => std::env::set_var("FNO_TEST_HERMETIC", v),
+                None => std::env::remove_var("FNO_TEST_HERMETIC"),
+            }
         }
+    }
+
+    /// The refusal itself: with nothing declared, resolving a state root must
+    /// name the pin to set rather than reach the operator's real `~/.fno`.
+    /// A bare `cargo test` sandboxes no HOME, so this is the only fence there.
+    #[test]
+    #[should_panic(expected = "FNO_SPACES_DIR")]
+    fn an_undeclared_root_refuses_and_names_the_pin() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _restore = EnvGuard::capture();
+        std::env::remove_var("FNO_SPACES_DIR");
+        std::env::remove_var(HOME_ENV);
+        std::env::remove_var("FNO_TEST_HERMETIC");
+        let _ = space_dir(&std::env::temp_dir());
+    }
+
+    /// `"0"` is a declaration, not a missing one, and it is what the dirty
+    /// ambient lane runs on.
+    #[test]
+    fn an_ambient_declaration_resolves_without_refusing() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _restore = EnvGuard::capture();
+        std::env::remove_var("FNO_SPACES_DIR");
+        std::env::remove_var(HOME_ENV);
+        std::env::set_var("FNO_TEST_HERMETIC", "0");
+        assert!(space_dir(&std::env::temp_dir())
+            .ends_with(space_slug(&worktree_repo_root(&std::env::temp_dir()))));
     }
 
     /// Mirror of the Python PARITY_SCENARIOS row "foreign-env-root-refuses"

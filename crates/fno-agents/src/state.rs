@@ -1902,7 +1902,10 @@ fn source_ahead_root(
 }
 
 fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateError> {
-    let shared = crate::paths::AgentsHome::from_env().registry_json();
+    let Some(home) = crate::paths::AgentsHome::from_env_opt() else {
+        return Ok(());
+    };
+    let shared = home.registry_json();
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let shared = shared.canonicalize().unwrap_or(shared);
     let Ok(exe) = std::env::current_exe() else {
