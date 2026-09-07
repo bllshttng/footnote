@@ -17,6 +17,7 @@ ACs:
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -221,3 +222,67 @@ def test_rm_without_a_worktree_is_a_clean_noop(isolated_state, claude_available,
     assert result.registry_changed is True
     assert result.worktree_receipt is None
     assert "worktree" not in capsys.readouterr().out
+
+
+def test_directory_bytes_measures_a_small_tree_inside_its_budget(tmp_path):
+    """AC2-HP (x-4775): a walk that completes inside the budget reports the
+    real measured size, unchanged from the unbounded version's behavior."""
+    d = tmp_path / "small"
+    (d / "sub").mkdir(parents=True)
+    (d / "a.txt").write_bytes(b"12345")
+    (d / "sub" / "b.txt").write_bytes(b"1234567890")
+
+    assert dispatch_mod._directory_bytes(str(d), budget_s=10.0) == 15
+
+
+def test_directory_bytes_returns_none_within_its_budget_on_a_stalled_walk(tmp_path):
+    """AC2-EDGE (x-4775): a walk that cannot finish inside the budget
+    returns None (unmeasured) within the budget - the positive marker
+    (elapsed time), never the mere absence of a value. Many subdirectories,
+    not many files: the deadline is checked once per directory `os.walk`
+    yields, so a flat directory gives the walk only one checkpoint."""
+    d = tmp_path / "wide"
+    d.mkdir()
+    for i in range(5000):
+        (d / f"d{i}").mkdir()
+
+    start = time.monotonic()
+    measured = dispatch_mod._directory_bytes(str(d), budget_s=0.001)
+    elapsed = time.monotonic() - start
+
+    assert measured is None
+    assert elapsed < 2.0, f"did not return within its budget: took {elapsed:.3f}s"
+
+
+def test_rm_reports_reclaimed_bytes_as_none_not_zero_when_the_walk_is_unmeasured(
+    isolated_state, claude_available, capsys, monkeypatch
+):
+    """A removed worktree whose size walk hit its budget must not report the
+    same `0` a kept tree reports for a real reason (x-4775)."""
+    tmp_path = isolated_state
+    wt = _linked_worktree(tmp_path, "unmeasured")
+    update_registry(lambda entries: entries + [_entry("w6", wt, tmp_path)])
+
+    import fno.worktree_reapable as wr
+
+    monkeypatch.setattr(
+        wr,
+        "reapable",
+        lambda path: Verdict(reapable=True, reason="clean", recoverable_deletions=0),
+    )
+    monkeypatch.setattr(wr, "branch_merged", lambda path: True)
+    monkeypatch.setattr(dispatch_mod, "_directory_bytes", lambda path: None)
+    monkeypatch.setattr(
+        dispatch_mod.subprocess,
+        "run",
+        lambda cmd, **kwargs: type("R", (), {"returncode": 0, "stderr": ""})(),
+    )
+
+    result = rm_agent("w6")
+
+    assert result.registry_changed is True
+    assert result.worktree_receipt == f"worktree removed: {wt}"
+    assert result.reclaimed_bytes is None
+    err = capsys.readouterr().err
+    assert "reclaimed_bytes=unmeasured" in err
+    assert "reclaimed_bytes=0" not in err

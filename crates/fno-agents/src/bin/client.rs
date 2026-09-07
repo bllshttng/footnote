@@ -3023,10 +3023,13 @@ fn format_success(
                 notes.push(format!("event record not written: {reason}"));
             }
             if result.get("worktree_outcome").and_then(Value::as_str) == Some("removed") {
-                let bytes = result
-                    .get("reclaimed_bytes")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
+                // `null` means the size walk hit its budget on a large or
+                // slow-storage tree - print `unmeasured`, never a `0` that
+                // reads identically to "measured, nothing to reclaim".
+                let bytes = match result.get("reclaimed_bytes").and_then(Value::as_u64) {
+                    Some(n) => n.to_string(),
+                    None => "unmeasured".to_string(),
+                };
                 notes.push(format!(
                     "WARNING: worktree removed by guarded cleanup (reclaimed_bytes={bytes})"
                 ));

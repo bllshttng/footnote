@@ -30,6 +30,9 @@ use crate::AgentStatus;
 use serde_json::{json, Map, Value};
 use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership check
 
+mod blocking_bound;
+pub(crate) use self::blocking_bound::directory_bytes;
+use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 mod list_rows;
 use self::list_rows::{attention_sort_key, handle_list};
 use std::os::unix::process::CommandExt; // process_group on std::process::Command
@@ -1548,23 +1551,6 @@ impl RemovalAuditContext {
                 .and_then(Value::as_u64),
         }
     }
-}
-
-pub(crate) fn directory_bytes(path: &std::path::Path) -> Option<u64> {
-    fn walk(path: &std::path::Path, total: &mut u64) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let metadata = std::fs::symlink_metadata(entry.path())?;
-            if metadata.is_dir() {
-                walk(&entry.path(), total)?;
-            } else {
-                *total = total.saturating_add(metadata.len());
-            }
-        }
-        Ok(())
-    }
-    let mut total = 0;
-    walk(path, &mut total).ok().map(|()| total)
 }
 
 /// Wall-clock epoch seconds, for GC grace math. Degrades to 0 (a pre-1970 clock
@@ -7198,7 +7184,7 @@ async fn handle_rm_with(
     // handler reuses this allocation instead of re-deriving the same short id.
     let harness_row_id = claude_row_id(&entry);
     let claude_agents = if entry.harness_name() == "claude" {
-        Some(read_claude_agents())
+        Some(off_executor(read_claude_agents))
     } else {
         None
     };
@@ -7232,7 +7218,7 @@ async fn handle_rm_with(
         .is_some_and(|state| matches!(state, "done" | "stopped" | "failed"));
     let provably_gone = row_state_terminal
         || claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
-        || pane_provably_absent(entry.mux.as_ref(), mux_pane_probe);
+        || off_executor(|| pane_provably_absent(entry.mux.as_ref(), mux_pane_probe));
     if entry.status == AgentStatus::Live && !force && !provably_gone {
         let row = harness_row_id
             .clone()
@@ -7282,12 +7268,14 @@ async fn handle_rm_with(
         };
         return Response::err(req.id, ErrorCode::Busy, detail);
     }
-    let harness_outcome = cascade_harness_session_result_with(
-        &entry,
-        claude_agents.as_ref(),
-        read_claude_agents,
-        claude_rm,
-    );
+    let harness_outcome = off_executor(|| {
+        cascade_harness_session_result_with(
+            &entry,
+            claude_agents.as_ref(),
+            read_claude_agents,
+            claude_rm,
+        )
+    });
     if let CascadeOutcome::Failed(reason) = &harness_outcome {
         if !force {
             return Response::err(
@@ -7298,7 +7286,7 @@ async fn handle_rm_with(
         }
     }
     let pane_outcome = if let Some(mux) = entry.mux.as_ref() {
-        match mux_pane_kill(&mux.session, mux.pane_id) {
+        match off_executor(|| mux_pane_kill(&mux.session, mux.pane_id)) {
             Ok(true) => CascadeOutcome::Removed,
             Ok(false) => CascadeOutcome::AlreadyAbsent("mux pane already absent".into()),
             Err(reason) => CascadeOutcome::Failed(reason),
@@ -7432,20 +7420,20 @@ async fn handle_rm_with(
     let worktree_path = std::path::Path::new(&entry.cwd);
     let detected_worktree = is_linked_worktree(&entry.cwd);
     let worktree_touched = audit.worktree_touched.unwrap_or(detected_worktree);
-    let measured_bytes = if detected_worktree {
-        directory_bytes(worktree_path)
-    } else {
-        None
-    };
-    let worktree_receipt = rm_take_worktree(&entry);
-    let worktree_removed = worktree_touched && !worktree_path.exists();
-    let reclaimed_bytes = audit.reclaimed_bytes.unwrap_or_else(|| {
-        if worktree_removed {
-            measured_bytes.unwrap_or(0)
+    // Measured and taken in ONE off-executor hop: they are adjacent, both
+    // filesystem-bound, and together they are the longest blocking stretch in
+    // the handler - and it runs after the row is already gone.
+    let (measured_bytes, worktree_receipt) = off_executor(|| {
+        let measured = if detected_worktree {
+            directory_bytes(worktree_path)
         } else {
-            0
-        }
+            None
+        };
+        (measured, rm_take_worktree(&entry))
     });
+    let worktree_removed = worktree_touched && !worktree_path.exists();
+    let reclaimed_bytes =
+        resolve_reclaimed_bytes(audit.reclaimed_bytes, worktree_removed, measured_bytes);
     let worktree_outcome = if !worktree_touched {
         "not-touched"
     } else if worktree_removed {
@@ -9813,8 +9801,11 @@ fn fill_random(buf: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
+    #[path = "blocking_bound_tests.rs"]
+    mod blocking_bound_tests;
     #[path = "store_socket_sweep_tests.rs"]
     mod store_socket_sweep_tests;
+    use super::blocking_bound::directory_bytes_within;
     use super::*;
     use std::io::Write;
 
