@@ -1,16 +1,15 @@
-"""x-c624: the SILENCE verdict and its drive-then-end apply lane.
+"""x-c624: the SILENCE verdict and its apply lane.
 
-A silent worker on an OPEN node is driven (a bounded resume, same mechanism
-as WAKE), then - only past `recovery.max_nudges` drives and only with
-`recovery.watchdog.end_after_drives` armed - ended and handed back to
-`fno backlog advance` so the grid picks a fresh thread or harness. Never a
-liveness claim (d-10a72d88): the verdict reads a quiet transcript and an
-open node, not whether the session is "alive".
+A silent worker on an OPEN node is driven - a bounded resume, the same
+mechanism WAKE already uses (`apply_verdict` delegates both verdicts to
+`_apply_wake`). Never a liveness claim (d-10a72d88): the verdict reads a
+quiet transcript and an open node, not whether the session is "alive".
+Ending a row past a drive cap and handing it back through
+`fno backlog advance` is a deferred follow-up, not this lane.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 from fno.agents import watchdog
 from fno.agents.watchdog import (
@@ -24,22 +23,9 @@ from fno.agents.watchdog import (
 NOW_1840 = datetime(2026, 8, 16, 18, 40, 0, tzinfo=timezone.utc).timestamp()
 
 
-def _iso(epoch: float) -> str:
-    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace(
-        "+00:00", "Z"
-    )
-
-
 def _facts(age_min: float) -> TailFacts:
     epoch = NOW_1840 - age_min * 60
     return TailFacts((), epoch, "", None, None, ())
-
-
-class _Proc:
-    def __init__(self, returncode=0, stderr="", stdout=""):
-        self.returncode = returncode
-        self.stderr = stderr
-        self.stdout = stdout
 
 
 # ---------------------------------------------------------------------------
@@ -147,175 +133,24 @@ def test_silence_verdict_classifies_a_codex_row(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# AC2: drive, then end and hand back
+# AC2: apply delegates to the same drive mechanism as WAKE
 # ---------------------------------------------------------------------------
 
-def _settings(*, max_nudges=3, end_after_drives=False):
-    return SimpleNamespace(
-        recovery=SimpleNamespace(
-            max_nudges=max_nudges,
-            watchdog=SimpleNamespace(end_after_drives=end_after_drives),
-        )
-    )
-
-
-def test_apply_silence_zero_drives_wakes_once(monkeypatch):
-    """AC2-HP: zero prior drives -> one resume, one watchdog_applied
-    {action: drive, attempt: 1}; no stop or rm."""
+def test_apply_silence_delegates_to_apply_wake(monkeypatch):
+    """AC2: apply_verdict(SILENCE, ...) drives via _apply_wake, unchanged -
+    no separate silence apply lane. Ending a row is a deferred follow-up."""
     v = Verdict("sess-1", "worker-1", "working", SILENCE,
                 "open node x-1, transcript quiet 20m", "drive")
-    wake_calls = []
+    calls = []
 
     def fake_wake(vv, *, cwd, runner):
-        wake_calls.append(1)
+        calls.append((vv, cwd))
         return "applied", "woke worker-1; message confirmed in transcript"
 
     monkeypatch.setattr(watchdog, "_apply_wake", fake_wake)
-    monkeypatch.setattr(watchdog, "_fno", lambda: ["fno"])
-    events = []
-    monkeypatch.setattr(
-        watchdog, "emit_event", lambda kind, data: events.append((kind, data))
-    )
-    run_calls = []
 
-    def runner(argv, **kw):
-        run_calls.append(argv)
-        return _Proc(0)
-
-    outcome, detail = watchdog._apply_silence(
-        v, cwd="/repo", node="x-1", runner=runner,
-        settings=_settings(max_nudges=3, end_after_drives=False),
-        now_s=NOW_1840,
-        events_reader=lambda row_id: [],
-        truth_for=lambda name: {"last_activity_age_s": 20 * 60},
-    )
+    outcome, detail = watchdog.apply_verdict(v, lanes="wake", cwd="/repo")
 
     assert outcome == "applied", detail
-    assert len(wake_calls) == 1
-    assert run_calls == []  # the drive step never shells out itself
-    kinds = [k for k, _ in events]
-    assert kinds == ["watchdog_applied"]
-    data = events[0][1]
-    assert data["action"] == "drive"
-    assert data["attempt"] == 1
-
-
-def test_apply_silence_ends_after_drives_exhausted(monkeypatch):
-    """AC2-END: max_nudges drives recorded after the row's last transcript
-    write, end_after_drives true -> stop, claim release, rm, then
-    watchdog_applied {action: end}, in that order."""
-    v = Verdict("sess-1", "worker-1", "working", SILENCE,
-                "open node x-1, transcript quiet 3h", "drive")
-    monkeypatch.setattr(watchdog, "_fno", lambda: ["fno"])
-    events = []
-    monkeypatch.setattr(
-        watchdog, "emit_event", lambda kind, data: events.append((kind, data))
-    )
-    run_calls = []
-
-    def runner(argv, **kw):
-        run_calls.append(argv)
-        if "advance" in argv:
-            return _Proc(0, stdout="advance: dispatched x-1 to a fresh thread\n")
-        return _Proc(0)
-
-    last_event_epoch = NOW_1840 - 3 * 3600
-    drive_events = [{"ts": _iso(last_event_epoch + 600 * i)} for i in range(1, 4)]
-
-    outcome, detail = watchdog._apply_silence(
-        v, cwd="/repo", node="x-1", runner=runner,
-        settings=_settings(max_nudges=3, end_after_drives=True),
-        now_s=NOW_1840,
-        events_reader=lambda row_id: drive_events,
-        truth_for=lambda name: {"last_activity_age_s": 3 * 3600},
-        node_state_for=lambda node: None,
-    )
-
-    assert outcome == "applied", detail
-    kinds = [k for k, _ in events]
-    assert kinds == ["agent_stopped", "agent_removed", "watchdog_applied"]
-    end_event = events[-1][1]
-    assert end_event["action"] == "end"
-    assert "advance: dispatched x-1" in end_event["redispatch"]
-    subcommands = [tuple(c[1:3]) for c in run_calls]
-    assert subcommands == [
-        ("agents", "stop"),
-        ("agents", "claim"),
-        ("agents", "rm"),
-        ("backlog", "note"),
-        ("backlog", "rank"),
-        ("backlog", "advance"),
-    ]
-
-
-def test_apply_silence_fresh_write_resets_drive_count(monkeypatch):
-    """AC2-RESET: the same three drives, but the row wrote AFTER the last
-    one - the count reads zero and the row is driven, not ended."""
-    v = Verdict("sess-1", "worker-1", "working", SILENCE,
-                "open node x-1, transcript quiet 5m", "drive")
-    monkeypatch.setattr(watchdog, "_fno", lambda: ["fno"])
-    monkeypatch.setattr(
-        watchdog, "_apply_wake",
-        lambda vv, *, cwd, runner: ("applied", "woke worker-1; confirmed"),
-    )
-    events = []
-    monkeypatch.setattr(
-        watchdog, "emit_event", lambda kind, data: events.append((kind, data))
-    )
-    run_calls = []
-
-    def runner(argv, **kw):
-        run_calls.append(argv)
-        return _Proc(0)
-
-    old_epoch = NOW_1840 - 5 * 3600
-    drive_events = [{"ts": _iso(old_epoch - 600 * i)} for i in range(1, 4)]
-
-    outcome, detail = watchdog._apply_silence(
-        v, cwd="/repo", node="x-1", runner=runner,
-        settings=_settings(max_nudges=3, end_after_drives=True),
-        now_s=NOW_1840,
-        events_reader=lambda row_id: drive_events,
-        # A fresh write: the row spoke 5 minutes ago, after all 3 drives.
-        truth_for=lambda name: {"last_activity_age_s": 5 * 60},
-    )
-
-    assert outcome == "applied", detail
-    assert run_calls == []  # driven, not stopped
-    kinds = [k for k, _ in events]
-    assert kinds == ["watchdog_applied"]
-    assert events[0][1]["action"] == "drive"
-    assert events[0][1]["attempt"] == 1
-
-
-def test_apply_silence_disarmed_end_reports_only(monkeypatch):
-    """AC2-EDGE: drives exhausted, end_after_drives false -> reported,
-    nothing stopped."""
-    v = Verdict("sess-1", "worker-1", "working", SILENCE,
-                "open node x-1, transcript quiet 3h", "drive")
-    monkeypatch.setattr(watchdog, "_fno", lambda: ["fno"])
-    events = []
-    monkeypatch.setattr(
-        watchdog, "emit_event", lambda kind, data: events.append((kind, data))
-    )
-    run_calls = []
-
-    def runner(argv, **kw):
-        run_calls.append(argv)
-        return _Proc(0)
-
-    last_event_epoch = NOW_1840 - 3 * 3600
-    drive_events = [{"ts": _iso(last_event_epoch + 600 * i)} for i in range(1, 4)]
-
-    outcome, detail = watchdog._apply_silence(
-        v, cwd="/repo", node="x-1", runner=runner,
-        settings=_settings(max_nudges=3, end_after_drives=False),
-        now_s=NOW_1840,
-        events_reader=lambda row_id: drive_events,
-        truth_for=lambda name: {"last_activity_age_s": 3 * 3600},
-    )
-
-    assert outcome == "reported"
-    assert "drives exhausted, end disarmed" in detail
-    assert run_calls == []
-    assert events == []
+    assert len(calls) == 1
+    assert calls[0] == (v, "/repo")

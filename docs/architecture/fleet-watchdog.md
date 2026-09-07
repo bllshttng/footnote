@@ -58,7 +58,7 @@ Actions delegate. The watchdog owns the decision, never the mechanism.
 | `reroute` | `fno.recovery._default_failover`: rotate the provider, stop first, then respawn in the same worktree. A bare redispatch would respawn onto the same capped account, so with no alternate armed the lane refuses and names the outcome rather than looping the fleet on the dead account |
 | `ghost` | report only |
 | `stale`, `contended`, `polling_settled` | report only, at every apply level |
-| `silence` | drive first (`fno agents resume`, same mechanism as `wake`, up to `recovery.max_nudges` attempts counted since the row's last transcript write - a fresh write resets the count). Past the cap, END only when `recovery.watchdog.end_after_drives` is true (default false, so a fresh install drives and reports, never stops a session): `fno agents stop` (falling back to `fno mux pane kill` on a pane-row refusal), force-release the node claim, `fno agents rm`, then hand the node back through `fno backlog advance` - never a direct respawn, so the grid picks the thread or harness |
+| `silence` | drive only (`fno agents resume`, same mechanism as `wake`). Ending a row past a drive cap and handing the node back through `fno backlog advance` is a deferred follow-up, not this lane |
 
 ## The friction verdicts and their one question
 

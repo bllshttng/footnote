@@ -712,11 +712,9 @@ def tick() -> None:
                         # (x-c624): the registry read directly, scoped to
                         # this project - fleet_rows never carries a codex or
                         # opencode row, so it cannot see the stuck worker the
-                        # operator asked about. `_apply_silence` emits its
-                        # own `watchdog_applied`/`watchdog_refused` (drive
-                        # attempt count, or the end+redispatch receipt), so
-                        # this loop only counts `acted` - a second emit here
-                        # would double the event for the same action.
+                        # operator asked about. Driven the same way WAKE is
+                        # (apply_verdict delegates both to _apply_wake); the
+                        # end-and-hand-back escalation is a follow-up.
                         silence_left = deadline - (time.monotonic() - started)
                         if silence_left < _WAKE_APPLY_FLOOR_S:
                             log.warning(
@@ -741,17 +739,20 @@ def tick() -> None:
                                     )
                                     break
                                 try:
-                                    _wd.apply_verdict(
-                                        silence_v, lanes="wake",
-                                        cwd=silence_row.cwd,
-                                        node=str(silence_row.node or ""),
+                                    outcome, detail = _wd.apply_verdict(
+                                        silence_v, lanes="wake", cwd=silence_row.cwd,
                                     )
                                 except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
-                                    log.warning(
-                                        "pr-watch: silence apply crashed for %s: %s",
-                                        silence_v.row_id, exc,
-                                    )
+                                    outcome, detail = "refused", f"silence drive crashed: {exc!r}"
                                 acted += 1
+                                _wd.emit_event(
+                                    "watchdog_applied" if outcome == "applied" else "watchdog_refused",
+                                    {
+                                        "row_id": silence_v.row_id,
+                                        "verdict": silence_v.verdict,
+                                        "detail": detail,
+                                    },
+                                )
 
                         recovery_scans = []
                         recovery_roots_done = 0
