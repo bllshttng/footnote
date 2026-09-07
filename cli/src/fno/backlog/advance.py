@@ -1319,6 +1319,7 @@ def _spawn_worker(
     dispatch_account: Optional[str] = None,
     permission_mode: Optional[str] = None,
     node: Optional[dict] = None,
+    dispatch_reservation: Optional[tuple] = None,
     caller: str = "unknown",
     events_path: Optional[Path] = None,
     grid_reason: Optional[str] = None,
@@ -1556,6 +1557,17 @@ def _spawn_worker(
     # merge so the resolver's own value (either way) is the only one that lands.
     base_env = {k: v for k, v in os.environ.items() if k != "TARGET_NO_MERGE"}
     run_env = {**base_env, **merged_env} if merged_env else (base_env or None)
+    # x-0961: the caller's dispatch:<id> reservation and the --node spawn
+    # door's own family-2 guard collide - the door acquires the SAME key,
+    # sees a foreign `advance:<pid>` holder it must never clear, and refuses
+    # with reservation-held. Hand the reservation over: release ours just
+    # before shelling the door, and the door's O_EXCL acquisition (its
+    # reservation plus the node:<id> handover) immediately re-closes the
+    # sub-second window. A racing dispatcher in that window is refused by the
+    # door's own atomic node-handover, so the release cannot double-dispatch.
+    if dispatch_reservation is not None:
+        _res_key, _res_holder, _res_root = dispatch_reservation
+        _safe_release(_res_key, _res_holder, _res_root)
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=600, env=run_env
     )
@@ -2107,6 +2119,7 @@ def dispatch_lanes(
                 verb=node.get("dispatch_verb"),
                 brief=_brief,
                 node=node,
+                dispatch_reservation=(dispatch_key, dispatch_holder, dispatch_root),
                 caller="dispatch_lanes",
                 events_path=ev_path,
                 receipt=lane_receipt,
@@ -3446,6 +3459,7 @@ def advance(
             node=node,
             verb=node.get("dispatch_verb"),
             brief=_brief,
+            dispatch_reservation=(dispatch_key, holder, dispatch_root),
             caller="advance",
             events_path=ev_path,
             receipt=next_receipt,
@@ -3774,6 +3788,7 @@ def _converge_one(
             verb=node_meta.get("dispatch_verb"),
             brief=_brief,
             node=node_meta,
+            dispatch_reservation=(dispatch_key, holder, dispatch_root),
             caller="_converge_one",
             events_path=ev_path,
             receipt=spawn_receipt,

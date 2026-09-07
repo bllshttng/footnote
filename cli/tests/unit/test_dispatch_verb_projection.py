@@ -145,7 +145,24 @@ def _record_spawns(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
         if "backlog" in argv:
             return real_run(cmd, *args, **kwargs)
         if "spawn" in argv:
-            calls.append({"argv": argv, "env": dict(kwargs.get("env") or {})})
+            # Snapshot the caller's dispatch reservation at shell time: the
+            # real --node door refuses a foreign advance:<pid> holder, so the
+            # wrapper must have handed it over (released) before shelling.
+            from fno.claims.core import claim_status
+            from fno.claims.io import claims_root_for
+
+            node_id = argv[argv.index("--node") + 1] if "--node" in argv else ""
+            res = claim_status(
+                f"dispatch:{node_id}", root=claims_root_for(f"dispatch:{node_id}")
+            ) if node_id else {}
+            calls.append(
+                {
+                    "argv": argv,
+                    "env": dict(kwargs.get("env") or {}),
+                    "dispatch_state": res.get("state"),
+                    "dispatch_holder": res.get("holder"),
+                }
+            )
             receipt = json.dumps(
                 {"name": "fake-thread", "short_id": "fakebp19", "substrate": "thread"}
             )
@@ -190,6 +207,9 @@ def test_epic_advance_declared_verb_reaches_spawn_argv(iso, monkeypatch):
     argv = calls[0]["argv"]
     assert argv[argv.index("--node") + 1] == "x-BP01"
     assert argv[argv.index("--slug") + 1] == "bp-declared"
+    # The --node door refuses a foreign dispatch reservation, so the wrapper
+    # must have released the caller's before shelling it.
+    assert calls[0]["dispatch_state"] == "free", calls[0]["dispatch_holder"]
 
 
 def test_epic_advance_undeclared_node_keeps_the_builtin(iso, monkeypatch):
