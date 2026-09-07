@@ -28,7 +28,9 @@ def _blob(token: str) -> str:
 
 def _pids(root) -> tuple[int, ...]:
     """The pids recorded on the claude taint marker."""
-    return tuple(pid for pid, _started in managed.tainting_writers("claude", root))
+    writers = managed.tainting_writers("claude", root)
+    assert writers is not None, "no taint marker to read pids from"
+    return tuple(pid for pid, _started in writers)
 
 
 def _codex_blob(token: str) -> str:
