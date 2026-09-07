@@ -784,8 +784,7 @@ class OwnedHarnessIdentity:
     * ``empty``    - no marker present.
     * ``spawn_record`` - the session id came from the cwd-keyed agents-registry
                      spawn record (a codex thread worker), set only when the
-                     walk returned no session id and the record's harness
-                     agrees with, or fills, the resolved one.
+                     walk returned no session id and the harnesses agree.
 
     ``markers_present`` carries every marker seen (with its value) and
     ``rejected`` the ids a live row already owns, so an ambiguous resolve can be
@@ -1235,9 +1234,9 @@ def current_session_ids(env: Optional[Mapping[str, str]] = None) -> set[str]:
 
 
 # --- The agents-registry spawn record as an identity source (x-e882) --------
-#: Row statuses under which a session still owns its identity (a
-#: harness_session_id held by such a row is provably not another acquiring
-#: session's). Declared here so the registry and the reader cannot drift.
+#: Row statuses under which a session still owns its identity (a held
+#: harness_session_id is provably not another acquiring session's).
+#: Declared here so the registry and the reader cannot drift.
 OWNERSHIP_LIVE_STATUSES = frozenset(
     {"spawning", "ready", "idle", "busy", "live", "restarting"}
 )
