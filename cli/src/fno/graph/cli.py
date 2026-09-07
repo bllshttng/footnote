@@ -3036,6 +3036,9 @@ def cmd_encounter(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended record as JSON."),
 ) -> None:
     """Record ONE encounter with this node, from this session, with evidence.
+
+    An encounter is a thing that happened and cannot be edited or withdrawn:
+    there is no correction verb, and a later correction is a `fno backlog note`.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno import style
