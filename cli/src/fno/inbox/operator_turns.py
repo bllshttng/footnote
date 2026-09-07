@@ -71,9 +71,9 @@ def _capture_dir() -> Path:
     override = os.environ.get("FNO_OPERATOR_CAPTURE_DIR")
     if override:
         return Path(override)
-    home = os.environ.get("FNO_HOME")
-    base = Path(home).expanduser() if home else Path.home() / ".fno"
-    return base / "operator-capture"
+    from fno.paths import state_dir
+
+    return state_dir() / "operator-capture"
 
 
 def _resolve_session(require_transcript: bool = True) -> tuple[str, Optional[Path]]:
