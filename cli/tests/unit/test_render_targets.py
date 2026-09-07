@@ -63,6 +63,11 @@ def _write_config(targets_toml: str, tmp_path: Path, monkeypatch: pytest.MonkeyP
     cfg = tmp_path / "config.toml"
     cfg.write_text(f"[backlog]\n{targets_toml}", encoding="utf-8")
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(cfg))
+    # The declaration key is unchanged by a content rewrite; drop the entry or
+    # the next read serves the previous rows and the shadow warning mis-fires.
+    from fno.config import _load_settings_at
+
+    _load_settings_at.cache_clear()
 
 
 @pytest.fixture(autouse=True)
