@@ -49,7 +49,6 @@ pub(crate) struct MergeCleanupRequest {
     branch: Option<String>,
     worktree: Option<String>,
     node_ids: Vec<String>,
-    candidate_row_names: Vec<String>,
     /// Unix seconds: when the merge landed (the grace anchor). A request
     /// without one (an older ritual mint) falls back to the envelope `ts`.
     merged_at: Option<i64>,
@@ -61,10 +60,20 @@ pub(crate) struct MergeCleanupRequest {
 /// The pending set for one repo: every request minus the ones a tombstone
 /// already settled. `merge_cleanup_completed` / `_refused` / `_expired` all
 /// finish a request; a held request stays pending and is re-read every pass.
+/// One journal read per call; the reaper pass calls the `_all` variant once
+/// and partitions in memory, so N roots cost one read, not N.
 pub(crate) fn pending_merge_cleanup_requests(
     home: &AgentsHome,
     repo: &str,
 ) -> Vec<MergeCleanupRequest> {
+    pending_merge_cleanup_requests_all(home)
+        .into_iter()
+        .filter(|request| request.repo == repo)
+        .collect()
+}
+
+/// Every pending request across repos, in one journal read.
+fn pending_merge_cleanup_requests_all(home: &AgentsHome) -> Vec<MergeCleanupRequest> {
     let Ok(contents) = std::fs::read_to_string(home.events_jsonl()) else {
         return Vec::new();
     };
@@ -88,9 +97,6 @@ pub(crate) fn pending_merge_cleanup_requests(
                 let Some(request_repo) = data.get("repo").and_then(Value::as_str) else {
                     continue;
                 };
-                if request_repo != repo {
-                    continue;
-                }
                 let Some(pr) = data.get("pr").and_then(Value::as_i64) else {
                     continue;
                 };
@@ -129,7 +135,6 @@ pub(crate) fn pending_merge_cleanup_requests(
                         branch: string_field("branch"),
                         worktree: string_field("worktree"),
                         node_ids: strings("node_ids"),
-                        candidate_row_names: strings("candidate_row_names"),
                         merged_at,
                         ts_unix,
                         session_id: string_field("session_id"),
@@ -152,7 +157,9 @@ pub(crate) fn pending_merge_cleanup_requests(
 /// True while any pending request stands for the repo: the worktree sweep's
 /// apply gate (a standing request means the pass may apply, not just report).
 pub(crate) fn merge_cleanup_requested(home: &AgentsHome, repo: &str) -> bool {
-    !pending_merge_cleanup_requests(home, repo).is_empty()
+    pending_merge_cleanup_requests_all(home)
+        .iter()
+        .any(|request| request.repo == repo)
 }
 
 /// One candidate row: its registry entry when the row still exists, `None`
@@ -164,8 +171,11 @@ struct CleanupRow {
 }
 
 /// The rows this request may remove: registry rows whose cwd IS the merged
-/// worktree or whose name was minted for one of the closed nodes, plus any
-/// request-named row the registry no longer carries. Sorted by name.
+/// worktree or whose name was minted for one of the closed nodes. Sorted by
+/// name. A request-named row the registry no longer carries is ALREADY gone,
+/// so it is not a candidate: rm on a missing name would fail and read as a
+/// refusal, and a re-pass after a held tree must read the row set as settled,
+/// not wedged.
 fn merge_cleanup_rows(home: &AgentsHome, request: &MergeCleanupRequest) -> Vec<CleanupRow> {
     let Ok(registry) = state::load_registry(&home.registry_json()) else {
         return Vec::new();
@@ -188,15 +198,6 @@ fn merge_cleanup_rows(home: &AgentsHome, request: &MergeCleanupRequest) -> Vec<C
             entry: Some(entry),
         })
         .collect();
-    let known: HashSet<String> = rows.iter().map(|row| row.name.clone()).collect();
-    for name in &request.candidate_row_names {
-        if !known.contains(name) {
-            rows.push(CleanupRow {
-                name: name.clone(),
-                entry: None,
-            });
-        }
-    }
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     rows.dedup_by(|a, b| a.name == b.name);
     rows
@@ -438,36 +439,48 @@ fn run_request(
     }
     // 6. The tree, after the rows: whatever its git status, a done and
     // merged node's tree goes; the branch and the transcript are the
-    // recovery path. Unpushed (HEAD not in origin/main) holds.
+    // recovery path. Unpushed (HEAD not in origin/main) holds. A HELD tree
+    // keeps the request pending - the rows are already gone and idempotent
+    // to re-read, so a later pass can take the tree once the hold clears
+    // (the branch pushed), instead of tombstoning the hold forever.
     let mut reclaimed_bytes: u64 = 0;
     let mut tree_note = "no-worktree";
     if let Some(worktree) = request.worktree.as_deref() {
         if std::path::Path::new(worktree).exists() {
             if (seams.tree_holds)(worktree) {
-                tree_note = "held:unreachable-from-origin-main";
+                emit_hold_once_per_hour(
+                    home,
+                    emitter,
+                    request,
+                    "tree-held:unreachable-from-origin-main",
+                    now,
+                );
+                return removed_rows.len() as u64;
+            }
+            reclaimed_bytes =
+                crate::daemon::directory_bytes(std::path::Path::new(worktree)).unwrap_or(0);
+            if (seams.take_tree)(worktree, root) {
+                let _ = emitter.emit(
+                    "worktree_removed",
+                    &json!({
+                        "path": worktree,
+                        "caller": "merge-reaper",
+                        "claim": format!(
+                            "merge-cleanup:{} all nodes done+merged",
+                            request.request_id
+                        ),
+                        "reason": "pr-merged; dirty is not a hold for a done node",
+                        "branch": request.branch,
+                        "forced": true,
+                        "reclaimed_bytes": reclaimed_bytes,
+                    }),
+                );
+                tree_note = "removed";
             } else {
-                reclaimed_bytes =
-                    crate::daemon::directory_bytes(std::path::Path::new(worktree)).unwrap_or(0);
-                if (seams.take_tree)(worktree, root) {
-                    let _ = emitter.emit(
-                        "worktree_removed",
-                        &json!({
-                            "path": worktree,
-                            "caller": "merge-reaper",
-                            "claim": format!(
-                                "merge-cleanup:{} all nodes done+merged",
-                                request.request_id
-                            ),
-                            "reason": "pr-merged; dirty is not a hold for a done node",
-                            "branch": request.branch,
-                            "forced": true,
-                            "reclaimed_bytes": reclaimed_bytes,
-                        }),
-                    );
-                    tree_note = "removed";
-                } else {
-                    tree_note = "held:removal-failed";
-                }
+                // A transient git failure retries on a later pass; tombstoning
+                // here would strand the tree the same way a hold would.
+                emit_hold_once_per_hour(home, emitter, request, "tree-held:removal-failed", now);
+                return removed_rows.len() as u64;
             }
         }
     }
@@ -507,15 +520,16 @@ pub(crate) fn consume_merge_cleanup_requests(
     }
     let _ = std::fs::write(&stamp, now.to_string());
 
-    // One doneness read per pass, not per request: the graph is shared state
-    // and the pass is bounded by the 60s floor, not by request count.
+    // One doneness read per pass, not per request, and ONE journal read per
+    // pass partitioned in memory: N repo roots cost one fold, not N.
     let node_states = crate::gc_sweep::read_graph_node_states(home);
+    let pending = pending_merge_cleanup_requests_all(home);
 
     let mut total_requests = 0usize;
     let mut in_grace = 0usize;
     let mut acted: u64 = 0;
     for root in roots {
-        for request in pending_merge_cleanup_requests(home, root) {
+        for request in pending.iter().filter(|r| r.repo == *root) {
             total_requests += 1;
             let merged_at = request.merged_at.unwrap_or(request.ts_unix);
             let age = now.saturating_sub(merged_at);
@@ -548,7 +562,7 @@ pub(crate) fn consume_merge_cleanup_requests(
             acted += run_request(
                 home,
                 emitter,
-                &request,
+                request,
                 root,
                 node_states.as_ref(),
                 now,
@@ -788,7 +802,6 @@ mod tests {
             branch: Some("feature/x".to_string()),
             worktree: Some(worktree.to_string()),
             node_ids: vec!["x-1".to_string()],
-            candidate_row_names: vec![],
             merged_at: None,
             ts_unix: 0,
             session_id: None,
@@ -962,6 +975,60 @@ mod tests {
             !events.contains("merge_cleanup_completed"),
             "a held request must not emit a receipt: {events}"
         );
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn held_tree_keeps_the_request_pending() {
+        // A tree that holds (unpushed HEAD) names the hold, removes its rows,
+        // and does NOT settle the request: a later pass takes the tree once
+        // the hold clears, instead of tombstoning the hold forever.
+        let home = temp_home("tree-hold");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        write_registry(&home, &[claude_row("target-x-1-worker", false)]);
+        let wt = home.root().parent().unwrap().join("wt2");
+        std::fs::create_dir_all(&wt).unwrap();
+        let request = settled_request(wt.to_str().unwrap());
+        let noop_stop = |_entry: &state::RegistryEntry| Ok("abc123".to_string());
+        let seams = RequestSeams {
+            stop: &noop_stop,
+            rm: &|_name| true,
+            tree_holds: &|_wt| true,
+            take_tree: &|_wt, _root| true,
+        };
+        let acted = run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            merged_states().as_ref(),
+            1_000_000,
+            &seams,
+        );
+        assert_eq!(acted, 1, "the row is removed, the tree is not");
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        assert!(
+            events.contains("tree-held:unreachable-from-origin-main"),
+            "the hold must name the tree: {events}"
+        );
+        assert!(
+            !events.contains("merge_cleanup_completed"),
+            "a tree-held request must not settle: {events}"
+        );
+        // The rm seam has no fixture side effect, so model pass one's
+        // removals by hand: the second pass must read an empty candidate
+        // set and take no action.
+        write_registry(&home, &[]);
+        let second = run_request(
+            &home,
+            &emitter,
+            &request,
+            "/repo",
+            merged_states().as_ref(),
+            1_000_001,
+            &seams,
+        );
+        assert_eq!(second, 0, "nothing left to remove");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
 }
