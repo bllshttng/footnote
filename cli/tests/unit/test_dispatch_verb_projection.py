@@ -33,7 +33,14 @@ BRIEF_SENTINEL = "brief-sentinel-7f31 blueprint-not-target"
 
 class Iso:
     """Isolated state: temp graph via a pinned FNO_CONFIG (the same file the
-    selection SUBPROCESS re-reads), tmp claims, armed auto-continue."""
+    selection SUBPROCESS re-reads), tmp claims, armed auto-continue.
+
+    `_spawn_worker` resolves its dispatch config through
+    `load_settings_for_repo(<node cwd>)`, a repo-scoped chain that IGNORES
+    FNO_CONFIG and would otherwise read this machine's real global config
+    (whose allowlist refuses /blueprint and whose merge grant varies). Each
+    test repo therefore carries its own `.fno/config.toml` pinning the two
+    keys the spawn reads, exactly as a real repo would."""
 
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         self.root = tmp_path
@@ -59,6 +66,20 @@ class Iso:
             lambda: [sys.executable, "-c", "from fno.cli import app; app()"],
         )
         self.events = tmp_path / ".fno" / "events.jsonl"
+
+    def repo(self, name: str = "web", *, git: bool = False) -> Path:
+        repo = self.root / name
+        fno_dir = repo / ".fno"
+        fno_dir.mkdir(parents=True)
+        (fno_dir / "config.toml").write_text(
+            "[dispatch]\n"
+            'allowed_verbs = ["/target", "/blueprint"]\n'
+            "\n[auto_merge]\n"
+            "enabled = false\n"
+        )
+        if git:
+            (repo / ".git").mkdir()
+        return repo
 
 
 @pytest.fixture
@@ -135,8 +156,7 @@ def _record_spawns(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 def test_epic_advance_declared_verb_reaches_spawn_argv(iso, monkeypatch):
     """AC4/AC5: a node declaring /fno:blueprint, dispatched through epic
     advance, hands the spawn the rendered verb and the brief on TARGET_BRIEF."""
-    repo = iso.root / "web"
-    repo.mkdir()
+    repo = iso.repo()
     _write_graph(iso.graph, verb="/fno:blueprint", brief=BRIEF_SENTINEL, cwd=str(repo))
     monkeypatch.setattr(
         "fno.graph._intake.project_root_from_settings",
@@ -158,8 +178,7 @@ def test_epic_advance_declared_verb_reaches_spawn_argv(iso, monkeypatch):
 def test_epic_advance_undeclared_node_keeps_the_builtin(iso, monkeypatch):
     """AC6-EDGE: a node declaring nothing gets the builtin and no brief -
     the same code path, distinguished only by the declaration."""
-    repo = iso.root / "web"
-    repo.mkdir()
+    repo = iso.repo()
     _write_graph(iso.graph, verb=None, brief=None, cwd=str(repo))
     monkeypatch.setattr(
         "fno.graph._intake.project_root_from_settings",
@@ -179,8 +198,7 @@ def test_epic_advance_undeclared_node_keeps_the_builtin(iso, monkeypatch):
 def test_lane_fill_declared_verb_reaches_spawn_argv(iso, monkeypatch):
     """The lane-fill door (`_ready_nodes` -> `dispatch_lanes`) shells the same
     `fno backlog ready` surface, so it eats declared verbs identically."""
-    repo = iso.root / "web"
-    (repo / ".git").mkdir(parents=True)
+    repo = iso.repo(git=True)
     _write_graph(iso.graph, verb="/fno:blueprint", brief=BRIEF_SENTINEL, cwd=str(repo))
     calls = _record_spawns(monkeypatch)
 
