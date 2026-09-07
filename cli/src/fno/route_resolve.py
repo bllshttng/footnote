@@ -55,9 +55,8 @@ _CAPACITY_RANK = {"ok": 3, "available": 3, "low": 2, "unknown": 1, "exhausted": 
 
 @dataclasses.dataclass(frozen=True)
 class InventoryRow:
-    """One resolved inventory row. ``band`` is "" when unbanded, and an
-    unbanded row is a grid candidate at every band: it ranks after the banded
-    rows that clear, in declared order."""
+    """One resolved inventory row; ``band`` is "" when unbanded (a candidate
+    at every band, ranked after the banded rows that clear)."""
 
     name: str
     harness: str
@@ -86,13 +85,8 @@ class InventoryRow:
 
 @dataclasses.dataclass(frozen=True)
 class Inventory:
-    """The resolved inventory plus its objective (the objective is config-owned).
-
-    ``rows`` is the built-in fallback table overridden and extended by config.
-    ``declared`` says whether CONFIG named any row, which ``rows`` alone can no
-    longer answer now that the fallback seeds it. The grid reads ``declared``:
-    a virgin install still injects nothing.
-    """
+    """The resolved inventory plus its config-owned objective. ``declared``
+    says whether CONFIG named any row: a virgin install injects nothing."""
 
     rows: dict[str, InventoryRow] = dataclasses.field(default_factory=dict)
     objective: str = _OBJECTIVES[0]
@@ -128,16 +122,9 @@ def inventory_from_rows(
     snapshot: Optional[dict] = None,
     declared: bool = True,
 ) -> Inventory:
-    """Fold declared rows into an :class:`Inventory`.
-
-    Rows are keyed by ``name``; a later row of the same name overrides per
-    field and the fields it did not name keep the earlier row's value (the
-    merge precedent from ``model_routing._DEFAULT_PROVIDERS``). Band
-    resolution per row: the row's own ``band``, else a snapshot percentile
-    against ``_BAND_FLOOR``, else unbanded. A row with no band is a candidate
-    at every band; it ranks after the banded rows that clear, and
-    ``fno config route inventory`` labels it ``unbanded``.
-    """
+    """Fold declared rows into an :class:`Inventory` (later rows of one name
+    override per field). Band: the row's own, else a percentile against
+    ``_BAND_FLOOR``, else unbanded."""
     folded: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for row in rows:
@@ -193,18 +180,8 @@ def inventory_from_rows(
 
 def _builtin_rows() -> list[dict[str, Any]]:
     """The built-in table as inventory rows: a FALLBACK, never the authority.
-
-    Config overrides and extends these. `inventory_from_rows` folds per name
-    and per field, so a config row naming an existing model replaces only the
-    fields it names, and a new name is simply added. That is the same merge
-    `model_routing._DEFAULT_PROVIDERS` uses, and it is what keeps adding a
-    model a config edit rather than a Python edit.
-
-    A model the table lists in two bands (`gpt-5.6-sol` is in both `max` and
-    `high`) keeps the STRONGEST one, picked by rank here rather than by the
-    order rows happen to be emitted in. One row per name, so the fold has no
-    same-name ordering to depend on.
-    """
+    One row per name, the strongest band winning; config overrides per field
+    and extends by name."""
     from fno.adapters.providers import benchmarks as _bm
 
     strongest: dict[str, str] = {}
@@ -236,11 +213,8 @@ def resolve_inventory(
     settings: object = None,
     snapshot: Optional[dict] = None,
 ) -> Inventory:
-    """Read the declared inventory from config (empty when nothing is declared).
-
-    Never raises on a config problem: an unloadable config is an EMPTY
-    inventory (the grid records ``no-inventory-declared``), not a dead spawn.
-    """
+    """Read the declared inventory from config. Never raises: an unloadable
+    config is an EMPTY inventory, not a dead spawn."""
     try:
         if settings is None:
             from fno.config import load_settings
@@ -279,11 +253,8 @@ SLOT_VERBS = ("think", "blueprint", "target", "review", "crown")
 
 
 def slot_verbs(settings: object = None, inventory: Optional[Inventory] = None) -> list[str]:
-    """Every verb whose slot the readout should show: the dispatched verbs
-    plus any profile that carries lane configuration. A verb armed only
-    through an unlisted profile key must still render, or the doctor would
-    call a half-armed router unarmed.
-    """
+    """Every verb the readout should show: the dispatched verbs plus any
+    profile carrying lane configuration."""
     verbs = list(SLOT_VERBS)
     if settings is None:
         settings, _profile, _lanes = _slot_entry(None, None)
@@ -315,17 +286,9 @@ def resolve_slot(
 ) -> tuple[Optional[dict[str, Any]], list[str]]:
     """Which lane does this dispatch ride right now: the ONE slot resolver.
 
-    The selection core is Rust (``fno-agents route-slot``, law d-450caaeb):
-    ``agents.profiles.<verb>.lanes`` is the rank, walked in declared order,
-    and the first lane whose posture, vendor cap, identity and per-account
-    capacity pass is the candidate. ``on_exhausted`` names the all-skipped
-    terminal; a command-line lane or ``FNO_SPAWN_GATE=0`` degrades whatever
-    it says. No ``lanes`` (and no ``by_difficulty`` overlay): fall through to
-    the verb's grid leg (a node-less spawn answers nothing). The
-    chain strings are the receipt vocabulary and come back verbatim from the
-    verb; a missing or failing binary is a named refusal, never a silent
-    lane-less spawn.
-    """
+    Selection is Rust (``fno-agents route-slot``): lanes walked in declared
+    order, or the grid when no lanes. Chain strings come back verbatim; a
+    missing or failing binary is a named refusal, never a silent spawn."""
     import os
 
     settings, profile, lanes = _slot_entry(settings, verb)
@@ -390,18 +353,6 @@ def _slot_entry(
     return settings, profile, lanes
 
 
-def _states_row_name(state_entry: Mapping, lanes: Any, lane_states: list) -> str:
-    """The row a state entry names: a declared row keeps its name; an inline
-    lane table folds as its own row named by the verb's rung."""
-    rung = str(state_entry.get("rung", ""))
-    try:
-        index = lane_states.index(state_entry)
-    except ValueError:
-        return rung
-    raw = lanes[index] if isinstance(lanes, (list, tuple)) and index < len(lanes) else None
-    return raw.strip() if isinstance(raw, str) else rung
-
-
 def slot_states(
     verb: str,
     capacity: Optional[Mapping[str, object]],
@@ -409,12 +360,9 @@ def slot_states(
     inventory: Optional[Inventory] = None,
     settings: object = None,
 ) -> dict[str, Any]:
-    """Readout of one verb's slot: lanes in order with live capacity states,
-    identity and observation source per lane, the ``on_exhausted`` terminal,
-    and the lane a spawn would take right now (resolved by
-    :func:`resolve_slot` itself). Display, never selection; callers label it
-    a preview.
-    """
+    """Readout of one verb's slot: lanes with live capacity, identity and
+    source per lane, the terminal policy, and the lane a spawn would take
+    right now. Display, never selection; callers label it a preview."""
     settings, _profile, lanes = _slot_entry(settings, verb)
     if inventory is None:
         inventory = resolve_inventory(settings=settings)
@@ -456,39 +404,21 @@ def slot_states(
         )
     except Exception:  # noqa: BLE001 - a missing verb degrades the readout
         lane_states, states_chain = [], []
-    # Rungs and the difficulty note are the verb's vocabulary: take them back
-    # from its output instead of rebuilding them here.
+    # Rungs, identity, source and the difficulty note are the verb's
+    # vocabulary: take them back from its output, never rebuilt here.
     for line in states_chain:
         note_prefix = f"slot note {rung_base} "
         if line.startswith(note_prefix):
             out["note"] = line[len(note_prefix):]
-    # Inline lane tables fold as their own rows named by rung, so the readout
-    # can show identity/source per lane; declared row names pass through.
-    lane_inv = inventory_from_rows(
-        list(inventory.rows.values())
-        + [
-            {
-                "name": rung,
-                "harness": str(raw.get("provider", "") or ""),
-                "model": str(raw.get("model", "") or ""),
-                "route": str(raw.get("route", "") or ""),
-                "account": str(raw.get("account", "") or ""),
-                "effort": str(raw.get("effort", "") or ""),
-            }
-            for rung, raw in (
-                (str(lane_states[i].get("rung", "")), raw)
-                for i, raw in enumerate(lanes)
-                if isinstance(raw, Mapping) and i < len(lane_states)
-            )
-        ],
-        declared=True,
-    )
     for state_entry in lane_states:
-        rung = str(state_entry.get("rung", ""))
-        row_name = _states_row_name(state_entry, lanes, lane_states)
-        row = lane_inv.rows.get(row_name)
-        state = str(state_entry.get("state", "unknown"))
-        entry: dict[str, Any] = {"rung": rung, "name": row_name, "state": state}
+        entry = {
+            "rung": str(state_entry.get("rung", "")),
+            "name": str(state_entry.get("name", "")),
+            "state": str(state_entry.get("state", "unknown")),
+        }
+        for key in ("identity", "source"):
+            if state_entry.get(key):
+                entry[key] = str(state_entry[key])
         out["lanes"].append(entry)
     candidate, slot_chain = resolve_slot(
         verb, None, capacity, inventory=inventory, settings=settings
@@ -506,12 +436,8 @@ def slot_states(
 def harness_accounts(
     harness: str, *, settings: object = None, inventory: Optional[Inventory] = None
 ) -> list[str]:
-    """Expand a harness to the ACCOUNT record ids reachable through it.
-
-    Quota is a property of an ACCOUNT; a harness is a client that can speak
-    for several. The set is a UNION: registered records bound to the harness
-    plus inventory-row accounts.
-    """
+    """Expand a harness to the ACCOUNT record ids reachable through it:
+    registered records plus inventory-row accounts."""
     inv = inventory if inventory is not None else resolve_inventory(settings=settings)
     accounts: list[str] = []
     for row in inv.rows.values():
@@ -537,15 +463,10 @@ def harness_accounts(
 
 
 def _identity_evidence(harness: str, accounts: list[str]) -> dict[str, str]:
-    """proven|mismatch per account, from the attribution owner alone.
-
-    ``proven``: the record id the owner says is the CLI's active slot occupant
-    on an untainted slot. Any other named account on a PROVEN slot is a
-    ``mismatch`` - it pins a name the slot disproves. No owner answer, a
-    tainted slot, or a store read failure leaves every account unnamed, which
-    consumers read as ``account_identity_unknown``. This never reads
-    credentials itself; x-d6be owns that and this consumes its verdicts.
-    """
+    """proven|mismatch per account, from the attribution owner alone: the
+    active slot's record id is ``proven``, any other named account on a proven
+    slot is ``mismatch``. No owner answer reads unknown. Never reads
+    credentials itself."""
     try:
         from fno.adapters.providers.managed import (
             active_slot_id,
@@ -567,16 +488,10 @@ def runtime_capacity(
     settings: object = None,
     inventory: Optional[Inventory] = None,
 ) -> dict[str, object]:
-    """Cached harness capacity: expand each harness to its accounts, read each
-    account's headroom, aggregate MAX (ok if ANY account is ok, exhausted only
-    if EVERY account is). Every harness NAMED by a declared row is probed
-    alongside ``providers``. The value is a detail mapping
-    ``{state, window, accounts, evidence, resets}``; bare state strings still
-    resolve as bare state strings too. When the attribution owner proves an
-    active slot account, ITS state is the aggregate - MAX over the sibling
-    records can never make canonical claude look healthy - and when the slot
-    only yields mismatches the aggregate reads unknown. Never probes, never
-    touches the network.
+    """Harness capacity: per-account headroom aggregated MAX (exhausted only
+    if EVERY account is); a proven active slot account IS the aggregate. The
+    value is ``{state, window, accounts, evidence, resets}``. Never probes,
+    never touches the network.
     """
     try:
         from fno.adapters.providers.runtime_state import headrooms
@@ -629,14 +544,8 @@ def resolve_tier(
     inventory: Optional[Inventory] = None,
     settings: object = None,
 ) -> tuple[Optional[str], list[str]]:
-    """Resolve a tier to a concrete declared model. Returns ``(model, chain)``.
-
-    ``provider`` scopes the candidate set to one harness: a band the filter
-    empties falls through the remaining bands within the same harness, then to
-    None (provider default) - never a foreign-harness model. The band math and
-    ordering live on ``fno-agents route-slot`` (mode ``tier``); this wrapper
-    owns the inventory read and never raises.
-    """
+    """Resolve a tier to a concrete declared model, scoped to one harness when
+    asked. The band math lives on ``fno-agents route-slot``; never raises."""
     from fno.route_slot_client import RouteSlotUnavailable, route_tier_via_binary
 
     inv = inventory if inventory is not None else resolve_inventory(
@@ -659,12 +568,8 @@ def resolve_dispatch_model(
     provider: Optional[str] = None,
     inventory: Optional[Inventory] = None,
 ) -> tuple[Optional[str], str, list[str]]:
-    """Apply the full precedence chain. Returns ``(model, decision_source, chain)``.
-
-    ``model`` is None only when everything falls through to the provider
-    default. Pins (``explicit`` / ``task_model`` / ``plan_model``) bypass the
-    band filter - operator authority outranks routing (Locked Decision 4).
-    """
+    """Apply the full precedence chain; ``(model, decision_source, chain)``.
+    Pins bypass the band filter - operator authority outranks routing."""
     if explicit:
         return explicit, "explicit", ["explicit"]
     if task_model:
@@ -693,14 +598,9 @@ def node_model(
     resolve_difficulty: bool = True,
     inventory: Optional[Inventory] = None,
 ) -> Optional[str]:
-    """Concrete ``--model`` for a node/task at the spawn seam, or None for default.
-
-    Reads the node's ``model`` pin and ``difficulty`` band under the full
-    precedence, with ``provider`` scoping bands to the spawn harness: None
-    means ``claude`` - the bg substrate's own spawn default, NOT the ambient
-    harness. Strictly non-fatal: any resolution error degrades to the explicit
-    override or the node's raw ``model`` pin (Locked Decision 10).
-    """
+    """Concrete ``--model`` for a node at the spawn seam, or None for default.
+    Strictly non-fatal: an error degrades to the explicit override or the
+    node's raw pin."""
     try:
         model, _source, _chain = resolve_dispatch_model(
             explicit=explicit,

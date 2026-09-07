@@ -720,20 +720,47 @@ fn states_leg(payload: &Value) -> Value {
     let mut lane_states = Vec::new();
     for (rung, row_name) in &plan {
         let row = rows.get(row_name);
-        let (state, window) = match row {
-            None => ("no-such-row".to_string(), String::new()),
+        let (state, window, identity, source) = match row {
+            None => ("no-such-row".to_string(), String::new(), None, None),
             Some(r) => {
                 let harness = row_value(r, "harness");
-                let (s, w) = row_capacity(r, capacity.get(&harness));
-                (s, w)
+                let account = row_value(r, "account");
+                let route = row_value(r, "route");
+                let detail = capacity.get(&harness);
+                let (s, w) = row_capacity(r, detail);
+                // Display evidence: the attribution owner's verdict for the
+                // row's named account, and where the observation came from.
+                let ident = if !account.is_empty() && route.is_empty() {
+                    Some(
+                        detail
+                            .and_then(|d| d.get("evidence"))
+                            .and_then(|e| e.get(&account))
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown"),
+                    )
+                } else {
+                    None
+                };
+                let src = detail
+                    .and_then(|d| d.get("window"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty());
+                (s, w, ident, src)
             }
         };
-        lane_states.push(json!({
+        let mut entry = json!({
             "rung": rung,
             "name": row_name,
             "state": state,
             "window": window,
-        }));
+        });
+        if let (Some(obj), Some(ident)) = (entry.as_object_mut(), identity) {
+            obj.insert("identity".into(), json!(ident));
+        }
+        if let (Some(obj), Some(src)) = (entry.as_object_mut(), source) {
+            obj.insert("source".into(), json!(src));
+        }
+        lane_states.push(entry);
     }
     chain.extend(prefix);
     json!({

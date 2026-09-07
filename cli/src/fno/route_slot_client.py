@@ -1,13 +1,7 @@
-"""The spawn seam's client for the ``fno-agents route-slot`` verb.
-
-The slot resolver is Rust (law d-450caaeb: no net-new Python feature; verbs
-port as they are touched). This module is the Python adapter: it gathers one
-JSON payload (profile fields, raw lanes, declared routing rows, the capacity
-snapshot, posture flags, vendor counts/caps, per-record vendors) and hands the
-JSON answer back untouched. The chain strings are the receipt vocabulary the
-seam, advance and the doctor match on; they come from Rust verbatim and are
-never reworded here. The capacity snapshot and live counts stay Python-side
-input adapters over the attribution owners; the verb never reads state.
+"""The spawn seam's client for the ``fno-agents route-slot`` verb: gathers
+one JSON payload (profile, lanes, declared rows, capacity snapshot, posture,
+vendor caps/counts) and hands the JSON answer back untouched. Chain strings
+are the receipt vocabulary; they come from the verb verbatim, never reworded.
 """
 from __future__ import annotations
 
@@ -32,9 +26,7 @@ def _profile_fields(profile: Optional[object]) -> dict[str, Any]:
 
 
 def _declared_rows(settings: object) -> dict[str, Any]:
-    """The CONFIG-declared rows exactly (never the built-in fallback): the
-    pre-port fold read ``settings.routing.models`` and the slot walks only
-    rows the operator named."""
+    """The CONFIG-declared rows exactly (never the built-in fallback)."""
     rows: dict[str, Any] = {}
     try:
         for row in getattr(getattr(settings, "routing", None), "models", None) or []:
@@ -70,9 +62,8 @@ def _thread_seatable(harnesses: list[str]) -> dict[str, bool]:
 def _vendor_tables(
     settings: object, rows: dict[str, Any], lanes: list[Any]
 ) -> dict[str, Any]:
-    """Vendor caps and live counts, gathered once for the whole lane list.
-    Vendors come from BOTH spellings: declared rows and inline lane tables
-    (an inline lane's own ``route`` names its vendor)."""
+    """Vendor caps and live counts for every vendor the rows or inline
+    lanes name by ``route``."""
     caps: dict[str, int] = {}
     counts: dict[str, int] = {}
     errors: dict[str, str] = {}
@@ -125,9 +116,8 @@ def _account_record_vendors(settings: object) -> dict[str, str]:
 
 
 def _lanes_payload(lanes: Any) -> list[Any]:
-    """Lane entries as JSON: dicts pass through; pre-built profile lane
-    objects serialize by their known attributes (their vocabulary is the same
-    ``SLOT_LANE_FIELDS`` table the verb validates against)."""
+    """Lane entries as JSON: dicts pass through; profile lane objects
+    serialize by the verb's own field vocabulary."""
     fields = (
         "provider", "model", "effort", "substrate", "permission_mode",
         "route", "account", "pane_group",
@@ -144,8 +134,7 @@ def _lanes_payload(lanes: Any) -> list[Any]:
 
 
 def _inventory_payload(inventory: Optional[Any]) -> dict[str, Any]:
-    """The resolved inventory as JSON: rows in declared order, the objective,
-    the prefer-harness tiebreaker, and whether CONFIG named anything."""
+    """The resolved inventory as JSON: rows in declared order plus objective."""
     if inventory is None:
         return {}
     try:
@@ -186,8 +175,8 @@ def _harness_installed_table(harnesses: list[str]) -> dict[str, bool]:
 
 
 def _effort_ok_table(rows: list[Mapping[str, Any]]) -> dict[str, dict[str, bool]]:
-    """Which (harness, effort) pairs survive ``effort_tokens``: the vocabulary
-    stays owned by the harness surface code; the verb only consumes verdicts."""
+    """Which (harness, effort) pairs survive ``effort_tokens``; the verb only
+    consumes verdicts."""
     out: dict[str, dict[str, bool]] = {}
     pairs = {
         (str(r.get("harness", "") or ""), str(r.get("effort", "") or ""))
@@ -226,25 +215,14 @@ def resolve_slot_via_binary(
     protected_role: Optional[str] = None,
     model_occupied: bool = False,
 ) -> tuple[Optional[dict], list[str]]:
-    """Call ``fno-agents route-slot`` and return its ``(candidate, chain)``.
-
-    The payload carries BOTH legs: the slot walk (lanes, policies, posture)
-    and the grid inputs (node difficulty/priority, role, the resolved
-    inventory) so the verb answers the one-slot-or-grid question in one call.
-    Raises :class:`RouteSlotUnavailable` when the binary is missing, fails,
-    or answers malformed JSON; the caller turns that into a named refusal
-    rather than a silent lane-less spawn.
+    """Call ``fno-agents route-slot``: payload carries both legs (slot walk
+    and grid inputs). Raises :class:`RouteSlotUnavailable` when the binary is
+    missing, fails, or answers malformed JSON - a named refusal, never a
+    silent lane-less spawn.
     """
     import os
 
-    # A dev checkout's own build outranks any installed copy: testing against
-    # a stale PATH binary would resolve lanes with last release's vocabulary.
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        raise RouteSlotUnavailable(
-            "the fno-agents binary was not found; reinstall fno,"
-            " run `fno doctor update --rust`, or set FNO_AGENTS_BIN"
-        )
+    binary = _binary_or_raise()
     rows = _declared_rows(settings)
     lanes_payload = _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else lanes
     inv_rows = []
@@ -306,6 +284,19 @@ def resolve_slot_via_binary(
     return out.get("candidate"), [str(line) for line in (out.get("chain") or [])]
 
 
+def _binary_or_raise():
+    """The dev checkout's own build outranks any installed copy: testing
+    against a stale PATH binary would resolve with last release's vocabulary."""
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        raise RouteSlotUnavailable(
+            "the fno-agents binary was not found; reinstall fno,"
+            " run `fno doctor update --rust`, or set FNO_AGENTS_BIN"
+        )
+    return binary
+    return binary
+
+
 def _route_slot_call(binary: object, payload: dict[str, Any]) -> dict[str, Any]:
     """One subprocess round-trip: JSON payload in, parsed JSON answer out."""
     import os
@@ -339,12 +330,7 @@ def route_tier_via_binary(
     inventory: Optional[Any],
 ) -> tuple[Optional[str], list[str]]:
     """Tier resolution on the verb: returns ``(model, chain)``."""
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        raise RouteSlotUnavailable(
-            "the fno-agents binary was not found; reinstall fno,"
-            " run `fno doctor update --rust`, or set FNO_AGENTS_BIN"
-        )
+    binary = _binary_or_raise()
     payload = {"mode": "tier", "tier": tier, "provider": provider,
                "inventory": _inventory_payload(inventory)}
     out = _route_slot_call(binary, payload)
@@ -361,12 +347,7 @@ def route_states_via_binary(
     settings: object,
 ) -> tuple[list[dict], list[str]]:
     """Per-lane capacity states for the readout: returns ``(states, chain)``."""
-    binary = find_dev_binary() or resolve_binary()
-    if binary is None:
-        raise RouteSlotUnavailable(
-            "the fno-agents binary was not found; reinstall fno,"
-            " run `fno doctor update --rust`, or set FNO_AGENTS_BIN"
-        )
+    binary = _binary_or_raise()
     rows = _declared_rows(settings)
     lanes_payload = _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else lanes
     payload = {
