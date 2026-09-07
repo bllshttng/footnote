@@ -858,7 +858,8 @@ def _report_band_routing() -> None:
         roles = None
     declared_count = 0
     try:
-        declared_count = len(getattr(settings, "routing", None).models or [])
+        routing = getattr(settings, "routing", None)
+        declared_count = len(getattr(routing, "models", None) or [])
     except Exception:  # noqa: BLE001 - the count is a display nicety
         declared_count = 0
     typer.echo(
