@@ -130,7 +130,7 @@ def test_pinned_record_whose_root_serves_another_account_is_a_mismatch(
     assert got.status == binding.MISMATCH
     assert got.observed_label == "readyrule@x"
     assert binding.MISMATCH_RECEIPT in got.receipt
-    assert not got.ok
+    assert got.status != binding.MATCHED
 
 
 def test_unbound_record_is_unknown_without_a_profile_call(

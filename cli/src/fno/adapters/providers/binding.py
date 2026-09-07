@@ -36,10 +36,6 @@ class AccountBinding:
     reason: str | None = None
 
     @property
-    def ok(self) -> bool:
-        return self.status == MATCHED
-
-    @property
     def receipt(self) -> str:
         """A line safe to print. It never names an account it cannot prove."""
         where = str(self.credential_root or "the shared ~/.claude slot")
