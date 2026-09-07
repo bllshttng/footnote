@@ -41,9 +41,7 @@ from typing import Any, Callable, Iterable, Optional
 from fno.agents.session_truth import classify_tail
 
 Verdict = namedtuple("Verdict", "row_id name state verdict basis action")
-#: ``agent`` defaults "claude" - every row but a silence_rows() codex/opencode
-#: row is claude, and confirm_wake_landed needs it to resolve the right
-#: transcript store (x-c624; resolve_transcript_path only knows claude/codex).
+#: ``agent`` (default "claude") resolves the row's transcript store (x-c624).
 Row = namedtuple("Row", "row_id name state node cwd agent", defaults=(None, "", "claude"))
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
@@ -753,9 +751,7 @@ def _verdict_one(
             "report",
         )
 
-    # silence (x-c624): open node, quiet past the drive threshold - see fleet-watchdog.md.
-    # node_state_for is called only for a row already past the age gate, so an
-    # unreadable graph forces LEAVE just for that row - never the whole table.
+    # silence (x-c624): open node, quiet past the drive threshold; node_state_for gated on age.
     if silence_after_s is not None and facts is not None and facts.last_event_epoch is not None:
         silence_age_s = max(0.0, now_s - facts.last_event_epoch)
         if silence_age_s > silence_after_s:
@@ -1308,8 +1304,7 @@ def silence_rows(roots: "Iterable[Path]") -> tuple[list[Row], list[str]]:
         if not any(resolved == r or resolved.startswith(r + "/") for r in root_strs):
             continue
         row_id = str(getattr(e, "harness_session_id", None) or getattr(e, "short_id", None) or e.name)
-        cwd = str(getattr(e, "cwd", "") or "")
-        agent = str(getattr(e, "harness", "") or "claude")
+        cwd, agent = str(getattr(e, "cwd", "") or ""), str(getattr(e, "harness", "") or "claude")
         state = str(getattr(e, "status", "") or "")
         out.append(Row(row_id, str(e.name), state, str(node), cwd, agent))
     return out, []
@@ -2773,8 +2768,7 @@ def apply_verdict(
     """Execute one verdict inside ``lanes`` ("wake" | "all"). Only ``SKIPPED``
     (outside the lane) is silent; every other word is news. Mechanisms delegate
     (resume for wake and silence; recovery._redispatch for reroute), run with
-    ``cwd`` set to the row's worktree. ``agent`` (default "claude") resolves the
-    row's transcript store for a silence-driven codex row (x-c624)."""
+    ``cwd``/``agent`` set to the row's worktree/harness (x-c624)."""
     if v.verdict not in LANES.get(lanes, frozenset()):
         return SKIPPED, f"{v.verdict} outside {lanes} lane"
     try:

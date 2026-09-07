@@ -723,12 +723,9 @@ def tick() -> None:
                                 if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
                                     log.warning("pr-watch: watchdog silence budget spent")
                                     break
-                                _wd_apply_and_emit(
-                                    _wd, silence_v, cwd=silence_row.cwd,
-                                    agent=silence_row.agent, label="silence drive",
-                                )
+                                _wd_apply_and_emit(_wd, silence_v, cwd=silence_row.cwd,
+                                                    agent=silence_row.agent, label="silence drive")
                                 acted += 1
-
                         recovery_scans = []
                         recovery_roots_done = 0
                         for recovery_root in roots:
