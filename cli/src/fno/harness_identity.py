@@ -1251,14 +1251,12 @@ def live_thread_row_for_cwd(
 
     A codex thread worker owns no process: every thread is a WebSocket client
     of the one shared ``codex app-server`` daemon, so N workers share one pid
-    and the process-tree walk cannot name a thread's session id. The spawn
-    record can - the daemon writes the row before the worker's first turn,
-    keyed by the cwd fno named at spawn (one worktree per worker), so a
-    sibling thread's lookup returns its own row.
-
-    Exactly one ownership-live ``substrate: thread`` row with a non-empty
-    harness and session id answers; zero and two-plus matches return None, as
-    does an absent, unreadable, or alien-shape registry (raise nothing).
+    and the walk cannot name a thread's session id. The spawn record can - the
+    daemon writes the row before the worker's first turn, keyed by the cwd fno
+    named at spawn (one worktree per worker), so a sibling's lookup returns its
+    own row. Exactly one ownership-live ``substrate: thread`` row with a
+    non-empty harness and session id answers; zero and two-plus matches return
+    None, as does an unreadable or absent registry (raise nothing).
     """
     if not cwd:
         return None
