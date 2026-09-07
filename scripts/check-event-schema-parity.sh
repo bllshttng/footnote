@@ -354,6 +354,9 @@ dual_owner_kinds = {
     "merge_cleanup_requested",
     "merge_cleanup_completed",
     "merge_cleanup_refused",
+    # worktree_removed: the archive path emits it (Python) and the merge
+    # reaper emits it (Rust) at the same removal boundary.
+    "worktree_removed",
     "control_plane_tick",
     # Evals demand: the pr-watch tick's evals leg (Python) is the only
     # emitter; the rows ride the daemon's journal, so the Rust known-kind

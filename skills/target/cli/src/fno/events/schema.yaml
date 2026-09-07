@@ -1805,7 +1805,7 @@ event_types:
 
   - name: worktree_removed
     description: "A worktree directory was removed by an fno path. Emitted once per removal so a recurrence is attributable: a live worker losing its tree (2026-08-25, 2026-08-29) left no row because no removal path emitted anything, and an absence of rows measured only the instrument. Pair with the guard refusals: this row records what the guard read at decision time, so a removal that skipped the claim check is visible after the fact."
-    sources: [bash]
+    sources: [bash, daemon]
     data:
       required: [path, caller, claim, reason]
       properties:
@@ -2264,6 +2264,54 @@ event_types:
         pr:
           type: integer
         reason:
+          type: string
+
+  - name: merge_cleanup_held
+    retention: durable
+    description: "A pending merge cleanup request was HELD by its doneness re-read (an open node, an empty node list, or an unreadable graph) and stays pending for the next reaper pass. Emitted at most once per hour per request, so a normal in-grace hold cannot outshout the events that matter."
+    sources: [daemon]
+    data:
+      required: [request_id, repo, pr, reason]
+      properties:
+        request_id:
+          type: string
+        repo:
+          type: string
+        pr:
+          type: integer
+        reason:
+          type: string
+
+  - name: merge_cleanup_expired
+    retention: durable
+    description: "A pending merge cleanup request aged past the expiry window past its merge moment and is tombstoned, so a broken reconcile cannot pin a request (and the rows it names) forever."
+    sources: [daemon]
+    data:
+      required: [request_id, repo, pr, reason]
+      properties:
+        request_id:
+          type: string
+        repo:
+          type: string
+        pr:
+          type: integer
+        reason:
+          type: string
+
+  - name: merge_reaper_stopped
+    retention: durable
+    description: "The merge reaper stopped a row's harness (claude stop, or the worker-socket stop) BEFORE removing the registry row. The order is load-bearing: a row dropped first orphans the session in its sideline. Pane rows emit no row here - their pane death is the stop."
+    sources: [daemon]
+    data:
+      required: [short_id, name, request_id]
+      properties:
+        short_id:
+          type: string
+        name:
+          type: string
+        request_id:
+          type: string
+        harness:
           type: string
 
   - name: agent_inconsistent

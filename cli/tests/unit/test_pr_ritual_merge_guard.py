@@ -167,7 +167,7 @@ def test_inside_own_worktree_defers_rather_than_advising(tmp_path: Path) -> None
     assert seen[0][1] == "deferred"
     assert seen[0][2].startswith("cleanup-requested request_id=")
     assert f"worktree={tmp_path}" in seen[0][2]
-    assert "reap-order" in seen[0][2]
+    assert "merged-pr" in seen[0][2]
 
 
 def test_deferred_is_a_distinct_status_from_skipped() -> None:
