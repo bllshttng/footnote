@@ -11891,14 +11891,12 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     #[test]
     fn build_codex_thread_entry_stamps_the_launch_posture() {
         let worktree = tempfile::tempdir().unwrap();
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "--quiet"])
-                .current_dir(worktree.path())
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(worktree.path())
+            .status()
+            .unwrap()
+            .success());
         let git_common_dir = std::process::Command::new("git")
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .current_dir(worktree.path())
