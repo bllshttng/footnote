@@ -353,3 +353,7 @@ def test_overall_max_bounds_the_epic_explain_decision(monkeypatch):
     assert report["decision"]["would_dispatch"] == ["x-a"]
     assert report["selection"]["stop"] == "max-dispatch"
     assert "overall --max 1" in render_lane_fill_report(report)
+    # A max-denied node was a candidate: the report must name the filter that
+    # dropped it, never claim it was never a candidate.
+    asked = build_lane_fill_report(epic="x-epic", max_dispatch=1, node_id="x-b")["asked"]
+    assert asked["dropped_by"] == "max-dispatch"

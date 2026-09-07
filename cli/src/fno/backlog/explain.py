@@ -777,10 +777,12 @@ def build_lane_fill_report(
             root = project_root_from_settings(proj)
             if not root:
                 reason = "unmapped-project"
+            elif len(selected) >= width:
+                # The drain checks the cap BEFORE the converge gates
+                # (advance_epic), so the preview must name the same drop first.
+                reason = "lane-cap"
             else:
-                reason = adv._converge_gate(child, root) or (
-                    "lane-cap" if len(selected) >= width else None
-                )
+                reason = adv._converge_gate(child, root)
         if reason is not None:
             reasons_by_id[child["id"]] = reason
             counts[reason] = counts.get(reason, 0) + 1
@@ -795,6 +797,10 @@ def build_lane_fill_report(
         denied = selected[max_dispatch:]
         selected = selected[:max_dispatch]
         counts["max-dispatch"] = len(denied)
+        for child in denied:
+            # Recorded for `asked` too, or a max-denied node would report
+            # never_a_candidate instead of the filter that dropped it.
+            reasons_by_id[child["id"]] = "max-dispatch"
         excluded.extend({"id": c["id"], "reason": "max-dispatch"} for c in denied)
         stop = "max-dispatch"
 

@@ -679,12 +679,15 @@ struct AdvanceChild {
     decision: String,
     #[serde(default)]
     reason: String,
-    /// Resolved launch substrate. `"headless"` is SYNCHRONOUS: `subprocess.run`
-    /// returned only after the one-shot worker finished, so the child must be
-    /// resolved from graph state now, never held open for crash reconcile.
-    /// Empty on an older CLI's receipt (enqueue as detached, the old behavior).
+    /// Resolved launch substrate. `Some("headless")` is SYNCHRONOUS:
+    /// `subprocess.run` returned only after the one-shot worker finished, so
+    /// the child must be resolved from graph state now, never held open for
+    /// crash reconcile. None on an older CLI's receipt (enqueue as detached,
+    /// the old behavior) - and None is what the CLI writes for skipped and
+    /// failed rows, so this must stay Option: a plain String rejects the
+    /// explicit null and voids the whole receipt parse.
     #[serde(default)]
-    substrate: String,
+    substrate: Option<String>,
 }
 
 /// The `fno backlog advance --epic <id> --json` receipt, the only fields the
@@ -869,7 +872,7 @@ fn dispatch_mission(
         // the one-shot worker finished and released its claim, so there is
         // nothing to reconcile later - the crash floor would fabricate a crash
         // on tick 3, every time (x-7f1f). Resolve from graph state now.
-        if child.substrate == "headless" {
+        if child.substrate.as_deref() == Some("headless") {
             resolve_sync_child(cfg, breaker, journal, &child.node_id);
             facts.sync_resolved += 1;
             continue;
@@ -877,7 +880,7 @@ fn dispatch_mission(
         // Guard against re-recording a still-pending node (a prior tick's
         // dispatch whose worker has not yet closed): advance already dedups by
         // live claim, but a boot-window respawn could echo the id. An older
-        // CLI's receipt carries an empty substrate and lands here: enqueued as
+        // CLI's receipt carries no substrate key and lands here: enqueued as
         // detached, today's behavior.
         if pending.iter().any(|p| p.node_id == child.node_id) {
             continue;
@@ -1482,8 +1485,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.children.len(), 2);
-        assert_eq!(r.children[0].substrate, "thread");
-        assert_eq!(r.children[1].substrate, "headless");
+        assert_eq!(r.children[0].substrate.as_deref(), Some("thread"));
+        assert_eq!(r.children[1].substrate.as_deref(), Some("headless"));
         assert!(!r.deactivated);
         assert!(!r.all_done);
     }
@@ -2735,6 +2738,40 @@ mod tests {
             vec!["x-a"]
         );
         assert_eq!(breaker.consecutive_failures("x-a"), 0);
+    }
+
+    #[test]
+    fn mixed_receipt_with_null_substrate_still_enqueues() {
+        // The CLI's --json receipt writes `"substrate": null` for every skipped
+        // or failed child row (AdvanceResult.substrate is None there), so a
+        // MIXED receipt - one dispatched child beside one already-claimed skip -
+        // is the common shape, not an edge. A substrate field that rejects null
+        // fails the WHOLE receipt parse and the drain enqueues nothing.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","children":[
+                {"node_id":"x-a","decision":"dispatched","substrate":"thread"},
+                {"node_id":"x-b","decision":"skipped","reason":"already-claimed","substrate":null}]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        dispatch_mission(&cfg, &mut breaker, &mut pending, &journal);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|p| p.node_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["x-a"],
+            "a skipped sibling must not void the dispatched child"
+        );
+        assert!(!journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("advance-epic-unparseable")));
     }
 
     #[test]
