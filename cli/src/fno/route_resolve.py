@@ -664,19 +664,23 @@ def resolve_slot(
         if row.route:
             vendor = row.route.replace(",", "/").partition("/")[0].strip() or None
         cap = provider_lanes_cap(caps.get(vendor)) if vendor else None
-        if vendor is not None and cap is not None and gate_bypassed:
-            chain.append(f"slot note {rung} {row_name} {vendor} cap bypassed (FNO_SPAWN_GATE=0)")
-        elif vendor is not None and cap is not None:
+        if vendor is not None and cap is not None:
             try:
                 current = provider_live_count(vendor)
             except ProviderCountUnavailable as exc:
-                chain.append(f"slot=provider-count-unavailable {rung} {vendor}: {exc}")
-                return None, chain
-            if current >= cap:
+                if not gate_bypassed:
+                    chain.append(f"slot=provider-count-unavailable {rung} {vendor}: {exc}")
+                    return None, chain
                 chain.append(
-                    f"slot skip {rung} {row_name} provider {vendor} at {current} of {cap}"
+                    f"slot note {rung} {row_name} {vendor} count unavailable ({exc});"
+                    " FNO_SPAWN_GATE=0 keeps the lane"
                 )
-                continue
+            else:
+                if current >= cap:
+                    chain.append(
+                        f"slot skip {rung} {row_name} provider {vendor} at {current} of {cap}"
+                    )
+                    continue
         state, window = row_capacity(row, capacity)
         if state in ("exhausted", "blocked"):
             chain.append(f"slot skip {rung} {row_name} capacity={state}")
