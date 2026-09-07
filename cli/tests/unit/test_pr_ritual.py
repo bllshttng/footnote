@@ -764,6 +764,10 @@ def test_mint_binds_node_ids_when_reconcile_closed_nothing(tmp_path, monkeypatch
     )
     runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner)
+    # The grace anchor rides the memoized gh read: the mint must stamp the
+    # PR's real merge time, not its own now, or the last mint per shared
+    # request id pushes the reap a full grace window past the merge.
+    r._merge_state = ("MERGED", "feature/x", "2026-09-07T15:00:00Z")
     monkeypatch.setattr(r, "_resolve_origin_slug", lambda: "owner/repo")
     _patch_sidecar_scan(monkeypatch, [
         {"id": "fno-abc1", "pr_number": 7, "pr_url": "https://github.com/owner/repo/pull/7"}])
@@ -774,6 +778,7 @@ def test_mint_binds_node_ids_when_reconcile_closed_nothing(tmp_path, monkeypatch
     requests = [data for kind, data in seen if kind == "merge_cleanup_requested"]
     assert len(requests) == 1
     assert requests[0]["node_ids"] == ["fno-abc1"]
+    assert requests[0]["merged_at"] == "2026-09-07T15:00:00Z"
     # The request id keys on the bound set: a site minting the same merge with
     # the ids bound folds to this id; the empty-keyed id never matches it.
     bound = _events.merge_cleanup_request_id("", 7, "feature/x", str(r.cwd), ["fno-abc1"])
