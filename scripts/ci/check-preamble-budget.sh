@@ -176,7 +176,17 @@ set -euo pipefail
 # mention of the spawn seam. Trimmed from 265 to 133 measured bytes first
 # (dropped the "seedless seed resolves nothing" clause as inferable); 16 is
 # the residue, zero spare.
-CEILING_BYTES=39711
+# +279 (39711 -> 39990), measured 2026-09-06: the reach test and the
+# config-before-rule step in .claude/rules/oss-fix-not-memory.md. The ladder
+# there said where a fact lands and never how to pick a tier, so tier 3, a doc
+# or a rule, became the default for work that belonged at tier 1. Compressed
+# from 816 to 276 measured bytes first (the worked example and the argument
+# went; both decisions stayed); 279 is the residue, zero spare.
+# -11 (39990 -> 39979), measured 2026-09-06: the AGENTS.md rank-claim fix
+# freed 11 bytes on this branch. Reclaimed rather than left, because
+# unreclaimed slack is how this file reached 55 bytes of headroom with no
+# commit to blame. Zero spare again.
+CEILING_BYTES=39979
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
