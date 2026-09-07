@@ -78,10 +78,7 @@ KEEPER = "keeper"
 #: MERGED or CLOSED). Neither acts at any apply level.
 CONTENDED = "contended"
 POLLING_SETTLED = "polling_settled"
-#: An open node, a spawn row, no crown, quiet past the drive threshold. Not a
-#: liveness claim (d-10a72d88). Driven like WAKE (x-c624); the end-and-hand-back
-#: escalation is a follow-up (a destructive action needs its own apply lane,
-#: not the "wake" bucket every tick already runs unattended).
+#: Open node, spawn row, no crown, quiet past the drive threshold (x-c624). Driven like WAKE.
 SILENCE = "silence"
 
 #: Every verdict this module can return. `--only` validates against THIS, not
@@ -563,8 +560,7 @@ def verdicts(
     """One verdict per row, in table precedence (ghost > contended > silence
     > stale > reroute > wake > leave). ``claim_for(node)`` returns the
     ``node:<id>`` claim view; ``node_state_for`` returns the graph entry or
-    None. ``silence_after_s`` is None by default (disabled) - only
-    :func:`silence_rows` callers pass it (x-c624)."""
+    None. ``silence_after_s`` is None (disabled) unless a caller arms it."""
     facts_by_row: dict[str, Optional[TailFacts]] = {}
     for row in rows:
         try:
@@ -754,26 +750,20 @@ def _verdict_one(
             "report",
         )
 
-    # silence (x-c624): an open node, quiet past the drive threshold. Scoping
-    # already happened in silence_rows(). Checked above the STALE ceiling on
-    # purpose - a row silent past 12h is exactly the case this exists for.
+    # silence (x-c624): open node, quiet past the drive threshold - see fleet-watchdog.md.
     if silence_after_s is not None and facts is not None and facts.last_event_epoch is not None:
         try:
             node_state = node_state_for(row.node) if row.node else None
         except Exception:  # noqa: BLE001 - unreadable graph condemns nothing
             return Verdict(row.row_id, row.name, row.state, LEAVE,
                            "graph unreadable, silence verdict refused", "none")
-        node_open = node_state is not None and str(node_state.get("status") or "") not in (
-            "done", "superseded",
-        )
-        if node_open:
-            silence_age_s = max(0.0, now_s - facts.last_event_epoch)
-            if silence_age_s > silence_after_s:
-                return Verdict(
-                    row.row_id, row.name, row.state, SILENCE,
-                    f"open node {row.node}, transcript quiet "
-                    f"{_mins(now_s, facts.last_event_epoch)}m", "drive",
-                )
+        node_open = node_state is not None and str(node_state.get("status") or "") not in ("done", "superseded")
+        silence_age_s = max(0.0, now_s - facts.last_event_epoch)
+        if node_open and silence_age_s > silence_after_s:
+            return Verdict(
+                row.row_id, row.name, row.state, SILENCE,
+                f"open node {row.node}, transcript quiet {_mins(now_s, facts.last_event_epoch)}m", "drive",
+            )
 
     window, reset_epoch, stamp = ("none", None, "")
     if facts is not None:
@@ -1288,9 +1278,7 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
 
 
 def silence_rows(roots: "Iterable[Path]") -> tuple[list[Row], list[str]]:
-    """SILENCE's own row set (x-c624): the registry, scoped to this project -
-    never ``claude agents --json`` (blind to codex/opencode). Kept: a LIVE
-    ``spawn`` row, no crown, ``project_root``/``cwd`` under a root, a node."""
+    """SILENCE's row set (x-c624): the registry, not ``claude agents --json``."""
     from fno.agents.registry import load_registry
     from fno.agents.spawn_gate import LIVE_STATUSES
 
@@ -1315,10 +1303,6 @@ def silence_rows(roots: "Iterable[Path]") -> tuple[list[Row], list[str]]:
             continue
         if not any(resolved == r or resolved.startswith(r + "/") for r in root_strs):
             continue
-        # harness_session_id is the durable per-session identity; short_id
-        # falls back for a row that predates it. entry.name is a LAST resort
-        # only - names are reused across spawns, which would conflate two
-        # sessions' drive history were this row_id ever used to key one.
         row_id = str(getattr(e, "harness_session_id", None) or getattr(e, "short_id", None) or e.name)
         out.append(Row(row_id, str(e.name), str(getattr(e, "status", "") or ""),
                         str(node), str(getattr(e, "cwd", "") or "")))
@@ -1333,9 +1317,7 @@ def silence_verdicts(
     claim_for: Optional[Callable[[str], dict]] = None,
     node_state_for: Optional[Callable[[str], Optional[dict]]] = None,
 ) -> tuple[list[Verdict], list[Row]]:
-    """SILENCE's classify step: :func:`silence_rows`, then :func:`verdicts`
-    with the age gate armed. Only ``SILENCE`` verdicts are actionable; any
-    other verdict here is a free second opinion the fleet sweep might miss."""
+    """SILENCE's classify step: :func:`silence_rows`, then :func:`verdicts` with the age gate."""
     from fno.agents.session_truth import resolve_session_truth
     from fno.config import load_settings
 
@@ -1351,9 +1333,7 @@ def silence_verdicts(
 
     def transcript_for(row_id: str) -> Optional[TailFacts]:
         row = next((r for r in rows if r.row_id == row_id), None)
-        if row is None:
-            return None
-        age_s = resolve_session_truth(row.name).get("last_activity_age_s")
+        age_s = resolve_session_truth(row.name).get("last_activity_age_s") if row else None
         epoch = now_s - float(age_s) if age_s is not None else None
         return TailFacts((), epoch, "", None, None, ())
 
@@ -2755,10 +2735,7 @@ def _confirm_once(
 #: so bare ``--apply`` stops there; reroute respawns, so it needs
 #: ``--apply-all``. ghost NEVER auto-acts (the remedy is a respawn under a
 #: new id, the operator's call).
-LANES = {
-    "wake": frozenset({WAKE, SILENCE}),
-    "all": frozenset({WAKE, REROUTE, SILENCE}),
-}
+LANES = {"wake": frozenset({WAKE, SILENCE}), "all": frozenset({WAKE, REROUTE, SILENCE})}
 
 #: The one silent outcome: the verdict was outside the lane the caller asked
 #: for, so nothing was attempted and there is nothing to report. Every other
@@ -2785,17 +2762,10 @@ def apply_verdict(
     failover_fn: Optional[Callable[[Any, Any], str]] = None,
     rotation: Optional[RotationBudget] = None,
 ) -> tuple[str, str]:
-    """Execute one verdict inside ``lanes`` ("wake" | "all"). Returns
-    ``(outcome, detail)``. Exactly ONE outcome is silent - ``SKIPPED``, the
-    verdict was outside the lane asked for - and every other word is news:
-    defaulting to surface means the next outcome added here cannot go silent
-    by omission. Mechanisms delegate (resume for wake AND silence - a silent
-    worker on an open node is only ever driven, never ended, from this lane;
-    the end-and-hand-back escalation is a follow-up with its own destructive
-    apply lane, not this one; recovery._redispatch for reroute), and every
-    delegated command runs with ``cwd`` set to the row's worktree: a
-    registry-less row from another project must resolve in its own project,
-    not whatever project launched the sweep."""
+    """Execute one verdict inside ``lanes`` ("wake" | "all"). Only ``SKIPPED``
+    (outside the lane) is silent; every other word is news. Mechanisms delegate
+    (resume for wake and silence; recovery._redispatch for reroute), run with
+    ``cwd`` set to the row's worktree."""
     if v.verdict not in LANES.get(lanes, frozenset()):
         return SKIPPED, f"{v.verdict} outside {lanes} lane"
     try:
@@ -2910,5 +2880,3 @@ def _apply_reroute(
         f"reroute refused: failover outcome {outcome!r}, no alternate armed "
         f"({v.basis}). Nothing rotated and the session is left as-is",
     )
-
-

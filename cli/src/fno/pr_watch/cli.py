@@ -303,6 +303,19 @@ class _WatchdogBudgetSpent(Exception):
 #: legs behind it.
 _WAKE_APPLY_FLOOR_S = 200
 
+
+def _wd_apply_and_emit(wd, verdict, *, cwd: str, label: str) -> str:
+    """Apply a wake-lane verdict (wake or silence) and emit the receipt."""
+    try:
+        outcome, detail = wd.apply_verdict(verdict, lanes="wake", cwd=cwd)
+    except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
+        outcome, detail = "refused", f"{label} crashed: {exc!r}"
+    wd.emit_event(
+        "watchdog_applied" if outcome == "applied" else "watchdog_refused",
+        {"row_id": verdict.row_id, "verdict": verdict.verdict, "detail": detail},
+    )
+    return outcome
+
 #: A stranded sweep is one batched git fetch plus a rev-list and a
 #: last-commit-age call per worktree - cheap, but not free at 60+
 #: worktrees. Skipping under this floor costs nothing: the next tick
@@ -693,39 +706,14 @@ def tick() -> None:
                                         "%s left for the next tick", verdict.row_id,
                                     )
                                     continue
-                                try:
-                                    outcome, detail = _wd.apply_verdict(
-                                        verdict, lanes="wake", cwd=row.cwd
-                                    )
-                                except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
-                                    outcome, detail = "refused", f"wake crashed: {exc!r}"
+                                _wd_apply_and_emit(_wd, verdict, cwd=row.cwd, label="wake")
                                 acted += 1
-                                _wd.emit_event(
-                                    "watchdog_applied" if outcome == "applied" else "watchdog_refused",
-                                    {
-                                        "row_id": verdict.row_id,
-                                        "verdict": verdict.verdict,
-                                        "detail": detail,
-                                    },
-                                )
-                        # SILENCE lane, same tick, same budget discipline
-                        # (x-c624): the registry read directly, scoped to
-                        # this project - fleet_rows never carries a codex or
-                        # opencode row, so it cannot see the stuck worker the
-                        # operator asked about. Driven the same way WAKE is
-                        # (apply_verdict delegates both to _apply_wake); the
-                        # end-and-hand-back escalation is a follow-up.
-                        silence_left = deadline - (time.monotonic() - started)
-                        if silence_left < _WAKE_APPLY_FLOOR_S:
-                            log.warning(
-                                "pr-watch: watchdog silence budget spent (%.1fs "
-                                "left for the next tick)", silence_left,
-                            )
+                        # SILENCE lane (x-c624): registry-scoped rows fleet_rows misses.
+                        if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
+                            log.warning("pr-watch: watchdog silence budget spent")
                         else:
                             try:
-                                silence_vs, silence_rows_out = _wd.silence_verdicts(
-                                    roots, now_s=now,
-                                )
+                                silence_vs, silence_rows_out = _wd.silence_verdicts(roots, now_s=now)
                             except Exception as exc:  # noqa: BLE001 - a broken lane never aborts the tick
                                 log.warning("pr-watch: silence sweep failed: %s", exc)
                                 silence_vs, silence_rows_out = [], []
@@ -733,26 +721,10 @@ def tick() -> None:
                                 if silence_v.verdict != _wd.SILENCE:
                                     continue
                                 if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
-                                    log.warning(
-                                        "pr-watch: watchdog silence budget spent, "
-                                        "%s left for the next tick", silence_v.row_id,
-                                    )
+                                    log.warning("pr-watch: watchdog silence budget spent")
                                     break
-                                try:
-                                    outcome, detail = _wd.apply_verdict(
-                                        silence_v, lanes="wake", cwd=silence_row.cwd,
-                                    )
-                                except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
-                                    outcome, detail = "refused", f"silence drive crashed: {exc!r}"
+                                _wd_apply_and_emit(_wd, silence_v, cwd=silence_row.cwd, label="silence drive")
                                 acted += 1
-                                _wd.emit_event(
-                                    "watchdog_applied" if outcome == "applied" else "watchdog_refused",
-                                    {
-                                        "row_id": silence_v.row_id,
-                                        "verdict": silence_v.verdict,
-                                        "detail": detail,
-                                    },
-                                )
 
                         recovery_scans = []
                         recovery_roots_done = 0
