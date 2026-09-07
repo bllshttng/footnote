@@ -710,32 +710,26 @@ def resolve_slot(
     # table folds as its own row named by its config path, with the posture
     # fields (substrate/permission_mode/pane_group) carried beside it.
     folded = _slot_fold(lanes, rung_base, settings, chain)
-    if folded[0] is None or folded[1] is None:
-        return None, chain
     plan, lane_inv, fields_by_rung = folded
-    plan = [
-        (rung, row_name, index)
-        for index, (rung, row_name) in enumerate(plan)
-    ]
+    if plan is None or lane_inv is None:
+        return None, chain
 
     import os
 
     gate_bypassed = os.environ.get("FNO_SPAWN_GATE") == "0"
-    try:
-        from fno.agents.spawn_gate import (
-            ProviderCountUnavailable,
-            provider_lanes_cap,
-            provider_live_count,
-        )
-        from fno.config import provider_limits_table
+    from fno.agents.spawn_gate import (
+        ProviderCountUnavailable,
+        provider_lanes_cap,
+        provider_live_count,
+    )
+    from fno.config import provider_limits_table
 
-        caps = dict(provider_limits_table(getattr(settings, "agents", None)))
+    try:
+        caps: dict = dict(provider_limits_table(getattr(settings, "agents", None)))
     except Exception:  # noqa: BLE001 - an unreadable cap table skips no lane
         caps = {}
-        provider_lanes_cap = lambda budget: None  # noqa: E731
-        provider_live_count = None
 
-    for rung, row_name, index in plan:
+    for index, (rung, row_name) in enumerate(plan):
         row = lane_inv.rows.get(row_name)
         if row is None:
             declared = ", ".join(sorted(lane_inv.rows)) or "(none)"
@@ -757,7 +751,7 @@ def resolve_slot(
             head = row.route.replace(",", "/").partition("/")[0].strip()
             vendor = head or None
         cap = provider_lanes_cap(caps.get(vendor)) if vendor else None
-        if vendor is not None and cap is not None and provider_live_count is not None:
+        if vendor is not None and cap is not None:
             try:
                 current = provider_live_count(vendor)
             except ProviderCountUnavailable as exc:
@@ -803,7 +797,7 @@ def resolve_slot(
                 )
                 if value
             }
-        candidate = {
+        pick: dict[str, Any] = {
             "harness": row.harness,
             "model": row.model,
             "lane": row_name,
@@ -812,8 +806,8 @@ def resolve_slot(
             "lane_fields": lane_fields,
         }
         if row.effort:
-            candidate["effort"] = row.effort
-        return candidate, chain
+            pick["effort"] = row.effort
+        return pick, chain
 
     if explicit_lane or gate_bypassed:
         why = (
@@ -879,10 +873,10 @@ def slot_states(
     )
     chain: list[str] = []
     folded = _slot_fold(lanes, rung_base, settings, chain)
-    if folded[0] is None:
+    plan, lane_inv, _fields = folded
+    if plan is None or lane_inv is None:
         out["would_take"] = chain[-1]
         return out
-    plan, lane_inv, _fields = folded
     for rung, row_name in plan:
         row = lane_inv.rows.get(row_name)
         if row is None:
