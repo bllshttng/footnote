@@ -4,10 +4,10 @@ a required binary dependency.
 
 Used by ``scripts/lint/no-cross-skill-runtime-calls.sh`` (the
 marketplace-readiness lint) to verify each driver skill's SKILL.md has
-``requires.binaries`` containing the named binary (default ``fno``).
+``metadata.requires.binaries`` containing the named binary (default ``fno``).
 
 Exit codes:
-    0  binary is declared in requires.binaries
+    0  binary is declared in metadata.requires.binaries
     1  frontmatter parsed OK but binary not declared (or no requires block)
     2  PyYAML missing OR file not found OR frontmatter malformed
 
@@ -57,7 +57,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--require",
         default="fno",
-        help="binary name that must appear in requires.binaries (default: fno)",
+        help="binary name that must appear in metadata.requires.binaries (default: fno)",
     )
     args = parser.parse_args(argv)
 
