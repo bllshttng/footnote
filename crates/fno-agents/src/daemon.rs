@@ -4410,6 +4410,23 @@ async fn ensure_codex_thread_handle(
             &json!({"name": entry.name, "lane": "thread", "session_id": session_id}),
         );
     }
+    // The durable fix promised above: persist what THIS resume actually
+    // resolved, not what the original spawn recorded. `resume()` (unlike
+    // `start_with_state_dirs`) carries no state_dirs, so a bounded thread's
+    // `granted_writable_roots` goes to empty here - an accurate report of the
+    // very loss the event above announces, not a stale echo of the spawn-time
+    // grant. Read from the driver BEFORE `into_actor` consumes it; the actor
+    // exposes neither field.
+    let resolved_sandbox = driver.resolved_sandbox_posture().to_string();
+    let granted_writable_roots = driver.granted_writable_roots().to_vec();
+    let resumed_name = entry.name.clone();
+    let _ = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
+        if let Some(row) = registry.find_mut(&resumed_name) {
+            row.resolved_sandbox = Some(resolved_sandbox);
+            row.granted_writable_roots = granted_writable_roots;
+        }
+    })
+    .await;
     let mut threads = ctx.codex_threads.lock().await;
     // A concurrent caller may have won the race while we were connecting.
     // Theirs is already published, so keep it and drop ours: dropping a
@@ -12610,6 +12627,71 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             }
             _ => panic!("a pane row must refuse, got: {resp:?}"),
         }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// A resume writes what it actually resolved onto the row, not a stale
+    /// echo of what the ORIGINAL spawn recorded. Caught in review: the schema
+    /// this node adds (`resolved_sandbox`/`granted_writable_roots`) was wired
+    /// on the spawn path only, leaving exactly the gap the pre-existing
+    /// comment on `ensure_codex_thread_handle` named as its own durable fix -
+    /// "the sibling node that owns that schema" is this one.
+    ///
+    /// `resume()` carries no state_dirs, so `granted_writable_roots` goes
+    /// empty here even though the row was seeded non-empty: that emptiness IS
+    /// the loss `codex_thread_resumed_without_state_grant` announces, not a
+    /// missed write. A row still showing the spawn-time roots after a resume
+    /// would look granted while actually ungranted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
+        let home = tmp_home("codex-resume-records-posture");
+        let cwd = tempfile::tempdir().unwrap();
+        let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-resumed"),
+        );
+        // Must match the fake's configured thread_id: `resume()` refuses when
+        // `thread/resume` confirms a different id than requested.
+        let session_id = "thread-resumed".to_string();
+        state::update_registry(&home.registry_json(), |registry| {
+            let mut entry = thread_entry("t-resume", AgentStatus::Live, None);
+            entry.cwd = cwd.path().to_string_lossy().into_owned();
+            entry.project_root = entry.cwd.clone();
+            entry.harness_session_id = Some(session_id.clone());
+            entry.codex_session_id = Some(session_id.clone());
+            // Seeded as if a prior spawn had granted a root - the exact value
+            // a stale write would leave behind uncorrected.
+            entry.resolved_sandbox = Some("workspaceWrite".into());
+            entry.granted_writable_roots = vec!["/stale/spawn-time/root".into()];
+            registry.entries.push(entry);
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let entry = state::load_registry(&home.registry_json())
+            .unwrap()
+            .find("t-resume")
+            .cloned()
+            .unwrap();
+        ensure_codex_thread_handle(&ctx, &entry)
+            .await
+            .expect("the fake daemon answers thread/resume");
+
+        let after = state::load_registry(&home.registry_json())
+            .unwrap()
+            .find("t-resume")
+            .cloned()
+            .unwrap();
+        // The fake models no sandbox, so the fresh read is the explicit
+        // unknown - not the workspaceWrite the row was seeded with.
+        assert_eq!(
+            after.resolved_sandbox.as_deref(),
+            Some(crate::codex_thread::SANDBOX_POSTURE_UNKNOWN)
+        );
+        assert!(
+            after.granted_writable_roots.is_empty(),
+            "a resume carries no state_dirs, so the stale spawn-time root must \
+             not survive: {:?}",
+            after.granted_writable_roots
+        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 
