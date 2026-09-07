@@ -4580,7 +4580,7 @@ event_types:
           description: "The measurement that decided the verdict (e.g. 'no transcript for <id>', 'node <id> done', '429 resets 18:48:21Z, 8m out')."
 
   - name: watchdog_applied
-    description: "The fleet watchdog executed a verdict's action: a wake whose message landed in the recipient transcript, a redispatch, or a stop+rm on a clean worktree."
+    description: "The fleet watchdog executed a verdict's action: a wake or silence-lane drive whose message landed in the recipient transcript, a redispatch, or a stop+rm on a clean worktree."
     sources: [daemon]
     data:
       required: [row_id, verdict, detail]
@@ -4590,7 +4590,7 @@ event_types:
           description: "The row's recorded session id."
         verdict:
           type: string
-          description: "wake | reroute | reap | retire."
+          description: "wake | reroute | reap | retire | silence."
         detail:
           type: string
           description: "What was done, including the mechanism's receipt."
