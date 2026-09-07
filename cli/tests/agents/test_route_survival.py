@@ -598,7 +598,11 @@ def test_cli_resume_gates_the_recorded_provider_before_dispatch(
     assert result.exit_code == 0, result.output
     assert events[0] == (
         "gate",
-        ("router", "bg", {"force": False, "no_wait": False, "route_provider": "zai"}),
+        (
+            "router",
+            "bg",
+            {"force": False, "no_wait": False, "route_provider": "zai", "node": None},
+        ),
     )
     assert events[1][0] == "dispatch"
     assert events[1][1]["route_provider"] == "zai"
