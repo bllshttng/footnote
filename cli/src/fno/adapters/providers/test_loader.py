@@ -872,7 +872,6 @@ class TestPWDRespected:
         # Pin the repo root at tmp_path (settings lives there). Readers anchor
         # on resolve_repo_root - the same resolver `config set --local` writes
         # through - and FNO_REPO_ROOT is its test hook.
-        from fno import paths as fno_paths
 
         monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
         config = load_providers()  # repo_root=None - resolves FNO_REPO_ROOT

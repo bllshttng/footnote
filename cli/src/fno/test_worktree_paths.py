@@ -25,8 +25,6 @@ def _hermetic_worktree_config(tmp_path_factory, monkeypatch):
     iso = tmp_path_factory.mktemp("iso") / "config.toml"
     iso.write_text("")
     monkeypatch.setenv("FNO_CONFIG", str(iso))
-    from fno import config as _config
-    from fno import paths as _paths
     yield
 
 

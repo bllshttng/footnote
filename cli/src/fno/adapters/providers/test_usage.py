@@ -1066,7 +1066,6 @@ class TestDispatchOneQuotaDefer:
         # FNO_EVENTS_PATH for the whole pytest process and it outranks the root,
         # so a test reading <root>/.fno/events.jsonl back must name that file.
         monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-        from fno import paths
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True)
@@ -1106,7 +1105,6 @@ class TestDispatchOneQuotaDefer:
         # FNO_EVENTS_PATH for the whole pytest process and it outranks the root,
         # so a test reading <root>/.fno/events.jsonl back must name that file.
         monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-        from fno import paths
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True)
@@ -1149,7 +1147,6 @@ class TestRequiredBotHeadroomCheck:
         # FNO_EVENTS_PATH for the whole pytest process and it outranks the root,
         # so a test reading <root>/.fno/events.jsonl back must name that file.
         monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-        from fno import paths
         monkeypatch.chdir(tmp_path)
         # Config: one required bot backed by codex.
         review = SimpleNamespace(github_apps=["chatgpt-codex-connector"], required_bots=None)

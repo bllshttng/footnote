@@ -38,7 +38,6 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, Mapping, Optional, cast
 
@@ -61,6 +60,11 @@ from pydantic import (
 from fno.config import _watchdog
 from fno.config._auto_heal import AutoHealBlock
 from fno.config._evals import EvalsBlock
+# The keyed settings loader lives in fno.config._loader (this file is over the
+# size budget and shrink-only); re-exported under the names every caller and
+# test already imports.
+from fno.config._loader import _load_settings_at as _load_settings_at
+from fno.config._loader import _settings_key as _settings_key
 from fno.config._sweeps import ReapReceiptsBlock, SweepKeys
 from fno.config._test import TestBlock
 from fno.config._watchdog import WatchdogBlock
@@ -5452,103 +5456,13 @@ def _revoke_unbacked_optouts(raw: dict[str, object]) -> dict[str, object]:
     return result if isinstance(result, dict) else raw
 
 
-def _settings_key() -> tuple:
-    """The declaration the settings resolution reads from the process.
-
-    Everything ``_candidate_paths`` consults: the four FNO_ env overrides,
-    ``HOME``, and the resolved repo root (itself keyed on cwd and
-    ``FNO_REPO_ROOT``). Two calls whose key agrees read the same settings
-    by construction; a test that changes any component gets a fresh load
-    with no cache_clear, which retires the per-test clearer registry and
-    the fixture swap (x-3d21 R5).
-    """
-    from fno.paths import resolve_repo_root
-
-    env = os.environ.get
-    return (
-        env("FNO_CONFIG"),
-        env("FNO_GLOBAL_SETTINGS_PATH"),
-        env("FNO_CONFIG_SEARCH_ROOT"),
-        env("FNO_NO_CANONICAL_CONFIG"),
-        env("HOME"),
-        str(resolve_repo_root()),
-    )
-
-
-@lru_cache(maxsize=8)
-def _load_settings_at(key: tuple) -> SettingsModel:
-    """Load, deep-merge, and cache the settings for one declaration ``key``.
-
-    Every existing candidate is read and deep-merged, highest priority winning
-    key-by-key: $FNO_CONFIG (when set, the only candidate) ->
-    <worktree>/.fno/settings.yaml -> <canonical>/.fno/settings.yaml
-    -> ~/.fno/settings.yaml -> built-in defaults. See _candidate_paths for
-    the canonical (main worktree from `git worktree list`) step that lets a
-    linked worktree read shared config. A key absent from a higher-priority file
-    falls through to the next file down, so global can hold shared defaults
-    while each project sets only its deltas.
-
-    Raises ValidationError on invalid values (glob chars, PATH_MAX, etc.).
-    Emits WARNING for unknown keys.
-    """
-    global _loaded_from
-
-    # Collect every candidate that exists and parses, in priority order
-    # (project-local highest, global lowest). Files that fail to parse are
-    # skipped (a WARNING is already emitted by _load_raw) so a corrupt
-    # higher-priority file still falls through to a valid lower-priority one.
-    # The walk (parse + per-layer legacy alias) is the ONE shared collector:
-    # resolve_source replays the same layers, so the chain, its order, and the
-    # alias pass (whose deprecation warnings fire once per process per chain,
-    # not once per consumer) live in exactly one place.
-    candidates = _candidate_paths()
-    layers = list(_aliased_layers(tuple(candidates)))
-
-    # Deep-merge lowest priority first so the highest-priority file wins per
-    # key. config.obsidian.vault can come from global while
-    # config.post_merge.parking_lot_path comes from the project file.
-    # Legacy keys were aliased PER LAYER inside _aliased_layers, before this
-    # merge, so a higher-priority file's legacy value still wins over a
-    # lower-priority file's canonical value (and vice-versa). Aliasing only the
-    # merged result would let a low-priority canonical key mask a high-priority
-    # legacy key.
-    raw: dict[str, object] = {}
-    for _path, parsed in reversed(layers):
-        raw = _deep_merge(raw, parsed)
-
-    # Per-worktree local override (x-cbce). A real, non-symlinked local file is
-    # layered only for the allowlisted collision keys.
-    if candidates:
-        raw = _layer_worktree_local_override(raw, candidates[0].parent)
-
-    # _loaded_from records the PRIMARY (highest-priority) file present, for
-    # `fno config doctor` and paths.config_file(). With layering there is no
-    # single source; the highest-priority file is the most meaningful anchor
-    # (Finding 3: paths.config_file must agree with the loader, not re-derive).
-    _loaded_from = layers[0][0] if layers else None
-
-    # Flatten the legacy config:-wrapped shape to the canonical top-level shape
-    # before warning/validation so unknown-key warnings key off real block names
-    # (the model is flat; a residual `config` key would look "unknown").
-    raw = _unwrap_config_dict(raw)
-
-    # Warn about unknown top-level and nested keys BEFORE model construction
-    # so the message appears even if validation later raises.
-    # The recursive walker handles nested blocks (paths, review, etc.) automatically;
-    # there is no need for an additional explicit nested call (which caused duplicate emission).
-    _warn_unknown_keys(raw, SettingsModel)
-
-    raw = _revoke_unbacked_optouts(raw)
-    return SettingsModel.model_validate(raw)
-
-
 def load_settings() -> SettingsModel:
     """Load the settings for the caller's declaration.
 
-    Uncached wrapper: the cache is :func:`_load_settings_at`, keyed on
-    :func:`_settings_key`. Reading the declaration at call time is what
-    makes a changed ``FNO_CONFIG`` (or any other key component) resolve
-    fresh without a cache_clear.
+    Uncached wrapper: the cache is :func:`fno.config._loader._load_settings_at`,
+    keyed on :func:`fno.config._loader._settings_key`. Reading the declaration
+    at call time is what makes a changed ``FNO_CONFIG`` (or any other key
+    component) resolve fresh without a cache_clear.
     """
     return _load_settings_at(_settings_key())
 
