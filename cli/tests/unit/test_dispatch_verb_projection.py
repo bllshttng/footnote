@@ -186,6 +186,10 @@ def test_epic_advance_declared_verb_reaches_spawn_argv(iso, monkeypatch):
     disp = [e for e in _events(iso.events) if e["type"] == "advance_dispatched"]
     assert disp and disp[0]["data"]["verb"] == "/blueprint"
     assert disp[0]["data"]["verb_source"] == "declared"
+    # AC10-HP: the worker-to-node join rides the spawn argv.
+    argv = calls[0]["argv"]
+    assert argv[argv.index("--node") + 1] == "x-BP01"
+    assert argv[argv.index("--slug") + 1] == "bp-declared"
 
 
 def test_epic_advance_undeclared_node_keeps_the_builtin(iso, monkeypatch):

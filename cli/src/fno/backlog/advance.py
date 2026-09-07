@@ -1522,6 +1522,13 @@ def _spawn_worker(
     # and the events into the account's home where nothing looks (x-c33e).
     if dispatch_account:
         cmd += ["--dispatch-account", dispatch_account]
+    # x-0961: the worker-to-node join. Without --node the registry row carries
+    # node: null, so no instrument can answer which worker is on which node;
+    # every manual spawn passes it, which is why manual dispatches joined and
+    # advance dispatches did not.
+    cmd += ["--node", node_id]
+    if node_slug:
+        cmd += ["--slug", node_slug]
     cmd += ["--name", agent_name, target_cmd]
 
     # The brief (US3) rides the spawn subprocess env as TARGET_BRIEF (never the
