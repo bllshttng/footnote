@@ -113,6 +113,11 @@ _WT_CWD_SNAPSHOT_OK=0
 # Snapshot-time evidence for the candidates _wt_pids kept, pid:cmd@cwd,
 # comma-joined. A later `ps -p` re-read lies: the process can die in between.
 _WT_PIDS_DIAG=""
+# Row counts the last _wt_pids decision read from each snapshot, plus the
+# diagnostic-format version the protected line stamps. A verdict that
+# contradicts these counters means an older script ran.
+_WT_PIDS_PS_ROWS=""
+_WT_PIDS_DIAG_VERSION=5
 
 _wt_refresh_cwd_snapshot() {
     local raw=""
@@ -129,6 +134,7 @@ _wt_refresh_cwd_snapshot() {
         /^p[0-9]+$/ { pid = substr($0, 2); next }
         /^n/ && pid != "" { print pid "\t" substr($0, 2) }
     ')"
+    _WT_CWD_ROWS="$(printf '%s\n' "${_WT_CWD_SNAPSHOT:-}" | awk 'NF { n++ } END { print n + 0 }')"
     _WT_CWD_SNAPSHOT_OK=1
 }
 
@@ -153,6 +159,8 @@ _wt_pids() {
     # would surface as the function's status even though the pids printed fine.
     candidates="$(printf '%s\n%s\n' "$pids" "$pids_f" | grep -v "^$$\$" | grep -v '^$' | sort -u || true)"
     if [[ -z "$candidates" ]]; then
+        _WT_PIDS_PS_ROWS=""
+        _WT_PIDS_DIAG=""
         return "$snapshot_rc"
     fi
     # One process-table snapshot for the whole candidate set, not one `ps`
@@ -198,6 +206,7 @@ _wt_pids() {
     # every candidate is kept fail-closed and the diagnostic records the ps
     # exit status plus any cwd sighting, readable from the protection line.
     ps_rows="$(awk -v m="__FNO_PS_SNAPSHOT_COMPLETE__" '$0 == m { exit } NF { c++ } END { print c + 0 }' <<< "$ps_snap")"
+    _WT_PIDS_PS_ROWS="$ps_rows"
     local filtered2="" pid_keep cwd_row kept_info kp kcmd kcwd
     _WT_PIDS_DIAG=""
     if [[ "$ps_rows" -eq 0 ]]; then
@@ -717,8 +726,9 @@ _cargo_target_offload() {
                 # `ps -p` re-read reports the empty command of a process
                 # that died in between and names nothing.
                 pid_diag="${_WT_PIDS_DIAG%,}"
-                printf 'cargo-offload protected bytes=%s reason=%s path=%s pids=%s\n' \
-                    "$bytes" "$protection" "$target" "${pid_diag%,}"
+                printf 'cargo-offload protected bytes=%s reason=%s path=%s v=%s ps_rows=%s cwd_rows=%s pids=%s\n' \
+                    "$bytes" "$protection" "$target" "$_WT_PIDS_DIAG_VERSION" \
+                    "${_WT_PIDS_PS_ROWS:-?}" "${_WT_CWD_ROWS:-?}" "${pid_diag%,}"
                 kept=$((kept + 1))
                 continue
             fi
