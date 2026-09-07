@@ -329,9 +329,7 @@ def inventory_cmd(
         capacity = runtime_capacity(inventory=inv)
     except Exception:  # noqa: BLE001 - a capacity read never breaks the readout
         capacity = {}
-    slots = [
-        slot_states(verb, capacity, inventory=inv) for verb in SLOT_VERBS
-    ]
+    slots = [slot_states(verb, capacity, inventory=inv) for verb in SLOT_VERBS]
     rows: list[dict[str, str]] = []
     refusals: list[str] = []
     if not inv.rows:
@@ -395,8 +393,6 @@ def inventory_cmd(
 
 def _echo_slots(slots: list[dict]) -> None:
     """Print the per-verb slot readout under the row table."""
-    if not slots:
-        return
     typer.echo("slots:")
     for slot in slots:
         lanes = slot.get("lanes") or []

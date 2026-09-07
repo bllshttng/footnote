@@ -824,12 +824,9 @@ def _report_deprecated_dispatch_harness() -> None:
 
 
 def _report_band_routing() -> None:
-    """Say when difficulty bands and verb slots are routing nothing, and why.
-
-    The line names BOTH halves - declared row count, verbs with no resolving
-    lane - and is silent only once at least one verb's slot would take a lane.
-    ``model_routing.roles`` is a DIFFERENT axis; having it set reads as
-    already on.
+    """Say when band routing is routing nothing, and why: silent only once at
+    least one verb's slot would take a lane. ``model_routing.roles`` is a
+    DIFFERENT axis; having it set reads as already on.
     """
     from fno import route_resolve
     from fno.config import load_settings
@@ -850,9 +847,8 @@ def _report_band_routing() -> None:
             f"agents.profiles.{verb}.lanes"
         ):
             empty_verbs.append(verb)
-    # Silent only when at least one verb's slot would take a lane right now:
-    # then routing is armed and the unconfigured verbs are a per-verb choice,
-    # not a dead router.
+    # Silent once any verb's slot would take a lane: routing is armed, and
+    # the unconfigured verbs are a per-verb choice, not a dead router.
     if len(empty_verbs) < len(route_resolve.SLOT_VERBS):
         return
     try:
