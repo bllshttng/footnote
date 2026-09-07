@@ -31,10 +31,10 @@ Setup links shared state from canonical: vault symlink, gitignored `.claude/` su
 
 The removal contract, missing until 174 trees piled up (74 GB). Three buckets, one trigger, one gate:
 
-- **DIRTY - holds only while the node is open.** A done and merged node's tree is removed by the merge reaper whatever its git status; the branch and the transcript are the recovery path. Unpushed (HEAD not in origin/main) still holds - that is unpushed work, not dirt. Law d-cfcf5a8e. For an OPEN node's tree the old boundary stands: report only. Except setup's own symlinks into canonical: discounted and named (`reason=setup-links`).
+- **DIRTY** - the merge reaper takes a done-and-merged tree whatever its git status; unpushed HEAD still holds (law d-cfcf5a8e).
 - **clean + unmerged** - never auto-pruned. Report the branch so a human judges (open PR or abandoned work).
 - **clean + merged** - prune the TREE, keep the BRANCH. The tree is a checkout. The branch is the work.
-- **Trigger: MERGE, never node-done.** The mint site is `fno do pr merge` itself (the post-merge ritual is the second mint site, for merges it observes); the daemon's merge reaper pays the order after a grace window.
+- **Trigger: MERGE, never node-done.** Mint sites: `fno do pr merge`, the post-merge ritual; the daemon reaper pays after a grace window.
 - **Gate: `reapable`** (`fno agents workspace worktree reapable`) enforces the buckets, not each caller.
 - **Backstop: the daemon's daily `cleanup --merged` sweep** - the ritual only sees its own PRs.
 
