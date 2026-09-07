@@ -68,7 +68,7 @@ def route_tier(payload: dict[str, Any]) -> tuple[Optional[str], list[str]]:
     return out.get("model"), [str(line) for line in (out.get("chain") or [])]
 
 
-def route_states(payload: dict[str, Any]) -> tuple[list[dict], list[str]]:
-    """The readout leg: returns ``(lane_states, chain)``."""
-    out = _route_slot_call(payload)
-    return out.get("lane_states") or [], [str(line) for line in (out.get("chain") or [])]
+def route_states(payload: dict[str, Any]) -> dict[str, Any]:
+    """The readout leg: the verb's whole states answer (lane_states, chain,
+    the policy lines, and would_take)."""
+    return _route_slot_call(payload)

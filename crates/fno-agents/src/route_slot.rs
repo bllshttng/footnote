@@ -667,6 +667,55 @@ fn states_leg(payload: &Value) -> Value {
     let mut chain: Vec<Value> = Vec::new();
     let mut lanes_raw = lanes_raw;
     let mut prefix: Vec<Value> = Vec::new();
+    let mut diff_note: Option<String> = None;
+    // The readout's policy lines, displayed the way the slot gate refuses on
+    // them: normalized when valid, ``{raw} (invalid)`` when not. Display
+    // reads the BASE profile; the walk below applies overlays to the lanes.
+    let policy_raw = |name: &str, default: &str| -> String {
+        match profile.get(name).and_then(Value::as_str) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => default.to_string(),
+        }
+    };
+    let raw_exhausted = policy_raw("on_exhausted", "refuse");
+    let norm = raw_exhausted.trim().to_lowercase();
+    let on_exhausted = if ON_EXHAUSTED.contains(&norm.as_str()) {
+        norm
+    } else {
+        format!("{raw_exhausted} (invalid)")
+    };
+    let on_low = policy_raw("on_low", "prefer_healthy");
+    let on_unknown = policy_raw("on_unknown", "allow");
+    // The lane a spawn would take right now: the same walk a dispatch runs,
+    // node-less, so the preview can never disagree with the gate.
+    let walk_verdict = |payload: &Value| -> (Value, &'static str) {
+        let mut slot_payload = payload.clone();
+        if let Some(obj) = slot_payload.as_object_mut() {
+            obj.remove("mode");
+        }
+        let slot_out = resolve_slot_payload(&slot_payload);
+        let candidate = slot_out.get("candidate");
+        let lane_rung = candidate
+            .and_then(|c| c.get("lane_rung"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !lane_rung.is_empty() {
+            let lane = candidate
+                .and_then(|c| c.get("lane"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            (json!(format!("{lane_rung} {lane}")), "armed")
+        } else {
+            let terminal = slot_out
+                .get("chain")
+                .and_then(Value::as_array)
+                .and_then(|c| c.last())
+                .cloned()
+                .unwrap_or(json!(""));
+            (terminal, "unarmed")
+        }
+    };
+    let (would_take, routing) = walk_verdict(payload);
     if let Some(bd) = profile
         .get("by_difficulty")
         .and_then(Value::as_object)
@@ -679,13 +728,17 @@ fn states_leg(payload: &Value) -> Value {
                 .and_then(Value::as_str);
             effective_difficulty(node_difficulty)
         };
+        diff_note = diff_reason;
         if let Some(ovl) = bd.get(&diff_key).and_then(Value::as_object) {
             for key in ovl.keys() {
                 if !["lanes", "on_exhausted", "on_low", "on_unknown"].contains(&key.as_str()) {
                     chain.push(json!(format!(
                         "slot=config {rung_base}.by_difficulty.{diff_key} has unknown field {key:?}"
                     )));
-                    return json!({"status": "states", "lane_states": [], "chain": chain});
+                    return json!({
+                        "status": "states", "lane_states": [], "chain": chain,
+                        "would_take": would_take, "routing": routing,
+                    });
                 }
             }
             if let Some(ovl_lanes) = ovl.get("lanes") {
@@ -695,16 +748,42 @@ fn states_leg(payload: &Value) -> Value {
                         chain.push(json!(format!(
                             "slot=config {rung_base}.by_difficulty.{diff_key}.lanes must be a non-empty list when declared"
                         )));
-                        return json!({"status": "states", "lane_states": [], "chain": chain});
+                        return json!({
+                            "status": "states", "lane_states": [], "chain": chain,
+                            "would_take": would_take, "routing": routing,
+                        });
                     }
                 }
             }
         }
-        if let Some(reason) = diff_reason {
-            prefix.push(json!(format!("slot note {rung_base} {reason}")));
-        }
     }
     let lanes_arr = lanes_raw.as_array().cloned().unwrap_or_default();
+    if lanes_arr.is_empty() {
+        // The no-lanes verdict: what a spawn would fall back to. No walk ran,
+        // so the policy lines stay unset exactly like an unarmed slot.
+        let inv = payload.get("inventory").cloned().unwrap_or(json!({}));
+        let rows = inv.get("rows").and_then(Value::as_array);
+        let would_take = if inv
+            .get("declared")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && rows.map_or(false, |r| !r.is_empty())
+        {
+            json!(format!(
+                "no lanes; grid over {} rows",
+                rows.map_or(0, |r| r.len())
+            ))
+        } else {
+            json!("no lanes; no inventory; harness default")
+        };
+        return json!({
+            "status": "states", "lane_states": [], "chain": chain,
+            "would_take": would_take, "routing": "unarmed",
+        });
+    }
+    if let Some(reason) = diff_note {
+        prefix.push(json!(format!("slot note {rung_base} {reason}")));
+    }
     let declared_rows = payload
         .get("declared_rows")
         .and_then(Value::as_object)
@@ -714,7 +793,10 @@ fn states_leg(payload: &Value) -> Value {
         Ok(f) => f,
         Err(line) => {
             chain.push(json!(line));
-            return json!({"status": "states", "lane_states": [], "chain": chain});
+            return json!({
+                "status": "states", "lane_states": [], "chain": chain,
+                "would_take": would_take, "routing": routing,
+            });
         }
     };
     let mut lane_states = Vec::new();
@@ -767,6 +849,11 @@ fn states_leg(payload: &Value) -> Value {
         "status": "states",
         "lane_states": lane_states,
         "chain": chain,
+        "on_exhausted": on_exhausted,
+        "on_low": on_low,
+        "on_unknown": on_unknown,
+        "would_take": would_take,
+        "routing": routing,
     })
 }
 
@@ -1502,6 +1589,78 @@ mod tests {
         assert_eq!(states.len(), 2);
         assert_eq!(states[0]["state"], "exhausted");
         assert_eq!(states[1]["state"], "no-such-row");
+    }
+
+    #[test]
+    fn states_verdict_names_the_lane_a_spawn_would_take() {
+        let out = resolve_slot_payload(&json!({
+            "mode": "states",
+            "rung_base": "agents.profiles.target",
+            "lanes_raw": ["flash-x"],
+            "declared_rows": {"flash-x": {"name": "flash-x", "harness": "claude",
+                                          "model": "glm"}},
+            "capacity": {"claude": {"state": "ok"}},
+            "profile": {"on_exhausted": "refuse"},
+        }));
+        assert_eq!(out["routing"], "armed");
+        assert_eq!(out["would_take"], "agents.profiles.target.lanes[0] flash-x");
+        assert_eq!(out["on_exhausted"], "refuse");
+        assert_eq!(out["on_low"], "prefer_healthy");
+        assert_eq!(out["on_unknown"], "allow");
+    }
+
+    #[test]
+    fn states_all_lanes_exhausted_reads_unarmed_with_the_terminal() {
+        let out = resolve_slot_payload(&json!({
+            "mode": "states",
+            "rung_base": "agents.profiles.target",
+            "lanes_raw": ["flash-x"],
+            "declared_rows": {"flash-x": {"name": "flash-x", "harness": "claude",
+                                          "model": "glm", "account": "zai-main"}},
+            "capacity": {"claude": {"state": "exhausted",
+                                    "accounts": {"zai-main": "exhausted"}}},
+            "profile": {"on_exhausted": "queue"},
+        }));
+        assert_eq!(out["routing"], "unarmed");
+        assert!(out["would_take"].as_str().unwrap().contains("exhausted"));
+    }
+
+    #[test]
+    fn states_no_lanes_names_the_grid_fallthrough_and_omits_policies() {
+        let out = resolve_slot_payload(&json!({
+            "mode": "states",
+            "rung_base": "agents.profiles.target",
+            "lanes_raw": [],
+            "inventory": {"declared": true,
+                          "rows": [{"name": "a", "harness": "claude", "model": "m"},
+                                   {"name": "b", "harness": "codex", "model": "m"}]},
+        }));
+        assert_eq!(out["would_take"], "no lanes; grid over 2 rows");
+        assert_eq!(out["routing"], "unarmed");
+        assert_eq!(out["lane_states"].as_array().unwrap().len(), 0);
+        assert!(out.get("on_exhausted").is_none());
+        let out = resolve_slot_payload(&json!({
+            "mode": "states", "rung_base": "agents.profiles.target",
+            "lanes_raw": [], "inventory": {"declared": false, "rows": []},
+        }));
+        assert_eq!(out["would_take"], "no lanes; no inventory; harness default");
+    }
+
+    #[test]
+    fn states_invalid_policy_is_displayed_with_the_invalid_marker() {
+        let out = resolve_slot_payload(&json!({
+            "mode": "states",
+            "rung_base": "agents.profiles.target",
+            "lanes_raw": ["flash-x"],
+            "declared_rows": {"flash-x": {"name": "flash-x", "harness": "claude",
+                                          "model": "glm"}},
+            "capacity": {"claude": {"state": "ok"}},
+            "profile": {"on_exhausted": "Bogus"},
+        }));
+        assert_eq!(out["on_exhausted"], "Bogus (invalid)");
+        // The walk refuses the same config, so the verdict names the fault.
+        assert!(out["would_take"].as_str().unwrap().contains("not one of"));
+        assert_eq!(out["routing"], "unarmed");
     }
 
     #[test]

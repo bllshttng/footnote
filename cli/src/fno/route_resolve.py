@@ -247,7 +247,6 @@ def resolve_inventory(
 
 
 
-_ON_EXHAUSTED = ("queue", "degrade", "refuse")
 #: The verbs fno dispatches, and therefore the slots an operator fills.
 SLOT_VERBS = ("think", "blueprint", "target", "review", "crown")
 
@@ -345,8 +344,7 @@ def _declared_rows(settings: object) -> dict[str, Any]:
 
 
 def _lanes_payload(lanes: Any) -> list[Any]:
-    """Lane entries as JSON: dicts pass through; profile lane objects
-    serialize by the verb's own field vocabulary."""
+    """Lane entries as JSON; profile lane objects serialize by the verb's own fields."""
     fields = ("provider", "model", "effort", "substrate", "permission_mode",
               "route", "account", "pane_group")
     out: list[Any] = []
@@ -369,13 +367,8 @@ def _inventory_payload(inventory: Optional[Any]) -> dict[str, Any]:
             "declared": bool(getattr(inventory, "declared", False)),
             "objective": str(getattr(inventory, "objective", "") or "cheapest-that-clears"),
             "prefer_harness": str(getattr(inventory, "prefer_harness", "") or ""),
-            "rows": [
-                {"name": r.name, "harness": r.harness, "model": r.model,
-                 "route": r.route, "account": r.account, "band": r.band,
-                 "percentile": r.percentile, "effort": r.effort,
-                 "cost_per_mtok_in": r.cost_per_mtok_in}
-                for r in inventory.rows.values()
-            ],
+            # asdict: the verb reads fields by name; a key it ignores is harmless.
+            "rows": [dataclasses.asdict(r) for r in inventory.rows.values()],
         }
     except Exception:  # noqa: BLE001 - an unreadable inventory grids on defaults
         return {}
@@ -400,52 +393,40 @@ def _harness_installed_table(harnesses: list[str]) -> dict[str, bool]:
 
 
 def _effort_ok_table(rows: list[Mapping[str, Any]]) -> dict[str, dict[str, bool]]:
-    """Which (harness, effort) pairs survive ``effort_tokens``; the verb only
-    consumes verdicts."""
+    """Which (harness, effort) pairs survive ``effort_tokens``; the verb only consumes verdicts."""
     out: dict[str, dict[str, bool]] = {}
     for row in rows:
-        harness = str(row.get("harness", "") or "")
-        effort = str(row.get("effort", "") or "")
+        harness, effort = str(row.get("harness", "") or ""), str(row.get("effort", "") or "")
         if not harness or not effort.strip():
             continue
         try:
             from fno.agents.mux_spawn import effort_tokens
 
             effort_tokens(harness, effort)
-            out.setdefault(harness, {})[effort] = True
+            verdict = True
         except Exception:  # noqa: BLE001 - an unusable effort surface is omitted
-            out.setdefault(harness, {})[effort] = False
+            verdict = False
+        out.setdefault(harness, {})[effort] = verdict
     return out
 
 
-def _vendor_tables(
-    settings: object, rows: dict[str, Any], lanes: list[Any]
-) -> dict[str, Any]:
-    """Vendor caps and live counts for every vendor the rows or inline
-    lanes name by ``route``."""
+def _vendor_tables(settings: object, rows: dict[str, Any], lanes: list[Any]) -> dict[str, Any]:
+    """Vendor caps and live counts for every vendor the rows or inline lanes name by ``route``."""
     caps: dict[str, int] = {}
     counts: dict[str, int] = {}
     errors: dict[str, str] = {}
     try:
         from fno.agents.spawn_gate import (
-            ProviderCountUnavailable,
-            provider_lanes_cap,
-            provider_live_count,
+            ProviderCountUnavailable, provider_lanes_cap, provider_live_count,
         )
         from fno.config import provider_limits_table
 
         table = dict(provider_limits_table(getattr(settings, "agents", None)))
         routes = [str(row.get("route", "") or "") for row in rows.values()]
-        routes += [
-            str(lane.get("route", "") or "")
-            for lane in lanes
-            if isinstance(lane, Mapping)
-        ]
-        for vendor in sorted({
-            route.replace(",", "/").partition("/")[0].strip()
-            for route in routes
-            if route.strip()
-        } - {""}):
+        routes += [str(lane.get("route", "") or "") for lane in lanes if isinstance(lane, Mapping)]
+        vendors = sorted({r.replace(",", "/").partition("/")[0].strip()
+                          for r in routes if r.strip()} - {""})
+        for vendor in vendors:
             cap = provider_lanes_cap(table.get(vendor))
             if cap is None:
                 continue
@@ -471,22 +452,11 @@ def _account_record_vendors(settings: object) -> dict[str, str]:
 
 
 def _slot_payload(
-    *,
-    rung_base: str,
-    profile: Optional[object],
-    lanes: Any,
-    node: Optional[Mapping],
-    capacity: Optional[Mapping[str, object]],
-    inventory: Optional[Any],
-    settings: object,
-    substrate: Optional[str],
-    permission_mode: Optional[str],
-    constrain_harness: Optional[str],
-    explicit_lane: bool,
-    explicit_model: bool,
-    gate_bypassed: bool,
-    role: Optional[str] = None,
-    protected_role: Optional[str] = None,
+    *, rung_base: str, profile: Optional[object], lanes: Any, node: Optional[Mapping],
+    capacity: Optional[Mapping[str, object]], inventory: Optional[Any], settings: object,
+    substrate: Optional[str], permission_mode: Optional[str], constrain_harness: Optional[str],
+    explicit_lane: bool, explicit_model: bool, gate_bypassed: bool,
+    role: Optional[str] = None, protected_role: Optional[str] = None,
     model_occupied: bool = False,
 ) -> dict[str, Any]:
     """The slot/grid payload: both legs' inputs plus the gather the verb
@@ -512,11 +482,8 @@ def _slot_payload(
         "thread_seatable": _thread_seatable(
             [str(r.get("harness", "")) for r in rows.values()]
             + [str(r.get("harness", "")) for r in inv_rows]
-            + [
-                str(lane.get("provider", "") or "")
-                for lane in (lanes_payload or [])
-                if isinstance(lane, Mapping)
-            ]
+            + [str(lane.get("provider", "") or "") for lane in (lanes_payload or [])
+               if isinstance(lane, Mapping)]
         ),
         "account_record_vendors": _account_record_vendors(settings),
         "role": role,
@@ -529,16 +496,12 @@ def _slot_payload(
     except Exception:  # noqa: BLE001 - an unusable effort table omits nothing
         payload["effort_ok"] = {}
     try:
-        payload["harness_installed"] = _harness_installed_table([
-            str(r.get("harness", "") or "") for r in inv_rows
-        ])
+        payload["harness_installed"] = _harness_installed_table(
+            [str(r.get("harness", "") or "") for r in inv_rows])
     except Exception:  # noqa: BLE001 - an unreadable roster degrades open
         payload["harness_installed"] = {}
-    payload.update(
-        _vendor_tables(
-            settings, rows, lanes_payload if isinstance(lanes_payload, list) else []
-        )
-    )
+    payload.update(_vendor_tables(
+        settings, rows, lanes_payload if isinstance(lanes_payload, list) else []))
     return payload
 
 
@@ -593,60 +556,35 @@ def slot_states(
         overlay = by_diff.get("high")
         if isinstance(overlay, Mapping):
             lanes = overlay.get("lanes")
-    if not lanes:
-        if inventory.declared and inventory.rows:
-            out["would_take"] = f"no lanes; grid over {len(inventory.rows)} rows"
-        else:
-            out["would_take"] = "no lanes; no inventory; harness default"
-        return out
-    raw_exhausted = str(getattr(_profile, "on_exhausted", "") or "refuse")
-    on_exhausted = raw_exhausted.strip().lower()
-    out["on_exhausted"] = (
-        on_exhausted if on_exhausted in _ON_EXHAUSTED else f"{raw_exhausted} (invalid)"
-    )
-    out["on_low"] = str(getattr(_profile, "on_low", "") or "prefer_healthy")
-    out["on_unknown"] = str(getattr(_profile, "on_unknown", "") or "allow")
     rung_base = f"agents.profiles.{verb}"
+    payload = _slot_payload(
+        rung_base=rung_base, profile=_profile, lanes=lanes, node=None,
+        capacity=capacity, inventory=inventory, settings=settings,
+        substrate=None, permission_mode=None, constrain_harness=None,
+        explicit_lane=False, explicit_model=False, gate_bypassed=False,
+    )
+    payload["mode"] = "states"
+    states: dict[str, Any] = {}
     try:
         from fno.route_slot_client import route_states
 
-        lane_states, states_chain = route_states({
-            "mode": "states",
-            "rung_base": rung_base,
-            "lanes_raw": _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else lanes,
-            "declared_rows": _declared_rows(settings),
-            "profile": _profile_fields(_profile),
-            "node": None,
-            "capacity": dict(capacity or {}),
-        })
-    except Exception:  # noqa: BLE001 - a missing verb degrades the readout
-        lane_states, states_chain = [], []
-    # Rungs, identity, source and the difficulty note are the verb's
-    # vocabulary: take them back from its output, never rebuilt here.
-    for line in states_chain:
+        states = route_states(payload)
+    except Exception as exc:  # noqa: BLE001 - a missing verb degrades the readout
+        states = {"would_take": f"slot=route-slot-unavailable ({exc})"}
+    for key in ("on_exhausted", "on_low", "on_unknown", "would_take", "routing"):
+        if key in states:
+            out[key] = states[key]
+    # The difficulty note is the verb's vocabulary: take it back verbatim.
+    for line in states.get("chain") or []:
         note_prefix = f"slot note {rung_base} "
         if line.startswith(note_prefix):
             out["note"] = line[len(note_prefix):]
-    for state_entry in lane_states:
-        entry = {
-            "rung": str(state_entry.get("rung", "")),
-            "name": str(state_entry.get("name", "")),
-            "state": str(state_entry.get("state", "unknown")),
-        }
-        for key in ("identity", "source"):
-            if state_entry.get(key):
-                entry[key] = str(state_entry[key])
-        out["lanes"].append(entry)
-    candidate, slot_chain = resolve_slot(
-        verb, None, capacity, inventory=inventory, settings=settings
-    )
-    if candidate is not None and candidate.get("lane_rung"):
-        out["would_take"] = f"{candidate['lane_rung']} {candidate['lane']}"
-        out["routing"] = "armed"
-    else:
-        out["routing"] = "unarmed"
-        if slot_chain:
-            out["would_take"] = slot_chain[-1]
+    out["lanes"] = [
+        {k: str(e.get(k, "" if k != "state" else "unknown"))
+         for k in ("rung", "name", "state")}
+        | {k: str(e[k]) for k in ("identity", "source") if e.get(k)}
+        for e in states.get("lane_states") or []
+    ]
     return out
 
 
