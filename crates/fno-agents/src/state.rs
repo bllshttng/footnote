@@ -1336,8 +1336,11 @@ impl RegistryEntry {
     /// stops there. For a thread row the two ids are the same value, so adopt
     /// the session id at load. A row that HAS a thread ref keeps it, because a
     /// branch is minted with its own and a succession keeps its stable one.
-    /// Both readers must agree: Python answers `fno agents retask`, Rust
-    /// answers the `fno mux pane ls --json` rows retask joins against.
+    /// Three readers share this file: Python's `load_registry`, this one, and
+    /// `crates/fno`'s own raw reader, which already resolves the identity as
+    /// fno_id then session_id then harness_session_id. This restates that
+    /// fallback so a daemon-side read cannot see None where the other two see
+    /// the session id.
     pub fn backfill_fno_id(&mut self) {
         if self.fno_id.as_deref().is_none_or(str::is_empty) {
             if let Some(sid) = self.harness_session_id.as_deref() {
