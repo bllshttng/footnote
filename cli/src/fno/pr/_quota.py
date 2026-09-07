@@ -10,7 +10,7 @@ from typing import Callable, Optional, Sequence
 
 from fno.paths import github_cli_proxy_dir, graphql_quota_lock
 from fno.pr._proc import Result, run
-from fno.setup.github_cli import PROXY_DEPTH_ENV, PROXY_EXEC_LINE
+from fno.setup.github_cli import PROXY_DEPTH_ENV, PROXY_EXEC_LINE, PROXY_IMPORT_LINE
 
 GRAPHQL_RESERVE = 200
 REFUSED = 75
@@ -49,7 +49,8 @@ def _is_proxy_shim(path: Path) -> bool:
     compiled ``gh`` binary. The match is anchored to the exec line
     ``ensure_proxy`` writes (``PROXY_EXEC_LINE``) rather than a bare substring,
     so a real ``gh`` that merely mentions the proxy name in a comment is not
-    mistaken for the shim.
+    mistaken for the shim. ``PROXY_IMPORT_LINE`` anchors the second shape, a
+    console script, which carries no exec line at all.
     """
     try:
         with path.open("rb") as handle:
@@ -57,7 +58,7 @@ def _is_proxy_shim(path: Path) -> bool:
     except OSError:
         return False
     text = head.decode("utf-8", errors="ignore")
-    return any(line.strip() == PROXY_EXEC_LINE for line in text.splitlines())
+    return any(line.strip() in (PROXY_EXEC_LINE, PROXY_IMPORT_LINE) for line in text.splitlines())
 
 
 def _proxy_dirs() -> set[str]:
