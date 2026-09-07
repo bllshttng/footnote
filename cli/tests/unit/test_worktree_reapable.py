@@ -304,10 +304,11 @@ def test_setup_links_only_is_reapable_and_names_what_it_discounted(
 
     assert v.reapable is True
     assert v.reason == "setup-links"
-    assert len(v.discounted) == 4
-    for named in ("cli/.agents", "cli/.claude", "cli/.codex", "cli/.codex-plugin"):
+    # Named, not counted: a developer's global ignore file or `.git/info/exclude`
+    # can hide one of these from git, and the count is not the claim under test.
+    for named in ("cli/.agents", "cli/.claude/skills", "cli/.codex", "cli/.codex-plugin"):
         assert named in v.detail
-    assert "discounted=4" in v.line()
+    assert f"discounted={len(v.discounted)}" in v.line()
 
 
 def test_one_modified_tracked_file_beside_setup_links_still_blocks(
@@ -398,16 +399,67 @@ def test_every_path_setup_links_is_discounted(tmp_path: Path) -> None:
     fails. The script is the authority; this asserts the classifier follows.
     """
     script = Path(__file__).resolve().parents[3] / "scripts" / "setup" / "setup-worktree.sh"
-    calls = re.findall(r'^\s*link_(?:dir|file|artifact)\s+"([^"$]+)"', script.read_text(), re.M)
-    assert len(calls) >= 10, f"parser found only {len(calls)} link calls; the script changed shape"
+    body = script.read_text()
+    sites = re.findall(r"^\s*link_(?:dir|file|artifact)\s+(\S.*)$", body, re.M)
+    literals = [m for m in (re.fullmatch(r'"([^"$]+)"', arg.strip()) for arg in sites) if m]
+    dynamic = [arg.strip() for arg in sites if not re.fullmatch(r'"[^"$]+"', arg.strip())]
+    # Every call site is accounted for, so a new one cannot slip past the
+    # parser the way a bare or interpolated argument would.
+    assert len(literals) + len(dynamic) == len(sites) and len(sites) >= 10
+    for arg in dynamic:
+        assert arg.startswith('".claude/'), f"unknown dynamic link target {arg}"
 
     canonical = tmp_path / "canonical"
     worktree = tmp_path / "wt"
-    worktree.mkdir()
-    for rel in calls:
+    for match in literals:
+        rel = match.group(1)
         target = canonical / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("x")
-        link = worktree / rel.replace("/", "_")
-        link.symlink_to(target)
-        assert _is_setup_link(link, canonical), f"setup links {rel}, the classifier does not know it"
+        # Both placements setup uses: at the worktree root, and one directory
+        # deeper, which is the shape that reads untracked.
+        for link in (worktree / rel, worktree / "cli" / rel):
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(target)
+            assert _is_setup_link(link, worktree, canonical), f"setup links {rel}, unknown"
+
+
+def test_an_ignored_sibling_does_not_veto_the_discount(
+    canonical: Path, tmp_path: Path
+) -> None:
+    """The default porcelain collapses a directory; its children may be ignored.
+
+    `.gitignore` carries `**/.claude/hooks/`, and this repo's own global
+    ignore and `.git/info/exclude` cover more. Judging a collapsed `cli/.claude/`
+    from disk asks about files git does not track, and one of them vetoed the
+    whole discount. Reading with `-uall` never collapses, so it never asks.
+    """
+    wt = _linked_wt(tmp_path, canonical, "ignored", "feature/ignored")
+    (wt / ".gitignore").write_text("**/.claude/hooks/\n")
+    _git(wt, "add", ".gitignore")
+    _git(wt, "-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-qm", "ignore")
+    _setup_links(wt, canonical)
+    (wt / "cli" / ".claude" / "hooks").mkdir()
+    (wt / "cli" / ".claude" / "hooks" / "log.txt").write_text("runtime noise\n")
+    # The fixture really does reproduce the trap: the default read collapses.
+    assert "?? cli/.claude/\n" in _git(wt, "status", "--porcelain")
+
+    v = reapable(wt)
+
+    assert v.reapable is True, f"an ignored sibling must not block: {v.line()}"
+    assert v.reason == "setup-links"
+
+
+def test_a_setup_target_linked_from_the_wrong_place_still_blocks(
+    canonical: Path, tmp_path: Path
+) -> None:
+    """The receipt claims setup authorship, so the link's own path must agree."""
+    wt = _linked_wt(tmp_path, canonical, "misplaced", "feature/misplaced")
+    (canonical / "internal").mkdir(exist_ok=True)
+    (wt / "vault").symlink_to(canonical / "internal")
+
+    v = reapable(wt)
+
+    assert v.reapable is False
+    assert v.reason == "untracked"
+    assert "vault" in v.detail

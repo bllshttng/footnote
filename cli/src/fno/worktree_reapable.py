@@ -96,43 +96,40 @@ def _canonical_root(worktree: Path) -> Optional[Path]:
     return common.parent
 
 
-def _is_setup_link(link: Path, canonical: Path) -> bool:
+def _accepts(here: str, rel: str) -> bool:
+    """Does a link at ``here`` sitting over target ``rel`` read as setup's?
+
+    Setup writes each link at the same relative path as its target, one
+    directory deeper at most, so the two must agree. Without that, a hand-made
+    ``vault -> $CANONICAL/internal`` reaps under a receipt claiming setup wrote
+    it. The boundary is a whole segment: ``x.agents`` is not ``.agents``.
+    """
+    parent, _, name = rel.rpartition("/")
+    if not name or not (rel in _SETUP_LINK_ROOTS or parent == ".claude"):
+        return False
+    return here == rel or here.endswith("/" + rel)
+
+
+def _is_setup_link(link: Path, worktree: Path, canonical: Path) -> bool:
     """Did setup-worktree.sh write this symlink?
 
-    Read the link ONE hop rather than resolving it: setup writes an absolute
-    ``$CANONICAL/$rel``, so the raw target IS the attribution, and resolving
-    follows ``internal`` (itself a symlink) out of the checkout.
+    Read the link ONE hop first: setup writes an absolute ``$CANONICAL/$rel``,
+    so the raw target IS the attribution, and resolving follows ``internal``
+    (itself a symlink) out of the checkout. The realpath pairs are the fallback
+    for a canonical reached by a different spelling (``/tmp`` vs ``/private``).
     """
     try:
         target = os.readlink(link)
-    except OSError:
+        here = link.relative_to(worktree).as_posix()
+    except (OSError, ValueError):
         return False
     if not os.path.isabs(target):
         return False
     for base in (str(canonical), os.path.realpath(canonical)):
-        rel = os.path.relpath(target, base)
-        if rel.startswith(".."):
-            continue
-        parent, _, name = rel.rpartition("/")
-        return bool(name) and (rel in _SETUP_LINK_ROOTS or parent == ".claude")
-    return False
-
-
-def _is_setup_dirt(path: Path, canonical: Path) -> bool:
-    """A setup symlink, or a directory holding nothing but setup dirt.
-
-    Setup makes a REAL ``.claude`` directory and fills it with links, so git
-    reports the directory, never its contents. An empty one reads False: git
-    never reports one, and yes would discount what was never looked at.
-    """
-    if path.is_symlink():
-        return _is_setup_link(path, canonical)
-    if path.is_dir():
-        try:
-            children = list(path.iterdir())
-        except OSError:
-            return False
-        return bool(children) and all(_is_setup_dirt(c, canonical) for c in children)
+        for candidate in (target, os.path.realpath(target)):
+            rel = os.path.relpath(candidate, base)
+            if not rel.startswith("..") and _accepts(here, rel):
+                return True
     return False
 
 
@@ -255,9 +252,14 @@ def reapable(path: Union[str, Path]) -> Verdict:
     target = Path(path)
     if not target.is_dir():
         return Verdict(False, "probe-failed", "path is not a directory")
+    # `-uall`, so every untracked entry is a FILE. The default collapses a
+    # directory to one line, and judging that from disk asks about children git
+    # does not track: `.gitignore` carries `**/.claude/hooks/`, so a worktree
+    # whose `cli/.claude/` holds setup's links beside an ignored `hooks/` read
+    # as real work and stayed in the kept-forever bucket this exists to empty.
     try:
         r = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain", "--untracked-files=all"],
             cwd=str(target),
             capture_output=True,
             text=True,
@@ -276,6 +278,6 @@ def reapable(path: Union[str, Path]) -> Verdict:
         if not canonical:
             canonical.append(_canonical_root(target))
         root = canonical[0]
-        return root is not None and _is_setup_dirt(target / rel, root)
+        return root is not None and _is_setup_link(target / rel, target, root)
 
     return classify(r.stdout, _discount)

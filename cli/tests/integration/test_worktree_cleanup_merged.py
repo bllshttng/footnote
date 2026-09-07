@@ -1196,6 +1196,11 @@ def _wire_real_reapable(canon: Path) -> None:
     under test. `wt_reapable` anchors on its own file, so the two libs and a
     `cli/` carrying src plus the venv have to sit under the fixture root.
     """
+    venv = REPO_ROOT / "cli" / ".venv" / "bin" / "python3"
+    # Named, because without it wt_reapable falls through to whatever `fno` is
+    # installed, which may predate this change and answers `reapable=no`. The
+    # test would then fail as "kept (dirty)" and read as a code defect.
+    assert venv.exists(), f"this test needs the checkout venv at {venv}"
     shutil.copy2(REAPABLE_SRC, canon / "scripts" / "lib" / "worktree-reapable.sh")
     shutil.copy2(FNO_PYTHON_SRC, canon / "scripts" / "lib" / "fno-python.sh")
     (canon / "cli").symlink_to(REPO_ROOT / "cli")
