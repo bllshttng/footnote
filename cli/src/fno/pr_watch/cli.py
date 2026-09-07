@@ -1001,56 +1001,60 @@ def tick() -> None:
                 log.warning("pr-watch: heal phase failed: %s", exc)
 
         set_tick_phase("stranded")
-        if _wd_lane_armed(settings):
-            try:
+        # The sweep feeds the board's provenance cache; the lane only arms acting.
+        lane_armed = _wd_lane_armed(settings)
+        try:
+            left = deadline - (time.monotonic() - started)
+            if left < _STRANDED_FLOOR_S:
+                raise _WatchdogBudgetSpent(
+                    f"{left:.1f}s left, under the {_STRANDED_FLOOR_S:.0f}s "
+                    "a stranded sweep costs"
+                )
+            from fno.branch_provenance_cache import write_cache
+            from fno.worktree_stranded import STRANDED, UNKNOWN, apply_sweep, sweep
+
+            wake = lane_armed and _wd_wake_armed(settings)
+            changed, stranded_n, unknown_n, acted_n, failed_n, roots_done = False, 0, 0, 0, 0, 0
+            for root in _catchup_roots():
+                # Re-check per root, not just once before the loop: a
+                # code-review finding caught that the floor above only
+                # bounded the FIRST root - a multi-repo tick with several
+                # catch-up roots could blow well past the shared tick
+                # deadline after the first root's own check passed.
                 left = deadline - (time.monotonic() - started)
                 if left < _STRANDED_FLOOR_S:
-                    raise _WatchdogBudgetSpent(
-                        f"{left:.1f}s left, under the {_STRANDED_FLOOR_S:.0f}s "
-                        "a stranded sweep costs"
+                    log.info(
+                        "pr-watch: stranded leg stopped after %d root(s), "
+                        "%.1fs left, under the %.0fs a sweep costs - "
+                        "remaining roots retry next tick",
+                        roots_done, left, _STRANDED_FLOOR_S,
                     )
-                from fno.worktree_stranded import STRANDED, UNKNOWN, apply_sweep, sweep
-
-                # "report" mode still classifies (so counts stay honest) but
-                # never pushes or files - the same wake vs report split the
-                # fleet watchdog leg above draws at apply_verdict.
-                wake = _wd_wake_armed(settings)
-                stranded_n = unknown_n = acted_n = failed_n = roots_done = 0
-                for root in _catchup_roots():
-                    # Re-check per root, not just once before the loop: a
-                    # code-review finding caught that the floor above only
-                    # bounded the FIRST root - a multi-repo tick with several
-                    # catch-up roots could blow well past the shared tick
-                    # deadline after the first root's own check passed.
-                    left = deadline - (time.monotonic() - started)
-                    if left < _STRANDED_FLOOR_S:
-                        log.info(
-                            "pr-watch: stranded leg stopped after %d root(s), "
-                            "%.1fs left, under the %.0fs a sweep costs - "
-                            "remaining roots retry next tick",
-                            roots_done, left, _STRANDED_FLOOR_S,
-                        )
-                        break
-                    try:
-                        stranded_rows = sweep(repo=root)
-                        outcomes = apply_sweep(stranded_rows, wake=wake)
-                    except Exception as exc:  # noqa: BLE001 - one bad repo never stops the rest
-                        log.warning("pr-watch: stranded sweep failed for %s: %s", root, exc)
-                        continue
-                    stranded_n += sum(1 for r in stranded_rows if r.klass == STRANDED)
-                    unknown_n += sum(1 for r in stranded_rows if r.klass == UNKNOWN)
-                    acted_n += len(outcomes)
-                    failed_n += sum(1 for o in outcomes if o["stopped_at"])
-                    roots_done += 1
-                typer.echo(
-                    f"stranded sweep ({'wake' if wake else 'report'}): "
-                    f"stranded={stranded_n} unknown={unknown_n} "
-                    f"acted={acted_n} failed={failed_n}"
-                )
-            except _WatchdogBudgetSpent as exc:
-                log.info("pr-watch: stranded leg skipped: %s", exc)
-            except Exception as exc:  # noqa: BLE001 - never let the stranded sweep break pr-watch
-                log.warning("pr-watch: stranded sweep failed: %s", exc)
+                    break
+                try:
+                    stranded_rows = sweep(repo=root)
+                    changed |= write_cache(root, stranded_rows)
+                    outcomes = apply_sweep(stranded_rows, wake=wake)
+                except Exception as exc:  # noqa: BLE001 - one bad repo never stops the rest
+                    log.warning("pr-watch: stranded sweep failed for %s: %s", root, exc)
+                    continue
+                stranded_n += sum(1 for r in stranded_rows if r.klass == STRANDED)
+                unknown_n += sum(1 for r in stranded_rows if r.klass == UNKNOWN)
+                acted_n += len(outcomes)
+                failed_n += sum(1 for o in outcomes if o["stopped_at"])
+                roots_done += 1
+            typer.echo(
+                f"stranded sweep ({'wake' if wake else 'report'}): "
+                f"stranded={stranded_n} unknown={unknown_n} "
+                f"acted={acted_n} failed={failed_n}"
+            )
+            if changed:
+                from fno.graph.render import render_graph_md
+                from fno.graph.store import read_graph_strict
+                render_graph_md(read_graph_strict())
+        except _WatchdogBudgetSpent as exc:
+            log.info("pr-watch: stranded leg skipped: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - never let the stranded sweep break pr-watch
+            log.warning("pr-watch: stranded sweep failed: %s", exc)
 
         # Canonical-sync catch-up. The dispatch above is event-time-only:
         # it acts on merges it DETECTS, so a merge that landed while the daemon was
