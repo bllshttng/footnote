@@ -295,6 +295,56 @@ def test_pane_stats_reports_born_and_gone(tmp_path, monkeypatch):
     assert section["gone"] == [3]
 
 
+def test_pane_stats_reads_rows_from_the_ephemeral_sibling(tmp_path, monkeypatch):
+    """Post-routing shape: the gauge's rows live only in the .ephemeral sibling."""
+    from fno.agents.top import pane_counter_rows
+
+    journal = _counter_event(
+        tmp_path,
+        monkeypatch,
+        {
+            "2026-08-22T14:30:00Z": [_PANE_A],
+            "2026-08-22T14:30:30Z": [{**_PANE_A, "bytes_in": 250}],
+        },
+    )
+    sibling = journal.with_name(journal.name + ".ephemeral")
+    sibling.write_text(journal.read_text())
+    journal.unlink()  # post-deploy: the durable journal holds no gauge rows
+
+    section = pane_counter_rows(journal)
+    assert section["status"] == "ok"
+    assert len(section["rows"]) == 1
+    assert section["rows"][0]["bytes_in"] == 150
+
+
+def test_pane_stats_bridges_a_just_rotated_sibling(tmp_path, monkeypatch):
+    """A sibling that rotated mid-window holds its newest pair in the .1
+    generation; the reader must bridge instead of reporting
+    insufficient-samples for the active file's first minute."""
+    from fno.agents.top import pane_counter_rows
+
+    journal = tmp_path / "global-events.jsonl"
+    older_gen = journal.with_name(journal.name + ".ephemeral.1")
+    with older_gen.open("a") as fh:
+        for ts, pane in (
+            ("2026-08-22T14:30:00Z", _PANE_A),
+            ("2026-08-22T14:30:30Z", {**_PANE_A, "bytes_in": 250}),
+        ):
+            fh.write(
+                json.dumps(
+                    {"ts": ts, "type": "mux_pane_counters", "source": "daemon",
+                     "data": {"session": "main", "panes": [pane]}}
+                )
+                + "\n"
+            )
+    active_sibling = journal.with_name(journal.name + ".ephemeral")
+    active_sibling.write_text("")  # just rotated: empty until the next 30s tick
+
+    section = pane_counter_rows(journal)
+    assert section["status"] == "ok"
+    assert section["rows"][0]["bytes_in"] == 150
+
+
 def test_pane_stats_single_sample_says_so(tmp_path, monkeypatch):
     """Honest-edge: one sample prints an explicit insufficiency, never an
     empty table that reads as 'no cost'."""
@@ -577,3 +627,70 @@ def test_the_unattributed_row_warning_fires_once_per_process(monkeypatch):
     spawn_gate.provider_live_count("openai")
 
     assert len([m for m in seen if "without a provider stamp" in m]) == 1
+
+
+def test_census_caption_points_at_the_transcript_verdict(runner):
+    """The table's footer names itself a census and defers liveness to truth.
+
+    A row's presence is launch-time evidence; the caption must say so in every
+    render, including the empty board, so nobody reads STATUS as an answer
+    about whether the session behind the row can move now.
+    """
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["top"])
+    out = result.output
+    assert result.exit_code == 0, out
+    assert "census: PID/RSS are the process at scan time" in out, out
+    assert "REACH reads the transcript" in out, out
+    assert "fno agents truth" in out, out
+
+
+def test_status_column_renders_served_activity_with_age(tmp_path, monkeypatch, runner):
+    """AC7-HP (x-c672): the STATUS column answers what the session is doing -
+    `writing 30s` for a transcript touched half a minute ago, `quiet 3h` for
+    one three hours stale - and the word `live` appears in neither row."""
+    roster = {"proto": 1, "workers": {}}
+    (tmp_path / "daemon" / "roster.json").write_text(json.dumps(roster))
+    rows = [
+        AgentEntry(
+            name="fresh-worker",
+            harness="claude",
+            cwd="/tmp",
+            log_path="/tmp/l",
+            status="busy",
+            pid=ALIVE,
+            short_id="aaaa0000",
+        ),
+        AgentEntry(
+            name="stale-worker",
+            harness="claude",
+            cwd="/tmp",
+            log_path="/tmp/m",
+            status="busy",
+            pid=ALIVE,
+            short_id="bbbb1111",
+        ),
+    ]
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+
+    from fno.agents import session_truth
+
+    def fake_truth(handle, **_kwargs):
+        fresh = handle == "fresh-worker"
+        return {
+            "state": "working",
+            "last_activity_age_s": 30 if fresh else 3 * 3600,
+        }
+
+    monkeypatch.setattr(session_truth, "resolve_session_truth", fake_truth)
+
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["top"])
+    assert result.exit_code == 0, result.output
+    assert "writing 30s" in result.output, result.output
+    assert "quiet 3h" in result.output, result.output
+    for line in result.output.splitlines():
+        if "fresh-worker" in line or "stale-worker" in line:
+            assert " live" not in f" {line}", line

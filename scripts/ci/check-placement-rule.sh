@@ -82,6 +82,11 @@
 #      would otherwise make the probe read ITS credential and file the usage
 #      under the wrong account id. Read-only; footnote stores nothing there.
 #      test_usage.py is its test, which builds a fake slot under tmp_path.
+#      binding.py is the shared effective-account read those callers now go
+#      through, and test_account_binding.py is its test: it builds a canonical
+#      ~/.claude and an alt dir under tmp_path to prove that two roots sharing
+#      a transcript folder keep distinct credential identity. Fixture paths
+#      under tmp_path; footnote stores nothing under either.
 #      managed.py resolves the same canonical path for the same reason, in
 #      reconcile-slot: an identity read must not follow an ambient
 #      CLAUDE_CONFIG_DIR, or the repair proves the pinned account and stamps
@@ -100,6 +105,10 @@
 #      scripts/setup/setup-worktree.sh symlinks .claude/{agents,commands,
 #      skills,settings.local.json,scheduled_tasks.*,...} from the canonical
 #      checkout into a worktree per that same documented contract.
+#      worktree_reapable.py reads the OTHER end of that contract: to decide
+#      whether an untracked path is one of those links, it has to name the
+#      `.claude` segment setup wrote. It never constructs a path to store
+#      anything - the only `.claude` it forms is a link target it compares.
 #   3. autocorrect's OWN remaining ~/.claude/ files that this wave
 #      deliberately did NOT move (proposed-patches/, corrections-malformed.log,
 #      the various watermark files, insights.md) - only corrections.log and
@@ -168,6 +177,7 @@ cli/src/fno/adapters/_shared.py
 cli/src/fno/adapters/providers/dispatch.py
 cli/src/fno/adapters/providers/managed.py
 cli/src/fno/adapters/providers/staging.py
+cli/src/fno/adapters/providers/test_account_binding.py
 cli/src/fno/adapters/providers/test_cli.py
 cli/src/fno/adapters/providers/test_dispatch.py
 cli/src/fno/adapters/providers/test_failover.py
@@ -237,6 +247,7 @@ cli/src/fno/wake/detect.py
 cli/src/fno/worker/review.py
 cli/src/fno/worktree_cli/cli.py
 cli/src/fno/worktree_paths.py
+cli/src/fno/worktree_reapable.py
 cli/src/fno/worktree.py
 crates/fno-agents/src/claude_adopt.rs
 crates/fno-agents/src/claude_ask.rs

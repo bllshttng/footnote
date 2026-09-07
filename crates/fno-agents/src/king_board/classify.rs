@@ -65,16 +65,7 @@ pub(crate) fn classify_planned_unclaimed(
         let status_ready = s_str(entry, "status") == Some("ready");
         let leaf = s_str(entry, "type") != Some("epic") && !child_ids.contains(&node_id);
         let completed = entry.get("completed_at").map(truthy).unwrap_or(false);
-        let has_pr = entry.get("pr_number").map(truthy).unwrap_or(false)
-            || entry
-                .get("additional_prs")
-                .and_then(Value::as_array)
-                .map(|extras| {
-                    extras
-                        .iter()
-                        .any(|e| e.is_object() && e.get("number").map(truthy).unwrap_or(false))
-                })
-                .unwrap_or(false);
+        let has_pr = node_has_pr(entry);
         let batch_owner = entry.get("batch").map(truthy).unwrap_or(false);
         let blocked = entry
             .get("blocked_by")
@@ -234,7 +225,7 @@ pub(crate) fn read_claimed_nodes(
 
 /// Positive evidence the holder is doing something (board._holder_is_active):
 /// an absent reading is not a staffed lane.
-pub(crate) fn holder_is_active(probe: Option<&crate::claude_ask::TruthProbe>) -> bool {
+pub(crate) fn holder_is_active(probe: Option<&crate::truth_probe::TruthProbe>) -> bool {
     let Some(probe) = probe else {
         return false;
     };
@@ -247,18 +238,51 @@ pub(crate) fn holder_is_active(probe: Option<&crate::claude_ask::TruthProbe>) ->
     }
 }
 
-/// Who is driving this node: active, stalled, or none. One answer, two queues:
-/// stalled_holder selects stalled and undriven_pr selects none.
+/// A node bound to a PR, by `pr_number` or any `additional_prs` entry.
+pub(crate) fn node_has_pr(node: &Value) -> bool {
+    node.get("pr_number").map(truthy).unwrap_or(false)
+        || node
+            .get("additional_prs")
+            .and_then(Value::as_array)
+            .map(|extras| {
+                extras
+                    .iter()
+                    .any(|e| e.is_object() && e.get("number").map(truthy).unwrap_or(false))
+            })
+            .unwrap_or(false)
+}
+
+/// Who is driving this node: active, stalled, crowned, or none. One answer,
+/// three queues: stalled_holder selects stalled, undriven_pr and
+/// unheld_progress select none. `crowned` is a live crown driving the epic it
+/// reigns over: scope ids reach the build only through a king manifest, and
+/// the session holding that manifest is the one building, so a scope hit is a
+/// live crown. The epic carries no claim of its own (a crown is not a claim),
+/// so without this state the reigning epic reads "none" and no verb can clear
+/// the row. A PR bound to the epic keeps it reading none - undriven_pr owns
+/// that shape, and a PR needs a driver of its own. In-scope leaves stay
+/// claim-driven: a dead worker under a crown is still a dead handoff.
 pub(crate) fn node_driver<'a>(
-    node_id: &str,
+    node: &Value,
     claim_by_node: &'a HashMap<String, Value>,
-    activity: &'a HashMap<String, crate::claude_ask::TruthProbe>,
+    activity: &'a HashMap<String, crate::truth_probe::TruthProbe>,
+    crown_ids: Option<&HashSet<String>>,
 ) -> (&'static str, Option<&'a Value>) {
+    let node_id = s_str(node, "id").unwrap_or("");
+    let crowned = crown_ids.is_some_and(|ids| ids.contains(node_id))
+        && s_str(node, "type") == Some("epic")
+        && !node_has_pr(node);
     let claim = claim_by_node.get(node_id);
     let Some(claim) = claim else {
+        if crowned {
+            return ("crowned", None);
+        }
         return ("none", None);
     };
     if DEAD_CLAIM_STATES.contains(&s_str(claim, "state").unwrap_or("")) {
+        if crowned {
+            return ("crowned", None);
+        }
         return ("none", Some(claim));
     }
     let holder = s_str(claim, "holder").unwrap_or("");
@@ -318,7 +342,7 @@ mod tests {
 
     #[test]
     fn holder_activity_reads_only_positive_evidence() {
-        let active = crate::claude_ask::TruthProbe {
+        let active = crate::truth_probe::TruthProbe {
             state: "working".to_string(),
             harness_title: None,
             reachability: None,
@@ -329,17 +353,58 @@ mod tests {
             observed_model: Value::Null,
         };
         assert!(holder_is_active(Some(&active)));
-        let old = crate::claude_ask::TruthProbe {
+        let old = crate::truth_probe::TruthProbe {
             last_activity_age_s: Some(STALLED_AFTER_S + 1.0),
             ..active.clone()
         };
         assert!(!holder_is_active(Some(&old)));
-        let parked = crate::claude_ask::TruthProbe {
+        let parked = crate::truth_probe::TruthProbe {
             state: "your-move".to_string(),
             ..active
         };
         assert!(holder_is_active(Some(&parked)));
         assert!(!holder_is_active(None));
+    }
+
+    #[test]
+    fn a_live_crown_drives_the_epic_but_not_its_leaves() {
+        let epic = json!({"id": "x-epic", "type": "epic"});
+        let leaf = json!({"id": "x-leaf", "parent": "x-epic"});
+        let claims: HashMap<String, Value> = HashMap::new();
+        let activity = HashMap::new();
+        let crown: HashSet<String> = ["x-epic", "x-leaf"]
+            .map(str::to_string)
+            .into_iter()
+            .collect();
+        assert_eq!(
+            node_driver(&epic, &claims, &activity, Some(&crown)).0,
+            "crowned"
+        );
+        // an epic bound to its own PR keeps reading none: undriven_pr owns
+        // that shape, and a PR needs a driver of its own (measured 2026-09-06:
+        // six graph epics carry a pr_number)
+        let epic_pr = json!({"id": "x-epic", "type": "epic", "pr_number": 42});
+        assert_eq!(
+            node_driver(&epic_pr, &claims, &activity, Some(&crown)).0,
+            "none"
+        );
+        // without the crown the same epic is an unheld dead handoff
+        assert_eq!(node_driver(&epic, &claims, &activity, None).0, "none");
+        // an in-scope leaf stays claim-driven
+        assert_eq!(
+            node_driver(&leaf, &claims, &activity, Some(&crown)).0,
+            "none"
+        );
+        // a live claim outranks the crown
+        let mut held = claims.clone();
+        held.insert(
+            "x-epic".to_string(),
+            json!({"key": "node:x-epic", "state": "live", "holder": "claude:h"}),
+        );
+        assert_eq!(
+            node_driver(&epic, &held, &activity, Some(&crown)).0,
+            "stalled"
+        );
     }
 
     #[test]

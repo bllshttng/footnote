@@ -52,6 +52,7 @@ FIELD_META: dict[str, Meta] = {
     "paths.fleet_dir": Meta("never", "Override path to the megatron fleet dir."),
     "paths.postmortems_dir": Meta("never", "Override path to the postmortems dir."),
     "paths.worktrees_base": Meta("never", "Override base dir for worktrees."),
+    "paths.cargo_targets_base": Meta("never", "Where 'worktree cargo-offload' relocates crates/<crate>/target caches (default ~/.fno/cargo-targets). Each tree keeps its own directory under <base>/<repo>/<tree>/; the checkout keeps a symlink, so built-binary paths stay valid."),
     "paths.memory_dir": Meta("never", "Override path to the memory dir."),
     "paths.hook_logs_dir": Meta("never", "Override path to hook logs."),
     "paths.inbox_dir": Meta("never", "Override path to the cross-project messaging inbox dir."),
@@ -217,13 +218,13 @@ FIELD_META: dict[str, Meta] = {
         "advanced", "When true (default), a code payload floors the harness-resolved self-review reviewer (claude /code-review, codex /review) onto the required set on a stock install, so a /target that ships code is held for a head-pinned attestation instead of asking an epic leader. Set false only under a live claim; the opt-out lapses after review.optout_ttl_minutes and disarms unattended auto-merge while held.",
     ),
     "review.require_corroboration": Meta(
-        "advanced", "When true (default false), a PR whose only coverage is the author's own (self_attested) local attestation reads as uncovered; the refusal names both satisfying paths: a second session's head-pinned attestation, or a GitHub App review. Read `fno doctor`'s self-attestation report before flipping it - that row is the number of recent merged PRs that would have been held.",
+        "advanced", "DEPRECATED, ignored since 2026-09-05: origin never gates. Setting it changes nothing; the key is kept so an existing config still loads. Every review counts as a round, whoever or whatever session produced it.",
     ),
     "review.github_approval_satisfies": Meta(
-        "advanced", "When true (default), a non-author human GitHub APPROVED review satisfies coverage on its own and the corroboration term - the one producer a stranger's GitHub project emits with no footnote machinery. The approver's login must differ from the PR author's (GitHub refuses an author's approval server-side; the gate asserts it, and an unreadable PR author excludes fail-closed). Set false to keep today's recorded-but-never-counted behavior. Limit: GitHub's refusal is per identity, not per human - a second account with its own token can still self-approve.",
+        "advanced", "When true (default), a non-author human GitHub APPROVED review satisfies coverage on its own - the one producer a stranger's GitHub project emits with no footnote machinery. The approver's login must differ from the PR author's (GitHub refuses an author's approval server-side; the gate asserts it, and an unreadable PR author excludes fail-closed). Set false to keep today's recorded-but-never-counted behavior. Limit: GitHub's refusal is per identity, not per human - a second account with its own token can still self-approve.",
     ),
     "review.max_rounds": Meta(
-        "advanced", "The maximum number of review rounds (default 2): a PR gets AT MOST this many reviews and never waits for a round to come back clean. Two means two, counted across the whole life of the PR. A round is one reviewed HEAD. Two verdicts at one unchanged head are one round. A cap whose size depends on how a reviewer batches its output is not a cap. A pass is a round like any verdict: it still satisfies coverage, but it refunds nothing. Past this many rounds, a finding still open is FILED as a backlog node and the merge proceeds. The exception is a CONFIRMED correctness or security finding, or a truncated remainder. Those keep the IMPOSSIBLE verdict and need a non-author GitHub approval or the coverage-override label. CI failures, lint failures and rebases are not rounds. One review stays the floor, so an unreviewed PR is still uncovered. Validated at parse: at least 1.",
+        "advanced", "The maximum number of review rounds (default 2): a PR gets AT MOST this many reviews and never waits for a round to come back clean. Two means two, counted across the whole life of the PR. A round is one reviewed HEAD. Two verdicts at one unchanged head are one round. A cap whose size depends on how a reviewer batches its output is not a cap. A pass is a round like any verdict: it still satisfies coverage, but it refunds nothing. At this many rounds the review phase is complete: the PR merges on green CI and open findings stay in the PR conversation - nothing is filed to the backlog and no finding class holds the PR past its own budget. CI failures, lint failures and rebases are not rounds. One review stays the floor, so an unreviewed PR is still uncovered. Validated at parse: at least 1.",
     ),
     "review.carry_interdiff_lines": Meta(
         "advanced", "How many interdiff lines a rebase or fix commit may add while a verdict from the older head still counts as a review of the new one (default 100, the threshold of the attestation law d-608344c1). The measure is the multiset symmetric difference of the two PR-code patches against the base, never a direct head-to-head diff, so base movement contributes nothing. UNDER the bound carries; at or over it, or with an unreadable patch on either side, the verdict is stale and a fresh round is owed. 0 disables the arm.",
@@ -277,13 +278,6 @@ FIELD_META: dict[str, Meta] = {
     ),
     # --- config.target.* ---
     "target.dedupe_dead_duplicates": Meta("never", "Opt-in cleanup of provably-dead duplicate state files."),
-    "target.auto_launch_on_blueprint": Meta(
-        "advanced",
-        "Auto-launch a /target worker when a node reaches ready via /blueprint. "
-        "Harness and substrate come from the dispatch capability map, never a claude hardcode: a harness whose spawn claim reads native resolves to a native interactive thread, the rest degrade to headless. "
-        "The worker defaults to no-merge and lands a PR for review; merge posture resolves per node from auto_merge.grant. "
-        "It never fires on a node that is not ready, one under a live claim, an epic with no ready child, a plan stamped source: claude-plan-mode, or a fleet at agents.max_live past the dispatch wait ceiling (FNO_AUTOLAUNCH_TIMEOUT, default 180s).",
-    ),
     "target.handoff.enabled": Meta("advanced", "Enable explicit target capability escalation."),
     "target.handoff.used_pct_trigger": Meta("never", "Context-used %% that triggers a general-session compact nudge."),
     "target.handoff.king_used_pct_trigger": Meta("advanced", "Context-used %% that triggers an earlier king compact nudge."),
@@ -294,6 +288,7 @@ FIELD_META: dict[str, Meta] = {
     "target.defaults.no_external": Meta("never", "Session-input default: skip external review (size-profile driven)."),
     "target.defaults.no_docs": Meta("never", "Session-input default: skip docs (size-profile driven)."),
     "target.defaults.max_iterations": Meta("advanced", "Session-input default: max pipeline iterations."),
+    "test.timeout_seconds": Meta("never", "Wall-clock bound for one suite run under `fno doctor test`; on expiry the run's whole process group is killed, so the deps test binary cargo exec'd dies with it (default 1800)."),
     # --- config.agents.* ---
     "agents.a2a.auto": Meta("advanced", "Allow agents to auto-open agent-to-agent threads."),
     "agents.a2a.turn_ceiling": Meta("advanced", "Max turns in an agent-to-agent thread."),
@@ -311,8 +306,11 @@ FIELD_META: dict[str, Meta] = {
     "agents.pane_group_max": Meta("advanced", "Maximum panes placed in one named pane_group tab before a spawn creates the next numbered sibling tab (default 4).", default_source="default"),
     "agents.fallback": Meta("advanced", "Ordered fallback chain per node size, consulted ONLY when a provider refuses and the account queue cannot answer (agents.fallback.<S|M|L|default> = a list of {harness,model,effort,substrate,permission_mode,route,account} links). The operator rule 'simple work to a claude sonnet bg thread, complex work to codex' written where a daemon can read it. Give every size more than one link: a claude weekly cap and a z.ai five-hour cap are different meters with different periods, and either can be the one that is down. A link whose own provider reads EXHAUSTED with an unexpired reset is SKIPPED; UNKNOWN is not exhausted and stays eligible. An all-exhausted chain returns empty rather than link zero, because routing into a known-capped provider is worse than holding. Unlike agents.profiles this block REFUSES a malformed value rather than degrading open: degrading open on the failover path spawns a worker at an unintended vendor and bills it.", default_source="default"),
     "agents.silence_deadline_seconds": Meta("advanced", "Seconds of transcript silence after which `fno agents sweep` reports a worker as silent (default 600). A REPORT and never an action: no stop, no spawn, no claim mutation. A worker whose transcript age is unknowable emits nothing at all, because absence of evidence must not become a finding.", default_source="default"),
-    "agents.dead_row_grace": Meta("advanced", "Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600).", default_source="default"),
+    "agents.retire_grace_s": Meta("advanced", "Seconds a worker's transcript must be quiet past, once every node its session is named on is done, before the daemon's retirement sweep drops its registry row (default 900). The receipt and the node's sessions[] row keep the resume handle. A legacy recovery.retire_grace_s still parses and lifts onto this key with a warning.", default_source="default"),
     "agents.reap_receipts.retain_days": Meta("advanced", "Days a reap receipt (the resume handle for a reaped row) stays before the GC sweep expires it (default 7). A receipt whose reaped_at cannot be read is kept and named, never deleted on a failed read.", default_source="default"),
+    "agents.single_flight_ttl_seconds": Meta("advanced", "Seconds a single-flight answer counts as fresh (default 10). Callers arriving inside the window read one child's stdout instead of each spawning their own; the latch is keyed on the normalized argv, so two `do pr wait` calls for different PRs stay two flights.", default_source="default"),
+    "agents.single_flight_join_budget_seconds": Meta("advanced", "Seconds a later caller waits for the in-flight holder's answer before running its own (default 30). Set over the 23.2 s worst-measured roster read: load is when the latch has to hold. An exhausted budget spawns and says so, because a latch that can wedge a caller is worse than the fan-out it prevents.", default_source="default"),
+    "agents.orphan_reap_after_seconds": Meta("advanced", "Age at which an fno child that init inherited is reaped (default 5400). Three times `do pr wait --timeout 30m`, the longest detached child allowed to be running. The sweep also needs parent pid 1 and a pid no registry row names live.", default_source="default"),
     "agents.max_live": Meta("advanced", "Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).", default_source="default"),
     "process_admission.max_processes": Meta("advanced", "Maximum fno-attributed OS processes admitted by the native pre-spawn gate; counts processes, not agents or panes (default 400).", default_source="default"),
     "agents.provider_limits": Meta("advanced", "Per-provider budget record keyed by model provider: `lanes` is the immediate-refusal cap on concurrent live workers, `subagents` is the in-session fan-out width review route resolution reads (1 means a panel is never dispatched there). A bare integer is still legal and reads as `lanes`. Unlisted providers are uncapped in both dimensions; the built-in zai budget is lanes 5, subagents 1, because that account is shared. Renamed from `agents.max_lanes` so no two leaves share that name with `parallel.max_lanes`; the legacy spelling still parses with one deprecation line.", default_source="default"),
@@ -322,7 +320,6 @@ FIELD_META: dict[str, Meta] = {
     "agents.hard_max_load_per_cpu": Meta("advanced", "Absolute machine backstop for spawn preflight: refuse above this factor times the CPU count regardless of whose load it is (<= 0 disables; default 40). Pure fleet-share admits spawns onto a box already thrashing from foreign work. Keep it well above agents.max_load_per_cpu.", default_source="default"),
     "agents.footprint_sustained_cpu_cores": Meta("advanced", "Absolute override for the doctor footprint sustained-CPU threshold, in cores. Unset, the threshold derives from measured CPU capacity (a fraction per core) instead of an absolute constant that asked a 12-core machine's fleet to idle at 8%.", default_source="default"),
     "agents.worker_qos": Meta("advanced", "Worker CPU/IO priority: utility (background QoS, default) or off.", default_source="default"),
-    "agents.spawn_permission_mode": Meta("advanced", "Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); defaults to bypassPermissions so fire-and-forget workers skip the worktree-entry prompt. An explicit flag wins; opt out with an explicit \"\" (forward nothing) or \"default\" (prompt positively). Claude-native, fail-closed at the spawn seam.", default_source="default"),
     "agents.codex.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless codex workers."),
     "agents.gemini.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless gemini workers."),
     # --- config.dispatch.* (harness-capability map overlay; `fno agents dispatch resolve`) ---
@@ -386,7 +383,7 @@ FIELD_META: dict[str, Meta] = {
         "advanced", "Consecutive dispatch failures before a node is parked."
     ),
     "active_backlog.max_concurrent": Meta(
-        "never", "In-flight nodes per project per tick (v1 == 1)."
+        "never", "Global ceiling on concurrent converge runs across all missions."
     ),
     "active_backlog.mission": Meta(
         "never", "Scope the drain daemon to a single mission's nodes."
@@ -485,16 +482,16 @@ FIELD_META: dict[str, Meta] = {
     "restart.enabled": Meta("never", "Enable crash-recovery worker revival after `fno agents restart --mux` kills a server. Defaults true."),
     # --- config.evals.* ---
     "evals.enabled": Meta("never", "Enable the headless eval-suite grading-worker spawn. Defaults true."),
+    "evals.schedule_days": Meta("never", "Days between scheduled regression-tier runs on the pr-watch tick (0 disables)."),
+    "evals.stale_days": Meta("never", "Age in days at which the newest regression-tier run reads STALE in doctor and triage health."),
     # --- config.recovery.* ---
-    "recovery.enabled": Meta("advanced", "Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.spawn_permission_mode default); a non-bypass worker cannot run autonomously and is not resumed."),
+    "recovery.enabled": Meta("advanced", "Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.defaults.permission_mode built-in for autonomous dispatch); a non-bypass worker cannot run autonomously and is not resumed."),
     "recovery.idle_threshold_seconds": Meta("never", "How stale a bg session must be (seconds) before recovery acts on it."),
     "recovery.max_nudges": Meta("never", "Per-session cap on held-by-design surfaces before recovery stops surfacing a stuck session (close notifications are once-only, tracked separately)."),
     "recovery.watchdog.enabled": Meta("advanced", "Whether the external fleet watchdog lane runs on the pr_watch tick (default false). The depth it goes to is recovery.watchdog.mode."),
-    "recovery.watchdog.mode": Meta("advanced", "How far an enabled watchdog lane goes: report (default; publish the unfinished-work report: in_progress nodes with free claims, done branches ahead of origin/main, dirty ownerless worktrees, and ownerless PRs older than 24h, each finding naming its clearing verb) | wake (report, plus resume positively stalled sessions) | handoff (also permit a proved cross-provider outage transaction). Reap and reroute never fire from a tick; they need a manual `fno agents watchdog --apply-all`."),
+    "recovery.watchdog.mode": Meta("advanced", "How far an enabled watchdog lane goes: report (default; publish the unfinished-work report: in_progress nodes with free claims, done branches ahead of origin/main, dirty ownerless worktrees, and ownerless PRs older than 24h, each finding naming its clearing verb) | wake (report, plus resume positively stalled sessions) | handoff (also permit a proved cross-provider outage transaction). Reroute never fires from a tick; it needs a manual `fno agents watchdog --apply-all`."),
     "recovery.watchdog.mail_to": Meta("advanced", "Mail handle the unfinished-work digest is pushed to when the finding set changes (agent name, short id, or project:<slug>). Empty (default) mails nobody."),
-    "recovery.watchdog.reap": Meta("advanced", "Whether `fno agents watchdog --apply-all` may EXECUTE the reap lane (default false). Reap runs stop then rm, which deletes the session's worktree; work that exists only there is gone with it. Wake and reroute are recoverable, so they ship on. Reap verdicts are still computed, reported and mailed when this is off - only the destructive action is withheld."),
     "recovery.startup_destructive": Meta("advanced", "Whether daemon startup may archive orphan state directories and rewrite dead-PID rows as exited. Defaults false so restart recovery preserves every resume record."),
-    "recovery.retire_grace_s": Meta("advanced", "How long a finished worker stays parked before `fno agents watchdog --apply-all` stops it (default 900 seconds; 0 turns the retire lane off). A worker that declares itself done and never exits holds a live slot against config.agents.max_live forever. The grace is the follow-up window, so a worker that just delivered can still be asked one more thing. Unlike reap this ships armed: retire only runs stop, so the worktree, the transcript and the registry row all survive and `fno agents resume` undoes it."),
     "recovery.provider_outage_quorum": Meta("never", "Minimum distinct-session votes required to open a provider/account breaker; default 2, configurable down to 1 so a lone worker's outage can move provider ownership when the operator says so."),
     "recovery.provider_outage_fup_window_seconds": Meta("never", "Fair Usage Policy cross-session quorum window in seconds; minimum and default 300."),
     "recovery.provider_outage_529_count": Meta("never", "Consecutive assistant 529 records required per session; minimum and default 3."),

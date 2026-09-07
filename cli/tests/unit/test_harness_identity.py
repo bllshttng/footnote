@@ -17,12 +17,29 @@ from fno.harness_identity import (
     claude_transport_short_id,
     current_session_id,
     current_session_ids,
+    harness_of_session_id,
     legacy_suffix_handle,
     present_harness_markers,
     resolve_harness_identity,
     resolve_owned_identity,
     session_identity_key,
 )
+
+
+@pytest.mark.parametrize(
+    ("session_id", "expected"),
+    [
+        ("b936b571-e0aa-40ed-a07d-97acb9a87db1", "claude"),
+        ("01a06886-9405-74a1-8afd-5b67baf89604", "codex"),
+        ("01A06886-9405-74A1-8AFD-5B67BAFB9604", "codex"),
+        ("ses_7f3a9b2cAbCd1234", "opencode"),
+        ("20260823T083106Z-cx87209-9d434e", None),
+        ("8ad8e13c", None),
+        ("", None),
+    ],
+)
+def test_harness_of_session_id_reads_the_shapes_own_harness(session_id, expected):
+    assert harness_of_session_id(session_id) == expected
 
 
 @pytest.mark.parametrize(

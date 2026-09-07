@@ -49,6 +49,7 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     "subscribe [--agent <name>] [--kinds state,exit] [--json]",
     "digest --session <s> [--since <ts> | --since-epoch <secs>] [--json]",
     "needs [--since-epoch <secs>] [--fires-floor <n>] [--json]",
+    "feed [--since-epoch <secs>] [--limit <n>] [--node <id>] [--session <id>] [--json]",
     // `review-coverage` deliberately has NO entry here: the per-verb --help
     // intercept would print a one-line usage and shadow the verb's own
     // --help, which states the load-bearing contract (no way to assert

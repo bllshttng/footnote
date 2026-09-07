@@ -1,27 +1,13 @@
 """The rolling 24h wake ledger on the king manifest.
 
-A king woken by ordinary traffic is normal operation, not a failure retry, so
-it gets its own budget: ``wake_times``, a comma-joined list of RFC3339 UTC
-stamps pruned to the trailing 24 hours at every read and write. One field
-carries the three facts a waker needs - the COUNT in the window is
-``len(read_wakes(...))``, the DEBOUNCE clock is ``max(...)`` of it, and the
-WINDOW rolls by construction because pruning happens on both edges.
-
-Why a pruned list and not an anchor-plus-counter. An anchored window is a
-tumbling window in disguise: it admits twice the ceiling across a boundary,
-and an implementation whose anchor never advances is a lifetime constant
-wearing a window's name - the exact silent stranding this ledger exists to
-prevent (a lifetime cap of any size strands a long-lived reign; 32 lifetime
-was a three-day budget at measured volume). A pruned list cannot express
-either bug.
-
-The ledger is keyed on a store path, never a crown. ``should_wake`` takes its
-ceiling and debounce as arguments rather than reaching into a king settings
-object, and every function takes the store path from its caller. The king is
-not the only spawner this machine has, so whichever component survives can
-hold the same bound; that is a parameter list, not an abstraction, and no
-second caller is wired in this change.
+``wake_times`` is a comma-joined stamp list pruned to the trailing 24h at
+every read and write, so the count, the debounce clock, and the window all
+come from one field. A pruned list, not an anchor-plus-counter: an anchor
+that never advances is a lifetime cap wearing a window's name, and a cap of
+any size strands a long-lived reign. Every function takes its ceiling,
+debounce, and store path from its caller; keyed on a path, not a crown.
 """
+
 from __future__ import annotations
 
 import fcntl
@@ -32,14 +18,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 #: The trailing window a stamp counts inside. A stamp exactly 24h old is
-#: OUTSIDE it: AC4's roll test advances past the oldest stamps' 24 hours and
-#: expects the next wake allowed, so the boundary belongs to the aged-out side.
+#: OUTSIDE it (the roll test advances past it and expects the next wake
+#: allowed), so the boundary belongs to the aged-out side.
 WINDOW = timedelta(hours=24)
 
-#: Byte bound on one frontmatter line, not a rate bound. The rate bound is
-#: ``should_wake``; this cap only stops a bypassed ledger (a hand-run caller)
-#: from growing the line without limit. A respecting caller can never exceed
-#: its own ceiling, so the default matches the shipped config default.
+#: Byte bound on one frontmatter line, not a rate bound (that is
+#: ``should_wake``); it stops a bypassed ledger growing without limit.
 DEFAULT_KEEP = 32
 
 _STAMP_FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -70,12 +54,8 @@ def _format_stamp(stamp: datetime) -> str:
 
 
 def read_wakes(path: Path, *, now: datetime) -> list[datetime]:
-    """The stamps inside the trailing 24h, oldest first.
-
-    An unreadable store reads as absent, matching :func:`parse_manifest`, and
-    an unparseable stamp is DROPPED rather than crashing the tick - a corrupt
-    ledger must not wedge the fleet's only waker.
-    """
+    """The stamps inside the trailing 24h, oldest first. An unreadable store
+    reads as absent; an unparseable stamp is dropped, never a crash."""
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError:
@@ -95,16 +75,9 @@ def read_wakes(path: Path, *, now: datetime) -> list[datetime]:
     return sorted(stamps)
 
 
-def should_wake(
-    path: Path, *, now: datetime, ceiling: int, debounce_s: int
-) -> WakeVerdict:
-    """Allow one wake, or refuse naming ``debounce`` or ``ceiling``.
-
-    A PURE read with no billing: tests and diagnostics use it to ask what the
-    gate would say. The wake dispatcher itself must call :func:`admit_wake`
-    only - deciding here and billing separately reopens the two-reader race
-    admit_wake exists to close.
-    """
+def should_wake(path: Path, *, now: datetime, ceiling: int, debounce_s: int) -> WakeVerdict:
+    """Allow one wake, or refuse naming ``debounce`` or ``ceiling``. A pure
+    read; the dispatcher must use ``admit_wake``, which bills under one lock."""
     stamps = read_wakes(path, now=now)
     if stamps and (now - stamps[-1]).total_seconds() < debounce_s:
         return WakeVerdict(refusal="debounce", count=len(stamps))
@@ -114,12 +87,8 @@ def should_wake(
 
 
 def _rewrite_wake_times(path: Path, stamps: list[datetime]) -> None:
-    """Replace the ``wake_times`` line with ``stamps``. Caller holds the lock.
-
-    Every other line passes through byte-identical. A manifest armed before
-    the field existed gets the line inserted after the last king field,
-    mirroring bump_respawn_count's anchor.
-    """
+    """Replace the ``wake_times`` line only; caller holds the lock. A manifest
+    from before the field existed gets it inserted after the last king field."""
     try:
         content = path.read_text(encoding="utf-8")
     except OSError:
@@ -165,19 +134,14 @@ def _with_manifest_lock(path: Path):
 def admit_wake(
     path: Path, *, now: datetime, ceiling: int, debounce_s: int, keep: int = DEFAULT_KEEP
 ) -> WakeVerdict:
-    """Decide AND bill one wake under a single lock.
-
-    ``allowed`` means the bill already landed: the read, the gate, the append,
-    and the rewrite happen inside one ``<scope>.md.lock`` critical section, so
-    two overlapping tick processes cannot both read an empty ledger and both
-    dispatch - the loser sees the winner's stamp inside the lock and takes the
-    debounce refusal. The caller dispatches only on ``allowed``. A ``ceiling``
-    of 0 is the unbounded spelling, mirroring ``at_respawn_ceiling``.
+    """Decide AND bill one wake under the manifest lock: ``allowed`` means the
+    bill landed, so two overlapping ticks cannot both dispatch. A ceiling of 0
+    is the unbounded spelling.
     """
     if not Path(path).exists():
-        return WakeVerdict(refusal="debounce", count=0)  # no ledger, no wake;
-        # the caller's walk construction is the error surface for a missing
-        # manifest
+        # No ledger, no wake; the caller's walk construction is the error
+        # surface for a missing manifest.
+        return WakeVerdict(refusal="debounce", count=0)
     with _with_manifest_lock(path):
         stamps = read_wakes(path, now=now)
         if stamps and (now - stamps[-1]).total_seconds() < debounce_s:
@@ -191,28 +155,23 @@ def admit_wake(
         # gate would read len(stamps) < ceiling forever.
         if ceiling > 0:
             keep = max(keep, ceiling)
-        stamps = sorted(stamps)[-max(1, keep):]
+        stamps = sorted(stamps)[-max(1, keep) :]
         _rewrite_wake_times(path, stamps)
         return WakeVerdict(refusal="", count=len(stamps))
 
 
 def bill_wake(path: Path, *, now: datetime, keep: int = DEFAULT_KEEP) -> int:
-    """Append ``now``, prune, rewrite ONLY the ``wake_times`` line.
-
-    An UNCONDITIONAL bill for callers that have already decided (tests
-    pre-filling a ledger, a hand-run bypass). The wake dispatcher uses
-    :func:`admit_wake`, which decides and bills under one lock. Both take the
-    same ``<scope>.md.lock`` flock the Rust arming and bump paths take: a
-    concurrent re-crown rewrites the whole manifest and a bill must not
-    interleave with it. Returns the count now inside the window.
+    """Append ``now``, prune, rewrite only the ``wake_times`` line. An
+    unconditional bill for callers that already decided; the dispatcher uses
+    ``admit_wake``. Takes the same flock as the Rust arming and bump paths.
+    Returns the count inside the window.
     """
     path = Path(path)
     if not path.exists():
-        return 0  # no manifest, no ledger to bill; the caller's walk
-        # construction is the error surface for that
+        return 0  # no manifest, no ledger to bill
     with _with_manifest_lock(path):
         stamps = list(read_wakes(path, now=now))
         stamps.append(now.astimezone(timezone.utc))
-        stamps = sorted(stamps)[-max(1, keep):]
+        stamps = sorted(stamps)[-max(1, keep) :]
         _rewrite_wake_times(path, stamps)
         return len(stamps)

@@ -34,7 +34,6 @@ import posixpath
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -47,6 +46,7 @@ from xml.etree import ElementTree
 import click
 
 from fno.hermetic import neutralise, poison
+from fno.test_runner import run_suite_bounded, test_timeout_seconds, wait_or_kill_group
 
 _TAIL_LINES = 40
 
@@ -304,19 +304,25 @@ def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
     looks stalled - a watcher can `tail -f` the log. Returns the first non-zero
     child exit code, else 0.
     """
+    timeout = test_timeout_seconds()
     rc = 0
     with open(log, "w", encoding="utf-8") as fh:
         for cmd in cmds:
-            print(f"running: {' '.join(map(str, cmd))} | log: {log}", flush=True)
+            print(
+                f"running: {' '.join(map(str, cmd))} | log: {log} | timeout: {timeout}s",
+                flush=True,
+            )
             fh.write(f"$ {' '.join(map(str, cmd))}\n")
             fh.flush()
             try:
-                proc = subprocess.run(cmd, env=env, stdout=fh, stderr=subprocess.STDOUT)
+                rc_cmd = run_suite_bounded(
+                    cmd, env, timeout, stdout=fh, stderr=subprocess.STDOUT
+                )
             except OSError as exc:
                 sys.stderr.write(f"fno doctor test: failed to run {cmd[0]}: {exc}\n")
                 return 127
-            if proc.returncode != 0:
-                rc = proc.returncode
+            if rc_cmd != 0:
+                rc = rc_cmd
                 break  # first failure wins; its output is the log tail
     if rc == 0:
         lines = [ln.rstrip() for ln in _tail(log, 5) if ln.strip()]
@@ -360,13 +366,12 @@ def _run(args: Sequence[str], stream: bool = False) -> int:
     cmd = [interp, "-m", "pytest", *pytest_args]
     if stream:
         try:
-            proc = subprocess.run(cmd, env=env)  # inherit stdio; no pipe, no mask
+            return run_suite_bounded(cmd, env, test_timeout_seconds())
         except OSError as exc:
             # FileNotFoundError (missing) AND PermissionError (present but not
             # executable) are both OSError; either means we could not run it.
             sys.stderr.write(f"fno doctor test: failed to run interpreter {interp}: {exc}\n")
             return 127
-        return proc.returncode
     return _run_captured([cmd], env, _log_path(root))
 
 
@@ -431,18 +436,23 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
     else:
         base = ["cargo", "test", "-q"]
     cap_tail: list[str] = []
+    timeout = test_timeout_seconds()
     if threads is None:
-        sys.stdout.write(f"fno doctor test rust: lanes {lanes_note}; runner default parallelism\n")
+        sys.stdout.write(
+            f"fno doctor test rust: lanes {lanes_note}; runner default parallelism; timeout {timeout}s\n"
+        )
     elif override:
         sys.stdout.write(
-            f"fno doctor test rust: lanes {lanes_note}; user parallelism flag wins, cap not applied\n"
+            f"fno doctor test rust: lanes {lanes_note}; user parallelism flag wins, cap not applied; timeout {timeout}s\n"
         )
     else:
         if nextest:
             base = [*base, "--test-threads", str(threads)]
         else:
             cap_tail = ["--", "--test-threads", str(threads)]
-        sys.stdout.write(f"fno doctor test rust: lanes {lanes_note}; test threads capped at {threads}\n")
+        sys.stdout.write(
+            f"fno doctor test rust: lanes {lanes_note}; test threads capped at {threads}; timeout {timeout}s\n"
+        )
 
     if "--manifest-path" in cargo_args:
         cmds = [[*base, *cargo_args]]
@@ -457,16 +467,15 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
 
     env = _child_env(root)
     if stream:
-        rc = 0
         for cmd in cmds:
             try:
-                proc = subprocess.run(cmd, env=env)
+                rc = run_suite_bounded(cmd, env, timeout)
             except OSError as exc:
                 sys.stderr.write(f"fno doctor test: failed to run {cmd[0]}: {exc}\n")
                 return 127
-            if proc.returncode != 0:
-                return proc.returncode
-        return rc
+            if rc != 0:
+                return rc
+        return 0
     return _run_captured(cmds, env, _log_path(root))
 
 
@@ -572,7 +581,8 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
      'FAKE_BIN="$(mktemp -d)"\n'
      'for p in codex gemini opencode; do printf "%s\\n%s\\n" "#!/bin/sh" "exit 0" > "$FAKE_BIN/$p"; chmod +x "$FAKE_BIN/$p"; done\n'
      'PATH="$FAKE_BIN:$PATH" uv run pytest --tb=short -q '
-     "tests/agents/test_rust_verb_parity.py tests/agents/test_ask_e2e_dispatch.py"),
+     "tests/agents/test_rust_verb_parity.py tests/agents/test_ask_e2e_dispatch.py "
+     "tests/unit/test_claims_core.py::TestSessionWitnessVerdicts"),
     # Same shard contract as the parity suites above: the wrapper carries the
     # @requires_rust marker, so in the pytest shard (binary deleted) it skips,
     # and here, after the build step, it runs for real. Never inside the
@@ -596,7 +606,8 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
      "bash tests/target/test_backfill_plan.sh\n"
      "bash tests/target/test_detect_pending_plan.sh\n"
      "bash tests/target/test_plan_mode_e2e.sh"),
-    ("bg-dispatch + ready-gated auto-launch harness", ".", "bash tests/test-bg-dispatch.sh"),
+    ("bg-dispatch harness", ".", "bash tests/test-bg-dispatch.sh"),
+    ("init claim-wait harness", ".", "bash tests/test-init-claim-wait.sh"),
     ("dispatch grant posture harness", ".", "bash tests/target/test_dispatch_grant_posture.sh"),
     ("agent skill harness", ".",
      "bash tests/skills/test_agent_normalize.sh\n"
@@ -647,15 +658,12 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("State-roots ratchet (declared root, R4/R5)", "cli", "uv run fno-py doctor lint state-roots"),
     ("Agent field coverage accounting", "cli", "uv run fno-py doctor lint field-coverage"),
     ("In-N-Out menu-cap ratchet", "cli", "uv run fno-py doctor lint menu-caps"),
+    ("Spawn flag-ownership ratchet (owner + provenance per flag)", "cli", "uv run fno-py doctor lint spawn-flag-owners"),
     ("Verb-surface ratchet (real count, both binaries)", "cli", "uv run fno-py doctor lint verb-ratchet"),
     ("Schema parity self-test", ".", "bash scripts/tests/check-event-schema-parity-selftest.sh"),
     ("Schema parity check (Python side)", ".", "bash scripts/check-event-schema-parity.sh"),
-    ("Registry schema parity selftest", ".", "bash scripts/ci/check-registry-schema-parity.sh --selftest"),
-    ("Registry schema parity check", ".", "bash scripts/ci/check-registry-schema-parity.sh"),
     ("Provider vocabulary parity selftest", ".", "bash tests/ci/test_provider_vocabulary_parity.sh"),
     ("Provider vocabulary parity check", ".", "bash scripts/ci/check-provider-vocabulary-parity.sh"),
-    ("Spawn lineage parity selftest", ".", "bash tests/ci/test_spawn_lineage_parity.sh"),
-    ("Spawn lineage parity check", ".", "bash scripts/ci/check-spawn-lineage-parity.sh"),
     ("Reviewer descriptor parity selftest", ".",
      "bash scripts/ci/check-reviewer-descriptor-parity.sh --selftest"),
     ("Reviewer descriptor parity check", ".",
@@ -928,6 +936,45 @@ def _smoke_env(root: Path) -> dict:
         env["STATE_PROFILE_DIR"] = str(_sandbox() / "home" / ".fno")
         env["CLAUDE_CODE_SESSION_ID"] = "state-canary-session"
     return env
+
+
+def _state_canary_snapshot() -> str:
+    """Snapshot path for this process, so two runs on one box never share one.
+
+    plant and verify run in the SAME process, so the pid keys both halves. CI
+    gives each shard its own runner and would not collide anyway; a developer
+    running two checkouts at once would.
+    """
+    return str(Path(tempfile.gettempdir()) / f"fno-state-canary.{os.getpid()}.snapshot")
+
+
+def _run_state_canary(root: Path, verb: str) -> int:
+    """Run scripts/ci/check-state-canary.sh on the PARENT HOME.
+
+    Deliberately NOT under _smoke_env: the sandbox is what the suite is allowed
+    to write, and the parent HOME is the surface the canary exists to protect.
+    Handing it the sandbox would measure the wrong root and pass forever.
+
+    A missing script is fatal on verify and non-fatal on plant. A verify that
+    cannot run must never read as a green; that is the absence-reads-as-success
+    failure this runner refuses everywhere else.
+
+    Not to be confused with _state_canary_status, which reads the state-lane
+    junit and answers a different question.
+    """
+    script = root / "scripts" / "ci" / "check-state-canary.sh"
+    if not script.is_file():
+        if verb == "verify":
+            sys.stderr.write(
+                f"smoke: {script} is missing - cannot verify the operator state "
+                "root was untouched, refusing to call this green\n"
+            )
+            return 1
+        return 0
+    env = dict(os.environ)
+    env["FNO_STATE_CANARY_SNAPSHOT"] = _state_canary_snapshot()
+    proc = subprocess.run(["bash", str(script), verb], cwd=str(root), env=env)
+    return proc.returncode
 
 
 def _read_failure_record(path: str, known: set[str]) -> set[str]:
@@ -1951,10 +1998,15 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         _preserve_claim_door(root, env)
         _scrub_target_bins(root)
 
+    # The canary brackets the whole run: plant before the first step, verify
+    # after the last. Both halves sit around the single _execute_steps call
+    # site, so this is one pair rather than a per-step hook.
+    _run_state_canary(root, "plant")
     results, first_rc = _execute_steps(
         root, env, [steps[i] for i in selected], keep_going,
         pytest_shard=shard_spec if shard_total > 1 else "",
     )
+    canary_rc = _run_state_canary(root, "verify")
     # Journey/rust/bash steps leak keepers via CLI subprocesses no conftest reaches.
     from fno.graph.store import sweep_orphaned_keepers
 
@@ -1973,7 +2025,12 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         print(f"  {s:6} {d:4.0f}s  {n}", flush=True)
 
     _write_failure_record(failure_record, [n for n, s, _ in results if s == "fail"])
-    return 1 if failed else 0
+    if canary_rc != 0 and not failed:
+        sys.stderr.write(
+            "smoke: every step passed but the state canary refused - a step "
+            "wrote to the operator state root. The run is NOT green.\n"
+        )
+    return 1 if (failed or canary_rc != 0) else 0
 
 
 # --census-deferred: stop _DISCOVERY_DEFERRED from silently holding green
@@ -2014,7 +2071,8 @@ def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) ->
     + os.killpg, never the `timeout` binary: that is absent on macOS (a recorded
     trap) and exits 127, measuring nothing. start_new_session makes the child a
     group leader so killpg reaches its grandchildren too, since a shell harness
-    spawns subprocesses a direct SIGKILL would orphan.
+    spawns subprocesses a direct SIGKILL would orphan. The wait/kill ladder is
+    shared with the suite runner (`wait_or_kill_group`).
     """
     start = time.monotonic()
     proc = subprocess.Popen(
@@ -2022,31 +2080,7 @@ def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) ->
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    try:
-        rc = proc.wait(timeout=kill_bound_s)
-        killed = False
-    except subprocess.TimeoutExpired:
-        # ProcessLookupError is the TOCTOU window where the child exited between
-        # the timeout and getpgid; wait() reaps it. PermissionError is NOT caught:
-        # start_new_session makes us own the group so it is near-impossible, and
-        # if it ever surfaces a loud crash beats a wedged proc.wait() with no kill.
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
-        rc = proc.returncode if proc.returncode is not None else 124
-        killed = True
-    except KeyboardInterrupt:
-        # The harness runs in its own session (start_new_session), so it does not
-        # share the terminal's SIGINT and would outlive a Ctrl-C with all its
-        # grandchildren. Kill the group before re-raising so nothing is orphaned.
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
-        raise
+    rc, killed = wait_or_kill_group(proc, kill_bound_s)
     return rc, time.monotonic() - start, killed
 
 

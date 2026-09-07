@@ -28,13 +28,16 @@ notify_app = typer.Typer(
 def send(
     title: str = typer.Argument(..., help="Notification title"),
     message: str = typer.Argument(..., help="Notification message body"),
+    pointer: str = typer.Option(
+        "", "--pointer", help="Verb or URL naming the durable state this notice points at"
+    ),
 ) -> None:
     """Send an OS notification.
 
     Dispatches via the in-package helper: macOS (osascript), Linux
     (notify-send), or a loud non-zero degrade when neither tool is available.
     """
-    code, err = send_notification(title, message)
+    code, err = send_notification(title, message, pointer)
     if err:
         typer.echo(err, err=True)
     raise typer.Exit(code=code)

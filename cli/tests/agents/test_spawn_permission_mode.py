@@ -325,7 +325,9 @@ def test_claude_python_build_argv_threads_permission_mode():
 
 
 def _fake_settings(mode: str):
-    return SimpleNamespace(agents=SimpleNamespace(spawn_permission_mode=mode))
+    return SimpleNamespace(
+        agents=SimpleNamespace(defaults=SimpleNamespace(permission_mode=mode))
+    )
 
 
 def _capture_spawn(monkeypatch, module):
@@ -366,13 +368,17 @@ def test_advance_worker_explicit_flag_wins_over_config(monkeypatch):
     assert captured["cmd"][i + 1] == "acceptEdits"
 
 
-def test_advance_worker_unset_config_is_unchanged(monkeypatch):
+def test_advance_worker_unset_config_falls_to_builtin(monkeypatch):
+    """AC3-HP (x-7198): no config at all still resolves the built-in answer,
+    byte-identical to the old spawn_permission_mode default."""
     from fno.backlog import advance
+    from fno.agents.spawn_defaults import SPAWN_PERMISSION_BUILTIN
 
     captured = _capture_spawn(monkeypatch, advance)
     monkeypatch.setattr("fno.config.load_settings", lambda: _fake_settings(""))
     advance._spawn_worker("x-test", None, "slug")
-    assert "--permission-mode" not in captured["cmd"]
+    i = captured["cmd"].index("--permission-mode")
+    assert captured["cmd"][i + 1] == SPAWN_PERMISSION_BUILTIN
 
 
 def test_think_worker_reads_config_default(monkeypatch):
@@ -393,7 +399,7 @@ def test_think_worker_codex_uses_shared_dispatch_default(monkeypatch):
 
     captured = _capture_spawn(monkeypatch, spawn_think)
     settings = SimpleNamespace(
-        agents=SimpleNamespace(spawn_permission_mode=""),
+        agents=SimpleNamespace(defaults=SimpleNamespace(permission_mode="")),
         dispatch=SimpleNamespace(
             harness="",
             substrate="",
@@ -423,7 +429,7 @@ def test_think_worker_scopes_tier_to_resolved_dispatch_harness(monkeypatch):
 
     captured = _capture_spawn(monkeypatch, spawn_think)
     settings = SimpleNamespace(
-        agents=SimpleNamespace(spawn_permission_mode=""),
+        agents=SimpleNamespace(defaults=SimpleNamespace(permission_mode="")),
         dispatch=SimpleNamespace(
             harness="codex",
             substrate="",
@@ -459,7 +465,7 @@ def test_think_worker_explicit_pane_uses_shared_capability_gate(monkeypatch):
 
     captured = _capture_spawn(monkeypatch, spawn_think)
     settings = SimpleNamespace(
-        agents=SimpleNamespace(spawn_permission_mode="plan"),
+        agents=SimpleNamespace(defaults=SimpleNamespace(permission_mode="plan")),
         dispatch=SimpleNamespace(
             harness="",
             substrate="pane",

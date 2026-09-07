@@ -739,6 +739,88 @@ PYEOF
   unset _STALE_STATUS _STALE_CLAIM_KEY _STALE_SESSION_ID _STALE_REASON _CLAIM_STATE _ARCHIVE_PATH
 fi
 
+# ── Foreign-manifest refusal (x-7040) ────────────────────────────────
+# A manifest that survived the preserves above may still belong to a stranger.
+# The manifest-exists branch below serves resume, but resume and stranger both
+# look like "the file is there": a stranger used to be told "leaving unchanged"
+# and left without a node claim, so the board read the node free while another
+# worker built on it - the dup-PR trap. The manifest names its run (fno_id),
+# so init can tell the two apart before anything mutates: the manifest's
+# fno_id must be this run's (TARGET_SESSION_ID, what drivers and successors
+# thread), or the harness session that wrote it must be this one (a plain
+# same-session re-init has no run id yet but the same transcript identity).
+# An unreadable fno_id refuses by its own reason: absence is never a match.
+# The repair names the recovery primitive that already exists and is proven on
+# this exact case - archive the foreign manifest, re-init, and the node claim
+# is taken fresh.
+# Scoped to a VALID manifest: only a parseable one names its run, so it is the
+# only file that can prove or refuse ownership. A corrupt file proves nothing
+# about ownership and keeps today's self-healing (the corrupt-archive below).
+if [[ -f "$STATE_FILE" ]] && is_valid_state_file; then
+  _FM_FNO_ID="$(sed -n '/^fno_id:[[:space:]]*/{s/^fno_id:[[:space:]]*//p;q;}' "$STATE_FILE" | tr -d '"' | xargs 2>/dev/null || true)"
+  _FM_CREATED_AT="$(sed -n '/^created_at:[[:space:]]*/{s/^created_at:[[:space:]]*//p;q;}' "$STATE_FILE" | tr -d '"' | xargs 2>/dev/null || true)"
+  _FM_HSID="$(sed -n '/^harness_session_id:[[:space:]]*/{s/^harness_session_id:[[:space:]]*//p;q;}' "$STATE_FILE" | tr -d '"' | xargs 2>/dev/null || true)"
+  _FM_CUR_ID="${TARGET_SESSION_ID:-}"
+  _FM_OURS=""
+  if [[ -n "$_FM_FNO_ID" && -n "$_FM_CUR_ID" && "$_FM_FNO_ID" == "$_FM_CUR_ID" ]]; then
+    _FM_OURS=1
+  fi
+  # Same-harness-session rescue: a re-invocation from the session that wrote
+  # the manifest keeps today's resume path. Both sides must be non-empty, so a
+  # manifest recorded as `null` never matches an unset env (absence is not a
+  # match here either).
+  if [[ -z "$_FM_OURS" ]]; then
+    for _fm_pair in \
+      "claude_session_id:${TARGET_TRANSCRIPT_ID:-${CLAUDE_CODE_SESSION_ID:-}}" \
+      "codex_thread_id:${CODEX_THREAD_ID:-}" \
+      "harness_session_id:${GEMINI_SESSION_ID:-}" \
+      "harness_session_id:${OPENCODE_SESSION_ID:-}"; do
+      _fm_field="${_fm_pair%%:*}"
+      _fm_env="${_fm_pair#*:}"
+      if [[ -n "$_fm_env" ]]; then
+        _fm_val="$(sed -n "/^${_fm_field}:[[:space:]]*/{s/^${_fm_field}:[[:space:]]*//p;q;}" "$STATE_FILE" | tr -d '"' | xargs 2>/dev/null || true)"
+        if [[ -n "$_fm_val" && "$_fm_val" == "$_fm_env" ]]; then
+          _FM_OURS=1
+          break
+        fi
+      fi
+    done
+    unset _fm_pair _fm_field _fm_env _fm_val
+  fi
+  if [[ -z "$_FM_OURS" && -z "$_FM_FNO_ID" && -z "${_FM_HSID#null}" ]]; then
+    # A manifest that names NO id (no readable fno_id, no harness session)
+    # cannot be adjudicated: nothing proves it foreign, and the degrade rule
+    # this file already follows preserves what it cannot read. Hand-seeded
+    # resumes and pre-fno_id manifests keep today's path. Any manifest that
+    # NAMES an id no caller matched still refuses below - an unreadable id is
+    # never treated as a match.
+    _FM_OURS=1
+  fi
+  if [[ -z "$_FM_OURS" ]]; then
+    _FM_CUR_HARNESS="${CLAUDE_CODE_SESSION_ID:-${CODEX_THREAD_ID:-${GEMINI_SESSION_ID:-${OPENCODE_SESSION_ID:-<none proven>}}}}"
+    {
+      echo "[init-target-state] REFUSED: foreign session manifest at $STATE_FILE."
+      if [[ -n "$_FM_FNO_ID" ]]; then
+        echo "  manifest fno_id: ${_FM_FNO_ID}${_FM_CREATED_AT:+ (created_at ${_FM_CREATED_AT})}"
+        echo "  manifest harness_session_id: ${_FM_HSID:-<null>}"
+      else
+        echo "  manifest fno_id: <unreadable or absent> - an unreadable id is never treated as a match"
+      fi
+      echo "  this run: ${_FM_CUR_ID:-<no run id minted yet>}, harness session ${_FM_CUR_HARNESS}"
+      echo ""
+      echo "The manifest belongs to another target run. Refusing to skip its node"
+      echo "claim silently: a skipped claim leaves the node reading free and invites"
+      echo "a second worker onto the same branch."
+      echo ""
+      echo "If this manifest is stale, archive it and re-run init; the claim is"
+      echo "taken fresh:"
+      echo "  fno do state archive --path \"$STATE_FILE\""
+    } >&2
+    exit 1
+  fi
+  unset _FM_FNO_ID _FM_CREATED_AT _FM_HSID _FM_CUR_ID _FM_CUR_HARNESS _FM_OURS
+fi
+
 # ── Scratchpad scaffolding ────────────────────────────────────────────
 SCRATCHPAD_DIR="$STATE_DIR/scratchpad"
 if [[ ! -f "$STATE_FILE" ]] || ! is_valid_state_file; then

@@ -2,11 +2,12 @@
 name: review
 description: "Review a diff or a research brief. Routes to the fno-owned inline review lane (default: levels low/medium/high/xhigh/max, --comment, --fix, optional PR/branch/path target), runtime evidence (prove-it), the apply-or-skip cleanup pass (cleanup), a cross-model second opinion (peer), the advisory research-verify panel for a doc deliverable (research), or a self-cert attestation for the config.review.reviewers gate (declare). Use when: 'review this', 'code review', 'is this ready', 'prove it works', 'clean this up', 'get a second opinion', 'review this research brief', 'declare this reviewed'."
 argument-hint: "[level] [--comment] [--fix] [<pr#>|<branch>|<path>] | prove-it [<target>] | cleanup [<target>] | peer [adversarial] [--attest|--post] [PR#|branch] [codex|gemini] | research [brief.md] | declare   e.g. (bare = the fno lane, level sized from the diff), `high --comment`, `657`, `prove-it`, `cleanup`, `peer 657 codex --attest`, `research out/topic.md`, `declare`"
-requires:
-  binaries:
-    - "fno >= 0.1"
-    - "gh >= 2.0"
-    - "git >= 2.0"
+metadata:
+  requires:
+    binaries:
+      - "fno >= 0.1"
+      - "gh >= 2.0"
+      - "git >= 2.0"
 ---
 
 <!-- style-exception: this file's producer bullets under "The attestation surface" are established dense single-line paragraphs joining several clauses with semicolons and dashes, a convention used throughout the file. Rewriting that file-wide convention is out of scope for x-e97b, which only touches one such bullet's body to name the new PostToolUse hook. -->
@@ -28,7 +29,7 @@ This is a **router**, not a monolith. It parses the first argument as a mode, an
 
 ## Review-cap gate
 
-The two-round cap is enforced at the review invocation itself, not only at the merge decision: the hold hook denies a review whose PR's rounds are spent, and the denial text is the instruction - decline the remaining findings with a recorded reason and merge. Two shapes pass the gate, both the attestation law's own. `--verify-fixes` in the invocation flags declares a scoped fix-verification of named findings, which is not a round. And a rebase delta measuring at or over the interdiff budget reviews freely.
+The round cap is enforced at the review invocation itself, not only at the merge decision: the hold hook denies a review whose PR's rounds are spent, and the denial text is the instruction - decline the remaining findings with a recorded reason and merge on green CI. At the configured rounds the review phase is complete and the PR merges on green CI; open findings stay in the PR conversation. Two shapes pass the gate, both the attestation law's own. `--verify-fixes` in the invocation flags declares a scoped fix-verification of named findings, which is not a round. And a rebase delta measuring at or over the interdiff budget reviews freely.
 
 ## Active skill freshness preflight
 

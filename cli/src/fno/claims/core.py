@@ -269,6 +269,8 @@ def _make_claim(
     harness: Optional[str] = None,
     pid_provenance: Optional[str] = None,
     pid_unavailable: bool = False,
+    *,
+    session_id: Optional[str] = None,
 ) -> Claim:
     acquired = now_ms()
     return Claim(
@@ -299,6 +301,7 @@ def _make_claim(
         # here: the owned path walks the process tree, and this function runs
         # inside the critical section every other acquirer waits on (x-20f1).
         harness=harness,
+        session_id=session_id,
         metadata=metadata or {},
     )
 
@@ -315,6 +318,7 @@ def acquire_claim(
     host: Optional[str] = None,
     harness: Optional[str] = None,
     pid_provenance: Optional[str] = None,
+    harness_session_id: Optional[str] = None,
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Claim:
@@ -367,6 +371,7 @@ def acquire_claim(
             host=host,
             harness=harness,
             pid_provenance=pid_provenance,
+            harness_session_id=harness_session_id,
             root=root,
             _attempt=_attempt + 1,
         )
@@ -387,14 +392,14 @@ def acquire_claim(
             acquired_lock = False
         return _retry()
 
-    # Resolve the harness ONCE, here, outside every mutex below. The owned path
-    # walks the process tree, and `_make_claim` is called from inside the
-    # recovery critical section that other acquirers are polling on: doing it
-    # there put a process walk in every waiter's path. Resolving up front also
-    # makes the first write and any refresh agree on one value rather than
-    # re-resolving under contention (x-20f1).
+    # Resolve the harness ONCE, outside every mutex below (x-20f1: the owned
+    # path walks the process tree inside the critical section). ONE walk for
+    # both halves: session_id and harness tag share one identity answer.
+    identity = resolve_self_identity()
     if harness is None:
-        harness = resolve_self_identity().harness
+        harness = identity.harness
+    if harness_session_id is None:
+        harness_session_id = identity.session_id
 
     # Provenance resolves ONCE, here, beside the harness and outside every
     # mutex below, for the same reason (x-20f1): the earning path walks the
@@ -407,7 +412,7 @@ def acquire_claim(
 
     new_claim = _make_claim(
         key, holder, ttl_ms, reason, metadata, pid, host, harness,
-        pid_provenance, pid_unavailable,
+        pid_provenance, pid_unavailable, session_id=harness_session_id,
     )
     payload = serialize_claim(new_claim)
 
@@ -474,7 +479,7 @@ def acquire_claim(
 
             refreshed = _make_claim(
                 key, holder, ttl_ms, reason, metadata, pid, host, harness,
-                pid_provenance, pid_unavailable,
+                pid_provenance, pid_unavailable, session_id=harness_session_id,
             )
             _atomic_replace(path, serialize_claim(refreshed))
             emit_claim_idempotent_reacquired(refreshed, previous=fresh_existing)
@@ -532,7 +537,7 @@ def acquire_claim(
                 # Raced into the idempotent path while we were grabbing the lock.
                 refreshed = _make_claim(
                     key, holder, ttl_ms, reason, metadata, pid, host, harness,
-                    pid_provenance, pid_unavailable,
+                    pid_provenance, pid_unavailable, session_id=harness_session_id,
                 )
                 _atomic_replace(path, serialize_claim(refreshed))
                 emit_claim_idempotent_reacquired(refreshed, previous=existing)
@@ -590,6 +595,7 @@ def _rebound_claim(
     new_pid_provenance: Optional[str] = None,
     keep_acquired_at: bool = False,
     new_pid_unavailable: bool = False,
+    new_session_id: Optional[str] = None,
 ) -> Claim:
     """A rebound claim: identity fields preserved, process anchor + lease fresh.
 
@@ -662,6 +668,9 @@ def _rebound_claim(
         # earns its own stamp from the caller (the reanchor path's pid IS the
         # prover's answer) or resets to ambient - never silently inherits.
         pid_provenance=new_pid_provenance,
+        # Identity like the holder: preserve unless the caller (a handover)
+        # re-stamps it to the successor's session.
+        session_id=new_session_id if new_session_id is not None else existing.session_id,
         metadata=new_metadata if new_metadata else existing.metadata,
     )
 
@@ -735,7 +744,12 @@ def compare_and_rebind(
     # Resolved BEFORE the recovery mutex below, for the same reason as
     # `acquire_claim`: the owned path walks the process tree, and everything
     # after the lock runs while other callers poll on it (x-20f1).
-    resolved_harness = new_harness if new_harness is not None else resolve_self_identity().harness
+    # ONE walk for both halves (see acquire_claim).
+    identity = resolve_self_identity()
+    resolved_harness = new_harness if new_harness is not None else identity.harness
+    resolved_session_id = (
+        harness_session_id if harness_session_id is not None else identity.session_id
+    )
     # Same placement, same reason: the rebind rewrites the pid, so its
     # provenance is earned here against the prover or it resets to ambient.
     resolved_provenance = _resolve_pid_provenance(new_pid, ttl_ms, resolved_harness)
@@ -851,6 +865,9 @@ def compare_and_rebind(
                 new_metadata=effective_new_metadata,
                 new_pid_provenance=resolved_provenance,
                 new_pid_unavailable=npid_unavailable,
+                # A handover changes WHO owns the claim, so the successor's
+                # session id replaces the spawner's, exactly as the harness does.
+                new_session_id=resolved_session_id,
             )
             _atomic_replace(path, serialize_claim(rebound))
             if emit:
@@ -873,6 +890,7 @@ def compare_and_rebind(
                     new_metadata=effective_new_metadata,
                     new_pid_unavailable=npid_unavailable,
                     new_pid_provenance=resolved_provenance,
+                    new_session_id=existing.session_id or resolved_session_id,
                 )
                 _atomic_replace(path, serialize_claim(rebound))
                 if emit:
@@ -913,6 +931,13 @@ def compare_and_rebind(
             new_metadata=effective_new_metadata,
             new_pid_provenance=resolved_provenance,
             new_pid_unavailable=npid_unavailable,
+            # A rename reaching THIS branch is still a handover: the
+            # successor's session id replaces the spawner's, never preserves it.
+            new_session_id=(
+                resolved_session_id
+                if handover_allowed
+                else (existing.session_id or resolved_session_id)
+            ),
         )
         _atomic_replace(path, serialize_claim(rebound))
         if emit:
@@ -1110,6 +1135,41 @@ def release_claim(
         release_dir_mutex(recovery_lock, token)
 
 
+def _registry_session_pid(session_id: str) -> Optional[int]:
+    """The live pid the fleet registry records for ``session_id``, or None.
+
+    The ``harness_session_id`` row binding is the identity proof, so no
+    create-time filter applies (it rejected every resumed session's anchor).
+    Reads the registry FILE directly (the L5 registry import is
+    boundary-refused) and degrades to None on anything unexpected.
+    """
+    sid = (session_id or "").strip()
+    if not sid:
+        return None
+    try:
+        import json
+
+        import psutil
+        from fno.paths import agents_registry_path
+
+        rows = json.loads(agents_registry_path().read_text(encoding="utf-8"))["agents"]
+    except Exception:  # noqa: BLE001 - liveness must degrade, never crash
+        return None
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("harness_session_id") or "").strip() != sid:
+            continue
+        pid = row.get("pid")
+        if isinstance(pid, int) and pid > 1:
+            try:
+                psutil.Process(pid)
+                return pid
+            except Exception:  # noqa: BLE001 - dead pid: next row
+                continue
+    return None
+
+
 def _reanchor_pid_for(
     existing: Claim, *, root: Optional[Path] = None, verdict: Optional[dict[str, Any]] = None
 ) -> Optional[int]:
@@ -1122,7 +1182,7 @@ def _reanchor_pid_for(
     every reader that must not steal from the first was forced to protect the
     second (x-05be).
 
-    Returns None - meaning leave the anchor alone - in three cases, each for its
+    Returns None - meaning leave the anchor alone - in four cases, each for its
     own reason:
 
       * The recorded pid is still LIVE. There is nothing to repair, and
@@ -1130,16 +1190,16 @@ def _reanchor_pid_for(
         over a running session's anchor.
       * The claim is off-machine. We cannot read another box's pid table, so a
         dead-looking pid there is unverified.
+      * The claim carries a session id but the registry row keyed by it has no
+        live pid (or there is no row). There is no session-keyed anchor.
       * No harness ancestor resolves. There is no better anchor to write, and a
         transient pid is a worse one: ``fno-agents loop-check`` exits about a
         second after it renews, so anchoring to the renewer would re-file the
         corpse under a fresh number and fix nothing.
 
-    PID-reuse detection survives because the anchor moves WITH the pid.
-    ``_rebound_claim`` rewrites ``acquired_at`` alongside ``pid``, and the
-    harness ancestor started before this renewal, so the claim reads live now
-    and a later recycle of that pid number reads ``create_time > acquired_at``
-    exactly as today.
+    PID-reuse detection survives because the anchor moves WITH the pid:
+    ``_rebound_claim`` holds ``acquired_at`` on renewal, so a later recycle of
+    the anchor pid still reads ``create_time > acquired_at``.
 
     THE TRUST BOUNDARY, stated rather than implied. The renewer is authenticated
     by its holder string and nothing else, and `fno agents claim status` publishes that
@@ -1148,10 +1208,9 @@ def _reanchor_pid_for(
     reads LIVE until that session ends instead of SUSPECT.
 
     That is the same credential `release_claim` and `refresh_claim` have always
-    accepted, not a new one, and no stronger check is available here: the
-    recorded pid is dead by precondition, so its ancestry cannot be walked to
-    prove the renewer shares its session. Closing it needs a session identity in
-    the claim record, which is its own change.
+    accepted. The session id in the record narrows it to the acquiring
+    session: the registry row keyed by that id is the verifiable identity the
+    record was missing.
     """
     # An EXPIRED claim is already reclaimable, and re-anchoring one resurrects it
     # as LIVE - taking a slot a peer is entitled to and racing whatever recovery
@@ -1163,6 +1222,33 @@ def _reanchor_pid_for(
         return None
     if verdict.get("bucket") == "offhost":
         return None
+
+    # Repair ONLY a corpse: a recorded pid that is still the same live process
+    # needs no repair, and rewriting it would let any holder-string holder
+    # take over a running session's anchor. The pid FACT gates this, not the
+    # verdict, and it sits BEFORE the session-keyed branch so a row naming a
+    # different live process (a keeper pid) can never steal a healthy anchor.
+    if existing.pid is not None:
+        try:
+            import psutil
+
+            recorded_alive = (
+                psutil.Process(existing.pid).create_time() * 1000 <= existing.acquired_at
+            )
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            recorded_alive = False
+        if recorded_alive:
+            return None
+
+    # Session-keyed re-anchor, BEFORE the state gate: the registry row keyed
+    # by the session id is the identity proof, so its live pid anchors
+    # regardless of create time (the filter that rejected every resumed
+    # harness). Mirrors renew_locked's is_live(recorded pid) gate.
+    if existing.session_id:
+        registry_pid = _registry_session_pid(existing.session_id)
+        if registry_pid is not None:
+            return registry_pid
+
     if verdict.get("state") not in (ClaimState.STALE.value, ClaimState.SUSPECT.value):
         return None
     from .session_pid import resolve_session_pid

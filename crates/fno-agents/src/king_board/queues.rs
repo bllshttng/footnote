@@ -1,10 +1,11 @@
-//! The operator lane parser and the eleven-queue board build (pure; no I/O).
-use super::classify::node_driver;
+//! The operator lane parser and the twelve-queue board build (pure; no I/O).
+use super::classify::{node_driver, node_has_pr};
 use super::prs::derived_status;
 use super::scope::operator_lane_path;
 use super::{
-    as_int, s_str, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, LEGACY_DEFER_PREFIX, SRC_CLAIMS,
-    SRC_NEEDS, SRC_PRS, SRC_PR_NODES, SRC_QUESTIONS, SRC_READY, SRC_UNDISPATCHED, TERMINAL_RUNGS,
+    as_int, s_str, truthy, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, LEGACY_DEFER_PREFIX,
+    SRC_CLAIMS, SRC_NEEDS, SRC_PRS, SRC_PR_NODES, SRC_QUESTIONS, SRC_READY, SRC_UNDISPATCHED,
+    TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -64,7 +65,7 @@ pub(crate) fn parse_lane(path: &Path) -> Result<Vec<LaneItem>, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Board construction: the eleven queues
+// Board construction: the twelve queues
 // ---------------------------------------------------------------------------
 
 pub(crate) struct Queue {
@@ -134,13 +135,16 @@ pub(crate) struct BoardInputs {
     pub(crate) ready: SourceRead,
     pub(crate) claims: SourceRead,
     pub(crate) claimed_nodes: SourceRead,
-    pub(crate) holder_activity: HashMap<String, crate::claude_ask::TruthProbe>,
+    pub(crate) holder_activity: HashMap<String, crate::truth_probe::TruthProbe>,
     pub(crate) prs: SourceRead,
     pub(crate) pr_nodes: SourceRead,
     pub(crate) outstanding: SourceRead,
     pub(crate) needs: SourceRead,
     pub(crate) lane: SourceRead,
     pub(crate) undispatched: SourceRead,
+    /// The graph entries (None = unreadable); one read shared with scope
+    /// compile, undispatched classify, and claimed-node lookups.
+    pub(crate) entries: Option<Vec<Value>>,
     pub(crate) warnings: Vec<String>,
     pub(crate) autonomous_merge: bool,
     pub(crate) scope_ids: Option<HashSet<String>>,
@@ -260,9 +264,10 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             continue;
         }
         let (state, claim) = node_driver(
-            s_str(node, "id").unwrap_or(""),
+            node,
             &claim_by_node,
             &inputs.holder_activity,
+            inputs.scope_ids.as_ref(),
         );
         if state != "stalled" {
             continue;
@@ -304,6 +309,65 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         })
         .collect();
 
+    // Unheld progress: the status stamp is never revoked when a worker dies,
+    // so an in_progress node with no live claim is invisible to every other
+    // queue at once - undispatched reads ready, stalled_holder starts from a
+    // live claim, undriven_pr requires a PR. Built only on a readable claims
+    // list: with no claims read every node would look unheld at once.
+    let mut unheld_rows: Vec<Value> = Vec::new();
+    if inputs.claims.is_ok() {
+        for node in inputs.entries.as_deref().unwrap_or(&[]) {
+            if !KING_PRIORITIES.contains(&s_str(node, "priority").unwrap_or("")) {
+                continue;
+            }
+            if s_str(node, "status") != Some("in_progress") {
+                continue;
+            }
+            if node.get("superseded_by").is_some_and(|v| !v.is_null()) {
+                continue;
+            }
+            if node
+                .get("completed_at")
+                .and_then(Value::as_str)
+                .is_some_and(|c| !c.is_empty() && !c.starts_with(LEGACY_DEFER_PREFIX))
+            {
+                continue;
+            }
+            if node_has_pr(node) {
+                continue; // undriven_pr owns the PR-bound shape.
+            }
+            let (state, claim) = node_driver(
+                node,
+                &claim_by_node,
+                &inputs.holder_activity,
+                inputs.scope_ids.as_ref(),
+            );
+            if state != "none" {
+                continue;
+            }
+            if !in_scope(
+                "unheld_progress",
+                node.get("id").unwrap_or(&Value::Null),
+                node,
+                &mut out_of_scope,
+            ) {
+                continue;
+            }
+            let mut row = json!({
+                "id": node.get("id"),
+                "priority": node.get("priority"),
+                "title": node.get("title"),
+            });
+            if let Some(claim) = claim {
+                row.as_object_mut().unwrap().insert(
+                    "claim_state".to_string(),
+                    claim.get("state").cloned().unwrap_or(Value::Null),
+                );
+            }
+            unheld_rows.push(row);
+        }
+    }
+
     // Operator lane.
     let lane_ok = inputs.lane.is_ok();
     let lane_items: Vec<LaneItem> = if lane_ok {
@@ -344,10 +408,36 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         Vec::new()
     };
 
+    // mergeable_pr is scoped by the node that binds each PR (pr_number plus
+    // additional_prs), the same join undriven_pr makes. A PR no node claims
+    // stays visible: an unattributable row is shown, never hidden.
+    let mut node_by_pr: HashMap<i64, String> = HashMap::new();
+    for node in &inputs.pr_nodes.rows() {
+        let Some(node_id) = s_str(node, "id").map(str::to_string) else {
+            continue;
+        };
+        if let Some(n) = node.get("pr_number").and_then(Value::as_i64) {
+            node_by_pr.insert(n, node_id.clone());
+        }
+        if let Some(extras) = node.get("additional_prs").and_then(Value::as_array) {
+            for extra in extras {
+                if let Some(n) = extra.get("number").and_then(Value::as_i64) {
+                    node_by_pr.insert(n, node_id.clone());
+                }
+            }
+        }
+    }
     let pr_rows: Vec<Value> = inputs
         .prs
         .rows()
         .iter()
+        .filter(|r| {
+            let node_id = node_by_pr
+                .get(&r.get("number").and_then(Value::as_i64).unwrap_or(-1))
+                .map(|id| json!(id))
+                .unwrap_or(Value::Null);
+            in_scope("mergeable_pr", &node_id, r, &mut out_of_scope)
+        })
         .map(|r| json!({"number": r.get("number"), "title": r.get("title")}))
         .collect();
 
@@ -385,9 +475,10 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 continue;
             }
             let (state, _claim) = node_driver(
-                s_str(node, "id").unwrap_or(""),
+                node,
                 &claim_by_node,
                 &inputs.holder_activity,
+                inputs.scope_ids.as_ref(),
             );
             if state != "none" {
                 continue;
@@ -425,7 +516,12 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .map(|qs| {
             qs.iter()
                 .map(|r| {
-                    json!({"id": r.get("id"), "question": r.get("question"), "ts": r.get("ts")})
+                    json!({
+                        "id": r.get("id"),
+                        "question": r.get("question"),
+                        "ts": r.get("ts"),
+                        "session_id": r.get("session_id")
+                    })
                 })
                 .collect()
         })
@@ -571,6 +667,24 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             true,
             String::new(),
             "",
+            None,
+        ),
+        queue(
+            "unheld_progress",
+            format!("graph entries + {SRC_CLAIMS}"),
+            &if inputs.entries.is_some() && inputs.claims.is_ok() {
+                SourceRead::ok(Value::Null)
+            } else {
+                SourceRead::err(if inputs.entries.is_none() {
+                    "graph unreadable".to_string()
+                } else {
+                    inputs.claims.error.clone().unwrap_or_default()
+                })
+            },
+            unheld_rows,
+            true,
+            "the status stamp is never revoked when a worker dies; claim-free in_progress rows are dead handoffs - redispatch the node or close it by hand".to_string(),
+            "/fno:target",
             None,
         ),
         queue(

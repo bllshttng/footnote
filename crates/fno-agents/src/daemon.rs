@@ -17,6 +17,7 @@ use crate::events::EventEmitter;
 // point (`state::update_registry`) can stage the same recovery record for a
 // row removed through ANY door; re-exported so the reap path's references
 // are unchanged.
+use crate::codex_thread_entry::build_codex_thread_entry;
 pub use crate::gc::{gc_sweep, gc_sweep_dry_run};
 use crate::identity::canonical_handle;
 use crate::paths::{self, AgentsHome};
@@ -24,11 +25,14 @@ use crate::protocol::{
     read_request, write_request, write_response, ErrorCode, Namespace, Request, Response,
 };
 pub use crate::receipt::{build_reap_receipt, write_reap_receipt, ReapReceipt};
-use crate::state::{self, RegistryEntry};
+use crate::state::{self, Lineage, RegistryEntry};
 use crate::AgentStatus;
 use serde_json::{json, Map, Value};
 use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership check
 
+mod blocking_bound;
+pub(crate) use self::blocking_bound::directory_bytes;
+use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 mod list_rows;
 use self::list_rows::{attention_sort_key, handle_list};
 use std::os::unix::process::CommandExt; // process_group on std::process::Command
@@ -79,11 +83,11 @@ pub struct DaemonOptions {
     /// discretion #5) skips the sweep entirely, so the first `list` reads
     /// its last recorded liveness until an idle tick settles it.
     pub reconcile_on_start: bool,
-    /// cwd the idle tick resolves `agents.dead_row_grace.<harness>` against
-    /// (x-9de7 task 6). A `Duration` cannot be pre-resolved here the way
-    /// `idle_exit` is: the grace is per-HARNESS, so the lookup happens once
-    /// per row, at sweep time, not once at startup.
-    pub dead_row_grace_cwd: PathBuf,
+    /// cwd the idle tick resolves `agents.*` config against (retire grace,
+    /// reap-receipt retention). A `Duration` cannot be pre-resolved here the
+    /// way `idle_exit` is: config candidates are per-cwd, so the lookup
+    /// happens at sweep time, not once at startup.
+    pub agents_config_cwd: PathBuf,
     /// Fire an OS notification when a badge ENTERS `blocked` (x-dd84). Default
     /// ON; overridden from `config.mux.notify_on_blocked` at startup.
     pub notify_on_blocked: bool,
@@ -98,7 +102,7 @@ impl Default for DaemonOptions {
             idle_exit: Duration::from_secs(1800),
             worker_bin: resolve_worker_bin(),
             reconcile_on_start: true,
-            dead_row_grace_cwd: PathBuf::from("."),
+            agents_config_cwd: PathBuf::from("."),
             notify_on_blocked: true,
             notify_on_done: false,
         }
@@ -568,212 +572,6 @@ pub fn process_start_time(_pid: u32) -> Option<u64> {
     None
 }
 
-/// Outcome of one dead-row GC pass (x-b1aa), for the `fno agents reap` report
-/// and tests. `reaped` lists the rows actually removed (by short_id, else name);
-/// `kept_dirty` is `(id, worktree_path)` for each row kept because its worktree
-/// has uncommitted changes (or the cleanliness probe failed), so the verb can
-/// surface the path for the operator to clean up.
-#[derive(Debug, Default, PartialEq)]
-pub struct GcSummary {
-    pub reaped: Vec<String>,
-    pub kept_dirty: Vec<(String, String)>,
-    /// Rows removed on absolute age alone, with nothing to corroborate.
-    ///
-    /// Kept SEPARATE from `reaped` on purpose. A backstop folded into one total
-    /// becomes the main path silently, and the corroboration gate it bypasses
-    /// turns into decoration. Reported at every pass, including zero.
-    pub reaped_backstop: Vec<String>,
-    /// Live rows removed on a positive done reading (idle past grace +
-    /// transcript tail classifies `done`). A THIRD count with its own meaning:
-    /// a finished turn, not a death; the reap event carries the resumable
-    /// handle for it. Separate from `reaped` for the same reason
-    /// `reaped_backstop` is.
-    pub reaped_dormant: Vec<String>,
-    /// `(row id, reason)` for every reaped row whose harness-session cascade
-    /// REFUSED or failed. Surfaced, never swallowed; the registry reap is not
-    /// rolled back for any of them.
-    pub cascade_refused: Vec<(String, String)>,
-    /// `(row id, reason)` for every target/reconcile row whose node-session
-    /// cleanup refused or failed. Those rows are restored for a later retry.
-    pub node_session_refused: Vec<(String, String)>,
-    /// Past-grace rows kept by the corroboration gate alone: no confirmed-dead
-    /// pid, no positively-stale transcript, and a liveness surface still on
-    /// record - short of the backstop horizon too (x-9de7 task 5). This is
-    /// the "stuck and invisible" case `gc.rs`'s own comments warn about;
-    /// before this field it had no report at all.
-    pub kept_uncorroborated: Vec<String>,
-    /// Rows kept because the liveness re-check reports them alive right now
-    /// (x-98ab). `Live` is the ordinary keep, and it went unreported for
-    /// exactly that reason - which made `fno agents reap --dry-run` on a
-    /// fully-live fleet name ZERO of the 26 rows it kept. A sweep that names
-    /// nothing it kept is indistinguishable from a sweep that never ran.
-    pub kept_live: Vec<String>,
-    /// Rows no gate has ruled on yet: the stored status is not terminal and
-    /// no pid is confirmed dead (x-91f3). This is the blanket that held the
-    /// measured registry - most rows carry no `short_id` and no `pid`, so
-    /// `is_live` could never vouch for them and this arm swallowed them
-    /// silently: the same zero-named-rows failure `kept_live` was added for,
-    /// one arm over. Reported like `kept_live` because an ordinary keep is
-    /// still a keep.
-    ///
-    /// `(id, tail)`: the second half is what the tail probe read for the row,
-    /// because "died mid-turn" and "no transcript to read" are the same word
-    /// otherwise, and an operator cannot act on a bare name. Same shape as
-    /// `kept_dirty` so the id stays a clean name in the JSON.
-    pub kept_not_terminal: Vec<(String, String)>,
-    /// Rows that read live AND carry an `exited_at` while the shared liveness
-    /// ladder (x-5d96) answers `Unknown`. Before this field the sweep resolved
-    /// that contradiction silently by dropping the stamp; now the row is
-    /// surfaced with the stamp preserved, and the verdict stays Keep - this
-    /// field names a gate, it never reaps.
-    pub kept_contradicted: Vec<String>,
-    /// Rows whose stale `exited_at` the sweep CLEARED on a positive Alive
-    /// reading from the shared ladder (x-5d96): the row is provably running,
-    /// the stamp is false evidence, and the resolution is reported instead of
-    /// happening silently. Includes dry-run, so a rehearsal names every row
-    /// whose stamp would go.
-    pub cleared_contradiction: Vec<String>,
-    /// Live-idle rows the stat gate could NOT answer for, so they escalated to
-    /// the batched truth probe this sweep. One number, not a cap: the old
-    /// `DORMANT_PROBE_CAP` of 8 truncated a sweep over a large roster
-    /// silently, judging an arbitrary first eight and reporting nothing about
-    /// the rest. Reporting the spend is what replaces it.
-    pub dormant_probes_escalated: usize,
-    /// `(row id, reason)` for every past-grace row classified reaped-shaped
-    /// but HELD because no resumable receipt could be staged for it (x-b150):
-    /// no session identity, a harness with no capability row, or a receipt
-    /// that would not persist. Unknown never reaps - a removal the operator
-    /// cannot undo needs at least the record of how to come back.
-    pub kept_no_receipt: Vec<(String, String)>,
-    /// Receipt filenames expired by the retention window this sweep (x-6db9),
-    /// each past `agents.reap_receipts.retain_days`.
-    pub expired_receipts: Vec<String>,
-    /// `(receipt filename, reason)` for every receipt the retention sweep
-    /// HELD: a missing or unparseable `reaped_at` is not evidence of age, so
-    /// the receipt is kept and named rather than deleted on a failed read -
-    /// the same fail-closed rule `build_reap_receipt` follows.
-    pub kept_receipts: Vec<(String, String)>,
-}
-
-/// Expire receipts older than `retain_days` in the sweep that also writes
-/// them (x-6db9): one pass both records and prunes. Ordering note: this runs
-/// BEFORE a receipt this pass may stage, never after - but a freshly written
-/// receipt carries `reaped_at` of now, so it can never be its own expiry's
-/// victim. A receipt whose `reaped_at` is missing or unparseable is KEPT and
-/// named: a failed read is not evidence of age, and deleting on one destroys
-/// the handle this store exists to preserve.
-fn expire_reap_receipts(home: &AgentsHome, retain_days: u64, summary: &mut GcSummary) {
-    let dir = home.root().join("reap-receipts");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return; // nothing was ever written: no store, no expiry
-    };
-    let now = row_timestamp(Some(&serde_json::Value::String(now_rfc3339_like())));
-    let Some(now) = now else {
-        return; // the clock itself unreadable: prune nothing
-    };
-    let window_secs = retain_days.saturating_mul(86_400);
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let read = std::fs::read(&path)
-            .map_err(|e| format!("receipt unreadable: {e}"))
-            .and_then(|raw| {
-                serde_json::from_slice::<serde_json::Value>(&raw)
-                    .map_err(|e| format!("receipt malformed: {e}"))
-            });
-        let receipt = match read {
-            Ok(receipt) => receipt,
-            Err(reason) => {
-                summary.kept_receipts.push((name, reason));
-                continue;
-            }
-        };
-        let reaped = row_timestamp(receipt.get("reaped_at"));
-        let Some(reaped) = reaped else {
-            summary.kept_receipts.push((
-                name,
-                "reaped_at missing or unparseable; a failed read is not evidence of age"
-                    .to_string(),
-            ));
-            continue;
-        };
-        let age_secs = (now - reaped).num_seconds().max(0) as u64;
-        if age_secs > window_secs {
-            match std::fs::remove_file(&path) {
-                Ok(()) => summary.expired_receipts.push(name),
-                Err(err) => summary
-                    .kept_receipts
-                    .push((name, format!("expiry failed: {err}"))),
-            }
-        }
-    }
-}
-
-/// The global ledger's rows, parsed ONCE per sweep. Best-effort by contract
-/// (x-b150 change 5): a missing or unreadable ledger answers None and every
-/// receipt stands on its row's own fields. (ponytail: `config.paths.*`
-/// overrides are not consulted here; the reader that owns overrides is the
-/// Python ledger reader, and the enrichment is a bonus, never the floor.)
-fn ledger_rows(ledger_path: &std::path::Path) -> Option<Vec<Value>> {
-    let content = std::fs::read_to_string(ledger_path).ok()?;
-    let data: Value = serde_json::from_str(&content).ok()?;
-    match data.get("entries").unwrap_or(&data) {
-        Value::Array(rows) => Some(rows.to_vec()),
-        _ => None,
-    }
-}
-
-/// The ledger row naming `session_id` in its `sessions`, if any. Only a real
-/// array of session ids matches; a row carrying `sessions` as anything else
-/// is never matched.
-fn ledger_entry_in<'a>(rows: &'a [Value], session_id: &str) -> Option<&'a Value> {
-    rows.iter().find(|r| {
-        r.get("sessions")
-            .and_then(Value::as_array)
-            .is_some_and(|sessions| sessions.iter().any(|s| s.as_str() == Some(session_id)))
-    })
-}
-
-/// The receipt gate at the classification arms. Stages the receipt for a row
-/// the policy just classified reap-shaped; a row whose receipt cannot be
-/// staged is held and named in `kept_no_receipt`. Returns whether the row may
-/// proceed to `to_reap`. `ledger_rows` is parsed ONCE per sweep, not per row.
-fn stage_reap_receipt(
-    e: &state::RegistryEntry,
-    id: &str,
-    ledger_rows: Option<&[Value]>,
-    receipts: &mut std::collections::BTreeMap<String, ReapReceipt>,
-    kept_no_receipt: &mut Vec<(String, String)>,
-) -> bool {
-    let ledger = ledger_rows
-        .and_then(|rows| ledger_entry_in(rows, e.harness_session_id.as_deref().unwrap_or("")));
-    match build_reap_receipt(e, ledger) {
-        Ok(receipt) => {
-            receipts.insert(e.name.clone(), receipt);
-            true
-        }
-        Err(reason) => {
-            kept_no_receipt.push((id.to_string(), reason));
-            false
-        }
-    }
-}
-
-/// `$HOME/.fno/ledger.json`, the ledger's default global path. Tests inject
-/// their own by building receipts with an explicit `ledger` value instead.
-fn default_ledger_path() -> std::path::PathBuf {
-    let base = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    base.join(".fno").join("ledger.json")
-}
-
 /// Distinct canonical repo roots the registry knows about, deduplicated.
 ///
 /// A linked worktree is not its own repo, so its rows fold into the checkout
@@ -814,240 +612,6 @@ fn registry_repo_roots(home: &AgentsHome) -> Vec<String> {
         }
     }
     seen.into_iter().collect()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MergeCleanupRequest {
-    request_id: String,
-    repo: String,
-    pr: i64,
-    worktree: Option<String>,
-    node_ids: Vec<String>,
-    candidate_row_names: Vec<String>,
-}
-
-fn pending_merge_cleanup_requests(home: &AgentsHome, repo: &str) -> Vec<MergeCleanupRequest> {
-    let Ok(contents) = std::fs::read_to_string(home.events_jsonl()) else {
-        return Vec::new();
-    };
-    let mut requested = std::collections::BTreeMap::<String, MergeCleanupRequest>::new();
-    let mut finished = std::collections::HashSet::<String>::new();
-    for line in contents.lines() {
-        let Ok(event) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(kind) = event.get("type").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(data) = event.get("data") else {
-            continue;
-        };
-        let Some(request_id) = data.get("request_id").and_then(Value::as_str) else {
-            continue;
-        };
-        match kind {
-            "merge_cleanup_requested" => {
-                let Some(request_repo) = data.get("repo").and_then(Value::as_str) else {
-                    continue;
-                };
-                if request_repo != repo {
-                    continue;
-                }
-                let Some(pr) = data.get("pr").and_then(Value::as_i64) else {
-                    continue;
-                };
-                let node_ids = data
-                    .get("node_ids")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect();
-                let candidate_row_names = data
-                    .get("candidate_row_names")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect();
-                requested.insert(
-                    request_id.to_owned(),
-                    MergeCleanupRequest {
-                        request_id: request_id.to_owned(),
-                        repo: request_repo.to_owned(),
-                        pr,
-                        worktree: data
-                            .get("worktree")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        node_ids,
-                        candidate_row_names,
-                    },
-                );
-            }
-            "merge_cleanup_completed" | "merge_cleanup_refused" => {
-                finished.insert(request_id.to_owned());
-            }
-            _ => {}
-        }
-    }
-    requested
-        .into_values()
-        .filter(|request| !finished.contains(&request.request_id))
-        .collect()
-}
-
-fn merge_cleanup_requested(home: &AgentsHome, repo: &str) -> bool {
-    !pending_merge_cleanup_requests(home, repo).is_empty()
-}
-
-fn merge_cleanup_reclaimed_bytes(home: &AgentsHome, worktree: &str) -> u64 {
-    let Ok(contents) = std::fs::read_to_string(home.events_jsonl()) else {
-        return 0;
-    };
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| event.get("type").and_then(Value::as_str) == Some("worktree_removed"))
-        .filter_map(|event| event.get("data").cloned())
-        .filter(|data| data.get("path").and_then(Value::as_str) == Some(worktree))
-        .filter_map(|data| data.get("reclaimed_bytes").and_then(Value::as_u64))
-        .last()
-        .unwrap_or(0)
-}
-
-fn merge_cleanup_guard_reason(repo: &str, worktree: &str) -> Option<String> {
-    let status = std::process::Command::new("git")
-        .current_dir(worktree)
-        .args(["status", "--porcelain"])
-        .output()
-        .ok()?;
-    if !status.status.success() {
-        return Some("git-status-unreadable".into());
-    }
-    if !status.stdout.is_empty() {
-        return Some("dirty".into());
-    }
-    let origin = std::process::Command::new("git")
-        .current_dir(repo)
-        .args(["rev-parse", "--verify", "--quiet", "origin/main"])
-        .output()
-        .ok()?;
-    if !origin.status.success() {
-        return Some("origin-main-unreadable".into());
-    }
-    let merged = std::process::Command::new("git")
-        .current_dir(worktree)
-        .args(["merge-base", "--is-ancestor", "HEAD", "origin/main"])
-        .status()
-        .ok()?;
-    if !merged.success() {
-        return Some("unreachable-from-origin-main".into());
-    }
-    None
-}
-
-fn merge_cleanup_row_names(home: &AgentsHome, request: &MergeCleanupRequest) -> Vec<String> {
-    let Ok(registry) = state::load_registry(&home.registry_json()) else {
-        return Vec::new();
-    };
-    let mut names = request.candidate_row_names.clone();
-    names.extend(
-        registry
-            .entries
-            .into_iter()
-            .filter(|entry| {
-                request
-                    .worktree
-                    .as_deref()
-                    .is_some_and(|worktree| entry.cwd == worktree)
-                    || request
-                        .node_ids
-                        .iter()
-                        .any(|node| entry.name.starts_with(&format!("target-{node}-")))
-            })
-            .map(|entry| entry.name)
-            .collect::<Vec<_>>(),
-    );
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn consume_merge_cleanup_requests(home: &AgentsHome, roots: &[String], emitter: &EventEmitter) {
-    for root in roots {
-        for request in pending_merge_cleanup_requests(home, root) {
-            if let Some(worktree) = request.worktree.as_deref() {
-                if std::path::Path::new(worktree).exists() {
-                    if let Some(reason) = merge_cleanup_guard_reason(root, worktree) {
-                        let _ = emitter.emit(
-                            "merge_cleanup_refused",
-                            &json!({
-                                "request_id": request.request_id,
-                                "repo": request.repo,
-                                "pr": request.pr,
-                                "reason": reason,
-                            }),
-                        );
-                    }
-                    continue;
-                }
-            }
-            let reclaimed_bytes = request
-                .worktree
-                .as_deref()
-                .map(|worktree| merge_cleanup_reclaimed_bytes(home, worktree))
-                .unwrap_or(0);
-            let names = merge_cleanup_row_names(home, &request);
-            let mut failed = None;
-            for name in names {
-                let output = std::process::Command::new("fno")
-                    .current_dir(root)
-                    .args([
-                        "agents",
-                        "rm",
-                        &name,
-                        "--audit-actor",
-                        "post-merge",
-                        "--audit-reason",
-                        "pr-merged",
-                        "--audit-request-id",
-                        &request.request_id,
-                        "--audit-worktree-touched",
-                        "--audit-reclaimed-bytes",
-                        &reclaimed_bytes.to_string(),
-                    ])
-                    .output();
-                if !output.as_ref().is_ok_and(|output| output.status.success()) {
-                    failed = Some(name);
-                    break;
-                }
-            }
-            if let Some(name) = failed {
-                let _ = emitter.emit(
-                    "merge_cleanup_refused",
-                    &json!({
-                        "request_id": request.request_id,
-                        "repo": request.repo,
-                        "pr": request.pr,
-                        "reason": format!("row-removal-failed:{name}"),
-                    }),
-                );
-                continue;
-            }
-            let _ = emitter.emit(
-                "merge_cleanup_completed",
-                &json!({
-                    "request_id": request.request_id,
-                    "repo": request.repo,
-                    "pr": request.pr,
-                    "reclaimed_bytes": reclaimed_bytes,
-                }),
-            );
-        }
-    }
 }
 
 /// How long between worktree report sweeps. A 24-hour reap order spans at
@@ -1201,17 +765,19 @@ pub fn parse_worktree_sweep(stdout: &str) -> Option<WorktreeSweepReport> {
 }
 
 /// Worktree sweep, one line per repo, on a 6h floor: report-only until a
-/// merge-minted reap order stands, then applying.
+/// merge-minted cleanup request stands, then applying.
 ///
 /// A timer tick proves nothing on its own, so an unearned tick still only
-/// REPORTS. Removal stays on the merge-triggered path: the post-merge ritual
-/// mints a `reap:pr-<n>` claim (TTL-bounded) before archive lookup, and while
-/// any such order stands in a repository (`orders` injects that scoped read)
-/// that repository's pass runs with `--apply`. The sweep's own guards -
-/// reapable, live claim, rooted processes - decide tree by tree. A tree that
-/// stays protected expires its order rather than being forced. There is no
-/// config knob, because two off-switches for one decision strand whoever
-/// flips the wrong one.
+/// REPORTS. Removal is merge-triggered: `fno do pr merge` (and the post-merge
+/// ritual, as its second mint site) writes the `merge_cleanup_requested`
+/// envelope, and while a pending request stands for a repository (`orders`
+/// injects that scoped read) that repository's pass runs with `--apply`. The
+/// primary consumer is the merge reaper (merge_reap.rs), which stops the
+/// harness, drops the rows, and takes the tree; this sweep only catches what
+/// that pass leaves behind. The sweep's own guards - reapable, live claim,
+/// rooted processes - still decide tree by tree. There is no config knob,
+/// because two off-switches for one decision strand whoever flips the wrong
+/// one.
 ///
 /// `orders` and `run` are injected so the policy is testable without shelling
 /// out.
@@ -1289,30 +855,6 @@ pub fn worktree_sweep(
     swept
 }
 
-/// Has this worker's transcript been written recently enough to call it alive?
-///
-/// `Some(true)` touched within `window_secs`, `Some(false)` positively stale,
-/// `None` no path recorded or the file cannot be stat'd.
-///
-/// This is the INDEPENDENT half of the reap decision. `status` and `exited_at`
-/// are one signal wearing two hats: the reconcile transition and `gc_sweep` (for
-/// rows no reconcile ever flipped) set the stamp when fno first observes the
-/// death, so they cannot corroborate each other. A claude bg
-/// thread that finished a turn is idle and resumable, not gone, and a batched
-/// stamp says nothing about which it is. Its transcript does.
-///
-/// `None` never grants permission. An unreadable transcript has two
-/// explanations and only one of them is a dead worker.
-fn transcript_fresh_probe(log_path: Option<&str>, now: i64, window_secs: i64) -> Option<bool> {
-    let path = log_path.filter(|p| !p.is_empty())?;
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    let secs = modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs() as i64;
-    Some(now.saturating_sub(secs) <= window_secs)
-}
-
 /// One per-sweep index of the harness transcript stores. A registry-wide
 /// question ("which rows' sessions still exist in their own store") is answered
 /// by ONE walk per harness and in-memory lookups, never a walk per row: the
@@ -1343,7 +885,6 @@ pub(crate) struct HarnessStoreIndex {
     /// unreadable directory: every later lookup answers None, fail closed.
     claude: Option<Result<Vec<(String, std::path::PathBuf)>, ()>>,
     codex: Option<Result<Vec<(String, std::path::PathBuf)>, ()>>,
-    claude_agents: Option<crate::claude_roster::ClaudeAgentsSnapshot>,
 }
 
 impl HarnessStoreIndex {
@@ -1427,12 +968,12 @@ impl HarnessStoreIndex {
                 .collect(),
         )
     }
-
-    fn claude_agents(&mut self) -> &crate::claude_roster::ClaudeAgentsSnapshot {
-        self.claude_agents
-            .get_or_insert_with(crate::claude_roster::read_all_agents)
-    }
 }
+
+/// Wall-clock bound for one harness removal subprocess (`run_claude_rm`). A
+/// hung removal must never wedge its caller (the operator measured a 300s+
+/// hang on a stuck row; the removal cannot inherit it).
+const CASCADE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Bounded walk collecting `(filename, path)` for every regular file under
 /// `dir` (claude is two levels, codex four; depth 5 covers both). `Err` on any
@@ -1456,41 +997,6 @@ pub(crate) fn index_tree(
         }
     }
     Ok(out)
-}
-
-/// Harness-session cascades per sweep: bounded so one sweep cannot turn into an
-/// unbounded subprocess farm; the remainder is candidates on the next tick.
-const CASCADE_CAP: usize = 10;
-/// Wall-clock bound for one harness removal subprocess. A hung removal must
-/// never wedge the sweep (the operator measured a 300s+ hang on a stuck row;
-/// the cascade cannot inherit it).
-const CASCADE_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// How long since this row last showed activity, in seconds. `None` when no
-/// activity signal can be read at all (no `last_message_at`, no stat-able
-/// transcript): idleness cannot be PROVEN then, and only a positive idle
-/// reading opens the dormant gate.
-fn row_idle_secs(
-    e: &state::RegistryEntry,
-    now: i64,
-    transcript: Option<&std::path::Path>,
-) -> Option<i64> {
-    let msg = e
-        .last_message_at
-        .as_deref()
-        .and_then(state::rfc3339_like_to_secs)
-        .map(|s| s as i64);
-    let transcript = transcript.and_then(|p| {
-        std::fs::metadata(p)
-            .ok()?
-            .modified()
-            .ok()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .map(|d| d.as_secs() as i64)
-    });
-    let latest = [msg, transcript].into_iter().flatten().max()?;
-    Some(now.saturating_sub(latest))
 }
 
 /// Remove a reaped row's session from its OWN harness's store (AC6). Returns
@@ -1530,17 +1036,6 @@ impl CascadeOutcome {
                 Some(reason)
             }
             Self::Removed | Self::NotApplicable => None,
-        }
-    }
-
-    fn failure(&self, row_id: &str) -> Option<(String, String)> {
-        match self {
-            Self::Failed(reason) => Some((row_id.to_string(), reason.clone())),
-            Self::Unverified(reason) => Some((
-                row_id.to_string(),
-                format!("harness teardown unverified: {reason}"),
-            )),
-            _ => None,
         }
     }
 }
@@ -1650,25 +1145,6 @@ fn cascade_harness_session_result_with(
     }
 }
 
-pub(crate) fn cascade_harness_session_with(
-    index: &mut HarnessStoreIndex,
-    e: &state::RegistryEntry,
-) -> Option<(String, String)> {
-    let row_id = claude_row_id(e).unwrap_or_else(|| e.name.clone());
-    let snapshot = if e.harness_name() == "claude" {
-        Some(index.claude_agents().clone())
-    } else {
-        None
-    };
-    cascade_harness_session_result_with(
-        e,
-        snapshot.as_ref(),
-        &crate::claude_roster::read_all_agents,
-        &run_claude_rm,
-    )
-    .failure(&row_id)
-}
-
 fn run_claude_rm(short_id: &str) -> Result<(), String> {
     let mut child = std::process::Command::new("claude")
         .args(["rm", short_id])
@@ -1757,7 +1233,7 @@ fn cascade_codex_index(
 /// Fails closed in the useful direction: a path we cannot read is "owns
 /// nothing", so its row is judged on terminal status and grace alone rather
 /// than pinned forever by a cleanliness answer that could never arrive.
-fn is_linked_worktree(cwd: &str) -> bool {
+pub(crate) fn is_linked_worktree(cwd: &str) -> bool {
     if cwd.is_empty() {
         return false;
     }
@@ -1778,7 +1254,7 @@ fn is_linked_worktree(cwd: &str) -> bool {
 /// stale `fno` predating the verb exits non-zero with no receipt, which is
 /// indistinguishable from any other non-answer, so every unknown degrades to
 /// `None` and the row is kept. That is exactly the prior behaviour.
-fn worktree_clean_probe(cwd: &str) -> Option<bool> {
+pub(crate) fn worktree_clean_probe(cwd: &str) -> Option<bool> {
     let out = std::process::Command::new("fno")
         .current_dir(cwd)
         .args(["agents", "workspace", "worktree", "reapable", cwd])
@@ -1866,7 +1342,7 @@ fn output_with_timeout(mut cmd: std::process::Command, secs: u64) -> Option<std:
 /// nothing names the work or the main line (detached HEAD, no main ref, git
 /// error) - the caller keeps the tree. Mirrors
 /// `fno.worktree_reapable.branch_merged`, the Python door's same question.
-fn branch_merged(cwd: &str) -> Option<bool> {
+pub(crate) fn branch_merged(cwd: &str) -> Option<bool> {
     let mut bases = vec!["origin/main".to_string(), "main".to_string()];
     if let Some(out) = output_with_timeout(
         {
@@ -2004,7 +1480,7 @@ fn rm_take_worktree_with(
     }
 }
 
-fn rm_take_worktree(entry: &state::RegistryEntry) -> Option<String> {
+pub(crate) fn rm_take_worktree(entry: &state::RegistryEntry) -> Option<String> {
     rm_take_worktree_with(entry, &worktree_gate, &|cwd| {
         // Run git FROM the worktree: the daemon's own cwd is usually not a
         // repository, and `git worktree remove` needs one to resolve against.
@@ -2077,26 +1553,9 @@ impl RemovalAuditContext {
     }
 }
 
-fn directory_bytes(path: &std::path::Path) -> Option<u64> {
-    fn walk(path: &std::path::Path, total: &mut u64) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let metadata = std::fs::symlink_metadata(entry.path())?;
-            if metadata.is_dir() {
-                walk(&entry.path(), total)?;
-            } else {
-                *total = total.saturating_add(metadata.len());
-            }
-        }
-        Ok(())
-    }
-    let mut total = 0;
-    walk(path, &mut total).ok().map(|()| total)
-}
-
 /// Wall-clock epoch seconds, for GC grace math. Degrades to 0 (a pre-1970 clock
 /// makes every stamped row look in-grace -> nothing reaped, the safe direction).
-fn now_epoch_secs() -> i64 {
+pub(crate) fn now_epoch_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -2108,7 +1567,7 @@ fn now_epoch_secs() -> i64 {
 /// Dispatch names are the durable join available even when a worker wedges
 /// before taking its node claim. Keep the parser narrow: ad-hoc agents that
 /// merely start with `target-` must never create a backlog failure.
-fn dispatch_node_id(name: &str) -> Option<String> {
+pub(crate) fn dispatch_node_id(name: &str) -> Option<String> {
     let mut parts = name.split('-');
     match parts.next()? {
         "target" | "reconcile" => {}
@@ -2128,7 +1587,7 @@ fn dispatch_node_id(name: &str) -> Option<String> {
     Some(format!("{prefix}-{hex}"))
 }
 
-fn global_events_path(home: &AgentsHome) -> PathBuf {
+pub(crate) fn global_events_path(home: &AgentsHome) -> PathBuf {
     home.root()
         .parent()
         .unwrap_or_else(|| home.root())
@@ -2136,7 +1595,7 @@ fn global_events_path(home: &AgentsHome) -> PathBuf {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum DispatchTermination {
+pub(crate) enum DispatchTermination {
     Found(String),
     Absent(Option<String>),
     Unknown(String),
@@ -2175,7 +1634,7 @@ fn dispatch_target_session_id(
     Ok(Some(parsed.session_id))
 }
 
-fn dispatch_termination(
+pub(crate) fn dispatch_termination(
     home: &AgentsHome,
     entry: &RegistryEntry,
     node_id: &str,
@@ -2200,7 +1659,7 @@ fn dispatch_termination(
     }
 }
 
-fn record_dead_dispatch(
+pub(crate) fn record_dead_dispatch(
     home: &AgentsHome,
     entry: &RegistryEntry,
     node_id: &str,
@@ -2224,7 +1683,10 @@ fn record_dead_dispatch(
         .map_err(|err| err.to_string())
 }
 
-fn restore_unaccounted_row(home: &AgentsHome, entry: &RegistryEntry) -> Result<(), String> {
+pub(crate) fn restore_unaccounted_row(
+    home: &AgentsHome,
+    entry: &RegistryEntry,
+) -> Result<(), String> {
     let mut restored = false;
     state::update_registry(&home.registry_json(), |registry| {
         if !registry.entries.iter().any(|row| row.name == entry.name) {
@@ -2243,118 +1705,6 @@ fn restore_unaccounted_row(home: &AgentsHome, entry: &RegistryEntry) -> Result<(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NodeSessionCascadeReceipt {
-    row_removed: bool,
-    status_before: Option<String>,
-    status_after: Option<String>,
-    remaining_open_do: usize,
-}
-
-pub(crate) fn reap_node_session(
-    entry: &state::RegistryEntry,
-    node_id: &str,
-    harness: &str,
-    session_id: &str,
-) -> Result<NodeSessionCascadeReceipt, String> {
-    let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
-    use std::io::Read;
-    let mut child = std::process::Command::new(&fno)
-        .current_dir(&entry.cwd)
-        .args([
-            "backlog",
-            "session",
-            "reap-open",
-            node_id,
-            "--harness",
-            harness,
-            "--session-id",
-            session_id,
-            // Close every open row the dead session held, not just its do
-            // window: a spawned reviewer opens a review row the do-only reap
-            // would leave reading "in progress" forever.
-            "--phase",
-            "all",
-            "--json",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("spawn node session reap: {err}"))?;
-    let mut stdout_bytes = Vec::new();
-    let mut stderr_bytes = Vec::new();
-    if let Some(mut stream) = child.stdout.take() {
-        stream
-            .read_to_end(&mut stdout_bytes)
-            .map_err(|err| format!("read node session reap stdout: {err}"))?;
-    }
-    if let Some(mut stream) = child.stderr.take() {
-        stream
-            .read_to_end(&mut stderr_bytes)
-            .map_err(|err| format!("read node session reap stderr: {err}"))?;
-    }
-    let exit = child
-        .wait()
-        .map_err(|err| format!("wait for node session reap: {err}"))?;
-    let stdout = String::from_utf8_lossy(&stdout_bytes);
-    let stderr = String::from_utf8_lossy(&stderr_bytes);
-    if !exit.success() {
-        return Err(format!(
-            "node session reap exited with code {:?}: {}{}",
-            exit.code(),
-            stdout.trim(),
-            if stderr.trim().is_empty() {
-                String::new()
-            } else {
-                format!("; stderr: {}", stderr.trim())
-            }
-        ));
-    }
-    let payload: Value = serde_json::from_str(stdout.trim())
-        .map_err(|err| format!("node session reap returned invalid JSON: {err}"))?;
-    if payload.get("settled") != Some(&Value::Bool(true)) {
-        return Err("node session reap returned no positive settled marker".into());
-    }
-    let row_removed = payload
-        .get("row_removed")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| "node session reap omitted row_removed".to_string())?;
-    let status_before = payload
-        .get("status_before")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let status_after = payload
-        .get("status_after")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let remaining_open_do = payload
-        .get("remaining_open_do")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "node session reap omitted remaining_open_do".to_string())?
-        .try_into()
-        .map_err(|_| "node session reap remaining_open_do overflowed usize".to_string())?;
-    Ok(NodeSessionCascadeReceipt {
-        row_removed,
-        status_before,
-        status_after,
-        remaining_open_do,
-    })
-}
-
-/// The dormant gate's transcript-tail read, as production runs it: the shared
-/// truth probe (`fno agents truth --handles ... --json`, bounded at 5s),
-/// lowered to the state string alone, for EVERY escalated handle in one
-/// subprocess. Injected into [`gc_sweep_impl`] so the decision path is
-/// unit-testable without shelling out to a real `fno`.
-pub(crate) fn live_truth_tail_states(
-    handles: &[String],
-) -> std::collections::HashMap<String, String> {
-    crate::claude_ask::family1_truth_probe_many(handles)
-        .into_iter()
-        .map(|(handle, probe)| (handle, probe.state))
-        .collect()
-}
-
 /// The one POSITIVE death proof the sweep holds itself: a recorded pid whose
 /// start time no longer matches provably ended. Folded into the answer type
 /// so the reapers read one vocabulary; the ladder never answers `Dead` from
@@ -2366,14 +1716,6 @@ pub(crate) fn fold_positive_death(
         .map(|p| !pid_is_ours(p, e.pid_start_time))
         .unwrap_or(false)
         .then_some(crate::client_verbs::RowLiveness::Dead)
-}
-
-/// One registry read for the pre-sweep truth batch. An unreadable registry
-/// yields no candidates; the sweep body re-reads and reports for itself.
-pub(crate) fn registry_entries(home: &AgentsHome) -> Option<Vec<state::RegistryEntry>> {
-    state::load_registry(&home.registry_json())
-        .ok()
-        .map(|r| r.entries)
 }
 
 /// The claude-uuid candidate handles for the sweep's ONE truth batch: the
@@ -2406,26 +1748,13 @@ pub(crate) fn batched_row_probes(
     truth_tail_probes: &dyn Fn(
         &[String],
     )
-        -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>,
-) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe> {
+        -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
+) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe> {
     let handles = row_truth_handles(entries);
     if handles.is_empty() {
         return std::collections::HashMap::new();
     }
     truth_tail_probes(&handles)
-}
-
-/// The batch as the gc path runs it, lowered to the state string the
-/// liveness ladder's truth rung reads.
-pub(crate) fn batched_row_states(
-    entries: &[state::RegistryEntry],
-    truth_tail_states: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
-) -> std::collections::HashMap<String, String> {
-    let handles = row_truth_handles(entries);
-    if handles.is_empty() {
-        return std::collections::HashMap::new();
-    }
-    truth_tail_states(&handles)
 }
 
 /// The title diff the sweep's `agent_renamed` emits are built from:
@@ -2529,863 +1858,6 @@ pub(crate) fn live_liveness_prober(
     }
 }
 
-#[allow(dead_code)]
-fn gc_sweep_impl(
-    home: &AgentsHome,
-    emitter: &EventEmitter,
-    grace_for_harness: &dyn Fn(&str) -> Duration,
-    dry_run: bool,
-    // Reap-receipt retention in days (x-6db9); dry-run passes 0 and never
-    // expires.
-    retain_days: u64,
-    // The dormant gate's tail read, BATCHED: one call for every handle the
-    // stat gate escalated, keyed by handle. A handle absent from the answer
-    // behaves exactly as `None` did on the per-row seam.
-    truth_tail_states: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
-    store_matches: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
-    row_liveness: &dyn Fn(&state::RegistryEntry) -> crate::client_verbs::RowLiveness,
-    cascade: &dyn Fn(&state::RegistryEntry) -> Option<(String, String)>,
-) -> GcSummary {
-    gc_sweep_impl_with_node_cascade(
-        home,
-        emitter,
-        grace_for_harness,
-        dry_run,
-        retain_days,
-        truth_tail_states,
-        store_matches,
-        row_liveness,
-        None,
-        cascade,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn gc_sweep_impl_with_node_cascade(
-    home: &AgentsHome,
-    emitter: &EventEmitter,
-    grace_for_harness: &dyn Fn(&str) -> Duration,
-    dry_run: bool,
-    // Reap-receipt retention in days (x-6db9); expiry is skipped on dry_run.
-    retain_days: u64,
-    // The dormant gate's tail read, BATCHED: one call for every handle the
-    // stat gate escalated, keyed by handle. A handle absent from the answer
-    // behaves exactly as `None` did on the per-row seam.
-    truth_tail_states: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
-    // The harness-store lookup (every transcript candidate this row's own
-    // store holds for its session id), injected so a sweep-level test never
-    // depends on what lives in the developer's real ~/.claude / ~/.codex.
-    store_matches: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
-    // The shared liveness ladder (x-5d96), injected for the same hermeticity:
-    // production probes the claude session socket + heartbeat + truth state;
-    // a test stages the answer.
-    row_liveness: &dyn Fn(&state::RegistryEntry) -> crate::client_verbs::RowLiveness,
-    // Node-session cleanup is separate from the harness-store cascade: failure
-    // restores the registry row and skips every later cascade.
-    node_cascade: Option<
-        &dyn Fn(
-            &state::RegistryEntry,
-            &str,
-            &str,
-            &str,
-        ) -> Result<NodeSessionCascadeReceipt, String>,
-    >,
-    // The post-reap harness-store cascade, injected for the same reason: a
-    // test must be able to stage a refusal without mutating PATH/HOME.
-    cascade: &dyn Fn(&state::RegistryEntry) -> Option<(String, String)>,
-) -> GcSummary {
-    // (x-f191) Per-row stderr progress, opt-in via FNO_REAP_PROGRESS=1: only
-    // a caller that reads partial output on a timeout (the mux server's
-    // bounded reap) sets it on the child. The daemon's idle tick runs this
-    // sweep every few seconds and must not log a line per row per tick.
-    let progress = std::env::var_os("FNO_REAP_PROGRESS").is_some_and(|v| v == "1");
-    let mut summary = GcSummary::default();
-    // The retention pass runs on EVERY sweep, before the empty-registry
-    // early return below: receipts age out on their own clock, and a quiet
-    // fleet must still prune. Any receipt this same pass goes on to write
-    // carries `reaped_at` of now, so it can never be this expiry's victim.
-    if !dry_run {
-        expire_reap_receipts(home, retain_days, &mut summary);
-    }
-    let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
-    if registry.entries.is_empty() {
-        return summary; // empty registry -> nothing to sweep (Boundary)
-    }
-    let live_workers = home.scan_worker_sockets();
-    let now = now_epoch_secs();
-    // One ledger parse per sweep: every receipt's enrichment reads these rows,
-    // and re-parsing the file per reaped row is wasted repeated I/O.
-    let ledger = ledger_rows(&default_ledger_path());
-
-    // Keyed by row name -> the `created_at` we evaluated. Applied under the lock
-    // ONLY when the row's current `created_at` still matches, so a same-name
-    // session reaped-and-recreated (or resurrected) between this unlocked snapshot
-    // + the slow git probes and the exclusive write is never clobbered by a
-    // stale name-only decision (TOCTOU; gemini HIGH / codex P2 on PR #126).
-    // `created_at` is the spawn-stamped identity discriminant: a replacement
-    // session carries a fresh one.
-    let mut to_reap: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    // Staged reap receipts (x-b150), keyed by row name: built at
-    // classification, persisted just before the registry write that drops the
-    // row. A row with no staged receipt never reaches `to_reap`.
-    let mut receipts: std::collections::BTreeMap<String, ReapReceipt> =
-        std::collections::BTreeMap::new();
-    // Rows in `to_reap` that got there on age alone, keyed by registry name.
-    let mut backstop_ids: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-    // Rows in `to_reap` that got there on a live-but-done reading, keyed by
-    // registry name. Reported separately (a death and a finished turn must stay
-    // distinguishable) and carrying a resumable handle in the reap event.
-    let mut dormant_ids: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-    let mut to_stamp: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-    let mut to_clear: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-
-    // PASS ONE: classify every row and stat its transcript, deciding only
-    // WHICH rows still need a truth probe spent on them. PASS TWO (below)
-    // batches those handles into one subprocess and applies the verdict.
-    //
-    // Every row is classified here; the only thing deferred is `dormant_done`,
-    // which is why the row's `GcRow` is carried forward rather than its
-    // verdict. `needs_probe` below is safe to decide here: it requires
-    // `!is_live` and the dormant gate requires `is_live`, so no row can want
-    // both.
-    struct PendingRow<'a> {
-        entry: &'a state::RegistryEntry,
-        row: crate::gc::GcRow,
-        id: String,
-        grace_secs: i64,
-        /// The idle reading that fed the dormant gate, kept so a row the gate
-        /// did not open for can be told WHY it was never probed.
-        idle: Option<i64>,
-        /// The handle this row escalated to the probe, when the stat gate could
-        /// not answer its liveness question from disk alone.
-        dormant_handle: Option<String>,
-    }
-    let mut pending: Vec<PendingRow> = Vec::with_capacity(registry.entries.len());
-
-    for e in &registry.entries {
-        // (x-f191) Progress on stderr, one line per row: a sweep that outlives
-        // its 20s caller bound can still say how far it got. stdout stays the
-        // --json contract; stderr lines are free-form and every consumer of
-        // this sweep already treats stderr as log. Gated: the daemon's idle
-        // tick runs this sweep every few seconds and must not log a line per
-        // row per tick.
-        if progress {
-            eprintln!("reap: scan {}", e.name);
-        }
-        let grace_secs = grace_for_harness(e.harness_name()).as_secs() as i64;
-        // x-91f3: the ladder answers for EVERY row, not only the stamped
-        // live-ish rows the consult below used to gate it to. `short_id` is
-        // present on 12 of 26 rows of the measured registry and `pid` on
-        // none - structural for codex, whose sessions a shared app-server
-        // hosts - so an `is_live` keyed on those two surfaces alone left
-        // every pid-less row reading not-live forever. The ladder's positive
-        // markers (claude socket, advancing heartbeat, truth state) are what
-        // such a row is judged by. The two process votes stay: the ladder
-        // never answers Alive from a pid, and a worker-sock hit is evidence
-        // it does not read.
-        let probe = row_liveness(e);
-        let is_live = live_workers.contains(&e.short_id)
-            || e.pid
-                .map(|p| pid_is_ours(p, e.pid_start_time))
-                .unwrap_or(false)
-            || probe == RowLiveness::Alive;
-        let pid_confirmed_dead = e
-            .pid
-            .map(|p| !pid_is_ours(p, e.pid_start_time))
-            .unwrap_or(false);
-        // A one-shot ask owns nothing; neither does a row sitting in the
-        // canonical checkout or in a plain directory. Only a LINKED worktree is
-        // removable, and only there does cleanliness decide anything.
-        let owns_worktree = !e.is_one_shot_ask() && is_linked_worktree(&e.cwd);
-        let exited_at = e
-            .exited_at
-            .as_deref()
-            .and_then(state::rfc3339_like_to_secs)
-            .map(|s| s as i64);
-
-        // Probe the worktree only for a row that could actually be reaped this
-        // pass (dead + terminal + past grace + owns a worktree). Keeps git off the
-        // hot path: steady state has no such rows, so no subprocess runs.
-        // The terminal set comes from the POLICY's one spelling: gating probes
-        // on a narrower local copy strands exactly the rows the policy would
-        // remove (the Orphaned drift).
-        let terminal_or_dead = crate::gc::status_is_terminal(e.status) || pid_confirmed_dead;
-        let past_grace = matches!(exited_at, Some(t) if now.saturating_sub(t) > grace_secs);
-        // The second signal, read whenever a reap is otherwise on the table.
-        // Cheap (one stat), and it is the discrimination `status` cannot make:
-        // an idle-but-resumable bg thread keeps touching its transcript.
-        // Repointed at the harness's own transcript: fno's log copies are
-        // routinely absent (83 of 88 rows on the machine this was measured
-        // on), which used to kill the freshness signal outright - it read
-        // `None` (unknown) and fail-closed to Keep for want of a file nobody
-        // writes anymore. `log_path` remains the fallback for a row with no
-        // session id.
-        // ONE store lookup answers both the existence question (gone?) and
-        // the freshness question (newest match's mtime) for this row.
-        // `terminal_or_dead` is deliberately not in this gate: the row shape
-        // that needs the transcript most is the one whose status disagrees
-        // with its exit stamp, and that gate read the status field.
-        let store_hits = if !is_live && past_grace {
-            store_matches(e)
-        } else {
-            None
-        };
-        let harness_session_gone = store_hits.as_ref().map(|m| m.is_empty());
-        let transcript_fresh = if !is_live && past_grace {
-            // The stamped-contradiction arm resolves the transcript through the
-            // shared rule: the harness store first, the `log_path` fallback
-            // only for a row already condemned.
-            transcript_fresh_probe(
-                crate::gc::row_transcript(
-                    store_hits.as_deref(),
-                    e.log_path.as_deref(),
-                    terminal_or_dead,
-                )
-                .as_deref()
-                .and_then(|p| p.to_str()),
-                now,
-                grace_secs,
-            )
-        } else {
-            None
-        };
-        // Live-but-done (the third eviction route): a live row idle past the
-        // grace window whose transcript tail POSITIVELY classifies done
-        // (promise emitted). A credential-dead worker reads live too, and
-        // neither alive nor dead; only the positive done reading evicts.
-        //
-        // This is the ONE call site where the probe is asked a LIVENESS
-        // question, and so the one where a stat can stand in for it: growth
-        // since the last sweep answers "is this row still advancing" directly.
-        // The list path and the refused leg ask for DISPLAY data instead
-        // (`state`, `observed_model`, the reachability triple), which no stat
-        // can supply, so they take batching alone.
-        //
-        // Bounded by the stat gate rather than a cap: only idle rows whose
-        // transcripts did not grow escalate, and pass two collapses all of
-        // them into one subprocess. The old DORMANT_PROBE_CAP of 8 silently
-        // truncated a sweep over a large roster, judging an arbitrary first
-        // eight and leaving the rest unexamined with no report of the
-        // shortfall. Removing it means every escalated row is judged this
-        // sweep, and the count spent is reported.
-        let mut dormant_handle = None;
-        let mut idle = None;
-        // Every pid-less row gets its tail read. The two identity clauses this
-        // gate used to demand (a short_id the harness issued, not-a-one-shot)
-        // said nothing about whether the tail is worth reading, and they held
-        // 31 of 32 kept-not-terminal rows out of the probe while their
-        // transcripts sat on disk unread. This gate only answers "should we
-        // READ this tail"; removal stays with gc_action, which requires a
-        // positive `done` tail plus past-grace and its own corroboration gates.
-        if is_live || e.pid.is_none() {
-            // The idle gate's transcript read comes from the same store index
-            // (in memory after the first build), never a fresh walk, through the
-            // same shared rule the contradiction arm uses - the unconditional
-            // `log_path` fallback read a 0-byte wrapper log for 21 claude rows
-            // that have the real transcript in their own store.
-            let transcript = crate::gc::row_transcript(
-                store_matches(e).as_deref(),
-                e.log_path.as_deref(),
-                terminal_or_dead,
-            );
-            // `row_idle_secs` folds the transcript's mtime into `idle`, so this
-            // gate opening already proves the transcript has been untouched for
-            // longer than grace - an hour by default, against a sweep every
-            // five seconds. That is why x-0d93's planned transcript-SIZE gate
-            // is not here: growth since the last sweep leaves an mtime seconds
-            // old, and such a row never reaches this branch at all. See
-            // `a_live_row_with_a_growing_transcript_is_never_probed_by_the_dormant_gate`.
-            idle = row_idle_secs(e, now, transcript.as_deref());
-            if idle.map_or(false, |secs| secs > grace_secs) {
-                dormant_handle = Some(crate::gc::row_handle(e));
-            }
-        }
-        // Filled in by pass two from the batched probe. A row the stat gate
-        // spared, or one the probe did not answer for, keeps `false`: only a
-        // positive `done` reading evicts.
-        let dormant_done = false;
-        // Built with `worktree_clean` unset so the probe decision can ask the
-        // policy itself. Filled in below, before any verdict is read from it.
-        let mut row = crate::gc::GcRow {
-            status: e.status,
-            is_live,
-            pid_confirmed_dead,
-            owns_worktree,
-            exited_at,
-            // A one-shot ask carries neither pid nor short_id: no worker can be
-            // hiding behind an identity that was never recorded. A codex
-            // THREAD row is the third shape, and it is the opposite case: it
-            // owns no pid BY DESIGN (the shared daemon's pid is not the
-            // worker's to hold), so counting shapes alone would leave the arm
-            // below reaping a live, resumable thread on shape alone. Its
-            // identity IS probeable (thread/loaded/list), and a probe that
-            // comes back empty corroborates through harness_session_gone, so
-            // the row gets a surface AND a way off the board. A one-shot ask
-            // gets neither - its harness_session_id names a FINISHED exchange
-            // - which is why the term keys on row shape and must never widen
-            // to "has a session id".
-            liveness_surface: e.pid.is_some() || !e.short_id.is_empty() || is_codex_thread_entry(e),
-            transcript_fresh,
-            harness_session_gone,
-            dormant_done,
-            worktree_clean: None,
-            probe,
-        };
-        // The probe condition MIRRORS the removal condition, asked through the
-        // one function that defines it. A narrower test here strands any row the
-        // policy would remove: `worktree_clean` stays `None`, the fail-closed arm
-        // keeps it, and the `kept_dirty` line below is gated on this same flag,
-        // so the operator is told nothing either. A backstop row is the other
-        // half - it has no corroboration by definition, and without it the valve
-        // never opens for the worktree-owning rows it was ordered for.
-        let past_backstop = matches!(exited_at,
-            Some(t) if now.saturating_sub(t) > crate::gc::backstop_horizon_secs(grace_secs));
-        // `treated_as_terminal`, never a local copy: a stamped row a stale
-        // transcript corroborates is terminal to the POLICY while its status
-        // field and pid still say otherwise, and gating the probe on the
-        // narrow question stranded exactly the rows the policy would remove.
-        let needs_probe = !is_live
-            && crate::gc::treated_as_terminal(&row)
-            && past_grace
-            && owns_worktree
-            && (crate::gc::removal_is_corroborated(&row) || past_backstop);
-        if needs_probe {
-            row.worktree_clean = worktree_clean_probe(&e.cwd);
-        }
-        let id = crate::gc::row_handle(e);
-        pending.push(PendingRow {
-            entry: e,
-            row,
-            id,
-            grace_secs,
-            idle,
-            dormant_handle,
-        });
-    }
-
-    // PASS TWO: ONE subprocess for every escalated handle, then the verdict.
-    // Duplicate handles collapse in the request and fan back out on read.
-    let escalated: Vec<String> = {
-        let mut seen = std::collections::BTreeSet::new();
-        pending
-            .iter()
-            .filter_map(|p| p.dormant_handle.clone())
-            .filter(|h| seen.insert(h.clone()))
-            .collect()
-    };
-    summary.dormant_probes_escalated = escalated.len();
-    let tails = if escalated.is_empty() {
-        std::collections::HashMap::new()
-    } else {
-        truth_tail_states(&escalated)
-    };
-
-    for p in pending {
-        let PendingRow {
-            entry: e,
-            mut row,
-            id,
-            grace_secs,
-            idle,
-            dormant_handle,
-        } = p;
-        // Only a POSITIVE `done` reading evicts. A handle the batch could not
-        // answer for is absent from the map and stays `false`, exactly as an
-        // unanswered per-row probe did: staleness never reaps.
-        let tail_state = dormant_handle.as_ref().and_then(|h| tails.get(h)).cloned();
-        row.dormant_done = tail_state.as_deref() == Some("done");
-        // The probe condition mirrors the removal condition, and pass one
-        // cannot see this one: `dormant_done` is known only after the tail read
-        // above. Without this, a worktree-owning row the dormant arm earns a
-        // removal for fails closed into `Keep(WorktreeUnprobed)` - stuck, and
-        // named as a worktree problem when the probe never ran.
-        if row.dormant_done && row.owns_worktree && row.worktree_clean.is_none() {
-            row.worktree_clean = worktree_clean_probe(&e.cwd);
-        }
-        match crate::gc::gc_action(&row, now, grace_secs) {
-            crate::gc::GcAction::Reap => {
-                if stage_reap_receipt(
-                    e,
-                    &id,
-                    ledger.as_deref(),
-                    &mut receipts,
-                    &mut summary.kept_no_receipt,
-                ) {
-                    to_reap.insert(e.name.clone(), e.created_at.clone());
-                }
-            }
-            crate::gc::GcAction::ReapBackstop => {
-                if stage_reap_receipt(
-                    e,
-                    &id,
-                    ledger.as_deref(),
-                    &mut receipts,
-                    &mut summary.kept_no_receipt,
-                ) {
-                    to_reap.insert(e.name.clone(), e.created_at.clone());
-                    backstop_ids.insert(e.name.clone(), id.clone());
-                }
-            }
-            crate::gc::GcAction::ReapDormant => {
-                if stage_reap_receipt(
-                    e,
-                    &id,
-                    ledger.as_deref(),
-                    &mut receipts,
-                    &mut summary.kept_no_receipt,
-                ) {
-                    to_reap.insert(e.name.clone(), e.created_at.clone());
-                    dormant_ids.insert(e.name.clone(), id.clone());
-                }
-            }
-            crate::gc::GcAction::StampExit => {
-                to_stamp.insert(e.name.clone(), e.created_at.clone());
-            }
-            crate::gc::GcAction::Keep => {
-                // Resurrected: drop the stale exit stamp so a later death
-                // starts a fresh grace clock. An `is_live` row clears on its
-                // positive process evidence (the pre-x-5d96 contract), and
-                // since x-91f3 a ladder-Alive answer is one of `is_live`'s
-                // three votes, so every positively-proven row clears here.
-                // An `Unknown` on a non-is_live row is the contradiction: the
-                // stamp is PRESERVED as evidence and the row is named below.
-                // Either way the disagreement resolves by evidence and gets
-                // reported - never silently in favour of either field.
-                if e.exited_at.is_some() && row.is_live {
-                    to_clear.insert(e.name.clone(), e.created_at.clone());
-                    summary.cleared_contradiction.push(id);
-                } else {
-                    // The SAME decision `gc_action` above just made, read a
-                    // second time for its reason (x-9de7 task 5): a row that
-                    // is stuck and invisible is the failure mode `gc.rs`'s own
-                    // comments warn about, so a past-grace Keep always gets a
-                    // named gate instead of a silent, unexplained keep.
-                    match crate::gc::keep_reason(&row, now, grace_secs) {
-                        Some(
-                            crate::gc::KeepReason::WorktreeDirty
-                            | crate::gc::KeepReason::WorktreeUnprobed,
-                        ) => {
-                            summary.kept_dirty.push((id, e.cwd.clone()));
-                        }
-                        Some(crate::gc::KeepReason::Uncorroborated) => {
-                            summary.kept_uncorroborated.push(id);
-                        }
-                        // x-98ab: the ordinary keep is still a keep. Reporting
-                        // it is what makes a zero-reap pass over a fully-live
-                        // fleet legible instead of a silent 26-row keep.
-                        Some(crate::gc::KeepReason::Live) => {
-                            summary.kept_live.push(id);
-                        }
-                        // x-91f3: the NotTerminal keep is the OTHER ordinary
-                        // keep, and on a registry of pid-less rows it is the
-                        // majority verdict. Reported like `kept_live` so a
-                        // pass names every row it held and the gate that held
-                        // it.
-                        Some(crate::gc::KeepReason::NotTerminal) => {
-                            summary.kept_not_terminal.push((
-                                id,
-                                match tail_state {
-                                    Some(state) => format!("tail: {state}"),
-                                    // The probe RAN for this handle and answered
-                                    // nothing: the attempted-and-failed verdict,
-                                    // and still a keep - only `done` evicts.
-                                    None if dormant_handle.is_some() => "tail: unknown".to_string(),
-                                    // The probe was NEVER ASKED. Name the gate
-                                    // that held it: the verdict this arm used
-                                    // to print was heard as read-and-failed and
-                                    // produced a wrong root cause.
-                                    None => format!(
-                                        "not probed: {}",
-                                        crate::gc::not_probed_reason(
-                                            e,
-                                            row.is_live,
-                                            idle,
-                                            grace_secs
-                                        )
-                                    ),
-                                },
-                            ));
-                        }
-                        Some(crate::gc::KeepReason::Contradicted) => {
-                            summary.kept_contradicted.push(id);
-                        }
-                        // WithinGrace: transient by construction - the row
-                        // leaves this arm when the window closes - unlike the
-                        // NotTerminal blanket, which never resolves on its
-                        // own.
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
-    // Cap the whole reap batch at CASCADE_CAP, not just the cascade calls
-    // within it: every row removed from the registry below MUST get its
-    // harness-store cascade attempted THIS sweep, because a row past that
-    // point cannot become a cascade candidate again (its registry record,
-    // the only handle the next sweep would find it by, is gone). A row
-    // beyond the cap simply stays in the registry and is re-evaluated next
-    // tick (codex review, PR #889). Truncated deterministically by name so
-    // dry-run and the real write agree on exactly which rows this covers.
-    if to_reap.len() > CASCADE_CAP {
-        let keep: std::collections::BTreeMap<String, String> = to_reap
-            .iter()
-            .take(CASCADE_CAP)
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        to_reap = keep;
-    }
-
-    if to_reap.is_empty() && to_stamp.is_empty() && to_clear.is_empty() {
-        return summary;
-    }
-    if dry_run {
-        // "Would reap": same `to_reap`/`backstop_ids` membership the real
-        // write below applies, read straight off the classification pass
-        // with no lock taken and no disk touched - `--dry-run`'s whole
-        // contract. Stamp candidates need no report: they never remove a
-        // row. Contradiction CLEARS are reported (x-5d96): the stamp is
-        // evidence, and a rehearsal names every row whose evidence would go.
-        for e in &registry.entries {
-            if to_reap.get(&e.name) != Some(&e.created_at) {
-                continue;
-            }
-            let id = crate::gc::row_handle(e);
-            if backstop_ids.contains_key(&e.name) {
-                summary.reaped_backstop.push(id);
-            } else if dormant_ids.contains_key(&e.name) {
-                summary.reaped_dormant.push(id);
-            } else {
-                summary.reaped.push(id);
-            }
-        }
-        return summary;
-    }
-
-    let now_stamp = now_rfc3339_like();
-    // Persist every receipt BEFORE the retain drops its row (x-b150): the
-    // ordering IS the losslessness. A receipt that will not write holds its
-    // row in the registry for the next sweep instead.
-    to_reap.retain(|name, _| {
-        let Some(receipt) = receipts.get(name) else {
-            // Unreachable: the gate stages a receipt before any insert. A row
-            // that somehow got here is kept - fail closed, never unreapable.
-            summary
-                .kept_no_receipt
-                .push((name.clone(), "no staged receipt".to_string()));
-            return false;
-        };
-        match write_reap_receipt(home, receipt) {
-            Ok(()) => true,
-            Err(err) => {
-                let id = if receipt.short_id.is_empty() {
-                    receipt.row_name.clone()
-                } else {
-                    receipt.short_id.clone()
-                };
-                summary
-                    .kept_no_receipt
-                    .push((id, format!("receipt did not persist: {err}")));
-                false
-            }
-        }
-    });
-    // Names actually removed under the lock (identity still matched), so the emit
-    // + summary report only what really happened (AC1-ERR / no phantom reaps).
-    let mut reaped_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    // Harness-store cascades performed this sweep (see CASCADE_CAP).
-    let mut cascaded: usize = 0;
-    let write = state::update_registry(&home.registry_json(), |r| {
-        // `created_at` guard: apply each mutation only if the row under the lock is
-        // still the SAME session we evaluated. A stale name whose row was
-        // recreated with a fresh `created_at` is skipped (never clobbers the new
-        // session); this preserves the liveness re-check guarantee across the
-        // unlocked-snapshot window.
-        for e in r.entries.iter_mut() {
-            if to_stamp.get(&e.name) == Some(&e.created_at) {
-                e.exited_at = Some(now_stamp.clone());
-            }
-            if to_clear.get(&e.name) == Some(&e.created_at) {
-                e.exited_at = None;
-            }
-        }
-        r.entries.retain(|e| {
-            if to_reap.get(&e.name) == Some(&e.created_at) {
-                reaped_names.insert(e.name.clone());
-                false
-            } else {
-                true
-            }
-        });
-    });
-    match write {
-        Ok(()) => {
-            // (x-f191) The write is one atomic pass, so the removed count is
-            // known here - before the per-row cascade work below, which is
-            // where a sweep under load spends its time.
-            if progress {
-                eprintln!("reap: removed {}", reaped_names.len());
-            }
-            // Emit only AFTER a successful write so the event log never diverges
-            // from disk (AC1-ERR), and only for rows actually removed under the
-            // lock (a stale candidate whose identity changed is not a reap).
-            for e in &registry.entries {
-                if reaped_names.contains(&e.name) {
-                    // (x-f191) The row whose accounting + cascade is now in
-                    // flight; the next scan/cascade line supersedes it.
-                    if progress {
-                        eprintln!("reap: cascade {}", e.name);
-                    }
-                    let node_id = dispatch_node_id(&e.name);
-                    let mut target_session_id = None;
-                    let mut termination_event = false;
-                    let mut accounted = true;
-                    if let Some(node_id) = node_id.as_deref() {
-                        match dispatch_termination(home, e, node_id) {
-                            DispatchTermination::Found(session_id) => {
-                                target_session_id = Some(session_id);
-                                termination_event = true;
-                            }
-                            DispatchTermination::Absent(session_id) => {
-                                target_session_id = session_id;
-                                if let Err(err) = record_dead_dispatch(
-                                    home,
-                                    e,
-                                    node_id,
-                                    target_session_id.as_deref(),
-                                ) {
-                                    accounted = false;
-                                    let restore = restore_unaccounted_row(home, e);
-                                    let _ = emitter.emit(
-                                        "daemon_recovery_error",
-                                        &json!({
-                                            "op": "record_dead_dispatch",
-                                            "short_id": e.short_id,
-                                            "error": err,
-                                            "restore_error": restore.err(),
-                                        }),
-                                    );
-                                }
-                            }
-                            DispatchTermination::Unknown(err) => {
-                                accounted = false;
-                                let restore = restore_unaccounted_row(home, e);
-                                let _ = emitter.emit(
-                                    "daemon_recovery_error",
-                                    &json!({
-                                        "op": "observe_dead_dispatch_termination",
-                                        "short_id": e.short_id,
-                                        "error": err,
-                                        "restore_error": restore.err(),
-                                    }),
-                                );
-                            }
-                        }
-                    }
-                    if !accounted {
-                        continue;
-                    }
-                    let row_id = crate::gc::row_handle(e);
-                    let node_session = if let (Some(node_id), Some(node_cascade)) =
-                        (node_id.as_deref(), node_cascade)
-                    {
-                        let harness = e.harness_name();
-                        let Some(session_id) = e
-                            .harness_session_id
-                            .as_deref()
-                            .filter(|value| !value.is_empty())
-                        else {
-                            let reason = "missing harness session identity".to_string();
-                            let detail = match restore_unaccounted_row(home, e) {
-                                Ok(()) => reason,
-                                Err(err) => format!("{reason}; restore failed: {err}"),
-                            };
-                            summary
-                                .node_session_refused
-                                .push((row_id.clone(), detail.clone()));
-                            let _ = emitter.emit(
-                                "daemon_recovery_error",
-                                &json!({
-                                    "op": "node_session_refused",
-                                    "short_id": e.short_id,
-                                    "node_id": node_id,
-                                    "error": detail,
-                                }),
-                            );
-                            continue;
-                        };
-                        if harness.is_empty() {
-                            let reason = "missing harness identity".to_string();
-                            let detail = match restore_unaccounted_row(home, e) {
-                                Ok(()) => reason,
-                                Err(err) => format!("{reason}; restore failed: {err}"),
-                            };
-                            summary
-                                .node_session_refused
-                                .push((row_id.clone(), detail.clone()));
-                            let _ = emitter.emit(
-                                "daemon_recovery_error",
-                                &json!({
-                                    "op": "node_session_refused",
-                                    "short_id": e.short_id,
-                                    "node_id": node_id,
-                                    "error": detail,
-                                }),
-                            );
-                            continue;
-                        }
-                        match node_cascade(e, node_id, harness, session_id) {
-                            Ok(receipt) => Some(receipt),
-                            Err(reason) => {
-                                let detail = match restore_unaccounted_row(home, e) {
-                                    Ok(()) => reason,
-                                    Err(err) => format!("{reason}; restore failed: {err}"),
-                                };
-                                summary
-                                    .node_session_refused
-                                    .push((row_id.clone(), detail.clone()));
-                                let _ = emitter.emit(
-                                    "daemon_recovery_error",
-                                    &json!({
-                                        "op": "node_session_refused",
-                                        "short_id": e.short_id,
-                                        "node_id": node_id,
-                                        "error": detail,
-                                    }),
-                                );
-                                continue;
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    // CASCADE (AC6): two stores, act on both, report both.
-                    // Deferred until AFTER dispatch accounting confirms this
-                    // row - cascading first and failing accounting second
-                    // would restore the registry row while its harness
-                    // session (or codex index entry) is already gone,
-                    // leaving a restored-but-unresumable row (codex review,
-                    // PR #889). If the harness's own store still holds the
-                    // session, remove it via the harness's own removal
-                    // surface. A refusal or failure is SURFACED in the reap
-                    // report and event (`cascade_refused`), never swallowed,
-                    // and never rolls back the registry reap - but an
-                    // unknown harness store (probe None) is a skip, not a
-                    // refusal: registry-only rows are the opencode/gemini
-                    // contract, not a failure. Bounded per sweep (the whole
-                    // reap batch is already capped at CASCADE_CAP above, so
-                    // this bound never actually engages - kept as a
-                    // belt-and-suspenders invariant, not the enforcement
-                    // point).
-                    let mut cascade_refused: Option<(String, String)> = None;
-                    if cascaded < CASCADE_CAP {
-                        cascaded += 1;
-                        cascade_refused = cascade(e);
-                    }
-                    if let Some((id, reason)) = &cascade_refused {
-                        summary.cascade_refused.push((id.clone(), reason.clone()));
-                    }
-                    let _ = emitter.emit_fields(
-                        "agent_row_reaped",
-                        json_obj(&[
-                            ("short_id", Value::String(e.short_id.clone())),
-                            ("name", Value::String(e.name.clone())),
-                            (
-                                "node_id",
-                                node_id.clone().map_or(Value::Null, Value::String),
-                            ),
-                            (
-                                "session_id",
-                                target_session_id.map_or(Value::Null, Value::String),
-                            ),
-                            ("termination_event", Value::Bool(termination_event)),
-                            ("harness", Value::String(e.harness_name().to_string())),
-                            (
-                                "harness_session_id",
-                                e.harness_session_id
-                                    .clone()
-                                    .map_or(Value::Null, Value::String),
-                            ),
-                            ("node_session_cleared", Value::Bool(node_session.is_some())),
-                            (
-                                "node_row_removed",
-                                node_session
-                                    .as_ref()
-                                    .map(|receipt| Value::Bool(receipt.row_removed))
-                                    .unwrap_or(Value::Null),
-                            ),
-                            (
-                                "node_status_before",
-                                node_session
-                                    .as_ref()
-                                    .and_then(|receipt| receipt.status_before.clone())
-                                    .map_or(Value::Null, Value::String),
-                            ),
-                            (
-                                "node_status_after",
-                                node_session
-                                    .as_ref()
-                                    .and_then(|receipt| receipt.status_after.clone())
-                                    .map_or(Value::Null, Value::String),
-                            ),
-                            (
-                                "node_remaining_open_do",
-                                node_session
-                                    .as_ref()
-                                    .map(|receipt| Value::from(receipt.remaining_open_do))
-                                    .unwrap_or(Value::Null),
-                            ),
-                            // A dormant reap is a finished turn, not a death:
-                            // the resumable handle (harness + session id above)
-                            // is the whole point of recording it.
-                            ("resumable", Value::Bool(dormant_ids.contains_key(&e.name))),
-                            (
-                                "cascade_refused",
-                                match &cascade_refused {
-                                    Some((id, reason)) => json!({"id": id, "reason": reason}),
-                                    None => Value::Null,
-                                },
-                            ),
-                        ]),
-                    );
-                    let reaped_id = crate::gc::row_handle(e);
-                    // A backstop removal is counted ONLY in its own list, never
-                    // in both. Two totals that overlap cannot be compared, and
-                    // comparing them is the point. A dormant reap likewise: it
-                    // is a third count with its own meaning.
-                    if backstop_ids.contains_key(&e.name) {
-                        summary.reaped_backstop.push(reaped_id);
-                    } else if dormant_ids.contains_key(&e.name) {
-                        summary.reaped_dormant.push(reaped_id);
-                    } else {
-                        summary.reaped.push(reaped_id);
-                    }
-                }
-            }
-        }
-        Err(err) => {
-            let _ = emitter.emit(
-                "daemon_recovery_error",
-                &json!({"op": "gc_sweep", "error": err.to_string()}),
-            );
-            // Nothing was removed; report no reaps (no event/disk divergence).
-            // ALL THREE lists, or the next writer that populates them earlier
-            // leaves this path claiming zero ordinary reaps beside phantom
-            // backstop or dormant ones - counts that disagree about the same
-            // failed sweep.
-            summary.reaped.clear();
-            summary.reaped_backstop.clear();
-            summary.reaped_dormant.clear();
-        }
-    }
-    summary
-}
-
 /// Terminal-stop sweep (x-fcbf): `claude stop` any fire-and-forget `claude --bg`
 /// worker that `finalize` marked terminal. finalize (running as the worker's own
 /// child) cannot self-exit it, so this daemon sweep — external to every worker —
@@ -3402,7 +1874,7 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
 /// keep running past the deadline this call gave up at (self-review finding:
 /// this was hand-duplicated at the RPC call site below; one shared helper
 /// now backs both).
-async fn bounded_claude_stop(
+pub(crate) async fn bounded_claude_stop(
     short: &str,
     timeout: Duration,
 ) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
@@ -4019,6 +2491,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // inline in the select arm and starve accept()/SIGTERM.
     let terminal_stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worktree_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Orphaned-test-binary reap gate: same one-in-flight discipline. The verb
+    // it shells to runs ps + a kill, so it never runs on the core loop.
+    let orphan_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut last_orphan_sweep = Instant::now();
     // Dead-row GC gate (x-ef7f): its dormant check shells out to the truth
     // probe, so it gets the same one-in-flight discipline as the sweeps beside
     // it rather than running inline in the select arm.
@@ -4091,7 +2567,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 }
                 // Reap any worker that exited since the last tick so it never
                 // lingers as a zombie under the long-lived daemon.
-                reap_zombies();
+                crate::orphan_reap::reap_daemon_children();
                 // Screen-manifest scrape sweep (the badge-lattice fallback
                 // rung): subprocesses + file IO, so it runs off-loop under
                 // spawn_blocking behind the one-in-flight gate.
@@ -4105,72 +2581,49 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         crate::scrape::scrape_sweep(&home, &emitter, notify_on_blocked);
                     });
                 }
-                // Dead-row GC (x-b1aa): remove terminal, past-grace, clean
-                // agent-view rows so finished rows self-clean without the merge
-                // ritual. Cheap in steady state (no candidates -> no git, no
-                // registry write); the grace window makes exact cadence
-                // non-critical, so running it on the idle tick is fine.
+                // Retirement sweep (x-c672): a row leaves when its WORK is
+                // done (reverse join) and its transcript is quiet past
+                // `agents.retire_grace_s`; its held process is stopped first,
+                // its receipt is written before the drop, and its
+                // clean-and-merged worktree is pruned. Cheap in steady state
+                // (no candidates -> no probes, no registry write).
                 // Runs off-loop under spawn_blocking behind a one-in-flight
-                // gate, like the scrape and worktree sweeps above (x-ef7f). Its
-                // dormant gate shells `fno agents truth` ONCE PER SWEEP: one
-                // child answers every escalated handle, bounded on the handle
-                // count and retried once on a crash. It shelled once per ROW
-                // before, each child bounded at 5s, so a 28-row roster could
-                // hold this select arm for minutes at a
-                // time. Inline, that starved accept() -- clients' connects timed
-                // out and lazy-started competing daemons, each adding rows and
-                // lengthening the next sweep -- and it starved the SIGTERM arm
-                // beside it, which is why a wedged daemon could only be
-                // SIGKILLed.
+                // gate, like the scrape and worktree sweeps above (x-ef7f):
+                // inline, a slow sweep starved accept() and the SIGTERM arm
+                // beside it.
                 if !gc_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
                     let flag = Arc::clone(&gc_in_flight);
                     let home = ctx.home.clone();
                     let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
-                    let grace_cwd = ctx.opts.dead_row_grace_cwd.clone();
+                    let grace_cwd = ctx.opts.agents_config_cwd.clone();
                     tokio::task::spawn_blocking(move || {
                         let _gate = SweepGate(flag);
-                        let grace_for_harness = |harness: &str| {
-                            Duration::from_secs(crate::agents_config::dead_row_grace_secs(
-                                &grace_cwd, harness,
-                            ))
-                        };
+                        let grace_secs =
+                            crate::agents_config::retire_grace_secs(&grace_cwd) as i64;
                         let retain_days =
                             crate::agents_config::reap_receipt_retain_days(&grace_cwd);
-                        let _ = gc_sweep(&home, &emitter, &grace_for_harness, retain_days);
+                        let _ = gc_sweep(&home, &emitter, grace_secs, retain_days);
+                        crate::gc::unowned_sweeps(&home, &emitter, &grace_cwd);
                     });
                 }
-                // Worktree sweep: the backstop for what the merge ritual
-                // missed. Its own 24h stamp makes it a near-no-op on this tick,
-                // but the verb shells git across every worktree when it does
-                // fire, so it runs off-loop behind a one-in-flight gate like the
-                // scrape sweep. Report-only unless a merge-minted reap order
-                // (reap:pr-* claim) stands, in which case the pass applies.
+                // Worktree sweep + merge reaper (x-07dc). The sweep is the
+                // backstop for what the reaper cannot reach; the reaper is the
+                // merge-triggered consumer of `merge_cleanup_requested`, with
+                // its own 60s floor. Both run off-loop behind the one-in-flight
+                // gate; the reaper's grace and stop order live in merge_reap.rs.
                 if !worktree_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
                     let flag = Arc::clone(&worktree_sweep_in_flight);
                     let home = ctx.home.clone();
                     let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
+                    let grace_cwd = ctx.opts.agents_config_cwd.clone();
                     tokio::task::spawn_blocking(move || {
                         let _gate = SweepGate(flag);
                         let roots = registry_repo_roots(&home);
                         let now = now_epoch_secs();
                         worktree_sweep(&home, &emitter, now, &roots, &|root| {
-                            if merge_cleanup_requested(&home, root) {
-                                return WorktreeSweepOrderRead::from(true);
-                            }
-                            // Compatibility with requests minted by older
-                            // rituals: a standing claim still authorizes the
-                            // guarded report/apply sweep during the deploy window.
-                            // Live reap orders anywhere (both claim roots are
-                            // read by `list`): each is minted only by a ritual
-                            // that gh-confirmed MERGED, so its standing is the
-                            // merge-trigger for this tick's apply pass.
-                            (!crate::claims::list(
-                                Some("reap:"),
-                                Some(std::path::Path::new(root)),
-                                false,
-                            )
-                            .is_empty())
-                                .into()
+                            // A pending merge-cleanup request is the standing
+                            // order: the pass applies while one waits.
+                            crate::merge_reap::merge_cleanup_requested(&home, root).into()
                         }, &|root, apply| {
                             let mut cmd = std::process::Command::new("fno");
                             cmd.current_dir(root)
@@ -4194,9 +2647,23 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                 },
                             }
                         });
-                        consume_merge_cleanup_requests(&home, &roots, &emitter);
+                        let grace_secs =
+                            crate::agents_config::retire_grace_secs(&grace_cwd) as i64;
+                        crate::merge_reap::consume_merge_cleanup_requests(
+                            &home, &roots, &emitter, grace_secs,
+                        );
                     });
                 }
+                // Orphaned-test-binary reap: the waitpid sweep above only ever
+                // sees the daemon's OWN children; a wedged deps/ test binary at
+                // ppid 1 holding zombie corpses is invisible to waitpid(-1), and
+                // this arm is what reaches that shape. The whole arm - cadence,
+                // gate, kill, events - lives in crate::orphan_reap.
+                crate::orphan_reap::maybe_sweep(
+                    &mut last_orphan_sweep,
+                    &orphan_sweep_in_flight,
+                    ctx.home.events_jsonl(),
+                );
                 // Terminal-stop sweep (x-fcbf): exit fire-and-forget `claude --bg`
                 // workers finalize marked terminal, so a shipped bg /target frees
                 // its slot instead of parking at an idle prompt forever. Spawned
@@ -4458,7 +2925,7 @@ async fn serve_connection(ctx: Arc<Ctx>, mut stream: UnixStream) {
 /// daemon's whole life. `gc_sweep` and the scrape sweep both shell out and
 /// parse the output, so this is not hypothetical. A guard clears the gate on
 /// the unwind path too.
-struct SweepGate(Arc<std::sync::atomic::AtomicBool>);
+pub(crate) struct SweepGate(pub(crate) Arc<std::sync::atomic::AtomicBool>);
 
 impl Drop for SweepGate {
     fn drop(&mut self) {
@@ -4960,7 +3427,7 @@ fn build_claude_stream_entry(
     // and no session parent is claimable from here. A daemon that somehow
     // still carries a marker attributes nothing rather than laundering it.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
-    let launch_account = crate::state::launch_account_from_env();
+    let (launch_account, launch_account_source) = crate::state::launch_provenance_from_env();
     RegistryEntry {
         node: None,
         // Stream-json adoption is gated on host_mode plus mode, not on a
@@ -4984,13 +3451,12 @@ fn build_claude_stream_entry(
         requested_provider: None,
         requested_effort: None,
         harness: Some("claude".into()),
-        harness_session_id: Some(uuid.into()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         // x-d285: the daemon env is what this claude child inherits, so the
-        // three-valued env read is the honest account fact (a daemon carrying
-        // an ambient config dir stamps unknown, never "default").
+        // three-valued env read is honest (ambient config dir = unknown).
         launch_account: launch_account.clone(),
+        launch_account_source,
         related_session_id: None,
         // v25: the vendor route is unobserved on this lane (it may be routed,
         // and `provider` above stays None for the same reason), so it stays
@@ -4998,14 +3464,11 @@ fn build_claude_stream_entry(
         // mirrors the launch read - unknown stays unknown.
         route_provider_id: None,
         model_name: None,
-        account_record_id: launch_account.clone(),
+        account_record_id: launch_account,
         cwd: cwd_s.clone(),
         project_root: cwd_s,
         session_id: None,
         spawn_trigger: None,
-        spawned_by_session: parent_session,
-        spawned_by_harness: parent_harness,
-        spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
         claude_session_uuid: Some(uuid.into()),
         messaging_socket_path: None,
@@ -5033,7 +3496,10 @@ fn build_claude_stream_entry(
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
-        ..Default::default()
+        ..RegistryEntry::new(
+            Some(uuid.into()),
+            Lineage::captured((parent_session, parent_harness, parent_cwd)),
+        )
     }
 }
 
@@ -5414,105 +3880,6 @@ async fn spawn_claude_stream_lane(
     )
 }
 
-/// Build the registry row for a Codex app-server thread. Codex has no fno
-/// short id: the full harness session id is both the resume handle and the
-/// canonical registry identity.
-fn build_codex_thread_entry(
-    name: &str,
-    cwd: &Path,
-    driver: &crate::codex_thread::CodexThread,
-    model: Option<&str>,
-    effort: Option<&str>,
-    yolo: bool,
-) -> RegistryEntry {
-    let cwd_s = cwd.to_string_lossy().into_owned();
-    let session_id = driver.thread_id().to_string();
-    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
-    RegistryEntry {
-        node: None,
-        // v25: the route axes this lane actually used. Codex's ambient auth
-        // is the account it positively pinned nothing past, so "default".
-        route_provider_id: Some("openai".into()),
-        model_name: model.filter(|m| !m.is_empty()).map(str::to_string),
-        account_record_id: Some("default".into()),
-        // The daemon-hosted codex app-server thread lane.
-        substrate: Some("thread".into()),
-        name: name.into(),
-        short_id: String::new(),
-        legacy_provider: String::new(),
-        provider: Some("openai".into()),
-        model: model.map(str::to_string),
-        // The model arrived on the spawn request, so requested is its basis -
-        // the field no longer reads unpopulated on this mint.
-        model_basis: model.map(|_| "requested".to_string()),
-        effort: effort.map(str::to_string),
-        // v23 (x-2019): the request beside the effect; verbatim as typed.
-        requested_model: model.filter(|m| !m.is_empty()).map(str::to_string),
-        requested_provider: None,
-        requested_effort: effort.filter(|v| !v.is_empty()).map(str::to_string),
-        harness: Some("codex".into()),
-        harness_session_id: Some(session_id.clone()),
-        predecessor_session_ids: Vec::new(),
-        forked_from_session_id: None,
-        // x-d285: non-claude harness; the account axis does not apply.
-        launch_account: None,
-        related_session_id: None,
-        cwd: cwd_s.clone(),
-        project_root: cwd_s,
-        session_id: None,
-        origin: Some("spawn".into()),
-        spawn_trigger: None,
-        spawned_by_session: parent_session,
-        spawned_by_harness: parent_harness,
-        spawned_by_cwd: parent_cwd,
-        legacy_claude_short_id: None,
-        claude_session_uuid: None,
-        messaging_socket_path: None,
-        codex_session_id: Some(session_id.clone()),
-        gemini_session_id: None,
-        mcp_channel_id: None,
-        cc_session_id: None,
-        host_mode: Some(crate::state::HOST_MODE_INTERACTIVE.into()),
-        status: AgentStatus::Live,
-        last_message_at: Some(now_rfc3339_like()),
-        created_at: now_rfc3339_like(),
-        // No pid, deliberately. A codex thread worker owns NO process: its
-        // app-server is the shared daemon, serving every other codex session
-        // on the machine too. `pid` is a LIVENESS surface, and writing the
-        // daemon's pid here made every thread row carry the same always-alive
-        // pid. A stopped row then read `Unmeasured` forever in `derive_liveness`
-        // (the status-contradicts-pid tier) and `pid_confirmed_dead` in gc
-        // could never corroborate its removal. Ownership is provable from the
-        // control socket and `thread/loaded/list`, which is where it belongs.
-        pid: None,
-        pid_start_time: None,
-        keeper_child_pid: None,
-        log_path: Some(driver.rollout_path().to_string_lossy().into_owned()),
-        last_reconciled_at: None,
-        inside_leg: None,
-        exited_at: None,
-        mux: None,
-        screen_state: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_grantor: None,
-        route_settings_path: None,
-        fno_id: Some(session_id),
-        delivery_policy: None,
-        // v19: the launch posture is the resume posture. The doc's old warning
-        // that "a registry row records no sandbox posture" died here.
-        sandbox_posture: Some(
-            if yolo {
-                "danger-full-access"
-            } else {
-                "workspace-write"
-            }
-            .to_string(),
-        ),
-        ..Default::default()
-    }
-}
-
 /// Start and register one Codex app-server thread. The seed turn is detached
 /// after registration so spawn returns a live row immediately while the held
 /// process remains available for later `ask` calls. Reached by the derived
@@ -5544,18 +3911,34 @@ async fn spawn_codex_thread_lane(
         );
     }
     let model = req.params.get("model").and_then(Value::as_str);
-    let yolo = req
-        .params
-        .get("yolo")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    // Both spellings, resolved by one reader. Reading `yolo` alone dropped
+    // `permission_mode` silently and started bounded, which downgrades the very
+    // posture the caller was naming; an unrecognized value is refused here
+    // rather than degraded, for the same reason.
+    let yolo = match crate::codex_thread::resolve_thread_posture(
+        req.params.get("yolo").and_then(Value::as_bool),
+        req.params.get("permission_mode").and_then(Value::as_str),
+    ) {
+        Ok(yolo) => yolo,
+        Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
+    };
     let effort = req.params.get("effort").and_then(Value::as_str);
+    let node = req.params.get("node").and_then(Value::as_str);
     // Hop 2 of the state-root grant (x-f22f). Read the roots from the REQUEST,
     // never from this process's environment. This daemon is long-lived and
     // shared across every thread on the machine, so its own env is not the
     // spawning client's - a `state_dirs_from_env()` call here would read
     // whatever shell started the daemon, which is the exact mistake the next
     // reader of this function will be tempted to make.
+    //
+    // The same holds for RESOLVING a root rather than reading one. The plan
+    // content directory is not missing from this list and does not need
+    // `provider::plan_content_dir` called here: the Python spawn seam already
+    // computes it for every substrate and publishes it on the env var the
+    // client turns into these params. Adding a resolver here would be a second
+    // answer to one question, and it would shell out to `fno` per spawn from
+    // async code on the daemon every codex worker shares. Pinned by
+    // `test_thread_spawn_seam_publishes_the_plan_dir`.
     let state_dirs: Vec<String> = req
         .params
         .get("state_dirs")
@@ -5593,7 +3976,7 @@ async fn spawn_codex_thread_lane(
             return Response::err(req.id, ErrorCode::SpawnFailed, error.to_string());
         }
     };
-    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort, yolo);
+    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort, yolo, node);
     let session_id = entry.harness_session_id.clone().unwrap_or_default();
     let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
         if registry
@@ -5771,6 +4154,23 @@ async fn ensure_codex_thread_handle(
             &json!({"name": entry.name, "lane": "thread", "session_id": session_id}),
         );
     }
+    // The durable fix promised above: persist what THIS resume actually
+    // resolved, not what the original spawn recorded. `resume()` (unlike
+    // `start_with_state_dirs`) carries no state_dirs, so a bounded thread's
+    // `granted_writable_roots` goes to empty here - an accurate report of the
+    // very loss the event above announces, not a stale echo of the spawn-time
+    // grant. Read from the driver BEFORE `into_actor` consumes it; the actor
+    // exposes neither field.
+    let resolved_sandbox = driver.resolved_sandbox_posture().to_string();
+    let granted_writable_roots = driver.granted_writable_roots().to_vec();
+    let resumed_name = entry.name.clone();
+    let _ = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
+        if let Some(row) = registry.find_mut(&resumed_name) {
+            row.resolved_sandbox = Some(resolved_sandbox);
+            row.granted_writable_roots = granted_writable_roots;
+        }
+    })
+    .await;
     let mut threads = ctx.codex_threads.lock().await;
     // A concurrent caller may have won the race while we were connecting.
     // Theirs is already published, so keep it and drop ours: dropping a
@@ -7013,21 +5413,6 @@ async fn read_worker_snapshot(sock: &std::path::Path) -> Option<String> {
         .and_then(|r| r.get("text").and_then(|t| t.as_str()).map(String::from))
 }
 
-/// Non-blocking reap of any exited worker child the daemon spawned, so a worker
-/// that exits while the daemon lives never lingers as a `<defunct>` zombie. The
-/// daemon spawns nothing but workers, so a `waitpid(-1, WNOHANG)` sweep is safe.
-fn reap_zombies() {
-    loop {
-        let mut status: libc::c_int = 0;
-        // SAFETY: waitpid with WNOHANG only reaps already-exited children and
-        // returns 0 (none ready) or -1 (no children) without blocking.
-        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if pid <= 0 {
-            break;
-        }
-    }
-}
-
 /// Map a truth probe onto the wire value `list` renders.
 ///
 /// Prefers the shared reachability verdict, which is derived once (Python-side,
@@ -7041,15 +5426,12 @@ fn reap_zombies() {
 /// because silence is absence of evidence and this registry lists REACHABLE
 /// agents rather than live processes -- a row is never condemned for being
 /// quiet, only for an affirmative falsification.
-/// `pid_confirmed_live` is a positive measurement in its OWN right (x-9de7
-/// task 3): a row whose `short_id` and `harness_session_id` are both empty
-/// resolves to its bare `name` in `registry_truth_handle`, which the truth
-/// probe can never find, so it answers `unknown` -- unrelated to whether the
-/// worker is actually running. Only the two shapes that mean "the probe could
-/// not measure" (`Some("unknown")`, and the state fallthrough) accept the
-/// override; `reachable`/`unreachable` and `working`/`done`/`stalled` stay
-/// probe-authoritative and unchanged, matching the monotone-lowering rule
-/// (never let a weaker signal raise a row the probe positively lowered).
+///
+/// STATUS is served ACTIVITY, so a confirmed-live pid is not an input here
+/// (x-c672): a process being up says nothing about when its transcript last
+/// moved, and the Python list lane has no pid census, so a pid lift here would
+/// read the same row as two different words on the two lanes. An unanswered
+/// activity age is `unknown` on both.
 fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {
     let value = value?;
     if let Some(raw) = value.as_str() {
@@ -7131,7 +5513,7 @@ fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<c
         && row_timestamp(row.get("created_at"))
             .is_some_and(|created_at| now - created_at > chrono::Duration::seconds(600))
     {
-        row.insert("status".into(), json!("live"));
+        row.insert("status".into(), json!("quiet"));
         row.insert("basis".into(), json!("stale-spawning-live-pid"));
     }
     row.remove("pid_alive");
@@ -7219,27 +5601,28 @@ fn liveness_origin(row: &Map<String, Value>) -> (Value, Option<String>) {
     }
 }
 
-fn rendered_status_from_truth(
-    probe: Option<&crate::claude_ask::TruthProbe>,
-    pid_confirmed_live: bool,
-) -> &'static str {
-    match probe.and_then(|p| p.reachability.as_deref()) {
-        Some("reachable") => return "live",
-        Some("unreachable") => return "orphaned",
-        Some("unknown") => {
-            return if pid_confirmed_live {
-                "live"
-            } else {
-                "unknown"
-            }
-        }
-        _ => {}
+/// The STATUS word `list` renders: SERVED ACTIVITY, never a `live` token
+/// (x-c672, AC7). Nothing decides on this word anymore - retirement reads the
+/// reverse join, the lanes read their own probes - so the column answers the
+/// operator's actual question, what is this session doing: `writing` (the
+/// transcript moved inside `STALE_ATTENTION_S`), `quiet` (older), `parked`
+/// (the tail closed a promise). A positively falsified row reads `orphaned`,
+/// and a probe that did not answer reads `unknown`. A confirmed-live pid does
+/// NOT lift an unanswered age to `quiet`: the word is activity, and a process
+/// being up says nothing about when it last wrote - the same row must render
+/// the same word through the Python list lane, which has no pid census.
+fn rendered_status_from_truth(probe: Option<&crate::truth_probe::TruthProbe>) -> &'static str {
+    if probe.and_then(|p| p.reachability.as_deref()) == Some("unreachable") {
+        return "orphaned";
     }
     match probe.map(|p| p.state.as_str()) {
-        Some("working" | "watching" | "your-move") => "live",
-        Some("done" | "stalled") => "orphaned",
-        _ if pid_confirmed_live => "live",
-        _ => "unknown",
+        Some("done") => "parked",
+        Some(_) => match probe.and_then(|p| p.last_activity_age_s) {
+            Some(age) if age < STALE_ATTENTION_S => "writing",
+            Some(_) => "quiet",
+            None => "unknown",
+        },
+        None => "unknown",
     }
 }
 
@@ -7286,7 +5669,7 @@ fn is_refused(observed_model: &Value, harness: &str, route_settings_path: Option
 /// truth-state arms plus the measured transcript age. A written `working`
 /// state is not progress evidence when its transcript stopped advancing.
 pub(crate) fn progress_from_truth(
-    probe: Option<&crate::claude_ask::TruthProbe>,
+    probe: Option<&crate::truth_probe::TruthProbe>,
     harness: &str,
     route_settings_path: Option<&str>,
 ) -> (&'static str, &'static str) {
@@ -7338,7 +5721,7 @@ const LIST_PROJECTION_OMISSIONS: [&str; 2] = ["model", "model_basis"];
 
 fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
 where
-    F: Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>,
+    F: Fn(&[String]) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
 {
     let all = req
         .params
@@ -7379,11 +5762,16 @@ where
     // Mirrors Python's AgentStatusFilter enum, which Typer
     // rejects at parse time.
     if let Some(ref st) = filter_status {
-        if st != "live" && st != "orphaned" && st != "unknown" {
+        if !matches!(
+            st.as_str(),
+            "writing" | "quiet" | "parked" | "orphaned" | "unknown"
+        ) {
             return Response::err(
                 req.id,
                 ErrorCode::InvalidStatus,
-                format!("invalid --status '{st}' (expected: live | orphaned | unknown)"),
+                format!(
+                    "invalid --status '{st}' (expected: writing | quiet | parked | orphaned | unknown)"
+                ),
             );
         }
     }
@@ -7475,11 +5863,7 @@ where
             // did on the per-row path: every reader below already treats an
             // unanswered row that way.
             let truth = truths.get(&registry_truth_handle(e)).cloned();
-            let pid_confirmed_live = e
-                .pid
-                .map(|p| pid_is_ours(p, e.pid_start_time))
-                .unwrap_or(false);
-            let rendered_status = rendered_status_from_truth(truth.as_ref(), pid_confirmed_live);
+            let rendered_status = rendered_status_from_truth(truth.as_ref());
             // The whole reachability triple, not just the verdict that
             // `rendered_status` above was picked from. That rendered word says
             // WHAT the row is; the triple says which question was answered and
@@ -8266,12 +6650,21 @@ async fn stop_keeper_confirmed(sock: &std::path::Path) -> bool {
 }
 
 async fn stop_worker_confirmed(ctx: &Ctx, entry: &RegistryEntry) -> bool {
+    stop_worker_confirmed_for_home(&ctx.home, entry).await
+}
+
+/// The home-keyed body of [`stop_worker_confirmed`], shared with the
+/// retirement sweep (x-c672), which holds an `AgentsHome` and no `Ctx`.
+pub(crate) async fn stop_worker_confirmed_for_home(
+    home: &AgentsHome,
+    entry: &RegistryEntry,
+) -> bool {
     // A lane-B keeper thread's lifecycle lives on its own socket (see
     // `keeper_thread_sock`); delegate before any worker_sock probe.
     if let Some(sock) = keeper_thread_sock(entry) {
         return stop_keeper_confirmed(&sock).await;
     }
-    let sock = ctx.home.worker_sock(&entry.short_id);
+    let sock = home.worker_sock(&entry.short_id);
     // 1. Graceful: ask the worker to tear down its PTY child + exit. Both the
     //    write (WORKER_ACK_WRITE_TIMEOUT) and the ACK read (WORKER_ACK_TIMEOUT)
     //    are bounded, asymmetrically like the client's own request/response
@@ -8791,7 +7184,7 @@ async fn handle_rm_with(
     // handler reuses this allocation instead of re-deriving the same short id.
     let harness_row_id = claude_row_id(&entry);
     let claude_agents = if entry.harness_name() == "claude" {
-        Some(read_claude_agents())
+        Some(off_executor(read_claude_agents))
     } else {
         None
     };
@@ -8825,7 +7218,7 @@ async fn handle_rm_with(
         .is_some_and(|state| matches!(state, "done" | "stopped" | "failed"));
     let provably_gone = row_state_terminal
         || claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
-        || pane_provably_absent(entry.mux.as_ref(), mux_pane_probe);
+        || off_executor(|| pane_provably_absent(entry.mux.as_ref(), mux_pane_probe));
     if entry.status == AgentStatus::Live && !force && !provably_gone {
         let row = harness_row_id
             .clone()
@@ -8875,12 +7268,14 @@ async fn handle_rm_with(
         };
         return Response::err(req.id, ErrorCode::Busy, detail);
     }
-    let harness_outcome = cascade_harness_session_result_with(
-        &entry,
-        claude_agents.as_ref(),
-        read_claude_agents,
-        claude_rm,
-    );
+    let harness_outcome = off_executor(|| {
+        cascade_harness_session_result_with(
+            &entry,
+            claude_agents.as_ref(),
+            read_claude_agents,
+            claude_rm,
+        )
+    });
     if let CascadeOutcome::Failed(reason) = &harness_outcome {
         if !force {
             return Response::err(
@@ -8891,7 +7286,7 @@ async fn handle_rm_with(
         }
     }
     let pane_outcome = if let Some(mux) = entry.mux.as_ref() {
-        match mux_pane_kill(&mux.session, mux.pane_id) {
+        match off_executor(|| mux_pane_kill(&mux.session, mux.pane_id)) {
             Ok(true) => CascadeOutcome::Removed,
             Ok(false) => CascadeOutcome::AlreadyAbsent("mux pane already absent".into()),
             Err(reason) => CascadeOutcome::Failed(reason),
@@ -9025,20 +7420,20 @@ async fn handle_rm_with(
     let worktree_path = std::path::Path::new(&entry.cwd);
     let detected_worktree = is_linked_worktree(&entry.cwd);
     let worktree_touched = audit.worktree_touched.unwrap_or(detected_worktree);
-    let measured_bytes = if detected_worktree {
-        directory_bytes(worktree_path)
-    } else {
-        None
-    };
-    let worktree_receipt = rm_take_worktree(&entry);
-    let worktree_removed = worktree_touched && !worktree_path.exists();
-    let reclaimed_bytes = audit.reclaimed_bytes.unwrap_or_else(|| {
-        if worktree_removed {
-            measured_bytes.unwrap_or(0)
+    // Measured and taken in ONE off-executor hop: they are adjacent, both
+    // filesystem-bound, and together they are the longest blocking stretch in
+    // the handler - and it runs after the row is already gone.
+    let (measured_bytes, worktree_receipt) = off_executor(|| {
+        let measured = if detected_worktree {
+            directory_bytes(worktree_path)
         } else {
-            0
-        }
+            None
+        };
+        (measured, rm_take_worktree(&entry))
     });
+    let worktree_removed = worktree_touched && !worktree_path.exists();
+    let reclaimed_bytes =
+        resolve_reclaimed_bytes(audit.reclaimed_bytes, worktree_removed, measured_bytes);
     let worktree_outcome = if !worktree_touched {
         "not-touched"
     } else if worktree_removed {
@@ -9545,7 +7940,7 @@ struct ReconcileSweepResult {
 ///
 /// `probe` is injected so this is testable without shelling out.
 fn predecessor_reachability(session_id: &str) -> Option<bool> {
-    crate::claude_ask::family1_truth_probe(session_id).and_then(|probe| {
+    crate::truth_probe::family1_truth_probe(session_id).and_then(|probe| {
         match probe.reachability.as_deref() {
             Some("reachable") => Some(true),
             Some("unreachable") => Some(false),
@@ -10375,7 +8770,7 @@ fn run_reconcile_sweep(
     // The session-names overlay folds into the rows on every sweep:
     // best-effort, one small file read, and the count is an event.
     crate::session_names_fold::fold_session_names(home, emitter);
-    let probes = batched_row_probes(&entries, &crate::claude_ask::family1_truth_probe_many);
+    let probes = batched_row_probes(&entries, &crate::truth_probe::family1_truth_probe_many);
     // One batch feeds both consumers: the ladder's truth rung reads states,
     // the title detector reads titles. The probes are keyed by the row's
     // claude uuid (the handle the batch asked for), which is also the map
@@ -10810,35 +9205,13 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
 
 /// Fire a fire-and-forget OS notification for a badge transition (x-dd84).
 ///
-/// Detached to its own thread so a missing or slow `fno inbox notify` can never stall
-/// the registry write that observed the transition - the same bounded/fail-open
-/// discipline as the external claim-status writer that once froze admit
-/// (memory project_grid_rail_drive_freeze). `FNO_BIN` selects the binary
-/// (default `fno`); a spawn failure (notifier not on PATH) logs one warn and is
-/// dropped, and the registry write that called this has already succeeded.
+/// Detached inside `operator_notice::notify_operator` so a missing or slow
+/// `fno inbox notify` can never stall the registry write that observed the
+/// transition - the same bounded/fail-open discipline as the external
+/// claim-status writer that once froze admit. A spawn failure is logged and
+/// dropped; the registry write that called this has already succeeded.
 pub(crate) fn notify_transition(title: String, body: String) {
-    // var_os (not var) so a non-UTF-8 FNO_BIN passes through to Command
-    // unmangled, matching scrape::fno_bin (gemini MEDIUM on #161).
-    let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
-    // ponytail: reap on the detached thread; `fno inbox notify` is a sub-second
-    // osascript/notify-send call, so waiting on it here cannot realistically leak.
-    std::thread::spawn(move || {
-        match std::process::Command::new(&fno)
-            .args(["inbox", "notify", &title, &body])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(mut child) => {
-                let _ = child.wait();
-            }
-            Err(e) => eprintln!(
-                "fno-agents-daemon: badge notify skipped ({} notify): {e}",
-                fno.to_string_lossy()
-            ),
-        }
-    });
+    crate::operator_notice::notify_operator(&title, &body, None);
 }
 
 /// Which null-uuid row (if any) should adopt a full session uuid seen on an
@@ -11428,8 +9801,11 @@ fn fill_random(buf: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
+    #[path = "blocking_bound_tests.rs"]
+    mod blocking_bound_tests;
     #[path = "store_socket_sweep_tests.rs"]
     mod store_socket_sweep_tests;
+    use super::blocking_bound::directory_bytes_within;
     use super::*;
     use std::io::Write;
 
@@ -11571,54 +9947,9 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn merge_cleanup_fold_keeps_requests_until_completed_or_refused() {
-        let home = tmp_home("merge-cleanup-fold");
-        let request = json!({
-            "ts": "2026-09-02T00:00:00Z",
-            "type": "merge_cleanup_requested",
-            "source": "python",
-            "data": {
-                "request_id": "merge-cleanup-1",
-                "repo": "/repo",
-                "pr": 42,
-                "branch": "feature/session",
-                "worktree": "/repo/worktree",
-                "node_ids": ["x-90ee"]
-            }
-        });
-        std::fs::write(
-            home.events_jsonl(),
-            format!("{}\n", serde_json::to_string(&request).unwrap()),
-        )
-        .unwrap();
-        assert_eq!(pending_merge_cleanup_requests(&home, "/repo").len(), 1);
-        assert!(merge_cleanup_requested(&home, "/repo"));
-
-        let completed = json!({
-            "ts": "2026-09-02T00:01:00Z",
-            "type": "merge_cleanup_completed",
-            "source": "daemon",
-            "data": {
-                "request_id": "merge-cleanup-1",
-                "repo": "/repo",
-                "pr": 42,
-                "reclaimed_bytes": 12
-            }
-        });
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(home.events_jsonl())
-            .unwrap()
-            .write_all(format!("{}\n", serde_json::to_string(&completed).unwrap()).as_bytes())
-            .unwrap();
-        assert!(pending_merge_cleanup_requests(&home, "/repo").is_empty());
-        assert!(!merge_cleanup_requested(&home, "/repo"));
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    // One-shot ask row (empty short_id + no pid): terminal, reapable on grace
-    // alone (owns no worktree). `exited_at` controls the grace clock.
+    // Generic one-shot ask row builder (empty short_id + no pid, owns no
+    // worktree). The `exited_at` argument predates reverse-join retirement;
+    // it now only feeds the liveness ladder's heartbeat rung.
     fn ask_row(name: &str, exited_at: Option<&str>) -> RegistryEntry {
         RegistryEntry {
             substrate: None,
@@ -13046,67 +11377,6 @@ mod tests {
         assert!(!mux_pane_is_absent("fno mux: permission denied"));
     }
 
-    #[test]
-    fn gc_sweep_reaps_stamped_stamps_unstamped_keeps_live() {
-        let home = tmp_home("gc-sweep");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-
-        state::update_registry(&home.registry_json(), |r| {
-            // Stamped long ago -> past grace -> reaped (AC1-HP; ask row skips the
-            // worktree probe).
-            r.entries
-                .push(ask_row("ask-old", Some("2020-01-01T00:00:00Z")));
-            // Terminal but never observed dead before -> stamped, not reaped.
-            r.entries.push(ask_row("ask-new", None));
-            // A live worker (our own pid, no start time -> bare-existence live) is
-            // never touched (AC1-FR).
-            let mut live = ask_row("live", None);
-            live.name = "live".into();
-            live.short_id = "wkL".into();
-            live.status = AgentStatus::Live;
-            live.pid = Some(std::process::id());
-            r.entries.push(live);
-        })
-        .unwrap();
-
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
-
-        assert_eq!(summary.reaped, vec!["ask-old".to_string()]);
-
-        let reg = state::load_registry(&home.registry_json()).unwrap();
-        let names: Vec<&str> = reg.entries.iter().map(|e| e.name.as_str()).collect();
-        assert!(!names.contains(&"ask-old"), "ask-old should be reaped");
-        assert!(
-            names.contains(&"ask-new"),
-            "ask-new should be kept (in grace)"
-        );
-        assert!(names.contains(&"live"), "live row must never be reaped");
-
-        // ask-new got its exit stamp; the live row stayed unstamped.
-        let new = reg.entries.iter().find(|e| e.name == "ask-new").unwrap();
-        assert!(
-            new.exited_at.is_some(),
-            "ask-new should be stamped this pass"
-        );
-        let live = reg.entries.iter().find(|e| e.name == "live").unwrap();
-        assert!(live.exited_at.is_none());
-
-        // The removal emitted exactly one agent_row_reaped for ask-old.
-        let events = read_events(&home);
-        let reaped: Vec<&Value> = events
-            .iter()
-            .filter(|e| e.get("type").and_then(Value::as_str) == Some("agent_row_reaped"))
-            .collect();
-        assert_eq!(reaped.len(), 1);
-        assert_eq!(
-            reaped[0]
-                .get("data")
-                .and_then(|d| d.get("name"))
-                .and_then(Value::as_str),
-            Some("ask-old")
-        );
-    }
-
     /// The real summary line, copied from this machine's output.
     const REAL_SUMMARY: &str = "would-archive      feature/x-3e17   /some/wt\n\
 Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-session, 1 processes, 0 salvage-failed, 0 needs-confirmation, 1 app-owned, 1 permanent), 0 failed  [dry-run: no changes made; pass --apply to execute]\n";
@@ -13507,79 +11777,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     }
 
     #[test]
-    fn transcript_probe_reads_freshness_and_fails_to_unknown() {
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let now = now_epoch_secs();
-
-        // No path recorded, and a path that does not exist: UNKNOWN, never a
-        // cheerful "stale". The caller reads None as "keep".
-        assert_eq!(transcript_fresh_probe(None, now, 3600), None);
-        assert_eq!(transcript_fresh_probe(Some(""), now, 3600), None);
-        assert_eq!(
-            transcript_fresh_probe(Some("/nonexistent/transcript.jsonl"), now, 3600),
-            None
-        );
-
-        let fresh = dir.path().join("fresh.jsonl");
-        std::fs::write(&fresh, "{}\n").unwrap();
-        assert_eq!(
-            transcript_fresh_probe(Some(&fresh.to_string_lossy()), now, 3600),
-            Some(true),
-            "a just-written transcript is a worker that is still around"
-        );
-
-        let stale = dir.path().join("stale.jsonl");
-        std::fs::write(&stale, "{}\n").unwrap();
-        assert!(std::process::Command::new("touch")
-            .args(["-t", "200001010000", &stale.to_string_lossy()])
-            .status()
-            .expect("touch runs")
-            .success());
-        assert_eq!(
-            transcript_fresh_probe(Some(&stale.to_string_lossy()), now, 3600),
-            Some(false),
-            "a transcript untouched for the window is a session that stopped"
-        );
-    }
-
-    #[test]
-    fn the_exit_stamp_is_written_per_sweep_not_per_exit() {
-        // NAMING THE BATCH WRITER. `gc_sweep` is the batch writer of
-        // `exited_at` (the reconcile Exited transition stamps one row at a
-        // time; the sweep remains the backstop for rows no reconcile ever
-        // flipped). It computes ONE timestamp per pass and applies it to
-        // every row it newly observes as dead. That is why rows across unrelated
-        // tenants and projects share a stamp to the second: the field measures a
-        // sweep tick, not an exit.
-        //
-        // This test pins the shape so the field cannot quietly start looking like
-        // real exit evidence and get trusted on its own again.
-        let home = tmp_home("gc-batch-stamp");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        state::update_registry(&home.registry_json(), |r| {
-            for n in ["ask-a", "ask-b", "ask-c"] {
-                r.entries.push(ask_row(n, None));
-            }
-        })
-        .unwrap();
-
-        gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
-
-        let reg = state::load_registry(&home.registry_json()).unwrap();
-        let stamps: std::collections::BTreeSet<String> = reg
-            .entries
-            .iter()
-            .filter_map(|e| e.exited_at.clone())
-            .collect();
-        assert_eq!(reg.entries.len(), 3, "nothing reaped on the stamping pass");
-        assert_eq!(
-            stamps.len(),
-            1,
-            "three unrelated rows share one stamp: it is a sweep tick, not an exit"
-        );
-    }
-
-    #[test]
     fn linked_worktree_detection_separates_owners_from_passers_through() {
         // The whole ownership test is `.git` being a FILE (a `gitdir:` pointer)
         // rather than a directory. Getting it backwards would either pin every
@@ -13617,66 +11814,9 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     fn gc_sweep_empty_registry_is_noop() {
         let home = tmp_home("gc-empty");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
-        assert!(summary.reaped.is_empty());
-        assert!(summary.kept_dirty.is_empty());
-        assert!(summary.kept_uncorroborated.is_empty());
-    }
-
-    /// x-9de7 task 5: the "stuck and invisible" case named in the plan -
-    /// past grace, a liveness surface on record, but no positive corroboration
-    /// (no confirmed-dead pid, no resolvable transcript) and short of the
-    /// backstop horizon. Before `kept_uncorroborated` this row was neither
-    /// reaped nor reported: an operator staring at `fno agents reap` saw
-    /// nothing at all.
-    #[test]
-    fn gc_sweep_reports_kept_uncorroborated_for_the_stuck_and_invisible_row() {
-        let home = tmp_home("gc-uncorroborated");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        // Past a 1h grace, nowhere near the 7-day backstop horizon: the case
-        // the corroboration gate exists to hold, not the escape hatch.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-        state::update_registry(&home.registry_json(), |r| {
-            let mut e = ask_row("stuck", Some(exited_at.as_str()));
-            e.short_id = "stuck".into(); // liveness_surface, no live socket
-            e.log_path = None; // transcript unresolvable -> transcript_fresh: None
-            r.entries.push(e);
-        })
-        .unwrap();
-
-        // gc_sweep_impl directly, not the gc_sweep wrapper: the wrapper's
-        // HarnessStoreIndex::default() falls back to the REAL $HOME when a
-        // developer machine has one, so "stuck"'s synthetic session id can
-        // resolve against the real ~/.claude/projects and read as gone -
-        // false corroboration this test exists to rule out. Stub `None`
-        // (unresolvable) is the harness-store answer this test is about.
-        let summary = gc_sweep_impl(
-            &home,
-            &emitter,
-            &|_| Duration::from_secs(3600),
-            false,
-            7,
-            &no_tails,
-            &|_| None,
-            &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-            &|_| None,
-        );
-
-        assert!(
-            summary.reaped.is_empty(),
-            "no corroboration -> never reaped"
-        );
-        assert!(summary.kept_dirty.is_empty(), "not a worktree case");
-        assert_eq!(summary.kept_uncorroborated, vec!["stuck".to_string()]);
-
-        // The row itself is untouched (still on disk, unstamped-differently).
-        let reg = state::load_registry(&home.registry_json()).unwrap();
-        assert!(reg.entries.iter().any(|e| e.name == "stuck"));
+        let summary = gc_sweep(&home, &emitter, 900, 7);
+        assert!(summary.retired.is_empty());
+        assert!(summary.pruned.is_empty());
     }
 
     // The gc ladder, reap-receipt gate and plan_reconcile
@@ -13685,6 +11825,12 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     // shrink).
     #[path = "gc_receipts.rs"]
     mod gc_receipts;
+
+    // The codex thread lane's spawn/registry/resume test family, moved
+    // verbatim into its own module for the same reason as gc_receipts above:
+    // file budget, test motion is the sanctioned shrink.
+    #[path = "codex_thread_lane.rs"]
+    mod codex_thread_lane;
 
     // --- plan_reconcile (US6.9): tri-state, status-aware transitions, budget ---
 
@@ -13747,6 +11893,23 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         }
     }
 
+    /// A codex THREAD row: no short_id, interactive host mode, full session
+    /// id, and a recorded rollout path (the durable resume object). Shared by
+    /// the reconcile/liveness family here and by the codex-thread-lane family
+    /// in `codex_thread_lane.rs`, which reaches it through the glob.
+    fn thread_entry(name: &str, status: AgentStatus, log_path: Option<String>) -> RegistryEntry {
+        let mut entry = rentry(name, status, None);
+        entry.pid = Some(999_999_999);
+        entry.short_id = String::new();
+        entry.legacy_provider = String::new();
+        entry.harness = Some("codex".into());
+        entry.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.into());
+        entry.session_id = None;
+        entry.harness_session_id = Some(format!("0198thread-{name}-00000000000000"));
+        entry.log_path = log_path;
+        entry
+    }
+
     fn probe_err() -> crate::provider::ReachabilityProbeError {
         crate::provider::ReachabilityProbeError::new("codex", "store unavailable")
     }
@@ -13780,6 +11943,9 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         e.legacy_provider = "claude".into();
         e.short_id = short_id.into();
         e.claude_session_uuid = None;
+        // A row fno itself spawned: the retirement origin gate retires only
+        // these, so every retirement-path fixture starts from spawn.
+        e.origin = Some("spawn".into());
         // x-7bcd: needs a resolvable handle; short_id is the transport key
         // this row is actually tested against, not one of the three legs.
         e.log_path = Some(format!("/tmp/{name}.log"));
@@ -13912,45 +12078,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert_eq!(changes[1].new_status, Some(AgentStatus::Live));
     }
 
-    /// A codex THREAD row: no short_id, interactive host mode, full session id,
-    /// and a recorded rollout path (the durable resume object).
-    fn thread_entry(name: &str, status: AgentStatus, log_path: Option<String>) -> RegistryEntry {
-        let mut entry = rentry(name, status, None);
-        entry.pid = Some(999_999_999);
-        entry.short_id = String::new();
-        entry.legacy_provider = String::new();
-        entry.harness = Some("codex".into());
-        entry.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.into());
-        entry.session_id = None;
-        entry.harness_session_id = Some(format!("0198thread-{name}-00000000000000"));
-        entry.log_path = log_path;
-        entry
-    }
-
-    #[test]
-    fn reconcile_leaves_a_hosted_codex_thread_untouched() {
-        let entries = vec![thread_entry(
-            "t-hosted",
-            AgentStatus::Live,
-            Some("/tmp/r.jsonl".into()),
-        )];
-        let (changes, _) = plan_reconcile(
-            &entries,
-            |_| Ok(false),
-            || false,
-            |_| true,
-            |_| false,
-            |_| true,               // thread_hosted: the daemon map names this row
-            |_| false,              // rollout_exists (irrelevant while hosted)
-            |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
-            true,                   // roster readable: the flip needs a successful roster read
-        );
-        assert_eq!(
-            changes[0].new_status, None,
-            "a hosted thread is the daemon's own; the stale pid must not settle it"
-        );
-    }
-
     #[test]
     fn reconcile_settles_an_unhosted_thread_with_a_rollout_to_orphaned() {
         let entries = vec![thread_entry(
@@ -13976,71 +12103,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         );
     }
 
-    /// AC15: a row whose startup resume FAILED reads Orphaned after the
-    /// recovery pass, never Live-forever. The resume is made to fail
-    /// deterministically via a nonexistent cwd (app-server spawn cannot even
-    /// start there).
-    /// AC11: a yolo spawn stamps the posture on the row; the resume lane's
-    /// helper reads it back.
-    ///
-    /// It drives a fake SHARED daemon. It used to install a stdio `codex` on
-    /// PATH and let the driver fork it. After the transport moved to the
-    /// shared daemon that fake was never reached: on a developer machine the
-    /// driver connected to the operator's REAL daemon and the test passed by
-    /// starting a real thread, and in CI, where no daemon runs, it panicked.
-    /// A test that reaches a live daemon is not a unit test, so it takes the
-    /// same fake every other one here does.
-    #[test]
-    fn build_codex_thread_entry_stamps_the_launch_posture() {
-        let worktree = tempfile::tempdir().unwrap();
-        let _guard = crate::PATH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let start = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                // The fake must outlive the start: it owns CODEX_HOME.
-                let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
-                    crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-p"),
-                );
-                crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
-                    .await
-                    .expect("yolo thread starts")
-            });
-        let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true);
-        assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
-        assert!(
-            entry_posture_is_full_access(&yolo)
-                && yolo.fno_id.as_deref() == Some("thread-p")
-                && yolo.mux.is_none()
-        );
-        let bounded = build_codex_thread_entry("t", worktree.path(), &start, None, None, false);
-        assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
-        assert!(!entry_posture_is_full_access(&bounded));
-        // A requested model stamps its basis on the row; an absent one
-        // leaves the basis absent with it.
-        let modeled = build_codex_thread_entry(
-            "t",
-            worktree.path(),
-            &start,
-            Some("gpt-5.6-sol"),
-            None,
-            false,
-        );
-        assert_eq!(modeled.model.as_deref(), Some("gpt-5.6-sol"));
-        assert_eq!(modeled.model_basis.as_deref(), Some("requested"));
-        assert_eq!(bounded.model_basis, None);
-        // v25 positive marker: the route identity the spawn actually used,
-        // read back non-empty from the minted row - the provider-outage
-        // collector refuses evidence on a row whose axes are absent, so an
-        // all-None stamp here would keep every daemon codex thread blind.
-        assert_eq!(modeled.route_provider_id.as_deref(), Some("openai"));
-        assert_eq!(modeled.model_name.as_deref(), Some("gpt-5.6-sol"));
-        assert_eq!(modeled.account_record_id.as_deref(), Some("default"));
-    }
-
     /// AC12: a PRE-v19 row (no posture key) still parses and reads the safe
     /// default - never a parse failure, never an accidental escalation.
     #[test]
@@ -14063,77 +12125,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             !entry_posture_is_full_access(&entry),
             "an unrecorded posture reads the safe default, never full access"
         );
-    }
-
-    /// AC16: a codex PANE row (mux ref set) must refuse from the ask lane
-    /// naming the pane verb, never reach ensure_codex_thread_handle and die
-    /// with the confusing "is not a Codex thread".
-    #[tokio::test(flavor = "current_thread")]
-    async fn ask_a_codex_pane_row_refuses_naming_the_pane_verb() {
-        let home = tmp_home("codex-pane-ask");
-        state::update_registry(&home.registry_json(), |registry| {
-            let mut entry = thread_entry("t-pane", AgentStatus::Live, None);
-            entry.mux = Some(state::MuxRef {
-                session: "main".into(),
-                pane_id: 3,
-            });
-            entry.log_path = Some("/tmp/t-pane.log".into());
-            registry.entries.push(entry);
-        })
-        .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
-        let resp = handle_ask(
-            &ctx,
-            &Request::new(1, "agent.ask", json!({"name": "t-pane", "message": "hi"})),
-        )
-        .await;
-        match &resp.payload {
-            crate::protocol::ResponsePayload::Err(e) => {
-                assert_eq!(e.code, ErrorCode::InvalidStatus);
-                assert!(
-                    e.message.contains("pane worker") && e.message.contains("mux pane send"),
-                    "refusal must name the pane verb: {}",
-                    e.message
-                );
-                assert!(
-                    !e.message.contains("is not a Codex thread"),
-                    "the confusing thread refusal must not surface: {}",
-                    e.message
-                );
-            }
-            _ => panic!("a pane row must refuse, got: {resp:?}"),
-        }
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recovery_stamps_a_failed_codex_thread_resume_orphaned() {
-        let home = tmp_home("codex-recover-orphaned");
-        state::update_registry(&home.registry_json(), |registry| {
-            let mut entry = thread_entry(
-                "t-dead",
-                AgentStatus::Live,
-                Some("/tmp/t-dead.jsonl".into()),
-            );
-            entry.cwd = "/nonexistent-cwd-for-resume-failure".into();
-            entry.project_root = entry.cwd.clone();
-            entry.harness_session_id = Some("0198dead-0000-7000-8000-00000000000f".into());
-            entry.codex_session_id = entry.harness_session_id.clone();
-            entry.pid = None;
-            registry.entries.push(entry);
-        })
-        .unwrap();
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
-        recover_codex_threads(&ctx).await;
-        let registry = load_registry_offloaded(home.registry_json())
-            .await
-            .expect("registry readable");
-        assert_eq!(
-            registry.find("t-dead").map(|entry| entry.status),
-            Some(AgentStatus::Orphaned),
-            "a failed resume must settle the row Orphaned, not Live-forever"
-        );
-        std::fs::remove_dir_all(home.root()).ok();
     }
 
     #[test]
@@ -15858,8 +13849,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     /// `rendered_status_from_truth` (a `fno` too old to emit the verdict), which
     /// is what keeps these pre-existing state-mapping assertions meaningful.
     /// `probe_reachable` below covers the current wire.
-    fn probe(state: &str) -> Option<crate::claude_ask::TruthProbe> {
-        Some(crate::claude_ask::TruthProbe {
+    fn probe(state: &str) -> Option<crate::truth_probe::TruthProbe> {
+        Some(crate::truth_probe::TruthProbe {
             state: state.into(),
             reachability: None,
             basis: None,
@@ -15874,22 +13865,11 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     /// The dormant gate's batch seam answering for nobody: no row's tail is
     /// readable. Every caller below has no live rows to probe, so this is the
     /// same "the probe said nothing" input the per-handle `None` used to be.
-    fn no_tails(_handles: &[String]) -> std::collections::HashMap<String, String> {
-        std::collections::HashMap::new()
-    }
-
     // -- The shared liveness ladder (x-5d96) ---------------------------------
-
     use crate::client_verbs::row_liveness;
 
     /// A per-row prober mirroring [`fn@live_liveness_prober`] for the staged
     /// answer: same positive-death fold, index built per call.
-    fn live_row_liveness(e: &state::RegistryEntry) -> crate::client_verbs::RowLiveness {
-        fold_positive_death(e).unwrap_or_else(|| {
-            crate::client_verbs::row_liveness(e, &crate::claude_ask::ClaudeHome::from_env())
-        })
-    }
-
     fn ladder_claude_row(name: &str, short_id: &str) -> RegistryEntry {
         let mut e = bg_claude_row(name, short_id);
         e.status = AgentStatus::Live;
@@ -16041,26 +14021,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             codex_truth_none,
         );
         assert_eq!(answer, RowLiveness::Alive);
-        // The sweep derives is_live from `probe == Alive` and the policy then
-        // names the row under the LIVE gate - not not-terminal. Assert the
-        // naming path, not just the enum.
-        let row = crate::gc::GcRow {
-            status: e.status,
-            is_live: answer == RowLiveness::Alive,
-            pid_confirmed_dead: false,
-            owns_worktree: false,
-            exited_at: None,
-            liveness_surface: true,
-            transcript_fresh: None,
-            harness_session_gone: None,
-            dormant_done: false,
-            worktree_clean: None,
-            probe: answer,
-        };
-        assert_eq!(
-            crate::gc::keep_reason(&row, now_epoch_secs(), 3600),
-            Some(crate::gc::KeepReason::Live),
-        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 
@@ -16088,23 +14048,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         );
         assert_eq!(answer, RowLiveness::Unknown);
         assert_ne!(answer, RowLiveness::Dead);
-        let row = crate::gc::GcRow {
-            status: e.status,
-            is_live: false,
-            pid_confirmed_dead: false,
-            owns_worktree: false,
-            exited_at: None,
-            liveness_surface: true,
-            transcript_fresh: None,
-            harness_session_gone: None,
-            dormant_done: false,
-            worktree_clean: None,
-            probe: answer,
-        };
-        assert_eq!(
-            crate::gc::keep_reason(&row, now_epoch_secs(), 3600),
-            Some(crate::gc::KeepReason::NotTerminal),
-        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 
@@ -16306,95 +14249,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     }
 
     #[test]
-    fn gc_sweep_surfaces_the_contradiction_instead_of_resolving_it_silently() {
-        // The four-row specimen at sweep level, WITHOUT a process surface
-        // (no pid, no worker socket): the stored status reads live, a stale
-        // exited_at sits on the row, and the ladder is silent. The stamp is
-        // PRESERVED and the row is named - never silently resolved in favour
-        // of either field. A ladder-Alive answer clears the stamp as the
-        // resurrected row it is, and an is_live row clears on its positive
-        // process evidence alone. No answer reaps anything.
-        let home = tmp_home("gc-contradiction");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        state::update_registry(&home.registry_json(), |r| {
-            let mut row = bg_claude_row("g4", "g4face");
-            row.status = AgentStatus::Live;
-            row.exited_at = Some("2026-08-21T00:42:40Z".into());
-            r.entries.push(row);
-        })
-        .unwrap();
-
-        let summary = gc_sweep_impl(
-            &home,
-            &emitter,
-            &|_| Duration::from_secs(3600),
-            false,
-            7,
-            &no_tails,
-            &|_| None,
-            &|_| RowLiveness::Unknown,
-            &|_| None,
-        );
-        assert!(summary.reaped.is_empty(), "no removal path opens");
-        assert_eq!(summary.kept_contradicted, vec!["g4face".to_string()]);
-        let reg = state::load_registry(&home.registry_json()).unwrap();
-        let stamp = reg.entries[0].exited_at.clone();
-        assert_eq!(
-            stamp.as_deref(),
-            Some("2026-08-21T00:42:40Z"),
-            "a silent ladder must not erase the contradiction's evidence"
-        );
-
-        // The ladder's positive answer clears the stale stamp, still reaping
-        // nothing - and the resolution is REPORTED, never silent.
-        let summary = gc_sweep_impl(
-            &home,
-            &emitter,
-            &|_| Duration::from_secs(3600),
-            false,
-            7,
-            &no_tails,
-            &|_| None,
-            &|_| RowLiveness::Alive,
-            &|_| None,
-        );
-        assert!(summary.reaped.is_empty());
-        assert!(summary.kept_contradicted.is_empty());
-        assert_eq!(summary.cleared_contradiction, vec!["g4face".to_string()]);
-        let reg = state::load_registry(&home.registry_json()).unwrap();
-        assert!(reg.entries[0].exited_at.is_none());
-
-        // An is_live row (bare-existence pid) clears on its process evidence
-        // ALONE: a kept stamp here would hand gc an old clock that skips
-        // grace at the row's real death (codex P2, PR 1329).
-        state::update_registry(&home.registry_json(), |r| {
-            let mut row = bg_claude_row("live-stamped", "livs0001");
-            row.status = AgentStatus::Live;
-            row.pid = Some(std::process::id());
-            row.exited_at = Some("2026-08-21T00:42:40Z".into());
-            r.entries.push(row);
-        })
-        .unwrap();
-        let summary = gc_sweep_impl(
-            &home,
-            &emitter,
-            &|_| Duration::from_secs(3600),
-            false,
-            7,
-            &no_tails,
-            &|_| None,
-            &|_| RowLiveness::Unknown,
-            &|_| None,
-        );
-        assert!(summary.reaped.is_empty());
-        assert_eq!(summary.cleared_contradiction, vec!["livs0001".to_string()]);
-        let reg = state::load_registry(&home.registry_json()).unwrap();
-        let stamped = reg.entries.iter().find(|e| e.name == "live-stamped");
-        assert!(stamped.unwrap().exited_at.is_none());
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    #[test]
     fn an_unreadable_roster_never_flips_the_zombie_arm() {
         // codex P1 (PR 1329): an unreadable roster is unknown liveness. The
         // fail-closed bg_live reading must not combine with a transient
@@ -16520,19 +14374,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert_eq!(changes[0].new_status, Some(AgentStatus::Exited));
     }
 
-    /// Adapt a per-handle tail answer into the dormant gate's BATCH seam, for
-    /// tests that stage a specific tail per row rather than counting spawns.
-    fn tails_for(
-        f: impl Fn(&str) -> Option<String>,
-    ) -> impl Fn(&[String]) -> std::collections::HashMap<String, String> {
-        move |handles: &[String]| {
-            handles
-                .iter()
-                .filter_map(|h| Some((h.clone(), f(h)?)))
-                .collect()
-        }
-    }
-
     /// Adapt a per-handle answer into the BATCH seam `handle_list_with_truth`
     /// takes, for the rendering tests below - they assert what a row renders,
     /// never how many processes paid for it.
@@ -16543,8 +14384,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     /// handler called it once or once per row, so the call SHAPE needs its own
     /// test against the raw seam.
     fn per_handle(
-        f: impl Fn(&str) -> Option<crate::claude_ask::TruthProbe>,
-    ) -> impl Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>
+        f: impl Fn(&str) -> Option<crate::truth_probe::TruthProbe>,
+    ) -> impl Fn(&[String]) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>
     {
         move |handles: &[String]| {
             handles
@@ -16558,8 +14399,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     fn probe_with_verdict(
         state: &str,
         reachability: &str,
-    ) -> Option<crate::claude_ask::TruthProbe> {
-        Some(crate::claude_ask::TruthProbe {
+    ) -> Option<crate::truth_probe::TruthProbe> {
+        Some(crate::truth_probe::TruthProbe {
             state: state.into(),
             reachability: Some(reachability.into()),
             basis: Some("transcript".into()),
@@ -16577,7 +14418,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         state: &str,
         reachability: &str,
         age_s: Option<f64>,
-    ) -> Option<crate::claude_ask::TruthProbe> {
+    ) -> Option<crate::truth_probe::TruthProbe> {
         let mut probe = probe_with_verdict(state, reachability).unwrap();
         probe.last_activity_age_s = age_s;
         Some(probe)
@@ -16590,51 +14431,33 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     #[test]
     fn the_reachability_verdict_outranks_the_transcript_state() {
         assert_eq!(
-            rendered_status_from_truth(
-                probe_with_verdict("working", "unreachable").as_ref(),
-                false
-            ),
+            rendered_status_from_truth(probe_with_verdict("working", "unreachable").as_ref()),
             "orphaned",
-            "a falsified row must not render live merely because its transcript is recent"
+            "a falsified row must not render writing merely because its transcript is recent"
         );
-        // And silence is not death: the verdict says unknown where the legacy
-        // state mapping said orphaned.
+        // A verdict that did not resolve falls through to the ACTIVITY read:
+        // a 12s-old transcript is writing whatever the state word says.
         assert_eq!(
-            rendered_status_from_truth(probe_with_verdict("stalled", "unknown").as_ref(), false),
-            "unknown"
+            rendered_status_from_truth(probe_with_verdict("stalled", "unknown").as_ref()),
+            "writing"
         );
         assert_eq!(
-            rendered_status_from_truth(probe("stalled").as_ref(), false),
-            "orphaned",
-            "the fallback keeps its old meaning for a fno too old to send a verdict"
+            rendered_status_from_truth(probe("stalled").as_ref()),
+            "unknown",
+            "a probe that answered nothing reads unknown, never orphaned (x-c672)"
         );
     }
 
     #[test]
-    fn a_confirmed_live_pid_overrides_an_unresolvable_truth_probe_but_never_a_falsifier() {
-        // x-9de7 task 3 (the second render path the king's live measurement
-        // found): a row with no short_id/harness_session_id resolves through
-        // its bare name, which the truth probe can never find -- "unknown" is
-        // then a statement about missing session identity, not about whether
-        // the worker is alive. A confirmed-live pid is its own measurement.
+    fn no_probe_at_all_reads_unknown_even_for_a_live_row() {
+        // A live pid is a fact about the PROCESS, not about served activity,
+        // so it is not an input to the STATUS word (x-c672): the Python list
+        // lane has no pid census, and an unanswered activity age must read
+        // the same word on both lanes.
         assert_eq!(
-            rendered_status_from_truth(probe_with_verdict("working", "unknown").as_ref(), true),
-            "live",
-            "an unresolvable probe + a confirmed-live pid must render live, not unknown"
-        );
-        assert_eq!(
-            rendered_status_from_truth(None, true),
-            "live",
-            "no probe at all (too-old fno / shellout failure) + a live pid still renders live"
-        );
-        // The override is scoped to the two unmeasured shapes ONLY. A probe
-        // that positively falsified the row (unreachable) is never raised by
-        // a live pid -- that would contradict the monotone-lowering rule
-        // task 4 exists to enforce.
-        assert_eq!(
-            rendered_status_from_truth(probe_with_verdict("working", "unreachable").as_ref(), true),
-            "orphaned",
-            "a positive falsifier must never be overridden by pid liveness"
+            rendered_status_from_truth(None),
+            "unknown",
+            "no probe at all reads unknown, never quiet"
         );
     }
 
@@ -16645,8 +14468,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         state: &str,
         reachability: &str,
         observed_model: Value,
-    ) -> Option<crate::claude_ask::TruthProbe> {
-        Some(crate::claude_ask::TruthProbe {
+    ) -> Option<crate::truth_probe::TruthProbe> {
+        Some(crate::truth_probe::TruthProbe {
             state: state.into(),
             reachability: Some(reachability.into()),
             basis: Some("transcript".into()),
@@ -16739,12 +14562,12 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     }
 
     #[test]
-    fn progress_deliberately_wedged_open_turn_is_live_but_not_advancing() {
+    fn progress_deliberately_wedged_open_turn_is_quiet_but_not_advancing() {
         let probe = probe_with_age("working", "reachable", Some(STALE_ATTENTION_S + 1.0));
         assert_eq!(
-            rendered_status_from_truth(probe.as_ref(), true),
-            "live",
-            "the process and reachability axes still say live"
+            rendered_status_from_truth(probe.as_ref()),
+            "quiet",
+            "the process and reachability axes still say present; the transcript has not moved"
         );
         assert_eq!(
             progress_from_truth(probe.as_ref(), "claude", None),
@@ -16804,7 +14627,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 idle_exit: Duration::from_secs(1800),
                 worker_bin,
                 reconcile_on_start: true,
-                dead_row_grace_cwd: PathBuf::from("/dev/null"),
+                agents_config_cwd: PathBuf::from("/dev/null"),
                 // Off in tests: a unit test must never spawn a real `fno inbox notify`.
                 notify_on_blocked: false,
                 notify_on_done: false,
@@ -16828,7 +14651,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 idle_exit: Duration::from_secs(1800),
                 worker_bin,
                 reconcile_on_start: true,
-                dead_row_grace_cwd: PathBuf::from("/dev/null"),
+                agents_config_cwd: PathBuf::from("/dev/null"),
                 // Off in tests: a unit test must never spawn a real `fno inbox notify`.
                 notify_on_blocked: false,
                 notify_on_done: false,
@@ -17442,7 +15265,7 @@ done
             &ctx,
             &req,
             per_handle(|_handle| {
-                Some(crate::claude_ask::TruthProbe {
+                Some(crate::truth_probe::TruthProbe {
                     state: "working".into(),
                     reachability: Some("reachable".into()),
                     basis: Some("transcript".into()),
@@ -17470,13 +15293,13 @@ done
         std::fs::remove_dir_all(home.root()).ok();
     }
 
-    /// The end-to-end shape of the king's live measurement (x-9de7 task 3): a
-    /// codex pane row with no short_id and no harness_session_id -- the exact
-    /// specimen -- resolves through `registry_truth_handle` to its bare name,
-    /// which no truth probe can ever find. `status` must still read `live`
-    /// when the pid demonstrably is, not `unknown`.
+    /// A codex pane row with no short_id and no harness_session_id resolves
+    /// through `registry_truth_handle` to its bare name, which no truth probe
+    /// can ever find. The STATUS word is activity, so even a demonstrably live
+    /// pid cannot lift an unanswered age: the row reads `unknown`, the same
+    /// word the Python list lane renders for it.
     #[test]
-    fn list_status_is_live_for_an_unresolvable_row_with_a_confirmed_live_pid() {
+    fn list_status_is_unknown_for_an_unresolvable_row_even_with_a_confirmed_live_pid() {
         let home = short_home("listlivepid");
         state::update_registry(&home.registry_json(), |r| {
             let mut e = seed_bare_row("cx-x-e14b");
@@ -17490,15 +15313,14 @@ done
 
         let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| None));
         let row = &response.result().unwrap()["agents"][0];
-        assert_eq!(row["status"], "live");
+        assert_eq!(row["status"], "unknown");
 
         std::fs::remove_dir_all(home.root()).ok();
     }
 
-    /// The pid-liveness override never fires FOR a row the probe positively
-    /// falsified, and never fires when the pid is confirmed dead -- only
-    /// "the probe could not measure" plus "the pid is confirmed live" together
-    /// produce the override.
+    /// The pid census does not reach the STATUS word at all: with no probe
+    /// answer and no live pid, the row also reads `unknown` (the reachability
+    /// fields still carry the pid verdict on their own axis).
     #[test]
     fn list_status_stays_unknown_for_an_unresolvable_row_with_no_confirmed_live_pid() {
         let home = short_home("listnolivepid");
@@ -17634,13 +15456,17 @@ done
         })
         .unwrap();
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let req = Request::new(1, "agent.list", json!({"status": "writing"}));
 
-        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|_handle| probe_with_verdict("working", "reachable")),
+        );
         let result = response.result().unwrap();
         let agents = result["agents"].as_array().unwrap();
         assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0]["status"], "live");
+        assert_eq!(agents[0]["status"], "writing");
 
         std::fs::remove_dir_all(home.root()).ok();
     }
@@ -17650,7 +15476,7 @@ done
         let home = short_home("listidentity");
         seed_stream_row(&home, "custom-worker-name", "abc12345");
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let req = Request::new(1, "agent.list", json!({"status": "writing"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
         let response = handle_list_with_truth(
@@ -17658,7 +15484,7 @@ done
             &req,
             per_handle(|handle| {
                 seen.borrow_mut().push(handle.to_string());
-                probe("working")
+                probe_with_verdict("working", "reachable")
             }),
         );
 
@@ -17679,7 +15505,7 @@ done
         })
         .unwrap();
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let req = Request::new(1, "agent.list", json!({"status": "writing"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
         let response = handle_list_with_truth(
@@ -17687,7 +15513,7 @@ done
             &req,
             per_handle(|handle| {
                 seen.borrow_mut().push(handle.to_string());
-                probe("working")
+                probe_with_verdict("working", "reachable")
             }),
         );
 
@@ -17710,7 +15536,7 @@ done
         })
         .unwrap();
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let req = Request::new(1, "agent.list", json!({"status": "writing"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
         let response = handle_list_with_truth(
@@ -17718,7 +15544,7 @@ done
             &req,
             per_handle(|handle| {
                 seen.borrow_mut().push(handle.to_string());
-                probe("working")
+                probe_with_verdict("working", "reachable")
             }),
         );
 
@@ -18536,166 +16362,6 @@ done
         std::fs::remove_dir_all(home.root()).ok();
     }
 
-    /// The attach lane WITHOUT a harness-owned server (claude) must refuse
-    /// with the client-side-lane pointer, never reach the codex app-server
-    /// lane: `thread_lane` answers "attach" for claude too, so a bare lane
-    /// test would hand a claude thread spawn to codex's app-server.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_spawn_thread_attach_without_server_refuses_with_client_pointer() {
-        let home = tmp_home("spawn-thread-attach-client");
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(
-            1,
-            "agent.spawn",
-            json!({"name": "test-agent", "provider": "claude", "substrate": "thread"}),
-        );
-        let resp = handle_spawn(&ctx, &req).await;
-        match &resp.payload {
-            crate::protocol::ResponsePayload::Err(e) => {
-                assert_eq!(e.code, ErrorCode::InvalidParams);
-                assert!(
-                    e.message.contains("--substrate thread"),
-                    "attach-without-server must point at the client-side lane; got: {}",
-                    e.message
-                );
-                assert!(
-                    !e.message.contains("retired at G4"),
-                    "this refusal is a lane split, not PTY retirement; got: {}",
-                    e.message
-                );
-            }
-            _ => panic!("expected refusal for an attach lane without a server"),
-        }
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    /// A keeper-lane harness (agy) refuses naming fno's keeper process; the
-    /// text carries no mux pointer and no daemon-PTY retirement claim.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_spawn_thread_keeper_lane_refuses_naming_keeper() {
-        let home = tmp_home("spawn-thread-keeper");
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(
-            1,
-            "agent.spawn",
-            json!({"name": "test-agent", "provider": "agy", "substrate": "thread"}),
-        );
-        let resp = handle_spawn(&ctx, &req).await;
-        match &resp.payload {
-            crate::protocol::ResponsePayload::Err(e) => {
-                assert_eq!(e.code, ErrorCode::InvalidParams);
-                assert!(
-                    e.message.contains("keeper"),
-                    "keeper-lane refusal must name the keeper process; got: {}",
-                    e.message
-                );
-                assert!(
-                    !e.message.contains("mux"),
-                    "keeper-lane refusal is not a PTY-retirement pointer; got: {}",
-                    e.message
-                );
-                assert!(
-                    !e.message.contains("retired at G4"),
-                    "keeper-lane refusal must not recycle the G4 message; got: {}",
-                    e.message
-                );
-            }
-            _ => panic!("expected refusal for a keeper-lane harness"),
-        }
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    /// An unknown harness on the thread substrate refuses via the contract
-    /// error rather than routing to any lane.
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_spawn_thread_unknown_harness_refuses() {
-        let home = tmp_home("spawn-thread-unknown");
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(
-            1,
-            "agent.spawn",
-            json!({"name": "test-agent", "provider": "nonexistent-provider", "substrate": "thread"}),
-        );
-        let resp = handle_spawn(&ctx, &req).await;
-        match &resp.payload {
-            crate::protocol::ResponsePayload::Err(e) => {
-                assert_eq!(
-                    e.code,
-                    ErrorCode::InvalidParams,
-                    "unknown harness on the thread substrate must refuse"
-                );
-                assert!(
-                    e.message.contains("unknown harness"),
-                    "refusal must carry the contract error; got: {}",
-                    e.message
-                );
-            }
-            _ => panic!("expected refusal for an unknown harness"),
-        }
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    /// The destination's own precondition: a provider the codex lane cannot
-    /// serve refuses loudly instead of silently starting a codex thread under
-    /// the caller's name. Pinned by calling the lane directly, because no
-    /// packaged row today answers attach-with-server except codex - this is
-    /// the guard a SECOND such row meets until its destination is wired.
-    #[tokio::test(flavor = "current_thread")]
-    async fn codex_thread_lane_refuses_a_provider_it_cannot_serve() {
-        let home = tmp_home("codex-lane-wrong-provider");
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(
-            1,
-            "agent.spawn",
-            json!({"name": "test-agent", "provider": "claude", "substrate": "thread"}),
-        );
-        let resp =
-            spawn_codex_thread_lane(&ctx, &req, "test-agent", Path::new("/tmp"), "claude").await;
-        match &resp.payload {
-            crate::protocol::ResponsePayload::Err(e) => {
-                assert_eq!(e.code, ErrorCode::InvalidParams);
-                assert!(
-                    e.message.contains("needs its own thread destination"),
-                    "the wrong-harness guard must name the missing destination; got: {}",
-                    e.message
-                );
-            }
-            _ => panic!("expected the codex lane to refuse a provider it cannot serve"),
-        }
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    /// The thread route's provider default is `codex`, matching the client's
-    /// daemon-bound predicate: a thread spawn with no provider reaches the
-    /// app-server lane, never a refusal (green gate, mute worker - the
-    /// defaults-must-match note in client.rs run()).
-    #[tokio::test(flavor = "current_thread")]
-    async fn handle_spawn_thread_absent_provider_defaults_to_codex_lane() {
-        with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
-            let home = tmp_home("spawn-thread-default-provider");
-            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
-            let worktree = home.root().join("worktree");
-            std::fs::create_dir_all(&worktree).unwrap();
-            let req = Request::new(
-                1,
-                "agent.spawn",
-                json!({
-                    "name": "t",
-                    "substrate": "thread",
-                    "cwd": worktree.to_string_lossy(),
-                    "message": "seed turn",
-                }),
-            );
-            let resp = handle_spawn(&ctx, &req).await;
-            assert!(
-                resp.result().is_some(),
-                "absent provider must default to codex and reach the thread lane: {resp:?}"
-            );
-            std::fs::remove_dir_all(home.root()).ok();
-        })
-        .await;
-    }
-
     // --- codex thread lane: actor-driven ask / stop (the x-de10 probes) ---
     //
     // These three are the make-it-fail probes for the concurrency rewrite:
@@ -18715,9 +16381,7 @@ done
         behavior: crate::codex_fake_daemon::Behavior,
         body: impl std::future::Future<Output = ()>,
     ) {
-        let _guard = crate::PATH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::path_test_guard();
         let _daemon = crate::codex_fake_daemon::FakeDaemon::start(behavior);
         body.await;
     }
@@ -18770,452 +16434,6 @@ done
             );
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-    }
-
-    /// Spawn a codex thread worker through the real handle_spawn and return
-    /// its response.
-    async fn spawn_codex_thread_for_test(ctx: &Ctx, home: &AgentsHome, seed: &str) -> Response {
-        let worktree = home.root().join("worktree");
-        std::fs::create_dir_all(&worktree).unwrap();
-        let req = Request::new(
-            1,
-            "agent.spawn",
-            json!({
-                "name": "t",
-                "provider": "codex",
-                "substrate": "thread",
-                "cwd": worktree.to_string_lossy(),
-                "message": seed,
-            }),
-        );
-        handle_spawn(ctx, &req).await
-    }
-
-    /// AC4 make-it-fail probe: an ask arriving while the SEED turn is driving
-    /// STEERS into it. Old mutex shape: the ask queued behind the whole seed
-    /// turn and drove a SECOND turn - this asserted reply would read REPLY-2
-    /// and two agent_ask_done events would land. Actor: one shared turn, one
-    /// event, the ask returns the seed turn's own reply.
-    #[tokio::test(flavor = "current_thread")]
-    async fn codex_thread_ask_while_driving_steers_instead_of_queueing() {
-        with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
-            let home = tmp_home("codex-steer");
-            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
-            let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
-            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
-
-            let ask = handle_ask(
-                &ctx,
-                &Request::new(2, "agent.ask", json!({"name": "t", "message": "follow-up"})),
-            )
-            .await;
-            let res = ask.result().expect("ask errored");
-            assert_eq!(
-                res["reply"], "REPLY-1",
-                "the follow-up must ride the seed turn, not drive a second one: {res:?}"
-            );
-
-            // Exactly ONE completed turn: the seed and the steered ask share
-            // it, so exactly one agent_ask_done event fires.
-            let events = await_ask_done(&home).await;
-            let done = events
-                .iter()
-                .filter(|e| e["type"] == "agent_ask_done")
-                .count();
-            assert_eq!(done, 1, "one shared turn must emit one event: {events:?}");
-            ctx.codex_threads.lock().await.remove("t");
-            std::fs::remove_dir_all(home.root()).ok();
-        })
-        .await;
-    }
-
-    /// AC10 (x-296f): a SEEDLESS codex thread spawn takes the warmup turn, so
-    /// a rollout exists and the worker is attachable from its first seconds.
-    /// The positive marker is the fake daemon's own received frame: a
-    /// `turn/start` carrying the warmup text. `thread/start` alone writes no
-    /// rollout and a harness resolves a session BY that rollout, so without
-    /// the warmup the first attach dies with "no rollout found for thread id".
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_seedless_codex_thread_spawn_takes_the_warmup_turn() {
-        let behavior = crate::codex_fake_daemon::Behavior::quick();
-        let received = std::sync::Arc::clone(&behavior.received);
-        with_fake_codex_daemon(behavior, async {
-            let home = tmp_home("codex-warmup");
-            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
-            // Seedless: the spawn request carries no message at all.
-            let spawned = spawn_codex_thread_for_test(&ctx, &home, "").await;
-            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
-
-            // The seed submit is async in the actor; wait for the frame rather
-            // than racing it.
-            let turns: Vec<serde_json::Value> = {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                loop {
-                    let turns: Vec<serde_json::Value> = received
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .iter()
-                        .filter(|f| f["method"] == "turn/start")
-                        .cloned()
-                        .collect();
-                    if !turns.is_empty() || std::time::Instant::now() >= deadline {
-                        break turns;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
-            };
-            assert_eq!(
-                turns.len(),
-                1,
-                "a seedless spawn takes exactly one warmup turn: {turns:?}"
-            );
-            assert_eq!(
-                turns[0]["params"]["input"][0]["text"], WARMUP_SEED,
-                "the warmup is the seed that was submitted: {turns:?}"
-            );
-
-            ctx.codex_threads.lock().await.remove("t");
-            std::fs::remove_dir_all(home.root()).ok();
-        })
-        .await;
-    }
-
-    /// The warmup must not double-submit behind a real seed: a spawn that
-    /// carries a prompt drives exactly that prompt, verbatim.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_seeded_codex_thread_spawn_drives_its_own_seed_only() {
-        let behavior = crate::codex_fake_daemon::Behavior::quick();
-        let received = std::sync::Arc::clone(&behavior.received);
-        with_fake_codex_daemon(behavior, async {
-            let home = tmp_home("codex-real-seed");
-            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
-            let spawned = spawn_codex_thread_for_test(&ctx, &home, "do the actual work").await;
-            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
-
-            let turns: Vec<serde_json::Value> = {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                loop {
-                    let turns: Vec<serde_json::Value> = received
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .iter()
-                        .filter(|f| f["method"] == "turn/start")
-                        .cloned()
-                        .collect();
-                    if !turns.is_empty() || std::time::Instant::now() >= deadline {
-                        break turns;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
-            };
-            assert_eq!(turns.len(), 1, "one seed, one turn: {turns:?}");
-            assert_eq!(
-                turns[0]["params"]["input"][0]["text"], "do the actual work",
-                "a real seed passes through verbatim: {turns:?}"
-            );
-
-            ctx.codex_threads.lock().await.remove("t");
-            std::fs::remove_dir_all(home.root()).ok();
-        })
-        .await;
-    }
-
-    /// AC5 + AC6 make-it-fail probe: stop INTERRUPTS the in-flight turn before
-    /// reporting stopped and names the interrupt outcome in the response. Old
-    /// shape: no `interrupt` key (remove-and-stamp while the turn task still
-    /// held an Arc clone), so the `interrupt == "interrupted"` assert fails
-    /// there.
-    ///
-    /// It also pins the ownership claim this lane exists for. The row's pid
-    /// is the SHARED daemon's, and that daemon is still running after the
-    /// stop. The assertion used to be the opposite (the pid must be GONE),
-    /// which is what owning a private app-server per worker looked like.
-    #[tokio::test(flavor = "current_thread")]
-    async fn codex_thread_stop_interrupts_and_stamps_exited_without_killing_the_daemon() {
-        with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::long(), async {
-            let home = tmp_home("codex-stop");
-            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
-            let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
-            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
-            let registry = load_registry_offloaded(home.registry_json())
-                .await
-                .expect("registry");
-            assert_eq!(
-                registry.find("t").and_then(|entry| entry.pid),
-                None,
-                "a thread row records no pid: it owns no process, and this \
-                 field is a liveness surface"
-            );
-            let daemon_state: Value = serde_json::from_str(
-                &std::fs::read_to_string(
-                    std::path::PathBuf::from(std::env::var("CODEX_HOME").unwrap())
-                        .join("app-server-daemon")
-                        .join("app-server.pid"),
-                )
-                .expect("daemon state"),
-            )
-            .expect("daemon state json");
-            let pid = daemon_state["pid"].as_u64().expect("daemon pid") as u32;
-
-            // Stop mid-turn, once the turn is actually driving.
-            await_driving_turn(&ctx, "t").await;
-            let stop =
-                handle_stop(&ctx, &Request::new(3, "agent.stop", json!({"name": "t"}))).await;
-            let res = stop.result().expect("stop errored");
-            assert_eq!(res["stopped"], true, "stop response: {res:?}");
-            assert_eq!(
-                res["interrupt"], "interrupted",
-                "stopped must name the interrupt outcome: {res:?}"
-            );
-
-            let registry = load_registry_offloaded(home.registry_json())
-                .await
-                .expect("registry");
-            assert_eq!(
-                registry.find("t").map(|e| e.status),
-                Some(AgentStatus::Exited)
-            );
-
-            // The shared daemon must SURVIVE the stop. Stopping a worker
-            // closes one connection; killing the app-server would take every
-            // other codex session on the machine with it.
-            let alive = std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false);
-            assert!(
-                alive,
-                "stopping a worker killed the shared app-server daemon {pid}"
-            );
-            ctx.codex_threads.lock().await.remove("t");
-            std::fs::remove_dir_all(home.root()).ok();
-        })
-        .await;
-    }
-
-    /// The zombie-stop probe: an interrupt the daemon never confirms must NOT
-    /// report a stop.
-    ///
-    /// With a private app-server, `kill_on_drop` made every stop terminal, so
-    /// `stopped: true` was always true. Against the shared daemon nothing ends
-    /// the turn but the interrupt itself, and an unconfirmed one leaves the
-    /// model taking that turn in the worker's worktree. Reporting `stopped:
-    /// true` there marks the row Exited, hides it from recovery, and discards
-    /// the interrupt handle, while the work continues unobserved.
-    ///
-    /// The fake acks the interrupt and never completes the turn, which is
-    /// exactly that state.
-    #[tokio::test(flavor = "current_thread")]
-    async fn codex_thread_stop_refuses_over_a_turn_the_interrupt_never_settled() {
-        let behavior = crate::codex_fake_daemon::Behavior::long().with_interrupt(
-            crate::codex_fake_daemon::Interrupt::AckOnly(std::time::Duration::ZERO),
-        );
-        with_fake_codex_daemon(behavior, async {
-            // A Drop guard, not a teardown line: an assertion below panics
-            // out of this body, and a leaked bound would silently shorten
-            // every later test's interrupt wait in the same process.
-            struct BoundGuard;
-            impl Drop for BoundGuard {
-                fn drop(&mut self) {
-                    std::env::remove_var("FNO_CODEX_INTERRUPT_BOUND_MS");
-                }
-            }
-            std::env::set_var("FNO_CODEX_INTERRUPT_BOUND_MS", "1500");
-            let _bound = BoundGuard;
-            let home = tmp_home("codex-zombie-stop");
-            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
-            let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
-            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
-            await_driving_turn(&ctx, "t").await;
-
-            let stop =
-                handle_stop(&ctx, &Request::new(3, "agent.stop", json!({"name": "t"}))).await;
-            let res = stop.result().expect("stop errored");
-            assert_eq!(
-                res["stopped"], false,
-                "an unsettled interrupt must not report a stop: {res:?}"
-            );
-            assert_eq!(
-                res["interrupt"], "timeout-turn-still-running",
-                "the response names why: {res:?}"
-            );
-
-            // The row stays non-terminal, so recovery can still see it, and
-            // the handle stays so the live turn keeps an interrupt handle.
-            let registry = load_registry_offloaded(home.registry_json())
-                .await
-                .expect("registry");
-            assert_ne!(
-                registry.find("t").map(|entry| entry.status),
-                Some(AgentStatus::Exited),
-                "a refused stop must not stamp the row terminal"
-            );
-            assert!(
-                ctx.codex_threads.lock().await.contains_key("t"),
-                "the actor must survive a refused stop; it holds the interrupt handle"
-            );
-
-            ctx.codex_threads.lock().await.remove("t");
-            std::fs::remove_dir_all(home.root()).ok();
-        })
-        .await;
-    }
-
-    /// AC3 make-it-fail probe: an ask against a turn longer than the bounded
-    /// wait answers `in_flight` with the turn id while the turn keeps running.
-    /// Old shape: the ask blocked on the mutex for the whole 30s turn and
-    /// returned a completed reply - `status == "in_flight"` fails there.
-    #[tokio::test(flavor = "current_thread")]
-    async fn codex_thread_ask_returns_in_flight_when_turn_exceeds_bound() {
-        with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::long(), async {
-            std::env::set_var("FNO_CODEX_ASK_WAIT_MS", "200");
-            let home = tmp_home("codex-inflight");
-            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
-            let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
-            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
-            await_driving_turn(&ctx, "t").await;
-
-            let started = std::time::Instant::now();
-            let ask = handle_ask(
-                &ctx,
-                &Request::new(2, "agent.ask", json!({"name": "t", "message": "status?"})),
-            )
-            .await;
-            let res = ask.result().expect("ask errored");
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(5),
-                "the bounded ask must answer near its 200ms bound, took {:?}",
-                started.elapsed()
-            );
-            assert_eq!(res["status"], "in_flight", "in_flight receipt: {res:?}");
-            assert!(res["reply"].is_null(), "in_flight reply is null: {res:?}");
-            assert_eq!(
-                res["turn_id"], "turn-1",
-                "the receipt carries the surviving interrupt handle: {res:?}"
-            );
-
-            // Stop cleans up: interrupts the still-driving turn and kills it.
-            let stop =
-                handle_stop(&ctx, &Request::new(3, "agent.stop", json!({"name": "t"}))).await;
-            let stop_res = stop.result().expect("stop errored");
-            assert_eq!(stop_res["interrupt"], "interrupted");
-            std::env::remove_var("FNO_CODEX_ASK_WAIT_MS");
-            ctx.codex_threads.lock().await.remove("t");
-            std::fs::remove_dir_all(home.root()).ok();
-        })
-        .await;
-    }
-
-    /// AC8 make-it-fail probe: mail arriving MID-TURN answers delivered on the
-    /// STEER ACK (milliseconds) and drives exactly ONE shared turn. Old shape:
-    /// the thread fell out of the switchboard as not-a-live-stream-thread, so
-    /// `delivered` read false - this assert fails there.
-    #[tokio::test(flavor = "current_thread")]
-    async fn switchboard_to_codex_thread_delivers_on_steering_ack_mid_turn() {
-        with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
-            let home = tmp_home("codex-mail");
-            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
-            let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
-            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
-            let registry = load_registry_offloaded(home.registry_json())
-                .await
-                .expect("registry");
-            let row = registry.find("t").expect("thread row").clone();
-            await_driving_turn(&ctx, "t").await;
-
-            let params = json!({
-                "to": "t",
-                "from": "king",
-                "body": "hello thread",
-                "mirror": false,
-                "recipient_identity": {
-                    "harness": "codex",
-                    "session_id": row.harness_session_id,
-                    "short_id": "",
-                    "created_at": row.created_at,
-                },
-            });
-            let started = std::time::Instant::now();
-            let resp =
-                handle_switchboard(&ctx, &Request::new(4, "agent.switchboard_v2", params)).await;
-            let res = resp.result().expect("switchboard errored");
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(5),
-                "delivery must answer on the steer ack, took {:?}",
-                started.elapsed()
-            );
-            assert_eq!(res["delivered"], true, "codex mail: {res:?}");
-            assert_eq!(res["identity_verified"], true);
-            assert_eq!(res["turn_id"], "turn-1", "steered into the shared turn");
-
-            // The body reached the thread: the steered turn carries it, so the
-            // completion event names the same single turn.
-            let events = await_ask_done(&home).await;
-            let done: Vec<_> = events
-                .iter()
-                .filter(|e| e["type"] == "agent_ask_done")
-                .collect();
-            assert_eq!(done.len(), 1, "one shared turn: {events:?}");
-            assert_eq!(
-                done[0]["data"]["turn_id"], "turn-1",
-                "the completion must name the turn both submits shared: {events:?}"
-            );
-            let injected = events.iter().any(|e| {
-                e["type"] == "agent_deliver_injected"
-                    && e["data"]["transport"] == "switchboard"
-                    && e["data"]["provider"] == "codex"
-            });
-            assert!(injected, "injected event missing: {events:?}");
-
-            // Cleanup: the actor holds a live daemon connection.
-            handle_stop(&ctx, &Request::new(5, "agent.stop", json!({"name": "t"}))).await;
-            ctx.codex_threads.lock().await.remove("t");
-            std::fs::remove_dir_all(home.root()).ok();
-        })
-        .await;
-    }
-
-    /// AC8 (idle half): mail to an IDLE codex thread starts the turn itself
-    /// and answers delivered with that turn id - no pane, no durable demote.
-    #[tokio::test(flavor = "current_thread")]
-    async fn switchboard_to_idle_codex_thread_delivers_on_start_ack() {
-        with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
-            let home = tmp_home("codex-mail-idle");
-            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
-            // No seed: the row is idle at mail time.
-            let spawned = spawn_codex_thread_for_test(&ctx, &home, "").await;
-            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
-            let registry = load_registry_offloaded(home.registry_json())
-                .await
-                .expect("registry");
-            let row = registry.find("t").expect("thread row").clone();
-
-            let params = json!({
-                "to": "t",
-                "from": "king",
-                "body": "wake up",
-                "mirror": false,
-                "recipient_identity": {
-                    "harness": "codex",
-                    "session_id": row.harness_session_id,
-                    "short_id": "",
-                    "created_at": row.created_at,
-                },
-            });
-            let resp =
-                handle_switchboard(&ctx, &Request::new(4, "agent.switchboard_v2", params)).await;
-            let res = resp.result().expect("switchboard errored");
-            assert_eq!(res["delivered"], true, "idle codex mail: {res:?}");
-            assert_eq!(res["turn_id"], "turn-1", "started the turn: {res:?}");
-
-            handle_stop(&ctx, &Request::new(5, "agent.stop", json!({"name": "t"}))).await;
-            ctx.codex_threads.lock().await.remove("t");
-            std::fs::remove_dir_all(home.root()).ok();
-        })
-        .await;
     }
 
     /// AC4-HP: handle_ask on AgentNotFound with a provider param routes into the

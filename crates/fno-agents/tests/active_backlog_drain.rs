@@ -61,6 +61,7 @@ fn cfg_for(tmp: &Path, fno_bin: PathBuf, mission: &str) -> DrainConfig {
         mission: mission.to_string(),
         failure_limit: 3,
         interval_seconds: 300,
+        rotation: None,
     }
 }
 
@@ -93,7 +94,9 @@ fn dispatch_records_pending_and_forwards_epic_seam() {
     let fno = stub_advance(
         &tmp.path().join("bin"),
         &args_file,
-        r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a","x-b"]}"#,
+        r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a","x-b"],
+            "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"},
+                        {"node_id":"x-b","decision":"dispatched","substrate":"thread"}]}"#,
     );
     let (journal, project_journal) = journal_in(tmp.path());
     let cfg = cfg_for(tmp.path(), fno, "x-epic");

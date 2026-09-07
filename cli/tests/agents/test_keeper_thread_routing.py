@@ -14,17 +14,21 @@ from fno.agents.rust_runtime import _is_keeper_thread_spawn, _KEEPER_THREAD_HARN
 
 
 def test_keeper_roster_matches_the_capability_lane() -> None:
-    """The literal tuple and the capability contract must agree in both
-    directions, with ONE named exception: opencode's row derives a keeper
-    lane (attach unsupported, resume supported) while its working thread
-    lane is the serve-HTTP arm the Rust client owns - the client.rs comment
-    records that exception verbatim."""
+    """The literal tuple and the capability contract must agree exactly.
+
+    Before x-df08, opencode's row derived a keeper lane (interactive_attach
+    unsupported, interactive_resume supported) while its working thread lane
+    was the serve-HTTP arm the Rust client owns - so this test carved out a
+    named exception. x-df08 fixed thread_lane() to read opencode's own
+    features.attach claim (native) first, which now correctly answers
+    "attach" for opencode, and the exception is no longer needed: the
+    capability-derived roster and the literal tuple agree without it."""
     from fno.agents.harness_map import thread_lane
     from fno.harness_names import SPAWN_HARNESSES
 
     keeper_roster = {h for h in SPAWN_HARNESSES if thread_lane(h) == "keeper"}
-    assert keeper_roster - {"opencode"} == set(_KEEPER_THREAD_HARNESSES)
-    assert "opencode" in keeper_roster, "the exception drifted; re-derive the tuple"
+    assert keeper_roster == set(_KEEPER_THREAD_HARNESSES)
+    assert "opencode" not in keeper_roster, "opencode's row regressed to keeper"
 
 
 def test_grok_thread_spawn_diverts_to_python() -> None:

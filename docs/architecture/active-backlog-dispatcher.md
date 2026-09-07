@@ -51,23 +51,21 @@ config.active_backlog (master switch) + epics with mission_active=true
        -> worker died with no termination event: crash floor -> failure
      dispatch: fno backlog advance --epic <id> --continuation --json
        -> deactivated / all_done: active_backlog_mission_retired, loop exits
-       -> dispatched: [nodes] recorded in `pending` for a later reconcile
+       -> children[] is the enqueue authority:
+            decision=dispatched + substrate=headless: SYNCHRONOUS - the
+              one-shot worker already ran, so resolve on the spot from graph
+              state (active_backlog_sync_resolved); never enters `pending`
+            decision=dispatched, any other substrate: recorded in `pending`
+              for a later reconcile
+            decision=failed: a real spawn failure -> feeds map_outcome
+              (breaker; defer at limit). decision=skipped never touches it.
         |
    wait poll floor (interval), waking early on the nudge sentinel mtime
 ```
 
 ## Components
 
-- **Config schema** (`cli/src/fno/config/__init__.py`, `ActiveBacklogConfig`).
-  `config.active_backlog`: `enabled` (bool or per-project map), `interval`
-  (duration string, default `5m`), `failure_limit` (default 3), `max_concurrent`
-  (default 1; v1 asserts 1, defined now so v2 parallelism needs no migration),
-  `mission` (optional). Mirrors the `config.auto_continue` / `config.target.blast`
-  fail-safe posture: a malformed block degrades to disabled, a bad scalar is
-  dropped to its default, and an invalid `interval` fails *closed* (the feature
-  disables) rather than spinning a 0-sleep hot loop. Accessors `is_enabled_for`,
-  `any_enabled`, `enabled_projects`, and `interval_seconds` centralize the
-  fail-closed rule.
+- **Config schema** (`cli/src/fno/config/__init__.py`, `ActiveBacklogConfig`). `config.active_backlog`: `enabled` (bool or per-project map), `interval` (duration string, default `5m`), `failure_limit` (default 3), `max_concurrent` (default 1). v1 asserts one concurrent dispatch. The field is defined now so v2 needs no migration. `mission` is IGNORED: missions are per-epic graph state (`mission_active`), never a config value. The key stays parseable for one release. When it is set, `fno config doctor` warns. The fail-safe posture mirrors `config.auto_continue` / `config.target.blast`. A malformed block degrades to disabled. A bad scalar drops to its default. An invalid `interval` fails *closed*: the feature disables, rather than spinning a 0-sleep hot loop. Accessors `is_enabled_for`, `any_enabled`, `enabled_projects`, and `interval_seconds` centralize the fail-closed rule.
 
 - **Target resolver** (`cli/src/fno/active_backlog.py`, surfaced as
   `fno config active-backlog --json`). The daemon is a per-user global process
@@ -81,15 +79,7 @@ config.active_backlog (master switch) + epics with mission_active=true
   `is_enabled_for(epic project)`, so an explicitly-disabled project's mission
   does not drain.
 
-- **Mission drain tick** (`crates/fno-agents/src/active_backlog.rs`,
-  `mission_drain_tick` / `dispatch_mission`). Reconciles prior fire-and-forget
-  dispatches from events (feeding the breaker) and then dispatches by shelling
-  `fno backlog advance --epic <id> --continuation --json`. The converge core owns
-  all dispatch policy (cross-project fan-out, per-root `walker:` respect,
-  `max_lanes`, claim dedup), so it is never forked. `--continuation` means the
-  daemon never (re)activates a mission and retires an already-inactive one, so an
-  operator `--stop` between ticks sticks. A `deactivated`/`all_done` receipt
-  retires the loop (`active_backlog_mission_retired`).
+- **Mission drain tick** (`crates/fno-agents/src/active_backlog.rs`, `mission_drain_tick` / `dispatch_mission`). Reconciles prior fire-and-forget dispatches from events (feeding the breaker) and then dispatches by shelling `fno backlog advance --epic <id> --continuation --json`. The converge core owns all dispatch policy, so this tick never forks it. Policy covers cross-project fan-out, per-root `walker:` respect, spawn-gate headroom width, and claim dedup. The walker probe runs per child, against that child's own root. One live walker in the epic repo refuses only its own repo's children. The rest of the pass still dispatches. `--continuation` means the daemon never reactivates a mission and retires an already-inactive one. An operator `--stop` between ticks sticks. A `deactivated`/`all_done` receipt retires the loop (`active_backlog_mission_retired`).
 
 - **Circuit breaker** (`CircuitBreaker`). A pure, cross-tick per-node
   consecutive-failure counter with Hermes semantics: increment on a failed
@@ -146,6 +136,12 @@ consolidates is the trigger layer: `/megawalk`, `fno backlog advance`, headless
 `loop run`, and now the resident daemon all spin up the same engine and all grab
 the same `walker:<cwd>` singleton, so they are mutually exclusive.
 
+## Operator receipts
+
+An exhausted mission tick keeps the stable `skip_reason=no_work` token. It adds `stranded=N` to its detail. The value comes from `fno backlog undispatched --json`. That command counts finalized ready leaf plans with no execution claim outside the exhausted mission. A failed or malformed observer read reports `stranded=unknown`. It never fabricates zero. The mission remains pinned, so visibility improves without releasing the drain to the general queue.
+
+To change only the node's board rank, run `fno backlog rank <id> --top`. When the node is outside every resolved active mission scope, the receipt says `no live dispatcher will take it`. If scope cannot be read, the receipt says `dispatcher scope unavailable`. A node inside a mission keeps the normal rank receipt. Ranking never broadens mission membership.
+
 ## Events
 
 All transitions are emitted through the loop `Journal` (project journal fatal,
@@ -154,7 +150,8 @@ from `events.jsonl` alone:
 
 | Event | When |
 |-------|------|
-| `active_backlog_dispatched{mission, dispatched}` | the mission tick fire-and-forgot one or more ready children |
+| `active_backlog_dispatched{mission, dispatched}` | the mission tick fire-and-forgot one or more ready children (detached only) |
+| `active_backlog_sync_resolved{node_id, resolution}` | a SYNCHRONOUS (`headless`) child was resolved on the spot instead of being held open |
 | `active_backlog_parked{node_id, consecutive_failures}` | a node tripped the circuit breaker (reconcile auto-defer) |
 | `active_backlog_skip{reason, ...}` | an `advance --epic` failure/unparseable receipt, or a node that failed without yet tripping the breaker |
 | `active_backlog_mission_retired{mission}` | the mission deactivated / all children done; the loop exits |
@@ -170,6 +167,7 @@ from `events.jsonl` alone:
 | One mission converges slowly | each active mission has its own independent loop, so other missions keep dispatching concurrently |
 | Backlog mutated many times quickly | the nudge is coalesced to one pending drain |
 | Operator `--stop` between ticks | `--continuation` never reactivates; the tick returns `deactivated` and the loop retires (no zombie ticks) |
+| Mission has no ready child while other planned work exists | the tick keeps `no_work` and names the mission plus board-wide `stranded=N` count; an unavailable observer reads `stranded=unknown` |
 | Empty / all-done mission | `advance --epic` reports `all_done`; the loop emits `active_backlog_mission_retired` and exits |
 | Invalid `interval` | config fails closed: the feature disables (no 0-sleep loop) |
 

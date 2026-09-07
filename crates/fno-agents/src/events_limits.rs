@@ -8,8 +8,8 @@
 //! instead of prose.
 //!
 //! The committed TOML is what a crates.io build compiles against, so the crate
-//! still builds with no `cli/` tree. A hand edit of the copy is caught by
-//! `scripts/ci/check-events-limits-fresh.sh`.
+//! still builds with no `cli/` tree. A hand edit of the copy is caught by the
+//! rust-ci generated-copies dirty-tree step.
 
 use std::sync::OnceLock;
 

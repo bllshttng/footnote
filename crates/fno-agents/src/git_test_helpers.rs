@@ -6,15 +6,26 @@
 
 /// git resolved to an absolute path ONCE: the snapshot is immune to PATH
 /// flips that happen after it.
+///
+/// The ONCE is the whole point and it was missing: this re-read PATH on every
+/// call, so it was a fresh lookup rather than a snapshot and every caller
+/// still raced the flips the module header describes. Only a real hit is
+/// cached, so a call that lands inside a stub window returns the bare name for
+/// itself without poisoning the snapshot for everyone after it.
 pub(crate) fn git_bin() -> std::path::PathBuf {
-    std::env::var("PATH")
-        .ok()
-        .and_then(|paths| {
-            std::env::split_paths(&paths)
-                .map(|d| d.join("git"))
-                .find(|p| p.is_file())
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from("git"))
+    static RESOLVED: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    if let Some(found) = RESOLVED.get() {
+        return found.clone();
+    }
+    let found = std::env::var("PATH").ok().and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|d| d.join("git"))
+            .find(|p| p.is_file())
+    });
+    match found {
+        Some(path) => RESOLVED.get_or_init(|| path).clone(),
+        None => std::path::PathBuf::from("git"),
+    }
 }
 
 /// `git init -q` with config sources pinned to /dev/null.

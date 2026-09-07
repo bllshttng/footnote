@@ -15,17 +15,20 @@
 pub(crate) fn mesh_identity_assignments(
     name: &str,
     harness: &str,
-    fno_id: Option<&str>,
+    node: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    // An empty harness or fno_id is OPTIONAL provenance (a degenerate row
+    // An empty harness or node is OPTIONAL provenance (a degenerate row
     // can carry neither field) and is omitted, not written as an empty
     // assignment; an empty NAME is the one hard error - the wrapper exists
-    // to carry it.
+    // to carry it. `node` is the backlog node id (ReentryPlan::node /
+    // RegistryEntry::node) -- a distinct axis from fno_id, the thread/session
+    // identity. A caller that passes fno_id here stamps a session id into
+    // FNO_NODE, which is what happened at both call sites before this fix.
     let mut pairs: Vec<(&str, &str)> = vec![("FNO_AGENT_SELF", name)];
     if !harness.is_empty() {
         pairs.push(("FNO_AGENT_HARNESS", harness));
     }
-    if let Some(id) = fno_id.filter(|id| !id.is_empty()) {
+    if let Some(id) = node.filter(|id| !id.is_empty()) {
         pairs.push(("FNO_NODE", id));
     }
     for (key, value) in &pairs {

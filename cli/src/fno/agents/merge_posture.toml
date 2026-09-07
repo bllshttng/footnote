@@ -3,8 +3,8 @@
 # Canonical home: this file (the Rust tree owns it, exactly like
 # harness_capabilities.toml). `crates/fno-agents/build.rs` produces the byte
 # copy at `cli/src/fno/agents/merge_posture.toml` (loaded as Python package
-# data) on every build, and
-# `scripts/ci/check-merge-posture-fresh.sh` trips on a hand-edited copy.
+# data) on every build; the rust-ci generated-copies dirty-tree step trips on
+# a hand-edited copy.
 # Rust `include_str!`s THIS file (fno_agents::merge_posture); Python reads the
 # copy table-driven (fno.agents.harness_map) - no subprocess, no daemon, no
 # drift. The engine semantics (arm/hold/clear, word-padded flag matching,

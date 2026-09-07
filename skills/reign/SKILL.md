@@ -2,6 +2,10 @@
 name: reign
 description: "The tenured king: stay active over a territory for days. Crowned once, check in on a schedule, drive with levers, park rather than die. Composes king-for-a-day (the one-wave pass) with a self-injected beat. Use when: 'reign over <scope>', 'stay king over <epic>', 'keep driving this territory'."
 argument-hint: "<scope> [--once]"
+metadata:
+  requires:
+    harness:
+      - loop
 ---
 
 <!-- style-exception: monitor cadences and verb spellings are load-bearing literals -->
@@ -35,7 +39,7 @@ The crown is bestowed, never inferred. Verify it before anything else:
 Six monitors, each a harness-tracked Monitor running a shell until-loop that costs no tokens while waiting and wakes the session only when its condition changes. Then two self-injected native commands.
 
 1. **Unread mail, 60s.** Everything routes through it: worker reports, peer facts, the operator's answers. Read with `fno agents mail unread -n <handle>`. The handle is `-n`, never a positional; the positional form fails loudly rather than returning empty.
-2. **Board change, 120s.** Do NOT poll `fno inbox board --json` (about two minutes at load). Watch the cheap proxy until the board port lands: tail the project events journal for `pr_opened`, `loop_terminated`, `claim_released`, plus the `fno backlog ready` count. `fno backlog ready` emits JSON on stdout; `-J` exists only for parity, so a line-prefix parser reads it as zero rows forever, which is indistinguishable from a quiet board. Assert a non-zero count as a positive control before trusting a zero.
+2. **Board change, 120s.** Do NOT poll `fno inbox board --json` (about two minutes at load). Watch the cheap proxy until the board port lands: tail the project events journal for `pr_opened`, `loop_terminated`, `claim_released`, plus the `fno backlog ready` count. `fno backlog ready` emits JSON on stdout; `-J` exists only for parity, so a line-prefix parser reads it as zero rows forever, which is indistinguishable from a quiet board. Assert a non-zero count as a positive control before trusting a zero. When you do read the board, a bare call is already scoped to this crown (the caller's own manifest is the default); pass `--state <path>` only to read outside it.
 3. **Crown liveness, 300s.** `reign_state(scope)` for this handle. Report an unreadable registry or graph as `CROWN-UNKNOWN`, never as a missing crown. Report `split` and court `conflicts` separately from the agree counts: two live rows over one scope each read `agree=true`, so a caller gating on the counts alone sees a healthy court while the fleet has two kings.
 4. **Main branch CI, 300s.** A red main blocks every merge in the fleet.
 5. **Capacity band, 300s, debounced across two consecutive samples.** The band must HOLD before it is believed: measured over, within, over, within inside fifteen minutes with no change in real work. Edge-triggering on this input is the opposite of debouncing. Print `sustained_cpu_cores` beside the verdict and flag when the two disagree.
@@ -45,10 +49,17 @@ Every arm emits on **probe failure** as well as on the watched condition. A moni
 
 Not monitored, because each has an owner: individual worker transcripts (court-mode watching, the machinery's job), per-PR CI (the merge arm and the heal driver), and the raw load average (item 5 names why).
 
-Then inject the two native commands, typing them as the operator would:
+Then inject the two native commands, typing them as the operator would. **Send them in two separate turns, never in one breath.** `/goal` is a one-way door: the moment it lands, the stop hook holds the session open and it never idles again, so anything still queued behind it is never delivered. Sending both together leaves the loop waiting forever and the operator has to interrupt the session by hand to get it in. Writing `/loop` first in the same turn does NOT avoid this, because both land in the same input queue and the goal closes the door on whatever has not been read yet.
+
+Inject the loop, end the turn so the harness actually delivers it, then confirm a cron exists before going on:
 
 ```
 fno agents mail send "/loop ${king.checkin_interval} ${king.checkin_text}" --to-self --raw
+```
+
+`CronList` must now name the job. An empty list means the loop never landed, so re-send it and stop: a reign with a goal and no loop has no beat, and only the operator can restart one. Once the cron is there, inject the goal:
+
+```
 fno agents mail send "/goal ${king.goal_text}" --to-self --raw
 ```
 
@@ -56,17 +67,19 @@ Read both texts with `fno config get`. The defaults, verbatim, so a fresh instal
 
 ```
 king.checkin_interval = 30m
-king.checkin_text = reign check-in: run the check-in body of the reign skill (skills/reign/SKILL.md); journal reign_checkin; if nothing changed since the last check-in, print 'no change' and stop
-king.goal_text = reign goal: fno inbox board --json reports no actionable rows for the crown scope, fno agents court --json shows no split, and the operator has not ordered a stand-down; until then keep reigning and never /goal clear on NoProgress
+king.checkin_text = reign check-in. Run the check-in body of the reign skill (skills/reign/SKILL.md). Journal reign_checkin. When nothing changed since the last check-in, print 'no change' and stop.
+king.goal_text = reign goal. When every node in the crown scope reads done or superseded, the goal is met. An open operator question blocks completion. An empty actionable queue is a quiet beat, never a finish line. A stand-down order from the operator ends the reign. Until then keep reigning. Never /goal clear on NoProgress.
 ```
 
-Confirm the goal with `/hooks` and the loop with its receipt. Journal `reign_armed` (`fno doctor event emit`) with every receipt.
+These defaults pass `fno doctor lint style`, and that is load-bearing rather than cosmetic. The mail bus lints the body it sends, so a default carrying a semicolon or a 26-word sentence refuses its own injection. A fresh install running this skill hit that on its first command and had to pass `--style-exception` to arm at all.
+
+Confirm the goal with `/hooks`. The loop was already confirmed by `CronList` above. Journal `reign_armed` (`fno doctor event emit`) with every receipt.
 
 ## The check-in body
 
 What the loop prompt runs every interval and what you run by hand at any time.
 
-Read `fno inbox board --json`, `fno agents court --json`, `fno agents status --json`. Print, one line each:
+Read `fno inbox board --json`, `fno agents court --json`, `fno agents status --json`. The board read defaults to this crown's manifest, so its rows are your scope; `--state <path>` reads outside it. Print, one line each:
 
 - open PR count
 - PRs with a free claim and no driver
@@ -76,7 +89,7 @@ Read `fno inbox board --json`, `fno agents court --json`, `fno agents status --j
 - the oldest worker last-seen stamp
 - crown liveness including `split`
 
-Then the levers, in this order, stopping at the first that applies per row: mail the stalled worker; `fno backlog rank <node> --top` so the drain dispatches it next tick; `fno backlog undefer` or `supersede` when the row is the problem; `fno inbox outstanding ask` when a lever needs the operator.
+Then the levers, in this order, stopping at the first that applies per row: mail the stalled worker; `fno backlog rank <node> --top` so the drain takes the node first, then put the node inside an active mission scope, because rank alone never dispatches and a crown is not a mission; `fno backlog undefer` or `supersede` when the row is the problem; `fno inbox outstanding ask` when a lever needs the operator.
 
 Journal `reign_checkin`. If nothing changed since the last check-in, print `no change` and stop.
 

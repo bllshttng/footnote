@@ -474,6 +474,7 @@ mod tests {
             name: name.into(),
             binding,
             cwd: None,
+            portal: None,
         }
     }
     fn spec(tree: LayoutTreeSpec, slots: Vec<(&str, LayoutBinding)>) -> AnchoredLayoutSpec {

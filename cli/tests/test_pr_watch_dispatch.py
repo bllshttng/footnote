@@ -2810,9 +2810,7 @@ class TestTickRecordsAndDeadline:
         )
 
         def _recovery_row(sid):
-            return watchdog.Row(
-                sid, sid, "orphaned", None, str(tmp_path), "adopted"
-            )
+            return watchdog.Row(sid, sid, "orphaned", None, str(tmp_path))
 
         def _recovery_verdict(sid):
             return watchdog.Verdict(

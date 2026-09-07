@@ -2,7 +2,7 @@
 
 The sender and reviewer run in different processes, so the invocation id is
 kept in a best-effort per-session sidecar while the canonical event remains in
-the worktree's ``.fno/events.jsonl`` journal.
+the project event journal.
 """
 from __future__ import annotations
 

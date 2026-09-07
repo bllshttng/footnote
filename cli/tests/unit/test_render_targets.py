@@ -63,6 +63,11 @@ def _write_config(targets_toml: str, tmp_path: Path, monkeypatch: pytest.MonkeyP
     cfg = tmp_path / "config.toml"
     cfg.write_text(f"[backlog]\n{targets_toml}", encoding="utf-8")
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(cfg))
+    # The declaration key is unchanged by a content rewrite; drop the entry or
+    # the next read serves the previous rows and the shadow warning mis-fires.
+    from fno.config import _load_settings_at
+
+    _load_settings_at.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -79,17 +84,7 @@ def _isolate(
 
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.graph._constants as gc
-    import fno.paths as paths_mod
-
-    for cache in ("_settings", "resolve_repo_root"):
-        maybe = getattr(paths_mod, cache, None)
-        if maybe is not None:
-            try:
-                maybe.cache_clear()  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
     for attr in ("GRAPH_JSON", "GRAPH_MD", "GRAPH_HTML", "GRAPH_ARCHIVE_JSON"):
         try:
             delattr(gc, attr)
@@ -112,7 +107,6 @@ def _isolate(
     monkeypatch.setitem(vars(gc), "GRAPH_MD", paths["md"])
     monkeypatch.setitem(vars(gc), "GRAPH_HTML", paths["html"])
     yield paths
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def _mutate(graph: Path, entries: list[dict], new_title: str) -> None:
@@ -317,14 +311,12 @@ def test_project_local_rows_warn_not_render(_isolate, tmp_path, monkeypatch, cap
     monkeypatch.setenv("FNO_CONFIG", str(local_cfg))
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     from fno.graph.roadmap_public import render_configured_targets
 
     render_configured_targets([])
     err = capsys.readouterr().err
     assert "project-local row(s) ignored" in err
     assert not _isolate["target"].exists()
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def test_render_targets_table_typo_degrades_to_empty(caplog):

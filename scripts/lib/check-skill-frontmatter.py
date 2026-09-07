@@ -4,10 +4,10 @@ a required binary dependency.
 
 Used by ``scripts/lint/no-cross-skill-runtime-calls.sh`` (the
 marketplace-readiness lint) to verify each driver skill's SKILL.md has
-``requires.binaries`` containing the named binary (default ``fno``).
+``metadata.requires.binaries`` containing the named binary (default ``fno``).
 
 Exit codes:
-    0  binary is declared in requires.binaries
+    0  binary is declared in metadata.requires.binaries
     1  frontmatter parsed OK but binary not declared (or no requires block)
     2  PyYAML missing OR file not found OR frontmatter malformed
 
@@ -57,7 +57,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--require",
         default="fno",
-        help="binary name that must appear in requires.binaries (default: fno)",
+        help="binary name that must appear in metadata.requires.binaries (default: fno)",
     )
     args = parser.parse_args(argv)
 
@@ -72,7 +72,9 @@ def main(argv: list[str]) -> int:
         print(f"ERROR: {err}", file=sys.stderr)
         return 2
 
-    reqs = (fm.get("requires") or {}).get("binaries") or []
+    # `metadata` is the documented custom-data field in the skill frontmatter
+    # contract; a top-level `requires` is not on the supported list.
+    reqs = ((fm.get("metadata") or {}).get("requires") or {}).get("binaries") or []
     if not isinstance(reqs, list):
         # `binaries` declared but not a list — author error. Treat as
         # missing-binary (rc=1) since the structural shape is wrong.

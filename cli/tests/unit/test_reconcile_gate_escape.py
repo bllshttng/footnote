@@ -224,13 +224,15 @@ def test_coverage_read_spans_the_global_log(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "global_events_json", lambda: global_dir / "events.jsonl")
 
     # The gate evaluated in a worktree -> emit_to_both put it in the global log,
-    # which is all canonical can see. Zero reviewers: this PR IS autonomy debt.
+    # which is all canonical can see. Zero reviewers on an uncovered row: this
+    # PR IS autonomy debt (a covered row is the gate's satisfied answer, count
+    # or no count).
     with (global_dir / "events.jsonl").open("w", encoding="utf-8") as fh:
         fh.write(json.dumps({
             "ts": "2026-08-08T02:35:30Z",
             "type": "review_coverage",
             "data": {
-                "pr": 218, "coverage": "covered", "reviewed_count": 0,
+                "pr": 218, "coverage": "uncovered", "reviewed_count": 0,
                 "head_sha": "a3f4b413b", "repo": "github.com/bllshttng/footnote",
             },
         }) + "\n")
@@ -255,7 +257,7 @@ def test_zero_coverage_escape_fires_with_no_required_bots(tmp_path):
     rec = _record(tmp_path)
     _write_event(
         tmp_path,
-        {"type": "review_coverage", "data": {"pr": 218, "coverage": "covered", "reviewed_count": 0, "head_sha": "abc"}},
+        {"type": "review_coverage", "data": {"pr": 218, "coverage": "uncovered", "reviewed_count": 0, "head_sha": "abc"}},
     )
     emit_gate_escape_for_record(
         rec,

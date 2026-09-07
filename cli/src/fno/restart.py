@@ -139,7 +139,11 @@ def _revive_orphans(
         subprocess.run([fno, "agents", "reconcile"], capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         pass
-    now_live = {r.get("name") for r in _agents_rows() if r.get("status") == "live"}
+    now_live = {
+        r.get("name")
+        for r in _agents_rows()
+        if r.get("status") in ("writing", "quiet", "parked")
+    }
     for name, row in pre_live.items():
         if name in now_live:
             continue
@@ -352,7 +356,7 @@ def restart_command(
             pre_live = {
                 r["name"]: r
                 for r in _agents_rows()
-                if r.get("name") and r.get("status") == "live"
+                if r.get("name") and r.get("status") in ("writing", "quiet", "parked")
             }
         if to_restart:
             fno = shutil.which("fno")

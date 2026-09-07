@@ -25,6 +25,7 @@ fn main() {
     // copies fresh.
     sync_harness_capabilities();
     sync_merge_posture();
+    sync_registry_schema();
     sync_events_limits();
     sync_check_supersession();
 
@@ -150,9 +151,9 @@ fn write_if_different(path: &Path, bytes: &[u8]) {
 /// does not depend on fno-agents as a cargo dep), so a dep would tie fno's
 /// publishability to a registry state that lags this repo. The developer who
 /// edits the canonical is the developer who builds this crate, so the sync
-/// happens where the edit happens and silent drift is impossible.
-/// `scripts/ci/check-harness-capabilities-fresh.sh` stays only as a tripwire
-/// for a copy edited by hand.
+/// happens where the edit happens and silent drift is impossible. The
+/// rust-ci generated-copies dirty-tree step is the tripwire for a copy
+/// edited by hand.
 ///
 /// No-op when `cli/` or the sibling crate is absent: that is the `cargo
 /// package` / crates.io tarball case, where the crate must still build
@@ -197,6 +198,41 @@ fn sync_merge_posture() {
     write_if_different(&cli_copy, &bytes);
 }
 
+/// Render the registry schema version from its single owner and project the
+/// Python copy.
+///
+/// `src/registry_schema.toml` holds `version` alone. `state.rs` `include!`s
+/// the generated constant, and registry.py reads the projected byte copy
+/// `cli/src/fno/agents/registry_schema.toml` as package data, so a bump is
+/// one edit in one file. This replaces the parity script that compared two
+/// independent literals; the rust-ci generated-copies dirty-tree step is the
+/// tripwire for a hand edit to the projected copy.
+fn sync_registry_schema() {
+    println!("cargo:rerun-if-changed=src/registry_schema.toml");
+    let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/registry_schema.toml");
+    let text = std::fs::read_to_string(&canonical)
+        .expect("src/registry_schema.toml must exist (it is the version's only owner)");
+    let parsed: toml::Value =
+        toml::from_str(&text).expect("src/registry_schema.toml must parse as TOML");
+    let version = parsed
+        .get("version")
+        .and_then(|value| value.as_integer())
+        .expect("src/registry_schema.toml must carry an integer `version`");
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR must be set"));
+    std::fs::write(
+        out_dir.join("registry_schema.rs"),
+        format!("pub const REGISTRY_SCHEMA_VERSION: u32 = {version};\n"),
+    )
+    .expect("generated registry_schema.rs must be writable");
+
+    let Some(root) = repo_root() else { return };
+    let cli_copy = root.join("cli/src/fno/agents/registry_schema.toml");
+    if !cli_copy.is_file() {
+        return;
+    }
+    write_if_different(&cli_copy, text.as_bytes());
+}
+
 /// PRODUCE `src/events_limits.toml` from the Python-owned event schema.
 ///
 /// `cli/src/fno/events/schema.yaml` is canonical and Python reads its `limits`
@@ -207,8 +243,8 @@ fn sync_merge_posture() {
 /// crates.io build compiles against and the link is a real dependency edge.
 ///
 /// No-op when the schema is absent (tarball case) and on any parse failure: the
-/// committed file is then the value, and `scripts/ci/check-events-limits-fresh.sh`
-/// is the tripwire against a hand edit.
+/// committed file is then the value, and the rust-ci generated-copies
+/// dirty-tree step is the tripwire against a hand edit.
 fn sync_events_limits() {
     let generated = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/events_limits.toml");
     let Some(root) = repo_root() else { return };

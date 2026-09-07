@@ -26,6 +26,13 @@ def _blob(token: str) -> str:
     return json.dumps({"claudeAiOauth": {"accessToken": token}})
 
 
+def _pids(root) -> tuple[int, ...]:
+    """The pids recorded on the claude taint marker."""
+    writers = managed.tainting_writers("claude", root)
+    assert writers is not None, "no taint marker to read pids from"
+    return tuple(pid for pid, _started in writers)
+
+
 def _codex_blob(token: str) -> str:
     return json.dumps(
         {
@@ -1676,7 +1683,7 @@ class TestReconcileRespectsLiveTaintWriters:
         so the conservative scan is the only honest answer."""
         by_id = self._arm(fake_slot, tmp_path, monkeypatch, [])
         managed._atomic_write_private(managed._slot_taint_path("claude", tmp_path), "1")
-        assert managed.tainting_pids("claude", tmp_path) is None
+        assert managed.tainting_writers("claude", tmp_path) is None
         monkeypatch.setattr(
             managed, "pinning_sessions",
             lambda config_dir=None: [managed.PinningSession(4242, "claude")],
@@ -1695,7 +1702,7 @@ class TestReconcileRespectsLiveTaintWriters:
             lambda config_dir=None: [managed.PinningSession(77, "claude")],
         )
         managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
-        assert managed.tainting_pids("claude", tmp_path) == (77,)
+        assert _pids(tmp_path) == (77,)
 
 
 class TestCanonicalSlotRead:
@@ -1717,7 +1724,7 @@ class TestCanonicalSlotRead:
 
         monkeypatch.setattr(managed, "_read_claude_blob", _record)
 
-        assert managed.read_canonical_slot_blob("claude") == _blob("CANONICAL")
+        assert managed.canonical_slot_blobs("claude") == [_blob("CANONICAL")]
         assert asked == [(tmp_path / ".claude", True)]
 
     def test_both_keychain_items_are_candidates(self, tmp_path, monkeypatch):
@@ -1864,23 +1871,11 @@ class TestForcedRebindNeverLeavesAStalePrincipal:
         fake_slot["claude"] = _blob("SOMEONE_ELSE")
         managed.snapshot_current(record, root=tmp_path)
         assert managed.record_principal("work-a", tmp_path) is not None  # preserved
-        managed.capture_record_principal(record, root=tmp_path, force=True)
+        managed._clear_record_principal("work-a", tmp_path)
 
         assert managed.record_principal("work-a", tmp_path) is None
         # The rest of the metadata survives.
         assert managed.read_meta("work-a", tmp_path)["harness"] == "claude"
-
-    def test_an_unforced_capture_leaves_a_bound_record_alone(self, fake_slot, tmp_path):
-        """A switch of an already-bound record must not spend a call, nor clear
-        a binding that is still correct."""
-        record = _rec("work-a")
-        fake_slot["claude"] = _blob("A0")
-        managed.snapshot_current(record, root=tmp_path)
-        _bind("work-a", "acct-a", tmp_path)
-
-        managed.capture_record_principal(record, root=tmp_path)
-
-        assert managed.record_principal("work-a", tmp_path)["account_uuid"] == "acct-a"
 
 
 class TestTaintWriterIdentity:
@@ -2050,7 +2045,9 @@ class TestOrganizationScopedIdentity:
                 {"account_uuid": "human-1", "organization_uuid": orgs[blob]}, None
             ),
         )
-        assert managed.canonical_slot_principal("claude") == (None, "ambiguous-slot")
+        assert managed.principal_of_blobs(
+            managed.canonical_slot_blobs("claude")
+        ) == (None, None, "ambiguous-slot")
         assert managed.reconcile_slot(
             "claude", by_id=by_id, root=tmp_path
         ).outcome == "ambiguous-slot"
@@ -2383,7 +2380,13 @@ class TestUnreadableSlotIsARefusal:
 
         assert result.outcome == "slot-unreadable" and "timed out" in result.detail
 
-    def test_drift_reports_nothing_rather_than_raising(self, tmp_path, monkeypatch):
+    def test_an_unreadable_slot_is_typed_for_the_binding_too(
+        self, tmp_path, monkeypatch
+    ):
+        """The drift read moved to `binding`; a denied Keychain still refuses
+        rather than raising, and reads as unknown rather than as healthy."""
+        from fno.adapters.providers import binding
+
         managed.stamp_active_slot("claude", "work-a", tmp_path)
         managed.write_record_principal(
             "work-a", {"account_uuid": "a", "organization_uuid": "o"}, tmp_path
@@ -2393,7 +2396,10 @@ class TestUnreadableSlotIsARefusal:
             raise managed.KeychainError("denied")
 
         monkeypatch.setattr(managed, "canonical_slot_blobs", _boom)
-        assert managed.slot_identity_drift("claude", tmp_path) is None
+        got = binding.resolve_account_binding(None, harness="claude", root=tmp_path)
+
+        assert got.status == binding.UNKNOWN
+        assert got.reason == "credential-unreadable"
 
 
 class TestRegisterPostWriteSlotMove:
@@ -2663,7 +2669,7 @@ class TestRegisterRespectsALiveTaintWriter:
         assert failure.startswith("slot-pinned:") and str(os.getpid()) in failure
         assert principal is None
         assert not (tmp_path / "work-a" / "blob").exists()
-        assert managed.tainting_pids("claude", tmp_path) == (os.getpid(),)
+        assert _pids(tmp_path) == (os.getpid(),)
 
     def test_a_dead_writer_does_not_block(self, tmp_path, monkeypatch):
         managed._set_slot_taint("claude", tmp_path, True, [999_999])

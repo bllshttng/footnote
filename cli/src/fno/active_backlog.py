@@ -64,9 +64,14 @@ class DrainTarget:
     interval_seconds: int
     failure_limit: int
     mission: Optional[str]
+    #: Global ceiling on concurrent converge runs across ALL missions, not a
+    #: per-mission budget. Every target carries the same value because the
+    #: daemon holds one gate for the whole drain; it rides on the target only
+    #: because the target list is the daemon's one config channel.
+    max_concurrent: int = 1
 
 
-def _workspace_paths() -> dict[str, str]:
+def _workspace_paths(*, strict: bool = False) -> dict[str, str]:
     """project name -> normalized absolute path, from the workspace map.
 
     Reuses ``graph.maintain.load_workspaces`` so this resolver cannot drift from
@@ -77,19 +82,24 @@ def _workspace_paths() -> dict[str, str]:
 
         return load_workspaces()
     except Exception:
+        if strict:
+            raise
         return {}
 
 
-def _active_missions() -> list[dict]:
+def _active_missions(*, strict: bool = False) -> list[dict]:
     """Epic nodes with ``mission_active=true`` (K1's durable activation record),
     across all projects. The field ``fno backlog advance --epic`` sets/clears;
     a store read fault (or an external backend selection, which can never carry
-    a footnote-set activation flag) yields none (fail-safe, never raises)."""
+    a footnote-set activation flag) yields none by default. Strict callers raise
+    on the same read failures so a receipt can distinguish unknown from empty."""
     try:
         from fno.tracker.metadata import read_entries
 
         entries = read_entries("active_backlog")
         if not isinstance(entries, list):
+            if strict:
+                raise ValueError("active mission read returned a non-list")
             return []
         # Require str id + project: a non-str id would pass a truthy check but
         # raise when resolve_drain_targets sorts by id, which would disable ALL
@@ -103,10 +113,12 @@ def _active_missions() -> list[dict]:
             and isinstance(e.get("project"), str)
         ]
     except Exception:  # noqa: BLE001 - a graph read/iterate fault yields no missions
+        if strict:
+            raise
         return []
 
 
-def resolve_drain_targets() -> list[DrainTarget]:
+def resolve_drain_targets(*, strict: bool = False) -> list[DrainTarget]:
     """One drain target per ACTIVE mission, in epic-id order (x-a4dc K2).
 
     A mission is an epic with ``mission_active=true`` (K1's activation record).
@@ -118,7 +130,9 @@ def resolve_drain_targets() -> list[DrainTarget]:
     ever comes back.
 
     ``config.active_backlog`` stays the daemon's master switch: an unenabled
-    config or invalid interval yields no targets. A mission whose epic project has
+    config or invalid interval yields no targets. ``config.active_backlog.mission``
+    is IGNORED (x-7f1f): missions are per-epic graph state (``mission_active``),
+    never a config value. A mission whose epic project has
     no workspace path is skipped (cannot root the loop). Fail-safe throughout.
     """
     try:
@@ -126,6 +140,8 @@ def resolve_drain_targets() -> list[DrainTarget]:
 
         cfg = load_settings().active_backlog
     except Exception:
+        if strict:
+            raise
         return []
 
     if not cfg.any_enabled():
@@ -134,9 +150,10 @@ def resolve_drain_targets() -> list[DrainTarget]:
     if interval is None:
         return []
 
-    paths = _workspace_paths()
+    paths = _workspace_paths(strict=True) if strict else _workspace_paths()
     targets: list[DrainTarget] = []
-    for epic in sorted(_active_missions(), key=lambda e: e["id"]):
+    missions = _active_missions(strict=True) if strict else _active_missions()
+    for epic in sorted(missions, key=lambda e: e["id"]):
         project = epic["project"]
         # Respect the per-project enable contract: with enabled={proj: bool} an
         # explicitly-disabled project's mission does not drain, even though
@@ -153,6 +170,7 @@ def resolve_drain_targets() -> list[DrainTarget]:
                 interval_seconds=interval,
                 failure_limit=cfg.failure_limit,
                 mission=epic["id"],
+                max_concurrent=cfg.max_concurrent,
             )
         )
     return targets
@@ -219,6 +237,7 @@ def drain_targets_as_dicts() -> list[dict]:
             "interval_seconds": t.interval_seconds,
             "failure_limit": t.failure_limit,
             "mission": t.mission,
+            "max_concurrent": t.max_concurrent,
         }
         for t in resolve_drain_targets()
     ]

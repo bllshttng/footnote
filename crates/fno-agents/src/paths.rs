@@ -24,6 +24,87 @@ use std::path::{Path, PathBuf};
 /// and by operators who keep state outside `$HOME`).
 pub const HOME_ENV: &str = "FNO_AGENTS_HOME";
 
+/// Whether a pin value declares a root. `FNO_TEST_HERMETIC` has the same
+/// three states the Python fence reads: `"1"` declares a sandboxed process
+/// root, `"0"` is ambient on purpose, and absent under test is an escaped
+/// reader. Neither value names a LANE. Nothing in the tree runs on `"0"` as a
+/// lane, because `fno doctor test --ambient dirty` ends at `neutralise`, which
+/// stamps `1`. `"0"` is set per test, to state an ambient read on purpose.
+///
+/// A pure function of its input, so the receipt test states the rule without
+/// touching the process environment.
+fn root_declared(pin: Option<&str>) -> bool {
+    matches!(pin, Some("0") | Some("1"))
+}
+
+/// Whether this process declared a root, read from the environment.
+fn test_root_declared() -> bool {
+    root_declared(std::env::var("FNO_TEST_HERMETIC").ok().as_deref())
+}
+
+/// Whether this process CLAIMS a sandbox.
+///
+/// `"1"` is a claim, not a proof. `fno doctor test rust` makes it true by
+/// pinning `HOME` inside a `mktemp` sandbox; a bare `FNO_TEST_HERMETIC=1
+/// cargo test` does not, and there [`fence_declared_root`] refuses the
+/// resolved root instead. That refusal is the point: a process claiming a
+/// sandbox it does not have should hear so, loudly.
+fn test_sandbox_claimed() -> bool {
+    std::env::var("FNO_TEST_HERMETIC").ok().as_deref() == Some("1")
+}
+
+/// Refuse an ambient `$HOME` fallback under test, naming the pin to set.
+///
+/// `cargo test` never sandboxes `HOME`, so a unit test that resolved a state
+/// root through the fallback landed manifests in the operator's real
+/// `~/.fno/spaces`.
+///
+/// `declared` is an argument, not an environment read, so the receipt test
+/// constructs the case. Reproducing it by removing the pins process-globally
+/// raced every lock-free state-resolving test in the binary into this panic.
+fn refuse_undeclared_home_fallback(declared: bool, pin: &str) {
+    if !cfg!(test) || declared {
+        return;
+    }
+    panic!(
+        "fno-agents resolved a state root from $HOME under test with no \
+         declared root. Set {pin} to a directory under std::env::temp_dir(), \
+         or FNO_TEST_HERMETIC=0 to declare an ambient run on purpose."
+    );
+}
+
+/// Refuse a declared root outside the temp dir when the process root is
+/// sandboxed, the way the Python accessor fence refuses one.
+///
+/// Both raw and canonical forms of the temp dir are compared: macOS reports it
+/// as `/var/folders/...` while `canonicalize` yields `/private/var/...`.
+fn fence_declared_root(claimed: bool, root: &Path) {
+    if !cfg!(test) || !claimed {
+        return;
+    }
+    let tmp = std::env::temp_dir();
+    let tmp_forms = [
+        std::fs::canonicalize(&tmp).unwrap_or_else(|_| tmp.clone()),
+        tmp,
+    ];
+    let root_forms = [
+        std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
+        root.to_path_buf(),
+    ];
+    if root_forms
+        .iter()
+        .any(|r| tmp_forms.iter().any(|t| r.starts_with(t)))
+    {
+        return;
+    }
+    panic!(
+        "fno-agents resolved the state root {} outside the test sandbox while \
+         FNO_TEST_HERMETIC=1 declares one. A hermetic run must not touch live \
+         state; pin the root under std::env::temp_dir().",
+        root.display()
+    );
+}
+
 /// Resolved `~/.fno/agents/` root and the paths under it.
 #[derive(Debug, Clone)]
 pub struct AgentsHome {
@@ -37,21 +118,61 @@ impl AgentsHome {
     /// home — it degrades to a relative tree.
     pub fn from_env() -> Self {
         if let Some(v) = std::env::var_os(HOME_ENV) {
-            return AgentsHome {
-                root: PathBuf::from(v),
-            };
+            let root = PathBuf::from(v);
+            fence_declared_root(test_sandbox_claimed(), &root);
+            return AgentsHome { root };
         }
+        refuse_undeclared_home_fallback(test_root_declared(), HOME_ENV);
         let base = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        AgentsHome {
-            root: base.join(".fno").join("agents"),
+        let root = base.join(".fno").join("agents");
+        fence_declared_root(test_sandbox_claimed(), &root);
+        AgentsHome { root }
+    }
+
+    /// The resolved root, or `None` when a test process declared none.
+    ///
+    /// For callers that only COMPARE a path against the shared root. Under
+    /// test with nothing declared there IS no shared root to compare against,
+    /// and inventing one out of ambient `$HOME` is the read this epic bars. A
+    /// caller that actually resolves state still refuses through
+    /// [`AgentsHome::from_env`].
+    ///
+    /// `None` covers the UNDECLARED case only. A process that declared a
+    /// sandbox it does not have still panics through [`fence_declared_root`];
+    /// that refusal is the point, not a hole in this degrade.
+    pub fn from_env_opt() -> Option<Self> {
+        if cfg!(test) && std::env::var_os(HOME_ENV).is_none() && !test_root_declared() {
+            return None;
         }
+        Some(Self::from_env())
     }
 
     /// Construct rooted at an explicit directory (tests).
     pub fn at(root: impl Into<PathBuf>) -> Self {
         AgentsHome { root: root.into() }
+    }
+
+    /// The shared `registry.json` path, resolved for COMPARISON only.
+    ///
+    /// [`AgentsHome::from_env_opt`] answers `None` when a test declared no
+    /// root, and a caller that only compares a target against the shared file
+    /// then has nothing to compare. That degrade reads as "this is not the
+    /// shared file", which turns a corruption guard OFF instead of narrowing
+    /// it: losing the pin must never widen what a fence permits. This resolves
+    /// the same path [`AgentsHome::from_env`] would and skips the fences,
+    /// because nothing is written through it.
+    pub fn shared_registry_json() -> PathBuf {
+        if let Some(v) = std::env::var_os(HOME_ENV) {
+            return PathBuf::from(v).join("registry.json");
+        }
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".fno")
+            .join("agents")
+            .join("registry.json")
     }
 
     /// The agents root directory.
@@ -342,18 +463,69 @@ pub fn worktree_repo_root(cwd: &Path) -> PathBuf {
 /// cross-language wire format).
 fn spaces_root_dir() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_SPACES_DIR").filter(|v| !v.is_empty()) {
-        return PathBuf::from(v);
+        let root = PathBuf::from(v);
+        fence_declared_root(test_sandbox_claimed(), &root);
+        return root;
     }
+    durable_spaces_root()
+}
+
+/// [`spaces_root_dir`] with the per-process `FNO_SPACES_DIR` pin ignored: the
+/// env var rides one process (a test sandbox, an isolation run), the default
+/// state root outlives it. A one-time migration moves the ONLY copy, so its
+/// destination must be a root the repo's own processes still resolve.
+fn durable_spaces_root() -> PathBuf {
     let state_root = if let Some(v) = std::env::var_os(HOME_ENV).filter(|v| !v.is_empty()) {
         let home = PathBuf::from(&v);
         home.parent().map(|p| p.to_path_buf()).unwrap_or(home)
     } else {
+        refuse_undeclared_home_fallback(test_root_declared(), "FNO_SPACES_DIR");
         std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .map(|h| PathBuf::from(h).join(".fno"))
             .unwrap_or_else(|| PathBuf::from(".fno"))
     };
-    state_root.join("spaces")
+    let root = state_root.join("spaces");
+    fence_declared_root(test_sandbox_claimed(), &root);
+    root
+}
+
+/// The nearest ancestor of `path` that is a checkout root, or None. A pure
+/// walk: no env, no cwd, no subprocess, so the answer about `old` cannot be
+/// bent by whoever is resolving state in this call.
+fn repo_root_of(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path.parent()?;
+    loop {
+        if candidate.join(".git").exists() {
+            return Some(candidate.to_path_buf());
+        }
+        candidate = candidate.parent()?;
+    }
+}
+
+/// Canonical form with a fallback for paths that do not fully exist yet:
+/// canonicalize the deepest existing ancestor and re-append the missing tail,
+/// so a symlinked root (/var vs /private/var) compares equal even when the
+/// destination's own directory is created only by the move itself.
+fn canonical_best_effort(path: &Path) -> PathBuf {
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = path.to_path_buf();
+    loop {
+        match probe.parent() {
+            Some(parent) if probe.file_name().is_some() => {
+                if let Ok(canonical) = std::fs::canonicalize(parent) {
+                    let mut out = canonical;
+                    for component in missing.iter().rev() {
+                        out.push(component);
+                    }
+                    return out;
+                }
+                missing.push(probe.file_name().unwrap().to_os_string());
+                probe = parent.to_path_buf();
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// The per-repo space key: the full canonical path with `/` swapped for `-`
@@ -420,9 +592,31 @@ pub fn ledger_path(cwd: &Path) -> PathBuf {
 /// `new` when `old` exists, is not a symlink, and `new` does not; leaves a
 /// `MOVED-TO` pointer naming the space so a stale reader fails loud. Best
 /// effort: any failure leaves the old file in place.
+///
+/// The destination must be the source repository's own DURABLE space (the
+/// default state root - never a per-process `FNO_SPACES_DIR` pin): a move
+/// into a sandbox root strands the only copy where the repo's own readers
+/// never look again, behind a MOVED-TO pointer they do not follow (x-d2e9).
+/// A source outside any checkout has no durable space to check against and
+/// keeps the old behavior.
 pub fn migrate_from_checkout(old: &Path, new: &Path) -> bool {
     if old == new || new.exists() || !old.exists() || old.is_symlink() {
         return false;
+    }
+    if let Some(repo) = repo_root_of(old) {
+        let canonical = canonical_repo_root(&repo).unwrap_or(repo);
+        let durable_space = durable_spaces_root().join(space_slug(&canonical));
+        // Compare canonical forms: macOS aliases /var to /private/var, so raw
+        // spellings of the same space would false-refuse and strand the
+        // journal behind a migration that never fires. best-effort because
+        // new's own directory is created by the move, not before it.
+        let new_space = new
+            .parent()
+            .map(canonical_best_effort)
+            .unwrap_or_else(|| canonical_best_effort(new));
+        if !new_space.starts_with(canonical_best_effort(&durable_space)) {
+            return false;
+        }
     }
     if let Some(parent) = new.parent() {
         if std::fs::create_dir_all(parent).is_err() {
@@ -451,6 +645,81 @@ pub fn migrate_from_checkout(old: &Path, new: &Path) -> bool {
         }
     }
     true
+}
+
+/// One test's declared state root: `FNO_SPACES_DIR` and `FNO_AGENTS_HOME`
+/// pinned under `std::env::temp_dir()`, restored on drop.
+///
+/// This is the Rust half of the three declarations. `cargo test` sandboxes no
+/// `HOME`, so a test that resolves a state root without one of these pins
+/// reaches the operator's live `~/.fno` - which is how loop_king unit tests
+/// landed king manifests in it.
+///
+/// The directory name carries the pid AND a sequence: two tests sharing a
+/// pid-only name raced each other's cleanup. The process-wide env lock is held
+/// for the guard's lifetime, so a test holding one must not take that lock
+/// itself.
+#[cfg(test)]
+pub(crate) struct DeclaredRoot {
+    root: PathBuf,
+    _env: Option<std::sync::MutexGuard<'static, ()>>,
+    spaces: Option<std::ffi::OsString>,
+    agents: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl DeclaredRoot {
+    pub(crate) fn declare(tag: &str) -> Self {
+        let env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Self::pin(tag, Some(env))
+    }
+
+    /// For a test that already holds the env lock. Taking it twice deadlocks.
+    pub(crate) fn declare_held(tag: &str) -> Self {
+        Self::pin(tag, None)
+    }
+
+    fn pin(tag: &str, env: Option<std::sync::MutexGuard<'static, ()>>) -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+
+        let root = std::env::temp_dir().join(format!(
+            "{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).ok();
+        let held = Self {
+            spaces: std::env::var_os("FNO_SPACES_DIR"),
+            agents: std::env::var_os(HOME_ENV),
+            root,
+            _env: env,
+        };
+        std::env::set_var("FNO_SPACES_DIR", &held.root);
+        std::env::set_var(HOME_ENV, held.root.join("agents"));
+        held
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.root
+    }
+}
+
+#[cfg(test)]
+impl Drop for DeclaredRoot {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.root).ok();
+        match &self.spaces {
+            Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+            None => std::env::remove_var("FNO_SPACES_DIR"),
+        }
+        match &self.agents {
+            Some(v) => std::env::set_var(HOME_ENV, v),
+            None => std::env::remove_var(HOME_ENV),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -701,6 +970,9 @@ mod tests {
         if !git_available() {
             return;
         }
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let agents_home = tmp("spaces-home");
         // Redirect the whole state root so the assertion never reads real $HOME.
         std::env::set_var(HOME_ENV, &agents_home);
@@ -764,5 +1036,159 @@ mod tests {
         let new2 = base.join("space").join("link.jsonl");
         assert!(!migrate_from_checkout(&link, &new2));
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Saved-env guard: the suite may run under a neutralised environment
+    /// whose pins other tests read, so every mutation is restored, not just
+    /// removed.
+    struct EnvGuard {
+        spaces: Option<std::ffi::OsString>,
+        home: Option<std::ffi::OsString>,
+        hermetic: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn capture() -> Self {
+            Self {
+                spaces: std::env::var_os("FNO_SPACES_DIR"),
+                home: std::env::var_os(HOME_ENV),
+                hermetic: std::env::var_os("FNO_TEST_HERMETIC"),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.spaces {
+                Some(v) => std::env::set_var("FNO_SPACES_DIR", v),
+                None => std::env::remove_var("FNO_SPACES_DIR"),
+            }
+            match &self.home {
+                Some(v) => std::env::set_var(HOME_ENV, v),
+                None => std::env::remove_var(HOME_ENV),
+            }
+            match &self.hermetic {
+                Some(v) => std::env::set_var("FNO_TEST_HERMETIC", v),
+                None => std::env::remove_var("FNO_TEST_HERMETIC"),
+            }
+        }
+    }
+
+    /// The refusal itself: with nothing declared, resolving a state root must
+    /// name the pin to set rather than reach the operator's real `~/.fno`.
+    /// A bare `cargo test` sandboxes no HOME, so this is the only fence there.
+    ///
+    /// The fence is handed its declaration rather than reached through the
+    /// process environment. Removing the three pins process-globally to
+    /// reproduce the case raced every lock-free state-resolving test in the
+    /// binary into this same panic: `finalize.rs` through `run_log_path` and
+    /// `events_path`, `claude_adopt.rs`, `codex_inject.rs`. None of them take
+    /// `test_env_lock`, and a mutex only guards the tests that hold it.
+    #[test]
+    #[should_panic(expected = "FNO_SPACES_DIR")]
+    fn an_undeclared_root_refuses_and_names_the_pin() {
+        refuse_undeclared_home_fallback(false, "FNO_SPACES_DIR");
+    }
+
+    /// A claimed sandbox that is not one is refused, not trusted. Nothing in
+    /// tree reaches this today, so without the test the guard's green would be
+    /// an absence rather than a receipt.
+    #[test]
+    #[should_panic(expected = "outside the test sandbox")]
+    fn a_claimed_sandbox_that_is_not_one_is_refused() {
+        fence_declared_root(
+            true,
+            Path::new("/nonexistent-outside-any-tmpdir/.fno/agents"),
+        );
+    }
+
+    /// A declared sandbox that IS one passes the same fence.
+    #[test]
+    fn a_root_under_the_temp_dir_passes_the_sandbox_fence() {
+        fence_declared_root(true, &std::env::temp_dir().join("fno-fence-ok"));
+    }
+
+    /// `"0"` is a declaration, not a missing one. It is set per test, never by
+    /// a lane: `--ambient dirty` ends at `neutralise`, which stamps `1`.
+    #[test]
+    fn an_ambient_declaration_is_a_declaration() {
+        assert!(root_declared(Some("0")));
+        assert!(root_declared(Some("1")));
+        assert!(!root_declared(None));
+        assert!(!root_declared(Some("")));
+    }
+
+    /// Mirror of the Python PARITY_SCENARIOS row "foreign-env-root-refuses"
+    /// (cli/tests/unit/test_paths_migration.py): a per-process FNO_SPACES_DIR
+    /// is not the repo's home, so events_path must leave the checkout
+    /// journal in place and land nothing in the foreign space.
+    #[test]
+    fn migrate_foreign_spaces_pin_refuses_to_move_checkout_journal() {
+        if !git_available() {
+            return;
+        }
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::capture();
+        let agents_home = tmp("foreign-home");
+        std::env::set_var(HOME_ENV, &agents_home);
+        let base = tmp("foreign");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".fno")).unwrap();
+        let old = repo.join(".fno").join("events.jsonl");
+        std::fs::write(&old, "rows").unwrap();
+        git(&repo, &["init", "-q"]);
+        let sandbox = base.join("sandbox-spaces");
+        std::env::set_var("FNO_SPACES_DIR", &sandbox);
+
+        let resolved = events_path(&repo);
+
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "rows");
+        assert!(
+            !resolved.exists(),
+            "no journal may appear in the foreign space"
+        );
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&agents_home).ok();
+    }
+
+    /// Mirror of the Python row "durable-config-root-migrates": with no env
+    /// pin, the default state root IS the durable home and a genuine legacy
+    /// checkout journal still moves once, behind a MOVED-TO marker.
+    #[test]
+    fn migrate_durable_root_still_moves_checkout_journal() {
+        if !git_available() {
+            return;
+        }
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::capture();
+        let agents_home = tmp("durable-home");
+        std::env::set_var(HOME_ENV, &agents_home);
+        std::env::remove_var("FNO_SPACES_DIR");
+        let base = tmp("durable");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".fno")).unwrap();
+        let old = repo.join(".fno").join("events.jsonl");
+        std::fs::write(&old, "rows").unwrap();
+        git(&repo, &["init", "-q"]);
+        let slug = space_slug(&std::fs::canonicalize(&repo).unwrap());
+        let expected = agents_home
+            .parent()
+            .unwrap()
+            .join("spaces")
+            .join(slug)
+            .join("events.jsonl");
+
+        let resolved = events_path(&repo);
+
+        assert_eq!(resolved, expected);
+        assert_eq!(std::fs::read_to_string(&expected).unwrap(), "rows");
+        assert!(!old.exists(), "the legacy file must move exactly once");
+        assert!(repo.join(".fno").join("MOVED-TO").exists());
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&agents_home).ok();
     }
 }

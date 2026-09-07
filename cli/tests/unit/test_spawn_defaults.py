@@ -790,12 +790,22 @@ def test_ac5_err_unknown_profile_provider_fails_closed():
 
 
 def test_ac5_err_nonmatching_seed_spawns_normally_under_bad_profile():
-    # The same bad-provider profile does NOT fire for a /think seed.
+    # The same bad-provider profile does NOT fire for a /think seed. The
+    # verb-seeded built-in permission rung (x-7198) still fires independently
+    # of any profile - a /think seed with no permission config resolves the
+    # built-in exactly like any other verb-seeded spawn.
     out = _inject(
         ["spawn", "--name", "w", "/think x"],
         profiles={"target": _lane("banana")},
     )
-    assert out == ["spawn", "--name", "w", "/think x"]
+    assert out == [
+        "spawn",
+        "--permission-mode",
+        "bypassPermissions",
+        "--name",
+        "w",
+        "/think x",
+    ]
 
 
 def test_ac6_edge_verb_not_first_token_no_profile():
@@ -852,10 +862,41 @@ def test_message_via_flag_keys_profile():
 
 
 def test_ac9_ui_no_config_field_prints_no_applied_line():
-    # A spawn with zero injected fields prints no `applied` line.
+    # A prose-seeded spawn with zero injected fields prints no `applied` line
+    # (a verb-seeded spawn always resolves the built-in permission rung,
+    # x-7198 - see test_ac9_ui_verb_seed_still_gets_the_builtin_applied_line).
+    err = io.StringIO()
+    _inject(["spawn", "--name", "w", "start the thing"], err=err, profiles={"other": {"model": "x"}})
+    assert "applied" not in err.getvalue()
+
+
+def test_ac9_ui_verb_seed_still_gets_the_builtin_applied_line():
+    # x-7198: a verb-seeded spawn with no permission config resolves the
+    # built-in bypassPermissions rung and DOES print an applied line, even
+    # though no other field was injected.
     err = io.StringIO()
     _inject(["spawn", "--name", "w", "/target x"], err=err, profiles={"other": {"model": "x"}})
-    assert "applied" not in err.getvalue()
+    assert "applied permission_mode=bypassPermissions" in err.getvalue()
+
+
+def test_apply_permission_builtin_false_suppresses_the_rung():
+    # x-7198 regression: retask.resolve_target_coordinate probes a candidate
+    # relaunch with the same verb-seeded shape a real dispatch uses, but it
+    # never launches anything - it diffs against an already-live worker. The
+    # builtin must not fire there (apply_permission_builtin=False), or every
+    # probe reads as "an explicit permission-mode override" and forces a
+    # respawn the live worker never needed.
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/target x"],
+        settings=_Settings(),
+        apply_permission_builtin=False,
+    )
+    assert "--permission-mode" not in out
+    # The default (True) still fires for every other caller, unchanged.
+    out_default = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/target x"], settings=_Settings()
+    )
+    assert out_default[out_default.index("--permission-mode") + 1] == "bypassPermissions"
 
 
 def test_unknown_config_substrate_degrades_open():

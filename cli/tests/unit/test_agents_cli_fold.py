@@ -83,14 +83,14 @@ def test_old_king_board_forwards_to_inbox_not_agents() -> None:
 
 def test_rust_shellouts_use_the_folded_mcp_and_board_paths() -> None:
     daemon = (REPO_ROOT / "crates/fno-agents/src/daemon.rs").read_text()
-    loopcheck = (REPO_ROOT / "crates/fno-agents/src/loopcheck.rs").read_text()
+    termination = (REPO_ROOT / "crates/fno-agents/src/king_termination.rs").read_text()
 
     assert '.args(["agents", "mcp", "send", "--session-id", channel_id])' in daemon
     # The king's board read is IN PROCESS since x-25b8: the stop gate calls the
     # collector as a library. The pinned invariant is the library call with the
     # stop-gate budget handed in, never a subprocess spelling.
-    assert "crate::king_board::read_board(&opts)" in loopcheck
-    assert "budget_ms: stopgate_read_timeout()" in loopcheck
+    assert "crate::king_board::read_board(&opts)" in termination
+    assert "budget_ms: crate::loopcheck::stopgate_read_timeout()" in termination
 
 
 def test_growth_launch_uses_the_folded_roles_path() -> None:

@@ -96,6 +96,30 @@ def _stub_signals(
     from fno import update
 
     monkeypatch.setattr(update, "stale_mux_servers", lambda: [])
+    # Control-plane arm staleness shells out to the real `fno-agents status
+    # --json`. A developer machine with genuinely stale arms leaks STALE lines
+    # into full-output assertions, so stub it like the other probes.
+    monkeypatch.setattr(
+        doctor,
+        "_control_plane_arms_report",
+        lambda: {"stale": [], "unknown_reason": None},
+    )
+    # Evals demand: build_report reads the real evals history through the
+    # summary seam; pin it fresh and quiet so a developer machine's stale bank
+    # cannot leak a STALE line into full-output assertions. Eval-specific tests
+    # patch the seam again via _patch_evals_summary.
+    monkeypatch.setattr("fno.paths.evals_history", lambda: Path("/evals/h.jsonl"))
+    monkeypatch.setattr(
+        "fno.evals.report.evals_health_summary",
+        lambda _path, **_kw: {
+            "regression_pass_rate": 1.0,
+            "flake_count": 0,
+            "regression_alarm": [],
+            "age_days": 1.0,
+            "stale": False,
+            "never_ran": False,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +301,6 @@ def test_build_report_checks_source_sync_after_post_merge_refresh(
         "_groom_health",
         "_archive_id_collisions",
         "_launch_agent_failures",
-        "_self_attested_coverage_report",
         "_plugin_cache_report",
         "_silent_switch_report",
         "_auto_merge_review_gap",
@@ -2668,3 +2691,115 @@ def test_plugin_file_json_contains_positive_record(
 # by test_doctor_silent_switch.py::test_armed_unknown_manifests_name_stale_plugin_cache_as_cause,
 # which owns the armed-manifest fixture this branch needs. Asserting it here too
 # would be a second implementation of one check.
+
+
+# ---------------------------------------------------------------------------
+# Evals demand (x-ab72): staleness row for the eval bank
+# ---------------------------------------------------------------------------
+
+
+def _patch_evals_summary(
+    monkeypatch: pytest.MonkeyPatch, summary: dict | None
+) -> None:
+    """Pin the summary seam: a fake history path + a canned summary.
+
+    The lazy imports resolve at call time from their source modules, so
+    patching there reaches the assembly without going through the real
+    ``~/.fno`` history.
+    """
+    monkeypatch.setattr("fno.paths.evals_history", lambda: Path("/evals/h.jsonl"))
+    monkeypatch.setattr(
+        "fno.evals.report.evals_health_summary", lambda _path, **_kw: summary
+    )
+
+
+def test_doctor_renders_evals_stale_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+    )
+    _patch_evals_summary(
+        monkeypatch,
+        {
+            "regression_pass_rate": 1.0,
+            "flake_count": 0,
+            "regression_alarm": [],
+            "age_days": 9.0,
+            "stale": True,
+            "never_ran": False,
+        },
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "evals STALE" in result.stdout
+    assert "9d old" in result.stdout
+    assert "fno doctor evals run --tier regression" in result.stdout
+
+
+def test_doctor_renders_evals_unknown_row_without_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+    )
+    _patch_evals_summary(monkeypatch, None)
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "evals UNKNOWN" in result.stdout
+
+
+def test_doctor_renders_evals_unknown_row_when_never_ran(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+    )
+    _patch_evals_summary(
+        monkeypatch,
+        {
+            "regression_pass_rate": None,
+            "flake_count": 0,
+            "regression_alarm": [],
+            "age_days": None,
+            "stale": False,
+            "never_ran": True,
+        },
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "evals UNKNOWN" in result.stdout
+
+
+def test_doctor_stays_silent_when_evals_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+    )
+    _patch_evals_summary(
+        monkeypatch,
+        {
+            "regression_pass_rate": 1.0,
+            "flake_count": 0,
+            "regression_alarm": [],
+            "age_days": 1.0,
+            "stale": False,
+            "never_ran": False,
+        },
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "evals" not in result.stdout

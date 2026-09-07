@@ -488,15 +488,38 @@ if [[ "$1" == "doctor" && "$2" == "event" && "$3" == "emit" ]]; then
   exit 0
 fi
 if [[ "$1" == "do" && "$2" == "review" && "$3" == "classify" ]]; then
-  f=""; shift 3
+  f=""; attest=""; ctx="unknown"; xctx="inline"; contract="json_block"; shift 3
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --findings-file) f="$2"; shift 2 ;;
+      --attest) attest="$2"; shift 2 ;;
+      --reviewer-context) ctx="$2"; shift 2 ;;
+      --execution-context) xctx="$2"; shift 2 ;;
+      --output-contract) contract="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
-  bash "$stub_dir/classify-real.sh" "$f"
-  exit $?
+  record="$(bash "$stub_dir/classify-real.sh" "$f")" || exit $?
+  if [[ -n "$attest" ]]; then
+    # The verb's contract, stubbed against the fixture repo (cwd): measure
+    # the verdict from the classified record (prose_unparseable always fails),
+    # measure the diff, merge, and write the ONE emit the shell delegates to.
+    if [[ "$contract" == "prose_unparseable" ]]; then
+      verdict="fail"
+    else
+      verdict="$(jq -r 'if (.findings_blocking // 1) == 0 then "pass" else "fail" end' <<<"$record")"
+    fi
+    merged="$(jq -cn --argjson rec "$record" --arg reviewer "$attest" --arg verdict "$verdict" \
+      --arg head "$(git rev-parse HEAD)" \
+      --arg branch "$(git rev-parse --abbrev-ref HEAD)" \
+      --arg base "$(git merge-base HEAD origin/main)" \
+      --arg ctx "$ctx" --arg xctx "$xctx" --arg contract "$contract" \
+      '$rec + {reviewer:$reviewer,head_sha:$head,verdict:$verdict,session_id:"",branch:$branch,reviewed_base_sha:$base,reviewed_head_sha:$head,reviewer_context:$ctx,execution_context:$xctx,output_contract:$contract,invocation_id:"UNJOINED"}')"
+    printf '%s\n' "doctor" "event" "emit" "-t" "review_attestation" "-s" "target" "-d" "$merged" \
+      > "$stub_dir/last-emit.txt"
+  fi
+  echo "$record"
+  exit 0
 fi
 exit 0
 FSTUB

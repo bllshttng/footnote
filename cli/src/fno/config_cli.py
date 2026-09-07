@@ -594,6 +594,7 @@ def doctor_cmd(
         _report_state_roots,
         _report_deprecated_auto_merge,
         _report_deprecated_dispatch_harness,
+        _report_deprecated_active_backlog_mission,
         _report_band_routing,
     ):
         try:
@@ -745,6 +746,42 @@ def _report_deprecated_auto_merge() -> None:
             f"      It reads as `auto_merge.grant = \"{reads_as}\"` for one release.\n"
             f"      Migrate: fno config set auto_merge.grant {reads_as}{scope_flag} && "
             f"fno config unset dispatch.auto_merge{scope_flag}"
+        )
+
+
+def _report_deprecated_active_backlog_mission() -> None:
+    """Name every config file still setting the ignored ``active_backlog.mission``.
+
+    x-7f1f retirement: the mission-scoped drain resolves one target per ACTIVE
+    mission (an epic with ``mission_active=true`` in the graph), so this key
+    selects nothing. Parseable for one release; this line names the live axis.
+    """
+    from fno.config import _candidate_paths, _global_settings_path, _load_raw
+
+    global_dir = _global_settings_path().parent
+    for candidate in _candidate_paths():
+        if not candidate.is_file():
+            continue
+        parsed, ok = _load_raw(candidate)
+        if not ok:
+            continue
+        block = parsed.get("active_backlog")
+        if not isinstance(block, dict):
+            wrapped = parsed.get("config")
+            block = wrapped.get("active_backlog") if isinstance(wrapped, dict) else None
+        if not isinstance(block, dict):
+            continue
+        mission = block.get("mission")
+        if not isinstance(mission, str) or not mission.strip():
+            continue
+        scope_flag = "" if candidate.parent == global_dir else " --local"
+        typer.echo(
+            f"warn: {candidate} sets `active_backlog.mission`, which the "
+            "mission-scoped drain IGNORES (missions are per-epic graph state, "
+            "not config).\n"
+            "      Live axis: `fno backlog advance --epic <id>` activates a "
+            "mission; `--stop` retires it.\n"
+            f"      Remove the ignored key: fno config unset active_backlog.mission{scope_flag}"
         )
 
 
@@ -1210,9 +1247,11 @@ def _check_overridden_writes(results: list) -> None:
 
     from pydantic import BaseModel
 
-    from fno.config import load_settings, resolve_source
+    from fno.config import _load_settings_at, load_settings, resolve_source
 
-    load_settings.cache_clear()
+    # The verb just rewrote a config file at the SAME declaration key; the
+    # keyed cache would serve the pre-write entry without this clear.
+    _load_settings_at.cache_clear()
     root = load_settings()
 
     def _traverse(dotted: str) -> tuple[bool, object]:
@@ -1308,9 +1347,10 @@ def _couple_grant_observer() -> None:
     import sys
 
     try:
-        from fno.config import load_settings
+        from fno.config import _load_settings_at, load_settings
 
-        load_settings.cache_clear()
+        # Same declaration key as the write above; clear the keyed entry.
+        _load_settings_at.cache_clear()
         settings = load_settings()
         am = settings.auto_merge
         armed = bool(am.enabled) and str(am.grant or "none") == "dispatch"

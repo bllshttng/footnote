@@ -44,7 +44,6 @@ def test_v2_flag_local_config_toml_wins_over_malformed_global(
     monkeypatch.setenv("FNO_CONFIG", str(bad_global))
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     config_mod._loaded_from = None
 
     from fno.cli import _load_v2_config_flag

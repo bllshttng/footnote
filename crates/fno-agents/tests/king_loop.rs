@@ -54,6 +54,39 @@ fn king_board_bin(dir: &Path, payload: &str, _exit: i32) -> PathBuf {
     path
 }
 
+/// The spec's undispatched row ids, or None when the spec never parsed.
+fn king_spec_rows(spec: &str) -> Option<Vec<String>> {
+    let parsed: serde_json::Value = serde_json::from_str(spec).ok()?;
+    let rows = parsed["queues"]
+        .as_array()?
+        .iter()
+        .find(|q| q["name"] == "undispatched")?["rows"]
+        .as_array()?
+        .clone();
+    Some(
+        rows.iter()
+            .filter_map(|r| r["id"].as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+/// The drain answer the fixture's fno stub owes: the epic plus every spec row
+/// reads undelivered, and a clean spec writes the epic itself done, so the
+/// graph and the stub answer the same question. An unparseable spec is the
+/// blind case and must refuse, never claim drained.
+fn king_drain_reply(spec: &str) -> String {
+    match king_spec_rows(spec) {
+        None => "exit 1".to_string(),
+        Some(rows) if rows.is_empty() => {
+            "echo '{\"scope\":\"drain\",\"undelivered\":0}'".to_string()
+        }
+        Some(rows) => format!(
+            "echo '{{\"scope\":\"drain\",\"undelivered\":{}}}'",
+            rows.len() + 1
+        ),
+    }
+}
+
 /// Write the fixture graph for `board_spec` and pin config + lane at `cwd`.
 /// The epic `drain` matches the manifest scope; every spec row becomes one
 /// undispatchable planned node.
@@ -62,40 +95,36 @@ fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
     fs::create_dir_all(&fno_dir).unwrap();
     let graph = cwd.join("graph.json");
     let spec = fs::read_to_string(board_spec).unwrap_or_default();
-    let parsed: Option<serde_json::Value> = serde_json::from_str(&spec).ok();
-    let ids: Vec<String> = parsed
-        .as_ref()
-        .and_then(|v| {
-            let rows = v["queues"]
-                .as_array()?
-                .iter()
-                .find(|q| q["name"] == "undispatched")?["rows"]
-                .as_array()
-                .cloned()?;
-            Some(
-                rows.iter()
-                    .filter_map(|r| r["id"].as_str().map(str::to_string))
-                    .collect(),
-            )
-        })
-        .unwrap_or_default();
-    if parsed.is_none() {
+    let ids = king_spec_rows(&spec);
+    if ids.is_none() {
         // Blind: the spec never parsed, so the graph source goes dark and the
         // collector answers with unreadable queues instead of a payload that
         // was never possible to fake here.
         let _ = fs::remove_file(&graph);
     } else {
-        let nodes: Vec<serde_json::Value> = std::iter::once(serde_json::json!(
-            {"id": "drain", "type": "epic", "status": "ready", "priority": "p1"}
-        ))
-        .chain(ids.into_iter().map(|id| {
-            // parent: the manifest scope compiles to the epic plus its
-            // descendants, so a workable row is a child of `drain`.
-            serde_json::json!({"id": id, "type": "feature", "status": "ready",
-                               "priority": "p0", "plan_path": "/plans/p.md",
-                               "parent": "drain"})
-        }))
-        .collect();
+        let ids = ids.unwrap_or_default();
+        // A clean spec writes the epic itself done: the reign's terminations
+        // key on the crown draining, so a fixture board with no rows must
+        // read as a drained crown, not an eternally open one.
+        let epic = if ids.is_empty() {
+            serde_json::json!(
+                {"id": "drain", "type": "epic", "status": "done",
+                 "completed_at": "2026-08-18T00:00:00Z", "priority": "p1"}
+            )
+        } else {
+            serde_json::json!(
+                {"id": "drain", "type": "epic", "status": "ready", "priority": "p1"}
+            )
+        };
+        let nodes: Vec<serde_json::Value> = std::iter::once(epic)
+            .chain(ids.into_iter().map(|id| {
+                // parent: the manifest scope compiles to the epic plus its
+                // descendants, so a workable row is a child of `drain`.
+                serde_json::json!({"id": id, "type": "feature", "status": "ready",
+                                   "priority": "p0", "plan_path": "/plans/p.md",
+                                   "parent": "drain"})
+            }))
+            .collect();
         fs::write(
             &graph,
             serde_json::to_string(&serde_json::json!({ "entries": nodes })).unwrap(),
@@ -122,9 +151,16 @@ fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
     // this stub every fire pays a real installed-CLI cold start and probes the
     // operator's live sessions - slow AND non-hermetic.
     fs::write(stubs.join("fno"), "#!/bin/sh\necho '{}'\n").unwrap();
+    let outstanding = if home.join("questions.jsonl").is_file() {
+        r#"{"questions":[{"id":"q-k-question","question":"choose","ts":"2026-09-06T00:00:00Z","session_id":"k-question"}]}"#
+    } else {
+        "{}"
+    };
     fs::write(
         stubs.join("fno-py"),
-        "#!/bin/sh\ncase \"$*\" in\n  *\"backlog ready\"*) echo '[]';;\n  *) echo '{}';;\nesac\n",
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *\"backlog ready\"*) echo '[]';;\n  *\"inbox outstanding\"*) echo '{outstanding}';;\n  *) echo '{{}}';;\nesac\n"
+        ),
     )
     .unwrap();
     // Stage the default mock only when absent: king_escalate_bin stages its
@@ -134,11 +170,19 @@ fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
         make_script(
             home,
             "escalate-mock",
-            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"escalate\" ]; then\n\
-             \x20 echo q-mock\n\
-             \x20 exit 0\n\
-             fi\n\
-             exit 0",
+            &format!(
+                "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; \
+                 then\n\
+                 \x20 {}\n\
+                 \x20 exit 0\n\
+                 fi\n\
+                 if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"escalate\" ]; then\n\
+                 \x20 echo q-mock\n\
+                 \x20 exit 0\n\
+                 fi\n\
+                 exit 0",
+                king_drain_reply(&spec)
+            ),
         );
     };
     #[cfg(unix)]
@@ -189,6 +233,7 @@ fn king_spawn_with(
     let out = cmd
         .env("FNO_CLAIMS_ROOT", home)
         .env("FNO_HOME", home)
+        .env("FNO_AGENTS_HOME", home.join("agents"))
         .env("PATH", format!("{}:{}", stubs.display(), real_path))
         .output()
         .unwrap();
@@ -292,6 +337,67 @@ fn king_nowork_is_the_clean_terminal_for_an_empty_board() {
         "the event must carry the king session id so the journal reader matches it"
     );
     assert_eq!(row["data"]["driver"], "king");
+}
+
+#[test]
+fn an_open_question_from_this_king_blocks_a_clean_board() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-question");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
+    let questions = bin_dir.path().join("questions.jsonl");
+    fs::write(
+        questions,
+        r#"{"ts":"2026-09-06T00:00:00Z","type":"operator_question","data":{"question_id":"q-k-question","question":"choose","session_id":"k-question"}}
+"#,
+    )
+    .unwrap();
+
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+
+    assert_eq!(code, 0);
+    assert_eq!(d["decision"], "block", "decision: {d}");
+    assert_eq!(d["termination_reason"], serde_json::Value::Null);
+    assert!(
+        d["reason"].as_str().unwrap().contains("operator question"),
+        "the block must name the open question: {d}"
+    );
+}
+
+#[test]
+fn an_unreadable_question_source_blocks_a_clean_board() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-question-unreadable");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let spec = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
+    king_prepare_fixture(cwd, bin_dir.path(), &spec);
+    fs::write(
+        bin_dir.path().join("stubs").join("fno-py"),
+        "#!/bin/sh\ncase \"$*\" in\n  *\"inbox outstanding\"*) exit 1;;\n  *\"backlog ready\"*) echo '[]';;\n  *) echo '{}';;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        bin_dir.path().join("stubs").join("fno-py"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    let (code, d) = king_spawn(&state, cwd, &events, bin_dir.path());
+
+    assert_eq!(code, 0);
+    assert_eq!(d["decision"], "block");
+    assert_eq!(d["termination_reason"], serde_json::Value::Null);
+    assert!(
+        d["reason"]
+            .as_str()
+            .unwrap()
+            .contains("outstanding operator questions are unreadable"),
+        "the block must name the unreadable question source: {d}"
+    );
 }
 
 #[test]
@@ -745,12 +851,17 @@ fn king_escalate_bin(dir: &Path, payload: &str, log: &Path) -> PathBuf {
         dir,
         "escalate-mock",
         &format!(
-            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"escalate\" ]; then\n\
+            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; then\n\
+             \x20 {}\n\
+             \x20 exit 0\n\
+             fi\n\
+             if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"escalate\" ]; then\n\
              \x20 echo \"$*\" >> {log}\n\
              \x20 echo q-mock\n\
              \x20 exit 0\n\
              fi\n\
              exit 0",
+            king_drain_reply(payload),
             log = log.display()
         ),
     );

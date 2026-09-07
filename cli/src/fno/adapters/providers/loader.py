@@ -254,7 +254,6 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "auto_register_sessions",
         "codex",
         "confirm",
-        "dead_row_grace",
         "defaults",
         "fallback",
         "footprint_sustained_cpu_cores",
@@ -269,11 +268,14 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "max_load_per_cpu",
         "pane_group_max",
         "min_free_gb",
+        "orphan_reap_after_seconds",
         "profiles",
         "provider_limits",
         "reap_receipts",
+        "retire_grace_s",
         "silence_deadline_seconds",
-        "spawn_permission_mode",
+        "single_flight_join_budget_seconds",
+        "single_flight_ttl_seconds",
         "worker_qos",
     }
 )

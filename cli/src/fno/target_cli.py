@@ -3065,7 +3065,7 @@ def _classify_worktree_occupancy(wt_path: Path) -> tuple[str, Optional[dict]]:
     if not session_id:
         return "unknown", {"reason": "session-id-unavailable"}
     try:
-        from fno.agents.watchdog import REAP_QUIET_AFTER_S, finished_with_the_tree, tail_facts
+        from fno.agents.watchdog import QUIET_AFTER_S, finished_with_the_tree, tail_facts
 
         facts = tail_facts(
             session_id,
@@ -3086,7 +3086,7 @@ def _classify_worktree_occupancy(wt_path: Path) -> tuple[str, Optional[dict]]:
     # disagree about the same session - a silent-but-ENGAGED tail read
     # available to a successor while reap refused to touch it, and a dead
     # worker occupied its tree an hour past the fleet's quiet window.
-    if not finished_with_the_tree(facts, time.time(), REAP_QUIET_AFTER_S):
+    if not finished_with_the_tree(facts, time.time(), QUIET_AFTER_S):
         return "occupied_worktree", {
             "session_id": session_id,
             "age_s": int(max(0.0, time.time() - last_epoch)),

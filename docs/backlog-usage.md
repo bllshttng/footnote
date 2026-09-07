@@ -133,11 +133,10 @@ fno backlog update <id> --project <name> --cwd <path>
 
 ### Reorder within a lane
 
-`rank` floats a card inside its `(column, project)` lane without changing its
-column. Board order == work order, so `--top` also makes it run next.
+`rank` floats a card inside its `(column, project)` lane without changing its column. Board order == work order, so `--top` decides where the card sits in that order. It does not dispatch the node. When the node is inside an active mission scope, a drain reaches it. A top-ranked node outside every active mission scope stays undispatched.
 
 ```bash
-fno backlog rank <id> --top            # front of the lane (and runs next)
+fno backlog rank <id> --top            # front of the lane (order only, no dispatch)
 fno backlog rank <id> --bottom
 fno backlog rank <id> --before <id>    # anchor must already be ranked
 fno backlog rank <id> --after <id>
@@ -201,10 +200,25 @@ Two hidden verbs serve the migration and the operator:
 
 - `fno backlog backfill-deferred-kind [--map FILE] [--apply]` classifies existing deferred rows by exact match against the built-in table plus a TSV map (`kind<TAB>exact reason` per line). Dry run by default. It never overwrites an existing kind and never closes or undefers anything.
 - `fno backlog stuck-epics` lists epics whose only incomplete children are deferred or superseded, each with a `closable` verdict and its holders. Read-only: closing one is always an operator ruling.
+- `fno backlog reopen <child> --reason ...` against a done-on-its-own-evidence parent stamps a `reopen_warning` on that parent, alongside the stderr warning. The marker names the child and the time, so the fact stays findable after the terminal with the warning is gone. When the parent is reopened directly, or the named child closes again, the marker clears.
 
 ## Finding work by meaning: find --fts
 
 `fno backlog find --fts "free text query"` searches title, slug, and details through an FTS5 index (BM25-ranked whole-word matching) and finds concepts that share only some of the original words. The index is a CACHE beside graph.json (`graph.json.fts5`), never a second source of truth. It stores the sha256 of the graph bytes, compares on every read, and rebuilds from scratch on any mismatch. There is no incremental write path, so the index cannot answer stale. A build without FTS5 degrades to the ordinary substring search with a warning. The honest limit: a query sharing no words with the node still misses, so filing duplicates before searching stays the failure mode to watch.
+
+## Reviewing duplicate and expired work
+
+`fno backlog discover --json` produces a read-only worklist for deferred rows whose `deferred_kind` is `expired`. It never closes or undefers a node.
+
+The pass joins the filing gate's two recall lanes. FTS5 catches vocabulary differences. Relatedness keeps the calibrated score and domain signal.
+
+The filing gate already exists, but it previously read only relatedness. The union labels each hit as `fts`, `relatedness`, or both.
+
+The pass reads `deferred_kind` as a field. It does not parse reason text. Decided kinds stay excluded and appear in `excluded_by_kind`.
+
+Each row reports `duplicate`, `satisfied`, `still_real`, or `undecided`. Evidence names a candidate node, merged PR, existing file, or the reason for uncertainty.
+
+The operator owns the ruling. The pass never auto-closes, auto-undefers, or changes `graph.json`. An empty result includes a positive control. An all-match result is refused as a failed instrument.
 
 ## Node-to-node edges
 
@@ -214,10 +228,13 @@ Four edges connect nodes, and only the first two gate anything.
 |------|----------|---------|--------|
 | `blocked_by` | `--blocked-by` / `--add-blocker` / `--remove-blocker` | this cannot start until that lands | yes: derives `_status: blocked` |
 | `parent` | `--parent` | this was decomposed into that epic | yes: rollup, epic depth |
+| `contained_in` | `fno backlog contain <owner> <id>...` | this ships inside that node's PR | yes: skipped by both dispatch paths, closed by the owner's merge |
 | `source_node_id` | `--source-node`, or captured ambiently | this came *out of* working on that | no |
 | `related` | `--related` | affinity: two sides of the same coin, or work that co-delivers | no |
 
 `source_node_id` and `related` are deliberately different questions.
+
+`contained_in` is not defer. Containment says the node's work ships inside the owner's PR. The row stays on the board with a `ships inside: <owner>` line and never dispatches alone. When the owner's merge cascades, the row closes with it. Defer is a judgement any groom pass can make and it hides the row. If the intent is "this ships with that", adopt, never defer. Full contract: [subtask-containment](architecture/subtask-containment.md).
 Origin is where the decision to think about this was made; affinity is asserted by whoever notices it, in either direction, and neither implies the other.
 
 **Origin capture is ambient first.** Filing a node from a session that already knows its node stamps the origin with no flag, through three branches in precedence order: an explicit `--source-node`, then an owned `.fno/target-state.md`, then the `FNO_NODE` a spawn exported. Pass `--source-node <id>` only when none of those apply, or to override them.

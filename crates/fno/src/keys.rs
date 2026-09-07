@@ -13,7 +13,8 @@
 //! select tab · `&` close tab · `w` sideline row selector · `b` toggle sideline ·
 //! `s` toggle status row · `?` key-table overlay · `d` detach · `[`/`]` jump
 //! prev/next command block · `v` select block · `y` copy selection · `r` rerun
-//! block (x-38c4) · `,` rename tab (x-c150) · prefix-prefix = one literal
+//! block (x-38c4) · `R` ask the pane to repaint (x-a600) · `,` rename tab
+//! (x-c150) · prefix-prefix = one literal
 //! prefix byte · `<`/`>` reorder the active tab (x-0333). Prefix + anything
 //! unmapped is swallowed with BEL - a chord typo must never leak half a chord
 //! into the pane (AC2-UI's never-leak guarantee).
@@ -387,6 +388,11 @@ pub enum Event {
     /// visible; this only expands or collapses it, and the client's view
     /// layer interprets that, not here.
     OpenCourt,
+    /// Open the activity feed overlay (prefix+e, x-4433): questions,
+    /// decisions and node lifecycle, newest first. Overlay-mode keys (j/k
+    /// move, Enter deep-links the row's session, q/Esc close) are
+    /// interpreted by the client's view layer, not here (like OpenAnswers).
+    OpenFeed,
     /// Show/hide the sideline (prefix+b).
     TogglePanel,
     /// (x-b186) Cycle the sideline density slim -> regular -> extended
@@ -1078,6 +1084,13 @@ fn default_bindings() -> Vec<KeyBinding> {
             Navigation,
             "copy selection",
         ),
+        b(
+            b'R',
+            "redraw-pane",
+            Cmd(C::RedrawPane { pane: None }),
+            Navigation,
+            "ask the pane to repaint",
+        ),
         b(b'r', "rerun-block", BlockRerun, Navigation, "rerun block"),
         b(b'/', "search", SearchOpen, Navigation, "search scrollback"),
         // The label names every row class `nav_rows()` actually emits. The old
@@ -1100,6 +1113,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             "sideline row selector",
         ),
         b(b'a', "answers", OpenAnswers, Global, "answer queue"),
+        b(b'e', "feed", OpenFeed, Global, "activity feed"),
         b(
             b'm',
             "yard",

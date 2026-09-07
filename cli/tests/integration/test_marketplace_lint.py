@@ -26,9 +26,10 @@ _CLEAN_SKILL_FRONTMATTER = textwrap.dedent(
     ---
     name: target
     description: "clean fixture"
-    requires:
-      binaries:
-        - "fno >= 0.1"
+    metadata:
+      requires:
+        binaries:
+          - "fno >= 0.1"
     ---
     Body content. No forbidden patterns.
     """
@@ -70,7 +71,7 @@ def _make_skill(tmp_root: Path, name: str, skill_md: str) -> Path:
 
 def test_clean_driver_skill_passes(tmp_path):
     """A skill with no Skill() calls, no path escapes, fno declared in
-    requires.binaries: lint exits 0."""
+    metadata.requires.binaries: lint exits 0."""
     _make_skill(tmp_path, "target", _CLEAN_SKILL_FRONTMATTER)
     result = _run(["bash", str(LINT), "--root", str(tmp_path)])
     assert result.returncode == 0, result.stdout + result.stderr
@@ -176,7 +177,7 @@ def test_sibling_skill_path_escape_fails(tmp_path):
 
 
 def test_missing_requires_block_fails(tmp_path):
-    """A driver skill without a requires.binaries block fails the lint."""
+    """A driver skill without a metadata.requires.binaries block fails the lint."""
     skill_md = textwrap.dedent(
         """\
         ---
@@ -193,17 +194,42 @@ def test_missing_requires_block_fails(tmp_path):
 
 
 def test_missing_fno_in_requires_fails(tmp_path):
-    """A requires.binaries: block that lists other binaries but not fno
-    fails the lint."""
+    """A metadata.requires.binaries block that lists other binaries but not
+    fno fails the lint."""
     skill_md = textwrap.dedent(
         """\
         ---
         name: target
         description: "fno missing"
+        metadata:
+          requires:
+            binaries:
+              - "gh >= 2.0"
+              - "git >= 2.30"
+        ---
+        body
+        """
+    )
+    _make_skill(tmp_path, "target", skill_md)
+    result = _run(["bash", str(LINT), "--root", str(tmp_path)])
+    assert result.returncode != 0
+    assert "does not declare 'fno'" in result.stderr
+
+
+def test_top_level_requires_block_fails(tmp_path):
+    """A declaration left at the pre-migration top level fails LOUDLY.
+
+    `requires` is not a field the skill frontmatter contract supports, so the
+    reader looks only under `metadata`. A skill still carrying the old shape
+    must fail the lint rather than pass on a block nothing reads."""
+    skill_md = textwrap.dedent(
+        """\
+        ---
+        name: target
+        description: "pre-migration shape"
         requires:
           binaries:
-            - "gh >= 2.0"
-            - "git >= 2.30"
+            - "fno >= 0.1"
         ---
         body
         """

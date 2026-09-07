@@ -46,6 +46,21 @@ HOLDER_A = "target-session:sid-a"
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _real_reap_for_verb_tests(monkeypatch):
+    """These tests drive the REAL reap against tmp roots, so the conftest's
+    hermetic reap stub must not reach them.
+
+    It never could while the CLI verbs captured core callables at import; the
+    CLI now resolves them at call time, which is what makes the stub visible
+    here. Restore the function from this file's own collection-time binding -
+    the same reference the conftest fixture already documents as unaffected.
+    """
+    import fno.claims.core as claims_core
+
+    monkeypatch.setattr(claims_core, "reap_dead_claims", reap_dead_claims)
+
+
 def _dead_pid() -> int:
     dead = 999_999
     while psutil.pid_exists(dead):
@@ -532,7 +547,6 @@ class TestReapDeadClaims:
         # path to follow the chdir). Clear it post-chdir so the write (or
         # non-write, which is what this test asserts) lands under tmp_path.
         from fno.paths import resolve_repo_root
-        resolve_repo_root.cache_clear()
         # The journal is pinned as well as the root. The hermetic sandbox sets
         # FNO_EVENTS_PATH for the whole pytest process and it is checked ahead
         # of the root, so a test reading the cwd-derived journal back has to
@@ -550,11 +564,17 @@ class TestReapDeadClaims:
         import json
 
         events_path = tmp_path / ".fno" / "events.jsonl"
-        # events.jsonl already exists from acquire_claim's own claim_acquired
-        # emission above; what a dry run must NOT add is a claim_reap_swept
-        # entry - that write would break `fno backlog reconcile --dry-run`'s
-        # own preview contract.
-        lines = [json.loads(line) for line in events_path.read_text().splitlines()]
+        # acquire_claim's claim_acquired is ephemeral-class, so it lands in the
+        # .ephemeral sibling and the journal itself may not exist yet. Read both
+        # files: what a dry run must NOT add is a claim_reap_swept entry - that
+        # write would break `fno backlog reconcile --dry-run`'s own preview
+        # contract.
+        from fno.paths import journal_and_ephemeral_sibling
+
+        lines = []
+        for candidate in journal_and_ephemeral_sibling(events_path):
+            if candidate.exists():
+                lines.extend(json.loads(line) for line in candidate.read_text().splitlines())
         swept = [e for e in lines if e["type"] == "claim_reap_swept"]
         assert swept == []
 
@@ -576,7 +596,6 @@ class TestReapDeadClaims:
         # dependent on what ran earlier in the session. Order-dependent here
         # means this test passes as part of the suite but fails run alone.
         from fno.paths import resolve_repo_root
-        resolve_repo_root.cache_clear()
         # The journal is pinned as well as the root. The hermetic sandbox sets
         # FNO_EVENTS_PATH for the whole pytest process and it is checked ahead
         # of the root, so a test reading the cwd-derived journal back has to

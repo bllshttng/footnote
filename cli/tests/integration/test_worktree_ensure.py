@@ -345,8 +345,8 @@ def test_ensure_external_worktrees_base_set_lands_under_base(
     main_repo: Path, tmp_path: Path
 ) -> None:
     """With `worktree.policy = external`, a configured paths.worktrees_base lands
-    the worktree at <base>/<repo>/<name> (the base only governs the external mode;
-    harness-native ignores it -- see the next test)."""
+    the worktree at <base>/<repo>/<name> (no degradation: the policy asked for
+    exactly this)."""
     base = tmp_path / "custom-bases"
     _write_config(
         main_repo / ".fno",
@@ -374,20 +374,24 @@ def test_ensure_harness_native_claude_lands_in_dot_claude(
     assert not _default_wt(tmp_path, main_repo, "hn").exists()
 
 
-def test_ensure_harness_native_ignores_worktrees_base(
+def test_ensure_harness_native_degrades_to_external_on_explicit_base(
     main_repo: Path, tmp_path: Path
 ) -> None:
-    """The default flip is absolute: harness-native + claude lands in
-    .claude/worktrees/ even when paths.worktrees_base is configured (the base is
-    honored only under the `external` policy)."""
+    """x-f96e: an explicitly configured paths.worktrees_base relocates a
+    harness-native claude dispatch to <base>/<repo>/<name>, receipt
+    policy=external. Before x-f96e the base was honored only under an
+    explicit `external` policy, so setting the key alone was a silent no-op
+    on this path while the WorktreeCreate hook relocated on it - two
+    creation paths disagreeing on one location."""
     base = tmp_path / "custom-bases"
     _write_config(main_repo / ".fno", f'[paths]\nworktrees_base = "{base}"\n')
     res = runner.invoke(
         app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "ib", "--harness", "claude"]
     )
     assert res.exit_code == 0, res.stderr
-    assert res.stdout.strip() == str(main_repo / ".claude" / "worktrees" / "ib")
-    assert not (base / main_repo.name / "ib").exists()
+    assert res.stdout.strip() == str(base / main_repo.name / "ib")
+    assert "policy=external" in res.stderr
+    assert not (main_repo / ".claude" / "worktrees" / "ib").exists()
 
 
 def test_ensure_harness_native_reuse(main_repo: Path, tmp_path: Path) -> None:

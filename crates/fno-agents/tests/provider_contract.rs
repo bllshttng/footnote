@@ -303,5 +303,5 @@ fn stream_fixtures_map_into_the_sealed_vocabulary() {
 // The old `capability_copies_are_byte_identical` twin test is gone (x-244c,
 // operator ruling 2026-09-02): this crate's table IS the canonical now and the
 // Python-tree copy is build-generated, so the byte check degenerated into
-// comparing the file with itself. `check-harness-capabilities-fresh.sh`
-// watches the generated copy instead.
+// comparing the file with itself. The rust-ci generated-copies dirty-tree
+// step watches the generated copy instead.

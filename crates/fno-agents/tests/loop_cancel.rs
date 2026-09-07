@@ -109,7 +109,13 @@ fn write_executable(path: &Path, body: &str) {
 fn king_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
     let dir = TempDir::new().unwrap();
     let fno_dir = dir.path().join(".fno");
-    let kings_dir = fno_dir.join("kings");
+    fs::create_dir_all(&fno_dir).unwrap();
+    let kings_dir = dir
+        .path()
+        .join(".fno")
+        .join("spaces")
+        .join(fno_agents::paths::space_slug(dir.path()))
+        .join("kings");
     let lib_dir = dir.path().join("lib");
     let bin_dir = dir.path().join("bin");
     fs::create_dir_all(&kings_dir).unwrap();
@@ -117,7 +123,11 @@ fn king_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
     fs::create_dir_all(&bin_dir).unwrap();
     write_executable(
         &dir.path().join("fake-fno"),
-        "printf '%s\\n' '{\"actionable\":1,\"queues\":[{\"name\":\"ready\",\"actionable\":true,\"rows\":[{\"id\":\"row-1\"}]}]}'",
+        "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; then\n\
+         \x20 printf '%s\\n' '{\"scope\":\"k\",\"undelivered\":1}'\n\
+         \x20 exit 0\n\
+         fi\n\
+         printf '%s\\n' '{\"actionable\":1,\"queues\":[{\"name\":\"ready\",\"actionable\":true,\"rows\":[{\"id\":\"row-1\"}]}]}'",
     );
     write_executable(&bin_dir.join("claude"), "exit 0");
     write_executable(
@@ -152,6 +162,7 @@ fn run_king(dir: &TempDir, lib_dir: &Path, bin_dir: &Path) -> Output {
         ])
         .env("PATH", format!("{}:/bin:/usr/bin", bin_dir.display()))
         .env("HOME", dir.path())
+        .env("FNO_AGENTS_HOME", dir.path().join(".fno/agents"))
         .env("FNO_LOOPCHECK_FNO_BIN", dir.path().join("fake-fno"))
         .output()
         .unwrap()
@@ -256,10 +267,12 @@ fn king_cancel_refusal_names_its_file_age_and_clear_command() {
     let (dir, lib_dir, bin_dir, events) = king_fixture();
     let sentinel = dir
         .path()
-        .canonicalize()
-        .unwrap()
-        .join(".fno/kings/k.cancelled");
+        .join(".fno")
+        .join("spaces")
+        .join(fno_agents::paths::space_slug(dir.path()))
+        .join("kings/k.cancelled");
     fs::write(&sentinel, "").unwrap();
+    let sentinel = sentinel.canonicalize().unwrap();
 
     let output = run_king(&dir, &lib_dir, &bin_dir);
     let stderr = String::from_utf8_lossy(&output.stderr);

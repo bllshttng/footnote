@@ -357,9 +357,15 @@ def _live_root_pids(
         fleet_unrouted = [
             row for row in unrouted_rows if _unrouted_row_costs_fleet(row, deadline)
         ]
+        gap_labels = sorted(
+            f"{getattr(row, 'name', '?')} "
+            f"(node={getattr(row, 'node', None) or 'unknown'})"
+            for row in fleet_unrouted
+        )
         gap_rows: list[str] = [
             f"{len(fleet_unrouted)} pidless row(s) with no identity route "
-            f"({', '.join(sorted({str(row.harness) for row in fleet_unrouted}))})"
+            f"({', '.join(sorted({str(row.harness) for row in fleet_unrouted}))}; "
+            f"rows: {', '.join(gap_labels)})"
         ] if fleet_unrouted else []
         if not routed_rows:
             return roots, AttributionGap("; ".join(gap_rows)) if gap_rows else None
@@ -658,7 +664,9 @@ def _payload(
         "fleet_percent_capacity": reading.fleet_cpu_cores / cpu_capacity * 100,
         "fleet_percent_measured_cpu": measured_share,
         "leak_verdict": leak_verdict(reading.direct_process_count, process_threshold),
-        "capacity_verdict": capacity_verdict(load_snapshot),
+        # x-5283 AC7: the verdict reads the LOAD snapshot, not sustained CPU.
+        "capacity_verdict": (cv := capacity_verdict(load_snapshot)),
+        "capacity_verdict_axis": "load_1m" if cv != "unknown" else "unknown",
         "load_1m": getattr(load_snapshot, "load_1m", None),
         "load_5m": getattr(load_snapshot, "load_5m", None),
         "load_15m": getattr(load_snapshot, "load_15m", None),
@@ -666,6 +674,13 @@ def _payload(
         "load_ceiling": getattr(load_snapshot, "load_ceiling", None),
         "load_cpu_count": getattr(load_snapshot, "load_cpu_count", None),
         "spawn_load_status": getattr(load_snapshot, "spawn_load_status", "unavailable"),
+        # The Claude Code background daemon's idle pre-warm pool. Outside the
+        # fleet numbers above on purpose - fno neither owns nor bounds it - but
+        # measured, because it can hold most of the machine whose load refuses
+        # every fno spawn.
+        "spare_pool_process_count": reading.spare_pool_process_count,
+        "spare_pool_cpu_cores": reading.spare_pool_cpu_cores,
+        "spare_pool_rss_gb": reading.spare_pool_rss_gb,
         "top": [
             {
                 "cpu_percent": cpu_percent,
@@ -772,7 +787,8 @@ def _emit_result(
                 )
         typer.echo(
             f"sustained CPU: {reading.sustained_cpu_cores:.3f} cores "
-            f"(threshold {threshold_cores:.3f} from {payload['cpu_capacity_cores']} cpus)"
+            f"(threshold {threshold_cores:.3f} from {payload['cpu_capacity_cores']} cpus; "
+            "a separate axis - it did not decide the verdict)"
         )
         typer.echo(
             f"descendant CPU: {reading.descendant_cpu_cores:.3f} cores "
@@ -794,17 +810,37 @@ def _emit_result(
                 f"({reading.direct_process_count} direct, roster unavailable)"
             )
         typer.echo(f"transient calls: {reading.transient_call_count}")
+        if reading.spare_pool_process_count:
+            typer.echo(
+                f"claude spare pool: {reading.spare_pool_process_count} processes, "
+                f"{reading.spare_pool_cpu_cores:.2f} cores, "
+                f"{reading.spare_pool_rss_gb:.1f}GB (idle pre-warm, not fleet; "
+                "never sweep it - a bg spawn is claimed from it)"
+            )
         if reading.attribution_gap is not None:
             typer.echo(
                 f"attribution gap: {reading.attribution_gap} "
                 "(fleet share is an undercount, not headroom)"
             )
+        axis = payload["capacity_verdict_axis"]
+        axis_numbers = ""
+        if axis != "unknown":
+            value, threshold = payload["load_1m"], payload["load_ceiling"]
+            axis_numbers = (
+                f" on {axis} ({value:.1f} against {threshold:.1f})"
+                if isinstance(value, (int, float))
+                and isinstance(threshold, (int, float))
+                else f" on {axis}"
+            )
         if exit_code == EXIT_CAPACITY_OVER:
-            typer.echo(f"verdict: capacity over (exit {exit_code})")
+            typer.echo(f"verdict: capacity over{axis_numbers} (exit {exit_code})")
         elif exit_code == EXIT_LEAK:
-            typer.echo(f"verdict: leak (exit {exit_code})")
+            typer.echo(f"verdict: leak{axis_numbers} (exit {exit_code})")
         else:
-            typer.echo(f"verdict: {capacity} (exit {exit_code})")
+            typer.echo(
+                f"verdict: {payload['capacity_verdict']}{axis_numbers} "
+                f"(exit {exit_code})"
+            )
         if reading.unparsed_lines:
             typer.echo(f"unparsed lines: {reading.unparsed_lines}")
         if note is not None:

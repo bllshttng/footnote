@@ -1462,6 +1462,7 @@ fn write_live_optout_claim(env: &Env, key: &str) {
         expires_at: Some(now + 300_000),
         reason: Some("merge-gating opt-out".into()),
         harness: None,
+        session_id: None,
         pid_provenance: None,
         machine_id: None,
         metadata: serde_json::Map::new(),

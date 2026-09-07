@@ -6,6 +6,8 @@
 #   worktree-lifecycle.sh cleanup --merged [--apply] [--kill-orphans]
 #   Both cleanup removal modes are dry-run by default; --apply executes.
 #   worktree-lifecycle.sh archive <name>            # Keep branch, remove directory
+#   worktree-lifecycle.sh cargo-offload [--apply]   # Move crates/*/target caches
+#                                                   # out of the repo root (x-f96e)
 set -uo pipefail
 
 # The one "is removing this worktree safe?" answer, shared with
@@ -108,22 +110,36 @@ _wt_permanent() {
 # pgrep lane still catches background processes carrying the path in argv.
 _WT_CWD_SNAPSHOT=""
 _WT_CWD_SNAPSHOT_OK=0
+# Snapshot-time evidence for the candidates _wt_pids kept, pid:cmd@cwd,
+# comma-joined. A later `ps -p` re-read lies: the process can die in between.
+_WT_PIDS_DIAG=""
+# Row counts the last _wt_pids decision read from each snapshot, plus the
+# diagnostic-format version the protected line stamps. A verdict that
+# contradicts these counters means an older script ran.
+_WT_PIDS_DIAG_VERSION=6
 
 _wt_refresh_cwd_snapshot() {
     local raw=""
     _WT_CWD_SNAPSHOT=""
     _WT_CWD_SNAPSHOT_OK=0
     command -v lsof >/dev/null 2>&1 || return 1
-    raw="$(lsof -a -d cwd -Fpn 2>/dev/null)" || return 1
+    # lsof runs from / (subshell cd, parent unaffected) so its own pipeline
+    # never lands in the snapshot with the sweep's cwd: run it from the repo
+    # root and the tree the sweep runs in - the canonical checkout - reads
+    # processes:2 with nobody in it, the lsof and its formatting fork. The
+    # awk below runs after raw is captured, so it cannot appear in raw.
+    raw="$(cd / && lsof -a -d cwd -Fpn 2>/dev/null)" || return 1
     _WT_CWD_SNAPSHOT="$(printf '%s\n' "$raw" | awk '
         /^p[0-9]+$/ { pid = substr($0, 2); next }
         /^n/ && pid != "" { print pid "\t" substr($0, 2) }
     ')"
+    _WT_CWD_ROWS="$(printf '%s\n' "${_WT_CWD_SNAPSHOT:-}" | awk 'NF { n++ } END { print n + 0 }')"
     _WT_CWD_SNAPSHOT_OK=1
 }
 
 _wt_pids() {
     local wt="$1" root pids="" pids_f="" re candidates filtered snapshot_rc=0
+    local ps_rc=0 ps_out="" ps_snap="" ps_rows=0
     root="$(cd "$wt" 2>/dev/null && pwd -P)" || root="$wt"
     if [[ "${_WT_CWD_SNAPSHOT_OK:-0}" -eq 1 ]]; then
         pids="$(printf '%s\n' "${_WT_CWD_SNAPSHOT:-}" | awk -F '\t' -v root="$root" -v logical="$wt" '
@@ -142,15 +158,20 @@ _wt_pids() {
     # would surface as the function's status even though the pids printed fine.
     candidates="$(printf '%s\n%s\n' "$pids" "$pids_f" | grep -v "^$$\$" | grep -v '^$' | sort -u || true)"
     if [[ -z "$candidates" ]]; then
+        _WT_PIDS_DIAG=""
         return "$snapshot_rc"
     fi
     # One process-table snapshot for the whole candidate set, not one `ps`
     # subprocess per pid: a concurrent sweep's own argv carries every
     # worktree path (see the lock comment above), so candidates scale with
     # the number of overlapping sweeps and a per-pid `ps` turned that into
-    # N sweeps x 49 worktrees x N matches.
+    # N sweeps x 49 worktrees x N matches. ppid rides the SAME snapshot: the
+    # ancestor drop below reads it in memory, never via a second ps call.
     # The marker keeps awk's first input non-empty and positively identifies a
     # completed snapshot; otherwise an empty ps makes the candidates FNR==NR.
+    ps_rc=0
+    ps_out="$(ps -Ao pid=,ppid=,command= 2>/dev/null)" || ps_rc=$?
+    ps_snap="$(printf '%s\n' "$ps_out"; printf '%s\n' '__FNO_PS_SNAPSHOT_COMPLETE__')"
     filtered="$(awk '
         BEGIN { snapshot_marker = "__FNO_PS_SNAPSHOT_COMPLETE__" }
         FNR==NR {
@@ -162,8 +183,9 @@ _wt_pids() {
             snapshot_rows++
             sub(/^[ \t]+/, "", line)
             pid = $1
-            sub("^" pid "[ \t]+", "", line)
+            sub("^" pid "[ \t]+[^ \t]+[ \t]+", "", line)
             cmdbypid[pid] = line
+            ppidbypid[pid] = $2
             next
         }
         {
@@ -176,8 +198,111 @@ _wt_pids() {
             if (cmd ~ /archive-worktree\.sh/ || cmd ~ /worktree-lifecycle\.sh/) next
             print pid
         }
-    ' <(ps -Ao pid=,command= 2>/dev/null; printf '%s\n' '__FNO_PS_SNAPSHOT_COMPLETE__') <(printf '%s\n' "$candidates"))"
-    printf '%s\n' "$filtered"
+    ' <(printf '%s\n' "$ps_snap") <(printf '%s\n' "$candidates"))"
+    # The drops below fire only on a positively-populated ps snapshot: an
+    # empty one (fork-starved sweep, sandbox denies ps) proves nothing, so
+    # every candidate is kept fail-closed and the diagnostic records the ps
+    # exit status plus any cwd sighting, readable from the protection line.
+    ps_rows="$(awk -v m="__FNO_PS_SNAPSHOT_COMPLETE__" '$0 == m { exit } NF { c++ } END { print c + 0 }' <<< "$ps_snap")"
+    local filtered2="" pid_keep cwd_row kept_info kp kcmd kcwd
+    _WT_PIDS_DIAG=""
+    if [[ "$ps_rows" -eq 0 ]]; then
+        filtered2="$filtered"
+        while IFS= read -r pid_keep; do
+            [[ -z "$pid_keep" ]] && continue
+            cwd_row="$(printf '%s\n' "${_WT_CWD_SNAPSHOT:-}" \
+                | awk -F '\t' -v want="$pid_keep" '$1 == want { print $2; exit }')"
+            _WT_PIDS_DIAG="${_WT_PIDS_DIAG}${pid_keep}:no-ps@${cwd_row:-no-cwd-row},"
+        done <<< "$filtered"
+        _WT_PIDS_DIAG="ps-rc=${ps_rc} rows=0 ${_WT_PIDS_DIAG%,}"
+        printf '%s\n' "$_WT_PIDS_DIAG" >&2
+        printf '%s\n' "$filtered2"
+        return "$snapshot_rc"
+    fi
+    # Survivors resolved in ONE awk pass over the in-memory snapshots, never
+    # one fork per candidate: under a fork-starved sweep the per-candidate
+    # awk calls multiply the very pressure that emptied the ps snapshot
+    # (CI smoke 2026-09-07, ps-rc diagnostic). Three drops, all reading the
+    # same snapshot:
+    # 1. machinery (done in the first awk) and ancestors of this sweep: the
+    #    candidate's ppid chain is walked to $$ in memory;
+    # 2. zombies and enumeration transients: a ps row whose command column
+    #    is empty or defunct owns no fds, no cwd, no mmap, and cannot hold
+    #    build artifacts;
+    # 3. a candidate with a live ps row, or a cwd-snapshot sighting, stays.
+    filtered2=""
+    # bash 3.2 cannot parse nested quotes inside ${var:-"..."}: the empty
+    # cwd snapshot rides as a placeholder row instead.
+    cwd_input="${_WT_CWD_SNAPSHOT}"
+    if [[ -z "$cwd_input" ]]; then
+        cwd_input="-"
+    fi
+    kept_info="$(awk -v self="$$" '
+        FNR == 1 { stage++ }
+        stage == 1 {
+            line = $0
+            if (line == "__FNO_PS_SNAPSHOT_COMPLETE__") {
+                seen_complete = 1
+                next
+            }
+            sub(/^[ \t]+/, "", line)
+            pid = $1
+            sub("^" pid "[ \t]+[^ \t]+[ \t]+", "", line)
+            cmdbypid[pid] = line
+            ppidbypid[pid] = $2
+            next
+        }
+        stage == 2 {
+            if (!walked && seen_complete) {
+                # The ANCESTORS of the sweep: walk UP from $$ once, after
+                # the ppid map is complete. A candidate IN this set is the
+                # sweep invoker. Walking from the CANDIDATE upward and
+                # hitting $$ would read the opposite: a descendant of the
+                # sweep, and a descendant anchored in the tree is a real
+                # occupant (the battery pins this).
+                p = self
+                for (i = 0; i < 12 && p != "" && p != "0" && p != "1"; i++) {
+                    mine[p] = 1
+                    p = ppidbypid[p]
+                }
+                walked = 1
+                selfcmd = cmdbypid[self]
+            }
+            if ($0 == "-") next
+            cwdbypid[$1] = $2
+            next
+        }
+        stage == 3 {
+            pid = $1
+            if (pid in mine) next
+            # A child of the sweep carrying the same command line as the
+            # sweep itself is the command-substitution subshell running this
+            # very check (CI smoke 2026-09-07, pid 6327: bash <script-path>):
+            # it lives for the whole function, so its ps row is live, and it
+            # forked after the cwd snapshot, so no cwd row can clear it. A
+            # real occupant has a different command line or another parent.
+            if (ppidbypid[pid] == self && cmdbypid[pid] == selfcmd) next
+            cmd = cmdbypid[pid]
+            if (cmd != "" && cmd !~ /defunct/) {
+                print pid "\t" cmd "\t-"
+                next
+            }
+            if (pid in cwdbypid) {
+                print pid "\tno-ps-row\t" cwdbypid[pid]
+            }
+        }
+    ' <(printf '%s\n' "$ps_snap") <(printf '%s\n' "$cwd_input") <(printf '%s\n' "$filtered"))"
+    while IFS=$'\t' read -r kp kcmd kcwd; do
+        [[ -z "$kp" ]] && continue
+        filtered2="${filtered2}${kp}"$'\n'
+        _WT_PIDS_DIAG="${_WT_PIDS_DIAG}${kp}:${kcmd:0:60}@${kcwd:0:60},"
+    done <<< "$kept_info"
+    # The row count rides inside the diagnostic: _wt_pids normally runs in a
+    # command substitution, and globals it sets die with that subshell. The
+    # stderr copy is what the parent actually reads.
+    _WT_PIDS_DIAG="ps-rows=${ps_rows} ${_WT_PIDS_DIAG%,}"
+    printf '%s\n' "$_WT_PIDS_DIAG" >&2
+    printf '%s\n' "$filtered2"
     return "$snapshot_rc"
 }
 
@@ -267,7 +392,7 @@ _cargo_target_bytes() {
 }
 
 _cargo_target_inventory() {
-    local output="$1" wt target bytes mtime protection pids pids_rc
+    local output="$1" wt target bytes mtime protection prot pids pids_rc resolved
     : > "$output"
     _wt_refresh_cwd_snapshot || true
     while IFS= read -r wt; do
@@ -286,10 +411,32 @@ _cargo_target_inventory() {
         fi
         shopt -s nullglob
         for target in "$wt/target" "$wt"/crates/*/target; do
-            [[ -d "$target" && ! -L "$target" ]] || continue
-            bytes="$(_cargo_target_bytes "$target")"
-            mtime="$(_cargo_target_mtime "$target")"
-            printf '%s\t%s\t%s\t%s\t%s\n' "$mtime" "$bytes" "$protection" "$wt" "$target" >> "$output"
+            prot="$protection"
+            if [[ -L "$target" ]]; then
+                # A cache cargo-offload relocated. The sweep follows the link
+                # or the relocation strands the bytes with no reclaimer at
+                # all. Following is gated by BOTH conjuncts of
+                # _cargo_target_offload_owns_path (under the fno base, tagged
+                # CACHEDIR.TAG); bytes and age read from the RESOLVED dir
+                # (BSD du does not follow a command-line symlink). A link
+                # failing either conjunct rides the protected lane as
+                # link-not-owned: counted, reported, never deleted. prot is
+                # per-target - the worktree-level protection must not leak
+                # into sibling target rows.
+                resolved="$(cd -- "$target" 2>/dev/null && pwd -P)" || continue
+                bytes="$(_cargo_target_bytes "$resolved")"
+                mtime="$(_cargo_target_mtime "$resolved")"
+                if [[ "$prot" == "-" ]] \
+                    && ! _cargo_target_offload_owns_path "$resolved"; then
+                    prot="link-not-owned"
+                fi
+            elif [[ -d "$target" ]]; then
+                bytes="$(_cargo_target_bytes "$target")"
+                mtime="$(_cargo_target_mtime "$target")"
+            else
+                continue
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\n' "$mtime" "$bytes" "$prot" "$wt" "$target" >> "$output"
         done
         shopt -u nullglob
     done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
@@ -301,12 +448,20 @@ _cargo_target_registered() {
 }
 
 _cargo_target_path_is_owned() {
-    local wt="$1" target="$2"
-    [[ -d "$wt" && -d "$target" && ! -L "$target" ]] || return 1
+    local wt="$1" target="$2" resolved=""
     case "$target" in
-        "$wt/target"|"$wt"/crates/*/target) return 0 ;;
+        "$wt/target"|"$wt"/crates/*/target) ;;
         *) return 1 ;;
     esac
+    if [[ -L "$target" ]]; then
+        # Relocated cache: the link must sit where a glob found it AND the
+        # resolved directory must be one the offload created.
+        resolved="$(cd -- "$target" 2>/dev/null && pwd -P)" || return 1
+        _cargo_target_offload_owns_path "$resolved" || return 1
+        return 0
+    fi
+    [[ -d "$wt" && -d "$target" ]] || return 1
+    return 0
 }
 
 _cargo_free_bytes() {
@@ -319,10 +474,45 @@ _cargo_free_bytes() {
     df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $4*1024}'
 }
 
+_cargo_offload_base() {
+    # Where relocated cargo caches live: paths.cargo_targets_base when set,
+    # else ~/.fno/cargo-targets. FNO_CARGO_TARGETS_BASE overrides the read so
+    # tests can point both the offload and the sweep at a sandbox.
+    local raw=""
+    if [[ -n "${FNO_CARGO_TARGETS_BASE:-}" ]]; then
+        printf '%s\n' "${FNO_CARGO_TARGETS_BASE/#\~/$HOME}"
+        return 0
+    fi
+    if command -v fno >/dev/null 2>&1; then
+        raw="$(fno config get config.paths.cargo_targets_base 2>/dev/null || true)"
+    fi
+    # The state-dir fallback form is the shape the hardcoded-path gate
+    # exempts: honor a configured state_dir, else the standard ~/.fno.
+    [[ "$raw" == "null" || -z "$raw" ]] && raw="${STATE_DIR:-$HOME/.fno}/cargo-targets"
+    # Config stores ~ literally; expand a leading ~ to $HOME.
+    printf '%s\n' "${raw/#\~/$HOME}"
+}
+
+_cargo_target_offload_owns_path() {
+    # Is $1 a directory this repo's cargo-offload created: resolved under the
+    # offload base AND carrying cargo's own CACHEDIR.TAG? Both conjuncts are
+    # load-bearing: the base is fno-owned, the tag is cargo's, so a symlink
+    # reaching outside either is not ours to delete.
+    local resolved="$1" base
+    [[ -d "$resolved" ]] || return 1
+    [[ -f "$resolved/CACHEDIR.TAG" ]] || return 1
+    base="$(_cargo_offload_base)"
+    base="$(cd -- "$base" 2>/dev/null && pwd -P)" || return 1
+    case "$resolved/" in
+        "$base/"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 _cargo_target_cleanup() {
     local cap_bytes="$1" max_age_days="$2" apply="$3" free_share_pct="${4:-50}"
     local inventory candidates selected now before_bytes projected_after
-    local mtime bytes protection wt target age_days reason pids
+    local mtime bytes protection wt target age_days reason pids resolved
     local reaped=0 reclaimed=0 protected=0 after_bytes status mode
     local free_bytes effective_cap_bytes
 
@@ -435,13 +625,35 @@ _cargo_target_cleanup() {
             protected=$((protected + 1))
             continue
         fi
-        rm -rf -- "$target"
-        if [[ ! -e "$target" ]]; then
-            printf 'cargo-target reaped bytes=%s reason=%s path=%s\n' "$bytes" "$reason" "$target"
-            reaped=$((reaped + 1))
-            reclaimed=$((reclaimed + bytes))
+        if [[ -L "$target" ]]; then
+            # Relocated cache: delete the RESOLVED directory first, then the
+            # link - rm -rf on a symlink alone never touches the bytes. The
+            # ownership recheck above already validated it, but resolve and
+            # re-verify here anyway: the check and the delete are separate
+            # walks, and the cheap conjuncts are what keep rm inside the base.
+            resolved="$(cd -- "$target" 2>/dev/null && pwd -P)" || resolved=""
+            if [[ -z "$resolved" ]] || ! _cargo_target_offload_owns_path "$resolved"; then
+                printf 'cargo-target kept bytes=%s reason=link-target-not-owned path=%s\n' "$bytes" "$target"
+                continue
+            fi
+            rm -rf -- "$resolved"
+            rm -f -- "$target"
+            if [[ ! -e "$resolved" && ! -L "$target" ]]; then
+                printf 'cargo-target reaped bytes=%s reason=%s path=%s\n' "$bytes" "$reason" "$target"
+                reaped=$((reaped + 1))
+                reclaimed=$((reclaimed + bytes))
+            else
+                printf 'cargo-target kept bytes=%s reason=delete-failed path=%s\n' "$bytes" "$target"
+            fi
         else
-            printf 'cargo-target kept bytes=%s reason=delete-failed path=%s\n' "$bytes" "$target"
+            rm -rf -- "$target"
+            if [[ ! -e "$target" ]]; then
+                printf 'cargo-target reaped bytes=%s reason=%s path=%s\n' "$bytes" "$reason" "$target"
+                reaped=$((reaped + 1))
+                reclaimed=$((reclaimed + bytes))
+            else
+                printf 'cargo-target kept bytes=%s reason=delete-failed path=%s\n' "$bytes" "$target"
+            fi
         fi
     done < "$selected"
 
@@ -455,6 +667,296 @@ _cargo_target_cleanup() {
         "$status" "$mode" "$before_bytes" "$after_bytes" "$after_bytes" "$cap_bytes" "$free_bytes" "$effective_cap_bytes" "$reaped" "$reclaimed" "$protected"
     unlink "$inventory" "$candidates" "$selected" 2>/dev/null || true
     [[ "$status" == "ok" ]]
+}
+
+# Relocate every crates/<crate>/target cache out of the repo root, leaving a
+# symlink at the old path (x-f96e). The repo root is what a harness plugin
+# update copies, and 36.8 of its 41 GB is cargo build output, so MOVING the
+# bytes - not deleting them - is the lever: a cache is regenerable, so moving
+# it out of a dirty, unpushed or unmerged tree costs rebuild time and never
+# costs work. Every tree keeps its OWN destination <base>/<repo>/<tree>/<crate>
+# so sibling builds never share an artifact lock. Selection is by the
+# crates/*/target filesystem glob ONLY, never by directory name: cli/src/fno/target,
+# skills/target and tests/target are SOURCE dirs, and a name-based sweep
+# deleted 66 of them across 26 worktrees on 2026-09-02.
+_cargo_target_offload() {
+    local apply="${1:-}"
+    local base repo main_wt wt target crate tree dest bytes resolved
+    local protection pids pids_rc diag_file
+    local moved=0 moved_bytes=0 kept=0 already=0 mode
+    base="$(_cargo_offload_base)"
+    main_wt="$(git worktree list --porcelain 2>/dev/null | awk 'NR==1{sub(/^worktree /, ""); print}')"
+    repo="$(basename "${main_wt:-$(pwd)}")"
+    mode="dry-run"
+    [[ -n "$apply" ]] && mode="apply"
+    diag_file="${TMPDIR:-/tmp}/fno-wt-pids-diag.$$"
+    : > "$diag_file" || diag_file="/dev/null"
+    _wt_refresh_cwd_snapshot || true
+    while IFS= read -r wt; do
+        [[ -d "$wt" ]] || continue
+        # Same protection lane as the sweep, computed once per worktree: an
+        # in-flight cargo build holds open descriptors under a target dir
+        # being moved, so a tree with a live session or any rooted process is
+        # reported and left for the next run.
+        protection="-"
+        if _wt_live "$wt"; then
+            protection="live-session"
+        else
+            # _wt_pids runs inside a command substitution: globals it sets
+            # die with the subshell (CI 2026-09-07: the protection line kept
+            # printing an empty pid list). Its diagnostic rides stderr to a
+            # file the parent reads back with the `read` builtin.
+            : > "$diag_file"
+            pids="$(_wt_pids "$wt" 2>"$diag_file")"
+            pids_rc=$?
+            _WT_PIDS_DIAG=""
+            IFS= read -r _WT_PIDS_DIAG < "$diag_file" || true
+            if [[ "$pids_rc" -ne 0 ]]; then
+                protection="process-snapshot-unreadable"
+            elif [[ -n "$pids" ]]; then
+                protection="processes:$(printf '%s\n' "$pids" | grep -c .)"
+            fi
+        fi
+        shopt -s nullglob
+        for target in "$wt"/crates/*/target; do
+            [[ -e "$target" || -L "$target" ]] || continue
+            if [[ "$wt" == "$main_wt" ]]; then
+                tree="canonical"
+            else
+                tree="$(basename "$wt")"
+            fi
+            crate="$(basename "$(dirname "$target")")"
+            dest="$base/$repo/$tree/$crate"
+            if [[ -L "$target" ]]; then
+                resolved="$(cd -- "$target" 2>/dev/null && pwd -P)" || resolved=""
+                if [[ "$resolved" == "$dest" ]]; then
+                    already=$((already + 1))
+                    continue
+                fi
+                printf 'cargo-offload kept bytes=%s reason=already-a-symlink path=%s dest=%s\n' \
+                    "$(_cargo_target_bytes "$resolved")" "$target" "$dest"
+                kept=$((kept + 1))
+                continue
+            fi
+            bytes="$(_cargo_target_bytes "$target")"
+            if [[ "$protection" != "-" ]]; then
+                # pid:cmd@cwd rides last (tail position, like detail): a
+                # diagnostic for a protection verdict, never parsed by
+                # consumers. Snapshot-time truth from _wt_pids: a later
+                # `ps -p` re-read reports the empty command of a process
+                # that died in between and names nothing.
+                pid_diag="${_WT_PIDS_DIAG%,}"
+                printf 'cargo-offload protected bytes=%s reason=%s path=%s v=%s cwd_rows=%s pids=%s\n' \
+                    "$bytes" "$protection" "$target" "$_WT_PIDS_DIAG_VERSION" \
+                    "${_WT_CWD_ROWS:-?}" "${pid_diag%,}"
+                kept=$((kept + 1))
+                continue
+            fi
+            if [[ -e "$dest" ]]; then
+                # Two trees can share a basename. The bytes stay in place and
+                # the collision is named rather than merged - one artifact
+                # lock per tree is the invariant the layout exists to keep.
+                printf 'cargo-offload kept bytes=%s reason=dest-collision path=%s dest=%s\n' "$bytes" "$target" "$dest"
+                kept=$((kept + 1))
+                continue
+            fi
+            if [[ -z "$apply" ]]; then
+                printf 'cargo-offload would-move bytes=%s path=%s dest=%s\n' "$bytes" "$target" "$dest"
+                continue
+            fi
+            if mkdir -p "$(dirname "$dest")" && mv -- "$target" "$dest"; then
+                # A concurrent cargo can recreate the path between the mv and
+                # the ln. An empty recreation yields to rmdir (nothing written
+                # yet, nothing lost); anything else, or a failed link, undoes
+                # the move so the tree is exactly as it was.
+                if ln -s "$dest" "$target" \
+                    || { rmdir -- "$target" 2>/dev/null && ln -s "$dest" "$target"; }; then
+                    printf 'cargo-offload moved bytes=%s path=%s dest=%s\n' "$bytes" "$target" "$dest"
+                    moved=$((moved + 1))
+                    moved_bytes=$((moved_bytes + bytes))
+                else
+                    # Undo: the bytes go back, the tree is as it was.
+                    mv -- "$dest" "$target" 2>/dev/null || true
+                    printf 'cargo-offload kept bytes=%s reason=move-failed path=%s dest=%s\n' "$bytes" "$target" "$dest"
+                    kept=$((kept + 1))
+                fi
+            else
+                printf 'cargo-offload kept bytes=%s reason=move-failed path=%s dest=%s\n' "$bytes" "$target" "$dest"
+                kept=$((kept + 1))
+            fi
+        done
+        shopt -u nullglob
+    done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
+    printf 'cargo-offload status=ok mode=%s base=%s moved=%s moved_bytes=%s already-offloaded=%s kept=%s\n' \
+        "$mode" "$base" "$moved" "$moved_bytes" "$already" "$kept"
+    [[ "$diag_file" == "/dev/null" ]] || rm -f "$diag_file"
+}
+
+# One sweep at a time, shared by cleanup and cargo-offload. Caller sets
+# MAIN_DIR first; the function leaves the trap armed on success.
+_acquire_sweep_lock() {
+    # --- mutual exclusion --------------------------------------------------
+    # A sweep is idempotent read-only-ish work (the --merged path only mutates
+    # on --apply) that gains nothing from overlapping with another sweep - and
+    # a concurrent sweep's own subprocesses carry every worktree path in their
+    # argv, which _wt_pids' pgrep then matches, turning N overlapping sweeps
+    # into an N-squared subprocess storm (measured: load 570, 159 chained
+    # sweep processes, 2026-08-17). One sweep at a time removes that term
+    # outright. Portable mkdir lock (atomic on every POSIX filesystem) so
+    # there's no flock dependency; the status) case is never wrapped in this,
+    # it stays a fast, always-answering read.
+    _GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null)"
+    case "$_GIT_COMMON_DIR" in
+        /*) ;;
+        *) _GIT_COMMON_DIR="$MAIN_DIR/$_GIT_COMMON_DIR" ;;
+    esac
+    _WT_SWEEP_LOCK="$_GIT_COMMON_DIR/fno-wt-sweep.lock"
+    # The sweep's own birth certificate, for the budget-expiry grace
+    # below: a directory OLDER than this file predates the sweep and can
+    # be nobody's live claim.
+    _WT_SWEEP_STARTED="$_GIT_COMMON_DIR/.fno-wt-sweep-started.$$"
+    : > "$_WT_SWEEP_STARTED" 2>/dev/null || _WT_SWEEP_STARTED=""
+    _wt_lock_acquired=""
+    for _wt_lock_attempt in 1 2 3 4 5; do
+        if mkdir "$_WT_SWEEP_LOCK" 2>/dev/null; then
+            # The claim is not HELD until our own pid is the one on disk:
+            # the steal window below can take a fresh mkdir away before
+            # the write lands, and a sweep that proceeded on a lost
+            # directory wedged every later sweep behind a pid-less lock.
+            echo $$ > "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
+            if [[ "$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true)" == "$$" ]]; then
+                _wt_lock_acquired=1
+                break
+            fi
+            continue
+        fi
+        _held_pid="$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true)"
+        if [[ -n "$_held_pid" ]]; then
+            if kill -0 "$_held_pid" 2>/dev/null; then
+                if [[ "$_held_pid" == "$$" ]]; then
+                    # Our OWN lost claim: the verify above rejected it, so
+                    # this directory is ours to reclaim - backing off to
+                    # ourselves would read as "another sweep is running"
+                    # and strand our pid on the path until it dies.
+                    unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
+                    rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true
+                    continue
+                fi
+                echo "worktree cleanup: another sweep (pid $_held_pid) is already running; exiting (sweeps are idempotent, no need to overlap)" >&2
+                exit 0
+            fi
+            # Stamped but dead: genuinely stale, reclaim it. The steal must
+            # take the directory that was OBSERVED, and the observed
+            # directory's identity is its pid file, byte for byte. A blind
+            # removal acts on an observation that is already stale when it
+            # lands: the stale dir may have been replaced by a peer's fresh
+            # claim in between, and eating that is the ABA shape that ended
+            # with two sweeps both holding the lock. An inode match is NOT
+            # identity either: on Linux the directory created right after
+            # one is deleted can reuse the freed inode, and CI proved it -
+            # the moved FRESH claim matched and was eaten. A successor
+            # carries no pid file (fresh claim) or its own live pid, never
+            # the observed dead one; and if that pid has been recycled to
+            # a live process by the time the comparison runs, the
+            # liveness re-check keeps the steal off. The steal target is
+            # per-attempt unique and pre-cleaned, so mv always renames
+            # rather than nesting into a leftover of a killed earlier
+            # steal.
+            _WT_STALE="$_WT_SWEEP_LOCK.stale.$$.$RANDOM"
+            rm -rf "$_WT_STALE" 2>/dev/null || true
+            mv "$_WT_SWEEP_LOCK" "$_WT_STALE" 2>/dev/null || true
+            if [[ -d "$_WT_STALE" ]]; then
+                _moved_stamp="$(cat "$_WT_STALE/pid" 2>/dev/null || true)"
+                if [[ -n "$_moved_stamp" && "$_moved_stamp" == "$_held_pid" ]] \
+                    && ! kill -0 "$_held_pid" 2>/dev/null; then
+                    rm -rf "$_WT_STALE"
+                elif [[ ! -e "$_WT_SWEEP_LOCK" ]]; then
+                    # Not what we observed and nobody has claimed the path
+                    # since: put it back untouched.
+                    # ACCEPTED RESIDUAL: a verified holder can still be
+                    # dislodged here by a double-steal chain - our stale
+                    # observation outlives a peer's steal-and-verify, our
+                    # mv takes the peer's verified dir, and a third claim
+                    # mkdirs inside the test-to-mv window so the restore
+                    # NESTS the peer's copy and the lift deletes it. The
+                    # lift stays (without it the holder's own trap wedges
+                    # on a non-empty dir); the window is milliseconds wide
+                    # and no shell primitive closes it in place - the
+                    # atomic-claim substrate is the real retirement, filed
+                    # separately.
+                    mv "$_WT_STALE" "$_WT_SWEEP_LOCK"
+                    # A claim taking the path between the test and this mv
+                    # makes the restore NEST (mv moves a dir into an
+                    # existing dir); lifting our copy back out leaves the
+                    # holder's own trap able to rmdir later.
+                    if [[ -d "$_WT_SWEEP_LOCK/${_WT_STALE##*/}" ]]; then
+                        rm -rf "$_WT_SWEEP_LOCK/${_WT_STALE##*/}"
+                    fi
+                elif [[ -z "$_moved_stamp" ]] || ! kill -0 "$_moved_stamp" 2>/dev/null; then
+                    # The path was re-taken before the restore, so the
+                    # moved copy is unreachable debris; reap it only when
+                    # its own stamp is absent or dead - never while it
+                    # names a live claim.
+                    rm -rf "$_WT_STALE"
+                fi
+                # A live-stamp copy with no free path stays where it is;
+                # the sibling sweep at the next acquisition reaps it once
+                # that process dies.
+            fi
+            # Return to the atomic mkdir path.
+            continue
+        fi
+        # Dir exists but carries no pid yet: a peer may be mid-acquire
+        # (mkdir succeeded, the pid write hasn't landed). Reclaiming this
+        # unconditionally is the exact race that let two sweeps both
+        # believe they held the lock - wait briefly instead of tearing
+        # down a hold that never went stale.
+        if [[ "$_wt_lock_attempt" -eq 5 ]]; then
+            # Still pid-less after the whole retry budget: not a
+            # mid-acquire peer (its write lands in milliseconds) but
+            # debris from a lost pid write. Reaping an EMPTY dir here is
+            # what keeps one lost write from wedging every future sweep,
+            # and the empty-only rmdir is also the guard: a peer's pid
+            # write landing between the emptiness read and here makes the
+            # dir non-empty and the rmdir fails, so a holder is never
+            # removed. The deeper wedge is a PID-LESS dir WITH content -
+            # an interrupted steal's nested copy, whose owner's trap
+            # unlinked the pid but could not rmdir - which the rmdir gives
+            # up on silently and every future sweep expires against. That
+            # one gets rm -rf, only once it is OLDER than this sweep
+            # (find -newer against the birth certificate above): anything
+            # created after the sweep started is someone's live claim and
+            # is spared.
+            if [[ -z "$(ls -A "$_WT_SWEEP_LOCK" 2>/dev/null || true)" ]]; then
+                rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true
+            elif [[ -n "$_WT_SWEEP_STARTED" ]] \
+                && [[ -n "$(find "$_WT_SWEEP_LOCK" -maxdepth 0 ! -newer "$_WT_SWEEP_STARTED" 2>/dev/null)" ]]; then
+                rm -rf "$_WT_SWEEP_LOCK"
+            fi
+        fi
+        sleep 0.2
+    done
+    if [[ -z "$_wt_lock_acquired" ]]; then
+        echo "worktree cleanup: could not acquire sweep lock after retries; exiting" >&2
+        exit 0
+    fi
+    # Sweep-leftover debris: a steal interrupted between the mv and its
+    # disposition leaves fno-wt-sweep.lock.stale.* siblings nothing ever
+    # revisits. Holding the lock makes every sibling unreferenced; each
+    # is reaped only while its own stamp is absent or dead, so a live
+    # claim's copy survives until that process dies.
+    for _wt_stale in "$_GIT_COMMON_DIR"/fno-wt-sweep.lock.stale.*; do
+        [[ -d "$_wt_stale" ]] || continue
+        _stale_stamp="$(cat "$_wt_stale/pid" 2>/dev/null || true)"
+        if [[ -z "$_stale_stamp" ]] || ! kill -0 "$_stale_stamp" 2>/dev/null; then
+            rm -rf "$_wt_stale"
+        fi
+    done
+    echo $$ > "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
+    # Only tear down the lock if it still names us - a lock reclaimed
+    # from a dead holder, or freshly acquired, must never be removed out
+    # from under a different process that has since taken it over.
+    trap 'rm -f "$_WT_SWEEP_STARTED" 2>/dev/null || true; [[ "$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null)" == "$$" ]] && { unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true; rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true; }' EXIT
 }
 
 case "${1:-status}" in
@@ -504,168 +1006,7 @@ case "${1:-status}" in
 
         MAIN_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
 
-        # --- mutual exclusion --------------------------------------------------
-        # A sweep is idempotent read-only-ish work (the --merged path only mutates
-        # on --apply) that gains nothing from overlapping with another sweep - and
-        # a concurrent sweep's own subprocesses carry every worktree path in their
-        # argv, which _wt_pids' pgrep then matches, turning N overlapping sweeps
-        # into an N-squared subprocess storm (measured: load 570, 159 chained
-        # sweep processes, 2026-08-17). One sweep at a time removes that term
-        # outright. Portable mkdir lock (atomic on every POSIX filesystem) so
-        # there's no flock dependency; the status) case is never wrapped in this,
-        # it stays a fast, always-answering read.
-        _GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null)"
-        case "$_GIT_COMMON_DIR" in
-            /*) ;;
-            *) _GIT_COMMON_DIR="$MAIN_DIR/$_GIT_COMMON_DIR" ;;
-        esac
-        _WT_SWEEP_LOCK="$_GIT_COMMON_DIR/fno-wt-sweep.lock"
-        # The sweep's own birth certificate, for the budget-expiry grace
-        # below: a directory OLDER than this file predates the sweep and can
-        # be nobody's live claim.
-        _WT_SWEEP_STARTED="$_GIT_COMMON_DIR/.fno-wt-sweep-started.$$"
-        : > "$_WT_SWEEP_STARTED" 2>/dev/null || _WT_SWEEP_STARTED=""
-        _wt_lock_acquired=""
-        for _wt_lock_attempt in 1 2 3 4 5; do
-            if mkdir "$_WT_SWEEP_LOCK" 2>/dev/null; then
-                # The claim is not HELD until our own pid is the one on disk:
-                # the steal window below can take a fresh mkdir away before
-                # the write lands, and a sweep that proceeded on a lost
-                # directory wedged every later sweep behind a pid-less lock.
-                echo $$ > "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
-                if [[ "$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true)" == "$$" ]]; then
-                    _wt_lock_acquired=1
-                    break
-                fi
-                continue
-            fi
-            _held_pid="$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true)"
-            if [[ -n "$_held_pid" ]]; then
-                if kill -0 "$_held_pid" 2>/dev/null; then
-                    if [[ "$_held_pid" == "$$" ]]; then
-                        # Our OWN lost claim: the verify above rejected it, so
-                        # this directory is ours to reclaim - backing off to
-                        # ourselves would read as "another sweep is running"
-                        # and strand our pid on the path until it dies.
-                        unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
-                        rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true
-                        continue
-                    fi
-                    echo "worktree cleanup: another sweep (pid $_held_pid) is already running; exiting (sweeps are idempotent, no need to overlap)" >&2
-                    exit 0
-                fi
-                # Stamped but dead: genuinely stale, reclaim it. The steal must
-                # take the directory that was OBSERVED, and the observed
-                # directory's identity is its pid file, byte for byte. A blind
-                # removal acts on an observation that is already stale when it
-                # lands: the stale dir may have been replaced by a peer's fresh
-                # claim in between, and eating that is the ABA shape that ended
-                # with two sweeps both holding the lock. An inode match is NOT
-                # identity either: on Linux the directory created right after
-                # one is deleted can reuse the freed inode, and CI proved it -
-                # the moved FRESH claim matched and was eaten. A successor
-                # carries no pid file (fresh claim) or its own live pid, never
-                # the observed dead one; and if that pid has been recycled to
-                # a live process by the time the comparison runs, the
-                # liveness re-check keeps the steal off. The steal target is
-                # per-attempt unique and pre-cleaned, so mv always renames
-                # rather than nesting into a leftover of a killed earlier
-                # steal.
-                _WT_STALE="$_WT_SWEEP_LOCK.stale.$$.$RANDOM"
-                rm -rf "$_WT_STALE" 2>/dev/null || true
-                mv "$_WT_SWEEP_LOCK" "$_WT_STALE" 2>/dev/null || true
-                if [[ -d "$_WT_STALE" ]]; then
-                    _moved_stamp="$(cat "$_WT_STALE/pid" 2>/dev/null || true)"
-                    if [[ -n "$_moved_stamp" && "$_moved_stamp" == "$_held_pid" ]] \
-                        && ! kill -0 "$_held_pid" 2>/dev/null; then
-                        rm -rf "$_WT_STALE"
-                    elif [[ ! -e "$_WT_SWEEP_LOCK" ]]; then
-                        # Not what we observed and nobody has claimed the path
-                        # since: put it back untouched.
-                        # ACCEPTED RESIDUAL: a verified holder can still be
-                        # dislodged here by a double-steal chain - our stale
-                        # observation outlives a peer's steal-and-verify, our
-                        # mv takes the peer's verified dir, and a third claim
-                        # mkdirs inside the test-to-mv window so the restore
-                        # NESTS the peer's copy and the lift deletes it. The
-                        # lift stays (without it the holder's own trap wedges
-                        # on a non-empty dir); the window is milliseconds wide
-                        # and no shell primitive closes it in place - the
-                        # atomic-claim substrate is the real retirement, filed
-                        # separately.
-                        mv "$_WT_STALE" "$_WT_SWEEP_LOCK"
-                        # A claim taking the path between the test and this mv
-                        # makes the restore NEST (mv moves a dir into an
-                        # existing dir); lifting our copy back out leaves the
-                        # holder's own trap able to rmdir later.
-                        if [[ -d "$_WT_SWEEP_LOCK/${_WT_STALE##*/}" ]]; then
-                            rm -rf "$_WT_SWEEP_LOCK/${_WT_STALE##*/}"
-                        fi
-                    elif [[ -z "$_moved_stamp" ]] || ! kill -0 "$_moved_stamp" 2>/dev/null; then
-                        # The path was re-taken before the restore, so the
-                        # moved copy is unreachable debris; reap it only when
-                        # its own stamp is absent or dead - never while it
-                        # names a live claim.
-                        rm -rf "$_WT_STALE"
-                    fi
-                    # A live-stamp copy with no free path stays where it is;
-                    # the sibling sweep at the next acquisition reaps it once
-                    # that process dies.
-                fi
-                # Return to the atomic mkdir path.
-                continue
-            fi
-            # Dir exists but carries no pid yet: a peer may be mid-acquire
-            # (mkdir succeeded, the pid write hasn't landed). Reclaiming this
-            # unconditionally is the exact race that let two sweeps both
-            # believe they held the lock - wait briefly instead of tearing
-            # down a hold that never went stale.
-            if [[ "$_wt_lock_attempt" -eq 5 ]]; then
-                # Still pid-less after the whole retry budget: not a
-                # mid-acquire peer (its write lands in milliseconds) but
-                # debris from a lost pid write. Reaping an EMPTY dir here is
-                # what keeps one lost write from wedging every future sweep,
-                # and the empty-only rmdir is also the guard: a peer's pid
-                # write landing between the emptiness read and here makes the
-                # dir non-empty and the rmdir fails, so a holder is never
-                # removed. The deeper wedge is a PID-LESS dir WITH content -
-                # an interrupted steal's nested copy, whose owner's trap
-                # unlinked the pid but could not rmdir - which the rmdir gives
-                # up on silently and every future sweep expires against. That
-                # one gets rm -rf, only once it is OLDER than this sweep
-                # (find -newer against the birth certificate above): anything
-                # created after the sweep started is someone's live claim and
-                # is spared.
-                if [[ -z "$(ls -A "$_WT_SWEEP_LOCK" 2>/dev/null || true)" ]]; then
-                    rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true
-                elif [[ -n "$_WT_SWEEP_STARTED" ]] \
-                    && [[ -n "$(find "$_WT_SWEEP_LOCK" -maxdepth 0 ! -newer "$_WT_SWEEP_STARTED" 2>/dev/null)" ]]; then
-                    rm -rf "$_WT_SWEEP_LOCK"
-                fi
-            fi
-            sleep 0.2
-        done
-        if [[ -z "$_wt_lock_acquired" ]]; then
-            echo "worktree cleanup: could not acquire sweep lock after retries; exiting" >&2
-            exit 0
-        fi
-        # Sweep-leftover debris: a steal interrupted between the mv and its
-        # disposition leaves fno-wt-sweep.lock.stale.* siblings nothing ever
-        # revisits. Holding the lock makes every sibling unreferenced; each
-        # is reaped only while its own stamp is absent or dead, so a live
-        # claim's copy survives until that process dies.
-        for _wt_stale in "$_GIT_COMMON_DIR"/fno-wt-sweep.lock.stale.*; do
-            [[ -d "$_wt_stale" ]] || continue
-            _stale_stamp="$(cat "$_wt_stale/pid" 2>/dev/null || true)"
-            if [[ -z "$_stale_stamp" ]] || ! kill -0 "$_stale_stamp" 2>/dev/null; then
-                rm -rf "$_wt_stale"
-            fi
-        done
-        echo $$ > "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
-        # Only tear down the lock if it still names us - a lock reclaimed
-        # from a dead holder, or freshly acquired, must never be removed out
-        # from under a different process that has since taken it over.
-        trap 'rm -f "$_WT_SWEEP_STARTED" 2>/dev/null || true; [[ "$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null)" == "$$" ]] && { unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true; rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true; }' EXIT
+        _acquire_sweep_lock
 
         if [[ -n "$CARGO_TARGETS" ]]; then
             CARGO_APPLY="$APPLY"
@@ -1020,8 +1361,24 @@ case "${1:-status}" in
         fi
         ;;
 
+    cargo-offload)
+        shift
+        OFFLOAD_APPLY=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --apply) OFFLOAD_APPLY="true"; shift ;;
+                --dry-run) OFFLOAD_APPLY=""; shift ;;
+                *) shift ;;
+            esac
+        done
+        MAIN_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
+        _acquire_sweep_lock
+        _cargo_target_offload "$OFFLOAD_APPLY"
+        exit $?
+        ;;
+
     *)
-        echo "Usage: worktree-lifecycle.sh {status|cleanup|archive} [args]"
+        echo "Usage: worktree-lifecycle.sh {status|cleanup|archive|cargo-offload} [args]"
         exit 1
         ;;
 esac

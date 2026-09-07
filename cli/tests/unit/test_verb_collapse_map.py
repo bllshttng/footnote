@@ -98,7 +98,26 @@ def test_map_covers_current_surface_once():
     # This branch adds `agents king cancel`, the isolated cancellation
     # control: counted from the merged file, 566 -> 567, and `agents king
     # shape` (reign) lands on the same count: 567 total from 565.
-    assert len(mapped) == 568, (
+    # This branch adds `backlog contain`, the plan-less containment fold,
+    # as one new row (first allocated under a retired alias, renamed in
+    # place before merge): 568 -> 569. Main added `agents feed`, the
+    # activity feed projection, from the same base; main's sidecar
+    # retirement deleted the `backlog rehash` row. The rust-conversion
+    # ruling deleted this branch's `agents reseat` Python surface: net zero.
+    # The crown-durability branch allocated the directly invoked
+    # `agents court-orphans` sweep its row. Counted from the merged file,
+    # never taken from either side: 570. This branch also adds
+    # `agents king drain`, the scope drain read the reign terminations key on:
+    # 570 -> 571. Upstream added `agents newest-assistant-text` (the hidden
+    # transcript read the loopcheck distress leg shells) and this branch adds
+    # `agents friction-escalate` (the watchdog friction lane): 571 -> 573.
+    # This branch also allocates `backlog requeue` its row: 573 -> 574.
+    # The cargo-offload branch allocates both spellings of the new verb their
+    # rows: `agents workspace worktree cargo-offload` and the legacy
+    # `worktree cargo-offload`: 574 -> 576.
+    # The two-lane discovery branch allocates `backlog discover`, the hidden
+    # discovery worklist read: counted from the merged file, 576 -> 577.
+    assert len(mapped) == 577, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

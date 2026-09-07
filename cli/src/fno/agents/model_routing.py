@@ -7,7 +7,7 @@ diff, the correctness verdict) stays on the primary Anthropic model,
 byte-for-byte as today.
 
 The ``build`` lane extends the same mechanism to *delivery* spawns (``/target
-bg`` + blueprint autolaunch). It is opt-in by config presence: unconfigured it
+bg`` + the ordered ``fno backlog advance`` drain). It is opt-in by config presence: unconfigured it
 routes nothing (fail-safe ``None``); writing ``model_routing.roles.build`` is
 the consent. ``build`` is not in :data:`DEFAULT_ROUTED_ROLES` but is named in
 :data:`KNOWN_LANE_ROLES` so ``fno config route ls`` renders it even before it is set.
@@ -330,8 +330,8 @@ def resolve_spawn_route(
 # IS the consent). `_role_target` already resolves any config-present name, so
 # these need no resolution-path change; they exist so `fno config route ls` can render
 # a lane that has no config line yet (an unconfigured `build` row) instead of
-# hiding it. `build` is the sanctioned delivery lane for /target bg + blueprint
-# autolaunch; `pr-create` is the PR-creation worker (/pr create). Unconfigured
+# hiding it. `build` is the sanctioned delivery lane for /target bg + the
+# ordered advance drain; `pr-create` is the PR-creation worker (/pr create). Unconfigured
 # either fails safe to the primary Anthropic model - no hardcoded tier.
 KNOWN_LANE_ROLES = ("build", "pr-create")
 
@@ -1719,7 +1719,7 @@ def effective_providers(
 AUTO_ASSIGNED_BY: dict[str, str] = {
     "post-merge": "pr_watch post-merge dispatch",
     "codex-verify": "codex verify lane",
-    "build": "/target bg + blueprint autolaunch",
+    "build": "/target bg + fno backlog advance",
 }
 
 # Why each protected name is guarded, rendered in the `assigned_by` column so a

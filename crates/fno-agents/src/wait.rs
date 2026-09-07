@@ -138,7 +138,7 @@ fn find_effective_entry(
 /// `fno-agents wait --agent <name> --state idle|blocked|done [--timeout-ms N] [--json]`
 pub async fn run_wait(rest: &[String], home: &AgentsHome) -> i32 {
     run_wait_with_timed_probe(rest, home, |handle, timeout| {
-        crate::claude_ask::family1_truth_probe_with_timeout(handle, timeout)
+        crate::truth_probe::family1_truth_probe_with_timeout(handle, timeout)
     })
     .await
 }
@@ -149,7 +149,7 @@ pub async fn run_wait(rest: &[String], home: &AgentsHome) -> i32 {
 pub async fn run_wait_with_probe(
     rest: &[String],
     home: &AgentsHome,
-    truth_probe: impl Fn(&str) -> Option<crate::claude_ask::TruthProbe>,
+    truth_probe: impl Fn(&str) -> Option<crate::truth_probe::TruthProbe>,
 ) -> i32 {
     run_wait_with_timed_probe(rest, home, |handle, _timeout| truth_probe(handle)).await
 }
@@ -157,7 +157,7 @@ pub async fn run_wait_with_probe(
 async fn run_wait_with_timed_probe(
     rest: &[String],
     home: &AgentsHome,
-    truth_probe: impl Fn(&str, Duration) -> Option<crate::claude_ask::TruthProbe>,
+    truth_probe: impl Fn(&str, Duration) -> Option<crate::truth_probe::TruthProbe>,
 ) -> i32 {
     let mut name: Option<String> = None;
     let mut target: Option<String> = None;
@@ -356,8 +356,8 @@ mod tests {
         })
     }
 
-    fn truth_probe(state: &str) -> crate::claude_ask::TruthProbe {
-        crate::claude_ask::TruthProbe {
+    fn truth_probe(state: &str) -> crate::truth_probe::TruthProbe {
+        crate::truth_probe::TruthProbe {
             state: state.into(),
             reachability: Some("reachable".into()),
             basis: Some("transcript".into()),

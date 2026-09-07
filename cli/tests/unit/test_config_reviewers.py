@@ -29,7 +29,6 @@ def _settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str):
     cfg = tmp_path / "settings.yaml"
     cfg.write_text(body)
     monkeypatch.setenv("FNO_CONFIG", str(cfg))
-    load_settings.cache_clear()
     return load_settings()
 
 
@@ -142,7 +141,6 @@ def _doctor_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reviewers: s
         monkeypatch.delenv(var, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    load_settings.cache_clear()
     from fno.cli import app
 
     return CliRunner().invoke(app, ["config", "doctor", "--review"])
@@ -205,7 +203,6 @@ def _doctor_peers(
         monkeypatch.delenv(var, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
-    load_settings.cache_clear()
     from fno.cli import app
 
     return CliRunner().invoke(app, ["config", "doctor", "--review"])
@@ -331,7 +328,10 @@ def _toml_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str):
     cfg = tmp_path / "config.toml"
     cfg.write_text(body)
     monkeypatch.setenv("FNO_CONFIG", str(cfg))
-    load_settings.cache_clear()
+    # The declaration key is unchanged by a content rewrite; drop the entry.
+    from fno.config import _load_settings_at
+
+    _load_settings_at.cache_clear()
     return load_settings()
 
 
@@ -423,7 +423,6 @@ def test_doctor_reports_the_resolved_gates(
     cfg.write_text('done_probes = ["make a11y-check"]\n\n' + _REGISTRY_TOML)
     monkeypatch.setenv("FNO_CONFIG", str(cfg))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s1")
-    load_settings.cache_clear()
     from fno.cli import app
 
     r = CliRunner().invoke(app, ["config", "doctor"])

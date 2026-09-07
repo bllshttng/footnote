@@ -745,7 +745,13 @@ def test_us2_schema_version_is_three() -> None:
     # v23 (x-3837): additive `substrate` - the lane a row was spawned on.
     # v24 (x-2019): additive `requested_model`/`requested_provider`/
     # `requested_effort` - the spawn request verbatim beside the effect.
-    assert SCHEMA_VERSION == 26
+    # v27 (x-04ce): additive `launch_account_source` - WHO chose the account.
+    # v28 (x-5283): additive `adopted_by_session` - who VOUCHED for an
+    # adopted row, split out of the spawn edge.
+    # v29: additive `resolved_sandbox`/`granted_writable_roots` - what a codex
+    # thread row's sandbox RESOLVED to server-side and the roots it carries,
+    # beside the v19 `sandbox_posture` REQUEST that a resume re-applies.
+    assert SCHEMA_VERSION == 29
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -2182,7 +2188,7 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
         write_registry,
     )
 
-    assert SCHEMA_VERSION == 26
+    assert SCHEMA_VERSION == 29
     use_tmpdir(monkeypatch, tmp_path)
     entry = register_existing_session(
         provider=CLAUDE_HARNESS,
@@ -2248,7 +2254,7 @@ def test_v24_requested_axis_round_trips_verbatim(tmp_path: Path, monkeypatch) ->
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, SCHEMA_VERSION, load_registry, write_registry
 
-    assert SCHEMA_VERSION == 26
+    assert SCHEMA_VERSION == 29
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     entry = AgentEntry(
         name="requested-axis",
@@ -2447,6 +2453,53 @@ def test_update_registry_emits_nothing_when_nothing_is_removed(
     assert not events_path.exists(), "a removal-free write never opens the stream"
 
 
+def test_update_registry_journals_rows_lost_naming_the_writer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """x-f0d2: a lossy save journals one grouped registry_rows_lost event.
+
+    The per-row registry_row_removed events carry the remover; the grouped
+    event is the writer-naming instrument the 09-03 investigation lacked:
+    writer (python), pid, the verb that ran, and every lost id with its name.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, update_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
+    _seed_rows(
+        registry_path,
+        [
+            AgentEntry(
+                name="kept", harness="claude", harness_session_id="kept-s",
+                cwd="/tmp", log_path="/tmp/k.log",
+            ),
+            AgentEntry(
+                name="dropped", harness="claude", harness_session_id="dropped-s",
+                cwd="/tmp", log_path="/tmp/d.log",
+            ),
+        ],
+    )
+
+    update_registry(
+        lambda es: [e for e in es if e.name != "dropped"], path=registry_path
+    )
+
+    lines = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    lost = [e for e in lines if e["type"] == "registry_rows_lost"]
+    assert len(lost) == 1, f"exactly one grouped loss event: {lines}"
+    data = lost[0]["data"]
+    assert data["writer"] == "python"
+    assert isinstance(data["pid"], int)
+    assert data["verb"], "the verb names the door, not just the binary"
+    assert data["lost"] == [
+        {"harness_session_id": "dropped-s", "name": "dropped"}
+    ]
+
+
 def test_update_registry_announces_a_removal_it_cannot_build_a_receipt_for(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2620,3 +2673,89 @@ def test_a_failed_write_announces_nothing(tmp_path: Path, monkeypatch) -> None:
         pass
 
     assert not events_path.exists(), "an unpersisted removal must not be announced"
+
+
+def _write_rows(registry_path: Path, rows: list[dict]) -> None:
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    from fno.agents.registry import SCHEMA_VERSION
+
+    registry_path.write_text(
+        json.dumps({"schema_version": SCHEMA_VERSION, "agents": rows}),
+        encoding="utf-8",
+    )
+
+
+def test_thread_ref_backfills_from_session_id(tmp_path: Path, monkeypatch) -> None:
+    """AC1-HP: a thread row that learned its session id also has a thread ref."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    _write_rows(
+        registry_path,
+        [
+            {
+                "name": "bp-b7c1-stuck",
+                "harness": "claude",
+                "harness_session_id": "5bab90bc-1391-4b94-8e5a-bfb663268506",
+                "substrate": "thread",
+                "cwd": "/tmp",
+                "log_path": "/tmp/bp.log",
+            }
+        ],
+    )
+
+    loaded = load_registry(path=registry_path)
+
+    assert len(loaded) == 1
+    assert loaded[0].fno_id == "5bab90bc-1391-4b94-8e5a-bfb663268506"
+
+
+def test_thread_ref_backfill_never_overwrites(tmp_path: Path, monkeypatch) -> None:
+    """AC2-EDGE: a row that already carries a thread ref keeps it."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    _write_rows(
+        registry_path,
+        [
+            {
+                "name": "branch-row",
+                "harness": "claude",
+                "harness_session_id": "sess-b",
+                "fno_id": "thread-a",
+                "substrate": "thread",
+                "cwd": "/tmp",
+                "log_path": "/tmp/br.log",
+            }
+        ],
+    )
+
+    loaded = load_registry(path=registry_path)
+
+    assert loaded[0].fno_id == "thread-a"
+
+
+def test_thread_ref_backfill_needs_a_session_id(tmp_path: Path, monkeypatch) -> None:
+    """AC3-EDGE: no session id to adopt leaves the thread ref absent."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    _write_rows(
+        registry_path,
+        [
+            {
+                "name": "spawning-row",
+                "harness": "claude",
+                "substrate": "thread",
+                "cwd": "/tmp",
+                "log_path": "/tmp/sp.log",
+            }
+        ],
+    )
+
+    loaded = load_registry(path=registry_path)
+
+    assert loaded[0].fno_id is None

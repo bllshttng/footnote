@@ -19,8 +19,9 @@ difficulty: <low | medium | high> # Required for plans created after 2026-08-26.
 #                                 # senior tech lead makes of the problem. Not
 #                                 # a model or capacity hint.
 # claims: ab-XXXXXXXX             # Only when the input was an ab-id. When set,
-#                                 # `fno backlog intake` updates that idea-state
-#                                 # node in place instead of creating a duplicate.
+#                                 # `fno backlog intake` updates that node in
+#                                 # place, in any state, instead of creating a
+#                                 # duplicate.
 #                                 # /blueprint writes this automatically; do not
 #                                 # hand-author it except to repair a dangling
 #                                 # node. See SKILL.md "Plan Claims Ingestion".

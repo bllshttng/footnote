@@ -21,14 +21,8 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    paths_mod._settings.cache_clear()
-    paths_mod.resolve_repo_root.cache_clear()
     yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()
-    paths_mod.resolve_repo_root.cache_clear()
 
 
 def test_inbox_path_default_anchors_to_repo_root(
@@ -48,8 +42,6 @@ def test_inbox_path_default_anchors_to_repo_root(
     )
     import fno.paths as paths_mod
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()
 
     result = paths_mod.inbox_path(project_root=tmp_path)
     assert result == (tmp_path / "internal/fno/backlog/parking-lot.md").resolve()
@@ -108,8 +100,6 @@ def test_inbox_path_honors_settings_override(
     )
     import fno.paths as paths_mod
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()
 
     result = paths_mod.inbox_path(project_root=tmp_path)
     assert result == custom.resolve()
@@ -133,8 +123,6 @@ def test_inbox_path_expands_project_template_var(
     )
     import fno.paths as paths_mod
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()
 
     result = paths_mod.inbox_path(project_root=tmp_path)
     assert result == (tmp_path / "myproj" / "inbox.md").resolve()
@@ -163,8 +151,6 @@ def test_inbox_path_resolves_through_symlink(
     )
     import fno.paths as paths_mod
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()
 
     canonical = tmp_path / "canonical_vault"
     canonical.mkdir()
@@ -213,8 +199,6 @@ def test_inbox_path_honors_post_merge_parking_lot_path(
     )
     import fno.paths as paths_mod
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()
 
     result = paths_mod.inbox_path(project_root=tmp_path)
     assert result == (tmp_path / "internal/etl/backlog/parking-lot.md").resolve()
@@ -240,8 +224,6 @@ def test_inbox_path_explicit_override_beats_post_merge(
     )
     import fno.paths as paths_mod
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()
 
     result = paths_mod.inbox_path(project_root=tmp_path)
     assert result == custom.resolve()
@@ -268,9 +250,6 @@ def test_explicit_project_root_loads_that_projects_capture_config(
     import fno.paths as paths_mod
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()
-    paths_mod.resolve_repo_root.cache_clear()
 
     result = paths_mod.inbox_path(project_root=sibling)
 

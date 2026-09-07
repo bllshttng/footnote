@@ -5,7 +5,7 @@
 use super::*;
 
 pub(super) fn handle_list(ctx: &Ctx, req: &Request) -> Response {
-    handle_list_with_truth(ctx, req, crate::claude_ask::family1_truth_probe_many)
+    handle_list_with_truth(ctx, req, crate::truth_probe::family1_truth_probe_many)
 }
 
 /// One row's list-lane attention key: evidence tier, then longest-silent

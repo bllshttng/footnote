@@ -99,8 +99,11 @@ mod tests {
     /// on `run_bounded` while `run_probe` kept its own bare `.spawn()`, so a
     /// loaded fleet host still turned a healthy done_probe into BLOCKED and
     /// held the stop gate. Both runners now route through the one spawner,
-    /// and exactly one direct spawn survives: `best_effort_notify`, which is
-    /// detached and non-fatal by design and has no caller to report to.
+    /// and the last direct spawn left the file entirely: the detached
+    /// notifier moved to `operator_notice::notify_operator_with`, which is
+    /// the crate's one direct spawn - detached with null stdio and non-fatal
+    /// by design, so it cannot take the bounded transport's piped,
+    /// owns-the-output contract, and its failures have no caller to retry to.
     #[test]
     fn no_unretried_spawn_outside_the_bounded_spawner() {
         let source = include_str!("loopcheck.rs");
@@ -120,10 +123,10 @@ mod tests {
         );
         assert_eq!(
             production.matches(".spawn()").count(),
-            1,
-            "exactly one direct spawn survives (the detached notifier); a new \
-             one routes through bounded_spawn::spawn_bounded, or amends this \
-             guard with why it cannot"
+            0,
+            "loopcheck spawns only through bounded_spawn; the crate's one \
+             detached direct spawn lives in operator_notice, and a new direct \
+             spawn here routes through spawn_bounded or amends this guard"
         );
     }
 

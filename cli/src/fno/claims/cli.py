@@ -61,6 +61,16 @@ from typing import Callable, List, Mapping, NamedTuple, Optional
 
 import typer
 
+# The core callables are resolved THROUGH the module at call time, never
+# bound here: a module-level `from .core import acquire_claim` snapshot is
+# frozen at this module's first import, and a worker whose first import lands
+# while a test's core stub is active captures the stub permanently - every
+# later `claim acquire` then prints success and writes nothing (the
+# xdist-scheduling flake in test_dispatch_barrier; see the regression test in
+# test_claims_cli.py). Constants and exception classes are safe to bind: the
+# suite patches functions, not classes.
+from . import core as _claims_core
+from . import io as _claims_io
 from .core import (
     HANDOVER_HOLDER_PREFIX as _HANDOVER_HOLDER_PREFIX,
     ClaimContended,
@@ -72,15 +82,7 @@ from .core import (
     ClaimVerdictUnavailable,
     ClaimState,
     HolderMismatch,
-    acquire_claim,
-    claim_status,
-    force_release_claim,
-    list_claims_with_counts,
-    reap_dead_claims,
-    refresh_claim,
-    release_claim,
 )
-from .io import dedup_claims_roots, global_claims_root
 from fno.tombstones import tombstone_group_cls
 
 
@@ -342,7 +344,7 @@ def acquire(
                 )
                 return
     try:
-        claim = acquire_claim(
+        claim = _claims_core.acquire_claim(
             key=key,
             holder=holder,
             reason=reason or None,
@@ -507,7 +509,9 @@ def release(
         )
         raise typer.Exit(code=2)
     try:
-        released = release_claim(key=key, holder=holder, strict=strict, root=_node_aware_root(key))
+        released = _claims_core.release_claim(
+            key=key, holder=holder, strict=strict, root=_node_aware_root(key)
+        )
     except HolderMismatch as exc:
         typer.echo(f"holder mismatch: {exc}", err=True)
         raise typer.Exit(code=4)
@@ -534,9 +538,38 @@ def release(
             _stamp_do_on_release(key, released, holder)
         elif rollback_do:
             _rollback_do_on_release(key, released, holder)
+    elif released is None and key.startswith("node:"):
+        # release_claim's own docstring names four ways it returns None (the
+        # file is already gone, the holder does not match, the file is
+        # corrupted, the recovery mutex timed out) - in all four nothing was
+        # unlinked, so the do row this call would have touched stays as it
+        # was. Named here rather than silent, for both flags: a do row was
+        # never in play for any key type outside node: (the success branch
+        # above shares the same gate).
+        if stamp_do:
+            typer.echo(
+                f"do stamp skipped for {key}: release was a no-op "
+                "(nothing was unlinked, so no do row was closed)",
+                err=True,
+            )
+        elif rollback_do:
+            typer.echo(
+                f"do rollback skipped for {key}: release was a no-op "
+                "(nothing was unlinked, so no do row was dropped)",
+                err=True,
+            )
 
+    # released is None means nothing was unlinked - a false "released: true"
+    # here is the receipt that let the missing do-row close go unnoticed.
+    # None covers four causes (already gone, holder mismatch, corrupted
+    # file, recovery-mutex timeout) that this return value cannot tell
+    # apart, so the message names the fact (nothing was unlinked) rather
+    # than guessing a cause - "was not held by {holder}" was wrong for
+    # three of the four.
     if json_output:
-        typer.echo(json.dumps({"key": key, "released": True}))
+        typer.echo(json.dumps({"key": key, "released": released is not None}))
+    elif released is None:
+        typer.echo(f"no-op: {key} was not released (nothing was unlinked)")
     else:
         typer.echo(f"released: {key}")
 
@@ -758,7 +791,7 @@ def refresh(
 ) -> None:
     """Extend a TTL claim's expires_at. No-op for PID-liveness claims."""
     try:
-        result = refresh_claim(key=key, holder=holder, ttl_ms=_parse_ttl(ttl), root=_node_aware_root(key))
+        result = _claims_core.refresh_claim(key=key, holder=holder, ttl_ms=_parse_ttl(ttl), root=_node_aware_root(key))
     except HolderMismatch as exc:
         typer.echo(f"holder mismatch: {exc}", err=True)
         raise typer.Exit(code=4)
@@ -1055,11 +1088,17 @@ def status(
     compute a field it discards would tax every tool call to answer a question
     it never asked.
     """
-    info = claim_status(key=key, root=_node_aware_root(key))
-    node_id = key[len("node:") :] if key.startswith("node:") else ""
+    info = _claims_core.claim_status(key=key, root=_node_aware_root(key))
+    node_id = key[len("node:"):] if key.startswith("node:") else ""
     crosschecked = roster and bool(node_id) and info.get("state") in _UNHELD_STATES
     if crosschecked:
         info.update(_roster_crosscheck(node_id))
+        if info.get("roster_rows_unresolved", 0):
+            # A scanned row with no node join is an unanswered ownership read,
+            # not proof that this claim is free. Keep the raw claim fields, but
+            # make the composite verdict fail closed for dispatch consumers.
+            info["state"] = "unknown"
+            info["basis"] = "unresolved-roster-row"
     if json_output:
         typer.echo(json.dumps(info))
         return
@@ -1069,7 +1108,12 @@ def status(
         # this command straight into jq without --json, and a trailing prose
         # line makes that read fail exactly when the claim has lapsed, which is
         # the case the operator most needs a truthful answer for.
-        typer.echo(_roster_verdict_line(info), err=True)
+        line = _roster_verdict_line(info)
+        # Witness named when one answered: a verdict from a failing probe
+        # stays auditable on the loud line.
+        if info.get("session_basis"):
+            line += f"; session witness: {info['session_basis']}"
+        typer.echo(line, err=True)
 
 
 def _merge_claims_across_roots(
@@ -1098,7 +1142,7 @@ def _merge_claims_across_roots(
     best_row: dict[str, Optional[dict]] = {}
 
     for candidate_root, cdir in deduped_roots:
-        rows, _counts, states_by_key = list_claims_with_counts(
+        rows, _counts, states_by_key = _claims_core.list_claims_with_counts(
             prefix=prefix or None, include_stale=include_stale, root=candidate_root,
         )
         row_by_key = {r["key"]: r for r in rows}
@@ -1219,9 +1263,9 @@ def list_cmd(
     else:
         # _node_aware_root("") already resolves to None via claims_root_for's
         # own colon check, so no separate `if prefix` branch is needed here.
-        roots = [global_claims_root(), _node_aware_root(prefix)]
+        roots = [_claims_io.global_claims_root(), _node_aware_root(prefix)]
 
-    deduped_roots = dedup_claims_roots(roots)
+    deduped_roots = _claims_io.dedup_claims_roots(roots)
     all_rows, row_roots, totals = _merge_claims_across_roots(
         deduped_roots, prefix=prefix, include_stale=include_stale
     )
@@ -1287,10 +1331,15 @@ def _node_settlement(reading: Optional[RosterReading] = None):
 
     Two positive findings, both proven by FINDING things, never by failing to:
 
-      * The claim's node is terminal in the graph (done/superseded). The
-        closure release should have dropped the claim already; one that
-        outlived its node (pre-fix leaks, a closer that crashed mid-release)
-        protects nothing whoever holds it. Holder-independent evidence.
+      * The claim's node is terminal in the graph (done/superseded) and the
+        holder cannot be proven alive. The closure release should have
+        dropped the claim already; one that outlived its node (pre-fix
+        leaks, a closer that crashed mid-release) protects nothing once its
+        lease is spent or its pid is gone. A LIVE holder keeps the claim
+        until its own lease ends: measured 2026-09-05, this arm reaped four
+        unexpired, live-pid claims on closed nodes (x-a114 twice, x-04ce,
+        x-9223-node) on every sweep, killing active loop-check leases and
+        opening the dup-PR window each time.
       * The lease is EXPIRED and the holder's roster row resolves to a
         DIFFERENT node. An expired lease is the holder's own statement that
         it stopped renewing; a row on another node is where it went. An
@@ -1335,6 +1384,24 @@ def _node_settlement(reading: Optional[RosterReading] = None):
         node_id = claim.key[len("node:") :]
         terminal = _terminal_ids()
         if terminal is not None and node_id in terminal:
+            # Closure settles a holder that cannot be proven alive, never one
+            # that can. Measured 2026-09-05 on four premature reaps (x-a114
+            # twice, x-04ce, x-9223-node): every one was an UNEXPIRED lease
+            # with a live recorded pid on a node the graph had closed, reaped
+            # by this arm on each sweep - a live session's loop-check lease
+            # (the follow-up-work shape) died with it, and every reap opened
+            # the dup-PR window the claim exists to close. An expired lease
+            # still settles here, as does a dead pid: the holder named its
+            # own end or the pid table ends it, and a closure release that
+            # crashed mid-way is exactly the leak this arm heals.
+            if native_verdict is not None and (
+                native_verdict.get("expired") is not True
+                and native_verdict.get("bucket") != "suspect"
+            ):
+                # Not expired and not dead-pid: the holder is proven live
+                # (bucket live) or unprobeable (offhost - unknown keeps, the
+                # same asymmetry the suspect buckets teach).
+                return None
             return True
         if native_verdict is None or native_verdict.get("expired") is not True:
             return None
@@ -1390,7 +1457,7 @@ def _transcript_activity(session_id: str, cwd: str):
         import time
 
         from fno.agents.watchdog import (
-            REAP_QUIET_AFTER_S,
+            QUIET_AFTER_S,
             finished_with_the_tree,
             tail_facts,
         )
@@ -1398,7 +1465,7 @@ def _transcript_activity(session_id: str, cwd: str):
         facts = tail_facts(session_id, cwd)
         if facts is None:
             return None
-        return finished_with_the_tree(facts, time.time(), REAP_QUIET_AFTER_S)
+        return finished_with_the_tree(facts, time.time(), QUIET_AFTER_S)
     except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
         return None
 
@@ -1414,12 +1481,14 @@ def _transcript_says_finished(session_id: str, cwd: str) -> bool:
         import time
 
         from fno.agents.watchdog import (
-            REAP_QUIET_AFTER_S,
+            QUIET_AFTER_S,
             finished_with_the_tree,
             tail_facts,
         )
 
-        return finished_with_the_tree(tail_facts(session_id, cwd), time.time(), REAP_QUIET_AFTER_S)
+        return finished_with_the_tree(
+            tail_facts(session_id, cwd), time.time(), QUIET_AFTER_S
+        )
     except Exception:  # noqa: BLE001 - an unreadable transcript proves nothing
         return False
 
@@ -1726,7 +1795,7 @@ def reap_cmd(
     evidence. Exits 1 when any reapable file's move could not be confirmed.
     """
     optout_sink: list = []
-    summary = reap_dead_claims(
+    summary = _claims_core.reap_dead_claims(
         roots=list(root) if root else None,
         apply=apply,
         abandonment_probe=_abandonment_probe(),
@@ -1833,7 +1902,7 @@ def _release_lane(*, lane: str, json_output: bool) -> None:
 def _force_release(*, key: str, reason: str, json_output: bool) -> None:
     """The former `claim force-release`. Archived to .expired/."""
     try:
-        force_release_claim(key=key, reason=reason, root=_node_aware_root(key))
+        _claims_core.force_release_claim(key=key, reason=reason, root=_node_aware_root(key))
     except ClaimValidationError as exc:
         typer.echo(f"validation error: {exc}", err=True)
         raise typer.Exit(code=2)

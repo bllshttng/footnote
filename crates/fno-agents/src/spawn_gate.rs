@@ -741,6 +741,36 @@ struct FootprintCausePayload {
     /// admission above the trigger.
     #[serde(default)]
     attribution_gap: Option<String>,
+    /// The Claude Code background daemon's idle pre-warm pool. Outside the
+    /// fleet numbers above (fno neither owns nor bounds it), read here so a
+    /// load refusal can name it: measured 2026-09-07, 45 idle `claude bg-spare`
+    /// processes held 66.5% of a 12-CPU machine while the refusal named only
+    /// the fleet, and an hour went into the wrong cause.
+    #[serde(default)]
+    spare_pool_process_count: u64,
+    #[serde(default)]
+    spare_pool_cpu_cores: f64,
+    /// 1-min load average, for the `fno agents status` machine line only (the
+    /// admission decision itself reads `loadavg_1m()` directly, never this
+    /// shelled-out copy).
+    #[serde(default)]
+    load_1m: Option<f64>,
+}
+
+/// Name the spare pool when it holds any CPU, else nothing.
+///
+/// Kept byte-identical to the Python twin's `_spare_pool_suffix` in
+/// `cli/src/fno/agents/spawn_gate.py` so the two gates cannot make different
+/// claims about the same reading.
+fn spare_pool_suffix(payload: &FootprintCausePayload) -> String {
+    let cores = payload.spare_pool_cpu_cores;
+    if payload.spare_pool_process_count == 0 || !cores.is_finite() || cores < 0.0 {
+        return String::new();
+    }
+    format!(
+        "; the claude spare pool holds {cores:.2} cores across {} idle pre-warm processes, which fno does not own or bound",
+        payload.spare_pool_process_count
+    )
 }
 
 /// What footprint answered when the gate asked whose CPU this is.
@@ -811,12 +841,14 @@ fn format_footprint_cause_json(raw: &str) -> Option<String> {
     // the wrong-cause failure this evidence line exists to prevent. The
     // Python twin drops the line entirely; naming the gap keeps the number
     // and removes the claim that it is the whole answer.
-    Some(match payload.attribution_gap {
-        Some(gap) => format!(
+    let pool = spare_pool_suffix(&payload);
+    let attributed = match payload.attribution_gap {
+        Some(ref gap) => format!(
             "{line}, but could not attribute every row ({gap}), so that share is an undercount"
         ),
         None => line,
-    })
+    };
+    Some(format!("{attributed}{pool}"))
 }
 
 /// Wall-clock budget for the out-of-process footprint probe: the Python
@@ -857,6 +889,40 @@ fn classify_footprint_cause_json(raw: &str) -> FleetReading {
 
 fn footprint_cause_evidence() -> Option<String> {
     footprint_cause_raw().and_then(|raw| format_footprint_cause_json(&raw))
+}
+
+/// One line for `fno agents status`: 1-min load, CPU capacity, and the claude
+/// spare pool - the same reading the load-refusal evidence line uses, so a
+/// caller can see the pool's share BEFORE a spawn ever gets refused on it.
+/// `None` when footprint could not be read (best-effort, never blocks status).
+pub fn machine_status_line() -> Option<String> {
+    format_machine_status_line(&footprint_cause_raw()?)
+}
+
+/// The pure formatter behind [`machine_status_line`], split out so it is
+/// testable without shelling out to `fno doctor footprint`.
+fn format_machine_status_line(raw: &str) -> Option<String> {
+    let payload: FootprintCausePayload = serde_json::from_str(raw).ok()?;
+    if payload.cpu_capacity_cores <= 0.0 || !payload.cpu_capacity_cores.is_finite() {
+        return None;
+    }
+    let load = payload
+        .load_1m
+        .filter(|v| v.is_finite())
+        .map(|v| format!("{v:.1}"))
+        .unwrap_or_else(|| "unknown".to_string());
+    let pool = if payload.spare_pool_process_count > 0 {
+        format!(
+            " claude_spare_pool={}proc/{:.2}cores",
+            payload.spare_pool_process_count, payload.spare_pool_cpu_cores
+        )
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "load_1m={load} capacity={:.2}cores{pool}",
+        payload.cpu_capacity_cores
+    ))
 }
 
 fn footprint_cause_raw() -> Option<String> {
@@ -1399,6 +1465,63 @@ MemAvailable:    8000000 kB\n";
         assert!(line.contains("2.92/12.00 cores"), "{line}");
         assert!(line.contains("21 bg-socket row(s)"), "{line}");
         assert!(line.contains("undercount"), "{line}");
+    }
+
+    /// Measured 2026-09-07: the pool held 66.5% of a 12-CPU machine while the
+    /// refusal named only the fleet. Kept byte-identical to the Python twin's
+    /// assertion in `test_footprint_cause_reader_names_the_claude_spare_pool`.
+    #[test]
+    fn the_evidence_line_names_the_claude_spare_pool() {
+        let raw = r#"{"fleet_cpu_cores":1.86,"cpu_capacity_cores":12,"fleet_percent_capacity":15.5,"fleet_percent_measured_cpu":32.3,"spare_pool_process_count":2,"spare_pool_cpu_cores":3.9}"#;
+        let line = format_footprint_cause_json(raw).expect("payload formats");
+        assert!(
+            line.contains("claude spare pool holds 3.90 cores across 2 idle pre-warm"),
+            "{line}"
+        );
+        assert!(line.contains("does not own or bound"), "{line}");
+    }
+
+    /// Negative control: with no pool fields at all (an older receipt, or a
+    /// machine with none running) the line carries no pool claim.
+    #[test]
+    fn the_evidence_line_names_no_pool_when_none_is_running() {
+        let raw = r#"{"fleet_cpu_cores":1.86,"cpu_capacity_cores":12,"fleet_percent_capacity":15.5,"fleet_percent_measured_cpu":32.3}"#;
+        let line = format_footprint_cause_json(raw).expect("payload formats");
+        assert!(!line.contains("spare pool"), "{line}");
+    }
+
+    /// The `fno agents status` machine line: load, capacity, and the pool
+    /// named beside them so a caller sees the pool's share before a spawn is
+    /// ever refused on it.
+    #[test]
+    fn machine_status_line_names_load_capacity_and_pool() {
+        let raw = r#"{"fleet_cpu_cores":0.06,"cpu_capacity_cores":12,"fleet_percent_capacity":0.5,"fleet_percent_measured_cpu":1.2,"spare_pool_process_count":45,"spare_pool_cpu_cores":7.98,"load_1m":102.4}"#;
+        let line = format_machine_status_line(raw).expect("payload formats");
+        assert_eq!(
+            line,
+            "load_1m=102.4 capacity=12.00cores claude_spare_pool=45proc/7.98cores"
+        );
+    }
+
+    /// Negative control: no pool, no load reading. The line still prints -
+    /// best-effort status is not all-or-nothing on one field.
+    #[test]
+    fn machine_status_line_omits_pool_and_reads_load_unknown() {
+        let raw = r#"{"fleet_cpu_cores":0.06,"cpu_capacity_cores":12,"fleet_percent_capacity":0.5,"fleet_percent_measured_cpu":1.2}"#;
+        let line = format_machine_status_line(raw).expect("payload formats");
+        assert_eq!(line, "load_1m=unknown capacity=12.00cores");
+    }
+
+    /// An unreadable capacity (missing/zero/non-finite) yields no line at all
+    /// rather than a fabricated one.
+    #[test]
+    fn machine_status_line_is_none_on_unreadable_capacity() {
+        assert_eq!(format_machine_status_line("{}"), None);
+        assert_eq!(format_machine_status_line("not json"), None);
+        assert_eq!(
+            format_machine_status_line(r#"{"fleet_cpu_cores":1.0,"cpu_capacity_cores":0}"#),
+            None
+        );
     }
 
     /// `capacity_verdict` is NOT the discriminator, and this is the test that

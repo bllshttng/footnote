@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 import typer
 
+from fno.agents import launch_provenance
 from fno.agents.rust_runtime import make_agents_group_cls
 
 agents_app = typer.Typer(
@@ -35,9 +36,12 @@ agents_app = typer.Typer(
 )
 
 class AgentStatusFilter(str, enum.Enum):
-    """Rendered family-1 liveness values accepted by ``list --status``."""
+    """Served-activity words accepted by ``list --status`` (AC7): what the
+    session is DOING, never a `live` token. See fno.agents.reachability."""
 
-    live = "live"
+    writing = "writing"
+    quiet = "quiet"
+    parked = "parked"
     orphaned = "orphaned"
     unknown = "unknown"
 
@@ -45,11 +49,9 @@ class AgentStatusFilter(str, enum.Enum):
 class AgentProgressFilter(str, enum.Enum):
     """Progress-axis values accepted by ``list --progress``.
 
-    A SECOND axis beside ``--status``, not a finer version of it: reachability
-    answers "can I reach this process"; progress answers "is it advancing,
-    awaiting the operator, parked, or refused" (fno.agents.reachability). The
-    two filter independently -- a row filtered `--progress parked` still
-    counts toward `--status live`.
+    A SECOND axis beside ``--status``: the status word answers "what is it
+    doing right now"; progress answers "is it advancing, awaiting the
+    operator, parked, or refused". The two filter independently.
     """
 
     advancing = "advancing"
@@ -750,47 +752,19 @@ def _worker_rpc(
 ) -> "dict | None":
     """One length-prefixed JSON RPC to a worker socket (NEVER raises).
 
-    Same 4-byte-LE-u32 + JSON framing as dispatch._daemon_rpc, but to an
-    arbitrary worker socket (the stream worker serves ``stream.*`` directly).
-    Returns the ``result`` dict, or None on any transport/error response.
+    The shared dispatch.rpc_roundtrip framing, to an arbitrary worker socket
+    (the stream worker serves ``stream.*`` directly). Returns the ``result``
+    dict, or None on any transport/error response.
     """
-    import socket
-    import struct
+    from fno.agents.dispatch import rpc_roundtrip
 
-    payload = json.dumps({"id": 1, "method": method, "params": params}).encode("utf-8")
-    frame = struct.pack("<I", len(payload)) + payload
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        sock.settimeout(connect_timeout)
-        try:
-            sock.connect(str(sock_path))
-        except (FileNotFoundError, ConnectionRefusedError, OSError):
-            return None
-        sock.settimeout(read_timeout)
-        sock.sendall(frame)
-        header = b""
-        while len(header) < 4:
-            chunk = sock.recv(4 - len(header))
-            if not chunk:
-                return None
-            header += chunk
-        (length,) = struct.unpack_from("<I", header)
-        if length > 16 * 1024 * 1024:
-            return None
-        data = b""
-        while len(data) < length:
-            chunk = sock.recv(length - len(data))
-            if not chunk:
-                return None
-            data += chunk
-        resp = json.loads(data.decode("utf-8"))
-        if not isinstance(resp, dict) or "error" in resp:
-            return None
-        return resp.get("result")
-    except (OSError, ValueError):
-        return None
-    finally:
-        sock.close()
+    return rpc_roundtrip(
+        sock_path,
+        method,
+        params,
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+    )
 
 
 def _render_stream_frame(frame: dict) -> "str | None":
@@ -906,8 +880,8 @@ def cmd_crown(
         [],
         "--scope",
         help=(
-            "Territory to grant. Repeat for a multi-project portfolio; the "
-            "crown level is derived and cannot be supplied."
+            "Territory to grant. Repeat for a multi-project portfolio or a "
+            "set of epics; the crown level is derived and cannot be supplied."
         ),
     ),
     reclaim: bool = typer.Option(
@@ -1521,9 +1495,9 @@ def cmd_spawn(
         "-k",
         help=(
             "Grant an orchestrator crown on the spawned worker, over the "
-            "territory named here. Repeatable: pass ONE epic id (a Director), "
-            "ONE project name (a project king), or SEVERAL project names for a "
-            "portfolio (`-k etl -k web`). The ladder altitude is derived from "
+            "territory named here. Repeatable: pass epic id(s) (a Director; "
+            "several crown one over the set), ONE project name (a project "
+            "king), or SEVERAL projects for a portfolio. The altitude is derived from "
             "what you name - there is no --level, and a node that is not an epic "
             "is refused, since implementers get no crowns. Stamped with the "
             "grantor derived from THIS session, never self-declared. Works on "
@@ -2574,8 +2548,14 @@ def cmd_spawn(
                 receipt_obj["permission_mode_requested"] = permission_mode
             # x-d012: name the pinned account so a mis-pin is visible at spawn
             # time, not at billing time. Only when set (receipt byte-stable else).
-            if account is not None:
-                receipt_obj["account"] = account
+            # x-04ce: the account fact carries WHO chose it.
+            _account, _source = launch_provenance.receipt_account_fields(
+                pane_result.launch_account, pane_result.launch_account_source, account
+            )
+            if _account is not None:
+                receipt_obj["account"] = _account
+                if _source is not None:
+                    receipt_obj["account_source"] = _source
             if dispatch_account is not None:
                 receipt_obj["dispatch_account"] = dispatch_account
                 # Name the credential provenance and the env keys actually
@@ -2783,7 +2763,7 @@ def cmd_spawn(
         # x-d012: name the pinned account. Only when set, so a non-account bg
         # receipt stays byte-identical to the Rust client's (which never emits
         # it - an --account spawn always re-execs into this Python path).
-        account_field = f', "account": {json.dumps(account)}' if account else ""
+        account_field = launch_provenance.bg_account_field(result, account)
         # x-8552: the composed spawn's live credential and payer, from the
         # composed env (see the pane branch); composed-only so an account-only
         # bg receipt stays byte-identical (AC3).
@@ -3131,14 +3111,13 @@ def cmd_ask(
     """
     from fno import rust_binary
     from fno._flag_aliases import refuse_retired_provider
-    from fno.agents import rust_runtime
     from fno.agents.dispatch import (
         AMBIGUOUS_PROJECT_EXIT_CODE,
         UNKNOWN_AGENT_EXIT_CODE,
         DispatchAskError,
         resolve_to_project,
     )
-    from fno.agents.rust_runtime import BIN_NOT_FOUND_EXIT, route_to_rust, runtime_mode
+    from fno.agents.rust_runtime import refuse_without_binary, route_to_rust, runtime_mode
 
     refuse_retired_provider(_provider_tombstone)
 
@@ -3191,22 +3170,7 @@ def cmd_ask(
     if runtime_mode() == "python" or binary is None:
         # There is no Python ask implementation to fall back to: the legs
         # were ported and deleted in the same change that moved this caller.
-        forced = (
-            f"{rust_runtime.RUNTIME_ENV}=python is set, and there is no Python "
-            "ask left to force; unset it with the binary installed. "
-            if runtime_mode() == "python"
-            else ""
-        )
-        print(
-            "fno agents ask: the Python ask runtime was ported to the Rust "
-            f"runtime, so ask requires the '{rust_binary.BINARY_NAME}' binary, "
-            f"which was not found. {forced}"
-            "Get it via `pip install fno` (bundled wheel), `cargo install "
-            "fno-agents`, or `cargo build --release -p fno-agents` plus "
-            f"`export {rust_binary.BINARY_ENV}=<path>`.",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=BIN_NOT_FOUND_EXIT)
+        refuse_without_binary("ask")
 
     args = ["ask"]
     if harness:
@@ -3242,7 +3206,7 @@ def cmd_list(
         help="Retired: filter by --harness.",
     ),
     status: AgentStatusFilter = typer.Option(
-        None, "--status", help="Filter by liveness (live | orphaned | unknown)."
+        None, "--status", help="Filter by served activity (writing | quiet | parked | orphaned | unknown); liveness is `fno agents truth`."
     ),
     progress: AgentProgressFilter = typer.Option(
         None,
@@ -3904,16 +3868,15 @@ def cmd_register(
 
     # `origin` is write-once, so a human taking over a pane footnote spawned
     # keeps `spawned` and this call cannot change it. Silence there reads as
-    # success: the operator believes they are registered as attended, while mail
-    # still treats them as unattended and the retire lane still holds them
-    # stoppable. The refusal is deliberate - a birth fact is not a claim a later
-    # caller gets to revise - so this says it rather than hiding it.
+    # success: the operator believes they are registered as attended, while
+    # mail still treats them as unattended. The refusal is deliberate - a
+    # birth fact is not a claim a later caller gets to revise - so this says
+    # it rather than hiding it.
     if entry.origin is not None and entry.origin != "operator":
         sys.stderr.write(
             f"note: origin stays {entry.origin!r}; it records what created this "
-            "row and is written once. Mail escalation and the watchdog retire "
-            "lane both read it, so this session is still treated as "
-            f"{entry.origin!r}.\n"
+            "row and is written once. Mail escalation reads it, so this "
+            f"session is still treated as {entry.origin!r}.\n"
         )
 
     # x-481e: record a clock saying "no expiry" beside a hand-stamped policy.
@@ -3983,7 +3946,7 @@ def cmd_top(
     The same union the spawn gate counts, so this is the audit surface every
     gate message points at. Python-only (RSS via psutil; not routed to the
     Rust client). ``--subagents`` (x-af92) appends a read-only sidechain
-    section; those rows are observable but not addressable.
+    section; each row also carries its node and whether it shipped (x-1379).
     """
     from fno.agents.top import render_top
 
@@ -4463,11 +4426,10 @@ def cmd_watchdog(
         False,
         "--apply-all",
         help=(
-            "Execute every lane: wake plus reap, reroute and retire, which all "
-            "stop a session, plus keeper collection, which kills an orphaned "
-            "keeper process and its hosted children. Only reap also deletes "
-            "its worktree; retire is a stop that `fno agents resume` undoes. "
-            "Implies --apply."
+            "Execute every lane: wake plus reroute (which stops and respawns "
+            "a session), plus keeper collection, which kills an orphaned "
+            "keeper process and its hosted children. Row retirement is the "
+            "daemon sweep's question (`fno agents reap`). Implies --apply."
         ),
     ),
     only: Optional[str] = typer.Option(
@@ -4548,31 +4510,39 @@ def cmd_watchdog(
             (wd.Verdict(**data), row)
             for data, row in zip(payload["verdicts"], rows)
         ]
+
+        def _print_verdicts():
+            for verdict, row in pairs:
+                typer.echo(
+                    f"{verdict.verdict:11} {verdict.row_id} "
+                    f"handle={verdict.name} cwd={row.cwd}"
+                )
+
+        def _apply_and_emit():
+            # One move shared by both lanes: apply, then the JSON emit.
+            results = wd.apply_recoverable(scan, scope_cwd=scope_cwd)
+            if json_out:
+                sys.stdout.write(
+                    json.dumps(
+                        {
+                            **payload,
+                            "results": results,
+                            "result_counts": wd.recovery_result_counts(results),
+                        }
+                    )
+                    + "\n"
+                )
+            return results
+
         if not scan.complete:
             if apply or apply_all:
-                results = wd.apply_recoverable(scan, scope_cwd=scope_cwd)
-                if json_out:
-                    sys.stdout.write(
-                        json.dumps(
-                            {
-                                **payload,
-                                "results": results,
-                                "result_counts": wd.recovery_result_counts(results),
-                            }
-                        )
-                        + "\n"
-                    )
-                else:
-                    print(results[0]["detail"], file=sys.stderr)
+                results = _apply_and_emit()
+                print(results[0]["detail"], file=sys.stderr)
                 raise typer.Exit(code=3)
             if json_out:
                 sys.stdout.write(json.dumps(payload) + "\n")
             else:
-                for verdict, row in pairs:
-                    typer.echo(
-                        f"{verdict.verdict:11} {verdict.row_id} "
-                        f"handle={verdict.name} cwd={row.cwd}"
-                    )
+                _print_verdicts()
                 for warning in payload["warnings"]:
                     print(f"warning: {warning}", file=sys.stderr)
                 typer.echo(
@@ -4618,11 +4588,7 @@ def cmd_watchdog(
             if json_out:
                 sys.stdout.write(json.dumps(payload) + "\n")
             else:
-                for verdict, row in pairs:
-                    typer.echo(
-                        f"{verdict.verdict:11} {verdict.row_id} "
-                        f"handle={verdict.name} cwd={row.cwd}"
-                    )
+                _print_verdicts()
                 typer.echo(
                     f"recoverable={payload['recoverable_count']} "
                     f"usable={payload['usable_recoverable_count']} "
@@ -4631,19 +4597,8 @@ def cmd_watchdog(
                 )
             return
 
-        results = wd.apply_recoverable(scan, scope_cwd=scope_cwd)
-        if json_out:
-            sys.stdout.write(
-                json.dumps(
-                    {
-                        **payload,
-                        "results": results,
-                        "result_counts": wd.recovery_result_counts(results),
-                    }
-                )
-                + "\n"
-            )
-        else:
+        results = _apply_and_emit()
+        if not json_out:
             for result in results:
                 line = f"{result['outcome']:9} {result['detail']}"
                 print(line, file=sys.stderr if result["outcome"] != "applied" else sys.stdout)
@@ -4732,11 +4687,9 @@ def cmd_watchdog(
         for v, _row in pairs:
             shown_counts[v.verdict] = shown_counts.get(v.verdict, 0) + 1
 
-    # Push, not pull: a verdict the king has to remember to fetch goes
-    # unread. Mail before writing the sweep file, so the change gate compares
-    # against the PREVIOUS sweep's signature - and only a delivered digest
-    # advances it (mail_gate), or a transient send failure would permanently
-    # swallow the verdict behind an unchanged signature.
+    # Push, not pull: mail before writing the sweep file, so only a delivered
+    # digest advances the change gate - a transient send failure must not
+    # permanently swallow the verdict behind an unchanged signature.
     recipient = mail_to
     if recipient is None:
         try:
@@ -4752,17 +4705,13 @@ def cmd_watchdog(
             print(f"watchdog mail: {receipt}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 - mail never breaks the sweep
         print(f"watchdog mail failed: {exc}", file=sys.stderr)
-    # A filtered run publishes only its own rows, so it must not stamp the
-    # whole non-leave set: doing so tells the next tick that ghost/wake rows
-    # it never emitted were already published.
+    # A filtered run publishes only its own rows: never stamp the whole
+    # non-leave set, and stamp the UNION with what was already published,
+    # or the next tick re-emits every filtered-out row.
     events_payload = (
         payload if only is None
         else {**payload, "verdicts": [v._asdict() for v, _ in pairs]}
     )
-    # A filtered run publishes a SUBSET, so its stamp has to be the union of
-    # what it just published and what was already published. Stamping the
-    # subset alone drops every filtered-out row from the record, and the next
-    # tick re-emits all of them.
     prev_events_sig = wd._last_events_signature()
     signature_to_stamp = wd.union_signature(
         prev_events_sig, wd.verdict_signature(events_payload)
@@ -4776,13 +4725,9 @@ def cmd_watchdog(
         ),
     )
 
-    # Classification events ride every mode: a verdict emitted only under a
-    # dry run left apply modes with no event record at all, while the tick
-    # emits per non-leave row regardless of mode. The two lanes must not
-    # diverge on what the record shows - and that cuts both ways. Emitting
-    # ungated here duplicated every row the tick had already published, and
-    # the stamp above then told the next tick they were all published, so a
-    # filtered hand-run made the tick re-emit most of the fleet.
+    # Classification events ride every mode (a dry-run-only verdict once left
+    # apply modes with no event record), gated on fresh_non_leave so a filtered
+    # hand-run neither diverges from the tick's record nor re-emits the fleet.
     fresh_ids = wd.fresh_non_leave(events_payload, prev_events_sig)
     for v, _row in pairs:
         if v.verdict != wd.LEAVE and v.row_id in fresh_ids:
@@ -4895,67 +4840,25 @@ def cmd_watchdog(
 def cmd_stale_escalate(
     json_out: bool = typer.Option(False, "--json", "-J", help="Machine-readable output."),
 ) -> None:
-    """Reconcile the durable stale-row question to the measured fleet.
-
-    Runs the real sweep (roster + transcripts + claims + graph), filters the
-    verdicts no action lane may take (``stale`` - past the wake ceiling),
-    and reconciles ONE ``[watchdog-stale:*]`` operator question to that set:
-    same set is a duplicate, a changed set closes the old ask and asks fresh,
-    an empty set closes what is open. Report-only by contract: this verb
-    never wakes, retires, reaps, or touches a worktree - the daemon's idle
-    tick is its only scheduled caller.
-    """
+    """Reconcile the durable stale-row question to the measured fleet."""
     from fno.agents import stale_lane as se
-    from fno.agents import watchdog as wd
-    from fno.carveout.core import resolve_carveout_root, resolve_session_id
 
-    payload, rows = wd.run_sweep()
-    if payload.get("refused"):
-        outcome, qid, stale_count, oldest = "refused", "", 0, 0
-    else:
-        stale_pairs = [
-            (wd.Verdict(**data), row)
-            for data, row in zip(payload["verdicts"], rows)
-            if data["verdict"] == wd.STALE
-        ]
-        try:
-            from fno.paths import resolve_repo_root
+    se.run(json_out=json_out)
 
-            session_id = resolve_session_id(resolve_repo_root())
-        except Exception:  # noqa: BLE001 - an unbound ask still records
-            session_id = None
-        outcome, qid = se.reconcile_stale(
-            stale_pairs,
-            root=resolve_carveout_root(),
-            session_id=session_id,
-            cwd=Path.cwd(),
-        )
-        stale_count = len(stale_pairs)
-        oldest = se.oldest_h([v.basis or "" for v, _row in stale_pairs]) or 0
 
-    summary = f"Summary: {stale_count} stale, outcome {outcome}, oldest {oldest}h"
-    if json_out:
-        sys.stdout.write(json.dumps({
-            "outcome": outcome,
-            "question_id": qid,
-            "stale_count": stale_count,
-            "oldest_h": oldest,
-            "summary": summary,
-        }) + "\n")
-        sys.stdout.flush()
-    else:
-        typer.echo(summary)
+@agents_app.command("friction-escalate", hidden=True)
+def cmd_friction_escalate(
+    json_out: bool = typer.Option(False, "--json", "-J", help="Machine-readable output."),
+) -> None:
+    """Reconcile ONE [watchdog-friction:*] question to the measured fleet."""
+    from fno.agents import friction_lane as fl
+
+    fl.run(json_out=json_out)
 
 
 @agents_app.command("ping", hidden=True)
 def cmd_ping() -> None:
-    """Health check (placeholder).
-
-    The US4-lifecycle story converts this from a phase-1 stub into an
-    informational message that defers the real probe to a future story.
-    Returns exit 0 so the catalog of ``_NOT_IMPLEMENTED`` markers in
-    ``cli.py`` shrinks to zero without growing a parallel verb surface.
-    """
+    """Health check (placeholder): exit 0, no verb surface grown."""
     typer.echo("(not yet implemented; planned for a future story)")
 
 
@@ -5195,33 +5098,22 @@ def cmd_attach(
 ) -> None:
     """Attach to a running agent session interactively.
 
-    With a live mux server: drives the one dedicated thread pane, which
-    routes every harness by capability (claude and a codex thread drive,
-    a codex pane navigates to its tab, gemini locates).
+    The Rust client verb owns attach; with an installed binary the runtime
+    router execs it before this function runs. With a live mux server it
+    drives the one dedicated thread pane, which routes every harness by
+    capability. With no mux server: claude execs ``claude attach
+    <short_id>``, a codex thread execs its declared attach form, pi joins
+    its own session, and every other row is asked of the capability table.
+    A row whose harness reads ``features.attach = native`` names the
+    daemon-kept lane it needs (exit 24); any other state refuses by name
+    with the key, the state and the probe that settles it (exit 13).
 
-    With no mux server, claude path: shells out to ``claude attach
-    <short_id>`` with inherited stdin/stdout/stderr - the claude TUI
-    takes over until you detach. fno's exit code mirrors claude's on
-    detach.
-
-    With no mux server, codex thread path: shells out to ``codex resume
-    <thread-id> --remote unix://<control-socket>``, which opens codex's
-    own TUI on the thread the shared app-server daemon owns. fno draws
-    nothing either way; each harness renders its own interface.
-
-    Every other harness: refused with exit 13, because it has no
-    persistent session to attach to.
+    There is no Python attach left: a missing binary is refused here.
     """
-    from fno.agents.dispatch import DispatchAskError, attach_agent
+    from fno.agents.rust_runtime import refuse_without_binary
 
-    try:
-        result = attach_agent(name)
-    except DispatchAskError as exc:
-        print(str(exc), file=sys.stderr)
-        raise typer.Exit(code=exc.exit_code) from exc
-
-    if result.exit_code != 0:
-        raise typer.Exit(code=result.exit_code)
+    _ = name
+    refuse_without_binary("attach")
 
 
 # ---------------------------------------------------------------------------
@@ -5370,3 +5262,5 @@ def harness_probe(
 
 
 agents_app.add_typer(harness_app, name="harness", hidden=True)
+
+from fno.agents import transcript_reads as _transcript_reads  # noqa: E402,F401

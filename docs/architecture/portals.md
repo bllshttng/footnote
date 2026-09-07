@@ -43,9 +43,11 @@ Pane ids allocate from zero, so pane 0 is a valid seat. Every portal lookup matc
 
 ## Three rules that are easy to get wrong
 
-**Portals are never persisted, and the prune folds.** A pane binds a session to geometry. A thread binds a session to a row. Persisting a portal re-binds a thread to a rectangle across a restart. `stored_tab_trees` prunes every portal seat before capture.
+**Portals persist as slots and restore held.** A pane binds a session to geometry. A thread binds a session to a row. Both facts still hold. What is persisted is not the thread. It is the slot `(index, row_key)` in its tab's stored tree, written by `SlotCapture::name_leaf` beside every other slot. The binding stays `Shell`, because at restore the seat IS a shell until the first reach fills it. A tab holding only portals is a tab like any other: it is captured whole, name included.
 
-The FOLD is the load-bearing part. `node_without_leaf` removes ONE leaf per call, and the capture loop calls it once per tab. A single call therefore captures the second portal tiled in a tab, and restore rebuilds a pane for a thread. The single-slot shape hid this, because one slot puts at most one leaf in a tab. A one-portal restart passes either way, so it is not the test.
+Restore holds the seat idle. A named shell takes the slot the tree kept, the `Portal` entry goes back in the map, and the pane says what it waits for. Held idle is the only safe shape, not a compromise. For opencode and agy `interactive_attach` is unsupported, so a portal onto them can only be a RESUME, and a resume starts a real agent process. Eager restore of three portals spawns three agents unasked. The operator's focus spends the process.
+
+Two gestures fill a held seat. Focusing the seat pane runs the row's reach, whose repoint respawns the viewer in that seat. Reaching the row with no explicit index goes home to the held seat that names the row. A seat held at index 1 fills at 1, instead of stranding while a fresh viewer mints at 0. An explicit `--portal N` still means N and never hijacks a held seat. A held portal whose row never returns stays a readable shell naming the row, which is the honest placeholder.
 
 **A closing portal vanishes, except the last one.** The idle-shell stand-in swap in `close_pane` exists for one reason. A viewer whose child died must not delete the only window onto the fleet. With another portal open that premise is false, so the swap fires only for the last one. Without that condition, closing four portals leaves four idle stand-in shells, each holding a tab open.
 

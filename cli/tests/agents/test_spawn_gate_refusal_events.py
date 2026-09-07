@@ -95,7 +95,13 @@ def test_king_share_refusal_emits_though_it_carries_no_receipt(journal: Path) ->
     receipt, so a design that only forwarded receipts would have left them as
     silent as before.
     """
-    census = spawn_gate.LiveCensus(king_counts={"kingA": 4, "kingB": 4})
+    census = spawn_gate.LiveCensus(
+        crowned_sessions={"kingA", "kingB"},
+        worker_rows={
+            "kingA": ["a0", "a1", "a2", "a3"],
+            "kingB": ["b0", "b1", "b2", "b3"],
+        },
+    )
 
     with pytest.raises(spawn_gate.GateRefused) as excinfo:
         spawn_gate._check_king_share(census, 8, caller_session="kingA")

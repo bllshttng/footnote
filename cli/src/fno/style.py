@@ -182,12 +182,13 @@ def has_exception(text: str) -> str | None:
 def check(text: str, *, surface: str = "mail", word_cap: int | None = None) -> list[Violation]:
     """Return every violation found in ``text``.
 
-    Rule 7 is the first surface-scoped rule. The surfaces in
-    :data:`CAPPED_SURFACES` carry the prose word cap; PR bodies, comments, and
-    changed markdown do not, because they are not read mid-turn. The text is
-    masked whole, then each line is split into its sentences: a paragraph is one
-    physical line and carries as many sentences as it needs, and rule 6 is what
-    holds that shape.
+    ``mail`` enforces the relay compression contract only: the 80-word cap.
+    Rules 1 to 6 are prose shape for text a human reads, and an agent mail is
+    not that. The surfaces in :data:`CAPPED_SURFACES` carry the prose word cap
+    alongside rules 1 to 6; PR bodies, comments, and changed markdown do not,
+    because they are not read mid-turn. The text is masked whole, then each
+    line is split into its sentences: a paragraph is one physical line and
+    carries as many sentences as it needs, and rule 6 is what holds that shape.
 
     ``word_cap`` overrides :data:`MESSAGE_WORD_CAP` for this one call. The
     caller resolves it, because this module promises no filesystem and no state
@@ -200,6 +201,8 @@ def check(text: str, *, surface: str = "mail", word_cap: int | None = None) -> l
     charge a file's total against one added line. Masking also means a pasted log
     can count near zero words; the cap covers prose, not a log dump.
     """
+    if surface == "mail":
+        return _check_message_length(text, word_cap or MESSAGE_WORD_CAP)
     violations = _run(text, None)
     if surface in CAPPED_SURFACES:
         violations.extend(_check_message_length(text, word_cap or MESSAGE_WORD_CAP))
@@ -365,7 +368,12 @@ def format_violations(violations: list[Violation]) -> str:
             ]
         )
     lines.append("add a style-exception line with a reason, or pass --style-exception.")
-    lines.append('run "fno doctor lint style --stdin" to check a rewrite before you send it.')
+    # Name the surface explicitly: --stdin defaults to mail, which checks the
+    # word cap only, so the bare command would pass a prose rewrite vacuously.
+    lines.append(
+        'run "fno doctor lint style --stdin --surface pr-body" to check a '
+        "rewrite before you send it."
+    )
     return "\n\n".join(lines)
 
 

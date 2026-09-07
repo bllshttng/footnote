@@ -243,9 +243,10 @@ def review_invocation_refusal(
             if measured is None or measured >= carry:
                 return ""
     return (
-        f"review refused: the two-round cap is spent for this head ({rounds_used} of {max_rounds} rounds used); "
-        "a new hunting round may not start. The cap law's remedy: decline the remaining findings with a recorded "
-        f"reason and merge, run a scoped fix-verification with {VERIFY_FIXES_FLAG}, or review a rebase delta over the interdiff budget."
+        f"review refused: the configured round cap is spent for this head ({rounds_used} of {max_rounds} rounds used); "
+        "a new hunting round may not start. The review phase is complete: merge on green CI - open findings stay "
+        "in the PR conversation. A scoped fix-verification with "
+        f"{VERIFY_FIXES_FLAG} is the one review-shaped act the cap still funds."
     )
 
 

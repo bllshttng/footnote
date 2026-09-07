@@ -38,6 +38,7 @@ from typing import Any, TypeGuard
 import yaml as _yaml
 
 from ..mutex import acquire_dir_mutex, release_dir_mutex
+from ..paths import EPHEMERAL_EVENTS_SUFFIX as EPHEMERAL_SUFFIX
 from .verify_child_promise import FanInTally, tally_fan_in, verify_child_promise
 
 
@@ -149,6 +150,9 @@ ALLOWED_SOURCE_PATTERNS: list[Any]
 ALLOWED_GATES: set[str]
 RETENTION_DEFAULT: str
 RETENTION_MINIMUM_TTL_HOURS: int
+# EPHEMERAL_SUFFIX (sibling journal for ephemeral-class rows, x-add3) is
+# aliased from fno.paths at import time, one definition shared by every
+# Python reader and writer; a parity test holds it equal to the Rust const.
 _schema_load_error: SchemaUnavailableError | None = None
 
 try:
@@ -626,11 +630,14 @@ def validate(event: dict[str, Any]) -> None:
         # nothing about EARLIER findings, so emitting one over a branch whose
         # chain still holds non-terminal blocking findings leaves them
         # non-terminal forever - the silent deadlock that surfaces rounds
-        # later as an impossible merge. Only a `fixed` disposition carried by
-        # THIS record leaves the outstanding set: the gate keeps `nonblocking`
-        # and an uncorroborated `declined` non-terminal by its own rules, and
-        # a producer check that waved those through would emit a pass the
-        # gate still refuses - the delayed failure this exists to make loud.
+        # later as an impossible merge. A `fixed` disposition carried by
+        # THIS record leaves the outstanding set, and so does a `declined`
+        # one: the shape check above already refuses a decline without its
+        # reason, so what reaches here records a judgment, and recording it
+        # mints no pass - corroboration stays the merge gate's call, and an
+        # uncorroborated decline still blocks the merge there. `nonblocking`
+        # never disposes: the producer claimed harmless where the gate
+        # re-derives blocking.
         # Enforced HERE rather than in the classify builder so no producer
         # surface needs new flags or a newer caller to be covered, and an
         # older deployment without this check degrades to today's behavior
@@ -662,18 +669,19 @@ def validate(event: dict[str, Any]) -> None:
                     entry.get("finding_key")
                     for entry in (dispositions or [])
                     if isinstance(entry, dict)
-                    and entry.get("disposition") == "fixed"
+                    and entry.get("disposition") in ("fixed", "declined")
                 }
                 outstanding = [key for key in nonterminal if key not in disposing]
                 if outstanding:
                     raise ValidationError(
                         "review_attestation refused: a findings-free pass "
                         "disposes nothing, and branch "
-                        f"{branch} still holds non-terminal blocking finding(s) "
-                        f"without a fixed disposition here: "
-                        f"{', '.join(outstanding)}; carry a fixed disposition "
-                        "for every finding you verified (a decline stays the "
-                        "merge gate's call, never the producer's)"
+                        f"{branch} still holds blocking finding(s) without a "
+                        f"disposition here: "
+                        f"{', '.join(outstanding)}; dispose each one here as "
+                        "fixed, or as declined carrying a reason (a decline "
+                        "needs a reason; the merge gate still corroborates a "
+                        "decline before it clears it)"
                     )
 
     # Same chokepoint rationale: mail_escalation's reason drives the overlay
@@ -1078,6 +1086,31 @@ def operator_question_closed(
     if closed_by is not None:
         data["closed_by"] = closed_by
     return _build("operator_question_closed", source, data)
+
+
+NOTICE_CAP = 2000
+
+
+def operator_notice(
+    *,
+    title: str,
+    body: str,
+    pointer: str = "",
+    source: str = "python",
+) -> dict[str, Any]:
+    """Build an ``operator_notice`` event (the notify chokepoint's journal leg).
+
+    A notice is a pointer to the durable queue, never a second inbox, so
+    ``pointer`` carries the verb that shows the content and ``body`` carries
+    counts, not rows.
+    """
+    data: dict[str, Any] = {
+        "title": title[:NOTICE_CAP],
+        "body": body[:NOTICE_CAP],
+    }
+    if pointer:
+        data["pointer"] = pointer[:NOTICE_CAP]
+    return _build("operator_notice", source, data)
 
 
 def operator_decision(
@@ -1692,28 +1725,23 @@ def _refuse_hermetic_escape(path: Path) -> None:
 
     Scope, stated so the next reader does not overclaim it: this guards
     :func:`append_event` only. ``events/log.py`` and ``agents/events.py`` write
-    journals through their own file handles and do not pass here, so the doc
-    must not say every Python event write funnels through this function.
+    journals through their own file handles and do not pass here. The rule
+    itself lives in :func:`fno.hermetic.declared_root`, so this fence and the
+    accessor fence in ``fno.paths`` cannot disagree.
     """
-    if os.environ.get("FNO_TEST_HERMETIC") != "1":
-        return
-    roots = _hermetic_allowed_roots()
-    # ONLY the realpath is judged. Accepting the raw form too would let a
-    # symlink sitting inside the sandbox pass while resolving to a live journal
-    # outside it - which is the precise mechanism this guard exists to stop, a
-    # worktree's `.fno/events.jsonl` being a symlink to the canonical one.
-    # Measured: 200 bytes of a production-shaped row reached the outside file
-    # through exactly that shape. The roots carry both forms already, so the
-    # macOS `/var` vs `/private/var` split is still handled.
-    resolved = Path(os.path.realpath(path))
-    if any(resolved == root or root in resolved.parents for root in roots):
-        return
-    raise HermeticEscapeError(
-        f"append_event refused a journal write outside the test sandbox: {path}. "
-        "A hermetic run must not touch a live events.jsonl. Pass an explicit "
-        "events_path= under tmp_path, or resolve the journal with "
-        "fno.paths.project_events_json() so FNO_EVENTS_PATH applies."
-    )
+    from fno.hermetic import UndeclaredStateRootError, declared_root
+
+    try:
+        declared_root(path)
+    except (HermeticEscapeError, UndeclaredStateRootError) as exc:
+        # Both refusals get the journal's remedy: the undeclared one is a
+        # SIBLING class, so catching only the escape sends the wrong advice.
+        raise type(exc)(
+            f"append_event refused a journal write with no declared root: "
+            f"{path}. Pass an explicit events_path= under tmp_path, or resolve "
+            "the journal with fno.paths.project_events_json() so "
+            f"FNO_EVENTS_PATH applies. ({exc})"
+        ) from exc
 
 
 def append_event(
@@ -1737,6 +1765,14 @@ def append_event(
 
         events_path = project_events_json()
     requested_path = Path(events_path)
+    # Honor the declared retention class (x-add3): an ephemeral row goes to the
+    # sibling journal beside the requested one, so a high-cadence gauge cannot
+    # consume the durable journal's rotation budget. Every other class keeps
+    # the requested path. The sibling is derived from the RESOLVED journal
+    # inside the loop, so a worktree journal symlinked into the repo's space
+    # routes its ephemeral rows to that space's sibling, not a worktree-local
+    # file the symlink never covered.
+    ephemeral = retention_for(str(event.get("type", ""))) == "ephemeral"
     # Before the mkdir: a refused write must not leave a .fno/ behind either.
     _refuse_hermetic_escape(requested_path)
     requested_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1751,8 +1787,13 @@ def append_event(
         # the escape this guard targets. Judging only before the resolve leaves
         # the window the retry loop was written to acknowledge.
         _refuse_hermetic_escape(resolved_path)
-        resolved_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_dir = resolved_path.parent / (resolved_path.name + ".lock.d")
+        target_path = (
+            resolved_path.with_name(resolved_path.name + EPHEMERAL_SUFFIX)
+            if ephemeral
+            else resolved_path
+        )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_dir = target_path.parent / (target_path.name + ".lock.d")
         token = acquire_dir_mutex(lock_dir, lock_timeout_seconds)
         if token is None:
             raise TimeoutError(f"events.jsonl lock timeout: {lock_dir}")
@@ -1766,7 +1807,7 @@ def append_event(
         release_dir_mutex(lock_dir, token)
 
     try:
-        with resolved_path.open("a", encoding="utf-8") as fh:
+        with target_path.open("a", encoding="utf-8") as fh:
             fh.write(_json.dumps(event, separators=(",", ":")) + "\n")
     finally:
         release_dir_mutex(lock_dir, token)
@@ -1781,6 +1822,7 @@ __all__ = [
     "MAX_DATA_BYTES",
     "RETENTION_DEFAULT",
     "RETENTION_MINIMUM_TTL_HOURS",
+    "EPHEMERAL_SUFFIX",
     "SCHEMA",
     "SESSION_SATISFIED_SOURCES",
     "SchemaUnavailableError",

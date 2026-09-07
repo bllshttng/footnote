@@ -24,11 +24,26 @@ fn pane(fno_id: Option<&str>, name: Option<&str>) -> PaneInfo {
         tab_name: None,
         tab_ordinal: None,
         fno_id: fno_id.map(str::to_string),
+        orphaned_worker: false,
         harness_session_id: None,
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         name: name.map(str::to_string),
     }
+}
+
+#[test]
+fn orphaned_worker_roundtrips_and_defaults_false() {
+    // (v71) The field is additive: present it round-trips, absent it decodes
+    // to false, so a v68 payload still reads.
+    let mut p = pane(None, None);
+    p.orphaned_worker = true;
+    let back: PaneInfo = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+    assert!(back.orphaned_worker);
+    let mut stripped = serde_json::to_value(&p).unwrap();
+    stripped.as_object_mut().unwrap().remove("orphaned_worker");
+    let legacy: PaneInfo = serde_json::from_value(stripped).unwrap();
+    assert!(!legacy.orphaned_worker);
 }
 
 #[test]

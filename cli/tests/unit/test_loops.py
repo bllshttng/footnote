@@ -23,11 +23,7 @@ def isolated_home(tmp_path: Path, monkeypatch):
     from fno import config as config_mod
     from fno import paths as paths_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
     yield tmp_path
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def test_loop_level_unconfigured_defaults_to_report(isolated_home):
@@ -158,7 +154,6 @@ def test_cli_ls_lists_configured_loop_with_level(isolated_home, tmp_path, monkey
 
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.loops import loops_app
 
@@ -181,7 +176,6 @@ def test_last_tick_survives_null_data_event(isolated_home, tmp_path, monkeypatch
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     from fno import paths as paths_mod
 
-    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
 
     events_path = tmp_path / ".fno" / "events.jsonl"
     events_path.parent.mkdir(parents=True, exist_ok=True)
@@ -192,10 +186,7 @@ def test_last_tick_survives_null_data_event(isolated_home, tmp_path, monkeypatch
 
     from fno.loops import _last_tick
 
-    try:
-        assert _last_tick("my-loop") is None
-    finally:
-        paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
+    assert _last_tick("my-loop") is None
 
 
 def test_zero_ttl_rejected(isolated_home):
@@ -230,7 +221,5 @@ def test_loops_paused_json_ignores_custom_absolute_state_dir(isolated_home, tmp_
     from fno import config as config_mod
     from fno import paths as paths_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     assert paths_mod.loops_paused_json() == tmp_path / ".fno" / "loops-paused.json"

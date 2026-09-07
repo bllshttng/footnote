@@ -37,7 +37,25 @@ def _capture_rust_cmds(monkeypatch, nextest=True):
     class _Proc:
         returncode = 0
 
-    monkeypatch.setattr(test_cmd.subprocess, "run", lambda cmd, env=None, **kw: cmds.append(list(cmd)) or _Proc())
+    def _record(cmd):
+        # Only the suite commands are recorded: config loads and root
+        # resolvers shell git on the side and were never part of this capture.
+        argv = cmd.split() if isinstance(cmd, str) else list(cmd)
+        if argv and argv[0] != "git":
+            cmds.append(argv)
+        return _Proc()
+
+    class _GroupProc:
+        # The runner spawns through Popen in its own process group, so a
+        # fake here must answer wait(timeout) like a real exit.
+        def __init__(self, cmd, env=None, **kw):
+            _record(cmd)
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(test_cmd.subprocess, "run", lambda cmd, env=None, **kw: _record(cmd))
+    monkeypatch.setattr(test_cmd.subprocess, "Popen", _GroupProc)
     monkeypatch.setattr(
         test_cmd.shutil,
         "which",
@@ -71,12 +89,25 @@ def test_marker_breached_ceiling_caps_threads_at_one(tmp_path, monkeypatch, caps
     cmds = _capture_rust_cmds(monkeypatch)
 
     import fno.agents.court as court
+    import fno.agents.spawn_gate as spawn_gate
+    import fno.config as fno_config
     import fno.doctor_footprint as footprint
     import fno.doctor_lanes as lanes
 
     # subprocess is a shared singleton: anything real that shells out would
     # land in the capture. The court census is one such caller.
     monkeypatch.setattr(court, "gather_court", lambda rows=None: {})
+    # The census now also carries the caller's own spawn-gate share
+    # (x-5283), patched here like every sensor: gate_census and
+    # load_settings both reach the repo-root resolution, and a cold cache
+    # shells git into the capture as the first rust command.
+    monkeypatch.setattr(spawn_gate, "census", lambda: None)
+    monkeypatch.setattr(spawn_gate, "share_reading", lambda *a, **k: None)
+    monkeypatch.setattr(
+        fno_config,
+        "load_settings",
+        lambda: SimpleNamespace(agents=SimpleNamespace(max_live=6)),
+    )
     monkeypatch.setattr(
         footprint,
         "_spawn_load_snapshot",

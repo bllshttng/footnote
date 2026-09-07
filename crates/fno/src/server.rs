@@ -40,9 +40,10 @@ use crate::proto::{
     AgentNoPaneReason, AgentRow, AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel,
     CardState, ClientMsg, Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot,
     LayoutSpec, LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo,
-    PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError, Reach, ResolvedPlacement,
-    RestoreRow, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo,
-    TabLayout, TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    PaneMeta, PanePlacement, PaneTarget, PlacementFallback, PortalSlot, ProtoError, Reach,
+    ResolvedPlacement, RestoreRow, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout,
+    SquadMeta, TabInfo, TabLayout, TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME,
+    MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 #[cfg(test)]
@@ -60,12 +61,13 @@ use crate::vt::{self, frame_text, Modes};
 
 mod agent_actions;
 mod agent_rows_join;
+pub(crate) mod lifecycle_target;
+mod pane_identity;
+mod pane_reseat;
 mod portal_reach;
+mod squad_sync;
 
-use self::agent_actions::{
-    run_agent_action, run_agent_rename, run_mail_send, run_reap, run_reentry_plan,
-    run_stop_or_remove,
-};
+use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
 
 /// A control connection's reply channel: exactly one [`ServerMsg`], then close.
 type ControlReply = oneshot::Sender<ServerMsg>;
@@ -682,6 +684,12 @@ enum CoreMsg {
         plans: HashMap<String, Result<ReentryVerdict, String>>,
         reply: ControlReply,
     },
+    /// (v71) `ControlVerb::SquadReload`: re-read `squads.json` into
+    /// `squad_members` on the core loop, so an external prune survives the
+    /// next `persist_squad`.
+    SquadReload {
+        reply: ControlReply,
+    },
     Gone(u64),
     /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
     Query(tokio::sync::oneshot::Sender<ServerMsg>),
@@ -833,6 +841,14 @@ enum CoreMsg {
         portal: u8,
         placement: PanePlacement,
         agents: Option<Vec<RegistryAgent>>,
+        reply: ControlReply,
+    },
+    /// (v72) Re-seat a live pane-hosted worker into a portal seat, keeping the
+    /// PTY (see [`ControlVerb::ThreadReseat`]). The server moves the topology;
+    /// the registry `mux` flip is the caller's half, on this receipt.
+    ReseatPane {
+        pane: u64,
+        portal: Option<u8>,
         reply: ControlReply,
     },
     TabJoin {
@@ -1032,6 +1048,12 @@ struct PaneEntry {
     /// This pane's monotonic counters. Same `Arc` as the registry row, so the
     /// core loop increments without touching the registry lock.
     stats: Arc<PaneCounters>,
+    /// (x-a600) A repaint request due to fire after the resize dust settles.
+    /// Set by the geometry pass when the grid changed; fired by the 1s core
+    /// tick. Deferral is the point: an immediate re-signal lands in the same
+    /// signal burst the resize itself raised and coalesces into it, so a
+    /// renderer that repaints exactly once on the burst never sees it.
+    nudge_due: Option<Instant>,
 }
 
 /// Extract the `FNO_NODE` value from a pane-run `argv`. The `_mesh_env_wrapper`
@@ -1859,26 +1881,6 @@ fi
     )
 }
 
-/// FNV-1a over bytes: tiny, dependency-free, deterministic - exactly what a
-/// stable-per-epic synthetic id needs (no crypto property required).
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &b in bytes {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
-/// The synthetic squad id for a mission's `SquadMeta` header, deterministic
-/// per epic id so the same mission maps to the same id across ticks. High bit
-/// (`proto::MISSION_SQUAD_BASE`) set so it never collides with a real squad
-/// id (those start at 1 and increment by one - see `next_squad_id`).
-fn mission_sid(epic_id: &str) -> u64 {
-    use crate::proto::MISSION_SQUAD_BASE;
-    MISSION_SQUAD_BASE | (fnv1a(epic_id.as_bytes()) & (MISSION_SQUAD_BASE - 1))
-}
-
 /// Sanitize a wire-supplied name: strip control characters (they would corrupt
 /// chrome cells), trim, cap at `cap` chars. The cap lives HERE and not only in
 /// the overlay: `Command` is a wire surface, and the TUI is not the only
@@ -2526,16 +2528,25 @@ struct SlotCapture<'a> {
     pane_owner: &'a HashMap<u64, &'a str>,
     /// (x-5baf) Each pane's live cwd, read once before the tab loop.
     pane_cwd: &'a HashMap<u64, String>,
+    /// (x-a9b4) Every live portal seat -> (index, row_key), read once before
+    /// the tab loop. A seated leaf names its slot after the portal instead of
+    /// an ordinal, so the capture keeps what restore needs to hold it again.
+    portal_seats: &'a HashMap<u64, (u8, String)>,
     slots: Vec<LayoutSlot>,
     by_pane: HashMap<u64, String>,
     ordinal: usize,
 }
 
 impl<'a> SlotCapture<'a> {
-    fn new(pane_owner: &'a HashMap<u64, &str>, pane_cwd: &'a HashMap<u64, String>) -> Self {
+    fn new(
+        pane_owner: &'a HashMap<u64, &str>,
+        pane_cwd: &'a HashMap<u64, String>,
+        portal_seats: &'a HashMap<u64, (u8, String)>,
+    ) -> Self {
         SlotCapture {
             pane_owner,
             pane_cwd,
+            portal_seats,
             slots: Vec::new(),
             by_pane: HashMap::new(),
             ordinal: 0,
@@ -2570,12 +2581,21 @@ impl<'a> SlotCapture<'a> {
     }
 
     fn name_leaf(&mut self, pane: u64) -> String {
-        let base = match self.pane_owner.get(&pane) {
-            Some(id) => id.to_string(),
-            None => {
-                self.ordinal += 1;
-                format!("p{}", self.ordinal)
-            }
+        // (x-a9b4) Order is portal, owner, ordinal. A portal seat that is
+        // also an attach pane (a LIVE viewer is: the reach inserts the
+        // mapping) captures as the portal slot, never as `Fno(attach_id)` -
+        // an attach binding would re-bind the thread to the rectangle at
+        // restore, the exact thing x-07c2's never-persist rule exists for.
+        // The slot pair is the durable record; the viewer process is not.
+        let base = match self.portal_seats.get(&pane) {
+            Some((index, _)) => format!("portal{index}"),
+            None => match self.pane_owner.get(&pane) {
+                Some(id) => id.to_string(),
+                None => {
+                    self.ordinal += 1;
+                    format!("p{}", self.ordinal)
+                }
+            },
         };
         let mut name = base.clone();
         let mut n = 2;
@@ -2583,14 +2603,23 @@ impl<'a> SlotCapture<'a> {
             name = format!("{base}#{n}");
             n += 1;
         }
-        let binding = match self.pane_owner.get(&pane) {
-            Some(id) => LayoutBinding::Fno(id.to_string()),
-            None => LayoutBinding::Shell,
+        let binding = if self.portal_seats.contains_key(&pane) {
+            LayoutBinding::Shell
+        } else {
+            match self.pane_owner.get(&pane) {
+                Some(id) => LayoutBinding::Fno(id.to_string()),
+                None => LayoutBinding::Shell,
+            }
         };
+        let portal = self.portal_seats.get(&pane).map(|(index, row)| PortalSlot {
+            index: *index,
+            row: row.clone(),
+        });
         self.slots.push(LayoutSlot {
             name: name.clone(),
             binding,
             cwd: self.pane_cwd.get(&pane).cloned(),
+            portal,
         });
         self.by_pane.insert(pane, name.clone());
         name
@@ -2602,56 +2631,22 @@ impl<'a> SlotCapture<'a> {
     }
 }
 
-/// The live tree minus one pane (x-07c2): the dedicated thread pane's leaf is
-/// pruned from a topology before capture, and a split it hollowed out
-/// collapses, because the thread pane is NEVER persisted - a pane binds a
-/// session to geometry, a thread binds a session to a row, and a persisted
-/// slot would re-bind a thread to a rectangle across a restart. `None` means
-/// nothing durable remains in this subtree.
-/// (x-8f9d) Does `portal_key` name the same ROW the reach resolved?
-///
-/// Not the same KEY: the TUI door keys a portal by the attach id while
-/// `fno agents attach` keys it by the registry name, and both doors advertise
-/// the same pane. Attach ids are unique per bg session, so a portal keyed by
-/// this row's attach id IS this row whatever door the reach came from - and the
-/// reverse (keyed by name, reached again by attach id) is the same row too,
-/// which is why the name comparison runs both directions.
-///
-/// One function, two callers: the same-row focus arm for the REQUESTED portal,
-/// and the one-row-one-viewer check across every OTHER portal. Two copies of
-/// this comparison drifting apart is how a duplicate viewer gets minted.
-fn node_without_leaf(node: &Node, skip: u64) -> Option<Node> {
-    match node {
-        Node::Leaf(p) => (*p != skip).then_some(Node::Leaf(*p)),
-        Node::Branch { axis, children } => {
-            let kept: Vec<(f32, Node)> = children
-                .iter()
-                .filter_map(|(w, n)| node_without_leaf(n, skip).map(|n| (*w, n)))
-                .collect();
-            match kept.len() {
-                0 => None,
-                1 => kept.into_iter().next().map(|(_, n)| n),
-                _ => Some(Node::Branch {
-                    axis: *axis,
-                    children: kept,
-                }),
-            }
-        }
-    }
-}
-
 /// (x-9052) Whether a stored layout slot binds a done member. Bindings name
 /// workers with the exact string `worker_binding_key` builds, so the slot
 /// filter and the member-loop gate can never disagree about who is done.
+/// (x-a9b4) A portal slot names done by its ROW: the same string set the
+/// forgotten-tombstone arm fills with attach ids, so a portal onto a done
+/// claude row collapses with the done leaves instead of restoring a held
+/// ghost.
 fn slot_names_done(slot: &LayoutSlot, done: &HashSet<String>) -> bool {
     matches!(&slot.binding, LayoutBinding::Fno(id) if done.contains(id))
+        || slot.portal.as_ref().is_some_and(|p| done.contains(&p.row))
 }
 
 /// (x-9052) The stored tree minus the leaves of DONE slots (names only, the
 /// same strings `LayoutTreeSpec::Slot` carries): done work earns no pane, so
-/// its leaf collapses instead of shell-substituting. Same collapse semantics
-/// as [`node_without_leaf`]; `None` means the tree is gone and the tab is
-/// skipped.
+/// its leaf collapses instead of shell-substituting. One-child splits
+/// collapse; `None` means the tree is gone and the tab is skipped.
 fn prune_done_slots(tree: &LayoutTreeSpec, done: &HashSet<String>) -> Option<LayoutTreeSpec> {
     match tree {
         LayoutTreeSpec::Slot(name) => {
@@ -3735,6 +3730,7 @@ impl Core {
                 refused_worker,
                 last_output: Instant::now(),
                 stats: Arc::clone(&stats),
+                nudge_due: None,
             },
         );
         self.pane_stats.write().unwrap().insert(id, stats);
@@ -3848,6 +3844,8 @@ impl Core {
     /// is stable and machine-readable. A pane mid-teardown (not in the tree)
     /// is still listed with what is known rather than dropped silently.
     fn pane_infos_with_agents(&self, agents: &[RegistryAgent]) -> Vec<PaneInfo> {
+        // (v71) One evidence read feeds every pane row's orphan verdict.
+        let evidence = self.member_evidence();
         let mut out: Vec<PaneInfo> = self
             .panes
             .iter()
@@ -3908,6 +3906,7 @@ impl Core {
                     // points at this pane in THIS session carries the durable
                     // identity. Server-owned (self.agents is the cached read).
                     fno_id: self.fno_id_for_pane_with_agents(pid, agents),
+                    orphaned_worker: self.orphaned_worker_for_pane(pid, agents, &evidence),
                     harness_session_id: joined_row.and_then(|a| a.harness_session_id.clone()),
                     predecessor_session_ids: joined_row
                         .map(|a| a.predecessor_session_ids.clone())
@@ -3939,40 +3938,6 @@ impl Core {
     #[cfg(test)]
     fn fno_id_for_pane(&self, pid: u64) -> Option<String> {
         self.fno_id_for_pane_with_agents(pid, &self.agents)
-    }
-
-    fn fno_id_for_pane_with_agents(&self, pid: u64, agents: &[RegistryAgent]) -> Option<String> {
-        let mut ids = std::collections::BTreeSet::new();
-        for a in agents {
-            if let Some((sess, pane)) = &a.mux {
-                if sess == &self.session_name && *pane == pid {
-                    if let Some(identity) = a.effective_identity() {
-                        ids.insert(identity.to_string());
-                    }
-                }
-            }
-        }
-        // (x-b029) The resume birthright. A pane the daemon itself re-homed
-        // (workspace restore, `pane run --worker`) is recorded in
-        // `worker_session_pane` with its (harness, session id) at spawn - the
-        // same id the resume argv carries. The registry FILE's row can still
-        // point at the pre-restart pane, so the join above misses and the
-        // pane read `-` while doing real work. This map is fno's own record,
-        // not an argv heuristic: the id was stamped at birth by the code that
-        // built the resume command.
-        for ((_, session_id), pane) in &self.worker_session_pane {
-            if *pane == pid {
-                ids.insert(session_id.clone());
-            }
-        }
-        if ids.is_empty() {
-            ids.extend(crate::thread_viewer::identity_for_pane(
-                &self.portals,
-                pid,
-                agents,
-            ));
-        }
-        (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
     }
 
     fn resolve_placement_target(
@@ -5629,179 +5594,6 @@ impl Core {
         } else {
             self.squad_members.remove(&detached.squad);
             self.persist_remove(&detached.squad_name, &detached.squad_key);
-        }
-    }
-
-    /// Detach a live worker pane from the visible topology without reaping its
-    /// child. A one-leaf tab gets a replacement shell so the session never
-    /// renders an empty tab or loses its last anchor.
-    fn detach_worker_pane(&mut self, pane: u64) -> Result<(), String> {
-        let (squad, tab_index) = self
-            .session
-            .find_pane(pane)
-            .ok_or_else(|| format!("no such pane: {pane}"))?;
-        let (rows, cols, entry_cwd) = {
-            let entry = self
-                .panes
-                .get(&pane)
-                .ok_or_else(|| format!("no such pane: {pane}"))?;
-            if !entry.pty.is_child_alive() {
-                return Err(format!("pane {pane} is no longer live"));
-            }
-            let (rows, cols) = entry.vt.size();
-            (rows, cols, entry.cwd.clone())
-        };
-        let agent_matches = self
-            .agents
-            .iter()
-            .filter(|agent| {
-                !agent.exited
-                    && (agent.mux.as_ref().is_some_and(|(session, candidate)| {
-                        session == &self.session_name && *candidate == pane
-                    }) || self.worker_pane_for_agent(agent) == Some(pane))
-            })
-            .collect::<Vec<_>>();
-        let mapped_worker = self.worker_member_context(pane).filter(|worker| {
-            self.worker_pane
-                .get(&worker.name)
-                .is_some_and(|panes| panes.contains(&pane))
-        });
-        let agent = match agent_matches.as_slice() {
-            [agent] => Some((*agent).clone()),
-            [] => None,
-            matches => {
-                return Err(format!(
-                    "pane {pane} has no unique live worker row (matches: {}, session: {})",
-                    matches.len(),
-                    self.session_name
-                ))
-            }
-        };
-        if agent.is_none() && mapped_worker.is_none() {
-            return Err(format!("pane {pane} has no unique live worker row"));
-        }
-        let (only_leaf, tab_name, tid, squad_name, squad_key, origins) = {
-            let sq = self
-                .session
-                .squad(squad)
-                .expect("find_pane returned live squad");
-            let tab = &sq.tabs[tab_index];
-            (
-                tree::leaves(&tab.root).len() == 1,
-                tab.name.clone(),
-                tab.id,
-                sq.name.clone().unwrap_or_default(),
-                sq.key.clone(),
-                sq.origins.clone(),
-            )
-        };
-        let cwd = if entry_cwd.is_empty() {
-            agent
-                .as_ref()
-                .map(|agent| agent.cwd.clone())
-                .or_else(|| mapped_worker.as_ref().map(|worker| worker.cwd.clone()))
-                .unwrap_or_default()
-        } else {
-            entry_cwd
-        };
-        let replacement = if only_leaf {
-            Some(self.spawn_pane(rows, cols, &cwd)?)
-        } else {
-            None
-        };
-        let vp = self.tab_rect(tid);
-        let si = self
-            .session
-            .squads
-            .iter()
-            .position(|s| s.id == squad)
-            .expect("squad live");
-        let outcome = {
-            let tab = &mut self.session.squads[si].tabs[tab_index];
-            tree::detach_leaf(tab, vp, pane).map_err(|error| error.to_string())?
-        };
-        if let (tree::DetachOutcome::TabEmptied, Some(shell)) = (outcome, replacement) {
-            let tab = &mut self.session.squads[si].tabs[tab_index];
-            tab.root = Node::Leaf(shell);
-            tab.focus = shell;
-        }
-        let detached = if let Some(agent) = agent {
-            DetachedPane::from_agent(&agent, squad, squad_name, squad_key, origins, tab_name)
-        } else {
-            mapped_worker.ok_or_else(|| format!("pane {pane} has no worker mapping"))?
-        };
-        self.detached_panes.insert(pane, detached.clone());
-        self.persist_detached_member(&detached, true);
-        Ok(())
-    }
-
-    fn reattach_detached_pane(
-        &mut self,
-        pane: u64,
-        fallback_squad: u64,
-    ) -> Result<(u64, TabId), String> {
-        let detached = self
-            .detached_panes
-            .get(&pane)
-            .cloned()
-            .ok_or_else(|| format!("no detached pane: {pane}"))?;
-        if !self
-            .panes
-            .get(&pane)
-            .is_some_and(|entry| entry.pty.is_child_alive())
-        {
-            return Err(format!("detached pane {pane} is no longer live"));
-        }
-        let squad = self
-            .session
-            .squad(detached.squad)
-            .map(|_| detached.squad)
-            .or_else(|| self.session.squad(fallback_squad).map(|_| fallback_squad))
-            .ok_or_else(|| "target workspace no longer exists".to_string())?;
-        let tid = self.session.mint_tab_id();
-        self.session
-            .squad_mut(squad)
-            .expect("target squad checked")
-            .tabs
-            .push(Tab {
-                name: detached.tab_name.clone(),
-                id: tid,
-                root: Node::Leaf(pane),
-                focus: pane,
-            });
-        self.detached_panes.remove(&pane);
-        self.bind_worker_pane(&detached, pane);
-        self.persist_detached_member(&detached, false);
-        Ok((squad, tid))
-    }
-
-    /// Detach `pane` from whatever tab currently holds it, keeping the PTY alive
-    /// (the [`Self::pane_break`] cleanup, minus the new-tab step). A no-op if the
-    /// pane is in no tab. Used to relocate a bound session's live pane into a
-    /// template tab without ever reaping it (Reconcile: relocate, never kill).
-    fn detach_pane_keep_pty(&mut self, pane: u64) {
-        let Some((sid, ti)) = self.session.find_pane(pane) else {
-            return;
-        };
-        let tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
-        let vp = self.tab_rect(tid);
-        let si = self
-            .session
-            .squads
-            .iter()
-            .position(|s| s.id == sid)
-            .expect("squad live");
-        let outcome = {
-            let tab = &mut self.session.squads[si].tabs[ti];
-            tree::detach_leaf(tab, vp, pane)
-        };
-        // TabEmptied leaves the tree unchanged (the pane still nominally in that
-        // single-pane tab); dropping the tab frees the pane. Either way the PTY
-        // survives, ready to graft into the template tree.
-        if matches!(outcome, Ok(tree::DetachOutcome::TabEmptied)) {
-            self.session.remove_tab(sid, ti);
-            self.tab_areas.remove(&tid);
-            self.reanchor_views();
         }
     }
 
@@ -7532,66 +7324,31 @@ impl Core {
             .iter()
             .map(|(pane, name)| (*pane, name.as_str()))
             .collect();
-        // (x-8f9d) Every portal seat, collected once: the per-tab prune below
-        // folds over all of them.
-        let seats: Vec<u64> = self.portals.values().map(|p| p.seat).collect();
-        // (x-5baf) Filled per tab below, after the portal prune, so a pruned
-        // portal pane never costs a cwd syscall nothing reads.
+        // (x-a9b4) Every live portal seat -> (index, row_key), collected once.
+        // A seat is CAPTURED now, not pruned: the slot keeps the pair restore
+        // needs to hold that seat again, and a tab holding only portals is a
+        // tab like any other.
+        let portal_seats: HashMap<u64, (u8, String)> = self
+            .portals
+            .iter()
+            .map(|(idx, p)| (p.seat, (*idx, p.row_key.clone())))
+            .collect();
+        // (x-5baf) Filled per tab below.
         let mut pane_cwd: HashMap<u64, String> = HashMap::new();
         let mut trees = Vec::with_capacity(sq.tabs.len());
         let mut active_tab = 0;
-        // If pruning hollows out the active tab itself, `active_tab` has no
-        // surviving position to copy - remember where the NEXT tab lands so
-        // restore falls onto the nearest surviving tab instead of silently
-        // defaulting to index 0 (an unrelated tab picked as "active").
-        let mut active_pruned_at: Option<usize> = None;
         for (i, t) in sq.tabs.iter().enumerate() {
-            // (x-07c2) Prune every portal's leaf before capture: portals are
-            // never persisted, so restore rebuilds no pane (and no split) for
-            // a thread. A tab the prune hollowed out entirely is not captured,
-            // and a skipped tab - the active one included - never leaves a
-            // dangling `active_tab` index behind (position IS the tab's
-            // durable identity in `tab_trees`).
-            //
-            // (x-8f9d) The FOLD is the load-bearing part, not the rename.
-            // `node_without_leaf` removes ONE leaf per call, and two portals
-            // can tile in one tab - which is the whole point of portals - so
-            // a single call would capture the second and restore would
-            // rebuild it. The single-slot shape hid this because one slot
-            // could only ever put one leaf in a tab. A seat that is not in
-            // this tab is a no-op, so folding over all of them is safe.
-            let mut pruned: Option<Node> = None;
-            let mut hollowed = false;
-            for seat in seats.iter() {
-                let next = match pruned.as_ref() {
-                    Some(node) => node_without_leaf(node, *seat),
-                    None => node_without_leaf(&t.root, *seat),
-                };
-                match next {
-                    Some(root) => pruned = Some(root),
-                    None => {
-                        hollowed = true;
-                        break;
-                    }
-                }
-            }
-            if hollowed {
-                if i == sq.active_tab {
-                    active_pruned_at = Some(trees.len());
-                }
-                continue;
-            }
             if i == sq.active_tab {
                 active_tab = trees.len();
             }
-            let root = pruned.as_ref().unwrap_or(&t.root);
+            let root = &t.root;
             let cwd_of = |p| {
                 self.panes
                     .get(&p)
                     .map(|e| (e.pty.child_pid(), e.cwd.as_str()))
             };
             crate::pane_cwd::fill_leaf_cwds(tree::leaves(root), cwd_of, &mut pane_cwd);
-            let mut capture = SlotCapture::new(&pane_owner, &pane_cwd);
+            let mut capture = SlotCapture::new(&pane_owner, &pane_cwd, &portal_seats);
             let tree = capture.node_to_spec(root);
             let focus = capture.slot_of(t.focus);
             trees.push(StoredTabTree {
@@ -7600,9 +7357,6 @@ impl Core {
                 slots: capture.slots,
                 focus,
             });
-        }
-        if let Some(pos) = active_pruned_at {
-            active_tab = pos.min(trees.len().saturating_sub(1));
         }
         Some((trees, active_tab))
     }
@@ -7624,6 +7378,35 @@ impl Core {
     /// How long a topology mutation stays dirty before the tick flushes it.
     /// One write per gesture, not one per drag event.
     const TOPOLOGY_DEBOUNCE: Duration = Duration::from_secs(2);
+
+    /// (x-a600) How long after a grid-changing resize the deferred repaint
+    /// request waits before firing: past the child's own SIGWINCH repaint,
+    /// short enough to feel instant. Fired by the 1s core tick, so the real
+    /// delay is this floor plus up to one tick.
+    const NUDGE_DELAY: Duration = Duration::from_millis(300);
+
+    /// Fire every due deferred repaint request (the 1s core tick's pass).
+    /// Re-reads each pane's CURRENT size, so a nudge armed by an older
+    /// geometry never re-introduces a stale winsize.
+    fn fire_due_nudges(&mut self) {
+        let due: Vec<u64> = self
+            .panes
+            .iter()
+            .filter_map(|(pid, e)| {
+                (e.nudge_due.is_some_and(|t| Instant::now() >= t)).then_some(*pid)
+            })
+            .collect();
+        for pid in due {
+            if let Some(entry) = self.panes.get_mut(&pid) {
+                entry.nudge_due = None;
+                let (rows, cols) = entry.vt.size();
+                entry.pty.nudge_winch(rows, cols);
+                e2e_log(format_args!(
+                    "resize repaint nudge fired for pane {pid} at {rows}x{cols}"
+                ));
+            }
+        }
+    }
 
     /// Mark the topology dirty (called from every `push_layout(true)`, the one
     /// funnel every layout mutation crosses) and flush immediately when the
@@ -8233,23 +8016,7 @@ impl Core {
         );
         match outcome {
             Ok(outcome) => {
-                let loaded = crate::squad_store::load();
-                let identities: HashMap<(String, String), Vec<_>> = loaded
-                    .squads
-                    .into_iter()
-                    .map(|s| ((s.name, s.key), s.members))
-                    .collect();
-                let sids: Vec<u64> = self.squad_members.keys().copied().collect();
-                for sid in sids {
-                    let Some((name, key)) = self.squad_identity(sid) else {
-                        continue;
-                    };
-                    if let Some(members) = identities.get(&(name, key)) {
-                        self.squad_members.insert(sid, members.clone());
-                    } else {
-                        self.squad_members.insert(sid, Vec::new());
-                    }
-                }
+                self.reload_members_from_store();
                 // Refused restore placeholders are positive dead markers even
                 // when their registry row is gone. Remove their visible panes
                 // after the store pass; keep a last pane so the session's
@@ -8593,6 +8360,8 @@ impl Core {
         } = journal;
         let mut worker_members_total = 0usize;
         let mut held_workers_total = 0usize;
+        // (x-a9b4) Portal seats held idle across every restored squad.
+        let mut held_portals_total = 0usize;
         let mut refused_workers_total = 0usize;
         // (x-9052) Worker members whose work the graph says is DONE. They are
         // history, not garbage: kept as members, never held, never refused-
@@ -8635,6 +8404,10 @@ impl Core {
             // spawn time (x-caef; the tree lane binds panes into trees before
             // any tab exists, so the mapping cannot ride the tab list).
             let mut tabs: Vec<Tab> = Vec::new();
+            // (x-a9b4) Portal slots held idle by this restore: (index, row,
+            // pane, tab id). Filled in the tree lane once the tab id exists,
+            // inserted into `portals` after the squad lands.
+            let mut held_portal_seats: Vec<(u8, String, u64, TabId)> = Vec::new();
             // (x-caef) Live member panes spawned but not yet placed in a tab:
             // (attach_id, pane, stored tab name). The tree lane places them by
             // slot; the legacy lane gives each its own tab.
@@ -8966,8 +8739,7 @@ impl Core {
                 for st in &ps.tab_trees {
                     // (x-9052) Prune done leaves BEFORE any pane minting: a
                     // slot binding a done member's leaf is removed, one-child
-                    // splits collapse, same collapse semantics as
-                    // `node_without_leaf`. An all-done tab is skipped whole:
+                    // splits collapse. An all-done tab is skipped whole:
                     // the shell substitute must never rebuild a ghost tab the
                     // gate just declined to hold.
                     let done_slot_names: HashSet<String> = st
@@ -8988,11 +8760,14 @@ impl Core {
                         .collect();
                     // (x-9052) The stored shell the fresh attach shell already
                     // represents: skip the tree, no pane minted, the claim is
-                    // consumed once.
+                    // consumed once. (x-a9b4) A portal slot is not that shell:
+                    // skipping the tree would drop the portal, so an unnamed
+                    // one-slot portal tab restores as its own tab, held.
                     let pure_shell_unnamed = st.tab_name.is_none()
                         && matches!(&tree_spec, LayoutTreeSpec::Slot(_))
                         && kept_slots.len() == 1
-                        && matches!(kept_slots[0].binding, LayoutBinding::Shell);
+                        && matches!(kept_slots[0].binding, LayoutBinding::Shell)
+                        && kept_slots[0].portal.is_none();
                     if pure_shell_unnamed && fresh_home_shell_claim {
                         fresh_home_shell_claim = false;
                         continue;
@@ -9041,6 +8816,15 @@ impl Core {
                                 .or_else(|| leaves.first().copied())
                                 .unwrap_or(leaves[0]);
                             let tid = self.session.mint_tab_id();
+                            // (x-a9b4) A portal slot's seat is the shell the
+                            // substitute already minted; remember it until the
+                            // tab ids are final.
+                            portal_reach::collect_portal_slot_seats(
+                                &kept_slots,
+                                &slot_pane,
+                                tid,
+                                &mut held_portal_seats,
+                            );
                             placed.extend(leaves.iter().copied());
                             tabs.push(Tab {
                                 name: st.tab_name.clone(),
@@ -9180,6 +8964,11 @@ impl Core {
                     self.detached_panes.insert(pane, detached);
                 }
             }
+            // (x-a9b4) Re-arm every held portal seat (in portal_reach): the
+            // entry goes back in the map, the seat pane gets its name and its
+            // held message, and the reach or a focus fills it on first demand.
+            held_portals_total +=
+                portal_reach::rearm_held_portal_seats(self, std::mem::take(&mut held_portal_seats));
             // Persist the reconciled membership (members dead at restore are now
             // tombstoned in the store) plus the just-restored tree capture, so a
             // second restart restores the same shape.
@@ -9211,19 +9000,15 @@ impl Core {
                 "restore: {idle_workers_total} worker row(s) idle - resume them from the agent panel"
             ));
         }
-        if hold_workers {
-            if worker_members_total == 0 {
-                self.notice_all("restore: 0 worker member(s) recorded; held 0 worker pane(s)");
-            } else {
-                self.notice_all(format!(
-                    "restore: held {held_workers_total} worker pane(s); focus one to resume it"
-                ));
-            }
-            if refused_workers_total > 0 {
-                self.notice_all(format!(
-                    "restore: {refused_workers_total} worker(s) could not be held"
-                ));
-            }
+        if hold_workers && worker_members_total == 0 && held_portals_total == 0 {
+            self.notice_all("restore: 0 worker member(s) recorded; held 0 worker pane(s)");
+        } else if hold_workers || held_portals_total > 0 {
+            portal_reach::notify_held_receipt(self, held_workers_total, held_portals_total);
+        }
+        if hold_workers && refused_workers_total > 0 {
+            self.notice_all(format!(
+                "restore: {refused_workers_total} worker(s) could not be held"
+            ));
         }
         if pruned_workers > 0 {
             self.notice_all(format!(
@@ -9340,44 +9125,6 @@ impl Core {
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
             let notice = run_dispatch_one(&session, node.as_deref(), account.as_deref()).await;
-            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
-        });
-    }
-
-    /// Shell `fno-agents <verb> <name>` OFF the core loop (x-76ea), mirroring
-    /// `dispatch_next`: the one-line outcome routes back as a `DispatchResult`
-    /// notice, but the AUTHORITATIVE row change is the registry poll's exited
-    /// flip / row vanish, not this notice. `verb` is a fixed literal
-    /// (`"stop"`/`"rm"`), never operator text; `name` was catalog-validated by
-    /// the caller.
-    fn agent_action(&self, id: u64, verb: &'static str, name: String) {
-        let core_tx = self.self_tx.clone();
-        tokio::spawn(async move {
-            let notice = run_agent_action(verb, &name).await;
-            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
-        });
-    }
-
-    /// Rename a row's label off-loop: the `agent_action` mirror with the new
-    /// label as a second argv token. The notice is the verb's own report.
-    fn agent_rename_action(&self, id: u64, token: String, new_name: String) {
-        let core_tx = self.self_tx.clone();
-        tokio::spawn(async move {
-            let notice = run_agent_rename(&token, &new_name)
-                .await
-                .unwrap_or_else(|e| e);
-            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
-        });
-    }
-
-    /// (x-f191) The one-gesture remove: off-loop like
-    /// [`Self::agent_action`], but the verb pair (stop, then rm) so the
-    /// operator states removal intent once. A live row stops first; a corpse
-    /// whose stop no-ops still clears through rm's already-absent gate.
-    fn stop_agent_action(&self, id: u64, name: String) {
-        let core_tx = self.self_tx.clone();
-        tokio::spawn(async move {
-            let notice = run_stop_or_remove(&name).await;
             let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
         });
     }
@@ -9790,56 +9537,6 @@ impl Core {
         });
     }
 
-    /// Resolve a sideline lifecycle target (x-76ea `StopAgent`/`RemoveAgent`) by
-    /// name against the current catalog, returning the exited flag of the single
-    /// resolved registry row. `name` is NOT a unique key (codex review): the
-    /// catalog dedups by `attach_id`, so an external roster row and a registry
-    /// row can carry the same name. Fail-closed on every ambiguity - absent, any
-    /// external row sharing the name (never act on a registry agent an external
-    /// shadows), or a >1 non-external collision - so a keypress can only ever act
-    /// on exactly one unambiguous registry agent, never a guessed match.
-    /// (x-9c5f) Widened from `Result<bool>` to the resolved row reference so
-    /// callers can read `.exited` AND `.claude_session_uuid` (the respawn arm
-    /// needs both); the fail-closed semantics (absent / external / ambiguous all
-    /// refused) are unchanged.
-    /// (v67) `harness_session_id` rides beside the label on
-    /// `StopAgent`/`RemoveAgent`; when it names a row, resolution prefers
-    /// identity and falls back to the label only when no row answers to that
-    /// id (a stale row, or an old client that carries the label alone). The
-    /// fail-closed rules are unchanged: absent, any external row sharing the
-    /// name (never act on a registry agent an external shadows), or a >1
-    /// non-external collision are all refused, so a keypress can only ever act
-    /// on exactly one unambiguous registry agent, never a guessed match.
-    fn resolve_lifecycle_target(
-        &self,
-        name: &str,
-        harness_session_id: Option<&str>,
-    ) -> Result<&RegistryAgent, String> {
-        if let Some(sid) = harness_session_id.filter(|s| !s.is_empty()) {
-            let by_id: Vec<&RegistryAgent> = self
-                .agents
-                .iter()
-                .filter(|a| !a.external && agent_harness_session_id(a) == Some(sid))
-                .collect();
-            if let [one] = by_id.as_slice() {
-                return Ok(one);
-            }
-        }
-        let matches: Vec<&RegistryAgent> = self.agents.iter().filter(|a| a.name == name).collect();
-        if matches.is_empty() {
-            return Err(format!("no such agent: {name}"));
-        }
-        if matches.iter().any(|a| a.external) {
-            return Err(format!(
-                "{name} is external - manage it from its own session"
-            ));
-        }
-        match matches.as_slice() {
-            [one] => Ok(one),
-            _ => Err(format!("{name} is ambiguous - use the CLI")),
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn attach(
         &mut self,
@@ -10135,6 +9832,11 @@ impl Core {
                             eprintln!("fno mux: pty resize failed: {e}");
                         }
                         entry.vt.resize(r.rows, r.cols);
+                        // (x-a600) Ask the child to repaint once the resize dust
+                        // settles: arm a deferred nudge the 1s core tick fires.
+                        // An immediate re-signal would coalesce into the burst
+                        // the resize itself raised and change nothing.
+                        entry.nudge_due = Some(Instant::now() + Self::NUDGE_DELAY);
                     }
                 }
             }
@@ -10357,17 +10059,11 @@ impl Core {
             })
             .collect();
         // Synthetic "mission squad" headers: one per active mission, done/total
-        // baked into the name so no proto bump is needed. Renders even with
-        // zero tagged workers - "nothing running" must stay visible, never
-        // vanish (empty-but-active).
-        squads.extend(self.missions.missions.iter().map(|m| SquadMeta {
-            id: mission_sid(&m.epic_id),
-            name: format!("{}  {}/{}", m.slug, m.done, m.total),
-            canonical_cwd: String::new(),
-            tabs: vec![],
-            active_tab: 0,
-            panes: 0,
-        }));
+        // and the rotation `(i of n)` baked into the name so no proto bump is
+        // needed. Renders even with zero tagged workers - "nothing running"
+        // must stay visible, never vanish (empty-but-active). Identity +
+        // naming: mission_squad.
+        squads.extend(crate::mission_squad::headers(&self.missions.missions));
         ServerMsg::Layout {
             squads,
             active_squad: view.0,
@@ -10608,7 +10304,7 @@ impl Core {
             self.missions
                 .node_to_epic
                 .get(&node_id)
-                .map(|epic| mission_sid(epic))
+                .map(|epic| crate::mission_squad::mission_sid(epic))
         };
 
         // 1. Pane rows: one per live tab leaf, deterministic (squad -> tab ->
@@ -12595,6 +12291,14 @@ impl Core {
                         }
                     }
                 }
+                // (x-a9b4) A focused portal seat that is still the held shell
+                // fills in place (portal_reach); anything else falls through
+                // to a plain focus.
+                if let Some(flow) =
+                    portal_reach::fill_held_portal_seat(self, client_id, view, vp, pid)
+                {
+                    return flow;
+                }
                 // Locate the leaf anywhere in the session, then view+focus it.
                 let target = self.session.find_pane(focus_pid).map(|(sid, ti)| {
                     (
@@ -12661,7 +12365,20 @@ impl Core {
                             }
                         },
                     };
-                    return self.reach_portal(client_id, view, vp, portal, &id, &placement);
+                    // (x-a9b4) `portal` names an index the CALLER chose;
+                    // `thread_pane` folds to 0 without the caller naming any,
+                    // and that default reach is allowed to go home to a held
+                    // seat that names the row.
+                    let portal_explicit = placement.portal.is_some();
+                    return self.reach_portal(
+                        client_id,
+                        view,
+                        vp,
+                        portal,
+                        &id,
+                        &placement,
+                        portal_explicit,
+                    );
                 }
                 // Validate the jobId shape (8 hex digits) BEFORE it reaches the
                 // argv - defense in depth even though spawn_pane_cmd never
@@ -13563,6 +13280,7 @@ impl Core {
             Command::StopAgent {
                 name,
                 harness_session_id,
+                pane_id,
             } => {
                 // Stop a live sideline row (x-76ea). Stop ONLY: this is the
                 // menu's stop-only path; the one-gesture stop-and-remove
@@ -13571,18 +13289,24 @@ impl Core {
                 // catalog fail-closed, identity first (v67). The subprocess
                 // gets the row's CURRENT label, so a harness-side rename
                 // between capture and keypress still reaches the right row.
-                let resolved = self
-                    .resolve_lifecycle_target(&name, harness_session_id.as_deref())
-                    .map(|a| a.name.clone());
+                let resolved =
+                    self.resolve_lifecycle_full(&name, harness_session_id.as_deref(), pane_id);
                 match resolved {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(label) => self.agent_action(client_id, "stop", label),
+                    Ok(lifecycle_target::LifecycleTarget::Registry(owned)) => {
+                        self.agent_action(client_id, "stop", owned)
+                    }
+                    Ok(lifecycle_target::LifecycleTarget::Pane(pid)) => {
+                        self.stop_pane_child(client_id, pid, &name)
+                    }
                 }
                 Flow::Continue
             }
             Command::RemoveAgent {
                 name,
                 harness_session_id,
+                pane_id,
+                measure,
             } => {
                 // (x-f191 scope b) The operator states the intent ONCE: remove.
                 // The server orchestrates stop-then-rm off-loop - a live row is
@@ -13591,12 +13315,31 @@ impl Core {
                 // no-ops reaches the CLI's already-absent branch through rm's
                 // daemon-side live gate. Same resolution as StopAgent: the
                 // subprocess gets the resolved row's current label.
-                let resolved = self
-                    .resolve_lifecycle_target(&name, harness_session_id.as_deref())
-                    .map(|a| a.name.clone());
+                // (x-b5d1) `measure` widens the door to the Unmeasured row:
+                // rm runs without the stop leg, and rm's daemon-side live
+                // gate is the measurement. The gate re-checks against THIS
+                // registry now - a row that came alive between the client's
+                // arm and Enter is refused, never rm'd live.
+                let resolved =
+                    self.resolve_lifecycle_full(&name, harness_session_id.as_deref(), pane_id);
                 match resolved {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(label) => self.stop_agent_action(client_id, label),
+                    Ok(lifecycle_target::LifecycleTarget::Registry(owned)) => {
+                        if measure
+                            && self.registry_liveness(&owned)
+                                == Some(crate::agents_view::Liveness::Alive)
+                        {
+                            self.notice(
+                                client_id,
+                                format!("{owned} is still live - stop it first"),
+                            );
+                        } else {
+                            self.remove_agent_action(client_id, owned, measure);
+                        }
+                    }
+                    Ok(lifecycle_target::LifecycleTarget::Pane(pid)) => {
+                        return self.remove_pane_row(client_id, pid, &name)
+                    }
                 }
                 Flow::Continue
             }
@@ -13794,6 +13537,50 @@ impl Core {
                     Some(text) => self.send_copy(client_id, text),
                     None => self.notice(client_id, "nothing selected"),
                 }
+                Flow::Continue
+            }
+            Command::RedrawPane { pane } => {
+                // (x-a600) The repaint gesture for a garbled pane: nudge the
+                // child's winsize so a SIGWINCH-respecting renderer repaints at
+                // the settled size, then re-seed the pane's frame to every
+                // viewer - the same flush-then-re-emit the push_layout reemit
+                // pass does, scoped to one pane. `None` is the sender's viewed
+                // tab's focus; a named pane is resolved session-wide and a
+                // stale id is refused fail-closed, like FocusPane.
+                let pid = match pane {
+                    Some(p) => p,
+                    None => match self.viewed_tab(view) {
+                        Some(tab) => tab.focus,
+                        None => return Flow::Continue,
+                    },
+                };
+                let Some(entry) = self.panes.get(&pid) else {
+                    self.notice(client_id, format!("{pid}: no such pane"));
+                    return Flow::Continue;
+                };
+                let (rows, cols) = entry.vt.size();
+                let frame = entry.vt.frame();
+                entry.pty.nudge_winch(rows, cols);
+                let mut seeded = 0usize;
+                for c in &mut self.clients {
+                    if c.visible.contains(&pid) {
+                        // One composite per enqueue, matching broadcast_pane's
+                        // per-viewing-client convention.
+                        entry
+                            .stats
+                            .frames_composited
+                            .fetch_add(1, Ordering::Relaxed);
+                        let mut d = c.dirty.lock().unwrap();
+                        d.insert(pid, frame.clone());
+                        drop(d);
+                        c.notify.notify_one();
+                        seeded += 1;
+                    }
+                }
+                e2e_log(format_args!(
+                    "redraw pane {pid}: nudged {rows}x{cols}, re-seeded to {seeded} viewer(s)"
+                ));
+                self.notice(client_id, format!("pane {pid} repaint requested"));
                 Flow::Continue
             }
         }
@@ -14158,6 +13945,10 @@ impl Core {
                 reply,
             } => {
                 self.workspace_restore_apply(dry_run, harness, plans, reply);
+                Flow::Continue
+            }
+            CoreMsg::SquadReload { reply } => {
+                self.handle_squad_reload(reply);
                 Flow::Continue
             }
             CoreMsg::Gone(id) => {
@@ -14565,6 +14356,15 @@ impl Core {
                 reply,
             } => {
                 self.portal_ctl(&name, portal, placement, agents, reply);
+                Flow::Continue
+            }
+            CoreMsg::ReseatPane {
+                pane,
+                portal,
+                reply,
+            } => {
+                let msg = self.reseat_pane_into_portal(pane, portal);
+                let _ = reply.send(msg);
                 Flow::Continue
             }
             CoreMsg::TabJoin {
@@ -15565,6 +15365,8 @@ async fn serve(
                 }
             }
             _ = pane_reap_tick.tick() => {
+                // (x-a600) Deferred repaint requests ride the same 1s pass.
+                core.fire_due_nudges();
                 // Snapshot first: reader completion guarantees all output for
                 // these panes was enqueued before this point. Drain it, then
                 // close exactly the snapshot even if another reader finishes
@@ -16177,6 +15979,7 @@ async fn handle_control(
                 })
                 .await
         }
+        ControlVerb::SquadReload => core_tx.send(CoreMsg::SquadReload { reply: reply_tx }).await,
         ControlVerb::PaneFocus { pane } => {
             core_tx
                 .send(CoreMsg::PaneFocus {
@@ -16199,6 +16002,15 @@ async fn handle_control(
                     portal: portal.unwrap_or(0),
                     placement,
                     agents,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::ThreadReseat { pane, portal } => {
+            core_tx
+                .send(CoreMsg::ReseatPane {
+                    pane,
+                    portal,
                     reply: reply_tx,
                 })
                 .await
@@ -16731,6 +16543,7 @@ async fn client_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pty::ChildGuard;
 
     #[path = "../server_thread_viewer_tests.rs"]
     mod thread_viewer_tests;
@@ -16741,9 +16554,17 @@ mod tests {
     mod portal_tests;
     // Same treatment: the lifecycle-resolution test family.
     mod lifecycle_tests;
+    // The (v72) re-seat test family, same treatment.
+    mod reseat_tests;
 
     // The sideline rename test family, same treatment.
     mod rename_tests;
+
+    // The squad-store sync family (prune reload marker + negative control).
+    mod squad_sync_tests;
+
+    // The per-pane orphan verdict family.
+    mod pane_identity_tests;
 
     #[test]
     fn node_from_argv_reads_the_wrapper_token() {
@@ -20747,6 +20568,7 @@ mod tests {
             Command::StopAgent {
                 harness_session_id: None,
                 name: "ghost".into(),
+                pane_id: None,
             },
         );
         assert!(matches!(flow, Flow::Continue));
@@ -22514,7 +22336,7 @@ mod tests {
             bg_row("king-cliverbs-x-c1b9-g2", "/w", None),
             bg_row("build-xcd1e", "/w", None),
         ];
-        let sid = mission_sid("x-aaaa");
+        let sid = crate::mission_squad::mission_sid("x-aaaa");
         let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
         let squads = match &msg {
             ServerMsg::Layout { squads, .. } => squads,
@@ -22546,7 +22368,9 @@ mod tests {
             ServerMsg::Layout { squads, .. } => squads,
             _ => unreachable!(),
         };
-        assert!(squads.iter().any(|s| s.id == mission_sid("x-aaaa")));
+        assert!(squads
+            .iter()
+            .any(|s| s.id == crate::mission_squad::mission_sid("x-aaaa")));
     }
 
     #[test]
@@ -22596,6 +22420,7 @@ mod tests {
                 Command::StopAgent {
                     harness_session_id: None,
                     name: "ext-a".into(),
+                    pane_id: None,
                 },
             ),
             (
@@ -22603,6 +22428,8 @@ mod tests {
                 Command::RemoveAgent {
                     harness_session_id: None,
                     name: "ext-b".into(),
+                    pane_id: None,
+                    measure: false,
                 },
             ),
         ] {
@@ -22794,6 +22621,7 @@ mod tests {
             Command::StopAgent {
                 name: "dup".into(),
                 harness_session_id: None,
+                pane_id: None,
             },
         );
         assert!(drain_notice(&mut rx).unwrap().contains("external"));
@@ -22811,6 +22639,8 @@ mod tests {
             Command::RemoveAgent {
                 name: "dup".into(),
                 harness_session_id: None,
+                pane_id: None,
+                measure: false,
             },
         );
         assert!(drain_notice(&mut rx).unwrap().contains("ambiguous"));
@@ -24124,6 +23954,28 @@ mod tests {
             "\u{3093}-54fa"
         ));
         assert!(!name_has_node_token("a\u{3093}-54fa", "\u{3093}-54fa"));
+    }
+
+    #[test]
+    fn measure_remove_on_an_alive_row_is_refused_before_any_spawn() {
+        // (x-b5d1) measure: true is a door for the Unmeasured row only. A
+        // row the registry reads Alive refuses on this server before any
+        // subprocess: a plain #[test] has no runtime, so reaching the
+        // spawn would panic - the clean refusal proves it never does.
+        let mut core = empty_core();
+        core.agents = vec![bg_row("corpse", "/tmp", None)];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(
+            1,
+            Command::RemoveAgent {
+                name: "corpse".into(),
+                harness_session_id: None,
+                pane_id: None,
+                measure: true,
+            },
+        );
+        assert!(drain_notice(&mut rx).unwrap().contains("is still live"));
     }
 
     /// A paneless registry row for the routing tests: `name`/`cwd`/`attach_id`
@@ -27351,184 +27203,11 @@ mod tests {
             });
     }
 
-    /// Rig: a Core with one live `/bin/cat` pane fed `bytes` through the real
-    /// pty-output drain path (our own channel stands in for the pty reader
-    /// thread). Returns the core and the pane id. The pane is tiny (2x4) on
-    /// purpose: a serialized Frame scales with cells, and a full-size grid
-    /// overflows the 4096-byte duplex the emission tests read only AFTER the
-    /// write returns, deadlocking the writer.
-    fn counter_core(bytes: &[u8]) -> (Core, u64) {
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let pid = core.spawn_pane(2, 4, "/tmp").expect("pane");
-        core.panes.get_mut(&pid).unwrap().node = Some("x-deadbeef".into());
-        core.panes.get_mut(&pid).unwrap().name = Some("peer".into());
-        core.panes.get_mut(&pid).unwrap().cmd = Some("claude".into());
-        let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
-        tx.try_send((pid, bytes.to_vec())).unwrap();
-        drop(tx);
-        let mut first_out = HashSet::new();
-        drain_pty_output(&mut core, &mut rx, None, &mut first_out);
-        (core, pid)
-    }
-
-    #[test]
-    fn pane_counters_count_fed_bytes_bursts_and_cpu() {
-        let (core, pid) = counter_core(b"hello");
-        let c = &core.panes[&pid].stats;
-        assert_eq!(c.bytes_in.load(Ordering::Relaxed), 5);
-        assert_eq!(c.grid_updates.load(Ordering::Relaxed), 1);
-        assert!(
-            c.cpu_ns.load(Ordering::Relaxed) > 0,
-            "feeding one burst must attribute nonzero handling time"
-        );
-    }
-
-    #[test]
-    fn watcherless_pane_stamps_last_output_on_every_burst() {
-        // (x-d401) `note_pane_output` returns early with no `pane wait`
-        // subscriber, which is why `last_activity_age_s` read None for panes
-        // running real workloads. The stamp lives on the drain path itself:
-        // every fed burst advances it whether or not anyone watches. The
-        // marker is the stamp's recency against a pre-feed Instant - only the
-        // drain path can produce it.
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let pid = core.spawn_pane(2, 4, "/tmp").expect("pane");
-        let registered = core.panes[&pid].last_output;
-        let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
-        let mut first_out = HashSet::new();
-        tx.try_send((pid, b"burst".to_vec())).unwrap();
-        drop(tx);
-        let before = Instant::now();
-        drain_pty_output(&mut core, &mut rx, None, &mut first_out);
-        assert!(
-            core.panes[&pid].last_output >= before,
-            "the drain path must stamp last_output with no watcher attached"
-        );
-        assert!(
-            core.panes[&pid].last_output > registered,
-            "a second burst must advance the registration stamp"
-        );
-    }
-
-    #[test]
-    fn hidden_pane_is_fed_but_never_composites() {
-        // No client is attached, so broadcast_pane's visible-gate returns
-        // before vt.frame(): the counter set must show fed-but-never-
-        // composited, the exact reading that separates feeding from display.
-        let (core, pid) = counter_core(b"data");
-        let c = &core.panes[&pid].stats;
-        assert_eq!(c.frames_composited.load(Ordering::Relaxed), 0);
-        assert_eq!(c.bytes_in.load(Ordering::Relaxed), 4);
-    }
-
-    #[test]
-    fn dropped_dirty_frame_composites_but_never_emits() {
-        // Two broadcasts with no writer drain: the newest-wins map keeps one
-        // frame, so composited advances twice and emitted once - the gap is
-        // the measurement, never "fixed" by counting the dropped frame.
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                let (mut core, pid) = counter_core(b"x");
-                core.panes.get_mut(&pid).unwrap().vt.feed(b"$ ");
-                let (tx, _rx) = mpsc::channel::<ServerMsg>(8);
-                let dirty: DirtyMap = Arc::default();
-                let notify = Arc::new(Notify::new());
-                core.clients.push(Client {
-                    id: 9,
-                    reliable_tx: tx,
-                    dirty: dirty.clone(),
-                    notify: notify.clone(),
-                    synced_modes: Modes::default(),
-                    view: (1, 1),
-                    visible: HashSet::from([pid]),
-                    dims: (24, 80),
-                    passive: false,
-                    last_press: None,
-                });
-                let base = core.panes[&pid]
-                    .stats
-                    .frames_composited
-                    .load(Ordering::Relaxed);
-                core.broadcast_pane(pid);
-                core.broadcast_pane(pid);
-                let c = &core.panes[&pid].stats;
-                assert_eq!(c.frames_composited.load(Ordering::Relaxed), base + 2);
-                assert_eq!(dirty.lock().unwrap().len(), 1, "newest-wins coalescing");
-
-                // The Bye flush is one wire path: one emitted frame.
-                let (mut writer, mut reader) = tokio::io::duplex(4096);
-                let stats = core.pane_stats.clone();
-                write_reliable(
-                    &mut writer,
-                    &ServerMsg::Bye { reason: "d".into() },
-                    &dirty,
-                    &stats,
-                )
-                .await
-                .unwrap();
-                let _ = read_msg::<_, ServerMsg>(&mut reader).await;
-                assert_eq!(c.frames_emitted.load(Ordering::Relaxed), 1);
-
-                // A reliable Frame (the cold-attach snapshot path) emits too.
-                write_reliable(
-                    &mut writer,
-                    &ServerMsg::Frame {
-                        pane_id: pid,
-                        frame: core.panes[&pid].vt.frame(),
-                    },
-                    &dirty,
-                    &stats,
-                )
-                .await
-                .unwrap();
-                let _ = read_msg::<_, ServerMsg>(&mut reader).await;
-                assert_eq!(c.frames_emitted.load(Ordering::Relaxed), 2);
-                // A pane with no registry row (reaped mid-drain) skips
-                // silently rather than counting a phantom emit.
-                count_frame_emitted(&stats, u64::MAX);
-                assert_eq!(c.frames_emitted.load(Ordering::Relaxed), 2);
-            });
-    }
-
-    #[test]
-    fn pane_stats_payload_carries_provenance_and_totals() {
-        let (core, pid) = counter_core(b"abc");
-        let payload = core.pane_stats_payload().expect("live pane -> payload");
-        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        assert_eq!(v["session"], "test");
-        let row = v["panes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["pane_id"].as_u64() == Some(pid))
-            .expect("the live pane's row");
-        assert_eq!(row["node"], "x-deadbeef");
-        assert_eq!(row["name"], "peer");
-        assert_eq!(row["cmd"], "claude");
-        assert_eq!(row["bytes_in"], 3);
-        for key in [
-            "grid_updates",
-            "frames_composited",
-            "frames_emitted",
-            "cpu_ns",
-        ] {
-            assert!(row[key].is_u64(), "{key} must be a number");
-        }
-        assert!(empty_core().pane_stats_payload().is_none());
-    }
-
-    #[test]
-    fn reaping_a_pane_drops_its_counter_row() {
-        let (mut core, pid) = counter_core(b"z");
-        assert!(core.pane_stats.read().unwrap().contains_key(&pid));
-        core.reap_pane(pid);
-        assert!(!core.pane_stats.read().unwrap().contains_key(&pid));
-    }
+    // Pane-counter and frame-emission family (plus the x-a600 repaint
+    // gesture tests) moved verbatim into its own module: this file is over
+    // the shrink-only line, and test motion is the sanctioned shrink.
+    #[path = "pane_frame_flow_tests.rs"]
+    mod pane_frame_flow_tests;
 
     #[test]
     fn cold_attach_delivers_every_pane_frame_on_the_reliable_channel() {
@@ -28463,14 +28142,10 @@ mod tests {
 
     #[test]
     fn emergency_roster_kills_plain_child_and_spares_keeper_child() {
-        let mut plain = std::process::Command::new("/bin/sh")
-            .args(["-c", "exec sleep 30"])
-            .spawn()
-            .unwrap();
-        let mut keeper = std::process::Command::new("/bin/sh")
-            .args(["-c", "exec sleep 30"])
-            .spawn()
-            .unwrap();
+        let plain =
+            ChildGuard::spawn(std::process::Command::new("/bin/sh").args(["-c", "exec sleep 30"]));
+        let keeper =
+            ChildGuard::spawn(std::process::Command::new("/bin/sh").args(["-c", "exec sleep 30"]));
         let plain_pid = plain.id();
         let keeper_pid = keeper.id();
         let roster = HashSet::from([
@@ -28495,11 +28170,8 @@ mod tests {
             "keeper roster child must survive"
         );
 
-        unsafe { libc::kill(keeper_pid as libc::pid_t, libc::SIGKILL) };
-        keeper.wait().unwrap();
-        // Reap the killed plain child too, so the test leaves no zombie
-        // behind. After the assertions, so what they read is unchanged.
-        let _ = plain.wait();
+        // The guards kill and reap at scope end, after the assertions, so
+        // what they read is unchanged and the test leaves no zombie.
     }
 
     #[test]

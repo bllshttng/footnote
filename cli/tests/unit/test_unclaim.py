@@ -143,7 +143,7 @@ def test_unclaim_refuses_live_foreign_lockfile(tmp_graph, claims_root, monkeypat
     # A live holder (this pid) that is NOT us => graph cleared, lockfile kept.
     _acquire("node:ab-1234abcd", "target-session:someone-else", pid=os.getpid(), root=claims_root)
     monkeypatch.setattr(
-        "fno.graph.cli._invoking_claim_holder",
+        "fno.backlog.requeue._invoking_claim_holder",
         lambda: "target-session:me-not-them",
     )
     result = runner.invoke(app, ["backlog", "unclaim", "ab-1234abcd"])
@@ -171,13 +171,13 @@ def _point_session_at(tmp_path: Path, monkeypatch, session_id: str) -> None:
 def test_invoking_session_id_reads_target_state(tmp_path, monkeypatch):
     # Regression: repo_root() is a str; _invoking_session_id must Path()-wrap it
     # before handing it to resolve_session_id, or it silently returns None.
-    import fno.graph.cli as gcli
+    import fno.backlog.requeue as grequeue
     _point_session_at(tmp_path, monkeypatch, "sid-123")
-    assert gcli._invoking_session_id() == "sid-123"
+    assert grequeue._invoking_session_id() == "sid-123"
 
 
 def test_invoking_claim_holder_prefers_manifest_holder(tmp_path, monkeypatch):
-    import fno.graph.cli as gcli
+    import fno.backlog.requeue as grequeue
 
     _point_session_at(tmp_path, monkeypatch, "unique-target-session")
     state = tmp_path / ".fno" / "target-state.md"
@@ -185,7 +185,7 @@ def test_invoking_claim_holder_prefers_manifest_holder(tmp_path, monkeypatch):
         state.read_text() + 'target_claim_holder: "target-session:codex-thread"\n'
     )
 
-    assert gcli._invoking_claim_holder() == "target-session:codex-thread"
+    assert grequeue._invoking_claim_holder() == "target-session:codex-thread"
 
 
 def test_unclaim_releases_own_live_lockfile(tmp_path, tmp_graph, claims_root, monkeypatch):

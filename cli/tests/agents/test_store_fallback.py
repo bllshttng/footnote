@@ -563,40 +563,6 @@ def test_lifecycle_refuses_registry_name_that_collides_with_store_session(
     assert store_only_id in str(exc.value)
 
 
-def test_attach_refuses_registry_name_that_collides_with_store_session(
-    _registry_home, monkeypatch
-):
-    from fno.agents import dispatch
-    from fno.agents.registry import AgentEntry, write_registry
-
-    registered_id = "aaaaaaaa-1111-2222-3333-444455556666"
-    store_only_id = "bbbbbbbb-1111-2222-3333-0000deadbeef"
-    write_registry([
-        AgentEntry(
-            name="deadbeef",
-            cwd="/registered",
-            log_path="",
-            harness="claude",
-            harness_session_id=registered_id,
-            short_id="aaaaaaaa",
-        )
-    ])
-    _write_codex_session(_registry_home, store_only_id)
-    attached = []
-    monkeypatch.setattr(
-        "fno.agents.harnesses.claude.claude_attach",
-        lambda short, **_kw: attached.append(short) or 0,
-    )
-
-    with pytest.raises(dispatch.DispatchAskError) as exc:
-        dispatch.attach_agent("deadbeef")
-
-    assert exc.value.exit_code == 2
-    assert registered_id in str(exc.value)
-    assert store_only_id in str(exc.value)
-    assert attached == []
-
-
 def test_dispatch_send_refuses_registry_name_colliding_with_store_session(
     _registry_home, monkeypatch
 ):
@@ -797,24 +763,6 @@ def test_resume_reports_ambiguity_rather_than_guessing(_registry_home):
     assert "matches 2 sessions" in result.stderr
 
 
-def test_attach_heals_an_unregistered_claude_session(_registry_home, monkeypatch):
-    """AC1-HP: attach shells claude against exactly the resolved session."""
-    from fno.agents import dispatch
-
-    _write_claude_session(_registry_home, CLAUDE_UUID)
-    attached = []
-    monkeypatch.setattr(dispatch, "is_provider_available", lambda _p: True)
-    monkeypatch.setattr(
-        "fno.agents.harnesses.claude.claude_attach",
-        lambda short, **_kw: attached.append(short) or 0,
-    )
-
-    result = dispatch.attach_agent("c655c326")
-
-    assert result.exit_code == 0
-    assert attached == ["c655c326"]
-
-
 def test_uppercase_uuid_still_resolves(_registry_home):
     """An id pasted out of a log resolves; opencode ids stay case-sensitive."""
     _write_claude_session(_registry_home, CLAUDE_UUID)
@@ -863,30 +811,6 @@ def test_resume_keeps_registry_ambiguity(_registry_home):
 
     assert result.exit_code == 13
     assert "is ambiguous across 2 agents" in result.stderr
-
-
-def test_attach_survives_an_unwritable_registry(_registry_home, monkeypatch):
-    """The healer returns a synthesized row when it cannot persist; attach must
-    use THAT row, not re-read the unchanged registry and report not-found."""
-    from fno.agents import dispatch
-
-    _write_claude_session(_registry_home, CLAUDE_UUID)
-
-    def _boom(**_kwargs):
-        raise OSError("read-only registry")
-
-    monkeypatch.setattr("fno.agents.registry.register_existing_session", _boom)
-    attached = []
-    monkeypatch.setattr(dispatch, "is_provider_available", lambda _p: True)
-    monkeypatch.setattr(
-        "fno.agents.harnesses.claude.claude_attach",
-        lambda short, **_kw: attached.append(short) or 0,
-    )
-
-    result = dispatch.attach_agent("c655c326")
-
-    assert result.exit_code == 0
-    assert attached == ["c655c326"]
 
 
 def test_invalid_utf8_transcript_does_not_crash(_registry_home):

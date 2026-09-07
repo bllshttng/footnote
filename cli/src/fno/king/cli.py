@@ -102,8 +102,31 @@ def init_cmd(
         )
         raise typer.Exit(2)
 
+    # Every spelling of one crown must arm the SAME file: canonicalize the set
+    # AND resolve aliases, or `--scope a` arms kings/a.md while row-keyed
+    # readers resolve kings/alpha.md from row.crown_scope - and the
+    # uncrowned-row warning stays silent, comparing through the same
+    # normalization.
+    from fno.agents.crown import _canonical_members, canonical_scope, split_scope
+
+    members = split_scope(scope)
+    if not members:
+        typer.echo(
+            "king: --scope needs a crown scope: name an epic or a project.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    scope = canonical_scope(list(_canonical_members(scope)))
+
     try:
         manifest_path = king_manifest_path(scope)
+    except ValueError as exc:
+        # A path-unsafe scope member ('..' or a '/') is a refusal, not a
+        # traceback: the safety check lives in king_manifest_path.
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+
+    try:
         fields = write_manifest(
             manifest_path,
             scope=scope,
@@ -476,7 +499,10 @@ def board_cmd(
         "payload naming what it could not read instead of being killed.",
     ),
     state: Optional[Path] = typer.Option(
-        None, "--state", hidden=True, help="King manifest whose scope bounds the board."
+        None,
+        "--state",
+        help="King manifest whose scope bounds the board. Defaults to this "
+        "session's own crown; pass one explicitly to read outside it.",
     ),
 ) -> None:
     """Report every queue that would keep a king working.
@@ -484,8 +510,10 @@ def board_cmd(
     The collector is the Rust runtime (x-25b8, d-e11b2b3e): this command is a
     shell over `fno-agents board` - it resolves the binary, passes the whole
     budget and the manifest through, and renders or emits the returned payload.
-    Exits non-zero when any queue could not be read: an unreadable queue is not
-    an empty one.
+    A bare call from a crowned session defaults to that crown's manifest (the
+    registry row plus the file, never presence alone, is the authority);
+    anything else reads the fleet-wide board. Exits non-zero when any queue
+    could not be read: an unreadable queue is not an empty one.
     """
     import subprocess
 
@@ -512,6 +540,26 @@ def board_cmd(
             err=True,
         )
         raise typer.Exit(code=2)
+
+    if state is None:
+        # A king reads its own board, so the crown it already holds is the
+        # scope it means. An unreadable, terminal, or uncrowned reading
+        # resolves nothing and the board stays fleet-wide, exactly as before.
+        from fno.agents.crown import calling_agent_row
+        from fno.king.state import resolve_king_manifest_path
+
+        caller = calling_agent_row()
+        session_id = (
+            getattr(caller, "harness_session_id", None)
+            or getattr(caller, "cc_session_id", None)
+            or ""
+        )
+        if session_id:
+            resolved = resolve_king_manifest_path(
+                session_id, getattr(caller, "harness", None)
+            )
+            if resolved is not None:
+                state = resolved
 
     cmd = [str(binary), "board", "--json"]
     if budget_ms is not None:
@@ -583,6 +631,36 @@ def escalate_cmd(
     typer.echo(qid)
 
 
+@king_app.command("drain")
+def drain_cmd(
+    scope: str = typer.Argument(..., help="The crown scope to count."),
+) -> None:
+    """Is the crown drained: how many scope nodes are not done or superseded.
+
+    The walk's termination reads this, never a queue: a row with a driver
+    leaves the actionable board while its work is unshipped, so the board
+    answers assignment and this answers delivery. An unreadable graph exits
+    nonzero on purpose - a walk that cannot see the scope must not read the
+    failure as drained.
+    """
+    from fno.graph.store import GraphUnreadableError, StoreUnavailable
+    from fno.king.scope import scope_undelivered
+    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
+
+    try:
+        entries = read_entries("king drain", strict=True)
+        undelivered = scope_undelivered(scope, entries)
+    except (
+        ExternalMetadataUnavailable,
+        GraphUnreadableError,
+        StoreUnavailable,
+        ValueError,
+    ) as exc:
+        typer.echo(f"king: drain for {scope!r} unreadable: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps({"scope": scope, "undelivered": undelivered}))
+
+
 def _render(board: dict, max_rows: int) -> None:
     typer.echo(f"actionable: {board['actionable']}")
     for q in board["queues"]:
@@ -612,6 +690,7 @@ agents_king_app.command("init")(init_cmd)
 agents_king_app.command("done")(done_cmd)
 agents_king_app.command("cancel")(cancel_cmd)
 agents_king_app.command("escalate")(escalate_cmd)
+agents_king_app.command("drain")(drain_cmd)
 agents_king_app.command("shape")(shape_cmd)
 # The stop hooks resolve the crown manifest through this hidden verb: the
 # deprecated `fno king` spelling once missed the verb_moves fold and burned

@@ -31,7 +31,6 @@ def tmp_home(tmp_path, monkeypatch):
     # Clear load_settings cache so config reads fresh from the tmp HOME
     try:
         from fno.config import load_settings
-        load_settings.cache_clear()
     except Exception:
         pass
     yield home

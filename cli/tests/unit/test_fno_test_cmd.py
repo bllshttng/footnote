@@ -37,8 +37,31 @@ def test_run_missing_interpreter_is_127(monkeypatch):
     assert test_cmd._run(["-q"]) == 127
 
 
+def _popen_fake(recorder, returncode: int = 0):
+    """A subprocess.Popen stand-in for the group-spawning runner.
+
+    The suite runner now spawns via Popen in its own process group, so cmd
+    capture must intercept Popen and answer wait(timeout) like a real exit.
+    """
+    calls = []
+
+    class _FakePopen:
+        def __init__(self, cmd, env=None, **kw):
+            self.pid = 4242
+            calls.append({"cmd": cmd, "env": env, "kw": kw})
+            recorder(cmd, env=env, kw=kw)
+
+        def wait(self, timeout=None):
+            return returncode
+
+        def kill(self):
+            pass
+
+    return _FakePopen
+
+
 def _fake_run_capture(monkeypatch, tmp_path):
-    """Set up a tmp checkout + a fake subprocess.run that captures the cmd."""
+    """Set up a tmp checkout + a fake runner that captures the cmd."""
     captured = {}
 
     class _Proc:
@@ -50,6 +73,11 @@ def _fake_run_capture(monkeypatch, tmp_path):
 
     monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: sys.executable)
     monkeypatch.setattr(test_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        test_cmd.subprocess,
+        "Popen",
+        _popen_fake(lambda cmd, env=None, kw=None: captured.update(cmd=cmd)),
+    )
     monkeypatch.chdir(tmp_path)
     (tmp_path / "cli" / "src" / "fno").mkdir(parents=True)
     (tmp_path / "cli" / "src" / "fno" / "__init__.py").write_text("", encoding="utf-8")
@@ -161,13 +189,11 @@ def test_stream_mode_inherits_stdio(tmp_path, monkeypatch):
     """--stream keeps the old inherited-stdio behavior: no capture kwargs."""
     captured = _fake_run_capture(monkeypatch, tmp_path)
     captured_kw = {}
-    real_fake = test_cmd.subprocess.run
 
-    def fake_run(cmd, env=None, **kw):
+    def record(cmd, env=None, kw=None):
         captured_kw.update(kw)
-        return real_fake(cmd, env=env, **kw)
 
-    monkeypatch.setattr(test_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(test_cmd.subprocess, "Popen", _popen_fake(record))
     assert test_cmd._run(["-q"], stream=True) == 0
     assert "stdout" not in captured_kw
 
@@ -186,17 +212,13 @@ def test_rust_mode_runs_each_crate_quietly(tmp_path, monkeypatch, capsys):
     """`fno doctor test rust` runs cargo test -q per crates/*/Cargo.toml (no nextest)."""
     cmds = []
 
-    class _Proc:
-        returncode = 0
-
-    def fake_run(cmd, env=None, **kw):
+    def record(cmd, env=None, kw=None):
         cmds.append(cmd)
         if cmd[0] == "cargo":  # sensor calls (lanes reading) pass no env
             assert env["RTK_DISABLED"] == "1"
-        return _Proc()
 
     _fake_checkout_with_crates(tmp_path, monkeypatch)
-    monkeypatch.setattr(test_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(test_cmd.subprocess, "Popen", _popen_fake(record))
     monkeypatch.setattr(test_cmd.shutil, "which", lambda name: None)
     assert test_cmd._run_rust([]) == 0
     # The lanes reading is real here (unpatched), so its sensor subprocess
@@ -212,15 +234,11 @@ def test_rust_mode_runs_each_crate_quietly(tmp_path, monkeypatch, capsys):
 def test_rust_mode_prefers_nextest(tmp_path, monkeypatch):
     cmds = []
 
-    class _Proc:
-        returncode = 0
-
-    def fake_run(cmd, env=None, **kw):
+    def record(cmd, env=None, kw=None):
         cmds.append(cmd)
-        return _Proc()
 
     _fake_checkout_with_crates(tmp_path, monkeypatch, n=1)
-    monkeypatch.setattr(test_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(test_cmd.subprocess, "Popen", _popen_fake(record))
     monkeypatch.setattr(
         test_cmd.shutil, "which", lambda name: "/x/cargo-nextest" if name == "cargo-nextest" else None
     )
@@ -236,15 +254,11 @@ def test_rust_mode_prefers_nextest(tmp_path, monkeypatch):
 def test_rust_mode_explicit_manifest_single_run(tmp_path, monkeypatch):
     cmds = []
 
-    class _Proc:
-        returncode = 3
-
-    def fake_run(cmd, env=None, **kw):
+    def record(cmd, env=None, kw=None):
         cmds.append(cmd)
-        return _Proc()
 
     _fake_checkout_with_crates(tmp_path, monkeypatch)
-    monkeypatch.setattr(test_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(test_cmd.subprocess, "Popen", _popen_fake(record, returncode=3))
     monkeypatch.setattr(test_cmd.shutil, "which", lambda name: None)
     rc = test_cmd._run_rust(["--manifest-path", "crates/alpha/Cargo.toml"])
     assert rc == 3  # real cargo exit code propagated
@@ -255,19 +269,15 @@ def test_rust_mode_explicit_manifest_single_run(tmp_path, monkeypatch):
 
 def test_pythonpath_pins_worktree_src(tmp_path, monkeypatch):
     """_run must prepend <root>/cli/src to PYTHONPATH so a worktree tests its
-    own source. We capture the child env via a fake subprocess.run."""
+    own source. We capture the child env through the Popen fake."""
     captured = {}
 
-    class _Proc:
-        returncode = 0
-
-    def fake_run(cmd, env=None, **kw):
+    def record(cmd, env=None, kw=None):
         captured["env"] = env
         captured["cmd"] = cmd
-        return _Proc()
 
     monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: sys.executable)
-    monkeypatch.setattr(test_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(test_cmd.subprocess, "Popen", _popen_fake(record))
     monkeypatch.chdir(tmp_path)
     (tmp_path / "cli" / "src" / "fno").mkdir(parents=True)
     (tmp_path / "cli" / "src" / "fno" / "__init__.py").write_text("", encoding="utf-8")

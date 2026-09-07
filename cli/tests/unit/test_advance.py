@@ -1143,6 +1143,125 @@ def test_spawn_worker_codex_receipt_with_only_session_id_key(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# x-7f1f task 1.1: the spawn receipt carries the substrate to the caller.
+# A headless dispatch is SYNCHRONOUS - subprocess.run returns only after the
+# one-shot worker finished - so the drain must know the substrate or it
+# fabricates a crash for a child that already succeeded.
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_worker_fills_receipt_out_param(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, _RECEIPT)
+    )
+    ev = tmp_path / "events.jsonl"
+    receipt: dict = {}
+    sid = adv._spawn_worker("ab-2222aaaa", None, events_path=ev, receipt=receipt)
+    row = json.loads(ev.read_text().splitlines()[-1])
+    assert row["type"] == adv.EVENT_SPAWNED
+    payload = row["data"]
+    assert receipt["short_id"] == payload["short_id"] == sid
+    assert receipt["substrate"] == payload["substrate"]
+    assert receipt["harness"] == payload["harness"]
+
+
+def test_spawn_worker_receipt_stays_empty_on_spawn_error(monkeypatch):
+    receipt: dict = {}
+    monkeypatch.setattr(
+        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(1, "", "daemon unreachable"),
+    )
+    with pytest.raises(adv.SpawnError):
+        adv._spawn_worker("ab-2222aaaa", None, receipt=receipt)
+    assert receipt == {}
+
+
+def _converge_env(monkeypatch, tmp_path):
+    """Silence the pre-spawn gates so _converge_one reaches the spawn seam."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    monkeypatch.setattr(adv, "_walker_live_at", lambda root: False)
+    monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda nid, root: None)
+    monkeypatch.setattr(
+        adv._autobrief, "resolve_dispatch_brief", lambda node_meta: ("", "")
+    )
+    monkeypatch.setattr(adv._route_resolve, "node_model", lambda *a, **k: None)
+
+
+def test_converge_one_dispatched_result_carries_substrate(monkeypatch, tmp_path):
+    _converge_env(monkeypatch, tmp_path)
+
+    def fake_spawn(node_id, root, slug, **kwargs):
+        kwargs["receipt"].update(
+            {"short_id": "headless", "substrate": "headless", "harness": "codex"}
+        )
+        return "headless"
+
+    monkeypatch.setattr(adv, "_spawn_worker", fake_spawn)
+    result = adv._converge_one(
+        {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
+    )
+    assert result.decision == "dispatched"
+    assert result.substrate == "headless"
+
+
+def test_converge_one_spawn_failure_leaves_receipt_empty(monkeypatch, tmp_path):
+    _converge_env(monkeypatch, tmp_path)
+    seen: dict = {}
+
+    def fake_spawn(node_id, root, slug, **kwargs):
+        seen["receipt"] = kwargs["receipt"]
+        raise adv.SpawnError("boom")
+
+    monkeypatch.setattr(adv, "_spawn_worker", fake_spawn)
+    result = adv._converge_one(
+        {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
+    )
+    assert result.decision == "failed"
+    assert seen["receipt"] == {}
+    assert result.substrate is None
+
+
+def test_converge_one_releases_reservation_when_outcome_is_not_dispatched(
+    monkeypatch, tmp_path
+):
+    """AC9-HP (x-41f7): a raise between a SUCCESSFUL spawn and the dispatched
+    receipt still returns the boot-window reservation. Spawn done, outcome not
+    a dispatch, is the exact span that held dispatch:x-e882 forever."""
+    _converge_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        adv, "_spawn_worker", lambda node_id, root, slug, **kwargs: "sid"
+    )
+    real_emit = adv._emit
+
+    def raise_after_spawn(event, data, path):
+        if event == adv.EVENT_DISPATCHED:
+            raise RuntimeError("journal unwritable")
+        real_emit(event, data, path)
+
+    monkeypatch.setattr(adv, "_emit", raise_after_spawn)
+    with pytest.raises(RuntimeError):
+        adv._converge_one(
+            {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
+        )
+    key = "dispatch:ab-1111aaaa"
+    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+
+
+def test_converge_one_dispatched_keeps_the_reservation(monkeypatch, tmp_path):
+    """AC10-EDGE: a dispatch keeps the reservation - the boot-window bridge
+    until the worker owns node:<id>."""
+    _converge_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        adv, "_spawn_worker", lambda node_id, root, slug, **kwargs: "sid"
+    )
+    result = adv._converge_one(
+        {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
+    )
+    assert result.decision == "dispatched"
+    key = "dispatch:ab-1111aaaa"
+    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "live"
+
+
+# ---------------------------------------------------------------------------
 # cmd_advance: the `fno backlog advance` CLI verb
 # ---------------------------------------------------------------------------
 
@@ -1813,7 +1932,9 @@ def _settings_ns(auto_merge=False, perm=""):
     import types
 
     return types.SimpleNamespace(
-        agents=types.SimpleNamespace(spawn_permission_mode=perm),
+        agents=types.SimpleNamespace(
+            defaults=types.SimpleNamespace(permission_mode=perm)
+        ),
         auto_merge=types.SimpleNamespace(
             grant="dispatch" if auto_merge else "none"
         ),
@@ -2195,7 +2316,9 @@ def test_quota_change_after_selection_cannot_rewrite_the_spawn(iso, monkeypatch)
 # ---------------------------------------------------------------------------
 # Autonomous permission-mode gate (_spawn_worker argv)
 #
-# US1 flips config.agents.spawn_permission_mode's default to "bypassPermissions".
+# US1: an unset config falls through to the SPAWN_PERMISSION_BUILTIN
+# "bypassPermissions" (formerly config.agents.spawn_permission_mode's own
+# default, collapsed onto agents.defaults.permission_mode, x-7198).
 # US2 gates the --permission-mode forward on the resolved harness being claude,
 # so a failover leg landing on codex/gemini (which the spawn seam exit-2 rejects
 # for a mapped mode) never carries the claude-native flag. US3 is that failover
@@ -2221,7 +2344,9 @@ def _spawn_argv(monkeypatch, *, provider, perm_config, permission_mode=None, sub
 
     resolved_harness = harness or (provider if provider in ("codex", "gemini") else "claude")
     fake_settings = SimpleNamespace(
-        agents=SimpleNamespace(spawn_permission_mode=perm_config),
+        agents=SimpleNamespace(
+            defaults=SimpleNamespace(permission_mode=perm_config)
+        ),
         dispatch=SimpleNamespace(auto_merge=False),
     )
     monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: fake_settings)
@@ -2273,10 +2398,13 @@ def test_codex_leg_skips_explicit_mode(iso, monkeypatch):
     assert _perm_of(cmd) is None
 
 
-def test_claude_leg_explicit_empty_opts_out(iso, monkeypatch):
-    """AC1-EDGE: an explicit "" forwards nothing (claude prompts normally)."""
+def test_claude_leg_empty_config_falls_to_builtin(iso, monkeypatch):
+    """x-7198: agents.defaults.permission_mode's empty string means unset (the
+    general SpawnDefaultsBlock convention), not opt-out - unlike the retired
+    spawn_permission_mode field, there is no longer a distinct "explicit empty"
+    signal, so an empty config resolves the built-in exactly like no config."""
     cmd = _spawn_argv(monkeypatch, provider="claude", perm_config="")
-    assert _perm_of(cmd) is None
+    assert _perm_of(cmd) == "bypassPermissions"
 
 
 def test_claude_leg_default_mode_positive(iso, monkeypatch):

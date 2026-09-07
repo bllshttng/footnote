@@ -203,6 +203,13 @@ def _kanban_card(
         reason = (entry.get("deferred_reason") or "").strip()
         body_lines.append(f"  deferred: {reason}" if reason else "  deferred")
 
+    # A contained, not-done row sits in its priority column (only deferred and
+    # superseded rows hide); without this line the card reads as a
+    # dispatchable idea when its work actually ships inside the owner's PR.
+    contained_in = entry.get("contained_in")
+    if isinstance(contained_in, str) and contained_in and not is_done:
+        body_lines.append(f"  ships inside: {contained_in}")
+
     pr_url = entry.get("pr_url")
     if pr_url and is_done:
         body_lines.append(f"  {pr_url}")

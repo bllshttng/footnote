@@ -189,13 +189,15 @@ class TestCensus:
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
         assert spawn_gate.census().count == 0
 
-    def test_spawning_outlived_by_a_live_pid_renders_live_with_basis(
+    def test_spawning_outlived_by_a_live_pid_renders_quiet_with_basis(
         self, monkeypatch
     ):
         """(x-d401 / x-0248) AC3-HP: a stored `spawning` token a live pid has
         outlived does not render a bare `spawning` - the row names the
-        movement-derived state and a basis for the rewrite. AC3-EDGE: a row
-        with no pid recorded yet keeps its honest token."""
+        movement-derived state and a basis for the rewrite. The process is
+        confirmed but the transcript is unread, so the served word is
+        `quiet`, never a `live` token. AC3-EDGE: a row with no pid recorded
+        yet keeps its honest token."""
         from datetime import datetime, timedelta, timezone
 
         stale = datetime.now(timezone.utc) - timedelta(hours=13)
@@ -210,7 +212,7 @@ class TestCensus:
 
         by_name = {w.name: w for w in spawn_gate.census().workers}
 
-        assert by_name["stale-spawn"].status == "live", (
+        assert by_name["stale-spawn"].status == "quiet", (
             "a working row must not read spawning"
         )
         assert by_name["stale-spawn"].status_basis == "stale-spawning-live-pid"
@@ -477,6 +479,86 @@ class TestRunGate:
         assert evidence is not None
         assert "footprint attributes 1.86/12.00 cores" in evidence
         assert "15.5% capacity" in evidence
+
+    def test_footprint_cause_reader_names_the_claude_spare_pool(self, monkeypatch):
+        """Measured 2026-09-07: the pool held 66.5% of a 12-CPU machine while
+        the refusal named only the fleet. It must be named in the same line."""
+        from fno import doctor_footprint
+
+        monkeypatch.setattr(
+            doctor_footprint,
+            "_live_root_pids",
+            lambda **_kwargs: (set(), None),
+        )
+        monkeypatch.setattr(
+            doctor_footprint,
+            "_read_ps",
+            lambda **_kwargs: (
+                """\
+                PID PPID ELAPSED %CPU RSS COMMAND
+                100 1 01:00:00 86.0 1024 fno-agents-worker --run
+                101 100 01:00:00 100.0 1024 cargo test -p fno
+                300 1 00:05:00 200.0 118784 claude bg-spare --bg-spare /tmp/x.claim.sock
+                301 1 00:05:00 190.0 118784 claude bg-pty-host --bg-pty-host /tmp/x.pty.sock 200 50
+                """,
+                None,
+            ),
+        )
+        monkeypatch.setattr(doctor_footprint, "_cpu_quota_cores", lambda: None)
+        monkeypatch.setattr(doctor_footprint, "_cpu_capacity_cores", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+        monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12, raising=False)
+        monkeypatch.setattr(
+            spawn_gate.os,
+            "sched_getaffinity",
+            lambda _pid: set(range(12)),
+            raising=False,
+        )
+
+        evidence = spawn_gate._footprint_cause_evidence()
+
+        assert evidence is not None
+        assert "claude spare pool holds 3.90 cores across 2 idle pre-warm" in evidence
+        assert "does not own or bound" in evidence
+
+    def test_footprint_cause_reader_names_no_pool_when_none_is_running(
+        self, monkeypatch
+    ):
+        """Negative control for the assertion above: with no pool rows in the
+        snapshot the evidence line carries no pool claim at all."""
+        from fno import doctor_footprint
+
+        monkeypatch.setattr(
+            doctor_footprint,
+            "_live_root_pids",
+            lambda **_kwargs: (set(), None),
+        )
+        monkeypatch.setattr(
+            doctor_footprint,
+            "_read_ps",
+            lambda **_kwargs: (
+                """\
+                PID PPID ELAPSED %CPU RSS COMMAND
+                100 1 01:00:00 86.0 1024 fno-agents-worker --run
+                """,
+                None,
+            ),
+        )
+        monkeypatch.setattr(doctor_footprint, "_cpu_quota_cores", lambda: None)
+        monkeypatch.setattr(doctor_footprint, "_cpu_capacity_cores", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+        monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12, raising=False)
+        monkeypatch.setattr(
+            spawn_gate.os,
+            "sched_getaffinity",
+            lambda _pid: set(range(12)),
+            raising=False,
+        )
+
+        evidence = spawn_gate._footprint_cause_evidence()
+
+        assert evidence is not None
+        assert "spare pool" not in evidence
 
     def test_footprint_cause_reader_fails_open_when_ps_is_unavailable(
         self, monkeypatch
@@ -1014,9 +1096,9 @@ class TestRunGate:
     def test_every_registry_mint_site_stamps_spawned_by(self):
         """The parent-edge sibling of the provider stamp test: each mint site
         calls the ambient capture helper and wires the triple onto the row.
-        The shell gate (check-spawn-lineage-parity.sh) runs the same sweep in
-        CI; this pytest copy fails in the local suite a developer actually
-        runs."""
+        The Rust mint constructor (RegistryEntry::new) now makes the omission a
+        compile error; this sweep stays as the local-suite check that each
+        site routes through it and still captures the ambient edge."""
         root = Path(__file__).resolve().parents[3]
         rust_sites = {
             "claude create": (
@@ -1048,7 +1130,10 @@ class TestRunGate:
             assert start in text and end in text.split(start, 1)[1], label
             body = text.split(start, 1)[1].split(end, 1)[0]
             assert "crate::claims::ambient_parent_edge()" in body, label
-            assert "spawned_by_session: parent_session" in body, label
+            # The identity and the parent edge ride the required mint
+            # constructor; a site naming neither fails to compile.
+            assert "RegistryEntry::new(" in body, label
+            assert "Lineage {" in body or "Lineage::captured(" in body, label
 
         state_rust = (root / "crates/fno-agents/src/state.rs").read_text()
         for field in ("spawned_by_session", "spawned_by_harness", "spawned_by_cwd"):
@@ -1067,7 +1152,11 @@ class TestRunGate:
         assert 'origin == "operator"' in register
         assert "spawned_by_session=_sb_session" in register
         fallback_python = (root / "cli/src/fno/agents/store_fallback.py").read_text()
-        assert "spawned_by_session=_sb_session" in fallback_python
+        # x-5283 LD3: the adoption mint site stamps the VOUCHER, never a
+        # spawn edge - its spawned_by_* stays None by design, so crowning
+        # cannot move a row's cost into the grantor's account.
+        assert "spawned_by_session=None" in fallback_python
+        assert "adopted_by_session=_sb_session" in fallback_python
 
     def test_force_does_not_bypass_provider_cap(self, monkeypatch):
         _settings(monkeypatch, max_live=99, max_lanes={"zai": 1})

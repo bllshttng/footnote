@@ -90,6 +90,17 @@ jobs:
           uv run mypy src/
           echo "main-python-static: checked ${python_files} Python files with ruff + mypy"
 
+      # The verb x harness doc is a projection of the capability table and
+      # skills/*/SKILL.md frontmatter. It lives here, not in rust-ci, because
+      # a skill prose edit must not pay a cargo build to prove one doc fresh.
+      - name: Verb matrix fresh
+        if: ${{ !cancelled() }}
+        working-directory: cli
+        run: |
+          set -euo pipefail
+          uv run fno-py doctor harness-matrix --write
+          git diff --exit-code -- ../docs/harnesses/verb-matrix.md
+
       # x-3d21 R4/R5: a state path built by hand consults nothing, so no env
       # pin, guard or refusal can reach it. The ratchet fails in BOTH
       # directions - a new hand-built path, and a baselined line whose site was
@@ -224,26 +235,6 @@ jobs:
         working-directory: cli
         run: uv run fno-py doctor lint hook-tombstones
 
-      - name: Harness capabilities table fresh (one canonical source, byte-identical copy)
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/ci/check-harness-capabilities-fresh.sh
-
-      - name: Harness capability matrix fresh (generated doc, never hand-edited)
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/ci/check-harness-capability-matrix-fresh.sh
-
-      - name: Run harness-capabilities freshness test harness
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash tests/ci/test_check_harness_capabilities_fresh.sh
-
-      - name: Merge-posture carrier table fresh (one canonical source, byte-identical copy)
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/ci/check-merge-posture-fresh.sh
-
       # The complete harness roster vs its shipped evidence: setup docs, the
       # Rust provider dispatch arms, and the Python adapter registry. stdlib
       # only - no package install, no Rust build, no network.
@@ -257,16 +248,6 @@ jobs:
         timeout-minutes: 5
         run: python3 scripts/ci/check-harness-roster-parity.py --selftest
 
-      - name: Events limits table fresh (generated from schema.yaml, not hand-edited)
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/ci/check-events-limits-fresh.sh
-
-      - name: Run events-limits freshness test harness
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash tests/ci/test_check_events_limits_fresh.sh
-
       - name: Cargo rustc-wrapper announces its path
         if: ${{ !cancelled() }}
         timeout-minutes: 5
@@ -279,6 +260,17 @@ jobs:
         run: |
           bash scripts/ci/check-disposable-rm.sh
           bash tests/ci/test-check-disposable-rm.sh
+
+      # The state canary's own positive control. `verify` is not run here: it
+      # needs a planted HOME with a suite run between plant and verify, and the
+      # smoke runner owns that bracket. `self-test` is self-contained and cheap,
+      # and it is what makes the canary's green mean anything: it plants into a
+      # fresh HOME, writes one byte into the planted graph.json, and fails
+      # unless the inner verify goes red naming that file.
+      - name: State canary self-test (positive control)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-state-canary.sh self-test
 
       # From autonomy-registry.yml.
       - name: autonomy registry ratchet

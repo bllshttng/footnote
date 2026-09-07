@@ -116,7 +116,6 @@ def _hermetic_config(tmp_path, monkeypatch, content: str = "schema_version: 1\n"
     f = tmp_path / "settings.yaml"
     f.write_text(content, encoding="utf-8")
     monkeypatch.setenv("FNO_CONFIG", str(f))
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def test_headless_default_is_bounded():

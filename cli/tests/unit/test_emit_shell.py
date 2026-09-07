@@ -26,22 +26,8 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
     yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
-
 def _set_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str) -> None:
     """Write a settings.yaml and wire it via FNO_CONFIG."""
     settings_file = tmp_path / "settings.yaml"
@@ -82,10 +68,7 @@ def test_emit_paths_sh_no_hardcoded_home(
     _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
     # Clear settings cache so the new HOME is picked up
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.setup.emit_shell import emit_paths_sh
 
@@ -104,10 +87,7 @@ def test_emit_paths_sh_state_dir_uses_home_template(
     monkeypatch.setenv("HOME", "/tmp/fake-home-check")
     _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.setup.emit_shell import emit_paths_sh
 
@@ -282,10 +262,7 @@ def test_emit_paths_sh_validation_failure_clear_error(
     )
     # Clear caches after the env was set
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.setup.emit_shell import emit_paths_sh
 
@@ -351,10 +328,7 @@ def test_emit_paths_sh_vault_template_resolved_at_codegen(
     settings_file.write_text(settings_content, encoding="utf-8")
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.setup.emit_shell import emit_paths_sh
 
@@ -390,10 +364,7 @@ def test_emit_paths_sh_vault_template_in_state_dir_no_raw_brace(
     settings_file.write_text(settings_content, encoding="utf-8")
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.setup.emit_shell import emit_paths_sh
 
@@ -427,10 +398,7 @@ def test_emit_paths_sh_config_file_uses_actual_loaded_path(
     monkeypatch.setenv("FNO_CONFIG", str(project_local))
     # Clear caches so the fresh env is picked up
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.setup.emit_shell import emit_paths_sh
 
@@ -466,14 +434,7 @@ def test_emit_paths_sh_use_defaults_machine_stable(
     # Call 1: no settings file at all
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
     output_no_settings = emit_paths_sh(use_defaults=True)
 
     # Call 2: settings file with custom state_dir
@@ -483,13 +444,6 @@ def test_emit_paths_sh_use_defaults_machine_stable(
         encoding="utf-8",
     )
     monkeypatch.setenv("FNO_CONFIG", str(custom_settings))
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
     output_custom_settings = emit_paths_sh(use_defaults=True)
 
     assert output_no_settings == output_custom_settings, (
@@ -512,14 +466,7 @@ def test_emit_paths_sh_use_defaults_config_file_uses_state_dir(
     custom_settings.write_text("schema_version: 1\n", encoding="utf-8")
     monkeypatch.setenv("FNO_CONFIG", str(custom_settings))
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
     from fno.setup.emit_shell import emit_paths_sh
 
     stub = emit_paths_sh(use_defaults=True)
@@ -548,14 +495,7 @@ def test_emit_paths_sh_use_defaults_false_reflects_user_settings(
     )
     monkeypatch.setenv("FNO_CONFIG", str(custom_settings))
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
     from fno.setup.emit_shell import emit_paths_sh
 
     stub = emit_paths_sh(use_defaults=False)

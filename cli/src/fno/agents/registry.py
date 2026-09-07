@@ -40,7 +40,9 @@ import os
 import re
 import sys
 import time
+import tomllib
 from dataclasses import asdict, dataclass, field, fields, replace
+from importlib import resources
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Optional, Tuple
@@ -265,7 +267,31 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # forward-compat rationale as v11-v24.
 # v26: additive served facts (liveness + its stamp, harness_title): a pre-v26
 # reader degrades (drops the keys, refuses writes) instead of TypeError at v25.
-SCHEMA_VERSION = 26
+# v27 (x-04ce): additive `launch_account_source` - WHO chose the row's
+# `launch_account`: "caller" or "config", vocabulary defined once in
+# `fno.agents.spawn_flag_owners`. None on every other row: "default" already
+# says nobody chose, a revive inherits the source row's stamp, legacy rows
+# predate the column. Before it, a config injection read as a caller decision.
+# Same additive-optional writer-protection rationale as v11-v25: asdict emits
+# the key on every written row, so a pre-v27 reader must reject the store on
+# version rather than TypeError on the unknown kwarg.
+# v29: additive `resolved_sandbox` / `granted_writable_roots` - the RESOLVED
+# codex thread posture and the roots that row carries, beside the v19
+# `sandbox_posture` REQUEST. Same additive-optional writer-protection
+# rationale as v27/v28: asdict emits the keys on every written row, so a
+# pre-v29 reader must reject the store on version rather than TypeError on the
+# unknown kwarg.
+# v28 (x-5283): additive `adopted_by_session` - the session that VOUCHED for
+# an adopted row; `spawned_by_session` keeps one meaning, so crowning cannot
+# re-attribute a row's cost. Same writer-protection rationale as v27.
+# The version NUMBER is read from the single-owner TOML that build.rs projects
+# from crates/fno-agents/src/registry_schema.toml; bump there, not here.
+def _read_schema_version() -> int:
+    raw = resources.files("fno.agents").joinpath("registry_schema.toml").read_text(encoding="utf-8")
+    return int(tomllib.loads(raw)["version"])
+
+
+SCHEMA_VERSION = _read_schema_version()
 
 
 
@@ -397,6 +423,21 @@ class AgentEntry:
     spawned_by_session: Optional[str] = None
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
+    # x-5283 LD3: adoption is VOUCHING, not spawning; the grantor lives here
+    # so ``spawned_by_*`` keeps one meaning. Additive-optional (schema v28).
+    adopted_by_session: Optional[str] = None
+    # v29: what the codex app-server RESOLVED for a thread row, in its own
+    # spelling ("workspaceWrite", "dangerFullAccess"), or "unknown" when
+    # thread/start reported no sandbox. Distinct from ``sandbox_posture``,
+    # which is the REQUEST a resume re-applies: a yolo thread asks for full
+    # access and the app-server can still keep its workspaceWrite default, so
+    # a row carrying only the request answers the wrong question. Recorded as
+    # an explicit "unknown" rather than an absent key, because absence read the
+    # same as a full-access thread and that ambiguity already cost one
+    # investigation a day. ``granted_writable_roots`` is the roots that row
+    # carries onto every turn; the posture alone does not say what it reached.
+    resolved_sandbox: Optional[str] = None
+    granted_writable_roots: list[str] = field(default_factory=list)
     # x-42c5: the CAUSE of the spawn, distinct from spawned_by_* above (which
     # identify WHO called `fno agents spawn`, not WHY). An automated dispatcher
     # sets FNO_SPAWN_TRIGGER before shelling out so the subprocess's own
@@ -491,12 +532,14 @@ class AgentEntry:
     # None for every non-inside-leg row; asdict re-emits it (None -> null, which
     # Rust reads back as None). Additive-optional, gated by the v5 schema bump.
     inside_leg: Optional[dict] = None
-    # Dead-row GC exit stamp (x-b1aa). ISO 8601 UTC set by the Rust daemon's GC
-    # sweep the first tick it observes this row's process gone; anchors the
-    # config.agents.dead_row_grace window before the row is reaped. Rust is the
-    # sole writer; Python only custodies it so a row round-trips losslessly.
-    # Additive-optional: an absent key reads as None and the Rust RegistryEntry
-    # mirrors it with #[serde(default, skip_serializing_if=...)], so no schema bump.
+    # Reconcile's Exited-transition stamp (x-b1aa): ISO 8601 UTC, written the
+    # moment reconcile proves the row's child gone and cleared again when
+    # current evidence contradicts it. Retirement no longer reads it (the
+    # reverse join + transcript quiet decide); the liveness ladder's heartbeat
+    # rung does. Rust is the sole writer; Python only custodies it so a row
+    # round-trips losslessly. Additive-optional: an absent key reads as None
+    # and the Rust RegistryEntry mirrors it with #[serde(default,
+    # skip_serializing_if=...)], so no schema bump.
     exited_at: Optional[str] = None
     # Mux hosting ref (4a-G2): ``{"session": <mux session>, "pane_id": <u64>}``
     # for an agent whose PTY is a mux pane (``fno agents spawn --substrate
@@ -611,6 +654,12 @@ class AgentEntry:
     liveness_measured_at: Optional[str] = None
     harness_title: Optional[str] = None
 
+    # v27 (x-04ce): WHO chose `launch_account`, vocabulary from
+    # spawn_flag_owners. None on "default", inherited, and unattributable
+    # rows. ABSENCE MEANS UNKNOWN, the `origin` discipline; Rust mirrors it
+    # as additive-optional passthrough.
+    launch_account_source: Optional[str] = None
+
     @property
     def session_id(self) -> Optional[str]:
         """The harness-specific resume-target id.
@@ -653,6 +702,32 @@ class AgentEntry:
         if self.crown_level is None:
             return None
         return f"L{self.crown_level} {self.crown_scope or '?'}"
+
+
+def mint_agent_entry(
+    *,
+    harness_session_id: Optional[str],
+    spawned_by_session: Optional[str],
+    spawned_by_harness: Optional[str],
+    spawned_by_cwd: Optional[str],
+    **kwargs: Any,
+) -> AgentEntry:
+    """The one Python mint constructor: birth writers build rows through this.
+
+    The canonical session identity and the parent edge are keyword-only with
+    no defaults, so a mint site that omits either gets a TypeError instead of
+    a silently-None row. This is the Python twin of Rust's
+    ``RegistryEntry::new`` and the replacement for the retired session-identity
+    and spawn-lineage parity scripts. Reads stay tolerant: ``AgentEntry``
+    itself keeps field defaults so legacy rows without these keys still load.
+    """
+    return AgentEntry(
+        harness_session_id=harness_session_id,
+        spawned_by_session=spawned_by_session,
+        spawned_by_harness=spawned_by_harness,
+        spawned_by_cwd=spawned_by_cwd,
+        **kwargs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1751,6 +1826,16 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
                         f"claude_short_id={legacy_short!r}; keeping short_id",
                         file=sys.stderr,
                     )
+            # Thread-ref backfill: a claude thread row is minted before its
+            # session uuid exists, so `fno_id` lands empty and no write site
+            # ever fills it -- the observation seam back-fills
+            # harness_session_id and short_id and stops there. For a thread row
+            # the two ids are the same value (75 of the 79 populated rows carry
+            # exactly that), so adopt it here, where every reader passes. A row
+            # that HAS a thread ref keeps it: a branch is minted with its own,
+            # and a succession keeps its stable one.
+            if not row.get("fno_id") and row.get("harness_session_id"):
+                row = {**row, "fno_id": row["harness_session_id"]}
             # `session_id` is a computed @property on AgentEntry, not an init field.
             # A Rust PTY row may serialize it (Rust skips it when None, so this only
             # fires for a row that recorded one); passing it to AgentEntry(**row)
@@ -2035,30 +2120,34 @@ def register_existing_session(
             suffix += 1
         # Parent edge (x-132c), captured for every NON-operator birth: a row
         # an operator's SessionStart registered has no spawner, and stamping
-        # the operator's own session env would record a self-edge. Adopted and
-        # synthesized rows DO take the registering session as their parent -
-        # it is the session that vouched for them. The identity guard below
-        # covers every OTHER self-registration caller (e.g. a mail hold
-        # registering the session it runs in): a row whose captured parent IS
-        # its own session id never stamps itself as its own parent, whatever
-        # origin the caller passed. Lazy import: dispatch owns the capture
-        # helper and imports this module at load time.
-        if origin == "operator":
-            _sb_session = _sb_harness = _sb_cwd = None
-        else:
+        # the operator's own session env would record a self-edge. ADOPTED
+        # rows are different (x-5283 LD3): adoption is vouching, not
+        # spawning, so the captured session lands on adopted_by_session and
+        # the spawned_by_* edge stays empty. The identity guard covers every
+        # OTHER self-registration caller: a row never stamps itself as its
+        # own parent.
+        _sb_session = _sb_harness = _sb_cwd = None
+        _adopted_by = None
+        if origin != "operator":
             from fno.agents.dispatch import _capture_parent_edge
 
             _sb_session, _sb_harness, _sb_cwd = _capture_parent_edge()
             if _sb_session is not None and _sb_session == session_id:
                 _sb_session = _sb_harness = _sb_cwd = None
-        fresh = AgentEntry(
+            if origin == "adopted":
+                _adopted_by = _sb_session
+                _sb_session = _sb_harness = _sb_cwd = None
+        fresh = mint_agent_entry(
+            harness_session_id=session_id,
+            spawned_by_session=_sb_session,
+            spawned_by_harness=_sb_harness,
+            spawned_by_cwd=_sb_cwd,
             name=chosen,
             harness=harness,
             provider=provider,
             model=model,
             model_basis="requested" if model else None,
             effort=effort,
-            harness_session_id=session_id,
             cwd=cwd,
             log_path=log_path,
             status=_REGISTERED_STATUS,
@@ -2071,9 +2160,7 @@ def register_existing_session(
             # runs on is unobserved, so the substrate stays unknown (never
             # "pane").
             substrate=None,
-            spawned_by_session=_sb_session,
-            spawned_by_harness=_sb_harness,
-            spawned_by_cwd=_sb_cwd,
+            adopted_by_session=_adopted_by,
             delivery_policy=(
                 None if delivery_policy in (None, "off") else delivery_policy
             ),
@@ -2673,6 +2760,30 @@ def _account_for_removed_rows(
             append_event(event, events_path=events_path)
         except Exception:  # noqa: BLE001 - an audit gap must not fail the write
             pass
+    _journal_rows_lost(events_path, removed)
+
+
+def _journal_rows_lost(events_path: Path, removed: list) -> None:
+    """One grouped ``registry_rows_lost`` per lossy save; best-effort like above."""
+    from fno.events import append_event
+
+    argv = [a if i else Path(a).name for i, a in enumerate(sys.argv[:6])]
+    event = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "type": "registry_rows_lost",
+        "source": "agents",
+        "data": {
+            "writer": "python",
+            "pid": os.getpid(),
+            "verb": " ".join(argv)[:200],
+            "lost": [{"harness_session_id": (e.harness_session_id or "").strip(), "name": e.name}
+                     for e in removed],
+        },
+    }
+    try:
+        append_event(event, events_path=events_path)
+    except Exception:  # noqa: BLE001 - an audit gap must not fail the write
+        pass
 
 
 def update_registry(

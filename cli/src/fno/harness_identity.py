@@ -426,6 +426,42 @@ def session_identity_key(session_id: str) -> str:
     return session_id if session_id.startswith("ses_") else session_id.lower()
 
 
+# Full-id shapes that name exactly one harness. A claude id is a UUIDv4; a
+# codex id is the time-prefixed UUIDv7; an opencode id is ``ses_``-prefixed.
+# Legacy and caller-minted ids (``20260823T...``, fno-minted uuid4s for grok
+# and pi threads) name no harness and are never refused on shape.
+_FULL_ID_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-([0-9a-f])[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+_FULL_ID_OPENCODE_RE = re.compile(r"^ses_[A-Za-z0-9]+$")
+
+#: Harnesses whose session-id shapes are definitively known. A shape mismatch
+#: is only provable between members of this set; grok/pi threads carry
+#: fno-minted UUIDv4s under their own harness, so a v4 shape alone cannot
+#: convict them of being claude.
+SHAPE_KNOWN_HARNESSES = frozenset({"claude", "codex", "opencode"})
+
+
+def harness_of_session_id(session_id: str) -> Optional[str]:
+    """The harness an id's own shape names, or None when the shape is silent.
+
+    The version nibble is the first hex of the third group: 4 is claude's
+    UUIDv4, 7 is codex's time-prefixed UUIDv7.
+    """
+    sid = (session_id or "").strip()
+    if _FULL_ID_OPENCODE_RE.match(sid):
+        return "opencode"
+    m = _FULL_ID_UUID_RE.match(sid)
+    if m:
+        version = m.group(1).lower()
+        if version == "4":
+            return "claude"
+        if version == "7":
+            return "codex"
+    return None
+
+
 def canonical_handle(session_id: str) -> str:
     """The mailbox address: the first eight characters of the session id.
 

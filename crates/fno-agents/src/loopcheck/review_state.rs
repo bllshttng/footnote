@@ -66,6 +66,7 @@ mod tests {
             refusal_reason: None,
             reviewer_context: None,
             required,
+            passed: false,
         }
     }
 

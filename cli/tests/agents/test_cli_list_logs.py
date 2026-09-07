@@ -149,7 +149,7 @@ def test_list_invalid_status_value_exits_2_with_allowed_values(
 
     assert result.exit_code == 2
     # Typer puts the allowed-values list in the usage error.
-    assert "live" in result.output.lower()
+    assert "writing" in result.output.lower()
     assert "orphaned" in result.output.lower()
 
 
@@ -175,14 +175,18 @@ def test_list_filter_by_status_orphaned(
         session_truth,
         "resolve_session_truth",
         lambda handle, **_kwargs: {
-            "state": "stalled" if handle == "dead" else "working"
+            "state": "stalled" if handle == "dead" else "working",
+            # x-c672: the status word keys on the measured age, so the
+            # fixtures carry one. The dead row reads stalled with NO age
+            # (an unanswered read), the live row a fresh transcript.
+            "last_activity_age_s": None if handle == "dead" else 30,
         },
     )
 
-    # A quiet row is UNKNOWN, not orphaned (x-16d8): this registry lists
-    # reachable agents rather than live processes, so silence is absence of
-    # evidence and never a death sentence. `orphaned` now means a falsifier
-    # affirmatively fired -- see the process-gone case below.
+    # A row whose probe answered nothing is UNKNOWN, not orphaned (x-16d8,
+    # x-c672): silence is absence of evidence and never a death sentence.
+    # `orphaned` means a falsifier affirmatively fired -- see the
+    # process-gone case below.
     result = runner.invoke(agents_app, ["list", "--status", "unknown", "--json"])
 
     assert result.exit_code == 0, result.output
@@ -405,10 +409,13 @@ def test_logs_claude_entry_missing_short_id_exits_1(tmp_path, monkeypatch, runne
     assert "short id" in result.output.lower() or "short_id" in result.output.lower()
 
 
-def test_agent_status_filter_is_the_rendered_family1_vocabulary():
+def test_agent_status_filter_is_the_rendered_activity_vocabulary():
     from fno.agents.cli import AgentStatusFilter
 
-    assert {m.value for m in AgentStatusFilter} == {"live", "orphaned", "unknown"}
+    # x-c672 (AC7): served activity. The `live` token is gone.
+    assert {m.value for m in AgentStatusFilter} == {
+        "writing", "quiet", "parked", "orphaned", "unknown",
+    }
 
 
 # ---------------------------------------------------------------------------

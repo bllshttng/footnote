@@ -222,16 +222,16 @@ def test_both_list_lanes_render_through_the_same_wire_mapping() -> None:
     Registry rows and the discovered live-sessions lane are rendered by different
     code, and the discovered lane kept a private `done|stalled -> orphaned` map.
     So one silent session read `orphaned` there while an equivalent registry row
-    read `unknown` -- this PR's own defect, one lane over, inside a single
-    `--json` response. Pinned by identity, not by equal values, so a copied dict
-    fails here too.
+    read `unknown` -- one lane over, inside a single `--json` response. Pinned by
+    identity, not by equal values, so a copied function fails here too.
     """
     from fno.agents import discover as discover_mod
     from fno.agents import read as read_mod
-    from fno.agents.reachability import WIRE_STATUS
+    from fno.agents import reachability
 
-    assert read_mod.WIRE_STATUS is WIRE_STATUS
-    assert discover_mod.WIRE_STATUS is WIRE_STATUS
+    for seam in ("classify_reachability", "classify_progress", "rendered_activity"):
+        assert getattr(read_mod, seam) is getattr(reachability, seam), seam
+        assert getattr(discover_mod, seam) is getattr(reachability, seam), seam
 
 
 def test_a_quiet_discovered_session_is_unknown_not_orphaned() -> None:

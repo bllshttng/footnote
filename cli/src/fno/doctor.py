@@ -960,13 +960,14 @@ def _mux_front_door_report() -> dict[str, Any]:
 
 
 # Runtime files no code writes anymore (Group 3 GC wave: convo-signals
-# capture, tasks.json/md migration, evals-history, metrics.jsonl analytics).
+# capture, tasks.json/md migration, metrics.jsonl analytics). evals-history
+# left this list at x-ab72: the eval bank's runner appends it on every
+# scheduled run, and the evals staleness row reads the same file.
 # Purely informational - never changes doctor's status or exit code.
 _ORPHAN_BASENAMES = (
     "convo-signals.jsonl",
     "tasks.json",
     "tasks.md",
-    "evals-history.jsonl",
     "metrics.jsonl",
 )
 
@@ -1246,97 +1247,6 @@ def _source_checkout_sync(source: Optional[Path]) -> dict[str, Any]:
     report["status"] = "behind"
     report["behind"] = behind
     return report
-
-
-def _self_attested_coverage_report() -> dict[str, Any]:
-    """Per merged PR in the recent window: did coverage rest on the author's
-    own attestation alone?
-
-    The number the operator needs before ever flipping
-    ``config.review.require_corroboration`` to true - each row is one merged PR
-    that policy would have held. Advisory only, never changes status/exit; a
-    probe that cannot run reports unknown rather than zero.
-    """
-    try:
-        # project_events_json, not a hand-joined resolve_repo_root: the domain
-        # helper honors the test sandbox pin (FNO_EVENTS_PATH), and a bare
-        # resolver call here arms the shellout-drift guard's module-level
-        # predicate, which then flags doctor.py's two pre-existing
-        # privately-rooted report shell-outs the guard was never taught about.
-        from fno.paths import project_events_json
-
-        events = project_events_json()
-        newest: dict[int, dict[str, Any]] = {}
-        try:
-            for line in events.read_text(encoding="utf-8").splitlines():
-                try:
-                    val = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if val.get("type") != "review_coverage":
-                    continue
-                data = val.get("data") or {}
-                pr = data.get("pr")
-                if isinstance(pr, int):
-                    newest[pr] = data
-        except OSError:
-            newest = {}
-
-        merged: list[dict[str, Any]] = []
-        proc = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--state",
-                "merged",
-                "--limit",
-                "10",
-                "--json",
-                "number",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        if proc.returncode == 0:
-            for row in json.loads(proc.stdout or "[]"):
-                number = row.get("number")
-                if not isinstance(number, int):
-                    continue
-                cov = newest.get(number)
-                if cov is None:
-                    continue
-                reviewed = cov.get("reviewed_count")
-                self_attested_n = cov.get("self_attested_count")
-                # The corroboration policy rewrites held rows to
-                # reviewed_count 0 while preserving self_attested_count, so a
-                # count-only filter hides exactly the PRs the policy holds -
-                # the population this report exists to measure.
-                if (
-                    not isinstance(reviewed, int)
-                    or reviewed <= 0
-                ) and not (isinstance(self_attested_n, int) and self_attested_n > 0):
-                    continue
-                # The SAME predicate the merge gate's corroboration policy
-                # applies, so the report and the gate cannot disagree about a
-                # row.
-                from fno.pr._coverage_gate import rests_on_self_attestation_alone
-
-                merged.append(
-                    {
-                        "pr": number,
-                        "reviewed_count": reviewed,
-                        "self_attested_count": cov.get("self_attested_count"),
-                        "self_attested_only": rests_on_self_attestation_alone(cov),
-                    }
-                )
-        return {
-            "prs": merged,
-            "self_attested_only_count": sum(1 for row in merged if row["self_attested_only"]),
-        }
-    except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
-        return {"prs": [], "self_attested_only_count": 0, "error": "probe failed"}
 
 
 def _launch_agent_failures() -> dict[str, Any]:
@@ -2551,6 +2461,19 @@ def _emit_human(
             "fno doctor: post-merge sync UNKNOWN - could not read merge state "
             f"({pms.get('detail') or 'gh unavailable or unauthenticated'}); "
             "run `gh auth status`."
+        )
+
+    # Evals demand: a red row is an escalation, never a gate; silent when fresh.
+    ev = result.get("evals")
+    if ev is None or ev.get("never_ran") or ev.get("age_days") is None:
+        detail = "no eval history" if ev is None else "no regression-tier run on record"
+        out(f"fno doctor: evals UNKNOWN ({detail}); "
+            "run `fno doctor evals run --tier regression -y`.")
+    elif ev.get("stale"):
+        out(
+            f"fno doctor: evals STALE - the newest regression-tier run is "
+            f"{int(ev['age_days'])}d old; run "
+            "`fno doctor evals run --tier regression -y`."
         )
 
     agents = result.get("launch_agents") or {}
@@ -4117,14 +4040,15 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     result["groom"] = _groom_health()
     result["archive_id_collisions"] = _archive_id_collisions()
     result["post_merge_sync"] = _post_merge_sync_health()
+    try:
+        from fno.evals.report import evals_health_summary
+        from fno.paths import evals_history
+
+        result["evals"] = evals_health_summary(evals_history())
+    except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
+        result["evals"] = None
     result["source_checkout_sync"] = _source_checkout_sync(src)
     result["launch_agents"] = _launch_agent_failures()
-
-    # Advisory self-attestation share (x-7f7b): per merged PR in the recent
-    # window, whether coverage rested on the author's own attestation alone -
-    # the number to read before flipping review.require_corroboration. Never
-    # changes status/exit.
-    result["self_attested_coverage"] = _self_attested_coverage_report()
 
     # Advisory silent-switch legibility (x-8cd5 Wave 6): default-off switches
     # silently producing inaction + default-on/armed switches silently merging.

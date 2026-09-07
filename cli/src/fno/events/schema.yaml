@@ -441,14 +441,17 @@ event_types:
         coverage:
           type: string
           enum: [covered, uncovered, unknown]
-          description: "`covered` (count > 0) carries a count in reviewed_count; `uncovered` is a real, known zero; `unknown` means the review read failed and no local evidence confirmed a review (fail closed for autonomy, honest in the receipt). `uncovered` was added in x-5b99: a zero count previously serialized as the string `covered`, so `coverage: covered` and `reviewed_count: 0` co-occurred on three PRs in flight and the reassuring WORD sat beside the honest NUMBER. Additive for every reader, all of which already test `covered AND count > 0`, so a historical `covered` event with a zero count keeps reading as not-covered."
+          description: "The WORD is the gate: `covered` means the review obligation is satisfied (the chain tiles with no open finding, or the configured rounds are spent), and every consumer keys on this string, never on the count beside it. `uncovered` is a real, known zero below the cap; `unknown` means the review read failed and no local evidence confirmed a review (fail closed for autonomy, honest in the receipt). A covered row CAN carry passed_count 0: a spent budget discharges the obligation whatever the rounds concluded."
         review_state:
           type: string
           enum: [reviewed, unreviewed, reviewer_refused]
           description: "Known review outcome when the evidence read succeeded. reviewed wins when any current non-human verdict counts; otherwise reviewer_refused wins when a configured reviewer refused; otherwise unreviewed. Omitted when coverage is unknown so transport failure never becomes a known review outcome."
         reviewed_count:
           type: integer
-          description: "Count of reviewed verdicts EXCLUDING human approvals (whether a human approval counts is the operator's deferred call; lean exclude). A verdict counts only while its freshness is not `stale`. Present whenever coverage is covered or uncovered (omitted only on unknown)."
+          description: "Count of reviewed verdicts EXCLUDING human approvals (whether a human approval counts is the operator's deferred call; lean exclude). A verdict counts only while its freshness is not `stale`. A review that concluded FAIL counts here too: the reviewer read the head, and the round-cap ruling counts the round whatever it concluded. Present on every row, unknown included - the coverage word can be unmeasured while the review count is not."
+        passed_count:
+          type: integer
+          description: "The pass subset of reviewed_count: verdicts whose review concluded PASS (a local attestation with verdict pass, or a GitHub approval). At a discharged round budget the two counts can differ by design - rounds spent on fails read reviewed without passing. Present on every row beside reviewed_count."
         self_attested_count:
           type: integer
           description: "How many of reviewed_count are the AUTHOR attesting its own diff (attestation_origin == self_attested). Recorded, never gating, and deliberately not named `independent_count` - the schema is explicit below that other_session is not independence, and this must not launder that. A self-attested pass counts, because self-review is the DEFAULT path (config.review.self_review_required floors the harness review verb onto the author's own head), so refusing one would wedge every single-session PR. What x-62a1 asked for is that the answer be visible in the verdict rather than asserted in prose: a gate that wants to demand a second reader is now one predicate over this number, not a redesign. Present alongside reviewed_count."
@@ -488,8 +491,8 @@ event_types:
                 description: "How a local_attestation verdict was scoped to this PR: `attested_branch` means the event was admitted while scope lasts - its branch equals the PR's head branch, or it pins the PR's exact head sha; `legacy_head_match` means the event predates the branch field and was admitted on exact head equality alone. Only present on local_attestation verdicts; github_app evidence is scoped by being a review object on this PR. A refusal that sees only legacy_head_match passes under a moved head names them as unscoped (pre-branch-field) rather than reporting a bare count."
               attestation_origin:
                 type: string
-                enum: [self_attested, other_session, unknown]
-                description: "Authorship of a local_attestation review, computed from attester_session_id vs the authoring session's harness_session_id. self_attested = emitted by the authoring session; other_session = emitted by a different session (NOT 'independent' - a self-handoff successor or a second agent in a shared worktree is a different session and still not independent); unknown = attester empty/absent, the author session is unknown (the entire pre-landed backlog), or the reading process could not resolve the authoring session (a loop-check run whose cwd has no target manifest). Always present, never an absent key: an absent key on a carried read once let a consumer read absent as 'not self_attested' and cleared a PR whose only review was the author's own. Meaningful only on local_attestation verdicts; github_app/human approvals carry unknown since a GitHub login has no session to compare. Recorded, never gating: reviewed_count does not read this field, so a self_attested verdict counts toward coverage exactly like any other and a green PR whose only attestation is self_attested is covered and may merge. Whether that should stay true is a later gate decision, not this field."
+                enum: [self_attested, other_session, unmeasured, unknown]
+                description: "Authorship of a local_attestation review, computed from attester_session_id vs the authoring session's harness_session_id. self_attested = emitted by the authoring session; other_session = emitted by a different session (NOT 'independent' - a self-handoff successor or a second agent in a shared worktree is a different session and still not independent); unmeasured = a concrete attester session id is present but no author session was available to compare (an author's own re-read from a cwd whose target manifest is absent lands here, and author_session_id carry-forward usually restores the measurement from the previous coverage row); unknown = the attester id itself was absent or empty (an env_only lane), which the recorded contract counts as a real review. Always present, never an absent key: an absent key on a carried read once let a consumer read absent as 'not self_attested' and cleared a PR whose only review was the author's own. Meaningful only on local_attestation verdicts; github_app/human approvals carry unknown since a GitHub login has no session to compare. Recorded, never gating: reviewed_count does not read this field, so a self_attested verdict counts toward coverage exactly like any other and a green PR whose only attestation is self_attested is covered and may merge. Whether that should stay true is a later gate decision, not this field."
               reviewer_context:
                 type: string
                 enum: [fresh, shared, unknown]
@@ -524,13 +527,7 @@ event_types:
           description: "Review rounds across the whole life of the PR (a round is one reviewed HEAD, so two verdicts at one unchanged head are one round; CI failures, lint failures and rebases are not rounds; a pass is one round like any verdict and refunds nothing). Computed by the Rust producer from the same chain, same scoping as the tiling walk, as the max of BOTH axes where both were read (attestation rounds and distinct GitHub-App reviewed commits); a healthy covered PR may carry the events axis alone, because the reviews read is paid only where it can change the answer. Re-derived by every gate surface before it refuses or blocks - never trusted off this row for a gate decision."
         rounds_exhausted:
           type: boolean
-          description: "Whether rounds_used exceeds the resolved config.review.max_rounds (default 2), on both axes. The raw budget fact: at the cap the PR merges with its remaining findings filed as nodes, unless the events axis is also spent and a hard finding remains (see impossible)."
-        events_rounds_exhausted:
-          type: boolean
-          description: "Whether the EVENTS axis alone (attestation rounds, never the GitHub-App reviewed-commit axis) exhausted config.review.max_rounds. Only an attestation can carry the fixed disposition that clears a hard finding, so the IMPOSSIBLE conjunct reads this axis, not rounds_exhausted: a bot-heavy PR whose local lane still has rounds is never impossible. Mirrors cap_verdict in the Python gate; held equal by the shared corpus."
-        impossible:
-          type: boolean
-          description: "events_rounds_exhausted AND a hard non-terminal finding remains: a CONFIRMED correctness or security finding, or a truncated remainder. Only this shape keeps the IMPOSSIBLE verdict (exit 5) at the cap; every other non-terminal finding is filed by the merge gate and the PR merges. Advisory on the row - every gate surface re-derives before answering (the merge gate through coverage_verdict, fno do pr status through cap_verdict) - so this flag is an audit trail, never a gate input."
+          description: "rounds_used >= config.review.max_rounds: the review obligation is satisfied. At the cap the review phase is complete and the PR merges on green CI; open findings stay in the PR conversation. Re-derived by every gate surface before it refuses or blocks - never trusted off this row for a gate decision."
         review_posture:
           type: object
           description: "The authoritative resolved review-posture verdict , computed by the Rust producer against the same verdicts coverage used and carried verbatim by every Python reader (AC6-HP: Python never reclassifies). Resolved from config.review.posture - explicit, or inferred from the legacy settings with the source naming which - and satisfied only when every component the rung names is evidenced at the evaluated head. OPTIONAL: absent on rows produced before this field existed and on unknown/failure rows, where absence reads 'no posture resolved here', never 'unsatisfied'."
@@ -999,8 +996,7 @@ event_types:
   - name: graph_reloaded
     description: |
       Emitted by the megawalk walker when a mid-loop mtime check detects
-      graph.json or its sha256 sidecar has changed; the entry list has
-      been reloaded.
+      graph.json has changed; the entry list has been reloaded.
     sources: [megawalk]
     data:
       required: [old_count, new_count, mtime_ns]
@@ -1016,13 +1012,13 @@ event_types:
           description: "st_mtime_ns of graph.json at the time of reload (may be null if file was missing)."
         sidecar_mtime_ns:
           type: integer
-          description: "st_mtime_ns of graph.json.sha256 at the time of reload (may be null; optional)."
+          description: "st_mtime_ns of graph.json.sha256 at the time of reload (may be null; optional; the sidecar was retired)."
     consumers: [operator]
 
   - name: graph_reload_failed
     description: |
       Emitted by the megawalk walker when a mid-loop reload attempt
-      raised GraphCorruptionError, JSONDecodeError, or OSError; cached
+      raised JSONDecodeError or OSError; cached
       graph_entries preserved this tick.
     sources: [megawalk]
     data:
@@ -1030,13 +1026,13 @@ event_types:
       properties:
         error_kind:
           type: string
-          description: "Exception class name (GraphCorruptionError, JSONDecodeError, or OSError)."
+          description: "Exception class name (JSONDecodeError or OSError)."
         mtime_ns:
           type: integer
           description: "st_mtime_ns of graph.json that triggered the failed reload attempt (may be null if missing)."
         sidecar_mtime_ns:
           type: integer
-          description: "st_mtime_ns of graph.json.sha256 at the time of the failed reload (may be null; optional)."
+          description: "st_mtime_ns of graph.json.sha256 at the time of the failed reload (may be null; optional; the sidecar was retired)."
         detail:
           type: string
           description: "str(exc) truncated to 200 chars (optional)."
@@ -1211,6 +1207,47 @@ event_types:
           description: "Comma-separated ancestor epic ids reopened alongside, because the cascade had auto-closed them when this node closed. Empty when none."
     consumers: [operator]
 
+  - name: single_flight_gate
+    retention: ephemeral
+    description: "One trip through the single-flight latch on an identical fno invocation. Emitted on every path, including the ones that spawn and the ones that could not latch at all: a latch silent when its cache is unreadable reports 'nothing was deduped' and 'the cache is broken' with the same silence."
+    sources: [fno-loop]
+    data:
+      required: [key_hash, outcome, waited_ms, answered]
+      properties:
+        key_hash:
+          type: string
+          description: "First 12 hex of the flight key's digest. The key is itself `flight:<blake3 of the normalized argv>`, because the raw argv is unbounded and the claim it locks is a filename, so this is a prefix of the name `fno agents claim status` shows."
+        outcome:
+          type: string
+          description: "spawn (held the claim and ran), cache (a fresh record answered), join (someone else's answer arrived), timeout (the join budget expired, so this caller ran its own)."
+        waited_ms:
+          type: integer
+          description: "Wall-clock milliseconds this caller spent in the latch."
+        answered:
+          type: boolean
+          description: "Whether the trip produced any stdout at all. False is a real run that measured nothing, never a latch that refused."
+        note:
+          type: string
+          description: "Present only when the latch could not function: no claims root, or an unreadable claim."
+  - name: orphan_reap_sweep
+    retention: ephemeral
+    description: "The daemon swept for fno children that init inherited. Emitted on EVERY run, including the runs that reap nothing: a reaper that speaks only when it kills cannot be told apart from a reaper that never ran."
+    sources: [daemon]
+    data:
+      required: [scanned, candidates, reaped, older_than_secs]
+      properties:
+        scanned:
+          type: integer
+          description: "Rows read from the process table. One ps for the whole machine, not one probe per candidate."
+        candidates:
+          type: integer
+          description: "Rows passing all four reap clauses: the fno-py entrypoint in argv, parent pid 1, past the age threshold, and no live registry row naming the pid."
+        reaped:
+          type: integer
+          description: "Candidates actually signalled. Lower than candidates when one had already exited or refused the signal."
+        older_than_secs:
+          type: integer
+          description: "The configured age threshold (config.agents.orphan_reap_after_seconds)."
   - name: claim_acquired
     retention: ephemeral
     description: "A work-claim was acquired on a key. First write to .fno/claims/<key>.lock."
@@ -1468,6 +1505,26 @@ event_types:
         pid:
           type: [integer, "null"]
           description: "Process id of the remover, when the emitter knows it."
+    consumers: [operator]
+
+  - name: registry_rows_lost
+    description: "One lossy registry save, grouped: the writer, its pid and verb, and every harness_session_id the save dropped with its row name. The per-row registry_row_removed events carry recovery receipts; this one names the writer, so rows can no longer vanish without a door being named."
+    sources: [daemon, agents]
+    data:
+      required: [writer, pid, verb, lost]
+      properties:
+        writer:
+          type: string
+          description: "Which writer dropped the rows: rust or python."
+        pid:
+          type: [integer, "null"]
+          description: "Process id of the writer."
+        verb:
+          type: string
+          description: "The command line that ran the lossy write (argv0 plus the leading arguments), so the door is named, not just the binary."
+        lost:
+          type: array
+          description: "One {harness_session_id, name} entry per dropped row."
     consumers: [operator]
 
   - name: claim_reap_swept
@@ -1748,7 +1805,7 @@ event_types:
 
   - name: worktree_removed
     description: "A worktree directory was removed by an fno path. Emitted once per removal so a recurrence is attributable: a live worker losing its tree (2026-08-25, 2026-08-29) left no row because no removal path emitted anything, and an absence of rows measured only the instrument. Pair with the guard refusals: this row records what the guard read at decision time, so a removal that skipped the claim check is visible after the fact."
-    sources: [bash]
+    sources: [bash, daemon]
     data:
       required: [path, caller, claim, reason]
       properties:
@@ -2020,6 +2077,9 @@ event_types:
         spawned_by_cwd:
           type: string
           description: "Parent cwd, used by the per-harness transcript-path resolver."
+        lineage_reason:
+          type: string
+          description: "Why spawned_by_session is absent: the identity resolution's own reason at spawn time (x-5283). A birth names either its parent or why it could not."
 
   - name: agent_stopped
     description: "An agent was stopped (graceful SIGTERM sequence completed)."
@@ -2204,6 +2264,54 @@ event_types:
         pr:
           type: integer
         reason:
+          type: string
+
+  - name: merge_cleanup_held
+    retention: durable
+    description: "A pending merge cleanup request was HELD by its doneness re-read (an open node, an empty node list, or an unreadable graph) and stays pending for the next reaper pass. Emitted at most once per hour per request, so a normal in-grace hold cannot outshout the events that matter."
+    sources: [daemon]
+    data:
+      required: [request_id, repo, pr, reason]
+      properties:
+        request_id:
+          type: string
+        repo:
+          type: string
+        pr:
+          type: integer
+        reason:
+          type: string
+
+  - name: merge_cleanup_expired
+    retention: durable
+    description: "A pending merge cleanup request aged past the expiry window past its merge moment and is tombstoned, so a broken reconcile cannot pin a request (and the rows it names) forever."
+    sources: [daemon]
+    data:
+      required: [request_id, repo, pr, reason]
+      properties:
+        request_id:
+          type: string
+        repo:
+          type: string
+        pr:
+          type: integer
+        reason:
+          type: string
+
+  - name: merge_reaper_stopped
+    retention: durable
+    description: "The merge reaper stopped a row's harness (claude stop, or the worker-socket stop) BEFORE removing the registry row. The order is load-bearing: a row dropped first orphans the session in its sideline. Pane rows emit no row here - their pane death is the stop."
+    sources: [daemon]
+    data:
+      required: [short_id, name, request_id]
+      properties:
+        short_id:
+          type: string
+        name:
+          type: string
+        request_id:
+          type: string
+        harness:
           type: string
 
   - name: agent_inconsistent
@@ -2446,8 +2554,23 @@ event_types:
         pid:
           type: integer
 
+  - name: orphan_test_binary_reaped
+    description: "An orphaned cargo deps/ test binary (parentless or holding 20+ zombie children, CACHEDIR.TAG-confirmed) was SIGKILLed by the daemon's 300s reap sweep, past the config.test.orphan_min_elapsed_seconds age guard. The payload is the reap row: pid, command, zombie count, elapsed_seconds."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        pid:
+          type: integer
+        command:
+          type: string
+        zombies:
+          type: integer
+        elapsed_seconds:
+          type: integer
+
   - name: agent_row_reaped
-    description: "An agent-view row was removed by the dead-row GC sweep or `fno agents reap`: a terminal/dead row past grace with corroboration (confirmed-dead pid, positively-stale transcript, or its session gone from its OWN harness's store), an absolute-age backstop removal, or a live-but-done row (idle past grace, transcript tail classifies done) which carries resumable: true so a dormant distinction can be rendered later. For a convention-named target/reconcile worker, node_id plus termination_event make a pre-claim death durable; no-termination reaps also emit node_failed for failure-streak accounting (x-5c08). Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
+    description: "An agent-view row was retired by the retirement sweep or `fno agents reap`: the session's WORK is done on every node its sessions[] names (the reverse join) and its transcript has been quiet past agents.retire_grace_s. basis names that verdict. The held process is stopped first, a resumable receipt is written before the row drops, and the node's sessions[] row and the harness transcript survive, so resumable is always true and `fno agents resume` still opens the session. For a convention-named target/reconcile worker, node_id plus termination_event make a pre-claim death durable; no-termination retirements also emit node_failed for failure-streak accounting (x-5c08). Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
     sources: [daemon]
     data:
       required: []
@@ -2464,28 +2587,16 @@ event_types:
           type: boolean
         harness:
           type: string
-          description: "The reaped row's harness identity (claude/codex/...), so the reap is attributable to the store that judged it."
+          description: "The retired row's harness identity (claude/codex/...), so the retirement is attributable to the store that judged it."
         harness_session_id:
           type: [string, "null"]
-          description: "The row's session id in its own harness's store. With harness, the resumable handle for a dormant reap; also the join key for correlating a reap with the harness's own session records."
+          description: "The row's session id in its own harness's store. With harness, the resumable handle; also the join key for correlating a retirement with the harness's own session records."
+        basis:
+          type: string
+          description: "The WORK-done verdict the retirement keyed on, e.g. 'every named node done: N1'."
         resumable:
           type: boolean
-          description: "True only for a live-but-done (dormant) reap: the session finished its turn rather than dying, and the handle above can resume it."
-        cascade_refused:
-          type: [object, "null"]
-          description: "When the post-reap cascade into the harness's own session store refused or failed: {id, reason}. Never swallowed, and never rolls back the registry reap."
-        node_session_cleared:
-          type: boolean
-          description: "True only after the exact open node do-row was positively settled by the observer cascade."
-        node_row_removed:
-          type: [boolean, "null"]
-          description: "Whether the observer cascade removed an open row; false means it was already settled."
-        node_status_before:
-          type: [string, "null"]
-        node_status_after:
-          type: [string, "null"]
-        node_remaining_open_do:
-          type: [integer, "null"]
+          description: "Always true: every retirement keeps the receipt and the harness session, so the handle above can resume it."
 
   - name: worktree_sweep
     description: "One repo's reading from the daemon's 24h worktree report sweep (x-5a30): what `fno agents workspace worktree cleanup --merged` WOULD archive. Report-only by construction, because a merged PR is external proof that work landed and a timer tick is not; removal stays on the merge-triggered path gated by post_merge.self_reap. Emitted for every repo including those reading zero, so a quiet repo is never mistaken for a sweep that did not run. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
@@ -2864,6 +2975,53 @@ event_types:
           description: "The cadence this arm runs on, in seconds; the readout reads stale past twice this. 0 marks an event-driven arm (stop_hook): staleness does not apply."
     consumers: [operator]
 
+  - name: evals_scheduled_run
+    description: "The pr-watch tick ran the regression tier on its schedule (the eval bank's demand leg): what ran and what it graded. The counterpart row in `fno doctor` and `fno backlog triage health` reads the same history this run appends, so a run that appends nothing is a could-not-fire (evals_stale), never a success."
+    sources: [daemon, test]
+    data:
+      required: [task_count, passes, duration_s]
+      properties:
+        task_count:
+          type: integer
+          description: "Distinct regression tasks the scheduled run executed, read back as the history delta, never parsed from subprocess stdout."
+        passes:
+          type: integer
+          description: "How many of those runs passed. Graded fails still land here; a plumbing failure is evals_stale instead."
+        duration_s:
+          type: number
+          description: "Wall seconds the underlying `fno doctor evals run --tier regression` subprocess took."
+        age_days_before:
+          type: number
+          description: "Optional. Age of the newest regression row when the leg fired; null when the bank had never run."
+        window_days:
+          type: integer
+          description: "Optional. The evals.schedule_days window the leg fired against."
+    consumers: [operator]
+
+  - name: evals_stale
+    description: "The eval bank is past twice its stale window and the scheduled run could not fire (gate refused, subprocess timeout, non-zero exit, or an exit-0 run that appended no rows). One journal row per attempt; the operator notice rides at most once per schedule window and reads this journal as its rate bound, so this event is the dedup."
+    sources: [daemon, test]
+    data:
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          enum: [gate, timeout, error, no_rows]
+          description: "Why the run could not fire: gate (spawn gate refused), timeout (the tick budget killed the subprocess), error (non-zero exit or spawn trouble), no_rows (exit 0 but no history rows appended)."
+        detail:
+          type: string
+          description: "Optional. The refusal, exit line, or stderr tail naming the cause."
+        age_days:
+          type: number
+          description: "Optional. Age of the newest regression row when the leg fired; absent when the bank had never run or the age was unreadable."
+        never_ran:
+          type: boolean
+          description: "Optional. True when the history holds no regression row at all: due, not aged."
+        window_days:
+          type: integer
+          description: "Optional. The evals.schedule_days window the notice dedup rides."
+    consumers: [operator]
+
   - name: gh_probe
     description: "The stop gate's gh-availability probe conclusion, one row per fire. Tri-state: found, absent (NotFound and no file at the path), or spawn_trouble (gh exists but could not be spawned right now: ETXTBSY, EACCES, a missing interpreter). Spawn trouble reads as present, so a transient spawn failure can no longer degrade a session to advisory mode as 'gh absent'. Deliberately NOT the loop_check type: read_prior_fires counts loop_check rows as fire observations, and a fingerprint-less row would break the no-progress streak."
     sources: [hook]
@@ -3105,6 +3263,23 @@ event_types:
           type: string
           description: "Optional. The decision_id this overturns, when it overturns one."
     consumers: [operator, fno inbox decisions]
+
+  - name: operator_notice
+    description: "One operator-attention notice left the notify chokepoint (fno.notify._impl.send_notification). The local OS toast is one leg; this row is the other: a status sink with events=[operator_notice] carries it off the host, so a remote operator sees it (x-5f06). A notice is a POINTER to the durable queue, never a copy: pointer names the verb that shows the content, and body carries counts, never rows."
+    sources: [python, daemon, test]
+    data:
+      required: [title, body]
+      properties:
+        title:
+          type: string
+          description: "Short headline, as the toast showed it."
+        body:
+          type: string
+          description: "Counts plus context, never queue content."
+        pointer:
+          type: string
+          description: "Optional. The verb (or URL) that shows the durable state, e.g. `fno inbox outstanding`."
+    consumers: [status_sinks, operator]
 
   - name: decision_retracted
     retention: durable
@@ -3676,6 +3851,13 @@ event_types:
         command:
           type: string
           description: "The dispatched message exactly as sent, with {id} substituted and spelled for the resolved harness (`/target ...` on claude/opencode, `$fno:target ...` on codex)."
+        verb:
+          type: string
+          description: "The verb this dispatch resolved: the node's declared dispatch_verb (canonicalized the way the allowlist rung does, so /fno:blueprint records /blueprint), or the literal 'builtin' when the node declared nothing. `builtin` beside a node that DID declare is only visible as a command mismatch, which is why this field exists (x-0961)."
+        verb_source:
+          type: string
+          enum: [declared, none-declared, field-absent]
+          description: "declared = the node dict carried a non-empty dispatch_verb. none-declared = the key was present and empty/null, a legitimate default. field-absent = the key was NOT in the dict at all, which can only mean the selection projection feeding this dispatcher dropped it; the spawn also warns on stderr, so a future lossy projection self-reports (x-0961)."
         cwd:
           type: string
           description: "The --cwd the worker was launched into; empty means --fresh."
@@ -3706,6 +3888,13 @@ event_types:
         agent_name:
           type: string
           description: "Spawned agent name (target-<full-node-id>-<slug>)."
+        verb:
+          type: string
+          description: "The verb this dispatch resolved: the node's declared dispatch_verb (canonicalized), or 'builtin'. See dispatch_spawned.verb (x-0961)."
+        verb_source:
+          type: string
+          enum: [declared, none-declared, field-absent]
+          description: "Whether the dispatched verb was declared, defaulted from an explicit empty, or unknowable because the feed dropped the key. See dispatch_spawned.verb_source (x-0961)."
         closed_node_id:
           type: string
           description: "The just-merged node whose close triggered this advance (keying for AC1-RACE)."
@@ -3855,6 +4044,8 @@ event_types:
         action:
           type: string
           enum: [blocked, redispatch, dispatch, auto-deferred, defer-failed, reaped-abandoned]
+        session_basis:
+          type: [string, "null"]
     consumers: [operator]
 
   - name: dispatch_dead_failure_limit
@@ -4432,7 +4623,7 @@ event_types:
           description: "The 8-hex jobId of the finished-but-open bg session surfaced to close."
 
   - name: watchdog_verdict
-    description: "The external fleet watchdog classified a fleet row outside every session and the verdict is not 'leave': a ghost, a reapable, a reroute, or a wake candidate. The basis names the measurement that decided it so a reader can falsify the call."
+    description: "The external fleet watchdog classified a fleet row outside every session and the verdict is not 'leave': a ghost, a stale row, a reroute, a wake candidate, or a report-only friction verdict. The basis names the measurement that decided it so a reader can falsify the call."
     sources: [daemon]
     data:
       required: [row_id, verdict]
@@ -4445,13 +4636,13 @@ event_types:
           description: "The row's name."
         verdict:
           type: string
-          description: "ghost | reap | retire | stale | reroute | wake | leave | unclaimed."
+          description: "ghost | stale | reroute | wake | leave | unclaimed | contended | polling_settled."
         basis:
           type: string
           description: "The measurement that decided the verdict (e.g. 'no transcript for <id>', 'node <id> done', '429 resets 18:48:21Z, 8m out')."
 
   - name: watchdog_applied
-    description: "The fleet watchdog executed a verdict's action: a wake whose message landed in the recipient transcript, a redispatch, or a stop+rm on a clean worktree."
+    description: "The fleet watchdog executed a verdict's action: a wake or silence-lane drive whose message landed in the recipient transcript, a redispatch, or a stop+rm on a clean worktree."
     sources: [daemon]
     data:
       required: [row_id, verdict, detail]
@@ -4461,7 +4652,7 @@ event_types:
           description: "The row's recorded session id."
         verdict:
           type: string
-          description: "wake | reroute | reap | retire."
+          description: "wake | reroute | reap | retire | silence."
         detail:
           type: string
           description: "What was done, including the mechanism's receipt."

@@ -135,7 +135,7 @@ def test_append_event_allows_the_pinned_journal(monkeypatch, tmp_path):
 def test_append_event_guard_is_inert_outside_a_hermetic_run(monkeypatch, tmp_path):
     """Production keeps writing. The guard keys on the neutralise receipt, so an
     operator's own journal write never meets it."""
-    monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
+    monkeypatch.setenv("FNO_TEST_HERMETIC", "0")
     outside = tmp_path / "checkout" / ".fno" / "events.jsonl"
     append_event(_event(), outside)
     assert outside.read_text().strip()
@@ -301,13 +301,83 @@ def test_hermetic_run_still_degrades_loudly_with_no_notifier(monkeypatch):
     assert code == 1 and "no OS notification tool available" in err
 
 
-def test_notification_dispatches_outside_a_hermetic_run(monkeypatch):
+def test_notification_dispatches_outside_a_hermetic_run(monkeypatch, tmp_path):
     """Production still notifies; the guard keys on the receipt, nothing else."""
     import fno.notify._impl as impl
 
     calls: list = []
     monkeypatch.setattr(impl.subprocess, "run", lambda *a, **k: calls.append(a))
     monkeypatch.setattr(impl.platform, "system", lambda: "Darwin")
-    monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
+    monkeypatch.setenv("FNO_TEST_HERMETIC", "0")
+    # The unsuppressed run also emits the operator_notice journal row (x-5f06);
+    # pin the journal inside the sandbox so the row never reaches a live one.
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / "events.jsonl"))
     assert impl.send_notification("t", "m") == (0, "")
     assert calls, "no dispatch attempted outside a hermetic run"
+
+
+# ---------------------------------------------------------------------------
+# The third declaration state: no pin at all, under a test runner (x-3d21)
+# ---------------------------------------------------------------------------
+#
+# The pin being ABSENT used to be fail-open, so a lane that skipped the
+# conftest chain resolved the operator root in silence. On 2026-09-06 one of
+# them overwrote the live graph with a 64-byte fixture payload.
+
+_OUTSIDE = Path("/nonexistent-operator-root/.fno/graph.json")
+
+
+def test_undeclared_root_refuses_under_pytest(monkeypatch):
+    from fno.hermetic import UndeclaredStateRootError, declared_root
+
+    monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
+    with pytest.raises(UndeclaredStateRootError) as excinfo:
+        declared_root(_OUTSIDE)
+    message = str(excinfo.value)
+    assert str(_OUTSIDE) in message
+    assert "OPERATOR" in message
+    for declaration in (
+        "FNO_TEST_HERMETIC=1",
+        "FNO_TEST_HERMETIC=0",
+        "use_tmpdir",
+    ):
+        assert declaration in message, f"the refusal must name {declaration}"
+
+
+def test_ambient_declaration_passes_the_same_path(monkeypatch):
+    """``0`` is a declaration, not a missing one. The dirty lane rests on it."""
+    from fno.hermetic import declared_root
+
+    monkeypatch.setenv("FNO_TEST_HERMETIC", "0")
+    assert declared_root(_OUTSIDE) == _OUTSIDE
+
+
+def test_no_pin_outside_a_test_process_is_production(monkeypatch):
+    """Production never meets the refusal: the marker is the runner itself."""
+    import sys
+
+    from fno.hermetic import declared_root
+
+    monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
+    monkeypatch.delitem(sys.modules, "pytest")
+    assert declared_root(_OUTSIDE) == _OUTSIDE
+
+
+def test_append_event_and_the_accessor_fence_agree_on_an_absent_pin(monkeypatch):
+    """One rule, two fences. A hand-pathed write refuses like an accessor does.
+
+    Both arms run. Asserting only the write half left the accessor half of the
+    claim resting on an absence, and ``_guard_state_path`` is the fence every
+    state accessor sits behind: a refactor of ``declared_root``'s early-return
+    order would leave a one-armed test green.
+    """
+    from fno import paths
+    from fno.hermetic import UndeclaredStateRootError
+
+    monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
+    with pytest.raises(UndeclaredStateRootError):
+        append_event(_event(), _OUTSIDE.with_name("events.jsonl"))
+
+    monkeypatch.setenv("FNO_SPACES_DIR", str(_OUTSIDE.parent / "spaces"))
+    with pytest.raises(UndeclaredStateRootError):
+        paths.spaces_root()

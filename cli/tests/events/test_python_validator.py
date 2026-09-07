@@ -744,27 +744,69 @@ def test_an_unreadable_event_log_produces_rather_than_refuses(
     assert validate(_attestation_event("pass", "feature/x-ob")) is None
 
 
-def test_a_nonblocking_or_declined_disposition_does_not_clear_the_key(
+def test_a_nonblocking_disposition_does_not_clear_the_key(
     tmp_path, monkeypatch
 ) -> None:
-    """Only `fixed` clears at emit: the gate keeps `nonblocking` and an
-    uncorroborated `declined` non-terminal by its own rules, so a producer
-    check that waved those through would emit a pass the gate still refuses."""
+    """`nonblocking` never disposes: the producer claimed harmless where the
+    gate re-derives blocking. A reasoned `declined` disposes here; recording
+    it mints no pass, because corroboration stays the merge gate's call."""
     _seed_obligation_chain(tmp_path, [_obligation_chain_event(0, "fail", [_OB_HARD])])
     monkeypatch.chdir(tmp_path)
-    for disposition in ("nonblocking", "declined"):
-        with pytest.raises(ValidationError) as exc:
-            validate(
-                _attestation_event(
-                    "pass",
-                    "feature/x-ob",
-                    dispositions=[
-                        {
-                            "finding_key": "cli/src/fake.py:779:correctness",
-                            "disposition": disposition,
-                            "reason": "attempted",
-                        }
-                    ],
-                )
+    with pytest.raises(ValidationError) as exc:
+        validate(
+            _attestation_event(
+                "pass",
+                "feature/x-ob",
+                dispositions=[
+                    {
+                        "finding_key": "cli/src/fake.py:779:correctness",
+                        "disposition": "nonblocking",
+                        "reason": "attempted",
+                    }
+                ],
             )
-        assert "cli/src/fake.py:779:correctness" in str(exc.value), disposition
+        )
+    assert "cli/src/fake.py:779:correctness" in str(exc.value)
+
+
+def test_a_declined_disposition_with_a_reason_is_emitted(tmp_path, monkeypatch) -> None:
+    """A reasoned decline disposes the key at emit: the gate already honors a
+    declined disposition, so the producer refusing to record one made the
+    state unreachable and held the branch forever."""
+    _seed_obligation_chain(tmp_path, [_obligation_chain_event(0, "fail", [_OB_HARD])])
+    monkeypatch.chdir(tmp_path)
+    event = _attestation_event(
+        "pass",
+        "feature/x-ob",
+        dispositions=[
+            {
+                "finding_key": "cli/src/fake.py:779:correctness",
+                "disposition": "declined",
+                "reason": "accepted trade-off: one server cannot own every "
+                "session's squads, and the window self-heals",
+            }
+        ],
+    )
+    assert validate(event) is None
+
+
+def test_a_reasonless_declined_disposition_is_refused(tmp_path, monkeypatch) -> None:
+    """The gate reads the reason, so a decline without one is the one decline
+    that must fail loud at emit."""
+    _seed_obligation_chain(tmp_path, [_obligation_chain_event(0, "fail", [_OB_HARD])])
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValidationError) as exc:
+        validate(
+            _attestation_event(
+                "pass",
+                "feature/x-ob",
+                dispositions=[
+                    {
+                        "finding_key": "cli/src/fake.py:779:correctness",
+                        "disposition": "declined",
+                        "reason": "   ",
+                    }
+                ],
+            )
+        )
+    assert "reason" in str(exc.value)

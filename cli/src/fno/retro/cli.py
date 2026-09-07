@@ -434,41 +434,17 @@ def _process_payload(
 
 def process_sentinel_file(
     sentinel_path: Path,
-    *,
-    repo_root: Path,
-    existing_nodes: list[dict],
-    comments: Optional[list[dict]] = None,
-    resolved_ids: Optional[set[str]] = None,
-    skipped_ids: Optional[set[str]] = None,
-    gh_runner: Optional[Callable] = None,
-    create_fn=None,
-    inbox_fn=None,
-    carveout_root: Optional[Path] = None,
-    current_repo_slug: Optional[str] = None,
-    node_root: Optional[Path] = None,
-    ledger_path: Optional[Path] = None,
+    **kwargs,
 ) -> "tuple[TriageReport, bool]":
     """Triage one sentinel file. Returns (report, removed).
 
-    The sentinel is removed ONLY when the land fully succeeded and the harvest
-    was not partial; otherwise it is retained for retry (AC4-ERR/AC6 idempotency).
+    Keyword passthrough to :func:`_process_payload`, whose signature is the
+    real one. The sentinel is removed ONLY when the land fully succeeded and
+    the harvest was not partial; otherwise it is retained for retry
+    (AC4-ERR/AC6 idempotency).
     """
     payload = json.loads(sentinel_path.read_text(encoding="utf-8"))
-    report, clean = _process_payload(
-        payload,
-        repo_root=repo_root,
-        existing_nodes=existing_nodes,
-        comments=comments,
-        resolved_ids=resolved_ids,
-        skipped_ids=skipped_ids,
-        gh_runner=gh_runner,
-        create_fn=create_fn,
-        inbox_fn=inbox_fn,
-        carveout_root=carveout_root,
-        current_repo_slug=current_repo_slug,
-        node_root=node_root,
-        ledger_path=ledger_path,
-    )
+    report, clean = _process_payload(payload, **kwargs)
     removed = False
     if clean:
         try:

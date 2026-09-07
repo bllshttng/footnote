@@ -29,7 +29,6 @@ def test_inbox_root_for_vault_derived_bare_name(monkeypatch, tmp_path):
     # Pin HOME so the bare name resolves under the tempdir, not the real home.
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    paths._settings.cache_clear()  # type: ignore[attr-defined]
     result = paths.inbox_root_for("acme-web")
     assert result == (
         tmp_path / "myvault" / "internal" / "agents" / "acme-web" / "inbox"
@@ -45,7 +44,6 @@ def test_inbox_root_for_vault_derived_absolute(monkeypatch, tmp_path):
     )
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    paths._settings.cache_clear()  # type: ignore[attr-defined]
     result = paths.inbox_root_for("acme-web")
     assert result == (
         vault / "internal" / "agents" / "acme-web" / "inbox"
@@ -62,7 +60,6 @@ def test_inbox_root_for_neutral_default_when_obsidian_disabled(monkeypatch, tmp_
     )
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    paths._settings.cache_clear()  # type: ignore[attr-defined]
     result = paths.inbox_root_for("acme-web")
     assert result == (
         state / "inbox" / "agents" / "acme-web" / "inbox"
@@ -87,7 +84,6 @@ def test_inbox_root_for_substitutes_target_project_not_current(monkeypatch, tmp_
     (tmp_path / "vault").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    paths._settings.cache_clear()  # type: ignore[attr-defined]
 
     # Sender's project id is "sender-project" but we route to "recipient-project".
     result = paths.inbox_root_for("recipient-project")
@@ -105,7 +101,6 @@ def test_inbox_dir_for_uses_inbox_root_for(monkeypatch, tmp_path):
     monkeypatch.delenv("FNO_INBOX_ROOT", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    paths._settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.inbox.store import inbox_dir_for
     result = inbox_dir_for("foo-project")
@@ -136,7 +131,6 @@ def test_inbox_root_for_rejects_path_traversal(monkeypatch, tmp_path, bad_name):
     `..` into the {project} substitution.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
-    paths._settings.cache_clear()  # type: ignore[attr-defined]
 
     with pytest.raises(ValueError):
         paths.inbox_root_for(bad_name)

@@ -105,9 +105,22 @@ fn sandbox_flag_resume_yolo_is_bypass() {
 // build_argv_create
 // ---------------------------------------------------------------------------
 
+/// A project dir that provably does not exist.
+///
+/// These tests pin the plan grant's ABSENT-cwd fallback, which fires only when
+/// the dir is missing: with a real cwd the grant shells out to `fno do plan
+/// path` and returns whatever that install configured. A fixed `/tmp/proj` made
+/// the verdict depend on whether some earlier run had left that path behind on
+/// the machine, and on this box it had.
+fn absent_project_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("fno-codex-argv-absent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
 #[test]
 fn build_argv_create_default_sandbox() {
-    let cwd = PathBuf::from("/tmp/proj");
+    let cwd = absent_project_dir();
     let full_prompt = "[from: alice]\n\nhello";
     let argv = build_argv_create(&cwd, full_prompt, false, None, None, None);
     assert_eq!(
@@ -119,7 +132,7 @@ fn build_argv_create_default_sandbox() {
             "exec",
             "--json",
             "-C",
-            "/tmp/proj",
+            cwd.to_string_lossy().as_ref(),
             "--skip-git-repo-check",
         ]
     );
@@ -134,7 +147,7 @@ fn build_argv_create_default_sandbox() {
 fn build_argv_create_forwards_model() {
     // x-c772: an explicit --model reaches `codex exec --model <m>` (between
     // --skip-git-repo-check and the sandbox flag). None/empty = no --model.
-    let cwd = PathBuf::from("/tmp/proj");
+    let cwd = absent_project_dir();
     let argv = build_argv_create(&cwd, "hi", false, Some("gpt-5.5"), None, None);
     let i = argv
         .iter()
@@ -151,7 +164,7 @@ fn build_argv_create_forwards_add_dir() {
     // x-b6e2: a user --add-dir grants extra write access on `codex exec`. codex's
     // own cwd rides -C, so add-dir is purely additive. Empty/None adds no USER
     // flag; the bounded worker's internal plan grant remains.
-    let cwd = PathBuf::from("/tmp/proj");
+    let cwd = absent_project_dir();
     let argv = build_argv_create(&cwd, "hi", false, None, None, Some("/extra"));
     let i = argv
         .iter()

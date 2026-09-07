@@ -31,6 +31,14 @@ HOOK="${REPO_ROOT}/hooks/target-stop-hook.sh"
 AGY_HOOK="${REPO_ROOT}/hooks/agy-target-stop-hook.sh"
 INIT_SCRIPT="${REPO_ROOT}/hooks/helpers/init-target-state.sh"
 
+# One pinned spaces root for seeds, the mux and the hook: the migration that
+# once ferried a seeded checkout file to the space refuses foreign
+# destinations by design, so every writer and reader must name the same root
+# and none of them may touch the developer's real ~/.fno.
+E2E_SPACES="$(mktemp -d "${TMPDIR:-/tmp}/fno-e2e-spaces.XXXXXX")"
+export FNO_SPACES_DIR="$E2E_SPACES"
+trap 'rm -rf "$E2E_SPACES"' EXIT
+
 # ── counters ─────────────────────────────────────────────────────────────────
 PASS=0; FAIL=0; SKIP_COUNT=0
 
@@ -180,6 +188,7 @@ from fno.approvals import (
     EffectStore,
     action_digest,
 )
+from fno.paths import project_log
 
 
 class AllowAuthority:
@@ -209,7 +218,7 @@ adapter = AdapterCapability(adapter_id="smtp-e2e", adapter_version="1")
 with EffectStore(
     root / ".fno/approvals.db",
     authority=AllowAuthority(),
-    events_path=root / ".fno/events.jsonl",
+    events_path=project_log("events.jsonl", project_root=root),
     now=lambda: now,
 ) as store:
     store.submit(request)
@@ -407,7 +416,12 @@ STATE
     # not fetched; a head-pinned code-review attestation provides coverage, which
     # is the operator's actual coverage source, so the green path reaches
     # DonePRGreen (not DoneUnreviewed).
-    printf '%s\n' '{"type":"review_attestation","data":{"reviewer":"code-review","head_sha":"deadbeefdeadbeefdeadbeefdeadbeef00000001","verdict":"pass"}}' > "${TMP_DIR}/.fno/events.jsonl"
+    # Seed where the resolver answers, not the legacy checkout path: the hook
+    # reads the space journal, and the migration that once ferried a seeded
+    # checkout file there refuses foreign destinations by design.
+    PROJ_EVENTS="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
+    mkdir -p "$(dirname "$PROJ_EVENTS")"
+    printf '%s\n' '{"type":"review_attestation","data":{"reviewer":"code-review","head_sha":"deadbeefdeadbeefdeadbeefdeadbeef00000001","verdict":"pass"}}' > "$PROJ_EVENTS"
 
     INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT}\"}"
     run_hook "$TMP_DIR" "$INPUT_JSON" \
@@ -558,8 +572,14 @@ TOML
     TRANSCRIPT="${TMP_DIR}/${UUID}.jsonl"
     printf '{"message":{"role":"user","content":"go"}}\n' > "$TRANSCRIPT"
 
-    # Write ledger with cost > cap for this session
-    cat > "${TMP_DIR}/.fno/ledger.json" <<LEDGER
+    # Write ledger with cost > cap for this session. Seed it where the hook's
+    # binary resolves the ledger (the space beside the resolved journal): the
+    # migration that once ferried a seeded checkout ledger there refuses
+    # foreign destinations by design, so a checkout-path seed goes unread
+    # whenever a spaces root pin is ambient.
+    PROJ_EVENTS="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
+    mkdir -p "$(dirname "$PROJ_EVENTS")"
+    cat > "${PROJ_EVENTS%events.jsonl}ledger.json" <<LEDGER
 [{"session_id":"${SESSION_ID}","cost_usd":0.05,"tokens":1000}]
 LEDGER
 
@@ -653,11 +673,15 @@ log "Case D: generic delivery through production mux and Claude hook"
     setup_delivery_project "$TMP_DIR" "$SESSION_ID" "$HARNESS_ID" "claude"
 
     COMMON_PATH="$(dirname "$MUX_BIN"):${TMP_DIR}/hook-bin:${PATH}"
+    # Same journal the hook will read: explicit --events wins, so name the
+    # resolved space path, not the legacy checkout one.
+    D_EVENTS="$(cd "$TMP_DIR" && HOME="$TMP_DIR/home" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
+    mkdir -p "$(dirname "$D_EVENTS")"
     EVAL_JSON=$(
         cd "$TMP_DIR" || exit 1
         env HOME="$TMP_DIR/home" UV_TOOL_DIR="$TMP_DIR/uv-tools" \
             FNO_BOOTSTRAP_WHEEL="$REPO_ROOT/cli" PATH="$COMMON_PATH" \
-            "$MUX_BIN" delivery evaluate --json --plan-path plan.md --events .fno/events.jsonl
+            "$MUX_BIN" delivery evaluate --json --plan-path plan.md --events "$D_EVENTS"
     )
     cd_ok=true
     assert_real_pending_path "$TMP_DIR" \

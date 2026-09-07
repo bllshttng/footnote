@@ -17,9 +17,9 @@ works" from "this fixture never closed anyway".
 """
 from __future__ import annotations
 
+from fno.graph._reconcile import _reopen_outranks_child_closes
 from fno.graph.cli import (
     _cascade_close_parents,
-    _reopen_outranks_child_closes,
     _strandable_epic_ids,
 )
 

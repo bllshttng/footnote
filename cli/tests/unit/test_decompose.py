@@ -565,14 +565,12 @@ def test_config_fallback_ceiling_applied(graph_env, tmp_path, monkeypatch):
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     before = read_entries()
     # 3 groups exceed the config ceiling of 2 -> rejected, nothing created.
     result = _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)])
     assert result.exit_code != 0
     assert read_entries() == before
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def test_invalid_config_ceiling_surfaced_not_swallowed(graph_env, tmp_path, monkeypatch):
@@ -586,7 +584,6 @@ def test_invalid_config_ceiling_surfaced_not_swallowed(graph_env, tmp_path, monk
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     before = read_entries()
     # --max-prs omitted -> reads config, which is invalid -> structured error.
@@ -594,7 +591,6 @@ def test_invalid_config_ceiling_surfaced_not_swallowed(graph_env, tmp_path, monk
     assert result.exit_code != 0
     assert "max_prs_per_epic" in result.output
     assert read_entries() == before
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def test_redecompose_clearing_waves_resets_details(graph_env):

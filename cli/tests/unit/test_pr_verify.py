@@ -183,7 +183,9 @@ def test_closed_blocks_exit_1_and_audits(tmp_path, gh_on, monkeypatch):
     monkeypatch.setattr(_verify, "run", fake)
     monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 1
-    events = (tmp_path / ".fno" / "events.jsonl").read_text()
+    from fno.paths import project_log
+
+    events = project_log("events.jsonl", project_root=tmp_path).read_text()
     assert "pr_closed_without_merge" in events
 
 
@@ -516,10 +518,43 @@ def test_reviews_no_qualifying_reply_flips_exit_1(tmp_path, monkeypatch, capsys)
     assert rc == 1
     out = capsys.readouterr().out
     assert "flipped back to false" in out and "bot" in out
-    events = (tmp_path / ".fno" / "events.jsonl").read_text()
+    from fno.paths import project_log
+
+    events = project_log("events.jsonl", project_root=tmp_path).read_text()
     audit = json.loads(events.strip().splitlines()[-1])
     assert audit["data"]["gate"] == "external_review_passed"
     assert audit["data"]["reviewer"] == "bot"
+
+
+def _boom_project_log(*args, **kwargs):
+    raise OSError("space unresolved")
+
+
+def test_emit_audit_survives_failing_project_log(tmp_path, monkeypatch, capsys):
+    sf = _state_file(tmp_path)
+    monkeypatch.setattr("fno.paths.project_log", _boom_project_log)
+    _verify._emit_audit(str(tmp_path), sf, "42", "probe")
+    err = capsys.readouterr().err
+    assert "events journal unresolved" in err and "probe" in err
+
+
+def test_reviews_flip_survives_failing_project_log(tmp_path, monkeypatch, capsys):
+    sf = _state_file(tmp_path)
+    monkeypatch.setattr(_verify, "_gh_available", lambda: True)
+    fake = FakeGH(
+        toplevel=str(tmp_path),
+        reviews=[{"login": "bot", "submitted_at": "2026-06-13T00:00:00Z"}],
+        author="me",
+        issue_comments=[],
+    )
+    monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
+    monkeypatch.setattr("fno.paths.project_log", _boom_project_log)
+    rc = _verify.run_verify_reviews("42", sf, cwd=str(tmp_path))
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "flipped back to false" in captured.out
+    assert "events journal unresolved" in captured.err
 
 
 # ---- qualifying-reply predicate (the forgery-hole-closing logic) ----

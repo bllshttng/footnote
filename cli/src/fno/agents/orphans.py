@@ -101,7 +101,7 @@ class Finding:
     name: str
     exe_name: str
     renamed: bool
-    cmdline: str
+    cmdline: str  # launch-time argv (attribution evidence, not current state)
     cwd: Optional[str]
     cpu_seconds: float
     age_seconds: float
@@ -752,7 +752,7 @@ def to_json(result: ScanResult) -> dict:
             {
                 "pid": f.pid,
                 "name": f.name,
-                "cmdline": f.cmdline,
+                "cmdline_launch_time": f.cmdline,
                 "cwd": f.cwd,
                 "arm": f.arm,
                 "avg_cpu_percent": round(f.avg_cpu_percent, 1),

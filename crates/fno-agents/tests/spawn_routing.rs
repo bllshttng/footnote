@@ -1348,6 +1348,54 @@ fn client_spawn_substrate_bg_agy_hard_errors_pointing_to_headless() {
     );
 }
 
+/// x-df08 (PR 1355 review, P2): gemini's `command_surface` reads `refused` -
+/// a deprecated harness with no dispatch lane at all, never a harness that
+/// merely lacks a built thread-spawn arm. `bg_substrate_refusal` must check
+/// that BEFORE naming a `thread_lane`, or a retired harness reads as future
+/// lane work.
+#[test]
+fn client_spawn_substrate_bg_gemini_names_the_deprecation_not_a_missing_lane() {
+    let home_dir = tmpdir("cli-spawn-bg-gemini-home");
+    let bin = find_client_bin();
+    if !bin.exists() {
+        eprintln!(
+            "skipping client_spawn_substrate_bg_gemini_names_the_deprecation_not_a_missing_lane: binary not found"
+        );
+        return;
+    }
+
+    let out = std::process::Command::new(&bin)
+        .args([
+            "spawn",
+            "myagent",
+            "hello",
+            "--harness",
+            "gemini",
+            "--substrate",
+            "bg",
+        ])
+        .env("FNO_SPAWN_GATE", "0")
+        .env("FNO_E2E", "1")
+        .env("FNO_AGENTS_HOME", &home_dir)
+        .output()
+        .expect("failed to run fno-agents");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "gemini --substrate bg must exit 2; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("deprecated") && stderr.contains("agy"),
+        "gemini's refusal must name the deprecation and its successor: {stderr}"
+    );
+    assert!(
+        !stderr.contains("keeper lane spawn arm") && !stderr.contains("never a harness limitation"),
+        "gemini's refusal must not describe a retired harness as future lane work: {stderr}"
+    );
+}
+
 /// x-9112: `spawn --substrate bg` without --provider no longer exits 2 with a
 /// "provider is required" error - it INFERS the invoking harness, mirroring
 /// Python's resolve_dispatch_harness (and the pane arm). Proven deterministically

@@ -2,11 +2,12 @@
 name: ship
 description: "Drive any deliverable to its finish line. The umbrella over delivery terminals: 'ship pr' is the PR lifecycle (= today's /pr), 'ship doc' ships a research brief to output_dir and grades it. Use when: 'ship this', 'ship a PR', 'ship the doc', 'ship the brief', 'deliver this'. Not for ongoing areas (budget, community) - those have no finish line; use /target."
 argument-hint: "<pr|doc>  (pr: create|check|merged - the PR lifecycle; doc: <topic> [--golden <discovery-*.md>])  - a type is required, there is no default"
-requires:
-  binaries:
-    - "fno >= 0.1"
-    - "gh >= 2.0"
-    - "git >= 2.0"
+metadata:
+  requires:
+    binaries:
+      - "fno >= 0.1"
+      - "gh >= 2.0"
+      - "git >= 2.0"
 ---
 
 # Ship

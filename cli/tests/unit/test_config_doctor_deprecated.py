@@ -23,7 +23,6 @@ def _pin_global(monkeypatch, tmp_path: Path, body: str) -> Path:
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(glob))
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     return glob
 
 
@@ -107,7 +106,6 @@ def test_project_file_migration_carries_local_flag(monkeypatch, tmp_path):
     monkeypatch.setattr(paths_mod, "resolve_repo_root", lambda: tmp_path / "proj")
     monkeypatch.setattr(paths_mod, "resolve_canonical_repo_root", lambda: tmp_path / "proj")
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(glob))
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     out: list[str] = []
     import typer
@@ -188,7 +186,6 @@ def test_legacy_harness_project_file_migration_carries_local_flag(
     monkeypatch.setattr(paths_mod, "resolve_repo_root", lambda: tmp_path / "proj")
     monkeypatch.setattr(paths_mod, "resolve_canonical_repo_root", lambda: tmp_path / "proj")
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(glob))
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     out: list[str] = []
     import typer

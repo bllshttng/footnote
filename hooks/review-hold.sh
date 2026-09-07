@@ -156,8 +156,15 @@ data="$(jq -cn \
   '{invocation_id:$invocation_id,stage:$stage,verb:$verb,args_raw:$args_raw,level:$level,level_source:$level_source,flags:$flags,transport:$transport,initiator:$initiator,target_session_id:$target_session_id,head_sha:$head_sha,branch:$branch} | if $model_family == "" then . else .model_family=$model_family end' \
   2>/dev/null || true)"
 if [[ -n "$data" ]]; then
+  # The resolver owns the default; --events is only for the hermeticity pin.
+  # A checkout-path fallback here wrote review_invocation rows to a retired
+  # file while loopcheck and settle read the space journal.
+  emit_events_args=()
+  if [[ -n "${FNO_EVENTS_PATH:-}" ]]; then
+    emit_events_args=(--events "$FNO_EVENTS_PATH")
+  fi
   "$FNO_BIN" doctor event emit -t review_invocation -s daemon -d "$data" \
-    --events "${FNO_EVENTS_PATH:-$cwd/.fno/events.jsonl}" >/dev/null 2>&1 || true
+    ${emit_events_args[@]+"${emit_events_args[@]}"} >/dev/null 2>&1 || true
 fi
 
 # The cap gate. Contract amendment, narrow and deliberate: the never-block

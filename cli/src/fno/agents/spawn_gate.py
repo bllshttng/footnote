@@ -235,11 +235,12 @@ class LiveCensus:
     #: (dedup-independent) so the slot cap mirrors the Rust gate exactly — see
     #: :attr:`slot_count`.
     fno_slot_workers: int = 0
-    #: live slot-holding rows per king session id (x-3f84 W4). None keys the
-    #: rows no king is attributable to (operator-run / pre-lineage rows): they
-    #: still consume ``max_live`` but never divide the share, because an
-    #: unknown lineage must not shrink everyone else's share to hide in it.
-    king_counts: dict[Optional[str], int] = field(default_factory=dict)
+    #: False when the registry read failed: share counts unknown, never zero.
+    registry_readable: bool = True
+    #: Crowned sessions via court.crowned_sessions (x-5283 LD1); the divisor.
+    crowned_sessions: set[str] = field(default_factory=set)
+    #: Worker rows per ``spawned_by_session``; None = the LD4 bucket.
+    worker_rows: dict[Optional[str], list[str]] = field(default_factory=dict)
 
     @property
     def count(self) -> int:
@@ -357,6 +358,7 @@ def census() -> LiveCensus:
         out.warnings.append(
             f"spawn-gate: fno registry unreadable ({exc}); registry rows omitted from the census"
         )
+        out.registry_readable = False
         rows = []
     claim_live_cache: dict[str, bool] = {}
     for row in rows:
@@ -405,9 +407,9 @@ def census() -> LiveCensus:
         # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
         out.fno_slot_workers += 1
-        out.king_counts[row.spawned_by_session] = (
-            out.king_counts.get(row.spawned_by_session, 0) + 1
-        )
+        # x-5283: a crowned row divides the cap and pays no per-king tax.
+        if row.crown_level is None:
+            out.worker_rows.setdefault(row.spawned_by_session, []).append(row.name)
         live_registry_names.add(row.name)
         dedup_key = row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
@@ -480,6 +482,12 @@ def census() -> LiveCensus:
         )
 
     out.slot_claims = _live_worker_slot_claims(out.warnings, live_registry_names)
+
+    # The divisor reads crowns through the court's own primitive (LD1/AC3).
+    if out.registry_readable:
+        from fno.agents.court import crowned_sessions
+
+        out.crowned_sessions = crowned_sessions(rows)
     return out
 
 
@@ -586,27 +594,34 @@ def provider_live_count(provider: str, counted: Optional[set[str]] = None) -> in
 
     count = 0
     counted_names: set[str] = set()
+
+    def _pane_state(row) -> "bool | None":
+        """Pane liveness via the mux probe. Raises ProviderCountUnavailable
+        when the probe crashes; None when the row carries no pane ref."""
+        if not isinstance(row.mux, dict):
+            return None
+        try:
+            from fno.agents.mux_spawn import _mux_pane_alive
+
+            return _mux_pane_alive(row.mux)
+        except Exception as exc:
+            raise ProviderCountUnavailable(
+                f"pane liveness unreadable for {row.name}: {exc}"
+            ) from exc
+
     for row in candidates:
         if row.pid is not None:
             if row.pid_start_time is None:
                 state = _pid_alive(row.pid, None)
                 if state is False:
                     continue
-                if isinstance(row.mux, dict):
-                    try:
-                        from fno.agents.mux_spawn import _mux_pane_alive
-
-                        pane_state = _mux_pane_alive(row.mux)
-                    except Exception as exc:
-                        raise ProviderCountUnavailable(
-                            f"pane liveness unreadable for {row.name}: {exc}"
-                        ) from exc
-                    if pane_state is True:
-                        count += 1
-                        counted_names.add(row.name)
-                        continue
-                    if pane_state is False:
-                        continue
+                pane = _pane_state(row)
+                if pane is True:
+                    count += 1
+                    counted_names.add(row.name)
+                    continue
+                if pane is False:
+                    continue
                 raise ProviderCountUnavailable(
                     f"process incarnation token missing for {row.name}"
                 )
@@ -619,21 +634,15 @@ def provider_live_count(provider: str, counted: Optional[set[str]] = None) -> in
                 count += 1
                 counted_names.add(row.name)
             continue
+        pane = _pane_state(row)
+        if pane is True:
+            count += 1
+            counted_names.add(row.name)
+            continue
+        if pane is False:
+            continue
         if isinstance(row.mux, dict):
-            try:
-                from fno.agents.mux_spawn import _mux_pane_alive
-
-                pane_state = _mux_pane_alive(row.mux)
-            except Exception as exc:
-                raise ProviderCountUnavailable(
-                    f"pane liveness unreadable for {row.name}: {exc}"
-                ) from exc
-            if pane_state is True:
-                count += 1
-                counted_names.add(row.name)
-                continue
-            if pane_state is False:
-                continue
+            # Unreadable is not absent: the cap refuses before the bg fallback.
             raise ProviderCountUnavailable(
                 f"pane liveness unreadable for {row.name}"
             )
@@ -1137,6 +1146,27 @@ def _fleet_cpu_reading() -> Optional[tuple[float, float]]:
         return None
 
 
+def _spare_pool_suffix(reading: Any) -> str:
+    """Name the Claude Code pre-warm pool when it holds any CPU.
+
+    Measured 2026-09-07: 45 idle `claude bg-spare` processes held 66.5% of a
+    12-CPU machine, and every fno spawn was refused on the load they produced.
+    The refusal named only the fleet, so an hour went into the wrong cause. The
+    pool is not fno's to bound; saying it is there is.
+
+    Kept byte-identical to the Rust twin in `crates/fno-agents/src/spawn_gate.rs`
+    so the two gates cannot make different claims about the same reading.
+    """
+    count = int(getattr(reading, "spare_pool_process_count", 0) or 0)
+    cores = float(getattr(reading, "spare_pool_cpu_cores", 0.0) or 0.0)
+    if count <= 0 or not math.isfinite(cores) or cores < 0:
+        return ""
+    return (
+        f"; the claude spare pool holds {cores:.2f} cores across {count} "
+        "idle pre-warm processes, which fno does not own or bound"
+    )
+
+
 def _footprint_cause_evidence() -> Optional[str]:
     """Read one fail-open fleet footprint for an over-load refusal."""
     try:
@@ -1168,7 +1198,7 @@ def _footprint_cause_evidence() -> Optional[str]:
             "spawn-gate: footprint attributes "
             f"{reading.fleet_cpu_cores:.2f}/{capacity:.2f} cores "
             f"({capacity_share:.1f}% capacity, {measured_share:.1f}% of measured CPU) "
-            "to the fleet"
+            "to the fleet" + _spare_pool_suffix(reading)
         )
     except Exception:
         return None
@@ -1423,20 +1453,61 @@ def _check_load_ceiling(
     )
 
 
-def _king_share(cap: int, king_counts: dict[Optional[str], int], caller: str) -> int:
-    """One king's fair share of the ceiling: a DIVISOR, never a second record.
+def _king_share(cap: int, crowned: set[str], caller: str) -> int:
+    """One king's fair share of the ceiling: ``cap // crowns`` (x-5283 LD1).
 
-    ``max_live`` stays the one ceiling; the share is ``cap // kings`` where
-    kings are the distinct attributed spawners among live rows, plus the
-    caller (a king spawning its FIRST worker still counts, or N kings with
-    live rows would admit an unbounded N+1th). Unattributed rows (None) never
-    divide the share - an unknown lineage must not shrink everyone else's
-    share to hide inside it. The floor of 1 keeps a crowded fleet able to
-    start one worker per king.
+    The divisor counts CROWNS from the court's own ``crown_level`` field; the
+    caller folds in only when itself crowned (LD2: still share-checked, never
+    in the divisor). The floor of 1 keeps a crowded fleet able to start one
+    worker per king. A fleet with NO crowns divides by nothing, so every
+    uncrowned caller's share floors at 1: a session holds one worker until
+    someone is crowned. That is the crownless fleet refusing to be
+    ungoverned, not a malfunction, and the refusal's "across 0 kings" names
+    it.
     """
-    kings = {k for k in king_counts if k is not None}
-    kings.add(caller)
-    return max(1, cap // len(kings))
+    divisor = len(crowned | ({caller} if caller in crowned else set()))
+    return max(1, cap // divisor) if divisor else 1
+
+
+def share_reading(census_obj: "LiveCensus", cap: int, caller: Optional[str]) -> dict:
+    """One share reading, printed by every surface that answers the question.
+
+    ``kings``/``share``/``held``/``held_rows`` (the caller's worker rows, by
+    name) and ``unattributed`` (the LD4 bucket: live rows that name nobody).
+    An unreadable registry returns None for every count (x-5283 AC9).
+    """
+    if not census_obj.registry_readable:
+        return {"kings": None, "share": None, "held": None,
+                "held_rows": None, "unattributed": None}
+    king_sessions = set(census_obj.crowned_sessions)
+    unattributed_rows = census_obj.worker_rows.get(None, [])
+    held_rows = list(census_obj.worker_rows.get(caller, [])) if caller else []
+    return {
+        "kings": len(king_sessions),
+        "share": _king_share(cap, king_sessions, caller or ""),
+        "held": len(held_rows),
+        "held_rows": held_rows,
+        "unattributed": {
+            "count": len(unattributed_rows),
+            "rows": list(unattributed_rows),
+        },
+    }
+
+
+def _take_headless_slot(
+    guard, name, holder, route_provider, provider_cap
+) -> None:
+    """The headless arm: bind the worker slot now. pane/bg keep the gate mutex
+    until dispatch returns (the caller releases via guard.release())."""
+    try:
+        _acquire_worker_slot(
+            guard, name, holder, route_provider,
+            fail_closed=provider_cap is not None,
+        )
+    except ProviderCountUnavailable as exc:
+        guard.release()
+        _refuse_provider_cap(route_provider or "unknown", provider_cap or 0, error=exc)
+    guard.release_gate_mutex()
 
 
 def _check_king_share(
@@ -1444,25 +1515,34 @@ def _check_king_share(
 ) -> None:
     """Refuse (never queue) when the calling king holds its full share (x-3f84 W4).
 
-    Six kings dispatching into one undivided ``max_live`` converge on the cap
-    by construction, however reasonable each king is alone. The share divides
-    THAT ceiling, and only for a caller whose session identity resolved: an
-    operator terminal or cron job has no lineage and is not competing for the
-    commons, so an unattributed caller skips the check. Waiting cannot help -
-    only the caller's own workers dying frees its share - so this refuses like
-    the provider cap rather than queueing.
+    The share divides ``max_live`` by CROWNS (x-5283 LD1); ``held`` counts
+    the caller's worker rows only; only a caller whose session identity
+    resolved is checked; and waiting cannot help - only the caller's own
+    workers dying frees its share - so this refuses like the provider cap.
+    Every number comes from :func:`share_reading`: the count the gate
+    refuses on and the count any readout prints are one value.
     """
     if not caller_session:
         return
-    share = _king_share(cap, census_obj.king_counts, caller_session)
-    held = census_obj.king_counts.get(caller_session, 0)
+    reading = share_reading(census_obj, cap, caller_session)
+    held, share, kings = reading["held"], reading["share"], reading["kings"]
+    if held is None or share is None or kings is None:
+        # An unreadable registry leaves every count unknown; there is nothing
+        # to enforce and no zero to fail open on.
+        return
     if held >= share:
-        kings = len({k for k in census_obj.king_counts if k is not None} | {caller_session})
-        _warn(
+        msg = (
             f"spawn-gate: king {caller_session[:8]} holds {held} of max_live {cap} "
             f"across {kings} kings (share {share}); refusing to spawn -- waiting "
             f"cannot help while your own workers hold the share (--force to bypass)"
         )
+        unattributed = reading["unattributed"] or {}
+        if unattributed.get("count"):
+            shown = ", ".join(unattributed["rows"][:5])
+            extra = "..." if unattributed["count"] > 5 else ""
+            msg += f"; {unattributed['count']} live row(s) name nobody and sit " \
+                f"in the unattributed bucket ({shown}{extra})"
+        _warn(msg)
         _refuse(
             EXIT_KING_SHARE,
             reason="king_share",
@@ -1698,20 +1778,7 @@ def run_gate(
                     "(--force); provider cap remains enforced"
                 )
                 if substrate == "headless":
-                    try:
-                        _acquire_worker_slot(
-                            guard,
-                            name,
-                            holder,
-                            route_provider,
-                            fail_closed=provider_cap is not None,
-                        )
-                    except ProviderCountUnavailable as exc:
-                        guard.release()
-                        _refuse_provider_cap(
-                            route_provider or "unknown", provider_cap or 0, error=exc
-                        )
-                    guard.release_gate_mutex()
+                    _take_headless_slot(guard, name, holder, route_provider, provider_cap)
                 return guard
             c = census()
             for w in c.warnings:
@@ -1761,20 +1828,7 @@ def run_gate(
                     guard.release()
                     raise
                 if substrate == "headless":
-                    try:
-                        _acquire_worker_slot(
-                            guard,
-                            name,
-                            holder,
-                            route_provider,
-                            fail_closed=provider_cap is not None,
-                        )
-                    except ProviderCountUnavailable as exc:
-                        guard.release()
-                        _refuse_provider_cap(
-                            route_provider or "unknown", provider_cap or 0, error=exc
-                        )
-                    guard.release_gate_mutex()
+                    _take_headless_slot(guard, name, holder, route_provider, provider_cap)
                 # pane/bg: keep the mutex until dispatch returns (the row
                 # exists by then); the caller releases via guard.release().
                 return guard

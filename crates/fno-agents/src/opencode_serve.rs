@@ -56,7 +56,7 @@ use std::time::Duration;
 use crate::claude_ask::{emit_event, validate_spawn_inputs};
 use crate::opencode_ask::{apply_opencode_variant, AskOutcome, OPENCODE_DEFAULT_MODEL};
 use crate::paths::AgentsHome;
-use crate::state::{load_registry, update_registry, RegistryEntry};
+use crate::state::{load_registry, update_registry, Lineage, RegistryEntry};
 use crate::AgentStatus;
 
 /// Everything the spawn needs from a live serve: the loopback base URL, the
@@ -513,6 +513,7 @@ pub fn dispatch_opencode_serve(
     cwd: &Path,
     model: Option<&str>,
     effort: Option<&str>,
+    node: Option<&str>,
 ) -> AskOutcome {
     dispatch_opencode_serve_inner(
         home,
@@ -522,6 +523,7 @@ pub fn dispatch_opencode_serve(
         cwd,
         model,
         effort,
+        node,
         crate::claude_ask::state_dirs_from_env(),
         "opencode",
     )
@@ -539,6 +541,7 @@ fn dispatch_opencode_serve_inner(
     cwd: &Path,
     model: Option<&str>,
     effort: Option<&str>,
+    node: Option<&str>,
     state_dirs: Vec<String>,
     opencode_bin: &str,
 ) -> AskOutcome {
@@ -796,7 +799,7 @@ fn dispatch_opencode_serve_inner(
         route_provider_id: Some("opencode".to_string()),
         model_name: model.filter(|m| !m.is_empty()).map(str::to_string),
         account_record_id: Some("default".to_string()),
-        node: std::env::var("FNO_NODE").ok().filter(|v| !v.is_empty()),
+        node: node.filter(|v| !v.is_empty()).map(str::to_string),
         // The serve-hosted worker lane (a detached run --attach writer behind
         // a shared serve): the public "thread" name for the local bg
         // selector.
@@ -818,7 +821,6 @@ fn dispatch_opencode_serve_inner(
         requested_provider: None,
         requested_effort: effort.filter(|v| !v.is_empty()).map(str::to_string),
         harness: Some("opencode".to_string()),
-        harness_session_id: Some(session_id.clone()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         cwd: cwd.to_string_lossy().to_string(),
@@ -826,9 +828,6 @@ fn dispatch_opencode_serve_inner(
         session_id: Some(session_id.clone()),
         origin: Some("spawn".to_string()),
         spawn_trigger: None,
-        spawned_by_session: parent_session,
-        spawned_by_harness: parent_harness,
-        spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
         claude_session_uuid: None,
         messaging_socket_path: None,
@@ -856,7 +855,14 @@ fn dispatch_opencode_serve_inner(
         fno_id: Some(session_id.clone()),
         delivery_policy: None,
         sandbox_posture: None,
-        ..Default::default()
+        ..RegistryEntry::new(
+            Some(session_id.clone()),
+            Lineage {
+                session: parent_session,
+                harness: parent_harness,
+                cwd: parent_cwd,
+            },
+        )
     };
     let registry_path = home.registry_json();
     match update_registry(&registry_path, |reg| {
@@ -1297,6 +1303,7 @@ mod tests {
             &cwd,
             None,
             None,
+            Some("x-535c"),
             vec![state_dir.to_string_lossy().to_string()],
             &stub.to_string_lossy(),
         );
@@ -1305,6 +1312,8 @@ mod tests {
         let receipt: serde_json::Value = serde_json::from_str(outcome.stdout.trim()).unwrap();
         assert_eq!(receipt["session_id"], "ses_dispatchtest1");
         assert_eq!(receipt["ok"], true);
+        let registry = crate::state::load_registry(&h.registry_json()).unwrap();
+        assert_eq!(registry.entries[0].node.as_deref(), Some("x-535c"));
         // The registry row exists with the harness session bound AND the
         // writer's pid as its liveness axis (spawn-gate cap + reconcile).
         let reg = load_registry(&h.registry_json()).unwrap();
@@ -1354,6 +1363,7 @@ mod tests {
             Path::new("/tmp"),
             None,
             None,
+            None,
             Vec::new(),
             "opencode",
         );
@@ -1374,6 +1384,7 @@ mod tests {
             "m",
             "op",
             Path::new("/tmp"),
+            None,
             None,
             None,
             Vec::new(),

@@ -84,18 +84,22 @@ help
 inbox approvals decide !--db
 inbox approvals ls !--db
 inbox approvals show !--db
-inbox board !--state
+inbox board
 inbox decide !--decision !--origin !--subject
 inbox decisions !--subject
 inbox law set
 inbox notify
+inbox operator ack
+inbox operator list
+inbox operator status
 inbox outstanding ask
 inbox outstanding clear !--origin
 inbox outstanding mine do
 inbox outstanding reindex
-king board !--state
+king board
 king cancel
 king done
+king drain
 king escalate
 king init
 king manifest-path
@@ -150,6 +154,7 @@ whoami status
 worker
 workspace register-worker
 workspace worktree archive
+workspace worktree cargo-offload
 workspace worktree cleanup
 workspace worktree ensure
 workspace worktree overlap-record

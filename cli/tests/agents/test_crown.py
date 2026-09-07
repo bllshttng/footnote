@@ -72,14 +72,19 @@ def test_scope_contains_canonicalizes_an_alias_project(monkeypatch, tmp_path) ->
     from fno.agents import crown
 
     # An epic filed under the alias 'a' (the raw spelling intake stores).
+    # The containment resolves the index once, so the stub sits there.
     monkeypatch.setattr(
-        crown, "_graph_entry", lambda nid: {"id": nid, "type": "epic", "project": "a"}
+        crown,
+        "_graph_index",
+        lambda: {"epic-1": {"id": "epic-1", "type": "epic", "project": "a"}},
     )
     assert crown.scope_contains("alpha", "epic-1") is True
 
     # A genuinely different project is still not contained.
     monkeypatch.setattr(
-        crown, "_graph_entry", lambda nid: {"id": nid, "type": "epic", "project": "beta"}
+        crown,
+        "_graph_index",
+        lambda: {"epic-1": {"id": "epic-1", "type": "epic", "project": "beta"}},
     )
     assert crown.scope_contains("alpha", "epic-1") is False
 
@@ -106,8 +111,67 @@ def test_the_store_gate_rejects_unstampable_pairs(level, scope) -> None:
     assert crown_validation_error(level, scope) is not None
 
 
-def test_the_store_gate_passes_the_two_legal_shapes() -> None:
+def test_a_mislabeled_level_cannot_switch_off_rivalry(monkeypatch, tmp_path) -> None:
+    """The rung is a fact about the SCOPE, not the stored number: a row stamped
+    level 0 over an epic set must not read as a different rung and slip the
+    cross-rung exemption while a rung-2 crown takes one member."""
+    import fno.agents.crown as crown_mod
+    from fno.agents.crown import _crown_rivals
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(
+        crown_mod,
+        "_graph_index",
+        lambda: {
+            nid: {"id": nid, "type": "epic", "project": "alpha"}
+            for nid in ("e-1", "e-2")
+        },
+    )
+
+    # Stored (0, "e-1,e-2") vs a real rung-2 crown over one member: derived
+    # rungs both 2, so overlap decides. Trusting stored levels answered False.
+    assert _crown_rivals("e-1,e-2", 0, "e-1", 2) is True
+    # A mislabeled portfolio (stored 2 over two projects) still courts its
+    # project king: derivation reads 0 vs 1, equality decides, not rivals.
+    assert _crown_rivals("alpha,beta", 2, "alpha", 1) is False
+
+
+def test_the_store_gate_refuses_a_level_that_names_a_different_rung(
+    monkeypatch, tmp_path
+) -> None:
+    """A stored level that contradicts its members is a stamp no resolver
+    produces; the gate refuses on positive evidence only, so a machine where
+    nothing resolves stays with the runtime guards."""
     from fno.agents.crown import crown_validation_error
+    from fno.projects import resolve as proj_resolve
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[work.workspaces.ws1]\nprojects = [{ name = "alpha" }, { name = "beta" }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
+    proj_resolve._clear_cache()
+
+    assert crown_validation_error(2, "alpha,beta") is not None
+    assert crown_validation_error(0, "e-1,e-2") is not None
+    assert crown_validation_error(0, "alpha,beta") is None
+    assert crown_validation_error(2, "e-1,e-2") is None
+
+
+def test_the_store_gate_passes_the_two_legal_shapes(monkeypatch, tmp_path) -> None:
+    from fno.agents.crown import crown_validation_error
+    from fno.projects import resolve as proj_resolve
+
+    # Level 0 needs its members to RESOLVE as projects, so the config declares
+    # the two names this test stamps a portfolio over.
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[work.workspaces.ws1]\nprojects = [{ name = "etl" }, { name = "web" }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
+    proj_resolve._clear_cache()
 
     assert crown_validation_error(None, None) is None      # an uncrowned spawn
     assert crown_validation_error(2, "epic-x") is None     # a Director
@@ -396,7 +460,7 @@ def test_top_rows_join_the_crown_through_session_id_when_names_differ(monkeypatc
     from fno.agents.spawn_gate import LiveWorker
 
     monkeypatch.setattr(
-        top, "_registry_handles", lambda: {"full-session-uuid": "last8reg"}
+        top, "_registry_maps", lambda: ({"full-session-uuid": "last8reg"}, {})
     )
     w = LiveWorker(
         source="claude",
@@ -510,6 +574,40 @@ def test_in_place_crown_receipt_names_a_disabled_king_loop(
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["king_loop_armed"] is False
+
+
+def test_crown_and_manifest_are_written_in_one_call(tmp_path: Path, monkeypatch) -> None:
+    """x-f0d2: the manifest is the durable crown record, the row its cache.
+
+    `fno agents crown` stamps the row and writes the same crown triple onto
+    the manifest in the one call, so a row the registry loses can heal its
+    crown back from the file.
+    """
+    import fno.king.state as king_state
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness_session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                status="idle",
+            )
+        ],
+    )
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    row = load_registry()[0]
+    manifest = king_state.parse_manifest(_space_manifest(tmp_path, "alpha"))
+    assert manifest["harness_session_id"] == row.harness_session_id
+    assert manifest["crown_scope"] == row.crown_scope == "alpha"
+    assert manifest["crown_grantor"] == row.crown_grantor == "human"
+    assert int(manifest["crown_level"]) == row.crown_level == 1
 
 
 def test_in_place_crown_aborts_before_registry_publish_when_manifest_write_fails(
@@ -1340,6 +1438,150 @@ def test_in_place_crown_refuses_a_second_live_holder_for_the_scope(
     assert result.exit_code == 2
     assert "already held" in result.output.lower()
     assert [asdict(row) for row in load_registry()] == before
+
+
+def test_in_place_crown_refuses_overlapping_territory_not_just_the_same_set(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A rung-2 set is a union: a live king over e-1,e-2 already rules e-1, so
+    crowning another row over e-1 alone is a double rule. The equality-only
+    scan let it through; the guard must fire on any shared member."""
+    from fno.agents.registry import load_registry
+    import fno.agents.crown as crown_mod
+
+    incumbent = _entry(
+        "incumbent",
+        harness_session_id="incumbent-session",
+        status="busy",
+        crown_level=2,
+        crown_scope="e-1,e-2",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [incumbent, target])
+    monkeypatch.setattr(
+        crown_mod,
+        "_graph_entry",
+        lambda nid: {"id": nid, "type": "epic", "project": "fno"}
+        if nid in ("e-1", "e-2")
+        else None,
+    )
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("worker", "--scope", "e-1")
+
+    assert result.exit_code == 2
+    assert "already held" in result.output.lower()
+    assert "incumbent" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_a_portfolio_kings_court_holds_project_kings(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The ladder documents a portfolio king's court AS project kings, so a
+    live row over 'alpha,beta' and a new crown over 'alpha' are two legitimate
+    crowns. Bare member overlap refused exactly that grant."""
+    from fno.agents.registry import load_registry
+
+    incumbent = _entry(
+        "portfolio-king",
+        harness_session_id="portfolio-session",
+        status="busy",
+        crown_level=0,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [incumbent, target])
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.stdout)
+    assert (receipt["level"], receipt["scope"]) == (1, "alpha")
+    held = {r.name: r.crown_scope for r in load_registry()}
+    assert held == {"portfolio-king": "alpha,beta", "worker": "alpha"}
+
+
+def test_a_project_kings_grant_covers_an_epic_set_under_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A king could grant one epic but never two: scope_contains read every
+    multi-member inner as a set-subset test, and a set of epic ids is never a
+    subset of a set of project names. The set must fall under the crown that
+    holds every member."""
+    import fno.agents.crown as crown_mod
+    from fno.agents.crown import grant_error
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(
+        crown_mod,
+        "_graph_index",
+        lambda: {
+            nid: {"id": nid, "type": "epic", "project": "alpha"}
+            for nid in ("e-1", "e-2")
+        },
+    )
+    king = _entry(
+        "king",
+        harness_session_id="king-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="alpha",
+        crown_grantor="human",
+    )
+
+    assert grant_error("e-1,e-2", king) is None
+    assert grant_error("e-1,e-3", king) is not None
+
+
+def test_the_store_gate_passes_a_rung_2_epic_set() -> None:
+    """A multi-member scope is level 0 (a project portfolio) or level 2 (an
+    epic set). The gate read multi-member as portfolio-only and refused the
+    rung-2 set the resolver had just minted on the spawn path."""
+    from fno.agents.crown import crown_validation_error
+
+    assert crown_validation_error(2, "e-1,e-2") is None
+    assert crown_validation_error(1, "e-1,e-2") is not None
+
+
+def test_two_epics_crown_in_place_as_one_set(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.registry import load_registry
+    import fno.agents.crown as crown_mod
+
+    target = _entry(
+        "mux-king",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [target])
+    monkeypatch.setattr(
+        crown_mod,
+        "_graph_index",
+        lambda: {
+            nid: {"id": nid, "type": "epic", "project": "fno"}
+            for nid in ("e-1", "e-2")
+        },
+    )
+
+    result = _invoke_crown("mux-king", "--scope", "e-1", "--scope", "e-2")
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.stdout)
+    assert (receipt["level"], receipt["scope"]) == (2, "e-1,e-2")
+    row = next(r for r in load_registry() if r.name == "mux-king")
+    assert (row.crown_level, row.crown_scope) == (2, "e-1,e-2")
 
 
 def test_a_king_cannot_crown_itself_even_to_a_strict_subset(

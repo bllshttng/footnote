@@ -16,6 +16,7 @@ use fno_agents::drift::drift_warning;
 use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
 use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
+use fno_agents::spawn_gate::machine_status_line;
 use fno_agents::usage::{verb_usage, CLIENT_VERB_USAGE};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
@@ -28,7 +29,9 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "bash-census",
     "board",
     "claim",
+    "codex-assign-project",
     "codex-loaded-threads",
+    "court-orphans",
     "detect",
     "digest",
     "drive",
@@ -47,6 +50,9 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "manifest-eval",
     "manifest-for-session",
     "needs",
+    "notify-watch",
+    "orphan-reap",
+    "feed",
     "ping",
     "pr-heal",
     "probe-run",
@@ -127,6 +133,16 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::manifest::run_manifest_eval(&args[1..]);
     }
 
+    // `orphan-reap` is the hidden reap lever for orphaned cargo test binaries:
+    // the daemon's 300s sweep and a human on a wedged box both run
+    // it binary-direct. Same `matches!` treatment as `mail-inject` so it stays
+    // out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the routable-verb
+    // parity guard - it reads one ps snapshot and prints, it is not an
+    // `fno agents` verb.
+    if matches!(verb, "orphan-reap") {
+        return fno_agents::orphan_reap::run_orphan_reap(&args[1..]);
+    }
+
     // `reentry-plan` is the INTERNAL machine resolver behind every
     // Claude re-entry door (x-d285): the Rust/Python attach+resume arms and
     // the mux gestures consume its verdict instead of each rebuilding a
@@ -165,6 +181,16 @@ async fn run(args: Vec<String>) -> i32 {
     // fno verb is added. The socket round-trip needs the user's daemon.
     if matches!(verb, "review-start") {
         return fno_agents::codex_inject::run_review_start(&args[1..]).await;
+    }
+
+    // `codex-assign-project` is the hidden project-assignment verb (x-dc97):
+    // resolve or create the repo's codex project for --cwd, and when
+    // --thread-id is given, assign that bound thread to it. The Python headless
+    // create lane shells this binary fire-and-forget after `thread.started`.
+    // Same `matches!` treatment as `review-start` so it stays out of
+    // CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the routable-verb parity guard.
+    if matches!(verb, "codex-assign-project") {
+        return fno_agents::codex_inject::run_codex_assign_project(&args[1..]).await;
     }
 
     // `claim` is the HIDDEN debug front over the native claims module
@@ -278,6 +304,12 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "graph-get" {
         return fno_agents::graph_get::run_graph_get(&args[1..]);
     }
+    // `court-orphans` (x-f0d2): the orphan-crown sweep for `fno agents court`,
+    // daemon-free read; `==` dispatch like graph-get, and registered in
+    // ALL_CLIENT_ACTIONS like every direct dispatch the ratchet counts.
+    if verb == "court-orphans" {
+        return fno_agents::loop_reign::run_court_orphans(&args[1..]);
+    }
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
     }
@@ -293,6 +325,13 @@ async fn run(args: Vec<String>) -> i32 {
     // parity guard does not see it - no advertised fno verb is added.
     if verb == "board" {
         return fno_agents::king_board::run_board(&args[1..]);
+    }
+
+    // `notify-watch` (x-87fb): the operator-notice sampler, read-only,
+    // daemon-free. Same `==` treatment as `board`: a read-only collector, not
+    // a routable `fno agents` verb, so no advertised fno verb is added.
+    if verb == "notify-watch" {
+        return fno_agents::operator_notice::run_notify_watch_verb(&args[1..]);
     }
 
     // `verify-evidence`: Rust port of scripts/lib/verify-event-evidence.sh
@@ -330,7 +369,7 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::client_verbs::run_adopt(&args[1..], &AgentsHome::from_env());
     }
     if verb == "attach" {
-        return fno_agents::client_verbs::run_attach(&args[1..], &AgentsHome::from_env());
+        return fno_agents::attach::run_attach(&args[1..], &AgentsHome::from_env());
     }
     // `recover` (x-d285): hidden-but-invocable manual restoration of a recorded
     // session under its account/route, with explicit two-id selection. Reads
@@ -384,6 +423,15 @@ async fn run(args: Vec<String>) -> i32 {
     // this off-loop when the prefix+a overlay opens.
     if verb == "needs" {
         return fno_agents::needs::run_needs(&args[1..], &AgentsHome::from_env()).await;
+    }
+
+    // `feed` (x-4433): one projection joining questions.jsonl + graph.json
+    // into an ordered feed whose rows carry the node id + session id the mux
+    // deep link resolves. Read-only, daemon-free like `needs`: it dispatches
+    // here before build_request. events.jsonl is deliberately NOT a source
+    // (72% ticks; lifecycle derives from the graph, never copied).
+    if verb == "feed" {
+        return fno_agents::feed::run_feed(&args[1..], &AgentsHome::from_env()).await;
     }
 
     // `status` reports on a *running* daemon: it must NOT lazy-start one just to
@@ -1109,7 +1157,7 @@ fn validate_effort_for_spawn(
     if value.is_empty() {
         return Err("--effort must be non-empty".to_string());
     }
-    if matches!(provider, "gemini" | "agy") {
+    if matches!(provider, "gemini") {
         return Err(format!(
             "harness {} has no reasoning-effort surface; omit --effort",
             provider
@@ -1648,7 +1696,14 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // on the serve IS the worker (steering/mail over the API is a filed
         // follow-up).
         ("opencode", "bg") => emit!(fno_agents::opencode_serve::dispatch_opencode_serve(
-            home, name, &message, from_name, &cwd, model, effort,
+            home,
+            name,
+            &message,
+            from_name,
+            &cwd,
+            model,
+            effort,
+            params.get("node").and_then(|v| v.as_str()),
         )),
 
         ("agy", "headless") => {
@@ -1666,15 +1721,16 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         ("codex", "bg") => None,
 
         // The three arms above stay NAMED rather than lane-routed, because
-        // they are three different ownership models and only two of them are
-        // what the contract says they are: claude's thread is hosted by the
-        // detached client itself, codex's by its own app-server, and
-        // opencode's by a serve-hosted HTTP session. opencode is the
-        // deliberate exception - its capability row declares
-        // `interactive_attach` unsupported, so the derived lane reads
-        // `keeper`, while its serve lane is built and working. Routing this
-        // match on the derived lane would send a working path to a refusal;
-        // the mismatch belongs to the capability row, not here.
+        // they are three different ownership models: claude's thread is
+        // hosted by the detached client itself, codex's by its own
+        // app-server, and opencode's by a serve-hosted HTTP session -
+        // `thread_lane` classifies all three `attach` (each answers "the
+        // harness owns the live session; a client re-attaches"), but that one
+        // label can't tell a client-side re-attach apart from a daemon-owned
+        // serve process, and each needs its own dispatch call. (Before x-df08,
+        // opencode's row read `keeper` here - a stale answer this match arm
+        // had to route around by name; the row now agrees with the dispatch
+        // below.)
         //
         // The REFUSAL is derived, because a provider name list goes stale the
         // moment a lane is built and then misdirects the reader it was meant
@@ -1713,9 +1769,23 @@ fn bg_substrate_refusal(harness: &str) -> String {
         py_repr(harness)
     );
     let tail = "use --substrate headless for a one-shot";
-    let lane = fno_agents::harness_capabilities::HarnessContract::packaged()
-        .ok()
-        .and_then(|contract| contract.thread_lane(harness).ok());
+    let contract = fno_agents::harness_capabilities::HarnessContract::packaged().ok();
+    // A refused command_surface (a deprecated harness, e.g. gemini) has no
+    // dispatch lane at all - check this BEFORE thread_lane, which would
+    // otherwise describe a retired harness as future lane work (PR 1355
+    // review, P2). Mirrors harness_map._refused_reason's wording so both
+    // runtimes name the same gap the same way.
+    if let Some(caps) = contract.as_ref().and_then(|c| c.capabilities(harness).ok()) {
+        if caps.command_surface == "refused" {
+            return format!(
+                "harness {} has no maintained footnote dispatch lane and is deprecated; \
+                 route this work to its successor 'agy' (or a claude/codex/opencode harness) \
+                 - no prose build brief is generated",
+                py_repr(harness)
+            );
+        }
+    }
+    let lane = contract.and_then(|contract| contract.thread_lane(harness).ok());
     match lane {
         // No resume form at all, so there is no lane for fno to build.
         Some("none") => {
@@ -1946,17 +2016,21 @@ fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus
                 .unwrap_or_else(|| "{}".into())
         );
     }
+    // Best-effort: a machine whose footprint cannot be read prints no line
+    // rather than a stale or fabricated one.
+    if let Some(line) = machine_status_line() {
+        println!("machine: {line}");
+    }
 }
 
-/// `fno agents reap`: manual dead-row garbage collection (x-b1aa). Runs the same
+/// `fno agents reap`: manual row retirement (x-c672). Runs the same
 /// `gc_sweep` the daemon runs on its idle tick, operating on the registry
-/// directly under the shared flock (no daemon required), and reports what it did:
-/// the count removed and, for each row KEPT, the specific gate that kept it
-/// (dirty/unprobed worktree, no positive corroboration yet - x-9de7 task 5 -
-/// or the liveness re-check itself, x-98ab) so a stuck row is never silent
-/// and invisible, and a zero-reap pass over a live fleet is never silent
-/// about the rows it kept. The grace window is resolved
-/// from `config.agents.dead_row_grace` exactly as the daemon does.
+/// directly under the shared flock (no daemon required), and reports what it
+/// did: every row retired with its basis, and for each row KEPT, the named
+/// gate holding it, so a stuck row is never silent and invisible, and a
+/// zero-reap pass over a live fleet is never silent about the rows it kept.
+/// The grace window is resolved from `config.agents.retire_grace_s` exactly
+/// as the daemon does.
 ///
 /// `--dry-run` runs the identical classification with no registry write and no
 /// `agent_row_reaped` event - a reaper an operator cannot rehearse is one they
@@ -1978,13 +2052,9 @@ fn run_reap(rest: &[String]) -> i32 {
     }
     let home = AgentsHome::from_env();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let grace_for_harness = |harness: &str| {
-        std::time::Duration::from_secs(fno_agents::agents_config::dead_row_grace_secs(
-            &cwd, harness,
-        ))
-    };
+    let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
     let summary = if dry_run {
-        fno_agents::daemon::gc_sweep_dry_run(&home, &grace_for_harness)
+        fno_agents::daemon::gc_sweep_dry_run(&home, grace_secs)
     } else {
         // Source "daemon" matches the event schema's declared source for
         // agent_row_reaped; the manual verb is the same operation as the tick.
@@ -1992,7 +2062,7 @@ fn run_reap(rest: &[String]) -> i32 {
         fno_agents::daemon::gc_sweep(
             &home,
             &emitter,
-            &grace_for_harness,
+            grace_secs,
             fno_agents::agents_config::reap_receipt_retain_days(&cwd),
         )
     };
@@ -2156,6 +2226,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--cwd",
         "--message",
         "--name",
+        "--node",
         "--session-id",
         "--status",
         "--progress",
@@ -2297,6 +2368,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             // fallback below keeps a direct `fno-agents spawn <name>` working.
             "--name" => {
                 params.insert("name".into(), str_arg(&mut it, "--name")?);
+            }
+            "--node" => {
+                params.insert("node".into(), str_arg(&mut it, "--node")?);
             }
             "--session-id" => {
                 params.insert("session_id".into(), str_arg(&mut it, "--session-id")?);
@@ -2949,10 +3023,13 @@ fn format_success(
                 notes.push(format!("event record not written: {reason}"));
             }
             if result.get("worktree_outcome").and_then(Value::as_str) == Some("removed") {
-                let bytes = result
-                    .get("reclaimed_bytes")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
+                // `null` means the size walk hit its budget on a large or
+                // slow-storage tree - print `unmeasured`, never a `0` that
+                // reads identically to "measured, nothing to reclaim".
+                let bytes = match result.get("reclaimed_bytes").and_then(Value::as_u64) {
+                    Some(n) => n.to_string(),
+                    None => "unmeasured".to_string(),
+                };
                 notes.push(format!(
                     "WARNING: worktree removed by guarded cleanup (reclaimed_bytes={bytes})"
                 ));
@@ -3116,22 +3193,48 @@ fn fetch_discovered_sessions(
     // early return made `--status orphaned` drop through Rust a row that Python
     // prints -- one runtime-dependent answer to one question. The row-level
     // filter at the bottom is the single place status is applied.
-    let mut cmd = Command::new("fno");
-    cmd.args(["agents", "discovered-json"]);
-    cmd.env("FNO_AGENTS_RUNTIME", "python");
+    let mut argv = vec!["agents".to_string(), "discovered-json".to_string()];
     if let Some(c) = cwd_filter {
-        cmd.args(["--cwd", c]);
+        argv.push("--cwd".into());
+        argv.push(c.into());
     }
     // Without this the rendered surface disagrees with the Python one:
     // `--harness claude` would list every discovered codex/opencode session.
     // An empty value is "no filter" on the Python side, so forwarding it would
     // make the two runtimes disagree again in the other direction.
     if let Some(p) = provider_filter.filter(|p| !p.is_empty()) {
-        cmd.args(["--harness", p]);
+        argv.push("--harness".into());
+        argv.push(p.into());
     }
-    let output = match cmd.output() {
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return Vec::new(),
+
+    // Every `fno agents list` on the box runs this, so several terminals asking
+    // at once each paid their own Python cold start for one answer. The latch
+    // is keyed on the argv above, so a run with a different `--cwd` or
+    // `--harness` is a different flight and keeps its own answer.
+    let key = fno_agents::single_flight::flight_key(&argv);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let flight = fno_agents::single_flight::run_or_join(
+        &key,
+        fno_agents::agents_config::single_flight_ttl(&cwd),
+        fno_agents::agents_config::single_flight_join_budget(&cwd),
+        // No outer deadline to subtract from: this path has no caller-supplied
+        // budget, so the wait it may have spent changes nothing about the run.
+        |_spent| {
+            let mut cmd = Command::new("fno");
+            cmd.args(&argv);
+            cmd.env("FNO_AGENTS_RUNTIME", "python");
+            // Fail-open by contract, and the same rule the latch needs: only a
+            // clean run is worth sharing, so a failure spends no cache entry
+            // and the next caller retries for real.
+            match cmd.output() {
+                Ok(o) if o.status.success() => Some(o.stdout),
+                _ => None,
+            }
+        },
+    );
+    let output = match flight.stdout {
+        Some(bytes) => bytes,
+        None => return Vec::new(),
     };
     let parsed: Value = match serde_json::from_slice(&output) {
         Ok(v) => v,

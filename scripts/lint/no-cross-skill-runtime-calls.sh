@@ -14,7 +14,7 @@
 #      content reuse must happen at BUILD TIME via skill-bundles.yaml, so
 #      each skill folder is self-contained at checkout.
 #   3. The skill's SKILL.md declares its `fno` binary dependency under
-#      `requires.binaries` in frontmatter. Mirrors how an npm skill
+#      `metadata.requires.binaries` in frontmatter. Mirrors how an npm skill
 #      declares `node` or a CLI tool declares `gh`.
 #
 # Usage:
@@ -135,7 +135,7 @@ for skill in "${SELF_CONTAINED_SKILLS[@]}"; do
   fi
 
   # -------------------------------------------------------------------
-  # Check 3: requires.binaries.fno declared in SKILL.md frontmatter.
+  # Check 3: metadata.requires.binaries.fno declared in SKILL.md frontmatter.
   # Tolerates missing SKILL.md only when the directory is also missing
   # (handled by the outer `continue` above); past that, SKILL.md is
   # required and must declare the dep.
@@ -166,7 +166,7 @@ for skill in "${SELF_CONTAINED_SKILLS[@]}"; do
     echo "" >&2
     EXIT=1
   elif [[ $rc -ne 0 ]]; then
-    echo "ERROR: skills/$skill/SKILL.md does not declare 'fno' under requires.binaries in frontmatter." >&2
+    echo "ERROR: skills/$skill/SKILL.md does not declare 'fno' under metadata.requires.binaries in frontmatter." >&2
     echo "  Add a requires: block to the frontmatter (see Phase 6 of the encapsulation refactor)." >&2
     echo "" >&2
     EXIT=1

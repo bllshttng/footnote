@@ -59,14 +59,18 @@ fn entry(name: &str, harness: &str, sid: Option<&str>) -> RegistryEntry {
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
+        resolved_sandbox: None,
+        granted_writable_roots: Vec::new(),
         origin: None,
         spawn_trigger: None,
         liveness: None,
         liveness_measured_at: None,
         harness_title: None,
+        launch_account_source: None,
         spawned_by_session: None,
         spawned_by_harness: None,
         spawned_by_cwd: None,
+        adopted_by_session: None,
         legacy_claude_short_id: None,
     }
 }

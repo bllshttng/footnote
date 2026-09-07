@@ -37,6 +37,7 @@ One file per install. These belong at the root.
 | `health-throttle.json`, `health-history.jsonl` | `health_monitor.py` | append-only |
 | `convo-signals.jsonl` | `inbox/drain.py` | append-only |
 | `recovery-nudges.json` | `recovery.py` | permanent |
+| `notify-signals.json` | `crates/fno-agents/src/operator_notice.rs` (the notify_watch arm) | permanent; one entry per subscribed signal, the last token + ts; safe to delete (the next state change re-sends) |
 | `watchdog-sweep.json` | `agents/watchdog.py` | permanent (rewritten per sweep) |
 | `recovery/provider-outages.json`, `.lock`, `.provider-outages-*.tmp` | `agents/provider_outage.py` | permanent breaker/evidence journal; lock and atomic temp sidecars live only for one write and stale temps are safe to remove when no writer holds the lock; stores fingerprints, bounded raw refusal text, and explicit route IDs, never credentials or full transcripts |
 | `recovery/provider-canaries/*.json` | `agents/watchdog.py` | bounded health proofs for audit; exact marker, provider/account IDs, pane ID, and timestamp only, never pane dumps or credentials |
@@ -92,6 +93,7 @@ One file per session, per day, or per throttle window.
 | `.preflight-receipt-locks/` | `scripts/ci/preflight.sh` | live lock dirs |
 | `mail-hold/<handle>.json` | `fno/mail/hold.py` via `paths.state_dir()` | one file per held session; deleted by the release timer, by `fno agents mail hold --off`, and by the turn-boundary tidy in `fno agents mail notify-self` |
 | `route-settings/<sha16>.json` | `agents/model_routing.py::_write_settings_env_file` via `paths.state_dir()` (content-addressed, 0600, carries a live auth token) | one file per distinct route overlay, shared by every session on that route; a resume re-resolves provider-default tiers (`refresh_provider_default_tiers`), so a moved default yields a new file rather than a served stale one; files no registry row references and older than 14 days are pruned by `fno config route settings ls --prune` |
+| `flight/<encoded key>.json` | `crates/fno-agents/src/single_flight.rs`, beside the claims dir it locks in (`$FNO_CLAIMS_ROOT`, else `$HOME`) | one file per distinct fno invocation; rewritten by each flight and read only inside the freshness window (`config.agents.single_flight_ttl_seconds`, default 10 s), so a leftover is inert rather than stale. Pruned past `ttl + join budget`, doubled, by `single_flight::prune_records` on the daemon's GC tick. Holds the child's stdout, which is the same text the verb prints on a terminal |
 | `locks/github-graphql-quota.lock` | `pr/_quota.py` via `paths.graphql_quota_lock()` | permanent empty sidecar; flock lives only for the probe-plus-command critical section |
 | `bin/github-cli/gh`, `gh.pre-fno` | `setup/github_cli.py` via `paths.github_cli_proxy_dir()` | permanent proxy; one backup is retained only when an unrelated wrapper was present |
 
@@ -156,7 +158,8 @@ Project state left the checkout. One space per repository, keyed on the CANONICA
 | `<space>/claims/` | `fno.claims` for repo-local keys (`walker:`, `review:`, `reap:`); global-id keys (`node:`, `dispatch:`, ...) stay at the global root | re-acquirable leases |
 | `<space>/kings/<scope>.md` | `cli/src/fno/king/state.py` via coronation or `fno agents king init` | one loop-state file per live crown scope; stale files are inert without a live registry crown and cleanup is best-effort (`fno agents king done` on abdication) |
 | `<space>/kings/<scope>.md.lock`, `.md.tmp` | `state.py` / `loop_king.rs` / `king/wake.py` over the manifest lock | lock lives only for the critical section; tmp is replaced on every locked write |
-| `<space>/kings/<scope>.wake.json` | `pr_watch/_king_wake.py` (the tick's wake phase) | tick-local board-hash cache with no reign meaning; refreshed only when a wake fires, so it never outlives the manifest beside it |
+| `<space>/kings/<scope>.wake.json` | `pr_watch/_king_wake.py` (the tick's wake phase) | tick-local trigger cache with no reign meaning: `board_hash` + `board_rows` (the board-change trigger) and `answered_cursor` (the answered-escalation trigger); refreshed only when a wake fires, so it never outlives the manifest beside it |
+| `<space>/kings/<scope>.wake.json.lock`, `.json.<pid>.tmp` | `pr_watch/_king_wake.py` over the manifest-lock helper | lock lives only for the sidecar's read-modify-write critical section; the pid-suffixed tmp is replaced on every locked write |
 | `<space>/kings/<scope>.md.wake.log` | `pr_watch/_king_wake.py` (detached wake-mode walk) | append-only stdout of the walks this phase spawned; the events journal is the receipt, this log is diagnosis |
 | `<space>/plans/` | `paths.plans_dir()` default (a configured vault template still wins) | permanent plan docs |
 | `<space>/inbox/` | `paths.inbox_dir()` default | per-project inbox |

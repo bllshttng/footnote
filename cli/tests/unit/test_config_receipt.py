@@ -19,7 +19,6 @@ def _patch_roots(monkeypatch, worktree: Path, canonical: Path, tmp_path: Path):
         lambda root=None, timeout=None: canonical,
     )
     monkeypatch.setattr("fno.paths.resolve_canonical_repo_root", lambda: canonical)
-    config.load_settings.cache_clear()
 
 
 def test_config_get_receipt_names_root_and_deciding_file(monkeypatch, tmp_path: Path, capsys):
@@ -91,16 +90,12 @@ def test_coverage_gate_consumers_emit_verbose_root_receipts(
     caplog.set_level(logging.DEBUG, logger="fno.pr._coverage_gate")
 
     _coverage_gate.resolved_max_rounds(str(worktree))
-    _coverage_gate._github_approval_satisfies(str(worktree))
     _coverage_gate._resolved_categories(str(worktree))
-    _coverage_gate._corroboration_refusal({"coverage": "covered"}, str(worktree))
 
     messages = [record.getMessage() for record in caplog.records]
     for key in (
         "config.review.max_rounds",
-        "config.review.github_approval_satisfies",
         "config.review.nonblocking_categories",
-        "config.review.require_corroboration",
     ):
         assert any(f"key={key}" in message for message in messages)
     assert all(f"root={worktree}" in message for message in messages)
@@ -112,7 +107,6 @@ def test_config_get_receipt_follows_a_pinned_fno_config(monkeypatch, tmp_path: P
     pinned.write_text("[review]\nmax_rounds = 7\n", encoding="utf-8")
     _patch_roots(monkeypatch, tmp_path / "worktree", tmp_path / "canonical", tmp_path)
     monkeypatch.setenv("FNO_CONFIG", str(pinned))
-    config.load_settings.cache_clear()
 
     get_cmd("review.max_rounds", False)
 

@@ -276,6 +276,29 @@ def test_docs_are_scanned(repo: Path) -> None:
     assert _run(repo).returncode == 1
 
 
+def test_retired_blueprint_launcher_is_enforced(repo: Path) -> None:
+    """The deleted launch-on-write hook must stay unrunnable: a skill teaching
+    it again fails, and the refusal names the advance replacement."""
+    _add(
+        repo,
+        "skills/k/new.md",
+        "Finish with `bash skills/blueprint/scripts/autolaunch-on-ready.sh <plan>`.\n",
+    )
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "autolaunch-on-ready.sh" in result.stderr
+    assert "fno backlog advance" in result.stderr
+
+
+def test_retired_blueprint_config_leaf_is_enforced(repo: Path) -> None:
+    """The real registry (copied by the fixture) carries the launch-on-write
+    leaf's tombstone; a doc reintroducing the key fails the config scan."""
+    _add(repo, "docs/new.md", "Set `target.auto_launch_on_blueprint = true` to arm it.\n")
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "target.auto_launch_on_blueprint" in result.stderr
+
+
 def test_a_shell_comment_is_never_reported(repo: Path) -> None:
     _add(repo, "hooks/new.sh", "# reaps with claude rm <short_id> internally\ntrue\n")
     assert _run(repo).returncode == 0

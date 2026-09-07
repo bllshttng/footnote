@@ -958,6 +958,12 @@ _LIVE_STATUS_INPUT = {
     "idle": "Idle",
     "done": "Done",
     "failed": "Done",
+    # x-8bfb: claude emits this routinely for a terminal row with no live
+    # turn. Liveness is the axis this vocabulary carries, and a stopped
+    # session has none - same as a failed one above. Outcome (why it
+    # stopped) is a different axis this vocabulary does not carry; do not
+    # widen this mapping to answer that question.
+    "stopped": "Done",
 }
 
 # Field aliases for the row schema. claude's `agents --json` emits `id` and
@@ -988,7 +994,7 @@ def _normalize_live_status(value: Any) -> Any:
 
 
 def _alias_value(
-    row: dict, keys: tuple[str, ...], valid, normalize=None
+    row: dict, keys: tuple[str, ...], valid, normalize=None, recognized=None
 ) -> tuple[Any, Optional[str]]:
     """Resolve one field across its schema aliases. Returns (value, warning).
 
@@ -1000,7 +1006,13 @@ def _alias_value(
 
     When two aliases both hold valid but DIFFERENT values there is no way to
     tell which the producer meant, so the first value in ``keys`` order is
-    returned with a warning rather than a silent pick.
+    returned with a warning rather than a silent pick - UNLESS ``recognized``
+    is given and every found value passes it (x-8bfb AC6/AC8): ``state``
+    already wins by the fixed ``keys`` order regardless, so a disagreement
+    between two individually-understood values is precedence working as
+    documented, not drift. Passing ``recognized`` in (rather than making this
+    function itself status-aware) keeps the short-id call site, which never
+    passes it, on its original always-warn-on-difference behavior.
 
     ``normalize`` is applied per alias BEFORE the comparison, so two spellings
     of the same meaning (``state: working`` / ``status: busy``) agree instead of
@@ -1018,6 +1030,8 @@ def _alias_value(
     # non-None JSON value, and hashing a dict/list one would raise TypeError
     # out of a function contracted to be best-effort.
     if any(other != value for _, other in found[1:]):
+        if recognized is not None and all(recognized(v) for _, v in found):
+            return value, None
         pairs = ", ".join(f"{k}={v!r}" for k, v in raw)
         return value, f"conflicting values across aliases ({pairs}); used {value!r}"
     return value, None
@@ -1201,6 +1215,19 @@ def claude_agents_json(
     rows, warnings = claude_agents_rows(timeout=timeout)
     out_map: dict[str, dict] = {}
     agent_rows = len(rows)
+    # x-8bfb: both drift families below are collected per DISTINCT shape while
+    # iterating and emitted once each after the loop, rather than once per
+    # row. A value drift is loud once no matter how many rows carry it
+    # (AC7-EDGE); a genuine fleet can carry the same unmapped value or the
+    # same alias disagreement on dozens of rows, and a line per row buries the
+    # one fact ("stopped is unmapped") under noise that scales with fleet
+    # size instead of with distinct causes.
+    unrecognized_status_counts: dict[str, int] = {}
+    conflict_message_counts: dict[str, int] = {}
+
+    def _status_recognized(v: Any) -> bool:
+        return isinstance(v, str) and v in KNOWN_LIVE_STATUSES
+
     for index, row in enumerate(rows):
         short_id, id_warning = _alias_value(row, _SHORT_ID_KEYS, _valid_short_id)
         if short_id is None:
@@ -1213,12 +1240,23 @@ def claude_agents_json(
             warnings.append(
                 f"claude agents --json {_row_label(row, index, 'non-interactive rows')} short id {id_warning}"
             )
+        # `recognized` scopes the alias-conflict suppression to THIS call site
+        # only (x-8bfb AC6/AC8/AC9): a disagreement between two values that
+        # both already resolve to a known live-status is precedence working
+        # as documented (`state` wins - unchanged), not drift, so it stays
+        # quiet. A disagreement touching a genuinely unknown value still
+        # warns; the short-id call above passes no `recognized` and keeps its
+        # original always-warn-on-difference behavior untouched.
         live_status, status_warning = _alias_value(
-            row, _STATUS_KEYS, _valid_status, normalize=_normalize_live_status
+            row,
+            _STATUS_KEYS,
+            _valid_status,
+            normalize=_normalize_live_status,
+            recognized=_status_recognized,
         )
         if status_warning:
-            warnings.append(
-                f"claude agents --json {_row_label(row, index, 'non-interactive rows')} status {status_warning}"
+            conflict_message_counts[status_warning] = (
+                conflict_message_counts.get(status_warning, 0) + 1
             )
         # The isinstance guard short-circuits before the frozenset lookup: a
         # non-string status (dict/list under drift) is itself unrecognized, and
@@ -1226,12 +1264,19 @@ def claude_agents_json(
         if live_status is not None and (
             not isinstance(live_status, str) or live_status not in KNOWN_LIVE_STATUSES
         ):
-            warnings.append(
-                f"claude agents --json {_row_label(row, index, 'non-interactive rows')} has unrecognized status="
-                f"{live_status!r} (expected one of {sorted(KNOWN_LIVE_STATUSES)}); "
-                "passing through unchanged"
-            )
+            key = repr(live_status)
+            unrecognized_status_counts[key] = unrecognized_status_counts.get(key, 0) + 1
         out_map[short_id] = {"live_status": live_status}
+    for value_repr, count in unrecognized_status_counts.items():
+        rows_word = "row" if count == 1 else "rows"
+        warnings.append(
+            f"claude agents --json {count} {rows_word} with unrecognized status="
+            f"{value_repr} (expected one of {sorted(KNOWN_LIVE_STATUSES)}); "
+            "passing through unchanged"
+        )
+    for message, count in conflict_message_counts.items():
+        rows_word = "row" if count == 1 else "rows"
+        warnings.append(f"claude agents --json {count} {rows_word} status {message}")
     # A per-row warning is quiet enough that a schema change dropping EVERY row
     # shipped unnoticed once already: 42 warnings into a list most callers never
     # print, and an empty map that reads exactly like "no agents running". A

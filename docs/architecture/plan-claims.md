@@ -1,4 +1,4 @@
-# Plan Claims to Existing Idea Nodes
+# Plan Claims to Existing Nodes
 
 ## Problem
 
@@ -12,9 +12,7 @@ the debt.
 
 ## Solution
 
-A plan can declare it implements an existing idea-state node with a
-`claims:` frontmatter field. When intake sees the claim it updates the
-existing node in place rather than appending a duplicate.
+A plan can declare it implements an existing node, in any state, with a `claims:` frontmatter field. When intake sees the claim it binds the plan to that node in place rather than appending a duplicate.
 
 Three layers, each more authoritative than the last:
 
@@ -32,19 +30,11 @@ Three layers, each more authoritative than the last:
    node-birth path (idea/add, single intake, multi-intake) and emits a
    stderr `dedup:` receipt naming up to three existing nodes that resemble
    the new one. It scores token-Jaccard via `relatedness.similar_nodes`
-   across all live states (a shipped `done` node is the answer to a
-   duplicate filing), at a 0.30 floor. For an idea-state top candidate the
-   receipt suggests `--claims` so the author can re-file and consolidate.
-   Warn-only - it never blocks a filing.
+   across all live states (a shipped `done` node is the answer to a duplicate filing), at a 0.30 floor. For an intake filing the receipt suggests `--claims` so the author can re-file and consolidate. Warn-only - it never blocks a filing.
 
 ## Authoring
 
-`/blueprint` writes `claims:` automatically when its argument matches the
-`^ab-[0-9a-f]{8}$` shape. The classifier lives in the "Plan Claims
-Ingestion" section of `skills/blueprint/SKILL.md` and shells out to
-`scripts/lib/parse-claims-arg.sh` to resolve title and details from the
-graph. After the plan file is written, `/blueprint` greps for a literal
-`claims: ab-XXX` line and refuses to adopt when the line is missing.
+When its argument matches the `^ab-[0-9a-f]{8}$` shape, `/blueprint` writes `claims:` automatically. The classifier lives in the "Plan Claims Ingestion" section of `skills/blueprint/SKILL.md` and shells out to `scripts/lib/parse-claims-arg.sh` to resolve title and details from the graph. After the plan file is written, `/blueprint` greps for a literal `claims: ab-XXX` line. A missing line refuses adoption.
 
 ```bash
 # Author a plan that auto-claims the idea node
@@ -73,44 +63,34 @@ failures cannot land:
 
 | Condition | Message hint |
 |-----------|--------------|
-| `--claims ab-XXX` names a node in non-idea state | "node ab-XXX is in state 'done'; refuse to claim a non-idea node" |
 | Plan path was already adopted as a different node | "plan_path already adopted as ab-Y, but --claims names ab-X. Remove or supersede ab-Y before claiming" |
 | Malformed `--claims` value | "invalid claims value: 'not-an-id' (expected ab-XXXXXXXX format)" |
+| Claim id not on the graph | "ab-XXX not found on graph" |
 
-The repair-path message names the exact `fno backlog supersede` command
-that unblocks the operator, so recovery is one shell line away.
+The repair-path message names the exact `fno backlog supersede` command that unblocks the operator, so recovery is one shell line away.
 
 ## Mutator semantics
 
-When a claim resolves to an idea-state node, intake's `claim_mutator`
+When a claim resolves to a node (any state), intake's `claim_mutator`
 preserves the original `id`, `created_at`, and `details` while updating:
 
 - `plan_path` to the new authoritative pointer
 - `title` to the plan's derived title
-- `blocked_by` deduplicated union of existing edges plus any new
-  `depends_on` from plan frontmatter
-- `priority` only when the plan supplies a non-default value (skips the
-  implicit `p2` to avoid downgrading a p1 idea)
+- `blocked_by` deduplicated union of existing edges plus any new `depends_on` from plan frontmatter
+- `priority`, when the plan supplies a non-default value (a plan without one skips the implicit `p2`, so a p1 idea never downgrades)
 - `points` when the plan supplies an estimate
-- `claimed_at` reset to None so `recompute_statuses` can flip
-  `idea -> ready` on the next read
+- a stale idea lock (`locked_at`) is cleared when the node holds no live work lock (`locked_by`), so `recompute_statuses` can flip `idea -> ready` on the next read; a locked node keeps its lock
 
-The original idea's textual `details` (the design body) survives; the
-plan path is the new source of truth for execution.
+The original node's textual `details` (the design body) survives; the plan path is the new source of truth for execution.
 
 ## Tests
 
-- `cli/tests/unit/test_intake_claims.py` - 20 unit tests covering all
-  three layers, both the function-call path (`_intake_impl`) and the
-  CliRunner end-to-end path against the real Typer command.
-- `tests/blueprint/test_claims_arg.sh` - 21 bash assertions covering the
-  parser script and the SKILL doc surface; runs against a fixture graph
-  in a temp HOME so CI doesn't depend on the user's live `~/.fno`.
+- `cli/tests/unit/test_intake_claims.py` - 20 unit tests covering all three layers, both the function-call path (`_intake_impl`) and the CliRunner end-to-end path against the real Typer command.
+- `tests/blueprint/test_claims_arg.sh` - 21 bash assertions covering the parser script and the SKILL doc surface; runs against a fixture graph in a temp HOME so CI doesn't depend on the user's live `~/.fno`.
 
 ## See also
 
 - `skills/blueprint/SKILL.md` - "Plan Claims Ingestion" section
 - `cli/src/fno/graph/_intake.py` - `_resolve_claim`, `_warn_similar_nodes`
 - `scripts/lib/parse-claims-arg.sh` - bash classifier
-- `docs/architecture/graph-collision-detection.md` - sister mechanism
-  for plan-vs-plan file overlap detection
+- `docs/architecture/graph-collision-detection.md` - sister mechanism for plan-vs-plan file overlap detection

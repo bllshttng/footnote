@@ -132,9 +132,7 @@ def test_ac6_fr_malformed_peers_hint_degrades_to_registry(env, tmp_path, monkeyp
         encoding="utf-8",
     )
     from fno import config as _cfg
-    _cfg.load_settings.cache_clear()
     import fno.paths as _paths
-    _paths._settings.cache_clear()
 
     cwd = _project_cwd(tmp_path, "projA")
     _register("alpha", cwd, status="live")
@@ -155,9 +153,7 @@ def test_peers_project_hint_associates_peer_without_matching_cwd(env, tmp_path, 
         encoding="utf-8",
     )
     from fno import config as _cfg
-    _cfg.load_settings.cache_clear()
     import fno.paths as _paths
-    _paths._settings.cache_clear()
     # The peers hint is read from cwd (the running agent's project); run there.
     monkeypatch.chdir(tmp_path)
 
@@ -182,9 +178,7 @@ def test_peers_hint_does_not_hide_peer_from_its_cwd_project(env, tmp_path, monke
         encoding="utf-8",
     )
     from fno import config as _cfg
-    _cfg.load_settings.cache_clear()
     import fno.paths as _paths
-    _paths._settings.cache_clear()
     monkeypatch.chdir(tmp_path)
 
     other = _project_cwd(tmp_path, "elsewhere")

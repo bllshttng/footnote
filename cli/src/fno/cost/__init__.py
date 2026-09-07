@@ -320,9 +320,8 @@ def _update_graph_node(graph_path: Path, node_id: str, session_id: str, cost_usd
     A hand-rolled writer here took a DIFFERENT lockfile than the canonical one
     (which resolves symlinks first, and footnote's worktree setup symlinks
     `.fno/`), so the two writers did not mutually exclude; it also rewrote a
-    legacy root-list graph.json as an empty `{"entries": []}` and left the
-    sha256 sidecar stale, which made the next reader raise and every later cost
-    attribution silently skip.
+    legacy root-list graph.json as an empty `{"entries": []}`, which every
+    later cost attribution then read as a blank board.
     """
     from fno.graph.store import locked_mutate_graph
 

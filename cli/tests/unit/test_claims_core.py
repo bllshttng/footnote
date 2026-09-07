@@ -16,10 +16,13 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import psutil
 import pytest
+
+from fno.rust_binary import find_dev_binary
 
 from fno.claims.core import (
     ClaimContended,
@@ -888,3 +891,312 @@ class TestForceRelease:
             force_release_claim("k", reason="operator override", root=tmp_path)
 
         assert not claim_path("k", root=tmp_path).exists()
+
+
+# ---------------------------------------------------------------------------
+# session-keyed liveness (x-a613): the session id is the witness
+# ---------------------------------------------------------------------------
+
+
+def _dev_native_binary() -> str:
+    """The worktree-built fno-agents: the session witness exists only here,
+    and the installed binary the default resolver finds predates it."""
+    return str(
+        Path(__file__).resolve().parents[3] / "crates/fno-agents/target/debug/fno-agents"
+    )
+
+
+def _dead_pid_context():
+    """A pid that is genuinely absent, plus proof it was alive once."""
+    dead = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    pid = dead.pid
+    dead.terminate()
+    dead.wait()
+    return pid
+
+
+class TestSessionIdStamping:
+    """The session id rides the claim record so classification and renewal can
+    resolve the holder through the registry row keyed by it, never by parsing
+    the published holder string."""
+
+    def test_acquire_stamps_session_id(self, tmp_path, monkeypatch):
+        """AC1: a claim acquired under a resolvable session identity reads it
+        back, resolved beside the harness from ONE identity answer."""
+        import types
+
+        import fno.claims.core as claims_core
+
+        identity = types.SimpleNamespace(
+            harness="claude", session_id="abc123", disposition="canonical"
+        )
+        monkeypatch.setattr(claims_core, "resolve_self_identity", lambda: identity)
+        claim = acquire_claim(
+            "node:x-sid", HOLDER_A, ttl_ms=60_000, pid=os.getpid(), root=tmp_path
+        )
+        assert claim.session_id == "abc123"
+
+    def test_acquire_pinned_session_id_wins(self, tmp_path, monkeypatch):
+        """An explicit harness_session_id (the init-hook pin) beats ambient."""
+        import types
+
+        import fno.claims.core as claims_core
+
+        identity = types.SimpleNamespace(
+            harness="claude", session_id="ambient", disposition="canonical"
+        )
+        monkeypatch.setattr(claims_core, "resolve_self_identity", lambda: identity)
+        claim = acquire_claim(
+            "node:x-sid",
+            HOLDER_A,
+            ttl_ms=60_000,
+            pid=os.getpid(),
+            harness_session_id="pinned-sid",
+            root=tmp_path,
+        )
+        assert claim.session_id == "pinned-sid"
+
+    def test_registry_session_pid_reads_the_row_binding(self, tmp_path, monkeypatch):
+        """The row keyed by harness_session_id names the live pid; a dead or
+        missing row answers None and the caller falls through."""
+        import json as _json
+
+        from fno.claims.core import _registry_session_pid
+
+        registry = tmp_path / "registry.json"
+        registry.write_text(
+            _json.dumps(
+                {
+                    "schema_version": 24,
+                    "agents": [
+                        {
+                            "name": "w",
+                            "harness": "claude",
+                            "harness_session_id": "ses_r",
+                            "pid": os.getpid(),
+                        },
+                        {
+                            "name": "dead",
+                            "harness": "claude",
+                            "harness_session_id": "ses_dead",
+                            "pid": 999_999_999,
+                        },
+                    ],
+                }
+            )
+        )
+        monkeypatch.setattr("fno.paths.agents_registry_path", lambda: registry)
+        assert _registry_session_pid("ses_r") == os.getpid()
+        assert _registry_session_pid("ses_dead") is None
+        assert _registry_session_pid("ses_absent") is None
+
+    def test_resume_rebind_backfills_session_id(self, tmp_path, monkeypatch):
+        """A pre-change claim (no session_id) rebound on resume takes the
+        rebinding session's id."""
+        import types
+
+        import fno.claims.core as claims_core
+
+        monkeypatch.setattr(
+            claims_core,
+            "resolve_self_identity",
+            lambda: types.SimpleNamespace(harness="claude", session_id="new-sid"),
+        )
+        dead_pid = _dead_pid_context()
+        path = claim_path("k", root=tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        legacy = Claim(
+            key="k",
+            holder=HOLDER_A,
+            acquired_at=now_ms() - 100,
+            expires_at=now_ms() + 600_000,
+            pid=dead_pid,
+            host=socket.gethostname(),
+        )
+        path.write_text(serialize_claim(legacy))
+
+        rebound, mode = compare_and_rebind("k", HOLDER_A, ttl_ms=600_000, root=tmp_path)
+        assert mode == "rebound"
+        assert rebound.session_id == "new-sid"
+
+    def test_handover_restamps_session_id_to_the_successor(self, tmp_path, monkeypatch):
+        """A handover changes WHO owns the claim, so the spawner's session id
+        must not survive it - same rule as the harness tag."""
+        import types
+
+        import fno.claims.core as claims_core
+
+        monkeypatch.setattr(
+            claims_core,
+            "resolve_self_identity",
+            lambda: types.SimpleNamespace(harness="claude", session_id="successor-sid"),
+        )
+        dead_pid = _dead_pid_context()
+        path = claim_path("k", root=tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handed = Claim(
+            key="k",
+            holder="spawn-handover:w1",
+            acquired_at=now_ms() - 100,
+            expires_at=now_ms() + 600_000,
+            pid=dead_pid,
+            host=socket.gethostname(),
+            session_id="spawner-sid",
+        )
+        path.write_text(serialize_claim(handed))
+
+        rebound, mode = compare_and_rebind(
+            "k", "spawn-handover:w1", new_holder=HOLDER_B, ttl_ms=600_000, root=tmp_path
+        )
+        assert mode == "handover"
+        assert rebound.session_id == "successor-sid"
+
+
+RUST_BIN = find_dev_binary()
+requires_rust = pytest.mark.skipif(
+    RUST_BIN is None,
+    reason="compiled fno-agents binary not present (the smoke pytest shard deletes it)",
+)
+
+
+class TestSessionWitnessVerdicts:
+    """The witness heals a live session's verdict and bounds the unknown.
+    These shell the NATIVE classifier, pinned to the worktree build."""
+
+    def _write_claim(self, tmp_path, key, session_id, pid, expires_delta):
+        path = claim_path(key, root=tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rec = Claim(
+            key=key,
+            holder=HOLDER_A,
+            acquired_at=now_ms() - 100,
+            expires_at=now_ms() + expires_delta,
+            pid=pid,
+            host=socket.gethostname(),
+            pid_provenance="session-prover",
+            session_id=session_id,
+        )
+        path.write_text(serialize_claim(rec))
+        return rec
+
+    def _pin_native_binary(self, monkeypatch):
+        monkeypatch.setenv("FNO_AGENTS_BIN", _dev_native_binary())
+
+    def _registry_home_with_live_row(self, tmp_path, session_id):
+        """A registry the NATIVE binary reads: FNO_AGENTS_HOME tmp + row pid +
+        start time in the convention daemon.process_start_time compares."""
+        import json as _json
+
+        home = tmp_path / "agents-home"
+        home.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "darwin":
+            start = int(psutil.Process(os.getpid()).create_time() * 1_000_000)
+        else:
+            with open(f"/proc/{os.getpid()}/stat") as fh:
+                stat = fh.read().rsplit(")", 1)[1].split()
+            start = int(stat[19])
+        row = {
+            "name": "w",
+            "cwd": str(tmp_path),
+            "harness": "claude",
+            "harness_session_id": session_id,
+            "pid": os.getpid(),
+            "pid_start_time": start,
+            "status": "busy",
+            "created_at": "2026-09-06T00:00:00Z",
+        }
+        (home / "registry.json").write_text(
+            _json.dumps({"schema_version": 24, "agents": [row]})
+        )
+        return home
+
+    @requires_rust
+    def test_status_live_session_never_reads_stale(self, tmp_path, monkeypatch):
+        """AC3 + x-0c29: an EXPIRED claim whose session's registry row is live
+        reads LIVE with the registry basis - a session that wrote seconds ago
+        must never be provably dead."""
+        self._pin_native_binary(monkeypatch)
+        dead_pid = _dead_pid_context()
+        self._write_claim(tmp_path, "k", "ses_live", dead_pid, -60_000)
+        monkeypatch.setenv(
+            "FNO_AGENTS_HOME", str(self._registry_home_with_live_row(tmp_path, "ses_live"))
+        )
+        status = claim_status("k", root=tmp_path)
+        assert status["state"] == "live", status
+        assert status["basis"] == "registry-session-live"
+        assert status["session_basis"] == "registry-session-live"
+
+    @requires_rust
+    def test_status_unresolved_names_the_witness(self, tmp_path, monkeypatch):
+        """AC5: expired, no registry row, no transcript -> the verdict is
+        bounded (Suspect inside the grace) and the payload names the session
+        witness unresolved, so a reader can see WHICH leg failed."""
+        self._pin_native_binary(monkeypatch)
+        dead_pid = _dead_pid_context()
+        self._write_claim(tmp_path, "k", "ses_ghost", dead_pid, -60_000)
+        home = tmp_path / "empty-agents-home"
+        home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("FNO_AGENTS_HOME", str(home))
+        status = claim_status("k", root=tmp_path)
+        assert status["state"] == "suspect", status
+        assert status["basis"] == "ttl-expired-unresolved"
+        assert status["session_basis"] == "unresolved"
+
+    @requires_rust
+    def test_status_without_session_id_keeps_legacy_stale(self, tmp_path, monkeypatch):
+        """AC4: a pre-change claim (no session id) reads Stale on expiry - the
+        reaper behavior the 1511 revert restored, unchanged."""
+        self._pin_native_binary(monkeypatch)
+        dead_pid = _dead_pid_context()
+        self._write_claim(tmp_path, "k", None, dead_pid, -60_000)
+        status = claim_status("k", root=tmp_path)
+        assert status["state"] == "stale", status
+        assert "session_basis" not in status
+
+    def test_refresh_never_reanchors_a_live_recorded_pid(self, tmp_path, monkeypatch):
+        """A healthy claim (recorded pid alive) is never re-anchored, even when
+        its registry row names a DIFFERENT live process (the keeper-pid shape:
+        rows record the keeper, not the child). Rewriting a running session's
+        anchor is the takeover the first None case exists to prevent."""
+        import fno.claims.core as claims_core
+
+        foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            # Let the child's create time fall clearly BEFORE acquired_at, so
+            # the recorded pid reads as the same live process, not a reuse.
+            time.sleep(0.3)
+            rec = self._write_claim(tmp_path, "k", "ses_live", foreign.pid, 600_000)
+            monkeypatch.setattr(
+                claims_core, "_registry_session_pid", lambda sid: os.getpid()
+            )
+            refreshed = refresh_claim("k", HOLDER_A, ttl_ms=600_000, root=tmp_path)
+            assert refreshed.pid == foreign.pid, "a live anchor must stay put"
+            assert refreshed.acquired_at == rec.acquired_at
+        finally:
+            foreign.terminate()
+            foreign.wait()
+
+    def test_refresh_reanchors_to_registry_row_pid_under_resume(self, tmp_path, monkeypatch):
+        """AC6: a claim whose recorded pid is dead and whose session row names
+        a live pid re-anchors to THAT pid on renewal - created after
+        acquired_at and all. Positive marker: the pid MOVES."""
+        import fno.claims.core as claims_core
+
+        dead_pid = _dead_pid_context()
+        rec = self._write_claim(tmp_path, "k", "ses_move", dead_pid, 600_000)
+        monkeypatch.setattr(claims_core, "_registry_session_pid", lambda sid: os.getpid())
+        refreshed = refresh_claim("k", HOLDER_A, ttl_ms=600_000, root=tmp_path)
+        assert refreshed.pid == os.getpid(), "the anchor must MOVE to the row pid"
+        assert refreshed.acquired_at == rec.acquired_at
+
+    def test_refresh_without_session_id_leaves_the_anchor_alone(self, tmp_path, monkeypatch):
+        """AC7: no session id -> the legacy create-time filter still governs,
+        and with no resolvable ancestor the pid is left exactly as found."""
+        dead_pid = _dead_pid_context()
+        rec = self._write_claim(tmp_path, "k", None, dead_pid, 600_000)
+        monkeypatch.setattr(
+            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: None
+        )
+        refreshed = refresh_claim("k", HOLDER_A, ttl_ms=600_000, root=tmp_path)
+        assert refreshed.pid == dead_pid
+        assert refreshed.acquired_at == rec.acquired_at

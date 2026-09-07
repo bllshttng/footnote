@@ -22,11 +22,11 @@ from fno.agents import format as fmt
 from fno.agents import truth_status
 from fno.agents.reachability import (
     UNREACHABLE,
-    WIRE_STATUS,
     classify_progress,
     classify_reachability,
     reachability,
     registry_falsifier,
+    rendered_activity,
 )
 from fno.agents.registry import (
     AgentEntry,
@@ -189,7 +189,15 @@ def list_agents(
             route_settings_path=entry.route_settings_path,
             last_activity_age_s=truth.get("last_activity_age_s"),
         )
-        rendered_status = WIRE_STATUS[reach.verdict]
+        # x-c672 (AC7): the STATUS word is served activity (writing | quiet |
+        # parked, + orphaned for a falsified row, unknown for an unanswered
+        # probe), rendered from the same single truth reading above. The old
+        # `live` token is gone; `--status` filters on these words.
+        rendered_status = rendered_activity(
+            truth_state=truth_state,
+            age_s=reach.age_s,
+            reachability=reach.verdict,
+        )
         if status is not None and rendered_status != status:
             continue
         # A second, independent axis: filtered separately from `status` above

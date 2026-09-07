@@ -640,3 +640,30 @@ def test_session_start_appends_outstanding_then_orphan_sweep() -> None:
         'append_section "$orphan_content"'
     ), "outstanding must be appended before the orphan sweep"
     assert "fno agents orphans --reap --quiet-unless-new" in body
+
+
+def test_to_json_labels_cmdline_as_launch_time():
+    """The JSON row renames cmdline to cmdline_launch_time.
+
+    An argv snapshot is evidence about launch, not about current state; the
+    bare `cmdline` key invited readers to treat it as the latter, which is the
+    exact misread this module exists to refuse.
+    """
+    born = time.time() - 600
+    common = dict(
+        pid=91,
+        name="node",
+        exe_name="node",
+        renamed=False,
+        cmdline="node server.js",
+        cwd="/repo",
+        cpu_seconds=0.0,
+        start_time=born,
+        arm="CWD",
+    )
+    finding = orphans.Finding(age_seconds=600, **common)
+    data = orphans.to_json(orphans.ScanResult(total=1, orphaned=1, findings=[finding]))
+
+    row = data["orphans"][0]
+    assert row["cmdline_launch_time"] == "node server.js", row
+    assert "cmdline" not in row, row

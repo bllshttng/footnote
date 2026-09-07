@@ -29,7 +29,9 @@
 # Usage: emit-attestation.sh <reviewer> [verdict] [reviewer_context] [execution_context] [output_contract] [--findings-file <path>]
 #   <reviewer>  a built-in (sigma | peer | code-review | declare) or any name declared
 #               in config.review.reviewer_registry (a leading '/' is stripped)
-#   [verdict]   pass (default) | fail
+#   [verdict]   pass (default) | fail; IGNORED when --findings-file is given -
+#               that path delegates to `fno do review classify --attest`, and
+#               the verdict is the one the classifier measured
 #   [reviewer_context]  fresh | shared | unknown (default unknown); positive
 #                       context evidence only, never inferred from the sender
 #   [execution_context] inline (default) | fork; where the review ran
@@ -464,21 +466,32 @@ fi
 if [[ -n "$review_event_data" ]]; then
   "${FNO:-fno}" doctor event emit -t review_invocation -s daemon -d "$review_event_data" >/dev/null 2>&1 || true
 fi
-data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
-  --arg session_id "$session_id" --arg harness "$harness" \
-  --arg model "$model" --arg provider "$provider" \
-  --arg reviewer_context "$reviewer_context" \
-  --arg invocation_id "$invocation_id" \
-  --arg branch "$branch" \
-  --arg reviewed_base_sha "$reviewed_base_sha" \
-  --arg reviewed_head_sha "$reviewed_head_sha" \
-  --argjson reviewed_line_count "$reviewed_line_count" \
-  --argjson reviewed_file_count "$reviewed_file_count" \
-  --argjson findings "$findings_json" \
-  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,reviewer_context:$reviewer_context,invocation_id:$invocation_id,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count,reviewed_file_count:$reviewed_file_count} + $findings')"
-# FNO overrides the binary (defaults to the mux); tests point it at fno-py,
-# which is on PATH in the uv test env where the mux is not installed.
-"${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"
+if [[ -n "$findings_file" ]]; then
+  # ONE WRITER: the verb re-classifies the same file and emits the row with
+  # the verdict IT measured; the verdict typed on argv is ignored on this
+  # path, so a row can never read milder than the classified findings. The
+  # verb's stderr line is the emit receipt. The typed-verdict emit below
+  # stays for `declare` and for hand runs with no findings file.
+  "${FNO:-fno}" do review classify --findings-file "$findings_file" \
+    --emit-record --attest "$reviewer" --reviewer-context "$reviewer_context" \
+    --execution-context "$execution_context" --output-contract "$output_contract" >/dev/null
+else
+  data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
+    --arg session_id "$session_id" --arg harness "$harness" \
+    --arg model "$model" --arg provider "$provider" \
+    --arg reviewer_context "$reviewer_context" \
+    --arg invocation_id "$invocation_id" \
+    --arg branch "$branch" \
+    --arg reviewed_base_sha "$reviewed_base_sha" \
+    --arg reviewed_head_sha "$reviewed_head_sha" \
+    --argjson reviewed_line_count "$reviewed_line_count" \
+    --argjson reviewed_file_count "$reviewed_file_count" \
+    --argjson findings "$findings_json" \
+    '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,reviewer_context:$reviewer_context,invocation_id:$invocation_id,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count,reviewed_file_count:$reviewed_file_count} + $findings')"
+  # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
+  # which is on PATH in the uv test env where the mux is not installed.
+  "${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"
+fi
 
 # The per-round disposition comment (the law's human-visible half): when the
 # findings file carried dispositions, the writer posts ONE machine-parseable
@@ -520,4 +533,8 @@ for _b in "${branch:-}" "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   "${FNO:-fno}" do pr review-hold release --branch "$_b" >/dev/null 2>&1 || true
 done
 
-echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset} reviewer_context=$reviewer_context lines=$reviewed_line_count files=$reviewed_file_count" >&2
+# The typed-verdict path prints its own receipt; the delegated path's receipt
+# is the verb's stderr line.
+if [[ -z "$findings_file" ]]; then
+  echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset} reviewer_context=$reviewer_context lines=$reviewed_line_count files=$reviewed_file_count" >&2
+fi

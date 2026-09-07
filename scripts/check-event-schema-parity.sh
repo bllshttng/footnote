@@ -349,11 +349,20 @@ collisions = python_types & rust_kinds
 # port) both emit it at the same scheduled-tick boundary.
 dual_owner_kinds = {
     "registry_row_removed",
+    "registry_rows_lost",
     "agent_removed",
     "merge_cleanup_requested",
     "merge_cleanup_completed",
     "merge_cleanup_refused",
+    # worktree_removed: the archive path emits it (Python) and the merge
+    # reaper emits it (Rust) at the same removal boundary.
+    "worktree_removed",
     "control_plane_tick",
+    # Evals demand: the pr-watch tick's evals leg (Python) is the only
+    # emitter; the rows ride the daemon's journal, so the Rust known-kind
+    # table carries them for acceptance without emitting.
+    "evals_scheduled_run",
+    "evals_stale",
 }
 collisions -= dual_owner_kinds
 if collisions:

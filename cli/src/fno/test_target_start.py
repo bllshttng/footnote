@@ -284,6 +284,11 @@ def test_desktop_canonical_start_refuses_without_project_assignment(
     monkeypatch.chdir(canonical)
     monkeypatch.setenv("CODEX_THREAD_ID", "thread-desktop")
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
+    # A readable empty graph, or the test is order-dependent: on a machine
+    # (or xdist worker) whose default space holds no graph.json, the real
+    # reader returns None and start refuses with the unreadable-graph exit 2
+    # before this test's own desktop refusal can fire.
+    monkeypatch.setattr(target_cli, "_graph_entries_or_none", lambda: [])
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda node, entries=None: node)
     monkeypatch.setattr(
         target_cli,

@@ -241,6 +241,53 @@ def _fmt_resets_in(resets_at: float | None, now: float) -> str:
     return f"in {hours}h{rem:02d}m"
 
 
+_MANUAL_SWITCH = (
+    "manual switch: sign out of claude and sign back in as the other account "
+    "(about a minute; live sessions need remote control re-enabled)"
+)
+
+
+def _identity_for(record, by_id: dict, now: float):
+    """The effective-account verdict for one claude record, or None.
+
+    Called only for a record that HAS an observation to attribute: resolving it
+    for every configured record costs one profile call per record.
+    """
+    from fno.adapters.providers.binding import resolve_account_binding
+
+    if record.harness != "claude":
+        return None
+    try:
+        return resolve_account_binding(
+            record, root=managed.store_root(), by_id=by_id, now=now
+        )
+    except Exception:  # noqa: BLE001 - a report never fails on an identity read
+        return None
+
+
+def _identity_lines(record, got, worst_pct: float, threshold: float, now: float) -> list[str]:
+    """The identity and manual-switch lines for one record's usage row.
+
+    An unproven identity is named rather than passed over. Silence there reads
+    as a proven account.
+    """
+    from fno.adapters.providers.binding import MATCHED
+
+    if got is None:
+        return []
+    prefix = f"{record.id}  [{record.harness}]  "
+    if got.status == MATCHED:
+        # None when two records share the identity, still a match for the pin.
+        served = got.matched_record or got.requested_record
+        age = max(0, int((now - got.observed_at) // 60))
+        lines = [f"{prefix}identity: {served} (observed {age}m ago)"]
+    else:
+        lines = [prefix + got.receipt]
+    if worst_pct >= threshold:
+        lines.append(prefix + _MANUAL_SWITCH)
+    return lines
+
+
 @cli.command("usage")
 def usage_providers(
     refresh: bool = typer.Option(
@@ -275,7 +322,9 @@ def usage_providers(
 
     config = _load()
     now = _time.time()
-    ttl = load_quota_config(repo_root=_get_repo_root()).probe_ttl_seconds
+    quota = load_quota_config(repo_root=_get_repo_root())
+    ttl = quota.probe_ttl_seconds
+    identities: dict = {}
 
     out: dict[str, object] = {}
     for record in config.records:
@@ -289,6 +338,7 @@ def usage_providers(
                 else UsageRefresh(cached, None if cached.windows else "no-windows")
             )
         if not obs.known:
+            # No identity on an unknown row: identity attributes an observation.
             out[record.id] = {"state": "unknown", "reason": obs.reason or "unknown"}
             continue
         snap = obs.snapshot
@@ -310,6 +360,14 @@ def usage_providers(
         if obs.persisted is False:
             # Additive: the reading is good, only its cache write lost the race.
             entry["persisted"] = False
+        got = identities[record.id] = _identity_for(record, config.by_id, now)
+        if got is not None:
+            entry["identity"] = {
+                "status": got.status,
+                "account": got.matched_record,
+                "reason": got.reason,
+                "observed_at": got.observed_at,
+            }
         out[record.id] = entry
 
     if json_output:
@@ -335,6 +393,11 @@ def usage_providers(
                 f"{record.id}  [{record.harness}]  {w['label']:<8} "
                 f"{w['used_pct']:5.1f}%  {_fmt_resets_in(w['resets_at'], now)}{suffix}"
             )
+        worst = max((w["used_pct"] for w in row["windows"]), default=0.0)
+        for line in _identity_lines(
+            record, identities.get(record.id), worst, quota.defer_threshold_pct, now
+        ):
+            typer.echo(line)
 
 
 @cli.command("window")
@@ -1295,39 +1358,63 @@ def _doctor_findings() -> list[dict]:
 
         # Taint watches the door footnote controls; `claude /login` uses the
         # other one and leaves a stamp that is wrong AND untainted, so nothing
-        # downstream hesitates. Comparing the stamp against the live principal
-        # is what turns that into a finding instead of silently wrong billing.
-        try:
-            drift = managed.slot_identity_drift(harness_kind)
-        except (OSError, managed.ManagedStoreError):
-            # A denied or timed-out Keychain read is a diagnosis we could not
-            # make, not a crash in a read-only verb.
-            drift = None
-        if drift and drift.get("ambiguous"):
-            findings.append({
-                "record": f"slot:{harness_kind}",
-                "problem": "ambiguous-slot",
-                "detail": (
-                    "the slot's stored credentials belong to different accounts "
-                    "(a stale scoped Keychain item beside a live unscoped one), so "
-                    "whichever is stamped, some reader gets the other; sign out and "
-                    f"back in, then `fno config accounts reconcile-slot {harness_kind}`"
-                ),
-            })
-        elif drift:
-            findings.append({
-                "record": f"slot:{harness_kind}",
-                "problem": "slot-identity-drift",
-                "detail": (
-                    f"the stamp names '{drift['stamped']}' but the live slot "
-                    f"credential belongs to {drift['live']} (an out-of-band "
-                    f"`{harness_kind} /login`), so usage is being attributed to the "
-                    f"wrong account - repair with "
-                    f"`fno config accounts reconcile-slot {harness_kind}`"
-                ),
-            })
+        # downstream hesitates. Asking the slot who it actually serves is what
+        # turns that into a finding instead of silently wrong billing.
+        findings.extend(_slot_identity_findings(harness_kind, config.by_id))
 
     return findings
+
+
+def _slot_identity_findings(harness_kind: str, by_id: dict) -> list[dict]:
+    """Identity findings for one CLI's shared slot, from the shared binding.
+
+    Free until it can answer. With no stamp, or no principal bound to the
+    stamped record, there is nothing to compare.
+    """
+    from fno.adapters.providers.binding import (
+        AMBIGUOUS,
+        UNKNOWN_RECEIPT,
+        resolve_account_binding,
+    )
+
+    if harness_kind != "claude":
+        return []
+    repair = f"repair with `fno config accounts reconcile-slot {harness_kind}`"
+    where = f"slot:{harness_kind}"
+
+    def _finding(problem: str, detail: str) -> list[dict]:
+        return [{"record": where, "problem": problem, "detail": detail}]
+
+    try:
+        root = managed.store_root()
+        stamped = managed.active_slot_id(harness_kind, root)
+        bound = managed.identity_key(managed.record_principal(stamped, root)) if stamped else None
+    except (OSError, managed.ManagedStoreError):
+        return []  # a diagnosis we could not make, not a crash in a read-only verb
+    if bound is None:
+        return []
+    got = resolve_account_binding(None, harness=harness_kind, root=root, by_id=by_id)
+    if got.status == AMBIGUOUS and got.reason == "ambiguous-slot":
+        return _finding("ambiguous-slot", (
+            "the slot's stored credentials belong to different accounts (a stale "
+            "scoped Keychain item beside a live unscoped one), so whichever is "
+            f"stamped, some reader gets the other; sign out and back in, then {repair}"
+        ))
+    if got.observed_principal is None:
+        # An unreadable slot cannot demonstrate drift, so this used to be quiet.
+        return _finding(UNKNOWN_RECEIPT, (
+            f"who the live slot serves could not be proven ({got.reason}), so usage "
+            f"and launch receipts stay unknown rather than naming '{stamped}'; this "
+            f"is not a healthy slot and not a successful switch - {repair}"
+        ))
+    if got.observed_principal == bound:
+        return []
+    return _finding("slot-identity-drift", (
+        f"the stamp names '{stamped}' but the live slot credential belongs to "
+        f"{got.observed_label or got.observed_principal} (an out-of-band "
+        f"`{harness_kind} /login`), so usage is being attributed to the wrong "
+        f"account - {repair}"
+    ))
 
 
 @cli.command("doctor")

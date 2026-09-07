@@ -588,8 +588,8 @@ def test_every_claude_sessionstart_recorder_declares_the_exact_same_inventory() 
     # A deliberate literal, bumped in the PR that adds a recorder. It is the
     # ratchet: the two asserts below prove the inventories AGREE, and would stay
     # green if a new recorder were added to every list consistently. This one
-    # makes that addition visible in review. 16 since law-session-start.
-    assert len(commands) == 16
+    # makes that addition visible in review. 17 since operator-capture-nudge.
+    assert len(commands) == 17
     assert len(set(inventories)) == 1
     assert inventories[0].split(",") == source_ids
 

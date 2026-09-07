@@ -410,8 +410,18 @@ def line_row_matches(harness: str, *, repo_root: Path | None = None) -> LineVerd
     sweep = run_instrument(
         ["python3", "scripts/diagnostics/capability-honesty-sweep.py"], cwd=root
     )
+    # The build produces the copies; this probe only asks whether a hand edit
+    # has dirtied them (the same diff the rust-ci generated-copies step runs).
     fresh = run_instrument(
-        ["bash", "scripts/ci/check-harness-capabilities-fresh.sh"], cwd=root
+        [
+            "git",
+            "diff",
+            "--exit-code",
+            "--",
+            "cli/src/fno/agents/harness_capabilities.toml",
+            "crates/fno/src/harness_capabilities.toml",
+        ],
+        cwd=root,
     )
     present, absent = _registration_membership(harness, root)
     clean_sweep = sweep[0] == 0 and not _sweep_has_finding(sweep[1], harness)

@@ -22,12 +22,8 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    paths_mod._settings.cache_clear()
     yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()
 
 
 def test_use_tmpdir_isolates_graph_json(

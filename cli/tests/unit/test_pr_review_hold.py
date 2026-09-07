@@ -541,8 +541,8 @@ def test_spent_cap_refuses_a_new_round_at_the_same_head(monkeypatch, tmp_path: P
     monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: _spent_chain(last))
     monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
     refusal = _review_hold.review_invocation_refusal("feature/x", last, cwd=str(tmp_path))
-    assert "two-round cap is spent" in refusal
-    assert "decline the remaining findings" in refusal
+    assert "the configured round cap is spent" in refusal
+    assert "merge on green CI" in refusal
     assert "--verify-fixes" in refusal
 
 
@@ -577,7 +577,7 @@ def test_rebase_delta_under_the_budget_still_refuses(monkeypatch, tmp_path: Path
     # reading, and a sub-budget interdiff must not mint a free one.
     monkeypatch.setattr(_review_hold, "_interdiff_lines", lambda *a, **k: 6)
     moved = "c" * 40
-    assert "two-round cap is spent" in _review_hold.review_invocation_refusal(
+    assert "the configured round cap is spent" in _review_hold.review_invocation_refusal(
         "feature/x", moved, cwd=str(tmp_path)
     )
 
