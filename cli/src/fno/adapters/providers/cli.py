@@ -1388,12 +1388,11 @@ def _slot_identity_findings(harness_kind: str, by_id: dict) -> list[dict]:
     try:
         root = managed.store_root()
         stamped = managed.active_slot_id(harness_kind, root)
+        bound = managed.identity_key(managed.record_principal(stamped, root)) if stamped else None
     except (OSError, managed.ManagedStoreError):
         return []  # a diagnosis we could not make, not a crash in a read-only verb
-    if not stamped or managed.record_principal(stamped, root) is None:
+    if bound is None:
         return []
-
-    bound = managed.identity_key(managed.record_principal(stamped, root))
     got = resolve_account_binding(None, harness=harness_kind, root=root, by_id=by_id)
     if got.status == AMBIGUOUS and got.reason == "ambiguous-slot":
         return _finding("ambiguous-slot", (

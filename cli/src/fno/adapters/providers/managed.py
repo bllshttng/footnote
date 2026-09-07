@@ -320,13 +320,6 @@ def canonical_slot_blobs(cli: str) -> list[str]:
     return slot_blobs(cli)
 
 
-def canonical_slot_identity(
-    cli: str,
-) -> tuple[Optional[dict], Optional[str], Optional[str]]:
-    """``(principal, the blob it was proven from, failure)`` for the shared slot."""
-    return principal_of_blobs(canonical_slot_blobs(cli))
-
-
 def principal_of_blobs(
     blobs: list[str],
 ) -> tuple[Optional[dict], Optional[str], Optional[str]]:

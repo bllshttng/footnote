@@ -2050,9 +2050,9 @@ class TestOrganizationScopedIdentity:
                 {"account_uuid": "human-1", "organization_uuid": orgs[blob]}, None
             ),
         )
-        assert managed.canonical_slot_identity("claude") == (
-            None, None, "ambiguous-slot"
-        )
+        assert managed.principal_of_blobs(
+            managed.canonical_slot_blobs("claude")
+        ) == (None, None, "ambiguous-slot")
         assert managed.reconcile_slot(
             "claude", by_id=by_id, root=tmp_path
         ).outcome == "ambiguous-slot"

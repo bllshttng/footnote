@@ -390,9 +390,9 @@ def _parse_claude_windows(payload: Any) -> tuple[UsageWindow, ...]:
 def _credential_still_current(record: ProviderRecord, bearer: str) -> bool:
     """Is ``bearer`` still a credential ``record``'s root serves?
 
-    The proof before the request closes the window on FETCHING another
-    account's numbers. This closes the one after it, where a sign-in would file
-    the old generation's reading under the new principal.
+    The proof before the request closes the window on fetching another account's
+    numbers. This closes the one after it, where a sign-in mid-request would
+    file the old generation's reading under the new principal.
     """
     try:
         return bearer in _claude_bearer_candidates(record)
@@ -411,12 +411,10 @@ def _probe_claude(
     network error aborts (fail-open None).
 
     Four unknowns, kept apart because each sends an operator somewhere else.
-    ``unattributed``: every candidate was refused before the request, so no
-    request was issued and the fault is the binding. ``credential-rejected``:
-    the request went out and the endpoint answered 401/403, so the repair is a
-    re-login, not network debugging. ``identity_changed``: the credential moved
-    between the proof and the reading, so a real reading is discarded rather
-    than filed under the wrong account. ``probe-failed``: everything else.
+    ``unattributed``: refused before any request, so the fault is the binding.
+    ``credential-rejected``: the endpoint answered 401/403, so the repair is a
+    re-login. ``identity_changed``: the credential moved mid-request, so a real
+    reading is discarded. ``probe-failed``: everything else.
     """
     unattributable = False
     rejected = False

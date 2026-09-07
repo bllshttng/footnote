@@ -43,28 +43,22 @@ class AccountBinding:
     @property
     def receipt(self) -> str:
         """A line safe to print. It never names an account it cannot prove."""
-        who = (
-            self.observed_label
-            or self.matched_record
-            or self.observed_principal
-            or "an unproven account"
-        )
         where = str(self.credential_root or "the shared ~/.claude slot")
+        if self.status == MATCHED:
+            served = self.matched_record or self.requested_record
+            return f"account_identity_matched: {where} serves {served}"
         if self.status == MISMATCH:
+            # A cached proof carries no label, so the record name beats a uuid.
+            who = (
+                self.observed_label
+                or self.matched_record
+                or self.observed_principal
+                or "another account"
+            )
             return (
                 f"{MISMATCH_RECEIPT}: {self.requested_record!r} is pinned, but "
                 f"{where} serves {who}; sign that account in where it belongs, or "
                 "pin the record whose identity it is"
-            )
-        if self.status == MATCHED:
-            return (
-                "account_identity_matched: "
-                f"{where} serves {self.matched_record or self.requested_record}"
-            )
-        if self.status == AMBIGUOUS:
-            return (
-                f"{UNKNOWN_RECEIPT}: {where} is ambiguous ({self.reason}); whichever "
-                "account were named, some reader would get the other"
             )
         return f"{UNKNOWN_RECEIPT}: {where} could not be attributed ({self.reason})"
 
