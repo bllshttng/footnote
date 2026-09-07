@@ -64,13 +64,15 @@ def _facts(
     return TailFacts([(epoch, text)], epoch, text, role, text)
 
 
-def _run(rows, transcripts, *, claims=None, nodes=None, now_s=NOW_1840):
+def _run(rows, transcripts, *, claims=None, nodes=None, now_s=NOW_1840,
+         pr_state_for=None):
     return verdicts(
         rows,
         transcript_for=lambda sid: transcripts.get(sid),
         claim_for=lambda node: (claims or {}).get(node, {}),
         node_state_for=lambda node: (nodes or {}).get(node),
         now_s=now_s,
+        pr_state_for=pr_state_for,
     )
 
 
@@ -190,6 +192,140 @@ def test_contended_never_acts_at_any_apply_level(tmp_path):
     outcome, detail = apply_verdict(v, lanes="all")
     assert outcome == watchdog.SKIPPED
     assert "outside" in detail
+
+
+def _polling_facts(poll_events):
+    """Fresh working-tail facts carrying a hand-built pr_polls view."""
+    text = "checking the pull request"
+    return TailFacts(
+        [(NOW_1840 - 60, text)], NOW_1840 - 60, text, "assistant", text,
+        tuple(poll_events),
+    )
+
+
+def test_settled_pr_reads_upgrade_leave_to_polling_settled():
+    row = Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")
+    [v] = _run(
+        [row],
+        {"aaaa1111-0000": _polling_facts([
+            ("read", 1371, ""),
+            ("settled", 1371, "MERGED"),
+            ("read", 1371, ""),
+            ("read", 1371, ""),
+            ("read", 1371, ""),
+        ])},
+        pr_state_for=lambda cwd, n: "MERGED",
+    )
+    assert v.verdict == watchdog.POLLING_SETTLED
+    assert v.basis == "3 PR-status reads of #1371 after the tail read it MERGED"
+    assert v.action == "report"
+    outcome, detail = apply_verdict(v, lanes="all")
+    assert outcome == watchdog.SKIPPED
+    assert "outside" in detail
+
+
+def test_open_pr_at_any_cadence_never_polls_as_settled():
+    row = Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")
+    events = [("settled", 1371, "CLOSED")] + [("read", 1371, "")] * 4
+    [v] = _run(
+        [row],
+        {"aaaa1111-0000": _polling_facts(events)},
+        # The live read says OPEN (reopened): the tail's stale CLOSED marker
+        # must not outvote the current state.
+        pr_state_for=lambda cwd, n: "OPEN",
+    )
+    assert v.verdict == LEAVE
+
+
+def test_unreadable_pr_state_attests_nothing():
+    row = Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")
+    events = [("settled", 1371, "MERGED")] + [("read", 1371, "")] * 3
+    [v] = _run(
+        [row],
+        {"aaaa1111-0000": _polling_facts(events)},
+        pr_state_for=lambda cwd, n: None,
+    )
+    assert v.verdict == LEAVE
+
+
+def test_reads_before_the_settle_marker_do_not_count():
+    row = Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")
+    [v] = _run(
+        [row],
+        {"aaaa1111-0000": _polling_facts([
+            ("read", 1371, ""),
+            ("read", 1371, ""),
+            ("settled", 1371, "MERGED"),
+            ("read", 1371, ""),
+        ])},
+        pr_state_for=lambda cwd, n: "MERGED",
+    )
+    # One read after the answer arrived is a wrap-up check, not a cadence.
+    assert v.verdict == LEAVE
+
+
+def test_pr_poll_record_sees_commands_and_results_records_drop():
+    entries = [
+        # A status-read command: visible to _pr_poll_record only - the
+        # flattened records text must not suddenly carry command strings the
+        # tail classifier was never tuned for.
+        {"message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash",
+             "input": {"command": "fno do pr status 1371"}},
+        ]}},
+        # The result that shows the answer arrived.
+        {"message": {"role": "user", "content": [
+            {"type": "tool_result",
+             "content": [{"type": "text",
+                          "text": '{"pr":1371,"state":"MERGED"}'}]},
+        ]}},
+        # The session's own prose asserting the same.
+        {"message": {"role": "assistant", "content": [
+            {"type": "text", "text": "PR 1371 merged, moving on"},
+        ]}},
+    ]
+    facts = watchdog._facts_from_entries(entries, 10)
+    assert facts.pr_polls == (
+        ("read", 1371, ""),
+        ("settled", 1371, "MERGED"),
+        ("settled", 1371, "MERGED"),
+    )
+    assert facts.records[2][1] == "PR 1371 merged, moving on"
+    # The command string and the tool_result body both stay invisible to the
+    # flattened records text.
+    assert facts.records[0][1] == ""
+    assert facts.records[1][1] == ""
+
+
+def test_run_sweep_carries_the_pr_state_seam_end_to_end():
+    from fno.agents import watchdog as wd
+
+    entries = [
+        {"message": {"role": "user", "content": [
+            {"type": "tool_result",
+             "content": [{"type": "text",
+                          "text": '{"pr":1371,"state":"MERGED"}'}]},
+        ]}},
+    ] + [
+        {"message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash",
+             "input": {"command": "gh pr view 1371"}},
+        ]}},
+    ] * 2
+    row = Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")
+    payload, out_rows = wd.run_sweep(
+        now_s=NOW_1840,
+        rows_provider=lambda: ([row], []),
+        transcript_fn=lambda sid: wd._facts_from_entries(entries, 10),
+        claim_fn=lambda node: {},
+        graph_fn=lambda: {},
+        pr_state_fn=lambda cwd, n: "MERGED",
+    )
+    assert not payload.get("refused")
+    [v] = payload["verdicts"]
+    assert v["verdict"] == watchdog.POLLING_SETTLED
+    assert payload["counts"]["polling_settled"] == 1
+    assert out_rows[0].row_id == "aaaa1111-0000"
 
 
 def test_single_sgt_429_is_report_only_until_provider_quorum():

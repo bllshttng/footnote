@@ -54,12 +54,15 @@ Row = namedtuple("Row", "row_id name state node cwd", defaults=(None, ""))
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
 #: record so the wake gate can run the shipped tail classifier (a POSITIVE
 #: resumability marker - the absence of a 429 is not one).
+#: ``pr_polls`` is the PR-activity view of the same window ((kind, pr, state)
+#: newest-last) - tool_use commands and tool_result bodies, which ``records``
+#: deliberately drops - feeding the settled-PR poll detector.
 #: No transcript resolving -> None (ghost), which is a different fact from a
 #: resolved-but-quiet transcript.
 TailFacts = namedtuple(
     "TailFacts",
-    "records last_event_epoch tail_text last_role last_text",
-    defaults=(None, ""),
+    "records last_event_epoch tail_text last_role last_text pr_polls",
+    defaults=(None, "", ()),
 )
 
 GHOST = "ghost"
@@ -83,6 +86,11 @@ KEEPER = "keeper"
 #: about the tree, never about the row, so it outranks every row-lane below
 #: ghost and no apply level acts on it.
 CONTENDED = "contended"
+#: Report-only: the tail keeps issuing PR-status reads of a PR the tail
+#: itself already shows MERGED or CLOSED. Only that positive marker fires -
+#: never a cadence heuristic, which would flag the sanctioned
+#: ``fno do pr wait`` CI-watch pattern.
+POLLING_SETTLED = "polling_settled"
 
 #: Every verdict this module can return. `--only` validates against THIS, not
 #: against a hand-copied tuple in the CLI: the copy went stale the moment a
@@ -90,7 +98,7 @@ CONTENDED = "contended"
 #: had been producing all along.
 VERDICTS = frozenset({
     GHOST, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE, KEEPER,
-    CONTENDED,
+    CONTENDED, POLLING_SETTLED,
 })
 
 _RECOVERY_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd])$", re.IGNORECASE)
@@ -593,6 +601,7 @@ def verdicts(
     now_s: float,
     provider_outages: Optional[dict[str, Any]] = None,
     worktree_check: Optional[Callable[[str], bool]] = None,
+    pr_state_for: Optional[Callable[[str, int], Optional[str]]] = None,
 ) -> list[Verdict]:
     """One verdict per row, in table precedence (ghost > contended > reroute
     > wake > leave). Each basis string names the measurement that decided it,
@@ -655,6 +664,24 @@ def verdicts(
             in_quorum_breaker=row.row_id in quorum_row_ids,
             peers=peers,
         )
+        # polling_settled upgrades a LEAVE the same way: the waste it names is
+        # a fact a row that owes nothing can carry, and every liveness lane
+        # above (ghost, stale, reroute, wake) must keep outranking it. Applied
+        # HERE, not at a leave return, for the same reason as unclaimed below.
+        if verdict.verdict == LEAVE:
+            facts = facts_by_row.get(row.row_id)
+            if facts is not None:
+                poll = _polling_basis(facts.pr_polls, pr_state_for, row.cwd)
+                if poll is not None:
+                    n, state, count = poll
+                    verdict = verdict._replace(
+                        verdict=POLLING_SETTLED,
+                        basis=(
+                            f"{count} PR-status reads of #{n} after the "
+                            f"tail read it {state}"
+                        ),
+                        action="report",
+                    )
         # The unclaimed advisory upgrades a LEAVE, and it is applied HERE
         # rather than at a leave return because there are four of them. Putting
         # it on one read as protection and left the common case - a healthy
@@ -1017,30 +1044,34 @@ def _facts_from_entries(
     """Pure derivation of :class:`TailFacts` from a parsed transcript tail."""
     if entries is None:
         return None
-    windowed: list[tuple[Optional[float], str, Optional[str]]] = []
+    windowed: list[tuple[Optional[float], str, Optional[str], tuple]] = []
     for record in entries:
         text = _record_text(record)
         msg = record.get("message")
         role = msg.get("role") if isinstance(msg, dict) else None
-        windowed.append((_record_epoch(record), text, str(role) if role else None))
+        windowed.append(
+            (_record_epoch(record), text, str(role) if role else None,
+             _pr_poll_record(record))
+        )
     # The window bounds EVERYTHING downstream, the (role, text) pair included:
     # a pair read from a record older than max_records would pair a stale text
     # with the fresh age and window inputs it is classified against.
     window = windowed[-max_records:]
-    records = [(epoch, text) for epoch, text, _role in window]
+    records = [(epoch, text) for epoch, text, _role, _pr in window]
     last_epoch = next((t for t, _ in reversed(records) if t is not None), None)
     last_role: Optional[str] = None
     last_text = ""
-    for _epoch, text, role in reversed(window):
+    for _epoch, text, role, _pr in reversed(window):
         if role:
             # The LAST role-bearing record inside the window decides the tail
             # classifier's input; a trailing user turn clears stale assistant
             # signals.
             last_role, last_text = role, text
             break
+    pr_polls = tuple(fact for *_heads, facts in window for fact in facts)
     return TailFacts(
         records, last_epoch, " ".join(t for _, t in records),
-        last_role, last_text,
+        last_role, last_text, pr_polls,
     )
 
 
@@ -1082,6 +1113,107 @@ def _record_text(e: dict) -> str:
     if not parts and isinstance(e.get("text"), str):
         parts = [e["text"]]
     return " ".join(" ".join(parts).split())
+
+
+#: A command that reads one PR's status. Deliberately narrow: the sanctioned
+#: CI-wait pattern (``fno do pr wait``) is one command whose internal polling
+#: never reaches the transcript, so a transcript-level repeat really is the
+#: agent re-asking.
+_PR_READ_RE = re.compile(
+    r"\b(?:fno\s+do\s+pr|gh\s+pr)\s+(?:status|info|view|checks|wait)\s+#?(\d+)"
+)
+_PR_JSON_STATE_RE = re.compile(r'"state"\s*:\s*"(MERGED|CLOSED)"')
+#: The session's own prose asserting a PR settled ("PR 1371 merged").
+_PR_PROSE_RE = re.compile(
+    r"\b(?:pr|pull request)\s*#?(\d+)\b[^.;]{0,60}?\b(merged|closed)\b",
+    re.IGNORECASE,
+)
+#: A PR number inside a tool-result blob (``"pr":1371``, ``pulls/1371``).
+_PR_ID_IN_BLOB_RE = re.compile(r'(?:pr|pulls)[/":# =]+(\d+)', re.IGNORECASE)
+#: PR states past which further status reads are waste.
+_SETTLED_PR_STATES = frozenset({"MERGED", "CLOSED"})
+
+
+def _pr_poll_record(e: dict) -> tuple[tuple[str, int, str], ...]:
+    """PR-activity facts from one raw transcript record, in record order.
+
+    ``("read", n, "")`` is a command that reads PR n's status;
+    ``("settled", n, "MERGED"|"CLOSED")`` is the record asserting PR n
+    reached a terminal state - a tool result's JSON or the session's own
+    prose. Tool_use commands and tool_result bodies are scanned here because
+    ``_record_text`` deliberately drops both, and they are the only places a
+    PR read is visible.
+    """
+    msg = e.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    blobs: list[str] = []
+    if isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "tool_use":
+                inp = part.get("input")
+                if isinstance(inp, dict):
+                    blobs.append(str(inp.get("command") or ""))
+            elif part.get("type") == "tool_result":
+                inner = part.get("content")
+                if isinstance(inner, str):
+                    blobs.append(inner)
+                elif isinstance(inner, list):
+                    blobs.append(" ".join(
+                        p.get("text", "")
+                        for p in inner
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    ))
+            elif part.get("type") == "text":
+                blobs.append(str(part.get("text") or ""))
+    elif isinstance(content, str):
+        blobs.append(content)
+    if isinstance(e.get("text"), str):
+        blobs.append(e["text"])
+    facts: list[tuple[str, int, str]] = []
+    for blob in blobs:
+        for m in _PR_READ_RE.finditer(blob):
+            facts.append(("read", int(m.group(1)), ""))
+        state = _PR_JSON_STATE_RE.search(blob)
+        if state:
+            for n in sorted(set(
+                int(x) for x in _PR_ID_IN_BLOB_RE.findall(blob)
+            )):
+                facts.append(("settled", n, state.group(1)))
+        for m in _PR_PROSE_RE.finditer(blob):
+            facts.append(("settled", int(m.group(1)), m.group(2).upper()))
+    return tuple(facts)
+
+
+def _polling_basis(
+    pr_polls: tuple,
+    pr_state_for: Optional[Callable[[str, int], Optional[str]]],
+    cwd: str,
+) -> Optional[tuple[int, str, int]]:
+    """(pr_number, state, reads_after_settle) when the tail keeps reading a
+    PR the tail itself shows settled, else None.
+
+    The settle marker must be IN the tail: without it there is no honest
+    "reads after the state was reached" count, only a guess about which reads
+    predate the merge. The live state read then confirms the PR is terminal
+    NOW; unreadable is UNKNOWN, and UNKNOWN produces no verdict.
+    """
+    settled: dict[int, str] = {}
+    after: dict[int, int] = {}
+    for kind, n, state in pr_polls:
+        if kind == "settled":
+            settled.setdefault(n, state)
+        elif n in settled:
+            after[n] = after.get(n, 0) + 1
+    for n, count in after.items():
+        if count < 2:
+            continue
+        current = pr_state_for(cwd, n) if pr_state_for is not None else None
+        if current is None or current.upper() not in _SETTLED_PR_STATES:
+            continue
+        return n, current.upper(), count
+    return None
 
 
 def _ledger_nodes() -> dict[str, str]:
@@ -1937,6 +2069,32 @@ def _persisted_open_breakers() -> list[dict[str, Any]]:
     return [item for item in (breakers or []) if isinstance(item, dict)]
 
 
+def _production_pr_state(cwd: str, pr_number: int) -> Optional[str]:
+    """Current PR state via the routed reader, or None when unreadable.
+
+    Runs in the row's own checkout so the number resolves against that
+    project's remote. Only called for a PR the tail already shows settled
+    with repeated later reads, so the cost is one subprocess per real
+    finding. None is UNKNOWN, and the polling lane stays silent on it -
+    never a verdict from an instrument that did not answer.
+    """
+    try:
+        proc = subprocess.run(
+            [*_fno(), "do", "pr", "info", str(pr_number)],
+            capture_output=True, text=True, timeout=60, check=False,
+            cwd=cwd or None,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        state = json.loads(proc.stdout).get("state")
+    except ValueError:
+        return None
+    return str(state) if state else None
+
+
 def _production_pane_occupancy(harness: str) -> int:
     """Live pane count for ONE harness in the resolved mux session.
 
@@ -1998,6 +2156,7 @@ def run_sweep(
     graph_fn: Optional[Callable[[], dict[str, dict] | _Unreadable]] = None,
     provider_outage_fn: Optional[Callable[[], dict[str, Any]]] = None,
     roster_timeout: Optional[float] = None,
+    pr_state_fn: Optional[Callable[[str, int], Optional[str]]] = None,
 ) -> tuple[dict, list[Row]]:
     """Build the real seams and classify the whole fleet once. Returns
     ``(payload, rows)`` - the payload is the ``--json`` shape
@@ -2079,6 +2238,12 @@ def run_sweep(
     graph_state = graph_fn()
     if isinstance(graph_state, _Unreadable):
         warnings = [*warnings, f"graph unreadable for every row: {graph_state.detail}"]
+    # The PR-state reader only arms on the fully-production path (no injected
+    # seams): a test that injects rows but forgets a PR stub gets a silent
+    # lane, never a subprocess against its fixtures.
+    pr_state_for = pr_state_fn
+    if pr_state_for is None and rows_provider is None and transcript_fn is None:
+        pr_state_for = _production_pr_state
     vs = verdicts(
         rows,
         transcript_for=transcript_fn,
@@ -2086,6 +2251,7 @@ def run_sweep(
         node_state_for=node_state_for,
         now_s=now_s,
         provider_outages=provider_outages,
+        pr_state_for=pr_state_for,
     )
     counts: dict[str, int] = {}
     for v in vs:
