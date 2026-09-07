@@ -718,6 +718,8 @@ def resolve_slot(
         caps = {}
 
     demoted: list[tuple[int, str, str, str]] = []
+    identity_skips: list[str] = []
+    resets_seen: list[float] = []
 
     def _take(
         index: int, rung: str, row_name: str, state: str, window: str, note: str = ""
@@ -813,15 +815,26 @@ def resolve_slot(
             # verdict; a vendor route (an API lane) never claimed the slot.
             ident = evidence.get(row.account, "unknown")
             if ident == "mismatch":
+                identity_skips.append(rung)
                 chain.append(f"slot skip {rung} {row_name} account_identity_mismatch")
                 continue
             if ident == "unknown" and on_unknown == "skip":
+                identity_skips.append(rung)
                 chain.append(
                     f"slot skip {rung} {row_name} account_identity_unknown (on_unknown=skip)"
                 )
                 continue
         state, window = row_capacity(row, capacity)
         if state in ("exhausted", "blocked"):
+            detail = (capacity or {}).get(row.harness)
+            resets = detail.get("resets") if isinstance(detail, Mapping) else None
+            if isinstance(resets, Mapping):
+                candidates = [
+                    v for k, v in resets.items()
+                    if isinstance(v, (int, float)) and (not row.account or k == row.account)
+                ]
+                if candidates:
+                    resets_seen.append(float(min(candidates)))
             chain.append(f"slot skip {rung} {row_name} capacity={state}")
             continue
         if state == "low" and on_low == "skip":
@@ -849,6 +862,18 @@ def resolve_slot(
     if explicit_lane or gate_bypassed:
         why = "the command line already names the lane" if explicit_lane else "FNO_SPAWN_GATE=0"
         chain.append(f"slot=exhausted degrade ({why})")
+        return None, chain
+    if identity_skips and len(identity_skips) == len(plan):
+        # Every lane lost on identity alone: the fix is the operator's manual
+        # canonical swap, never a login performed by fno.
+        chain.append("slot=manual_account_switch_required")
+        return None, chain
+    if on_exhausted == "queue":
+        import time as _time
+
+        future = [r for r in resets_seen if r > _time.time()]
+        retry = f" retry_at={int(min(future))}" if future else ""
+        chain.append(f"slot=exhausted queue{retry}")
         return None, chain
     chain.append(f"slot=exhausted {on_exhausted}")
     return None, chain

@@ -218,6 +218,34 @@ class SpawnError(RuntimeError):
     """``fno agents spawn`` failed for a reason that leaves the node re-dispatchable."""
 
 
+class SpawnQueueRefused(SpawnError):
+    """Exit 78: every configured lane is exhausted; the typed refusal carries
+    the per-lane reasons and, when a reset is known, ``retry_at``."""
+
+    def __init__(self, message: str, retry_at: Optional[float] = None):
+        super().__init__(message)
+        self.retry_at = retry_at
+
+
+def _slot_queue_retry_at(stdout: str) -> Optional[float]:
+    """The ``retry_at`` from the seam's typed queue-refusal JSON, if any."""
+    for line in reversed((stdout or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+        except Exception:  # noqa: BLE001 - not JSON, keep scanning
+            continue
+        if isinstance(data, dict) and data.get("reason") == "slot_exhausted":
+            value = data.get("retry_at")
+            try:
+                return float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Seams (subprocess to the public CLI; patched in unit tests)
 # ---------------------------------------------------------------------------
@@ -1446,6 +1474,13 @@ def _spawn_worker(
         stderr = (proc.stderr or "").strip()
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
             raise SpawnAlreadyRunning(f"agent {agent_name} already exists")
+        if proc.returncode == 78:
+            # The slot's typed capacity refusal: persist a defer through the
+            # backlog owner and hand retry_at to the dispatcher's skip.
+            raise SpawnQueueRefused(
+                f"slot queue refused: {(stderr or proc.stdout or '').strip()[:200]}",
+                retry_at=_slot_queue_retry_at(proc.stdout or ""),
+            )
         # The --node door's family-2 guard dedups (a peer door won the node
         # handover, or our released reservation was re-taken mid-launch) by
         # refusing with already-running. That is the benign skip the caller's
@@ -3307,6 +3342,30 @@ def advance(
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
         return skip("already-claimed", node_id=node_id)
+    except SpawnQueueRefused as exc:
+        # Every configured lane is exhausted: persist the queue state on the
+        # node (the backlog defer owner), then skip with the reset horizon.
+        _safe_release(dispatch_key, holder, dispatch_root)
+        defer_reason = (
+            f"slot-queue: every configured lane exhausted; retry_at="
+            f"{int(exc.retry_at) if exc.retry_at else 'unknown'}"
+        )
+        proc = subprocess.run(
+            [*_subprocess_util.fno_py_cmd(), "backlog", "defer", node_id,
+             "--reason", defer_reason],
+            cwd=node_cwd or None,
+            capture_output=True,
+            text=True,
+        )
+        return skip(
+            "slot-queue-deferred",
+            node_id=node_id,
+            retry_at=exc.retry_at,
+            detail=(
+                f"deferred={'yes' if proc.returncode == 0 else 'no'}"
+                f" retry_at={exc.retry_at or '-'}"
+            ),
+        )
     except Exception as exc:  # noqa: BLE001
         _safe_release(dispatch_key, holder, dispatch_root)
         return failed(node_id, str(exc))

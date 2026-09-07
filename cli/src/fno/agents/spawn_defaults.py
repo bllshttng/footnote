@@ -1189,6 +1189,13 @@ def inject_spawn_defaults(
                     file=err,
                 )
                 raise SystemExit(2)
+            if _terminal == "slot=manual_account_switch_required":
+                print(
+                    "fno agents spawn: every lane needs a manual canonical "
+                    "account switch; refusing; no worker launched",
+                    file=err,
+                )
+                raise SystemExit(2)
             if _terminal == "slot=exhausted refuse":
                 print(
                     "fno agents spawn: every configured lane is exhausted; "
@@ -1196,7 +1203,7 @@ def inject_spawn_defaults(
                     file=err,
                 )
                 raise SystemExit(2)
-            if _terminal == "slot=exhausted queue":
+            if _terminal.startswith("slot=exhausted queue"):
                 _lanes = [
                     {"name": _p[3], "reason": _p[4] if len(_p) > 4 else "exhausted"}
                     for _p in (
@@ -1205,12 +1212,16 @@ def inject_spawn_defaults(
                         if _line.startswith("slot skip ")
                     )
                 ]
-                print(json.dumps({
+                _payload: dict = {
                     "status": "refused",
                     "reason": "slot_exhausted",
                     "verb": profile_verb,
                     "lanes": _lanes,
-                }))
+                }
+                _retry = _terminal.partition("retry_at=")[2].strip()
+                if _retry:
+                    _payload["retry_at"] = float(_retry)
+                print(json.dumps(_payload))
                 raise SystemExit(78)
             if slot_candidate is not None and slot_candidate.get("lane_rung"):
                 lane = slot_candidate["lane_fields"]
