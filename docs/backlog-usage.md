@@ -206,6 +206,20 @@ Two hidden verbs serve the migration and the operator:
 
 `fno backlog find --fts "free text query"` searches title, slug, and details through an FTS5 index (BM25-ranked whole-word matching) and finds concepts that share only some of the original words. The index is a CACHE beside graph.json (`graph.json.fts5`), never a second source of truth. It stores the sha256 of the graph bytes, compares on every read, and rebuilds from scratch on any mismatch. There is no incremental write path, so the index cannot answer stale. A build without FTS5 degrades to the ordinary substring search with a warning. The honest limit: a query sharing no words with the node still misses, so filing duplicates before searching stays the failure mode to watch.
 
+## Reviewing duplicate and expired work
+
+`fno backlog discover --json` produces a read-only worklist for deferred rows whose `deferred_kind` is `expired`. It never closes or undefers a node.
+
+The pass joins the filing gate's two recall lanes. FTS5 catches vocabulary differences. Relatedness keeps the calibrated score and domain signal.
+
+The filing gate already exists, but it previously read only relatedness. The union labels each hit as `fts`, `relatedness`, or both.
+
+The pass reads `deferred_kind` as a field. It does not parse reason text. Decided kinds stay excluded and appear in `excluded_by_kind`.
+
+Each row reports `duplicate`, `satisfied`, `still_real`, or `undecided`. Evidence names a candidate node, merged PR, existing file, or the reason for uncertainty.
+
+The operator owns the ruling. The pass never auto-closes, auto-undefers, or changes `graph.json`. An empty result includes a positive control. An all-match result is refused as a failed instrument.
+
 ## Node-to-node edges
 
 Four edges connect nodes, and only the first two gate anything.

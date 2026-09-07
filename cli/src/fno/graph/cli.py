@@ -479,18 +479,7 @@ def _latest_receipt(node_id: str, events: list[dict]) -> Optional[str]:
 def _merge_unconfirmed(child: dict) -> bool:
     """True when a done child carries a PR that GitHub never confirmed merged.
 
-    A child reads ``done`` the moment ``/target`` finalizes, not when the PR
-    merges, so at a wave gate the graph can say a dependency landed while its
-    branch is still open. ``merge_status`` is written only by
-    :func:`_apply_completion_fields` when a caller resolved MERGED from gh, so
-    its absence is exactly "nobody confirmed this".
-
-    Deliberately NOT called "unmerged". The absence has two explanations - the
-    PR is genuinely open, or it merged through a path that never stamped the
-    field - and asserting the first from the absence of the second is the
-    absence-as-evidence trap. The caller's wording, and ``--verify-merges``,
-    keep that distinction. Measured 2026-09-01: 16 of 444 done nodes carrying a
-    PR were in this state, spanning 2026-04-28 to 2026-08-26.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     return (
         child.get("status") == "done"
@@ -892,19 +881,7 @@ def _prompt_difficulty_value(value: str) -> str:
 def _encounter_provenance(harness: str | None) -> dict[str, str]:
     """Model/effort provenance for an encounter record, or nothing.
 
-    Read from the harness's own env, and only for the harness that owns those
-    names. The variables survive a fork, so a codex session launched from a
-    claude shell inherits them; writing them onto a codex vote would attribute
-    it to a model that did not cast it, which reads as measured. A harness with
-    nothing to report omits the keys rather than writing a plausible default.
-
-    The two names are not equally first-party. CLAUDE_EFFORT lives in the
-    claude binary's own namespace, so its presence is claude's doing.
-    ANTHROPIC_MODEL is a provider SDK name a shell can export for unrelated
-    tooling, so it counts only when ANTHROPIC_BASE_URL is exported beside it:
-    the launcher that owns the model string owns the endpoint and sets the
-    pair, and a lone model string says nothing about the route this session
-    actually ran on.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     provenance: dict[str, str] = {}
     if harness != "claude":
@@ -1399,33 +1376,38 @@ def _fold_candidates(
     *, title: str, details: Optional[str], difficulty: str, entries: list[dict]
 ) -> tuple[list[dict], str]:
     """Find live filing siblings before the node-ID mint boundary."""
-    from fno.graph import relatedness
+    from fno.graph import discovery, relatedness
 
     candidates, source = relatedness.filing_candidates(entries, _relatedness_path())
-    incoming = {
-        "id": "__incoming__",
-        "title": title,
-        "details": details,
-        "difficulty": difficulty,
-        "domain": "code",
-    }
-    ranked = relatedness.similar_nodes(incoming, candidates, k=5)
+    ranked = discovery.candidates(
+        title,
+        details or "",
+        entries=candidates,
+        graph_path=_graph_path(),
+        limit=5,
+    )
     by_id = {entry.get("id"): entry for entry in candidates}
     out: list[dict] = []
-    for node_id, score, reason in ranked:
-        node = by_id.get(node_id)
+    for candidate in ranked:
+        node = by_id.get(candidate.node_id)
         if node is None:
             continue
+        reason = candidate.reason
+        if candidate.lanes == frozenset({"fts"}):
+            reason = f"fts-only: {reason or 'full-text match'}"
         out.append(
             {
-                "id": node_id,
+                "id": candidate.node_id,
                 "title": node.get("title"),
                 "status": node.get("status"),
-                "holder": _live_worker(node_id),
-                "score": score,
+                "holder": _live_worker(candidate.node_id),
+                "score": candidate.score,
                 "evidence": reason,
+                "lanes": sorted(candidate.lanes),
             }
         )
+    if ranked.degraded and ranked.warning:
+        source = f"{source}; degraded: {ranked.warning}"
     # A live plan surface is an independent fold signal when the filing names
     # one of the same files. The claim holder comes from the lockfile, not the
     # graph snapshot's stale locked_by field.
@@ -4161,18 +4143,7 @@ def _starvation_receipts(
 ) -> list[tuple[str, str]]:
     """Classify why each ready-ish in-scope node was NOT selected (G1 receipts).
 
-    Zero-silent-starvation (, epic Success Definition 2): when ``next``
-    returns null but buildable-looking nodes exist, name why each was excluded
-    so an operator is never left guessing. Reasons: ``plan-less`` | ``container``
-    | ``claimed`` | ``design`` | ``quarantined`` | ``dead-ancestor``. A node
-    genuinely in review (open PR) or committed to a batch is not starved and
-    gets no line.
-    Pure over the injected ``claimed`` set + ``now`` so it is unit-testable.
-
-    Mirrors ``_pick_ready``'s SCOPING (project, parent subtree via ``scope_ids``,
-    ``--mission``, ``--roadmap-id``) so a scoped request that returns null never
-    explains itself with an out-of-scope node (codex P2). Only the exclusion
-    filters differ - that is the whole point of the receipt.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.backlog.advance import selection_guards
     from fno.graph._intake import filter_by_project
@@ -8750,18 +8721,7 @@ def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
 def _strandable_contained_ids(entries: list[dict]) -> set[str]:
     """Open nodes whose delivery unit is ALREADY done - closeable right now.
 
-    ``_cascade_close_contained`` only fires while a unit is being closed, and
-    ``scan_merge_drift`` never returns an already-closed unit, so a node that
-    became contained AFTER its owner shipped is reachable by neither. That is
-    not hypothetical: re-running an `adopt` spec back-fills ``contained_in``
-    onto a node adopted by an older fno, and if that node's owner has already
-    merged, the back-fill removes it from selection (the containment guard) with
-    nothing left that would ever complete it - visible, unbuildable, never done.
-
-    Read-only. The same self-heal role ``_strandable_epic_ids`` plays for
-    all-done epics, and for the same reason: a state the forward path now
-    prevents still has to be swept out of graphs that already carry it. Once
-    migrated this returns empty and the sweep is a no-op.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     by_id = {e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
     out: set[str] = set()
@@ -9770,19 +9730,7 @@ def _evidence_pr_number(evidence, refs: list) -> Optional[int]:
 def _cascade_reopen_parents(entries: list[dict], node_id: str) -> tuple[list[str], list[str]]:
     """Reopen ancestor epics the cascade auto-closed. Returns (reopened, warned).
 
-    The inverse of :func:`_cascade_close_parents`, and not a refusal, because a
-    done epic with a live child is not a risky state to correct - it is an
-    inconsistent one. The epic's work IS its children; one of them is open again.
-
-    The judgment call is WHICH ancestors. An epic closed by the cascade carries
-    the ``auto-closed:`` note :func:`_auto_closed_note` wrote, so reopening it
-    just restores what the cascade would compute today. An epic closed WITHOUT
-    that note was closed on its own evidence - a real PR, an operator decision -
-    and silently reopening it would discard a judgment this verb never made. So
-    those are left done and NAMED, which is the refuse-and-say-why rule applied
-    to a case where either silent choice is wrong.
-
-    Walks up under the same 64-deep cap the close path uses, for the same reason.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from fno.graph._reconcile import stamp_reopen_warning
     id_to_entry = {
@@ -13798,6 +13746,50 @@ def cmd_find(
         )
 
 
+@cli.command("discover", hidden=True)
+def cmd_discover(
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        "-L",
+        min=1,
+        help="Max candidate matches retained for each expired node.",
+    ),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit a JSON worklist."),
+) -> None:
+    """Review expired deferred nodes without changing backlog state.
+
+    The output is a ranked worklist for a human.  It never closes, undefers,
+    or otherwise writes a node.
+    """
+    from fno.graph import discovery
+
+    report, refusal = discovery.expired_worklist(limit, graph_path=_graph_path())
+    if refusal:
+        typer.echo(refusal, err=True)
+        raise typer.Exit(code=2)
+
+    if json_output:
+        typer.echo(json.dumps(report, indent=2))
+        return
+
+    worklist = report["worklist"]
+    positive = report["positive_control"]
+    typer.echo(
+        f"discover: assessed={report['assessed']} "
+        f"excluded-by-kind={report['excluded_by_kind']}"
+    )
+    for row in worklist:
+        evidence = ", ".join(row["evidence"]) or row["reason"]
+        typer.echo(f"{row['id']}\t{row['verdict']}\t{evidence}")
+    if positive is not None:
+        typer.echo(
+            f"positive control: {positive['query']!r} -> "
+            f"{', '.join(positive['matches']) or 'no matches'} ({positive['lane']})"
+        )
+    for warning in report["warnings"]:
+        typer.echo(f"degraded: {warning}", err=True)
+
 
 # ---------------------------------------------------------------------------
 # collisions sub-app: file-overlap detection between plans
@@ -14347,6 +14339,7 @@ _FOOTNOTE_OWNED_VERBS = frozenset(
         # replays the post-publish views after a native (mux) store write;
         # renders only, never a graph write
         "render-views",
+        "discover",
         # demand reads encounters and writes nothing
         "demand",
         # completion works on any backend by design (task 4.1)
