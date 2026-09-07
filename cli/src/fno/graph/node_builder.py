@@ -152,7 +152,7 @@ def _build_backlog_node(
     artifact_url: Optional[str] = None,
     completion_note: Optional[str] = None,
     source_session_id: Optional[str] = None,
-) -> _NodeFields:
+) -> dict:
     """Build a backlog node dict shared by ``cmd_add`` and ``cmd_idea``.
 
     ``out``, when given, receives metadata ABOUT the capture that is not itself

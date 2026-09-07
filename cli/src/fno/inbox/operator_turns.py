@@ -319,13 +319,19 @@ def _resolve_or_fail(require_transcript: bool = True) -> tuple[str, Optional[Pat
         raise typer.Exit(code=1)
 
 
+def _resolve_with_transcript() -> tuple[str, Path]:
+    sid, path = _resolve_or_fail(require_transcript=True)
+    assert path is not None  # require_transcript=True guarantees it
+    return sid, path
+
+
 @operator_app.command("list")
 def cmd_list(
     limit: int = typer.Option(None, "--limit", "-L", min=1, help="Max turns to show."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit a JSON array."),
 ) -> None:
     """Undispositioned operator turns, oldest first."""
-    sid, path = _resolve_or_fail()
+    sid, path = _resolve_with_transcript()
     acked = read_acked_turn_ids(sid)
     pending = [t for t in read_operator_turns(path) if t["turn_id"] not in acked]
     if limit is not None:
@@ -367,7 +373,7 @@ def cmd_status(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the depth payload."),
 ) -> None:
     """Queue depth for this session - the number the capture hook reads."""
-    sid, path = _resolve_or_fail()
+    sid, path = _resolve_with_transcript()
     depth = queue_depth(sid, path)
     if json_output:
         typer.echo(json.dumps(depth, indent=2))
