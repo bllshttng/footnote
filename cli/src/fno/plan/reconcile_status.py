@@ -137,7 +137,11 @@ def _done_node_ids() -> frozenset:
     second time. No graph => empty, and `sweep` then stands Tier 2 down rather
     than reading that as a negative answer and writing a terminal.
     """
-    return frozenset(i for i, status in _node_status_map().items() if status == "done")
+    from fno.paths import graph_json
+
+    return frozenset(
+        i for i, status in _node_status_map(graph_json()).items() if status == "done"
+    )
 
 
 def _plan_link_id(frontmatter: dict) -> Optional[str]:
@@ -170,10 +174,14 @@ def _default_signal(frontmatter: dict) -> bool:
     return bool(node_id) and node_id in _done_node_ids()
 
 
-@lru_cache(maxsize=1)
-def _node_status_map() -> dict:
-    """Map node id -> derived ``status``. Empty when the graph is unreadable,
-    which disables Tier 3 (it must never rewrite on absent evidence).
+@lru_cache(maxsize=8)
+def _node_status_map(graph_path: Path) -> dict:
+    """Map node id -> derived ``status`` for one declared graph root.
+
+    Keyed on ``graph_path``: the cache serves one read per declared root, so
+    a caller pointing at another graph gets a fresh read with no cache_clear.
+    Empty when the graph is unreadable, which disables Tier 3 (it must never
+    rewrite on absent evidence).
 
     Reads THROUGH the archive, because the sweep's whole population is plans
     whose node already shipped and `fno backlog archive` moves exactly those
@@ -191,11 +199,10 @@ def _node_status_map() -> dict:
     """
     try:
         from fno.graph.store import entries_with_archive, read_graph_strict
-        from fno.paths import graph_json
 
         return {
             e.get("id"): e.get("status")
-            for e in entries_with_archive(read_graph_strict(graph_json()))
+            for e in entries_with_archive(read_graph_strict(graph_path))
             if e.get("id")
         }
     except Exception:  # noqa: BLE001 - no graph => no Tier 3
@@ -243,7 +250,9 @@ def sweep(
         return res
 
     if status_map is None:
-        status_map = _node_status_map()
+        from fno.paths import graph_json
+
+        status_map = _node_status_map(graph_json())
 
     # An empty map is absent evidence, and Tier 2 treats a False signal as
     # "not closed" -> `superseded`, so a graph that fails to read would stamp a

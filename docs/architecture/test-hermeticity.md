@@ -130,7 +130,7 @@ The final populated full smoke run completed with 18,789 passed, 127 skipped, an
 
 ## Cached declared state
 
-The R5 guard walks every `lru_cache` and `cache` decorator under `cli/src/fno`. Each cached declared-state reader has one of two recorded answers. Its cache is cleared by pytest before each test. Or a declared root argument is part of its cache key. `fleet_has_crown_at(registry_path)` is the keyed precedent. `load_settings`, `fno.paths._settings`, `resolve_repo_root`, and the graph status map use the existing clear registry. Tool discovery and machine-identity caches are recorded as non-state caches with reasons.
+The R5 guard walks every `lru_cache` and `cache` decorator under `cli/src/fno`. Each cached declared-state reader has one of two recorded answers. A declared root argument is part of its cache key. Or a recorded reason explains why the cache is not a state reader. `fleet_has_crown_at(registry_path)` and `_load_settings_at` (keyed on the full declaration) are the keyed precedents. The zero-arg caches over `load_settings`, `_settings`, `resolve_repo_root`, and the graph status map are retired. Their keyed replacements need no clear registry. Tool discovery and machine-identity caches are recorded as non-state caches with reasons.
 
 `cli/tests/unit/test_cached_state_surface.py` contains a positive control that fails on an unregistered zero-argument cache and passes on a root-keyed cache. A zero-hit scan without that positive control is not evidence that the decorator walk ran.
 

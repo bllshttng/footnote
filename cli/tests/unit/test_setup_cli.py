@@ -21,32 +21,13 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     if hasattr(config_mod, "_loaded_from"):
         config_mod._loaded_from = None
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-    if hasattr(paths_mod, "resolve_repo_root"):
-        try:
-            paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
     yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     if hasattr(config_mod, "_loaded_from"):
         config_mod._loaded_from = None
     import fno.paths as paths_mod2
-    if hasattr(paths_mod2, "_settings"):
-        try:
-            paths_mod2._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
-
 # ---------------------------------------------------------------------------
 # AC-E-HP: fno setup migrate-paths honors active state_dir
 # ---------------------------------------------------------------------------
@@ -78,16 +59,9 @@ def test_migrate_paths_cmd_passes_state_dir_to_run_migration(
 
     # Clear caches so new config is picked up
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     if hasattr(config_mod, "_loaded_from"):
         config_mod._loaded_from = None
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
     captured_calls: list[dict] = []
 
     def _mock_run_migration(**kwargs: object) -> int:

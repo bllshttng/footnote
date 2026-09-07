@@ -28,34 +28,10 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     # Clear settings cache so monkeypatched env takes effect
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     # Clear paths caches (resolve_repo_root now @cached)
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-    if hasattr(paths_mod, "resolve_repo_root"):
-        try:
-            paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
     yield
     # Clear again after test to avoid pollution
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-    if hasattr(paths_mod, "resolve_repo_root"):
-        try:
-            paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
-
 def _write_settings(tmp_path: Path, content: str) -> Path:
     """Write a settings.yaml to tmp_path and return its path."""
     f = tmp_path / "settings.yaml"
@@ -135,7 +111,6 @@ def test_fno_repo_root_warns_when_pinned_to_fno_from_foreign_repo(
     # short-circuit does not fire; the (stubbed) git probe reports other_repo.
     monkeypatch.setattr(paths_mod.subprocess, "run", _fake_git_toplevel(other_repo))
 
-    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
     result = paths_mod.resolve_repo_root()
 
     assert result == fno_dir.resolve()  # warning is non-fatal
@@ -155,7 +130,6 @@ def test_fno_repo_root_no_warning_when_root_is_not_plugin_root(
     other.mkdir()
     monkeypatch.setenv("FNO_REPO_ROOT", str(other))
 
-    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
     paths_mod.resolve_repo_root()
     assert "FNO_REPO_ROOT pins" not in capsys.readouterr().err
 
@@ -182,7 +156,6 @@ def test_fno_repo_root_no_warning_when_cwd_is_inside_the_pinned_repo(
         lambda *a, **k: type("R", (), {"returncode": 0})(),
     )
 
-    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
     paths_mod.resolve_repo_root()
     assert "FNO_REPO_ROOT pins" not in capsys.readouterr().err
 
@@ -629,10 +602,7 @@ def test_paths_cache_consistent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
     # Clear caches explicitly
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.paths import graph_json
 
@@ -685,7 +655,6 @@ def test_vault_in_state_dir_with_obsidian_disabled_rejected(
         "schema_version: 1\nconfig:\n  state_dir: '{vault}/fno'\n  obsidian:\n    enabled: false\n",
     )
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -914,10 +883,7 @@ def test_config_file_inside_state_dir(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.paths import config_file
 
@@ -946,10 +912,7 @@ def test_config_file_loaded_from_is_preferred_over_state_dir_derivation(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     # Trigger load
     config_mod.load_settings()

@@ -7,7 +7,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SOURCE_ROOT = REPO_ROOT / "cli" / "src" / "fno"
 _ROOT_PARAMETER_NAMES = frozenset(
-    {"cwd", "path", "registry_path", "repo_root", "root", "root_path", "state_path"}
+    {"cwd", "graph_path", "path", "registry_path", "repo_root", "root", "root_path", "state_path"}
 )
 
 # These caches are intentionally not declared-state readers. Their reasons are
@@ -19,6 +19,7 @@ _NON_STATE_CACHE_REASONS = {
     ("fno.agents.mux_spawn", "_codex_cli_version"): "cache key is tool version discovery, not fno state",
     ("fno.agents.harness_map", "_shipped_verbs"): "cache key is the shipped plugin surface, not fno state",
     ("fno.agents.harness_map", "_carrier_vocab"): "cache key is the shipped package-data table, not fno state",
+    ("fno.config._loader", "_load_settings_at"): "cache key is the full declaration (_settings_key: env overrides + HOME + resolved repo root), which carries the state root",
 }
 
 
@@ -130,9 +131,8 @@ def test_cached_state_probe_finds_the_known_surface():
     names = {reader.qualified_name for reader in _cached_readers()}
 
     assert {
-        "fno.config.load_settings",
-        "fno.paths._settings",
-        "fno.paths.resolve_repo_root",
+        "fno.config._loader._load_settings_at",
+        "fno.paths.resolve_repo_root_at",
         "fno.plan.reconcile_status._node_status_map",
         "fno.mail.envelope.fleet_has_crown_at",
     } <= names

@@ -60,7 +60,8 @@ def _run_get(key: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: st
     monkeypatch.setenv("FNO_CONFIG", str(f))
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+    # The declaration key is unchanged by a content rewrite; drop the entry.
+    config_mod._load_settings_at.cache_clear()
     from fno.cli import app
 
     from typer.testing import CliRunner

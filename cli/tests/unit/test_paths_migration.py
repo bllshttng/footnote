@@ -25,13 +25,7 @@ def _isolated_roots(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("FNO_EVENTS_PATH", raising=False)
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
     yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
 
 
 def _git_repo(path: Path) -> Path:
@@ -67,7 +61,6 @@ def test_ac1_foreign_spaces_root_leaves_checkout_journal_alone(
     monkeypatch.setenv("FNO_SPACES_DIR", str(tmp_path / "sandbox-spaces"))
     monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
     monkeypatch.chdir(repo)
-    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
 
     paths_mod.project_events_json()
 
@@ -92,7 +85,6 @@ def test_ac2_durable_space_still_migrates_once_and_writes_marker(
     monkeypatch.delenv("FNO_SPACES_DIR", raising=False)
     monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
     monkeypatch.chdir(repo)
-    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
 
     resolved = paths_mod.project_events_json()
 
@@ -125,7 +117,6 @@ def test_ac3_parity_scenarios(
         monkeypatch.delenv("FNO_SPACES_DIR", raising=False)
     monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
     monkeypatch.chdir(repo)
-    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
 
     paths_mod.project_events_json()
 

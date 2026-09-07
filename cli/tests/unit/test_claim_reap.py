@@ -547,7 +547,6 @@ class TestReapDeadClaims:
         # path to follow the chdir). Clear it post-chdir so the write (or
         # non-write, which is what this test asserts) lands under tmp_path.
         from fno.paths import resolve_repo_root
-        resolve_repo_root.cache_clear()
         # The journal is pinned as well as the root. The hermetic sandbox sets
         # FNO_EVENTS_PATH for the whole pytest process and it is checked ahead
         # of the root, so a test reading the cwd-derived journal back has to
@@ -597,7 +596,6 @@ class TestReapDeadClaims:
         # dependent on what ran earlier in the session. Order-dependent here
         # means this test passes as part of the suite but fails run alone.
         from fno.paths import resolve_repo_root
-        resolve_repo_root.cache_clear()
         # The journal is pinned as well as the root. The hermetic sandbox sets
         # FNO_EVENTS_PATH for the whole pytest process and it is checked ahead
         # of the root, so a test reading the cwd-derived journal back has to

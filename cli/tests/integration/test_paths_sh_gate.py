@@ -38,22 +38,8 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
     yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
-
 def _set_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str) -> None:
     """Write a settings.yaml and wire it via FNO_CONFIG."""
     settings_file = tmp_path / "settings.yaml"

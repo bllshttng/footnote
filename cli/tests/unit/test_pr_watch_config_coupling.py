@@ -17,7 +17,6 @@ def tmp_home(tmp_path, monkeypatch):
     (tmp_path / ".fno").mkdir()
     try:
         from fno.config import load_settings
-        load_settings.cache_clear()
     except Exception:
         pass
     return tmp_path
@@ -140,7 +139,6 @@ def test_activation_failure_is_loud_and_keeps_config(tmp_home, monkeypatch):
 
     # Config value stuck despite the activation failure.
     from fno.config import load_settings
-    load_settings.cache_clear()
     assert load_settings().pr_watch.enabled is True
 
 

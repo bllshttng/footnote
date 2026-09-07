@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Generator
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -21,32 +21,13 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     if hasattr(config_mod, "_loaded_from"):
         config_mod._loaded_from = None
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-    if hasattr(paths_mod, "resolve_repo_root"):
-        try:
-            paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
     yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     if hasattr(config_mod, "_loaded_from"):
         config_mod._loaded_from = None
     import fno.paths as paths_mod2
-    if hasattr(paths_mod2, "_settings"):
-        try:
-            paths_mod2._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
-
 # ---------------------------------------------------------------------------
 # AC-D-HP: _check_migration passes active state_dir to run_migration
 # ---------------------------------------------------------------------------
@@ -84,16 +65,9 @@ def test_check_migration_passes_state_dir_to_run_migration(
 
     # Clear caches so the new config is picked up
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     if hasattr(config_mod, "_loaded_from"):
         config_mod._loaded_from = None
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
     # No sentinel at the custom state_dir - migration should fire
     assert not (custom_state / ".path-migration-done").exists()
 
@@ -157,16 +131,9 @@ def test_check_migration_does_not_delete_tmp_outside_lock(
 
     # Clear caches
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     if hasattr(config_mod, "_loaded_from"):
         config_mod._loaded_from = None
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
     # Create a fake "in-flight" .tmp file as if another process is writing it
     # Put it next to the settings.yaml that config_file() will return
     inflight_tmp = fno_dir / ".settings.yaml.FAKEPID.tmp"

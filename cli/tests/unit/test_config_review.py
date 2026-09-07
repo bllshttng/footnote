@@ -39,7 +39,8 @@ def _load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str):
 
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+    # The declaration key is unchanged by a content rewrite; drop the entry.
+    config_mod._load_settings_at.cache_clear()
     return config_mod.load_settings()
 
 

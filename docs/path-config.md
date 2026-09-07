@@ -216,4 +216,4 @@ def test_my_feature(tmp_path, monkeypatch):
     # paths.graph_json() now resolves under tmp_path; real ~/.fno untouched
 ```
 
-The helper writes a minimal `config.toml`, sets `FNO_CONFIG`, and clears both `load_settings` and `_settings` caches.
+The helper writes a minimal `config.toml` and sets `FNO_CONFIG`. The settings cache keys on that declaration, so no cache clearing is needed.

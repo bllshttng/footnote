@@ -76,7 +76,6 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # would pass on the real session id rather than the one they set.
     import fno.paths as paths_mod
 
-    paths_mod.resolve_repo_root.cache_clear()
     # The clear path projects decisions onto the subject node's graph entry,
     # resolving GRAPH_JSON through the module attribute. Pin it to a
     # nonexistent path so these tests never read or write the real machine
@@ -1277,7 +1276,6 @@ def capture_roots(
     monkeypatch.setenv("FNO_REPO_ROOT", str(this))
     import fno.paths as paths_mod
 
-    paths_mod.resolve_repo_root.cache_clear()
     (this / ".fno").mkdir(exist_ok=True)
     graph = tmp_path / "graph.json"
     graph.write_text(

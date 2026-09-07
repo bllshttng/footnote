@@ -334,7 +334,6 @@ def _pin_two_layers(
     monkeypatch.setattr(paths_mod, "resolve_repo_root", lambda: tmp_path / "proj")
     monkeypatch.setattr(paths_mod, "resolve_canonical_repo_root", lambda: tmp_path / "proj")
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(glob_yaml))
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def test_set_warns_when_higher_precedence_layer_overrides(

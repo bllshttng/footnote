@@ -2466,7 +2466,6 @@ def _waive_env(monkeypatch, tmp_path):
 
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_EVENTS_PATH", str(_journal(tmp_path)))
-    paths_mod.resolve_repo_root.cache_clear()
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     from types import SimpleNamespace
 

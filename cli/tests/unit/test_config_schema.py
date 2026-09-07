@@ -40,7 +40,6 @@ def test_glob_star_in_state_dir_rejected(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -58,7 +57,6 @@ def test_glob_question_in_paths_rejected(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -75,7 +73,6 @@ def test_glob_bracket_in_plans_dir_rejected(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -96,7 +93,6 @@ def test_load_settings_cache_hit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
     # Clear lru_cache so the monkeypatch env takes effect
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -122,7 +118,6 @@ def test_unknown_key_emits_warning(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     with caplog.at_level(logging.WARNING, logger="fno.config"):
         from fno.config import load_settings
@@ -147,7 +142,6 @@ def test_default_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -162,7 +156,6 @@ def test_default_plans_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -177,7 +170,6 @@ def test_schema_version_defaults_to_1(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -192,7 +184,6 @@ def test_obsidian_disabled_by_default(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -217,7 +208,6 @@ def test_vault_template_with_obsidian_disabled_rejected(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -249,7 +239,6 @@ def test_top_level_project_id_logs_deprecation_warning(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     with caplog.at_level(logging.WARNING, logger="fno.config"):
         from fno.config import load_settings
@@ -274,7 +263,6 @@ def test_config_project_id_no_warning(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     with caplog.at_level(logging.WARNING, logger="fno.config"):
         from fno.config import load_settings
@@ -343,7 +331,6 @@ def test_double_brace_escape_not_rejected_as_vault(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -393,20 +380,8 @@ def test_load_settings_falls_through_on_corrupt_project_local(
     monkeypatch.setenv("HOME", str(fake_home))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     config_mod._loaded_from = None
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-    if hasattr(paths_mod, "resolve_repo_root"):
-        try:
-            paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
     from fno.config import load_settings
 
     result = load_settings()
@@ -433,7 +408,6 @@ def test_state_dir_exceeding_path_max_rejected(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -473,7 +447,6 @@ def test_corrupt_yaml_returns_defaults_and_logs_warning(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     with caplog.at_level(logging.WARNING, logger="fno.config"):
         from fno.config import load_settings
@@ -518,13 +491,8 @@ def test_project_local_settings_anchored_to_repo_root_not_cwd(
     monkeypatch.setenv("FNO_REPO_ROOT", str(repo_root))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     config_mod._loaded_from = None
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-    if hasattr(paths_mod, "resolve_repo_root"):
-        paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -545,7 +513,6 @@ def test_env_var_takes_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("FNO_CONFIG", str(custom_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 
@@ -570,7 +537,6 @@ def test_unknown_key_no_warning_without_fno_debug(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     with caplog.at_level(logging.WARNING, logger="fno.config"):
         from fno.config import load_settings
@@ -595,7 +561,6 @@ def test_unknown_key_emits_warning_with_fno_debug(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     with caplog.at_level(logging.WARNING, logger="fno.config"):
         from fno.config import load_settings
@@ -620,7 +585,6 @@ def test_unknown_key_not_emitted_twice(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     with caplog.at_level(logging.WARNING, logger="fno.config"):
         from fno.config import load_settings
@@ -647,7 +611,6 @@ def test_blueprint_max_prs_per_epic_default(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     settings = config_mod.load_settings()
     assert settings.blueprint.max_prs_per_epic == 4
@@ -665,7 +628,6 @@ def test_blueprint_max_prs_per_epic_override(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     settings = config_mod.load_settings()
     assert settings.blueprint.max_prs_per_epic == 7
@@ -683,7 +645,6 @@ def test_blueprint_max_prs_per_epic_rejects_non_positive(
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     with pytest.raises(Exception, match=r"max_prs_per_epic|>= ?1|positive"):
         config_mod.load_settings()

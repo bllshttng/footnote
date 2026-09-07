@@ -17,18 +17,8 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno import target_cli
-from fno.paths import resolve_repo_root
 
 runner = CliRunner()
-
-
-def _clear_root_cache():
-    # resolve_repo_root() caches the FNO_REPO_ROOT value per process; tests
-    # that flip the env must clear it first.
-    try:
-        resolve_repo_root.cache_clear()
-    except AttributeError:
-        pass
 
 
 def test_target_init_help_documents_inputs():
@@ -78,7 +68,6 @@ def test_target_init_shells_through_with_env(monkeypatch, tmp_path):
     # FNO_REPO_ROOT is authoritative.
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
     plan = tmp_path / "p" / "x.md"
     plan.parent.mkdir()
@@ -94,7 +83,6 @@ def test_target_init_shells_through_with_env(monkeypatch, tmp_path):
     assert captured["env"].get("TARGET_START") == "1"
     assert captured["env"].get("TARGET_INPUT") == "fix-login"
     assert captured["env"].get("TARGET_PLAN_PATH") == str(plan)
-    _clear_root_cache()
 
 
 def _fake_plugin_root(tmp_path):
@@ -257,13 +245,11 @@ def test_target_init_size_sets_target_size_env(monkeypatch, tmp_path):
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
     result = runner.invoke(app, ["do", "target", "init", "--input", "x", "--size", "m"])
     assert result.exit_code == 0, result.output
     assert captured["env"].get("TARGET_SIZE") == "M"  # normalized to upper
-    _clear_root_cache()
 
 
 def test_target_init_model_provider_set_dispatch_env(monkeypatch, tmp_path):
@@ -281,7 +267,6 @@ def test_target_init_model_provider_set_dispatch_env(monkeypatch, tmp_path):
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
     result = runner.invoke(
@@ -290,7 +275,6 @@ def test_target_init_model_provider_set_dispatch_env(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert captured["env"].get("TARGET_DISPATCH_MODEL") == "glm-4.7"
     assert captured["env"].get("TARGET_DISPATCH_PROVIDER") == "codex"
-    _clear_root_cache()
 
 
 def test_target_init_beastmode_sets_authority_env(monkeypatch, tmp_path):
@@ -308,13 +292,11 @@ def test_target_init_beastmode_sets_authority_env(monkeypatch, tmp_path):
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
     result = runner.invoke(app, ["do", "target", "init", "--input", "x", "--beastmode"])
     assert result.exit_code == 0, result.output
     assert captured["env"].get("TARGET_BEASTMODE") == "1"
-    _clear_root_cache()
 
 
 def test_target_init_beast_alias_grants_too(monkeypatch, tmp_path):
@@ -337,13 +319,11 @@ def test_target_init_beast_alias_grants_too(monkeypatch, tmp_path):
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
     result = runner.invoke(app, ["do", "target", "init", "--input", "x", "--beast"])
     assert result.exit_code == 0, result.output
     assert captured["env"].get("TARGET_BEASTMODE") == "1"
-    _clear_root_cache()
 
 
 def test_target_init_clears_ambient_beastmode_without_flag(monkeypatch, tmp_path):
@@ -367,7 +347,6 @@ def test_target_init_clears_ambient_beastmode_without_flag(monkeypatch, tmp_path
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
     monkeypatch.setenv("TARGET_BEASTMODE", "1")  # the ambient grant
-    _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
     result = runner.invoke(app, ["do", "target", "init", "--input", "x"])
@@ -376,7 +355,6 @@ def test_target_init_clears_ambient_beastmode_without_flag(monkeypatch, tmp_path
         "ambient TARGET_BEASTMODE must be cleared, not forwarded: "
         f"got {captured['env'].get('TARGET_BEASTMODE')!r}"
     )
-    _clear_root_cache()
 
 
 def test_target_init_no_pins_no_dispatch_env(monkeypatch, tmp_path):
@@ -394,14 +372,12 @@ def test_target_init_no_pins_no_dispatch_env(monkeypatch, tmp_path):
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
     result = runner.invoke(app, ["do", "target", "init", "--input", "x"])
     assert result.exit_code == 0, result.output
     assert "TARGET_DISPATCH_MODEL" not in captured["env"]
     assert "TARGET_DISPATCH_PROVIDER" not in captured["env"]
-    _clear_root_cache()
 
 
 def test_target_init_empty_model_rejected(monkeypatch, tmp_path):
@@ -409,7 +385,6 @@ def test_target_init_empty_model_rejected(monkeypatch, tmp_path):
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    _clear_root_cache()
 
     def _no_run(*a, **k):
         raise AssertionError("must not shell out on an empty --model")
@@ -418,7 +393,6 @@ def test_target_init_empty_model_rejected(monkeypatch, tmp_path):
     result = runner.invoke(app, ["do", "target", "init", "--input", "x", "--model", "  "])
     assert result.exit_code == 2
     assert "--model must not be empty" in result.output
-    _clear_root_cache()
 
 
 def test_target_init_rejects_invalid_size(monkeypatch, tmp_path):
@@ -426,7 +400,6 @@ def test_target_init_rejects_invalid_size(monkeypatch, tmp_path):
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    _clear_root_cache()
 
     def _no_run(*a, **k):
         raise AssertionError("must not shell out on invalid --size")
@@ -435,7 +408,6 @@ def test_target_init_rejects_invalid_size(monkeypatch, tmp_path):
     result = runner.invoke(app, ["do", "target", "init", "--input", "x", "--size", "XL"])
     assert result.exit_code == 2
     assert "invalid --size" in result.output
-    _clear_root_cache()
 
 
 def test_target_init_help_documents_size():
@@ -451,7 +423,6 @@ def test_target_init_missing_script_exits_2(monkeypatch, tmp_path):
     fake_root.mkdir()
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    _clear_root_cache()
     result = runner.invoke(app, ["do", "target", "init", "--input", "x"])
     assert result.exit_code == 2
     # Capability-accurate (not "is the plugin installed correctly?"): the
@@ -459,7 +430,6 @@ def test_target_init_missing_script_exits_2(monkeypatch, tmp_path):
     assert "footnote plugin" in result.output
     assert "pip install fno" in result.output
     assert "--plugin-dir" in result.output
-    _clear_root_cache()
 
 
 def test_target_init_degrade_writes_no_state(monkeypatch, tmp_path):
@@ -473,7 +443,6 @@ def test_target_init_degrade_writes_no_state(monkeypatch, tmp_path):
     monkeypatch.chdir(proj)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    _clear_root_cache()
 
     def _no_run(*a, **k):
         raise AssertionError("must not shell out when the init script is missing")
@@ -483,7 +452,6 @@ def test_target_init_degrade_writes_no_state(monkeypatch, tmp_path):
     assert result.exit_code == 2
     assert "footnote plugin" in result.output
     assert not (proj / ".fno").exists()
-    _clear_root_cache()
 
 
 def test_target_init_resolves_from_plugin_root(monkeypatch, tmp_path):
@@ -513,13 +481,11 @@ def test_target_init_resolves_from_plugin_root(monkeypatch, tmp_path):
     monkeypatch.chdir(user_project)
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
     monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
-    _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
     result = runner.invoke(app, ["do", "target", "init", "--input", "x"])
     assert result.exit_code == 0, result.output
     assert str(plugin_root) in captured["cmd"][1]
-    _clear_root_cache()
 
 
 def test_state_init_redirects_target_bootstrap():
@@ -806,7 +772,6 @@ def test_target_start_beastmode_noop_when_already_isolated_is_named(tmp_path, mo
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    _clear_root_cache()
     manifest = fake_root / ".fno" / "target-state.md"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text("---\nattended: true\n---\n")
@@ -824,7 +789,6 @@ def test_target_start_beastmode_noop_when_already_isolated_is_named(tmp_path, mo
     result = runner.invoke(app, ["do", "target", "start", "x-yol"])
     assert result.exit_code == 0, result.output
     assert "did NOT take" not in result.output, "warned without the flag"
-    _clear_root_cache()
 
 
 def test_target_init_beastmode_noop_on_existing_manifest_is_named(tmp_path, monkeypatch):
@@ -839,7 +803,6 @@ def test_target_init_beastmode_noop_on_existing_manifest_is_named(tmp_path, monk
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
     manifest = fake_root / ".fno" / "target-state.md"
@@ -864,7 +827,6 @@ def test_target_init_beastmode_noop_on_existing_manifest_is_named(tmp_path, monk
     assert result.exit_code == 0, result.output
     assert "did NOT take" not in result.output, result.output
     assert "ANCHOR IT" not in result.output, result.output
-    _clear_root_cache()
 
 
 def test_target_init_beastmode_unanchored_grant_is_named(tmp_path, monkeypatch):
@@ -880,7 +842,6 @@ def test_target_init_beastmode_unanchored_grant_is_named(tmp_path, monkeypatch):
     fake_root = _fake_plugin_root(tmp_path)
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
-    _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
     manifest = fake_root / ".fno" / "target-state.md"
@@ -907,7 +868,6 @@ def test_target_init_beastmode_unanchored_grant_is_named(tmp_path, monkeypatch):
     assert "owner_pid" not in warning, (
         "the warning must not suggest a pid can anchor a grant: " + warning
     )
-    _clear_root_cache()
 
 
 def test_target_start_never_refuses_mismatched_inplace_manifest(tmp_path, monkeypatch):
@@ -998,7 +958,6 @@ def _init_env(tmp_path, monkeypatch):
 
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(_fake_plugin_root(tmp_path)))
-    _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
     return ran
 
@@ -1045,7 +1004,6 @@ def test_target_init_refuses_held_node_before_bootstrap(tmp_path, monkeypatch):
     assert "king:119e3c52" in result.output
     assert "The finding is fixed and re-reviewed" in result.output
     assert ran == []
-    _clear_root_cache()
 
 
 def test_target_init_refuses_child_held_by_delivery_owner(tmp_path, monkeypatch):
@@ -1056,7 +1014,6 @@ def test_target_init_refuses_child_held_by_delivery_owner(tmp_path, monkeypatch)
     assert result.exit_code == 2, result.output
     assert "held by plan x-5a5c" in result.output
     assert ran == []
-    _clear_root_cache()
 
 
 def test_check_dispatch_hold_is_wired_for_direct_shell_bootstrap(tmp_path, monkeypatch):
@@ -1079,7 +1036,6 @@ def _unreadable_graph(tmp_path, monkeypatch):
     gp = tmp_path / "graph-unreadable"
     gp.mkdir()
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
-    _clear_root_cache()
     return gp
 
 
@@ -1097,7 +1053,6 @@ def test_target_init_refuses_named_node_when_graph_unreadable(tmp_path, monkeypa
     assert "backlog graph is unreadable" in result.output
     assert "refusing to assume unheld" in result.output
     assert ran == []
-    _clear_root_cache()
 
 
 def test_target_init_free_text_proceeds_when_graph_unreadable(tmp_path, monkeypatch):
@@ -1109,7 +1064,6 @@ def test_target_init_free_text_proceeds_when_graph_unreadable(tmp_path, monkeypa
     result = runner.invoke(app, ["do", "target", "init", "--input", "fix the login bug"])
     assert "dispatch-hold-invalid" not in result.output
     assert ran != [], "free-text init must still reach the bootstrap"
-    _clear_root_cache()
 
 
 def test_check_dispatch_hold_refuses_named_node_when_graph_unreadable(tmp_path, monkeypatch):
@@ -1119,7 +1073,6 @@ def test_check_dispatch_hold_refuses_named_node_when_graph_unreadable(tmp_path, 
     assert result.exit_code == 9, result.output
     assert "backlog graph is unreadable" in result.output
     assert "refusing to assume unheld" in result.output
-    _clear_root_cache()
 
 
 def test_target_start_refuses_node_when_graph_unreadable(tmp_path, monkeypatch):
@@ -1157,7 +1110,6 @@ def test_target_start_refuses_node_when_graph_unreadable(tmp_path, monkeypatch):
     assert "dispatch-hold-invalid" in result.output
     assert "backlog graph is unreadable" in result.output
     assert seen["ensure"] is False, "no worktree may be allocated before the refusal"
-    _clear_root_cache()
 
 
 def test_target_init_redirects_a_named_contained_node(tmp_path, monkeypatch):
@@ -1175,7 +1127,6 @@ def test_target_init_redirects_a_named_contained_node(tmp_path, monkeypatch):
     # Nothing was claimed: the bash bootstrap - which acquires the node claim
     # and writes the immutable manifest - never ran.
     assert ran == []
-    _clear_root_cache()
 
 
 def test_target_init_redirect_names_the_delivery_unit_it_routes_to(tmp_path, monkeypatch):
@@ -1192,7 +1143,6 @@ def test_target_init_redirect_names_the_delivery_unit_it_routes_to(tmp_path, mon
     assert result.exit_code == 2
     assert "x-8a4f" in result.output
     assert "/fno:target x-8a4f" in result.output
-    _clear_root_cache()
 
 
 def test_target_init_still_dispatches_the_delivery_unit_itself(tmp_path, monkeypatch):
@@ -1204,7 +1154,6 @@ def test_target_init_still_dispatches_the_delivery_unit_itself(tmp_path, monkeyp
     assert result.exit_code == 0, result.output
     assert len(ran) == 1
     assert ran[0].get("TARGET_INPUT") == "x-6320"
-    _clear_root_cache()
 
 
 def test_target_init_free_text_is_untouched_by_the_containment_read(tmp_path, monkeypatch):
@@ -1215,7 +1164,6 @@ def test_target_init_free_text_is_untouched_by_the_containment_read(tmp_path, mo
     result = runner.invoke(app, ["do", "target", "init", "--input", "fix the login redirect"])
     assert result.exit_code == 0, result.output
     assert len(ran) == 1
-    _clear_root_cache()
 
 
 def test_redirect_helper_ignores_non_contained_and_malformed_input():
@@ -1282,7 +1230,6 @@ def test_plan_path_naming_only_contained_nodes_is_redirected(tmp_path, monkeypat
     result = runner.invoke(app, ["do", "target", "init", "--plan-path", str(plan)])
     assert result.exit_code == 2, result.output
     assert ran == []
-    _clear_root_cache()
 
 
 def test_check_contained_refuses_with_the_shell_gates_own_code(tmp_path, monkeypatch):
@@ -1354,7 +1301,6 @@ def test_plan_held_only_by_contained_nodes_still_redirects(tmp_path, monkeypatch
     assert result.exit_code == 2, result.output
     assert "x-6320" in result.output
     assert ran == []
-    _clear_root_cache()
 
 
 def test_contained_nodes_naming_different_owners_stay_ambiguous(tmp_path, monkeypatch):
@@ -1394,7 +1340,6 @@ def test_redirect_to_an_already_merged_owner_says_so(tmp_path, monkeypatch):
     assert "already shipped" in result.output
     assert "700" in result.output
     assert "run `/fno:target x-6320`" not in result.output
-    _clear_root_cache()
 
 
 def test_target_start_redirects_before_creating_a_worktree(tmp_path, monkeypatch):
@@ -1425,7 +1370,6 @@ def test_target_start_redirects_before_creating_a_worktree(tmp_path, monkeypatch
     result = runner.invoke(app, ["do", "target", "start", "x-261c"])
     assert result.exit_code == 2, result.output
     assert ensured == [], "worktree was allocated before the redirect fired"
-    _clear_root_cache()
 
 
 def test_check_contained_reads_through_the_keeper(tmp_path, monkeypatch):
@@ -1496,7 +1440,6 @@ def test_redirect_names_a_dead_owner_instead_of_routing_to_it(tmp_path, monkeypa
     assert "--parent null" in result.output
     assert "run `/fno:target x-6320`" not in result.output
     assert ran == []
-    _clear_root_cache()
 
 
 def test_check_contained_says_so_when_the_store_is_unavailable(tmp_path,

@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from fno import paths
 from fno.cli import app
 
 runner = CliRunner()
@@ -74,7 +73,6 @@ def test_worktree_archive_in_foreign_repo(
     monkeypatch.chdir(foreign_git_repo)
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
     monkeypatch.setenv("FNO_REPO_ROOT", str(foreign_git_repo))
-    paths.resolve_repo_root.cache_clear()
 
     origin = tmp_path / "origin.git"
     subprocess.run(

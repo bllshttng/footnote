@@ -332,7 +332,6 @@ def test_revive_enabled_defaults_true_matching_prior_ungated_behavior(
     monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "nonexistent.yaml"))
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     assert restart._revive_enabled() is True
 
 

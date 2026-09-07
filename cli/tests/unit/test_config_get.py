@@ -26,7 +26,6 @@ def _run(args, tmp_path, monkeypatch, settings_content):
     monkeypatch.setenv("FNO_CONFIG", str(f))
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     from fno.cli import app
 
     return CliRunner().invoke(app, args)
@@ -179,7 +178,6 @@ def _pin_two_layers(
     monkeypatch.setattr(paths_mod, "resolve_repo_root", lambda: tmp_path / "proj")
     monkeypatch.setattr(paths_mod, "resolve_canonical_repo_root", lambda: tmp_path / "proj")
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(glob))
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def test_get_prints_deciding_file_and_overridden_file(
