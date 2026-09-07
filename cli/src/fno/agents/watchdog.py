@@ -782,6 +782,8 @@ def _sandbox_denial_text(facts: Optional[TailFacts]) -> Optional[str]:
     """Return the last distress text only for the Git sandbox signature."""
     if facts is None:
         return None
+    if facts.last_role != "assistant":
+        return None
     text = facts.last_text or facts.tail_text
     if "Operation not permitted" not in text:
         return None

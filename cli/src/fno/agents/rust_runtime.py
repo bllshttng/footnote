@@ -575,7 +575,7 @@ _CODE_PAYLOAD_PREFIXES = frozenset(
 
 def _is_codex_code_payload(args: Sequence[str]) -> bool:
     """Recognize a bounded code workflow seed at the spawn seam."""
-    for token in _args_before_argv(args)[1:]:
+    for token in args[1:]:
         if token.startswith("-"):
             continue
         if token.split(maxsplit=1)[0] in _CODE_PAYLOAD_PREFIXES:
@@ -597,6 +597,7 @@ def _is_bounded_codex_code_spawn(args: Sequence[str]) -> bool:
         return False
     if _has_flag(
         args,
+        short="-Y",
         longs=("--yolo", "--dangerously-bypass-approvals-and-sandbox"),
     ):
         return False

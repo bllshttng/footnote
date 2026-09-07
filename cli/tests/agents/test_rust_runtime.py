@@ -264,6 +264,12 @@ def test_codex_code_spawn_refuses_when_git_grant_is_unresolved(
     assert called == []
 
 
+def test_codex_code_payload_after_provider_fence_is_checked() -> None:
+    assert rr._is_codex_code_payload(
+        ["spawn", "--", "$fno:target x-f370"]
+    )
+
+
 def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> None:
     """A resolved grant is the positive control and must not refuse."""
     from fno.cli import app
@@ -296,7 +302,10 @@ def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> 
     assert called and called[0][0] == "spawn"
 
 
-def test_codex_yolo_code_spawn_skips_bounded_grant_refusal(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("bypass", ["--yolo", "-Y"])
+def test_codex_yolo_code_spawn_skips_bounded_grant_refusal(
+    monkeypatch, tmp_path, bypass
+) -> None:
     from fno.cli import app
 
     called: list[list[str]] = []
@@ -319,7 +328,7 @@ def test_codex_yolo_code_spawn_skips_bounded_grant_refusal(monkeypatch, tmp_path
             "thread",
             "--cwd",
             str(tmp_path),
-            "--yolo",
+            bypass,
         ],
     )
 

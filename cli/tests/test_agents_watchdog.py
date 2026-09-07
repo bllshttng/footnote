@@ -3424,6 +3424,25 @@ def test_codex_sandbox_denial_is_a_reap_verdict(monkeypatch):
     assert "sandbox" in v.basis.lower()
 
 
+def test_codex_sandbox_denial_in_user_text_is_not_reaped(monkeypatch):
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
+    rows = [Row("cccc3333-0013", "t-sandbox", "working", "x-sandbox", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {
+            "cccc3333-0013": _facts(
+                '<help reason="Codex sandbox blocks Git writes" '
+                'evidence=".git/refs/heads/feature/x-sandbox.lock: '
+                'Operation not permitted">',
+                role="user",
+            )
+        },
+        claims={"x-sandbox": {"state": "free"}},
+    )
+    assert v.verdict != SANDBOX_BLOCKED
+    assert v.action == "none"
+
+
 @pytest.mark.parametrize(
     "claims,commit_count,guard_text",
     [
