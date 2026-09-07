@@ -767,6 +767,34 @@ mod tests {
     }
 
     #[test]
+    fn ac3_edge_claude_row_without_any_session_id_lands_in_stop_refused() {
+        // A claude row owns no worker socket, so the old socket probe read
+        // "down" instantly and the row dropped while the claude daemon still
+        // held the session (the adopt-then-rm recovery, 50 times). Now a
+        // claude row the stop cannot REACH - no short id, no session id -
+        // answers false and lands in stop_refused: the sweep must not drop a
+        // row whose sideline entry it cannot settle.
+        let dir = std::env::temp_dir().join(format!(
+            "fno-gc-claude-stop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = AgentsHome::at(&dir);
+        home.ensure_root().unwrap();
+        let entry = crate::state::RegistryEntry {
+            name: "target-x-07dc-worker".into(),
+            cwd: dir.to_string_lossy().to_string(),
+            harness: Some("claude".into()),
+            ..Default::default()
+        };
+        assert!(!gc_sweep::stop_row_process(&home, &entry));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn dry_run_never_stops_a_retiring_row() {
         // A rehearsal that killed the worker it rehearsed retiring would be
         // the destructive run wearing a dry flag. The stop seam must never

@@ -118,12 +118,11 @@ pub(crate) fn graph_path(home: &AgentsHome) -> PathBuf {
     state_root.join("graph.json")
 }
 
-/// Read the working graph plus the archive and build the reverse-join index
-/// and the open-do map. The archive is advisory (a read failure contributes
-/// nothing); the WORKING graph failing to parse is `None` and the sweep keeps
-/// every row as `graph unreadable`. A missing graph file is an empty graph
-/// (every row reads `no provenance`), matching the Python read seam.
-pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
+/// Read the working graph plus the archive. The archive is advisory (a read
+/// failure contributes nothing); the WORKING graph failing to parse is `None`
+/// and every consumer keeps its rows. A missing graph file is an empty graph,
+/// matching the Python read seam.
+pub(crate) fn read_graph_entries_raw(home: &AgentsHome) -> Option<Vec<Value>> {
     let graph_path = graph_path(home);
     let state_root = home.root().parent().unwrap_or(home.root());
     let read = |path: &std::path::Path| -> Result<Vec<Value>, ()> {
@@ -142,6 +141,13 @@ pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     // blind the sweep to the working graph.
     let archive = read(&state_root.join("graph-archive.json")).unwrap_or_default();
     entries.extend(archive);
+    Some(entries)
+}
+
+/// Read the working graph plus the archive and build the reverse-join index
+/// and the open-do map.
+pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
+    let entries = read_graph_entries_raw(home)?;
     let index = graph_store::sessions_index(&entries);
     let mut open_do: HashMap<String, Vec<String>> = HashMap::new();
     for entry in &entries {
@@ -355,6 +361,36 @@ pub(crate) fn without_settled(mut graph: GraphRead, planned: &[StaleDoRow]) -> G
     graph
 }
 
+/// Node id -> `(status, merge_status)` over the same read. The merge reaper's
+/// doneness re-read: a node must read done AND merged before its worker's
+/// rows or tree go.
+pub(crate) fn read_graph_node_states(
+    home: &AgentsHome,
+) -> Option<HashMap<String, (String, Option<String>)>> {
+    let entries = read_graph_entries_raw(home)?;
+    let mut states = HashMap::new();
+    for entry in entries {
+        let Some(id) = graph_store::entry_id(&entry) else {
+            continue;
+        };
+        states.insert(
+            id.to_string(),
+            (
+                entry
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                entry
+                    .get("merge_status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            ),
+        );
+    }
+    Some(states)
+}
+
 /// Stop a retiring row's held process from a sync caller. The stop is async,
 /// so it runs on a dedicated thread with a one-shot current-thread runtime:
 /// `Handle::block_on` on the caller's own thread panics inside an ambient
@@ -362,6 +398,13 @@ pub(crate) fn without_settled(mut graph: GraphRead, planned: &[StaleDoRow]) -> G
 /// under `spawn_blocking`), and a fresh thread is legal in both. A runtime
 /// that cannot be built fails closed: the row keeps under `stop_refused`.
 pub(crate) fn stop_row_process(home: &AgentsHome, e: &state::RegistryEntry) -> bool {
+    // A claude row owns no worker socket, so the socket probe below reads
+    // "down" instantly and the registry row would drop while the claude
+    // daemon still holds the session - the adopt-then-rm recovery the
+    // operator ran 50 times. Stop through `claude stop` instead.
+    if e.harness_name() == "claude" {
+        return stop_claude_confirmed(e);
+    }
     let home = home.clone();
     let entry = e.clone();
     std::thread::spawn(move || {
@@ -373,6 +416,60 @@ pub(crate) fn stop_row_process(home: &AgentsHome, e: &state::RegistryEntry) -> b
     })
     .join()
     .unwrap_or(false)
+}
+
+/// Stop a claude row's session before the row drops. The roster is the exited
+/// proof: a session the live roster no longer lists is already gone, and
+/// running `claude stop` on it would fail on every future sweep, wedging the
+/// row in `stop_refused` forever. A roster read that FAILS holds the row -
+/// a torn read is not an exited proof. An unreachable session id (no short
+/// id, no session id) holds too: the sweep cannot reach the session, so it
+/// must not drop the row and orphan the sideline entry.
+fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
+    let Some(short) = e
+        .transport_short()
+        .map(str::to_string)
+        .or_else(|| roster_short(&e.harness_session_id))
+    else {
+        return false;
+    };
+    if let Ok(roster) = crate::claude_roster::ClaudeRoster::load_default() {
+        let listed = roster.find(&short).is_some()
+            || e.harness_session_id
+                .as_deref()
+                .is_some_and(|sid| roster.find(sid).is_some());
+        if !listed {
+            return true;
+        }
+    }
+    let stop = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(|rt| {
+                rt.block_on(async {
+                    matches!(
+                        crate::daemon::bounded_claude_stop(&short, std::time::Duration::from_secs(15))
+                            .await,
+                        Ok(Ok(output)) if output.status.success()
+                    )
+                })
+            })
+            .unwrap_or(false)
+    })
+    .join()
+    .unwrap_or(false);
+    stop
+}
+
+/// Resolve a claude short id from the live roster by session id.
+fn roster_short(session_id: &Option<String>) -> Option<String> {
+    let sid = session_id.as_deref()?.trim();
+    if sid.is_empty() {
+        return None;
+    }
+    let roster = crate::claude_roster::ClaudeRoster::load_default().ok()?;
+    roster.find(sid).map(|w| w.short_id().to_string())
 }
 
 /// The production tree probes for a retiring row: cleanliness first, the

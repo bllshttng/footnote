@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from fno.agents import events as _events
 from fno.config import PostMergeBlock
 from fno.pr import _ritual
 from fno.pr._proc import Result
@@ -730,7 +731,7 @@ def test_archive_defers_when_run_inside_worktree(tmp_path, capsys, monkeypatch):
 def test_archive_emits_one_merge_cleanup_request(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(
-        _ritual,
+        _events,
         "_emit_daemon_envelope",
         lambda kind, data: seen.append((kind, data)),
     )
@@ -750,25 +751,21 @@ def test_archive_emits_one_merge_cleanup_request(tmp_path, monkeypatch):
     assert request["request_id"].startswith("merge-cleanup-")
 
 
-def test_archive_defer_mints_the_reap_order(tmp_path, capsys, monkeypatch):
-    # The deferred debt is now a fact in the world: a TTL claim the daemon's
-    # periodic sweep consumes (it applies while any order stands), so "later"
-    # no longer depends on a human remembering the sweep verb.
+def test_archive_defer_mints_the_cleanup_request(tmp_path, capsys, monkeypatch):
+    # The deferred debt is a fact in the world: the request envelope the
+    # daemon's merge reaper consumes after the grace window, so "later" no
+    # longer depends on a human remembering the sweep verb.
     runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner)
     monkeypatch.setattr(r, "_find_worktree", lambda branch: str(r.cwd))
     r.leg_archive()
     out = capsys.readouterr().out
-    order_calls = [c for c in runner.calls if "reap:pr-7" in " ".join(c)]
-    assert order_calls, "the defer must mint the reap order"
-    c = order_calls[0]
-    assert "acquire" in c and "--ttl" in c and "24h" in c
-    assert "reap-order reap:pr-7 standing" in out
+    assert "cleanup-requested request_id=merge-cleanup-" in out
 
 
-def test_archive_refusal_leaves_a_standing_order(tmp_path, capsys, monkeypatch):
+def test_archive_refusal_leaves_a_standing_request(tmp_path, capsys, monkeypatch):
     # A guarded refusal (live session, salvage) leaves the tree in place: the
-    # work is still owed, so the order stands for the sweep to retry.
+    # work is still owed, so the request stands for the reaper to retry.
     inner = FakeRunner(branch="feature/x")
 
     class _RefusingRunner:
@@ -789,50 +786,33 @@ def test_archive_refusal_leaves_a_standing_order(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "step=archive status=failed" in out
     assert "exit=2" in out
-    assert "reap-order reap:pr-7 standing" in r.ctx.receipts[-1].detail
+    assert "cleanup-requested request_id=" in r.ctx.receipts[-1].detail
 
 
-def test_reap_order_already_standing_is_not_a_failure(tmp_path, capsys, monkeypatch):
-    # acquire rc 1 = an earlier ritual for this PR already ordered it; the
-    # standing order is the desired end state, not an error.
-    runner = FakeRunner(branch="feature/x", claim_rc=1)
+def test_cleanup_request_mint_is_idempotent_by_id(tmp_path, monkeypatch):
+    # Two mints for the same merge carry the SAME request id; the daemon's
+    # fold (not the mint) collapses them into one pending request.
+    runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner)
-    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(r.cwd))
-    r.leg_archive()
-    out = capsys.readouterr().out
-    assert "step=archive status=deferred" in out
-    assert "already standing" in out
+    first = r._register_cleanup_request("feature/x", str(tmp_path / "wt"), "merged-pr")
+    second = r._register_cleanup_request("feature/x", str(tmp_path / "wt"), "merged-pr")
+    first_id = first.split("request_id=")[1].split(";")[0]
+    second_id = second.split("request_id=")[1].split(";")[0]
+    assert first_id == second_id
 
 
-@pytest.mark.parametrize("claim_rc", [0, 1])
-def test_standing_reap_order_clears_the_sweep_stamp(
-    tmp_path, monkeypatch, claim_rc
-):
+def test_cleanup_request_clears_the_sweep_stamp(tmp_path, monkeypatch):
+    # Minting makes the next idle tick the request's first payment window.
     agents_home = tmp_path / "agents"
     agents_home.mkdir()
     stamp = agents_home / "worktree-sweep.stamp"
     stamp.write_text("123")
     monkeypatch.setattr(_ritual, "agents_home_dir", lambda: agents_home, raising=False)
-    r = _bare(tmp_path, FakeRunner(claim_rc=claim_rc))
+    r = _bare(tmp_path, FakeRunner())
 
-    receipt = r._register_reap_order("test")
+    r._register_cleanup_request("feature/x", str(tmp_path / "wt"), "test")
 
-    assert "standing" in receipt
     assert not stamp.exists()
-
-
-def test_unwritten_reap_order_leaves_the_sweep_stamp(tmp_path, monkeypatch):
-    agents_home = tmp_path / "agents"
-    agents_home.mkdir()
-    stamp = agents_home / "worktree-sweep.stamp"
-    stamp.write_text("123")
-    monkeypatch.setattr(_ritual, "agents_home_dir", lambda: agents_home, raising=False)
-    r = _bare(tmp_path, FakeRunner(claim_rc=2))
-
-    receipt = r._register_reap_order("test")
-
-    assert "reap-order-unwritten" in receipt
-    assert stamp.read_text() == "123"
 
 
 def test_archive_runs_script_when_worktree_found(tmp_path, capsys, monkeypatch):
@@ -864,7 +844,7 @@ def test_archive_removes_the_row_only_after_the_worktree_is_gone(tmp_path, monke
     (tmp_path / "scripts" / "setup" / "archive-worktree.sh").write_text("#!/bin/sh\nexit 0\n")
     events = []
     monkeypatch.setattr(
-        _ritual,
+        _events,
         "_emit_daemon_envelope",
         lambda kind, data: events.append((kind, data)),
     )
@@ -913,10 +893,10 @@ def test_archive_missing_script_receipt_keeps_worktree_and_order(
     assert "step=archive status=deferred" in out
     assert "worktree=" in out
     assert "archive-worktree.sh missing" in out
-    assert "reap-order reap:pr-7 standing" in out
+    assert "cleanup-requested request_id=" in out
 
 
-def test_archive_without_a_worktree_still_mints_the_reap_order(tmp_path, capsys, monkeypatch):
+def test_archive_without_a_worktree_still_mints_the_request(tmp_path, capsys, monkeypatch):
     runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner)
     monkeypatch.setattr(r, "_find_worktree", lambda branch: None)
@@ -924,20 +904,7 @@ def test_archive_without_a_worktree_still_mints_the_reap_order(tmp_path, capsys,
     out = capsys.readouterr().out
     assert "step=archive status=deferred" in out
     assert "no worktree for feature/x" in out
-    assert "reap-order reap:pr-7 standing" in out
-    assert any("reap:pr-7" in " ".join(call) for call in runner.calls)
-
-
-def test_archive_without_a_written_order_fails_loudly(tmp_path, capsys, monkeypatch):
-    runner = FakeRunner(branch="feature/x", claim_rc=2)
-    r = _bare(tmp_path, runner)
-    monkeypatch.setattr(r, "_find_worktree", lambda branch: None)
-
-    r.leg_archive()
-
-    out = capsys.readouterr().out
-    assert "step=archive status=failed" in out
-    assert "reap-order-unwritten" in out
+    assert "cleanup-requested request_id=" in out
 
 
 def test_archive_receipt_is_written_to_the_daemon_journal(
@@ -948,7 +915,7 @@ def test_archive_receipt_is_written_to_the_daemon_journal(
     monkeypatch.setattr(r, "_find_worktree", lambda branch: None)
     events = []
     monkeypatch.setattr(
-        _ritual,
+        _events,
         "_emit_daemon_envelope",
         lambda kind, data: events.append((kind, data)),
         raising=False,
