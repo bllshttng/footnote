@@ -1808,6 +1808,16 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
                         f"claude_short_id={legacy_short!r}; keeping short_id",
                         file=sys.stderr,
                     )
+            # Thread-ref backfill: a claude thread row is minted before its
+            # session uuid exists, so `fno_id` lands empty and no write site
+            # ever fills it -- the observation seam back-fills
+            # harness_session_id and short_id and stops there. For a thread row
+            # the two ids are the same value (75 of the 79 populated rows carry
+            # exactly that), so adopt it here, where every reader passes. A row
+            # that HAS a thread ref keeps it: a branch is minted with its own,
+            # and a succession keeps its stable one.
+            if not row.get("fno_id") and row.get("harness_session_id"):
+                row = {**row, "fno_id": row["harness_session_id"]}
             # `session_id` is a computed @property on AgentEntry, not an init field.
             # A Rust PTY row may serialize it (Rust skips it when None, so this only
             # fires for a row that recorded one); passing it to AgentEntry(**row)
