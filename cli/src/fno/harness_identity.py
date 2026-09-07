@@ -1248,9 +1248,8 @@ def live_thread_row_for_cwd(
 ) -> Optional[tuple[str, str]]:
     """The ``(harness, session_id)`` of the ONE live thread row holding ``cwd``.
 
-    A codex thread worker owns no process: every thread is a WebSocket client
-    of the one shared ``codex app-server`` daemon, so N workers share one pid
-    and the walk cannot name a thread's session id. The spawn record can - the
+    A codex thread worker owns no process: N threads share one daemon pid, so
+    the walk cannot name a thread's session id. The spawn record can - the
     daemon writes the row before the worker's first turn, keyed by the cwd fno
     named at spawn (one worktree per worker), so a sibling's lookup returns its
     own row. Exactly one ownership-live ``substrate: thread`` row with a

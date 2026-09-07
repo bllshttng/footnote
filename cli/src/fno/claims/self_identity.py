@@ -153,12 +153,10 @@ def _fill_spawn_record(owned):
     """Fill a session id the walk could not supply from the cwd-keyed spawn
     record (x-e882).
 
-    Order is the whole guard: a resolved session id short-circuits before the
-    registry is read, a fail-closed disposition (malformed or contradictory
-    input) is never overwritten, and a process carrying ANY other family's
-    marker never adopts - the record key is cwd, which bystanders share.
-    ``spawn_record`` stays outside ``_PROVEN_DISPOSITIONS``: the manifest
-    shared-anchor check stays armed for record-carried ids.
+    Guards, in order: a resolved session id short-circuits before the read, a
+    fail-closed disposition is never overwritten, and a process carrying ANY
+    other family's marker never adopts - cwd is shared by bystanders.
+    ``spawn_record`` stays outside ``_PROVEN_DISPOSITIONS`` (see above).
     """
     if owned.session_id or owned.disposition in {"invalid", "contradiction"}:
         return owned
