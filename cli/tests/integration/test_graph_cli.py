@@ -934,6 +934,37 @@ def test_rank_top_names_when_no_live_dispatcher_reaches_node(tmp_graph, monkeypa
     assert result.exit_code == 0, result.output
     assert "no live dispatcher will take it" in result.output
     assert "x-beef" in result.output
+    # The remedy, or the honest absence of one (x-7f1f): with no epic parent
+    # the note names the per-epic activation axis and prints no command that
+    # cannot work.
+    assert "no epic to activate" in result.output
+    assert "advance --epic x-0bad" not in result.output
+
+
+def test_rank_top_names_the_epic_activation_command(tmp_graph, monkeypatch):
+    """x-7f1f: the note names the ONE command that makes a dispatcher take the
+    node - activating the epic it hangs from."""
+    import fno.active_backlog as active_backlog
+
+    monkeypatch.setattr(
+        active_backlog,
+        "resolve_drain_targets",
+        lambda **_: [SimpleNamespace(mission="x-beef")],
+    )
+    tmp_graph.write_text(json.dumps({
+        "entries": [
+            {"id": "x-beef", "title": "Mission", "type": "epic",
+             "status": "in_progress", "priority": "p1", "project": "fno"},
+            {"id": "x-0dad", "title": "Outside child", "status": "ready",
+             "priority": "p1", "project": "fno", "parent": "x-feed"},
+        ]
+    }) + "\n")
+
+    result = _invoke("backlog", "rank", "x-0dad", "--top")
+
+    assert result.exit_code == 0, result.output
+    assert "no live dispatcher will take it" in result.output
+    assert "Activate its epic: fno backlog advance --epic x-feed" in result.output
 
 
 def test_rank_top_keeps_normal_receipt_when_mission_reaches_node(tmp_graph, monkeypatch):

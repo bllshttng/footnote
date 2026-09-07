@@ -10762,9 +10762,9 @@ def cmd_advance(
     if explain:
         from fno.backlog.explain import build_report, render_report
 
-        # --explain --epic models the DAEMON's cascade (select_lane_fill), never
-        # the next cascade: two selectors, and an answer about the wrong one is
-        # the lie the dry run exists to prevent.
+        # --explain --epic models the DAEMON's drain (the --epic fan-out through
+        # the converge gates), never the next cascade: two selectors, and an
+        # answer about the wrong one is the lie the dry run exists to prevent.
         if epic is not None:
             from fno.backlog.explain import build_lane_fill_report, render_lane_fill_report
 

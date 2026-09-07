@@ -181,32 +181,25 @@ def test_every_filter_carries_an_actionable_why():
 # explain runs the fill itself and names ITS drops.
 # ---------------------------------------------------------------------------
 
-def _lane_fill_world(monkeypatch, ready, *, high_collision_for=None, max_lanes=2,
-                     live_slots=0):
-    """Hermetic seams for build_lane_fill_report; returns the advance module."""
-    from types import SimpleNamespace
-
+def _lane_fill_world(monkeypatch, ready, *, max_lanes=2, gates=None):
+    """Hermetic seams for build_lane_fill_report (x-7f1f): the preview runs the
+    drain's own selection (_ready_leaf_children through _converge_gate), so the
+    seams pin exactly those."""
     from fno.backlog import advance as adv
 
     monkeypatch.setattr(adv, "_spawn_headroom", lambda *a, **k: max_lanes)
-    monkeypatch.setattr(adv, "_ready_nodes", lambda project, mission: ready)
-    monkeypatch.setattr(adv, "_live_lane_domains", lambda *a, **k: set())
-    monkeypatch.setattr(adv, "_live_worked_entries", lambda *a, **k: [])
+    monkeypatch.setattr(adv, "_ready_leaf_children", lambda epic: ready)
     monkeypatch.setattr(adv, "_auto_continue_resolve", lambda: (False, "config"))
-    monkeypatch.setattr("fno.claims.lanes.find_lane_slot", lambda nid, root=None: None)
-    monkeypatch.setattr("fno.claims.lanes.active_lane_count", lambda *a, **k: live_slots)
-    # A stated file surface, so the collision gate actually runs for every node.
     monkeypatch.setattr(
-        "fno.graph.collision.resolve_plan_path", lambda p: p
+        "fno.graph._intake.project_root_from_settings",
+        lambda project: f"/mapped/{project}",
     )
-    monkeypatch.setattr("fno.graph.collision.has_file_surface", lambda p: True)
-    hits = high_collision_for or {}
+    refusals = gates or {}
 
-    def _fake_high_collision(node, inflight):
-        target = hits.get(node["id"])
-        return SimpleNamespace(with_node_id=target) if target else None
+    def _gate(child, root):
+        return refusals.get(child["id"])
 
-    monkeypatch.setattr(adv, "_high_collision", _fake_high_collision)
+    monkeypatch.setattr(adv, "_converge_gate", _gate)
     return adv
 
 
@@ -217,34 +210,37 @@ def _ready_node(nid, **kw):
     return base
 
 
-def test_epic_explain_counts_drops_under_the_fill_filter_names(monkeypatch):
-    """AC14: the collision drop is counted under in-flight-collision, by name."""
+def test_epic_explain_reports_the_children_the_drain_would_dispatch(monkeypatch):
+    """x-7f1f: the preview classifies through the drain's own gates, so a node
+    the drain would refuse for walker-live is a drop here too - under the
+    drain's name, never the old lane-fill selector's vocabulary."""
     _lane_fill_world(
         monkeypatch,
-        [_ready_node("x-win"), _ready_node("x-coll")],
-        high_collision_for={"x-coll": "some-plan"},
+        [_ready_node("x-win"), _ready_node("x-walker")],
+        gates={"x-walker": "walker-live"},
     )
     from fno.backlog.explain import build_lane_fill_report
 
     report = build_lane_fill_report(epic="x-epic")
     assert report["mode"] == "lane-fill"
     drops = {d["filter"]: d["dropped"] for d in report["selection"]["drops"]}
-    assert drops["in-flight-collision"] == 1
-    assert drops["unevaluated"] == 0
+    assert drops["walker-live"] == 1
+    assert drops["lane-cap"] == 0
+    assert "in-flight-collision" not in drops
+    assert "unevaluated" not in drops
     assert [e["id"] for e in report["selection"]["would_fill"]] == ["x-win"]
-    assert report["selection"]["stop"] in ("no-candidate", "filled")
 
 
-def test_epic_explain_names_the_filter_that_dropped_the_asked_node(monkeypatch):
+def test_epic_explain_names_the_gate_that_dropped_the_asked_node(monkeypatch):
     _lane_fill_world(
         monkeypatch,
-        [_ready_node("x-win"), _ready_node("x-coll")],
-        high_collision_for={"x-coll": "some-plan"},
+        [_ready_node("x-win"), _ready_node("x-walker")],
+        gates={"x-walker": "walker-live"},
     )
     from fno.backlog.explain import build_lane_fill_report
 
-    asked = build_lane_fill_report(epic="x-epic", node_id="x-coll")["asked"]
-    assert asked["dropped_by"] == "high-collision:some-plan"
+    asked = build_lane_fill_report(epic="x-epic", node_id="x-walker")["asked"]
+    assert asked["dropped_by"] == "walker-live"
 
     winner = build_lane_fill_report(epic="x-epic", node_id="x-win")["asked"]
     assert winner["rank"] == 0
@@ -254,37 +250,57 @@ def test_epic_explain_names_the_filter_that_dropped_the_asked_node(monkeypatch):
 
 
 def test_epic_explain_renders_no_next_cascade(monkeypatch):
-    """The rendered text carries the fill's drops and none of the next cascade."""
+    """The rendered text carries the drain's gate names and none of the next cascade."""
     _lane_fill_world(
         monkeypatch,
-        [_ready_node("x-win"), _ready_node("x-coll")],
-        high_collision_for={"x-coll": "some-plan"},
+        [_ready_node("x-win"), _ready_node("x-walker")],
+        gates={"x-walker": "walker-live"},
     )
     from fno.backlog.explain import build_lane_fill_report, render_lane_fill_report
 
     text = render_lane_fill_report(build_lane_fill_report(epic="x-epic"))
     assert "lane fill" in text
-    assert "in-flight-collision" in text
+    assert "walker-live" in text
     assert "unmerged-open-pr" not in text
     assert "selection-guard" not in text
 
 
-def test_cap_full_counts_the_denied_lanes_under_lane_slot(monkeypatch):
-    """Preview holds no slot, so the cap is measured live: width 1, 1 held slot,
-    three selectable nodes - the two picks beyond headroom are lane-slot drops."""
+def test_cap_denied_counts_under_lane_cap(monkeypatch):
+    """x-7f1f: the fan-out's width is the spawn-gate headroom; picks beyond it
+    are lane-cap drops, the same reason the live pass emits."""
     _lane_fill_world(
         monkeypatch,
         [_ready_node("x-a"), _ready_node("x-b"), _ready_node("x-c")],
         max_lanes=1,
-        live_slots=1,
     )
     from fno.backlog.explain import build_lane_fill_report
 
     report = build_lane_fill_report(epic="x-epic")
     drops = {d["filter"]: d["dropped"] for d in report["selection"]["drops"]}
     assert report["selection"]["stop"] == "cap-full"
-    assert drops.get("lane-slot") == 1
-    assert report["selection"]["would_fill"] == []
+    assert drops["lane-cap"] == 2
+    assert [e["id"] for e in report["selection"]["would_fill"]] == ["x-a"]
+
+
+def test_unmapped_and_projectless_children_get_the_drains_own_drops(monkeypatch):
+    from fno.backlog import advance as adv
+
+    _lane_fill_world(
+        monkeypatch,
+        [_ready_node("x-noproj", project=None), _ready_node("x-orphan")],
+    )
+    monkeypatch.setattr(
+        "fno.graph._intake.project_root_from_settings", lambda project: None
+    )
+    from fno.backlog.explain import build_lane_fill_report
+
+    report = build_lane_fill_report(epic="x-epic")
+    drops = {d["filter"]: d["dropped"] for d in report["selection"]["drops"]}
+    assert drops["no-project"] == 1
+    assert drops["unmapped-project"] == 1
+    assert [e["id"] for e in report["selection"]["would_fill"]] == []
+    assert {r["id"] for r in report["selection"]["excluded"]} == {"x-noproj", "x-orphan"}
+    assert adv  # the seams patched the drain module, not a copy
 
 
 def test_advance_explain_epic_routes_to_the_fill_not_the_next_cascade(monkeypatch):

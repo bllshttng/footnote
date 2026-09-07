@@ -3606,6 +3606,26 @@ def _walker_live_at(project_root: str) -> bool:
         return False
 
 
+def _converge_gate(child: dict, root: str) -> Optional[str]:
+    """The pre-spawn refusal reason for one child, or None to dispatch.
+
+    The two gates ``_converge_one`` applied inline, extracted so the
+    ``--explain --epic`` preview runs the SAME classifier against the SAME
+    child and cannot describe a selection the drain would not make (x-7f1f).
+    """
+    # The spawned worker runs in the target repo, not this one. If that project
+    # already has a live walker, let it claim the node - spawning here would launch
+    # a second target into that repo (codex P2). Checked at the target root because
+    # its walker claim lives under that root's .fno/claims.
+    if _walker_live_at(root):
+        return "walker-live"
+    # Already being worked? Same liveness gate as advance() step 4. This is what
+    # makes epic-advance idempotent (AC1-EDGE): a re-run finds the first pass's workers
+    # holding node:<id> and dispatches nothing, WITHOUT depending on the 3-min
+    # dispatch TTL still being live.
+    return _node_dispatch_block_reason(child["id"], root)
+
+
 def _converge_one(
     node_meta: dict,
     root: str,
@@ -3665,20 +3685,12 @@ def _converge_one(
             "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
         )
 
-    # The spawned worker runs in the target repo, not this one. If that project
-    # already has a live walker, let it claim the node - spawning here would launch
-    # a second target into that repo (codex P2). Checked at the target root because
-    # its walker claim lives under that root's .fno/claims.
-    if _walker_live_at(root):
-        return skip("walker-live")
-
-    # Already being worked? Same liveness gate as advance() step 4. This is what
-    # makes epic-advance idempotent (AC1-EDGE): a re-run finds the first pass's workers
-    # holding node:<id> and dispatches nothing, WITHOUT depending on the 3-min
-    # dispatch TTL still being live.
-    block_reason = _node_dispatch_block_reason(node_id, root)
-    if block_reason:
-        return skip(block_reason)
+    # The pre-spawn gates, shared verbatim with the --explain preview
+    # (_converge_gate): a live walker in the target repo, then the node-claim
+    # liveness gate.
+    gate = _converge_gate(node_meta, root)
+    if gate:
+        return skip(gate)
 
     from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim
 

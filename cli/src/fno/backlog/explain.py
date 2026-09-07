@@ -730,17 +730,6 @@ def _render_gates_routing_decision(report: dict, out: list) -> None:
     )
 
 
-# The canonical lane-fill filter names, in report order. The names come from
-# advance.lane_fill_filter_name's mapping over the classifier's tokens; this
-# list only fixes the ORDER the report prints them in, plus the catch-alls.
-_LANE_FILL_FILTER_ORDER = (
-    "live-lane",
-    "live-lane-domain",
-    "in-flight-collision",
-    "unevaluated",
-)
-
-
 def build_lane_fill_report(
     *,
     epic: str,
@@ -749,109 +738,84 @@ def build_lane_fill_report(
     top: int = 5,
     max_dispatch: Optional[int] = None,
 ) -> dict:
-    """``--explain --epic``: the fill the daemon's cascade would make, as a READ.
+    """``--explain --epic``: the fan-out the daemon's drain would make, as a READ.
 
     The daemon's only walk is ``active_backlog`` shelling ``advance --epic``,
-    which reaches ``select_lane_fill`` - a SECOND selector beside ``next``, with
-    its own drops. Reporting the ``next`` cascade for an epic question is the
-    second-selector lie this function exists to prevent, so this runs (a
-    preview of) the fill itself and aggregates its drops by name.
+    whose fan-out runs ``_ready_leaf_children`` through the converge gates.
+    This preview used to call ``select_lane_fill(mission=epic)`` instead, which
+    reaches ``fno backlog ready --mission <epic>`` - a ``mission_id`` field 0 of
+    2320 graph nodes carry - so it reported an empty mission for every epic
+    (x-7f1f). It now classifies the SAME children through the SAME pre-spawn
+    gates the drain runs (``_converge_gate`` plus the epic fan-out's own
+    no-project / unmapped-project / lane-cap), so it cannot describe a
+    selection the drain would not make.
 
-    One implementation, not two: every drop is classified by the fill's own
-    ``_classify_lane_candidate`` - the single per-candidate truth the live
-    selector and the shadow report already share - so this report cannot
-    describe a selection the selector would not make. Counts reflect the seed
-    state (live lanes and in-flight work at read time), not the fill's own
-    growing state mid-loop; the fill preview carries the authoritative
-    ``stop`` / ``excluded`` / picks.
-
-    Never dispatches, never claims a slot (``claim=False``), never emits.
+    Never dispatches, never claims, never emits.
     """
-    # Same guard as build_report: the census attributes the fill's graph-side
+    # Same guard as build_report: the census attributes the preview's graph-side
     # reads to this function, so the tracker-owned refusal lives here too.
     from fno.graph.cli import _refuse_tracker_owned_on_external_backend
 
     _refuse_tracker_owned_on_external_backend("advance")
 
     from fno.backlog import advance as adv
-    from fno.claims.lanes import active_lane_count
+    from fno.graph._intake import project_root_from_settings
 
-    max_lanes = adv._spawn_headroom()
-    fill_report: dict = {}
-    selected = adv.select_lane_fill(
-        max_lanes, project, mission=epic, claim=False, report=fill_report
-    )
-    ready = adv._ready_nodes(project, epic)
+    width = adv._spawn_headroom()
+    ready = adv._ready_leaf_children(epic)
 
-    # The preview holds no slot, so it can never trip the fill's own cap-full
-    # stop; the cap is read directly instead. Lanes already held by live peers
-    # consume the width, and a pick beyond the remaining headroom is exactly
-    # the drop ``lane-slot`` names in the live path.
-    slot_note: Optional[str] = None
-    try:
-        headroom = max(0, max_lanes - active_lane_count())
-    except Exception as exc:  # noqa: BLE001 - report the unreadable cap, never a fake zero
-        headroom = max_lanes
-        slot_note = f"lane-slot count unreadable: {str(exc)[:120]}"
-    cap_denied = 0
-    if len(selected) > headroom:
-        cap_denied = len(selected) - headroom
-        selected = selected[:headroom]
-        fill_report["stop"] = "cap-full"
-        fill_report["excluded"] = list(fill_report.get("excluded", []))
-
-    # Seed the classifier exactly like the fill does (fail-open to empty), so
-    # the recount sees the same world the fill's first pick saw.
-    try:
-        used_domains = adv._live_lane_domains()
-    except Exception:  # noqa: BLE001 - annotation-only seed; fail open like the fill
-        used_domains = set()
-    try:
-        inflight = adv._live_worked_entries()
-    except Exception:  # noqa: BLE001 - fail open like the fill's collision gate
-        inflight = []
-
+    # Classify every child through the fan-out's gates, in the drain's order.
     counts: dict[str, int] = {}
     reasons_by_id: dict[str, str] = {}
-    for entry in ready:
-        reason = adv._classify_lane_candidate(
-            entry, used_domains=used_domains, inflight=inflight
-        )
+    excluded: list[dict] = []
+    selected: list[dict] = []
+    for child in ready:
+        proj = child.get("project")
+        if not proj:
+            reason = "no-project"
+        else:
+            root = project_root_from_settings(proj)
+            if not root:
+                reason = "unmapped-project"
+            else:
+                reason = adv._converge_gate(child, root) or (
+                    "lane-cap" if len(selected) >= width else None
+                )
         if reason is not None:
-            reasons_by_id[entry["id"]] = reason
-            name = adv.lane_fill_filter_name(reason)
-            counts[name] = counts.get(name, 0) + 1
-    if cap_denied:
-        counts["lane-slot"] = cap_denied
+            reasons_by_id[child["id"]] = reason
+            counts[reason] = counts.get(reason, 0) + 1
+            excluded.append({"id": child["id"], "reason": reason})
+        else:
+            selected.append(child)
 
     # The live run's overall --max binds after the spawn-gate width does, so a
     # dry run that ignored it would promise more dispatches than the run makes.
+    stop: Optional[str] = "cap-full" if counts.get("lane-cap") else None
     if max_dispatch is not None and len(selected) > max_dispatch:
+        denied = selected[max_dispatch:]
         selected = selected[:max_dispatch]
-        fill_report["stop"] = "max-dispatch"
+        counts["max-dispatch"] = len(denied)
+        excluded.extend({"id": c["id"], "reason": "max-dispatch"} for c in denied)
+        stop = "max-dispatch"
 
-    ordered_names = list(_LANE_FILL_FILTER_ORDER) + [
-        n for n in counts if n not in _LANE_FILL_FILTER_ORDER
-    ]
-    if slot_note is not None:
-        ordered_names.append("lane-slot-unreadable")
+    ordered_names = [
+        "no-project",
+        "unmapped-project",
+        "walker-live",
+        "lane-cap",
+        "max-dispatch",
+    ] + [n for n in counts if n not in (
+        "no-project", "unmapped-project", "walker-live", "lane-cap", "max-dispatch"
+    )]
     drops = [{"filter": n, "dropped": counts.get(n, 0)} for n in ordered_names]
 
     selected_ids = [e["id"] for e in selected]
     asked: dict = {}
     if node_id:
-        excluded_row = next(
-            (r for r in fill_report.get("excluded", []) if r.get("id") == node_id), None
-        )
         rank = next((i for i, nid in enumerate(selected_ids) if nid == node_id), None)
         reason = reasons_by_id.get(node_id)
-        dropped = reason or (excluded_row or {}).get("reason")
-        if dropped:
-            asked = {
-                "id": node_id,
-                "dropped_by": dropped,
-                "rank": None,
-            }
+        if reason:
+            asked = {"id": node_id, "dropped_by": reason, "rank": None}
         elif rank is not None:
             asked = {"id": node_id, "dropped_by": None, "rank": rank}
         else:
@@ -870,7 +834,7 @@ def build_lane_fill_report(
         "mode": "lane-fill",
         "epic": epic,
         "selection": {
-            "width": max_lanes,
+            "width": width,
             "pool": len(ready),
             "drops": drops,
             "would_fill": [
@@ -883,9 +847,8 @@ def build_lane_fill_report(
                 }
                 for e in selected[:top]
             ],
-            "stop": fill_report.get("stop"),
-            "excluded": fill_report.get("excluded", []),
-            "slot_note": slot_note,
+            "stop": stop,
+            "excluded": excluded,
         },
         "asked": asked,
         "gates": [
