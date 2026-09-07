@@ -230,10 +230,11 @@ fn json_u64(value: &serde_json::Value) -> Option<u64> {
 /// Ensure the Codex app-server daemon before a client-side spawn or attach.
 ///
 /// Returns the whole [`crate::harness_daemon::EnsureResult`] rather than the
-/// receipt alone because the daemon's PID is the thread lane's identity: a
-/// codex thread worker's app-server IS this process, and the registry row
-/// records that pid so the ownership claim is readable without a process
-/// walk.
+/// receipt alone because the daemon's PID anchors the thread lane: a codex
+/// thread worker's app-server IS this process. The registry row records
+/// `pid: None` for a thread worker (one always-alive shared pid on every row
+/// broke liveness); ownership is provable from the control socket and
+/// `thread/loaded/list`.
 pub fn ensure_codex_daemon() -> Result<crate::harness_daemon::EnsureResult, String> {
     crate::harness_daemon::ensure_harness_daemon(&CodexDaemonAdapter::from_environment())
         .map_err(|error| error.to_string())

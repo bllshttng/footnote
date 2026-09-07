@@ -520,10 +520,12 @@ pub struct CodexThread {
     /// actor's read pump; the legacy read paths below then refuse rather than
     /// spin.
     stream: Option<AppServerStream>,
-    /// The shared app-server daemon's pid, recorded at connect. This is the
-    /// registry row's `pid` for a codex thread worker, which is what makes
-    /// "this worker's app-server is the shared daemon's" readable from the
-    /// row instead of only from a process walk.
+    /// The shared app-server daemon's pid, recorded at connect. This is NOT
+    /// the registry row's `pid`: the row carries `pid: None` for a codex
+    /// thread worker (codex_thread_entry.rs - one always-alive shared pid on
+    /// every thread row broke `derive_liveness` and gc). The daemon pid travels
+    /// into [`CodexThreadActor`]; ownership is provable from the control
+    /// socket and `thread/loaded/list`, not from a row pid.
     daemon_pid: Option<u32>,
     pending: VecDeque<Value>,
     /// `turn/completed` notifications parsed once at push, keyed by turn id
@@ -1014,9 +1016,10 @@ impl CodexThread {
     }
 
     /// The pid of the app-server SERVING this thread, which is the shared
-    /// daemon. The registry row records it, so the ownership claim ("a codex
+    /// daemon. The registry row does NOT record it (thread rows carry
+    /// `pid: None`; codex_thread_entry.rs), so the ownership claim ("a codex
     /// thread worker's app-server is the shared daemon's") is provable from
-    /// the row against `lsof` on the control socket, with no inference from a
+    /// the control socket and `thread/loaded/list`, with no inference from a
     /// process count.
     pub fn pid(&self) -> Option<u32> {
         self.daemon_pid

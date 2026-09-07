@@ -25,6 +25,14 @@
 # to it. Nothing in the tree does that today, and a rename would be a
 # deliberate act to dodge this gate rather than an accident.
 #
+# The thread lane's identity source lives inside the sanctioned implementation
+# and so has NO baseline entry: a codex thread worker shares one app-server pid
+# with every other thread worker, so its harness/session id comes from the
+# cwd-keyed agents-registry spawn record read by
+# `live_thread_row_for_cwd` (fno.harness_identity) inside
+# `fno.claims.self_identity.resolve_self_identity`. That read calls no
+# precedence primitive, which is why the baseline is unchanged.
+#
 # Run: bash scripts/ci/check-identity-stamp-sites.sh
 # Exit: 0 the caller set matches the baseline, 1 a new or removed site, 2 misuse.
 

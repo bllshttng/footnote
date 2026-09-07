@@ -1242,7 +1242,7 @@ def resolve_owned_identity_cmd() -> None:
     # non-single disposition) so a future leak is reconstructable from the event
     # log alone. A single-family resolve can still carry a refused collision, so
     # emit on rejected too.
-    if owned.disposition in {"proven", "ambiguous"} or owned.rejected:
+    if owned.disposition in {"proven", "ambiguous", "spawn_record"} or owned.rejected:
         from fno.agents.events import emit_identity_resolution
 
         emit_identity_resolution(owned)
