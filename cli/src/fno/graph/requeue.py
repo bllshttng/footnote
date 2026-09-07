@@ -46,8 +46,9 @@ def _invoking_claim_holder() -> Optional[str]:
     """Best-effort holder from the active target manifest; falls back to the target session id."""
     try:
         from fno.graph._intake import repo_root
+        from fno.paths import target_state_path_or_legacy
 
-        state = Path(repo_root()) / ".fno" / "target-state.md"
+        state = target_state_path_or_legacy(Path(repo_root()))
         for line in state.read_text(encoding="utf-8").splitlines():
             if line.lstrip().startswith("target_claim_holder:"):
                 value = line.split(":", 1)[1].strip().strip("\"'")
