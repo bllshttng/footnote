@@ -76,11 +76,28 @@ postcompact_resolve_sid() {
     fi
     if [[ -z "$sid" ]]; then
         if [[ "${FNO_PLATFORM:-}" == "codex" ]]; then
-            sid="${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}"
+            # Same-family rule the resolvers enforce: two DIFFERENT codex ids
+            # are a disagreement, so attach nothing rather than guess.
+            if [[ -n "${CODEX_THREAD_ID:-}" && -n "${CODEX_SESSION_ID:-}" \
+                  && "${CODEX_THREAD_ID}" != "${CODEX_SESSION_ID}" ]]; then
+                sid=""
+            else
+                sid="${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}"
+            fi
         elif [[ "${FNO_PLATFORM:-}" == "claude" || -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
             sid="${CLAUDE_CODE_SESSION_ID:-}"
         else
-            sid="${CODEX_THREAD_ID:-${CLAUDE_CODE_SESSION_ID:-${CODEX_SESSION_ID:-}}}"
+            local candidate
+            sid=""
+            for candidate in "${CODEX_THREAD_ID:-}" "${CLAUDE_CODE_SESSION_ID:-}" "${CODEX_SESSION_ID:-}"; do
+                [[ -n "$candidate" ]] || continue
+                if [[ -z "$sid" ]]; then
+                    sid="$candidate"
+                elif [[ "$sid" != "$candidate" ]]; then
+                    sid=""
+                    break
+                fi
+            done
         fi
     fi
     printf '%s' "$sid"

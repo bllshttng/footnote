@@ -95,6 +95,11 @@ def _write_existing_entry(name: str, provider: str, session_id: str) -> None:
 def workdir(tmp_path, monkeypatch):
     """Isolated fno home with codex marked available on PATH."""
     use_tmpdir(monkeypatch, tmp_path)
+    # Pin the repo root and stand inside the sandbox: the spawn default-move
+    # compares caller cwd to the canonical root, and the receipt is only
+    # byte-stable when every resolution branch short-circuits to tmp.
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "codex").write_text("#!/bin/sh\necho fake\n", encoding="utf-8")
@@ -108,6 +113,9 @@ def workdir_claude(tmp_path, monkeypatch):
     """Isolated fno home with claude marked available on PATH."""
     from tests.agents._fake_claude import install_fake_claude
     use_tmpdir(monkeypatch, tmp_path)
+    # Same pin as workdir: keep the default-move resolver inside the sandbox.
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     bin_dir = tmp_path / "bin"
     install_fake_claude(bin_dir)
     monkeypatch.setenv("PATH", str(bin_dir))
@@ -448,7 +456,14 @@ def test_spawn_claude_once_uses_headless(workdir_claude) -> None:
 
 def test_spawn_codex_plain_no_once_requires_runtime(workdir, monkeypatch) -> None:
     """Codex thread spawn reports the missing Rust runtime distinctly."""
+    from fno import rust_binary
     from fno.agents.cli import agents_app
+
+    # A smoke run preserves a real fno-agents for the claim door and may leave
+    # it reachable; this test pins the missing-runtime refusal, so force the
+    # fallback by stubbing both resolvers.
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
 
     runner = _make_runner()
     result = runner.invoke(

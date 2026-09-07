@@ -175,289 +175,11 @@ fn pane_state_derives_worst_first_from_badge_and_seen() {
     assert_eq!(rollup, Some(PaneState::Blocked), "the worst state wins");
 }
 
-#[test]
-fn agent_hit_resolves_pane_then_attach_then_notice() {
-    // The shared seam (x-653d): a keyboard goto and a mouse click resolve an
-    // agent to the SAME ChromeHit. pane > attach > notice.
-    let hosted = AgentRow {
-        harness: None,
-        model: None,
-        route: None,
-        reach: Reach::Locate,
-        spawned_by_session: None,
-        harness_session_id: None,
-        squad: Some(1),
-        name: "a".into(),
-        pane_id: Some(7),
-        portal: None,
-        badge: None,
-        reason: None,
-        exited: false,
-        dnd: false,
-        unmeasured: false,
-        answerable: None,
-        attach_id: None,
-        external: false,
-        seen: false,
-        cwd_base: None,
-        tombstone: false,
-        subline: None,
-        tab: None,
-        account: None,
-        updated_at: None,
-        pr: None,
-        tail: None,
-        crown_level: None,
-        crown_scope: None,
-        basis: None,
-        last_activity_age_s: None,
-        resumable: false,
-        no_pane_reason: None,
-        pane_activity: None,
-    };
-    // A pane-hosted row focuses regardless of the active squad.
-    assert!(
-        matches!(agent_hit(&hosted, 2), ChromeHit::Cmds(c) if c == vec![Command::FocusPane(7)])
-    );
-    // (x-07c2) A watch-only attachable row (any workspace) reaches the ONE
-    // dedicated thread pane: one AttachAgent with the thread_pane flag,
-    // no placement dialog. The server owns the tier.
-    let bg = AgentRow {
-        harness: None,
-        model: None,
-        route: None,
-        pane_id: None,
-        portal: None,
-        attach_id: Some("job1".into()),
-        ..hosted.clone()
-    };
-    assert!(matches!(
-        agent_hit(&bg, 2),
-        ChromeHit::Cmds(c) if c == vec![Command::AttachAgent {
-            id: "job1".into(),
-            placement: PanePlacement { portal: Some(0), ..Default::default() },
-        }]
-    ));
-    // A TOMBSTONE row keeps its attach_id (the client needs it to dismiss),
-    // so the reach arm gates on !exited: a dead agent never reaches, it
-    // notices.
-    let dead = AgentRow {
-        harness: None,
-        model: None,
-        route: None,
-        pane_id: None,
-        portal: None,
-        attach_id: Some("job1".into()),
-        exited: true,
-        dnd: false,
-        unmeasured: false,
-        tombstone: true,
-        ..hosted.clone()
-    };
-    assert!(matches!(agent_hit(&dead, 2), ChromeHit::Notice(_)));
-    // A live paneless row with NO attach id reaches BY NAME - the Follow
-    // and Locate tiers (the dedicated pane tails or explains).
-    let orphan = AgentRow {
-        harness: None,
-        model: None,
-        route: None,
-        name: "t-live-paneless".into(),
-        pane_id: None,
-        portal: None,
-        attach_id: None,
-        no_pane_reason: Some(AgentNoPaneReason::LivePaneless),
-        ..hosted.clone()
-    };
-    assert!(matches!(
-        agent_hit(&orphan, 2),
-        ChromeHit::Cmds(c) if c == vec![Command::AttachAgent {
-            id: "t-live-paneless".into(),
-            placement: PanePlacement { portal: Some(0), ..Default::default() },
-        }]
-    ));
-    // The LivePaneless notice itself still exists (render paths and the
-    // server refusal echo it); its actionable peek command must survive
-    // narrow clipping. Driven directly, not through agent_hit: the click
-    // path now EXECUTES that advice in the dedicated pane instead.
-    let mut narrow = two_pane_view();
-    narrow.set_notice(no_pane_notice(&orphan));
-    let (_, clipped) = narrow.notice_overlay(80).expect("notice is set");
-    assert!(
-        clipped.contains("fno agents peek t-live-paneless --follow"),
-        "the actionable command must survive narrow clipping: {clipped}"
-    );
+// The agent_hit gesture-resolution family, moved verbatim
+// into its own module (this file is shrink-only under the file budget).
+#[path = "client/tests/agent_hit_tests.rs"]
+mod agent_hit_tests;
 
-    for (reason, marker) in [
-        (AgentNoPaneReason::MissingHarness, "no harness recorded"),
-        (
-            AgentNoPaneReason::MissingSessionId,
-            "supported harness has no session id",
-        ),
-        (AgentNoPaneReason::UnsupportedHarness, "unsupported harness"),
-    ] {
-        let dead = AgentRow {
-            portal: None,
-            harness: None,
-            model: None,
-            route: None,
-            name: "t-dead-paneless".into(),
-            exited: true,
-            no_pane_reason: Some(reason),
-            pane_activity: None,
-            ..orphan.clone()
-        };
-        match agent_hit(&dead, 2) {
-            ChromeHit::Notice(text) => {
-                assert!(text.contains("t-dead-paneless"), "dead notice: {text}");
-                assert!(text.contains(marker), "dead notice: {text}");
-                assert!(!text.contains("live"), "dead notice misclassified: {text}");
-            }
-            other => panic!(
-                "dead paneless reason must remain a notice: {}",
-                chrome_hit_label(&Some(other))
-            ),
-        }
-    }
-}
-
-#[test]
-fn agent_hit_resumes_a_resumable_paneless_row() {
-    // x-5f7f: a paneless row the server marked resumable (its harness owns
-    // a resume form and the row carries the session id) resolves to
-    // ResumeAgent - the operator's explicit gesture. Ordering: attach
-    // still wins while a claude bg row is live and carries a jobId;
-    // resumable takes the dead-and-nameless cases the notice used to eat.
-    let row = AgentRow {
-        harness: None,
-        model: None,
-        route: None,
-        reach: Reach::Locate,
-        spawned_by_session: None,
-        harness_session_id: None,
-        squad: Some(1),
-        name: "t-codex-one".into(),
-        pane_id: None,
-        portal: None,
-        badge: None,
-        reason: None,
-        exited: true,
-        dnd: false,
-        unmeasured: false,
-        answerable: None,
-        attach_id: None,
-        external: false,
-        seen: false,
-        cwd_base: None,
-        tombstone: false,
-        subline: None,
-        tab: None,
-        account: None,
-        updated_at: None,
-        pr: None,
-        tail: None,
-        crown_level: None,
-        crown_scope: None,
-        basis: None,
-        last_activity_age_s: None,
-        resumable: true,
-        no_pane_reason: None,
-        pane_activity: None,
-    };
-    assert!(matches!(
-        agent_hit(&row, 2),
-        ChromeHit::Cmds(c)
-            if c == vec![Command::ResumeAgent { name: "t-codex-one".into() }]
-    ));
-    // A live attachable row reaches the dedicated thread pane even if a
-    // stale server also flagged it resumable: while the daemon owns the
-    // session, attaching is the cheaper truth, and resuming a live row
-    // would mint a second writer (the LivePaneless warning).
-    let attachable = AgentRow {
-        portal: None,
-        harness: None,
-        model: None,
-        route: None,
-        attach_id: Some("c19cd2c3".into()),
-        exited: false,
-        resumable: true,
-        no_pane_reason: None,
-        pane_activity: None,
-        ..row.clone()
-    };
-    assert!(matches!(
-        agent_hit(&attachable, 2),
-        ChromeHit::Cmds(c) if matches!(
-            c.as_slice(),
-            [Command::AttachAgent { placement, .. }] if placement.portal_target() == Some(0)
-        )
-    ));
-}
-
-#[test]
-fn agent_hit_watch_only_reaches_the_thread_pane() {
-    // (x-07c2) A watch-only attachable row (any workspace) resolves to the
-    // dedicated thread pane: one AttachAgent carrying the thread_pane
-    // flag and the row's attach id, no placement dialog. The explicit
-    // placement gestures (picker `p`, menu splits, open-here, drag) still
-    // pin a persisted pane when the operator wants one.
-    let row = AgentRow {
-        harness: None,
-        model: None,
-        route: None,
-        reach: Reach::Drive,
-        spawned_by_session: None,
-        harness_session_id: None,
-        squad: Some(1),
-        name: "sib".into(),
-        pane_id: None,
-        portal: None,
-        badge: None,
-        reason: None,
-        exited: false,
-        dnd: false,
-        unmeasured: false,
-        answerable: None,
-        attach_id: Some("job1".into()),
-        external: false,
-        seen: false,
-        cwd_base: None,
-        tombstone: false,
-        tab: None,
-        subline: None,
-        account: None,
-        updated_at: None,
-        pr: None,
-        tail: None,
-        crown_level: None,
-        crown_scope: None,
-        basis: None,
-        last_activity_age_s: None,
-        resumable: false,
-        no_pane_reason: None,
-        pane_activity: None,
-    };
-    match agent_hit(&row, 1) {
-        ChromeHit::Cmds(c) => assert!(
-            matches!(
-                c.as_slice(),
-                [Command::AttachAgent { id, placement }] if id == "job1" && placement.portal_target() == Some(0)
-            ),
-            "expected a portal 0 reach, got {c:?}"
-        ),
-        other => panic!(
-            "expected a thread-pane reach, got {}",
-            chrome_hit_label(&Some(other))
-        ),
-    }
-}
-
-// A mission squad is a render-time grouping header, not a real squad
-// `place_spawned_pane` can route a pane into - a mission-grouped row's
-// placement must fall back to a real target, and the picker must never
-// offer the virtual id as a choice (codex review of x-1a47 change 2/3,
-// P1-b). Driven through the `p`-key door (attach_dst_squads +
-// open_attach_place), the only door left since x-07c2 moved every
-// deliberate attach gesture to the dedicated thread pane.
 #[tokio::test]
 async fn open_attach_place_excludes_mission_squad_from_placement_targets() {
     let mut view = two_pane_view();
@@ -685,6 +407,8 @@ fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> Age
         exited,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -1218,6 +942,8 @@ pub(super) fn focus_agent(pane: u64) -> AgentRow {
         exited: false,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -3234,6 +2960,8 @@ fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> 
         exited,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -3928,6 +3656,8 @@ fn view_with_dead_interleaved() -> View {
         exited,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -4124,6 +3854,8 @@ fn section_header_is_clickable_but_never_selector_selectable() {
         exited: false,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -4444,6 +4176,8 @@ fn elsewhere_section_live_only_hides_exited_orphans() {
         exited,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -4507,6 +4241,8 @@ fn section_header_caret_tracks_all_three_states() {
         exited,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -4628,6 +4364,8 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         exited: false,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -4667,6 +4405,8 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         exited: false,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: Some("c19cd2c3".into()),
         external: false,
@@ -4705,6 +4445,8 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         exited: false,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -4787,6 +4529,8 @@ fn chrome_hit_bottom_chrome_row_is_swallowed() {
             exited: false,
             dnd: false,
             unmeasured: false,
+            liveness_age_s: None,
+            harness_title: None,
             answerable: None,
             attach_id: None,
             external: false,
@@ -4850,14 +4594,15 @@ fn client_compose_draws_scroll_indicator_when_pane_scrolled() {
 #[test]
 fn client_compose_status_row_shows_session_cwd_and_help() {
     // US4 AC4-UI: bottom row carries session name, active squad cwd, and
-    // the `? for keys` affordance; the focused pane's scroll offset joins
-    // it when non-zero (the canonical `[+N]` home).
+    // the `? keys · glyphs` affordance (x-b5d1 named the legend); the
+    // focused pane's scroll offset joins it when non-zero (the canonical
+    // `[+N]` home).
     let mut view = two_pane_view();
     let text = frame_text(&view.compose());
     let bottom = text.lines().last().unwrap().to_string();
     assert!(bottom.contains("main"), "{bottom:?}");
     assert!(bottom.contains("/code/footnote"), "{bottom:?}");
-    assert!(bottom.contains("? for keys"), "{bottom:?}");
+    assert!(bottom.contains("? keys"), "{bottom:?}");
     assert!(!bottom.contains("[+"), "no stale indicator: {bottom:?}");
     // The row is blanked first, so no divider glyphs bleed through the
     // gaps between segments.
@@ -5344,6 +5089,8 @@ fn row_menu_entries_gate_by_agent_state() {
         exited,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: attach.map(Into::into),
         external: false,
@@ -5598,166 +5345,6 @@ fn decode_cmds(buf: Vec<u8>) -> Vec<Command> {
     out
 }
 
-/// Open the section menu on a squad header and run its only entry.
-async fn arm_clear_dead(v: &mut View, squad: u64) {
-    let hdr = squad_header_at(v, squad);
-    assert!(v.open_row_menu(hdr, Anchor::Center), "section menu opens");
-    // Rename now leads the workspace menu, so explicitly select Clear dead.
-    let m = v.row_menu.as_mut().unwrap();
-    m.popup.sel = m
-        .actions
-        .iter()
-        .position(|a| *a == super::MenuAction::ClearDead)
-        .expect("clear-dead entry present");
-    let mut buf: Vec<u8> = Vec::new();
-    row_menu_execute_selected(v, &mut buf).await.unwrap();
-    assert!(buf.is_empty(), "the menu entry only arms the confirm");
-}
-
-#[tokio::test]
-async fn clear_dead_removes_every_dead_row_in_the_section() {
-    // (x-f300) The header menu's clear-dead sends one Remove per exited row
-    // and leaves every live row alone.
-    let mut v = view_with_dead_interleaved();
-    arm_clear_dead(&mut v, 1).await;
-    match v.confirm.as_ref().map(|c| &c.action) {
-        Some(ConfirmKind::ClearDead { dead, .. }) => assert_eq!(*dead, 2),
-        _ => panic!("expected a ClearDead confirm"),
-    }
-    let mut buf: Vec<u8> = Vec::new();
-    confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    assert_eq!(
-        decode_cmds(buf),
-        vec![
-            Command::RemoveAgent {
-                name: "dead-a".into()
-            },
-            Command::RemoveAgent {
-                name: "dead-b".into()
-            },
-        ],
-        "only the exited rows are removed"
-    );
-}
-
-#[test]
-fn nonworkspace_section_with_no_dead_rows_gets_a_notice() {
-    // The menu never renders a no-op entry: a NON-workspace band (Elsewhere)
-    // with nothing to clear and nothing to rename gets a notice, not a
-    // one-entry menu (AC-EDGE). A workspace section always opens (Rename).
-    let orphan_live = {
-        let mut r = lifecycle_row("stray-live", false, false);
-        r.squad = Some(99); // no such squad -> Elsewhere band
-        r
-    };
-    let mut v = view_with_agents(vec![orphan_live]);
-    let hdr = v
-        .display_rows()
-        .iter()
-        .position(|r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::Elsewhere))
-        .expect("elsewhere band");
-    assert!(!v.open_row_menu(hdr, Anchor::Center));
-    assert!(v.row_menu.is_none());
-    assert!(v.notice.is_some(), "and says why");
-}
-
-#[tokio::test]
-async fn workspace_section_menu_offers_rename() {
-    // US3: a workspace section header offers Rename (menu parity with
-    // selector `r`), even with no dead rows to clear.
-    let mut v = view_with_agents(vec![]);
-    v.layout.agents = vec![lifecycle_row("live-a", false, false)];
-    let hdr = squad_header_at(&v, 1);
-    assert!(v.open_row_menu(hdr, Anchor::Center), "workspace menu opens");
-    assert_eq!(
-        v.row_menu.as_ref().unwrap().actions,
-        vec![
-            super::MenuAction::Rename,
-            super::MenuAction::MoveSquad(-1),
-            super::MenuAction::MoveSquad(1),
-            super::MenuAction::RemoveSquad
-        ],
-        "no dead rows -> the five standing workspace verbs"
-    );
-    let mut buf: Vec<u8> = Vec::new();
-    row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
-    assert!(buf.is_empty(), "opening the overlay sends nothing");
-    assert_eq!(
-        v.rename.map(|(t, _)| t),
-        Some(RenameTarget::Squad(1)),
-        "opens the rename overlay for this workspace"
-    );
-}
-
-#[test]
-fn workspace_section_menu_offers_rename_then_clear_dead() {
-    // With dead rows present the workspace menu offers BOTH, Rename first.
-    let mut v = view_with_dead_interleaved();
-    let hdr = squad_header_at(&v, 1);
-    assert!(v.open_row_menu(hdr, Anchor::Center));
-    assert_eq!(
-        v.row_menu.as_ref().unwrap().actions,
-        vec![
-            super::MenuAction::Rename,
-            super::MenuAction::MoveSquad(-1),
-            super::MenuAction::MoveSquad(1),
-            super::MenuAction::RemoveSquad,
-            super::MenuAction::ClearDead
-        ]
-    );
-}
-
-#[tokio::test]
-async fn workspace_section_menu_move_sends_the_reorder_command() {
-    // AC8-HP: Move up/down ride the same Command::MoveSquad the keyboard
-    // J/K path sends; the server's silent clamp covers the at-edge case
-    // (AC9-EDGE), so the client sends unconditionally and never bells.
-    let mut v = view_with_agents(vec![]);
-    v.layout.agents = vec![lifecycle_row("live-a", false, false)];
-    let hdr = squad_header_at(&v, 1);
-    assert!(v.open_row_menu(hdr, Anchor::Center));
-    for (delta, label) in [(-1, "up"), (1, "down")] {
-        let m = v.row_menu.as_mut().unwrap();
-        m.popup.sel = m
-            .actions
-            .iter()
-            .position(|a| *a == super::MenuAction::MoveSquad(delta))
-            .unwrap_or_else(|| panic!("move-{label} entry present"));
-        let mut buf: Vec<u8> = Vec::new();
-        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
-        assert_eq!(
-            decode_cmds(buf),
-            vec![Command::MoveSquad { squad: 1, delta }],
-            "move {label} sends the reorder command"
-        );
-        assert!(v.open_row_menu(hdr, Anchor::Center), "re-open for the next");
-    }
-}
-
-#[tokio::test]
-async fn workspace_section_menu_remove_opens_the_confirm_not_the_command() {
-    // AC8-HP: Remove workspace routes through the SAME
-    // ConfirmKind::RemoveSquad confirm the keyboard path builds - a mouse
-    // click must not skip the destructive-action gate.
-    let mut v = view_with_agents(vec![]);
-    v.layout.agents = vec![lifecycle_row("live-a", false, false)];
-    let hdr = squad_header_at(&v, 1);
-    assert!(v.open_row_menu(hdr, Anchor::Center));
-    let m = v.row_menu.as_mut().unwrap();
-    m.popup.sel = m
-        .actions
-        .iter()
-        .position(|a| *a == super::MenuAction::RemoveSquad)
-        .unwrap();
-    let mut buf: Vec<u8> = Vec::new();
-    row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
-    assert!(buf.is_empty(), "the entry arms the confirm, sends nothing");
-    match v.confirm.as_ref().map(|c| &c.action) {
-        Some(ConfirmKind::RemoveSquad { squad, .. }) => assert_eq!(*squad, 1),
-        _ => panic!("expected a RemoveSquad confirm"),
-    }
-}
-
 #[test]
 fn name_entry_prompt_renders_centered_naming_its_target() {
     // The create/rename/recruit name inputs used to paint the bottom-left
@@ -5801,93 +5388,6 @@ fn name_entry_prompt_renders_centered_naming_its_target() {
         !bottom.contains("rename"),
         "the prompt left the bottom row it used to share"
     );
-}
-
-#[test]
-fn every_confirm_variant_renders_shared_chrome_and_controls() {
-    let variants = vec![
-        (ConfirmKind::Dispatch { node: "x-1".into() }, "dispatch"),
-        (
-            ConfirmKind::RemoveSquad {
-                squad: 1,
-                panes: 2,
-                last: false,
-            },
-            "remove squad",
-        ),
-        (
-            ConfirmKind::StopAgent {
-                name: "agent".into(),
-            },
-            "stop agent",
-        ),
-        (
-            ConfirmKind::RemoveAgent {
-                name: "agent".into(),
-            },
-            "remove agent",
-        ),
-        (ConfirmKind::ReapAgents, "reap"),
-        (
-            ConfirmKind::StopExternal {
-                attach_id: "a-1".into(),
-                name: "external".into(),
-            },
-            "stop external",
-        ),
-        (
-            ConfirmKind::RemoveExternal {
-                attach_id: "a-1".into(),
-                name: "external".into(),
-            },
-            "remove external",
-        ),
-        (
-            ConfirmKind::DismissMember {
-                squad: 1,
-                attach_id: "a-1".into(),
-            },
-            "dismiss member",
-        ),
-        (
-            ConfirmKind::ClearDead {
-                key: crate::view_store::SectionKey::Missions,
-                squad: None,
-                dead: 3,
-            },
-            "clear dead",
-        ),
-        (ConfirmKind::CloseTab { tab: 1 }, "close tab"),
-    ];
-
-    for (action, label) in variants {
-        let mut view = two_pane_view();
-        view.confirm = Some(ConfirmAction {
-            action,
-            label: label.into(),
-        });
-        let (rows, cols) = (view.term.0 as usize, view.term.1 as usize);
-        let mut cells = vec![Cell::default(); rows * cols];
-        view.draw_bottom_row(&mut cells, rows, cols);
-        let screen: String = (0..rows)
-            .map(|r| {
-                cells[r * cols..(r + 1) * cols]
-                    .iter()
-                    .map(|cell| cell.c)
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(
-            screen.contains('┌'),
-            "{label} has no shared top border: {screen}"
-        );
-        assert!(
-            screen.contains("enter confirm · esc cancel"),
-            "{label} has no actual controls footer: {screen}"
-        );
-    }
 }
 
 #[test]
@@ -6245,7 +5745,10 @@ async fn clear_dead_refolds_the_set_at_commit_not_at_open() {
     assert_eq!(
         decode_cmds(buf),
         vec![Command::RemoveAgent {
-            name: "dead-b".into()
+            harness_session_id: None,
+            name: "dead-b".into(),
+            pane_id: None,
+            measure: false
         }],
         "the vanished row is not re-removed"
     );
@@ -6266,7 +5769,10 @@ async fn clear_dead_routes_external_rows_by_attach_id() {
         decode_cmds(buf),
         vec![
             Command::RemoveAgent {
-                name: "plain-dead".into()
+                harness_session_id: None,
+                name: "plain-dead".into(),
+                pane_id: None,
+                measure: false,
             },
             Command::RemoveExternal {
                 attach_id: "deadbeef".into(),
@@ -6340,7 +5846,10 @@ async fn clear_dead_dismisses_member_tombstones() {
                 attach_id: "deadbeef".into()
             },
             Command::RemoveAgent {
-                name: "plain-dead".into()
+                harness_session_id: None,
+                name: "plain-dead".into(),
+                pane_id: None,
+                measure: false,
             },
         ]
     );
@@ -6454,7 +5963,10 @@ async fn clear_dead_is_scoped_to_its_own_section() {
     assert_eq!(
         decode_cmds(buf),
         vec![Command::RemoveAgent {
-            name: "dead-in-1".into()
+            harness_session_id: None,
+            name: "dead-in-1".into(),
+            pane_id: None,
+            measure: false,
         }],
         "the sibling squad's dead row is untouched"
     );
@@ -6486,7 +5998,10 @@ async fn clear_dead_works_on_the_elsewhere_band_too() {
     assert_eq!(
         decode_cmds(buf),
         vec![Command::RemoveAgent {
-            name: "stray-dead".into()
+            harness_session_id: None,
+            name: "stray-dead".into(),
+            pane_id: None,
+            measure: false,
         }]
     );
 }
@@ -6575,6 +6090,8 @@ async fn row_menu_disambiguates_same_named_agents() {
         exited: false,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -6803,6 +6320,9 @@ async fn row_menu_keys_run_the_same_execute_path_as_enter() {
     // execute path a click and Enter use - positive markers on the
     // command sent, the confirm armed, or the composer opened.
     let mut v = view_with_agents(vec![paneless_bg_row("w1")]);
+    // The confirm pref pinned ON: this test exercises the confirm-overlay
+    // path, which the default (off) now bypasses (x-e763 AC10/AC11).
+    v.confirm_lifecycle = true;
     assert!(v.open_row_menu(1, Anchor::Center));
 
     // o runs Open Here: the attach-here command.
@@ -6824,7 +6344,7 @@ async fn row_menu_keys_run_the_same_execute_path_as_enter() {
     assert!(
         matches!(
             v.confirm.as_ref().map(|c| &c.action),
-            Some(super::ConfirmKind::StopAgent { name }) if name == "w1"
+            Some(super::ConfirmKind::StopAgent { name, .. }) if name == "w1"
         ),
         "the stop key armed the stop confirm"
     );
@@ -6878,45 +6398,58 @@ async fn a_bound_byte_no_entry_offers_dismisses_without_action() {
     assert!(v.row_menu.is_none(), "the menu dismissed");
     assert!(buf.is_empty(), "no action fired");
 
-    // The remove byte on a LIVE row's menu: remove-row is bound, the row
-    // offers no Remove action (the entry is inert), so it dismisses too.
+    // The remove byte on a LIVE row's menu: remove-row is bound, the entry
+    // is enabled, and with the confirm pref at its default (off) the byte
+    // dispatches the remove in ONE gesture (x-e763, AC10).
     assert!(v.open_row_menu(1, Anchor::Center));
     let x = crate::keys::menu_byte_for("remove-row").unwrap();
     let mut buf: Vec<u8> = Vec::new();
     row_menu_keys(&mut v, &[x], &mut buf).await.unwrap();
     assert!(v.row_menu.is_none(), "the menu dismissed");
-    assert!(buf.is_empty(), "no remove fired from a live row's menu");
+    assert_eq!(
+        decode_cmds(buf),
+        vec![Command::RemoveAgent {
+            harness_session_id: None,
+            name: "w1".into(),
+            pane_id: None,
+            // The paneless bg row is Unmeasured (no badge, no activity
+            // reading), so the remove measures (x-b5d1): every door that
+            // removes a `?` row skips the stop leg it cannot answer.
+            measure: true,
+        }],
+        "the remove byte removed the live row in one gesture"
+    );
 }
 
 #[test]
-fn the_inert_remove_entry_shows_the_key_and_the_precondition() {
-    // AC11-EDGE: the disabled Remove entry carries the byte that WILL
-    // remove the row once the precondition clears, beside the
-    // precondition - and it stays unselectable, contributing no action
-    // slot, so the actions vector stays index-aligned with the rows.
+fn the_remove_entry_on_a_live_row_is_selectable_and_carries_the_key() {
+    // (x-e763) The old inert gate (greyed Remove, "stop first") asserted a
+    // server refusal that no longer exists: the server orchestrates
+    // stop-then-rm in one gesture. The live-row menu's Remove is now a
+    // real entry, selectable, carrying its menu-key hint.
     let mut v = view_with_agents(vec![paneless_bg_row("w1")]);
     assert!(v.open_row_menu(1, Anchor::Center));
     let m = v.row_menu.as_ref().unwrap();
     let remove_key = crate::keys::menu_key_for("remove-row").unwrap();
-    let inert_row = m.popup.rows.iter().find_map(|row| match row {
+    let live_row = m.popup.rows.iter().find_map(|row| match row {
         PopupRow::Entry {
             glyph,
             label,
             hint,
             enabled,
-        } if label == "Remove" && !*enabled => Some((glyph.clone(), hint.clone())),
+        } if label == "Remove" && *enabled => Some((glyph.clone(), hint.clone())),
         _ => None,
     });
     assert_eq!(
-        inert_row,
-        Some(("✕".into(), format!("{remove_key} stop first"))),
-        "the hint carries the key and the precondition"
+        live_row,
+        Some(("✕".into(), remove_key)),
+        "Remove is enabled and names its key"
     );
     assert!(
-        !m.actions
+        m.actions
             .iter()
             .any(|a| matches!(a, super::MenuAction::Remove)),
-        "an inert entry contributes no action slot"
+        "the entry carries a runnable action slot"
     );
 }
 
@@ -7054,13 +6587,16 @@ async fn menu_accelerator_remove_arms_the_dead_row_confirm() {
         SectionKey::Squad("/code/footnote".into()),
         SectionView::Expanded,
     );
+    // The confirm pref pinned ON: this test exercises the confirm-overlay
+    // path (x-e763 AC11).
+    v.confirm_lifecycle = true;
     let idx = agent_row_at(&v, |a| a.name == "dead");
     v.open_row_menu(idx, Anchor::Center);
     let key = crate::keys::menu_byte_for("remove-row").expect("remove-row registered");
     let mut buf: Vec<u8> = Vec::new();
     row_menu_keys(&mut v, &[key], &mut buf).await.unwrap();
     match v.confirm.as_ref().map(|c| &c.action) {
-        Some(super::ConfirmKind::RemoveAgent { name }) => assert_eq!(name, "dead"),
+        Some(super::ConfirmKind::RemoveAgent { name, .. }) => assert_eq!(name, "dead"),
         _ => panic!("expected RemoveAgent{{dead}} confirm"),
     }
     let mut buf: Vec<u8> = Vec::new();
@@ -7068,7 +6604,10 @@ async fn menu_accelerator_remove_arms_the_dead_row_confirm() {
     assert_eq!(
         decode_cmds(buf),
         vec![Command::RemoveAgent {
-            name: "dead".into()
+            harness_session_id: None,
+            name: "dead".into(),
+            pane_id: None,
+            measure: false,
         }],
         "the confirm the key armed removes exactly this row"
     );
@@ -7169,6 +6708,9 @@ async fn a_confirm_survives_the_release_of_the_click_that_armed_it() {
     // Driven through handle_stdin with real SGR bytes - the builder-level
     // tests never touched this path, which is how the gap survived them.
     let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+    // The confirm pref pinned ON: this test exercises the confirm-overlay
+    // path (x-e763 AC11).
+    v.confirm_lifecycle = true;
     let row = agent_row_at(&v, |a| a.name == "w");
     assert!(v.open_row_menu(row, Anchor::Center));
     menu_select(&mut v, super::MenuAction::Stop).await;
@@ -7193,11 +6735,16 @@ async fn a_confirm_survives_the_release_of_the_click_that_armed_it() {
              underneath with no press before it"
     );
 
-    // Enter still commits it.
+    // Enter still commits it. The command carries the pane the row was
+    // drawn from (x-e763 AC6).
     confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
     assert_eq!(
         decode_cmds(buf),
-        vec![Command::StopAgent { name: "w".into() }],
+        vec![Command::StopAgent {
+            name: "w".into(),
+            harness_session_id: None,
+            pane_id: Some(10)
+        }],
         "Enter commits the confirm the click armed"
     );
 }
@@ -7207,6 +6754,9 @@ async fn an_outside_press_does_not_dismiss_an_armed_confirm() {
     // The confirm owns every pointer event. An outside press is swallowed,
     // while only its rendered shared Chrome esc chip cancels it.
     let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+    // The confirm pref pinned ON: this test exercises the confirm-overlay
+    // path (x-e763 AC11).
+    v.confirm_lifecycle = true;
     let row = agent_row_at(&v, |a| a.name == "w");
     assert!(v.open_row_menu(row, Anchor::Center));
     menu_select(&mut v, super::MenuAction::Stop).await;
@@ -7654,35 +7204,19 @@ fn only_a_multi_pane_tab_wears_the_group_marker() {
 }
 
 #[test]
-fn a_live_row_shows_remove_as_inert_rather_than_hiding_it() {
-    // The server refuses RemoveAgent on a live row ("still live - stop it
-    // first"). Hiding the entry said the action does not exist; showing it
-    // greyed says it exists and names the precondition. Disabled contributes
-    // zero targets, so it can never be selected and never shifts the actions
-    // vector.
+fn a_live_rows_menu_carries_an_enabled_remove() {
+    // (x-e763) AC8: a live row's menu offers Remove as a real, enabled
+    // entry. Neither verb is gated behind the other any more.
     let live = agent_row("w", 10, Some(AgentBadge::Working), false);
     let menu = super::build_row_menu(&live, Anchor::Center);
-    let inert: Vec<&PopupRow> = menu
-        .popup
-        .rows
-        .iter()
-        .filter(|r| matches!(r, PopupRow::Entry { enabled: false, .. }))
-        .collect();
+    let enabled =
+        menu.popup.rows.iter().any(
+            |r| matches!(r, PopupRow::Entry { label, enabled: true, .. } if label == "Remove"),
+        );
+    assert!(enabled, "Remove is a selectable entry on a live row");
     assert!(
-        matches!(
-            inert.as_slice(),
-            [PopupRow::Entry { label, hint, .. }]
-                if label == "Remove"
-                    && hint == &format!(
-                        "{} stop first",
-                        crate::keys::menu_key_for("remove-row").unwrap_or_default()
-                    )
-        ),
-        "exactly one greyed Remove naming its key and precondition: {inert:?}"
-    );
-    assert!(
-        !menu.actions.contains(&super::MenuAction::Remove),
-        "a live row's Remove carries no action to run"
+        menu.actions.contains(&super::MenuAction::Remove),
+        "the entry carries a runnable action"
     );
 }
 
@@ -8409,6 +7943,8 @@ fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         exited: false,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -9647,6 +9183,8 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 exited: false,
                 dnd: false,
                 unmeasured: false,
+                liveness_age_s: None,
+                harness_title: None,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -9683,6 +9221,8 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 exited: true,
                 dnd: false,
                 unmeasured: false,
+                liveness_age_s: None,
+                harness_title: None,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -9719,6 +9259,8 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 exited: false,
                 dnd: false,
                 unmeasured: false,
+                liveness_age_s: None,
+                harness_title: None,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -9831,6 +9373,8 @@ fn squad_header_rollup_counts_in_every_view_state() {
             exited,
             dnd: false,
             unmeasured: false,
+            liveness_age_s: None,
+            harness_title: None,
             answerable: None,
             attach_id: None,
             external: false,
@@ -10266,6 +9810,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 exited: true,
                 dnd: false,
                 unmeasured: false,
+                liveness_age_s: None,
+                harness_title: None,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -10302,6 +9848,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 exited: false,
                 dnd: false,
                 unmeasured: false,
+                liveness_age_s: None,
+                harness_title: None,
                 answerable: None,
                 attach_id: Some("ab12cd34".into()),
                 external: true,
@@ -10338,6 +9886,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 exited: false,
                 dnd: false,
                 unmeasured: false,
+                liveness_age_s: None,
+                harness_title: None,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -10377,6 +9927,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 exited: false,
                 dnd: false,
                 unmeasured: false,
+                liveness_age_s: None,
+                harness_title: None,
                 answerable: None,
                 attach_id: Some("ff99ff99".into()),
                 external: true,
@@ -10891,6 +10443,8 @@ fn unified_rows_view() -> View {
         exited: false,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: attach_id.map(Into::into),
         external: false,
@@ -11627,6 +11181,8 @@ fn peek_overlay_renders_loading_transcript_and_answerable() {
         exited: false,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: Some(answerable(&[("1", "Yes"), ("2", "No")], 7)),
         attach_id: None,
         external: false,
@@ -12076,6 +11632,8 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
         exited: true,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: Some("deadbeef".into()),
         external: false,
@@ -12133,6 +11691,8 @@ pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRo
         exited,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external,
@@ -12167,7 +11727,7 @@ async fn selector_x_on_live_agent_arms_remove_confirm() {
     assert!(buf.is_empty(), "arming a confirm sends nothing");
     assert_eq!(v.selector, None, "the confirm closes the selector");
     match v.confirm.as_ref().map(|c| (&c.action, c.label.as_str())) {
-        Some((ConfirmKind::RemoveAgent { name }, label)) => {
+        Some((ConfirmKind::RemoveAgent { name, .. }, label)) => {
             assert_eq!(name, "worker-a");
             assert_eq!(label, "worker-a");
         }
@@ -12186,7 +11746,7 @@ async fn selector_x_on_exited_agent_arms_remove_confirm() {
     selector_keys(&mut v, b"x", &mut buf).await.unwrap();
     assert!(buf.is_empty());
     match v.confirm.as_ref().map(|c| &c.action) {
-        Some(ConfirmKind::RemoveAgent { name }) => assert_eq!(name, "worker-b"),
+        Some(ConfirmKind::RemoveAgent { name, .. }) => assert_eq!(name, "worker-b"),
         _ => panic!("expected a RemoveAgent confirm"),
     }
 }
@@ -12385,12 +11945,30 @@ async fn confirm_keys_enter_sends_stop_then_remove_agent() {
     // sends the captured-name command (the row index is never re-read).
     for (kind, want) in [
         (
-            ConfirmKind::StopAgent { name: "w".into() },
-            Command::StopAgent { name: "w".into() },
+            ConfirmKind::StopAgent {
+                name: "w".into(),
+                sid: None,
+                pane_id: None,
+            },
+            Command::StopAgent {
+                name: "w".into(),
+                harness_session_id: None,
+                pane_id: None,
+            },
         ),
         (
-            ConfirmKind::RemoveAgent { name: "w".into() },
-            Command::RemoveAgent { name: "w".into() },
+            ConfirmKind::RemoveAgent {
+                name: "w".into(),
+                sid: None,
+                pane_id: None,
+                measure: false,
+            },
+            Command::RemoveAgent {
+                name: "w".into(),
+                harness_session_id: None,
+                pane_id: None,
+                measure: false,
+            },
         ),
     ] {
         let mut v = view_with_agents(vec![]);
@@ -13188,6 +12766,8 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             exited: false,
             dnd: false,
             unmeasured: false,
+            liveness_age_s: None,
+            harness_title: None,
             answerable: None,
             attach_id: None,
             external: false,
@@ -13224,6 +12804,8 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             exited: false,
             dnd: false,
             unmeasured: false,
+            liveness_age_s: None,
+            harness_title: None,
             answerable: None,
             attach_id: Some("deadbee1".into()),
             external: false,
@@ -13299,6 +12881,8 @@ fn squad_rollup_bare_pane_folds_to_idle() {
         exited: false,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -13479,6 +13063,8 @@ async fn nav_goto_teleports_cross_squad_then_focuses() {
         exited: false,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -13854,11 +13440,11 @@ fn sideline_scroll_window_excludes_chrome_bottom_row() {
         v.bottom_row_is_chrome(),
         "status bar occupies the bottom row"
     );
-    // (x-cd67 US1) The sideline owns row 0, so the usable height no longer
-    // subtracts the tab-bar row - only the chrome bottom row.
+    // (x-cd67 US1) The sideline owns row 0: subtract only the chrome bottom
+    // row, then the always-visible court block's reservation (x-aeab).
     assert_eq!(
         v.sideline_visible_rows(),
-        v.term.0 as usize - 1,
+        v.term.0 as usize - 1 - v.court_block_rows(),
         "chrome bottom row is not a scroll slot"
     );
     v.status_on = false;
@@ -13868,8 +13454,8 @@ fn sideline_scroll_window_excludes_chrome_bottom_row() {
     );
     assert_eq!(
         v.sideline_visible_rows(),
-        v.term.0 as usize,
-        "with no chrome the full terminal height is usable"
+        v.term.0 as usize - v.court_block_rows(),
+        "with no chrome the full height minus the block is usable"
     );
 }
 
@@ -13946,6 +13532,8 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         exited: false,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: None,
         attach_id: None,
         external: false,
@@ -14120,6 +13708,8 @@ fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow
         exited: false,
         dnd: false,
         unmeasured: false,
+        liveness_age_s: None,
+        harness_title: None,
         answerable: ans,
         attach_id: None,
         external: false,
@@ -14516,6 +14106,8 @@ fn attention_key_orders_the_shared_fixture() {
                 exited: r["exited"].as_bool().unwrap_or(false),
                 dnd: false,
                 unmeasured: r["unmeasured"].as_bool().unwrap_or(false),
+                liveness_age_s: None,
+                harness_title: None,
                 ..blocked_row(r["name"].as_str().expect("row has a name"), 0, None)
             };
             (row, need_of(r["need"].as_str()))
@@ -18932,3 +18524,16 @@ fn ux_shot_twenty_tabs_before() {
         "twenty tabs (before: clipped)",
     );
 }
+
+// (x-e763) The section-menu / clear-dead family lives in its own module
+// under the file-budget gate; this file is shrink-only against main.
+#[path = "client/tests/section_menu_tests.rs"]
+mod section_menu_tests;
+use section_menu_tests::arm_clear_dead;
+
+// (x-e763) The default-dispatch lifecycle gestures, same file-budget rule.
+#[path = "client/tests/lifecycle_dispatch_tests.rs"]
+mod lifecycle_dispatch_tests;
+
+#[path = "client/tests/confirm_tests.rs"]
+mod confirm_tests;

@@ -36,6 +36,62 @@ pub fn graph_path() -> PathBuf {
     base.join(".fno").join("graph.json")
 }
 
+/// The `(harness, harness_session_id)` pairs whose work the graph says is
+/// DONE (x-9052). A node is done when `status` names done, `merge_status`
+/// names merged, or `completed_at` is set - the ship vocabulary's terminal
+/// states, never a liveness verdict (a merged node stays done when its
+/// sessions die). Pure so the restore gate is testable without files.
+pub fn done_session_ids_from(raw: &str) -> HashSet<(String, String)> {
+    let mut done = HashSet::new();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return done;
+    };
+    let Some(entries) = value.get("entries").and_then(|v| v.as_array()) else {
+        return done;
+    };
+    for node in entries {
+        // The same `_status` pre-rename tolerance `node_status` gives the
+        // sideline reader, so an unrewritten document classifies the same.
+        let status = node_status(node).unwrap_or_default();
+        let is_done = status == "done"
+            || matches!(
+                node.get("merge_status").and_then(|v| v.as_str()),
+                Some("merged")
+            )
+            || node
+                .get("completed_at")
+                .and_then(|v| v.as_str())
+                .is_some_and(|v| !v.is_empty());
+        if !is_done {
+            continue;
+        }
+        let Some(sessions) = node.get("sessions").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for session in sessions {
+            let Some(harness) = session.get("harness").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(session_id) = session.get("session_id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            done.insert((harness.to_string(), session_id.to_string()));
+        }
+    }
+    done
+}
+
+/// The live done set. An unreadable or malformed graph reads as EMPTY, not
+/// as "nothing is done" being asserted positively - restore keeps every
+/// worker (today's behavior) when the instrument cannot read (fail open,
+/// x-9052 AC2-EDGE).
+pub fn done_session_ids() -> HashSet<(String, String)> {
+    match std::fs::read_to_string(graph_path()) {
+        Ok(raw) => done_session_ids_from(&raw),
+        Err(_) => HashSet::new(),
+    }
+}
+
 /// Whether an external tracker backend is selected, resolved exactly as the
 /// Python side resolves it (`FNO_TRACKER_BACKEND`, default `graph`). Shared
 /// resolution so the reader and `get_tracker` can never disagree about which
@@ -878,10 +934,74 @@ pub fn live_claims_from_sweep(stdout: &str) -> Option<HashMap<String, String>> {
     Some(live)
 }
 
-/// The reader's between-tick memory (mtime-gated document cache + last-sent
-/// cards), mirroring [`crate::agents_view::ReaderState`]. The interval task
-/// lives in server.rs (it owns the `CoreMsg` sender); this keeps the derivation
-/// pure and unit-testable.
+/// How often the reader re-shells the claim sweep while a viewer is attached.
+/// Claims do not change sixty times a minute - a card flip, release, or TTL
+/// expiry landing this late is invisible next to the lane it feeds - and each
+/// sweep is a whole `fno-agents` process. Under load (parallel test runs)
+/// those subprocesses stretch toward their timeout, so pacing them is what
+/// keeps a busy machine from paying a spawn per second for an overlay that
+/// moves a few times an hour. Same reasoning as the x-4e30 client gate.
+pub(crate) const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Shell `fno-agents claim sweep --json`, bounded + fail-open (the digest
+/// idiom, x-4e2d): returns the live-claim map (node id -> holder) for the
+/// work-queue overlay (x-54fa), or `None` on missing binary / non-zero exit /
+/// timeout / unparseable output - the caller keeps its last-good sweep, so a
+/// single flaky tick never downgrades an in-flight card.
+pub(crate) async fn run_claim_sweep() -> Option<HashMap<String, String>> {
+    const SWEEP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(800);
+    let mut command =
+        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    command
+        .args(["claim", "sweep", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        // On timeout the future is dropped; kill_on_drop reaps the child so a
+        // hung sweep can't accumulate an orphan per tick.
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
+    let output = tokio::time::timeout(SWEEP_TIMEOUT, fut).await.ok()?.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    live_claims_from_sweep(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// A failure must persist this many consecutive sweeps before it is logged.
+const SWEEP_LOG_AFTER_FAILURES: u32 = 3;
+
+/// Log-once-per-real-outage gate for the claim sweep. A plain `failing` bool
+/// assumes failure is sticky, and intermittent failure (a loaded machine
+/// stretching every sweep toward its timeout) flaps two lines per blip - one
+/// log carried 5237 failed and 5218 recovered lines, a third of it. The
+/// first line waits for [`SWEEP_LOG_AFTER_FAILURES`] consecutive failures;
+/// recovery logs only when a failure was actually logged.
+#[derive(Default)]
+pub(crate) struct SweepLogGate {
+    consecutive_failures: u32,
+    logged: bool,
+}
+
+impl SweepLogGate {
+    /// Record a success; `true` when a logged failure just ended (print the
+    /// recovery line).
+    pub(crate) fn success(&mut self) -> bool {
+        let was_logged = self.logged;
+        *self = Self::default();
+        was_logged
+    }
+
+    /// Record a failure; `true` when this is the failure worth a log line.
+    pub(crate) fn failure(&mut self) -> bool {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if !self.logged && self.consecutive_failures >= SWEEP_LOG_AFTER_FAILURES {
+            self.logged = true;
+            true
+        } else {
+            false
+        }
+    }
+}
 #[derive(Default)]
 pub struct ReaderState {
     cached_raw: Option<String>,
@@ -1039,8 +1159,88 @@ impl ReaderState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sweep_log_gate_holds_the_first_line_until_failures_persist() {
+        let mut gate = SweepLogGate::default();
+        assert!(!gate.failure(), "first failure is silent");
+        assert!(!gate.failure(), "second failure is silent");
+        assert!(gate.failure(), "third consecutive failure logs");
+        assert!(!gate.failure(), "already logged: no second failure line");
+        assert!(gate.success(), "recovery after a LOGGED failure logs");
+        assert!(!gate.success(), "a second success is silent");
+    }
+
+    #[test]
+    fn sweep_log_gate_ignores_flapping() {
+        // The shape that filled a third of one server log: intermittent
+        // failures that never persist long enough to be an outage.
+        let mut gate = SweepLogGate::default();
+        for _ in 0..5 {
+            assert!(!gate.failure());
+            assert!(!gate.failure());
+            assert!(!gate.success(), "nothing was logged, no recovery line");
+        }
+    }
+
+    #[test]
+    fn sweep_log_gate_resets_the_threshold_after_recovery() {
+        let mut gate = SweepLogGate::default();
+        for _ in 0..3 {
+            gate.failure();
+        }
+        assert!(gate.success());
+        // A new outage starts counting from zero, not from the logged flag.
+        assert!(!gate.failure());
+        assert!(!gate.failure());
+        assert!(gate.failure());
+    }
+
     fn graph(nodes: &str) -> String {
         format!(r#"{{"entries": [{nodes}]}}"#)
+    }
+
+    #[test]
+    fn done_sessions_collect_from_done_merged_and_completed_nodes() {
+        // x-9052 AC1-HP: the three terminal spellings all contribute, and a
+        // live node contributes none.
+        let doc = graph(
+            r#"{"id":"a","status":"done","sessions":[{"harness":"codex","session_id":"s1"}]},
+               {"id":"b","status":"in_review","merge_status":"merged","sessions":[{"harness":"claude","session_id":"s2"}]},
+               {"id":"c","status":"ready","completed_at":"2026-09-01","sessions":[{"harness":"agy","session_id":"s3"}]},
+               {"id":"d","status":"ready","sessions":[{"harness":"codex","session_id":"s4"}]},
+               {"id":"e","_status":"done","sessions":[{"harness":"agy","session_id":"s5"}]}"#,
+        );
+        let done = done_session_ids_from(&doc);
+        assert_eq!(
+            done.len(),
+            4,
+            "done+merged+completed+_status contribute; ready does not"
+        );
+        for pair in [("codex", "s1"), ("claude", "s2"), ("agy", "s3")] {
+            assert!(
+                done.contains(&(pair.0.to_string(), pair.1.to_string())),
+                "missing {pair:?}: {done:?}"
+            );
+        }
+        assert!(!done.contains(&("codex".into(), "s4".into())));
+        assert!(done.contains(&("agy".into(), "s5".into())));
+    }
+
+    #[test]
+    fn done_sessions_fail_open_on_bad_shapes() {
+        // x-9052 AC2-EDGE: a torn document, a missing graph, a node without
+        // sessions, a string session - all read as EMPTY, never as a partial
+        // truth restore would act on.
+        assert!(done_session_ids_from("not json at all").is_empty());
+        assert!(done_session_ids_from("{}").is_empty());
+        assert!(done_session_ids_from(&graph(
+            r#"{"id":"a","status":"done","sessions":[{"harness":"codex"}]}"#
+        ))
+        .is_empty());
+        assert!(done_session_ids_from(&graph(
+            r#"{"id":"a","status":"done","sessions":["plain-string"]}"#
+        ))
+        .is_empty());
     }
 
     /// The graph as five projects' work plus one unscoped node, the shape the

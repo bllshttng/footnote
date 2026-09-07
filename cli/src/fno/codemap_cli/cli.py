@@ -2,8 +2,9 @@
 
 Thin wrapper around ``repo_map.py`` (the analysis engine) and ``db-schema.py``
 (optional DB-aware companion), both of which sit next to this module. The
-wrapper preserves byte-equivalent output so callers that already rely on
-.fno/codemap.md (blueprint, target, operator, megawalk) keep working.
+wrapper preserves byte-equivalent output so callers that already read
+codemap.md (blueprint, target, operator, megawalk) keep working; the file
+lives in the repo's space, resolved by ``fno-agents state path codemap``.
 
 The engines live INSIDE the package, not under the repo's ``scripts/``, because
 they are fno's own analysis code and must be found wherever fno is installed.
@@ -123,7 +124,7 @@ ENGINE_DIR = Path(__file__).resolve().parent
 
 app = typer.Typer(
     name="codemap",
-    help="Generate AST+PageRank codebase map (writes to .fno/codemap.md by default).",
+    help="Generate AST+PageRank codebase map (writes codemap.md into the repo's space by default).",
     invoke_without_command=True,
 )
 
@@ -135,7 +136,7 @@ def codemap(
         None,
         "--output",
         "-o",
-        help="Output path. Defaults to .fno/codemap.md under the repo root.",
+        help="Output path. Defaults to codemap.md in the repo's space (worktree slice).",
     ),
     tokens: int = typer.Option(2048, "--tokens", help="Token budget for the map."),
     repo: Optional[Path] = typer.Option(
@@ -175,16 +176,14 @@ def codemap(
             err=True,
         )
         raise typer.Exit(code=EXIT_USAGE)
-    # Default output path discrimination:
-    #   * --json without --output -> .fno/codemap.json so a JSON
-    #     run never overwrites the canonical markdown artifact (Codex P2).
-    #   * --repo without --output -> write to the ANALYZED repo's
-    #     .fno/codemap.md so downstream skills in that repo find
-    #     the artifact they expect (Codex P2).
+    # Default output path: the analyzed repo's worktree space slice, so a JSON
+    # run never overwrites the canonical markdown artifact (Codex P2) and
+    # downstream skills in that repo find the artifact they expect.
     if output is None:
-        anchor_repo = target_repo
+        from fno.paths import worktree_space_dir
+
         out_name = "codemap.json" if json_output else "codemap.md"
-        out_path = anchor_repo / ".fno" / out_name
+        out_path = worktree_space_dir(target_repo) / out_name
     else:
         out_path = output
     out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -72,3 +72,48 @@ fn thread_pane_placement_field_is_additive() {
     let back: ControlVerb = serde_json::from_str(&serde_json::to_string(&verb).unwrap()).unwrap();
     assert_eq!(verb, back);
 }
+
+#[test]
+fn thread_reseat_verb_decodes_both_portal_forms() {
+    // (v72) A pre-v72 client never sends ThreadReseat; the verb is NEW, so
+    // the pin is its wire shape: the bare pane form (portal defaults) and
+    // the explicit index form must both decode and round-trip.
+    let bare: ControlVerb = serde_json::from_str(r#"{"ThreadReseat":{"pane":42}}"#).unwrap();
+    match bare {
+        ControlVerb::ThreadReseat { pane, portal } => {
+            assert_eq!(pane, 42);
+            assert_eq!(portal, None, "an absent index takes the next free portal");
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+    let verb = ControlVerb::ThreadReseat {
+        pane: 42,
+        portal: Some(3),
+    };
+    let back: ControlVerb = serde_json::from_str(&serde_json::to_string(&verb).unwrap()).unwrap();
+    assert_eq!(verb, back);
+}
+
+#[test]
+fn layout_slot_portal_field_is_additive() {
+    // (v73) A pre-v73 build has no `portal` on LayoutSlot: a slot JSON
+    // without it decodes to the plain shell it already is, and a slot
+    // carrying a seat round-trips. The field is additive, so v73 moves
+    // only the pin; floor stays 58.
+    let pre_v73 = r#"{"name":"portal1","binding":"shell"}"#;
+    let slot: LayoutSlot = serde_json::from_str(pre_v73).unwrap();
+    assert_eq!(slot.name, "portal1");
+    assert_eq!(slot.binding, LayoutBinding::Shell);
+    assert_eq!(slot.portal, None);
+    let seated = LayoutSlot {
+        name: "portal1".into(),
+        binding: LayoutBinding::Shell,
+        cwd: None,
+        portal: Some(PortalSlot {
+            index: 1,
+            row: "deadbee1".into(),
+        }),
+    };
+    let back: LayoutSlot = serde_json::from_str(&serde_json::to_string(&seated).unwrap()).unwrap();
+    assert_eq!(seated, back);
+}

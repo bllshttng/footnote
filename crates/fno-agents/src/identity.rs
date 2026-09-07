@@ -59,6 +59,51 @@ pub(crate) fn session_handle_tier(token: &str, session_id: &str) -> Option<u8> {
     .map(|tier| tier as u8)
 }
 
+/// Whether an id's shape can definitively name `harness`. Only claude
+/// (UUIDv4), codex (time-prefixed UUIDv7), and opencode (`ses_`) ids carry a
+/// known shape; grok and pi threads run fno-minted UUIDv4s under their own
+/// harness, so a v4 shape alone cannot convict them of being claude.
+pub(crate) fn shape_known_harness(harness: &str) -> bool {
+    matches!(harness, "claude" | "codex" | "opencode")
+}
+
+/// The harness an id's own shape names, or None when the shape is silent.
+/// Parity with Python `fno.harness_identity.harness_of_session_id`: the
+/// keeper re-validates under the lock, so the two rules must agree or one
+/// side accepts a stamp the other refuses.
+pub(crate) fn harness_of_session_id(session_id: &str) -> Option<&'static str> {
+    let sid = session_id.trim();
+    if sid.is_empty() {
+        return None;
+    }
+    let bytes = sid.as_bytes();
+    if sid.starts_with("ses_") && bytes[4..].iter().all(|b| b.is_ascii_alphanumeric()) {
+        return Some("opencode");
+    }
+    // 8-4-4-4-12 hex; the version nibble is the first hex of group three.
+    let groups: Vec<&str> = sid.split('-').collect();
+    if groups.len() == 5
+        && [
+            groups[0].len(),
+            groups[1].len(),
+            groups[2].len(),
+            groups[3].len(),
+            groups[4].len(),
+        ] == [8, 4, 4, 4, 12]
+        && groups
+            .iter()
+            .all(|g| !g.is_empty() && g.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        let version = groups[2].as_bytes()[0].to_ascii_lowercase();
+        return match version {
+            b'4' => Some("claude"),
+            b'7' => Some("codex"),
+            _ => None,
+        };
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

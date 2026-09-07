@@ -28,6 +28,7 @@ Exceptions:
     ClaimGoneAway   - file disappeared mid-operation
     ClaimValidationError - invalid input (ttl out of range, key too long, ...)
 """
+
 from __future__ import annotations
 
 from .core import (
@@ -38,6 +39,8 @@ from .core import (
     ClaimGoneAway,
     ClaimHeldByOther,
     ClaimValidationError,
+    ClaimVerdictError,
+    ClaimVerdictUnavailable,
     HolderMismatch,
     RebindRefused,
     acquire_claim,
@@ -69,6 +72,8 @@ __all__ = [
     "ClaimHeldByOther",
     "ClaimState",
     "ClaimValidationError",
+    "ClaimVerdictError",
+    "ClaimVerdictUnavailable",
     "DEFAULT_LANE_TTL_MS",
     "HolderMismatch",
     "LANE_HOLDER_PREFIX",

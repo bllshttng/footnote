@@ -1,4 +1,5 @@
 //! `fno-agents` substrate crate (Phase 6, ab-a09e1eaf).
+#![recursion_limit = "512"]
 //!
 //! This crate is the Rust substrate for PTY-managed agents (codex / gemini /
 //! future OpenCode). It is split per the design's Locked Decisions:
@@ -39,14 +40,20 @@
 //!   (the per-CLI [`readiness::ReadinessDetector`] impls now live in
 //!   [`readiness`]).
 
+// daemon.rs's `agent.list` row is one json! literal with a key set pinned by
+// schemas/agents-list-row.json; the crate-level recursion_limit above covers
+// the macro expansion since `spawned_by_session` joined the contract.
+
 pub mod active_backlog;
 mod agent_lock;
 pub mod agents_config;
 pub mod agy_ask;
+pub mod attach;
 pub mod bash_census;
 mod bounded_spawn;
 mod cancel_sentinel;
 pub mod check_supersession;
+pub mod claim_verbs;
 pub mod claims;
 pub mod claude_adopt;
 pub mod claude_ask;
@@ -63,18 +70,25 @@ pub mod codex_ask;
 pub mod codex_fake_daemon;
 pub mod codex_inject;
 pub mod codex_thread;
+mod codex_thread_entry;
 mod completion_output;
 pub mod cursor_agent;
 pub mod daemon;
 pub mod delivery_completion;
 pub mod digest;
+pub mod disposition_gate;
+mod distress;
 pub mod drift;
 pub mod envelope;
 pub mod events;
 pub mod events_limits;
+pub mod feed;
 pub mod finalize;
 pub mod gc;
+pub mod gc_sweep;
 pub mod gemini_ask;
+#[cfg(test)]
+mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
 pub mod graph_store;
@@ -84,10 +98,13 @@ pub mod heal;
 mod identity;
 pub mod interrupt_classify;
 pub mod kill_criteria;
+pub mod king_board;
+pub mod king_termination;
 pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;
 pub mod loop_king;
+pub mod loop_reign;
 pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
@@ -95,11 +112,17 @@ pub mod mail_inject;
 pub mod manifest;
 pub mod manifest_lookup;
 pub mod merge_posture;
+pub mod merge_reap;
+#[cfg(test)]
+#[path = "mint_guard_tests.rs"]
+mod mint_guard_tests;
 pub mod model_env_scrub;
 pub mod needs;
 pub mod nudge;
 pub mod opencode_ask;
 pub mod opencode_serve;
+pub mod operator_notice;
+pub mod orphan_reap;
 pub mod osc;
 pub mod pane_keeper;
 pub mod pane_relaunch;
@@ -120,15 +143,20 @@ pub mod run_outcome;
 pub mod run_state;
 pub mod scrape;
 pub mod screen;
+pub mod session_names_fold;
 pub mod session_start_bytes;
+pub mod single_flight;
 pub mod spawn_gate;
 pub mod spawn_payload;
 pub mod state;
+pub mod state_path;
 pub mod stream_worker;
 pub mod subprocess_ask;
 pub mod subscribe;
 pub mod supervisor;
 pub mod terminal_stop;
+pub mod tick_ledger;
+pub mod truth_probe;
 pub mod usage;
 pub mod verify_evidence;
 pub mod version;
@@ -390,6 +418,29 @@ fn raw_monotonic_nanos() -> u64 {
 #[cfg(test)]
 pub static PATH_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Hold [`PATH_TEST_MUTEX`] for the rest of the scope, poisoning ignored: a
+/// panicking test leaves the env restored by its own guard, so refusing the
+/// lock afterwards would fail every later test instead of the broken one.
+#[cfg(test)]
+pub fn path_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    PATH_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The process `PATH` with `dir` in front. PREPEND, never replace: PATH is
+/// process-global, so a test that replaces it takes the system tools away from
+/// every concurrent test in the binary, and a stub only needs to win.
+#[cfg(test)]
+pub fn path_with(dir: &std::path::Path) -> std::ffi::OsString {
+    let mut value = std::ffi::OsString::from(dir);
+    if let Some(previous) = std::env::var_os("PATH") {
+        value.push(":");
+        value.push(previous);
+    }
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,6 +525,20 @@ mod tests {
     // surfaces. This test scans every production call site and fails on drift.
 
     // ── fire the registry check HERE, not only in CI ──────────────────────
+    /// The reign events (x-7b36): a king journals these from the session, and
+    /// `fno doctor event audit --type` resolves the name through this table.
+    /// A kind dropped here makes the done-probe read "unknown type", which is
+    /// the absence-lie in audit form.
+    #[test]
+    fn event_table_knows_reign() {
+        for kind in ["reign_armed", "reign_checkin", "reign_dispatch_exception"] {
+            assert!(
+                KNOWN_EVENT_KINDS.contains(&kind),
+                "{kind} missing from KNOWN_EVENT_KINDS"
+            );
+        }
+    }
+
     // `KNOWN_EVENT_KINDS` and `schema.yaml` cannot be generated from each
     // other: the YAML entry carries description/sources/data/consumers the
     // const does not have, and the two sets are a deliberate partition. So
@@ -592,7 +657,18 @@ mod tests {
         // examples inside doc comments in the test module that the byte-level
         // scanner picks up. (Escaped `.emit(\"...\")` in the scanner self-check
         // string is NOT matched: the char after `(` is a backslash, not `"`.)
-        const TEST_ONLY_EMIT_KINDS: &[&str] = &["tick", "heartbeat", "foo", "x"];
+        // `mux_pane_counters`/`operator_decision` are real kinds whose production
+        // emitters live outside this crate (the mux server shells out to the
+        // Python CLI; operator_decision is Python-only); the routing unit tests
+        // in events.rs emit them below the test boundary.
+        const TEST_ONLY_EMIT_KINDS: &[&str] = &[
+            "tick",
+            "heartbeat",
+            "foo",
+            "x",
+            "mux_pane_counters",
+            "operator_decision",
+        ];
         let test_only: BTreeSet<&str> = TEST_ONLY_EMIT_KINDS.iter().copied().collect();
 
         let mut below_only: Vec<String> = Vec::new();
@@ -762,14 +838,36 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_stop_refused",
     "agent_exited",
     "agent_removed",
+    // Served facts (daemon-emitted): the sweep is the only writer of the
+    // registry's measured surfaces, so each of these announces a change that
+    // a reader would otherwise learn from a snapshot field. `agent_renamed`
+    // is the harness's title moving against the row's last-seen baseline
+    // (the label is never rewritten); `agent_model_changed` /
+    // `agent_effort_changed` are PostModelSwitch axis changes verified by
+    // the report write; `session_aliases_merged` is the session-names
+    // overlay folding legible aliases onto rows.
+    "agent_renamed",
+    "agent_model_changed",
+    "agent_effort_changed",
+    "session_aliases_merged",
     "merge_cleanup_requested",
     "merge_cleanup_completed",
     "merge_cleanup_refused",
+    // Merge reaper (daemon-emitted, x-07dc): a pending request was HELD (the
+    // node reads open, the list is empty, or the graph would not read) and is
+    // retried next pass; a request aged past its expiry window and is
+    // tombstoned; a row's harness was stopped ahead of its registry removal.
+    "merge_cleanup_held",
+    "merge_cleanup_expired",
+    "merge_reaper_stopped",
     "agent_inconsistent",
     "agent_ask_done",
     "agent_create_no_session",
     "agent_orphan_reaped",
     "agent_orphan_state_archived",
+    // Orphaned-test-binary reap sweep (daemon-emitted): one event per pid
+    // the footprint verb killed on the daemon's behalf.
+    "orphan_test_binary_reaped",
     // Late bind (daemon-emitted, x-9de7 task 2): a pane-hosted codex row whose
     // spawn-time bind window expired got its `harness_session_id` resolved on
     // a later reconcile tick, from the pane-tree rollout probe. Makes "the row
@@ -791,6 +889,16 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // `agent_row_reaped` (the GC door's own event); this fires for every
     // door, including ones nobody has enumerated yet.
     "registry_row_removed",
+    // One lossy save, grouped (x-f0d2): the writer, pid, verb, and every
+    // lost id in one event, beside the per-row receipts above, so a save
+    // that drops rows can never vanish without a door being named.
+    "registry_rows_lost",
+    // Orphan process sweep (daemon-emitted): the row GC beside it reaps
+    // registry ROWS, this reaps the `fno-py` children that init inherited and
+    // nobody was waiting on. Emitted on EVERY run including the ones that reap
+    // nothing, because a reaper that speaks only when it kills cannot be told
+    // apart from a reaper that never ran.
+    "orphan_reap_sweep",
     // Worktree report sweep (daemon-emitted, x-5a30): one line per repo per 24h
     // saying what `fno agents workspace worktree cleanup --merged` WOULD archive. Report-only by
     // construction, because a timer tick is not proof that work landed; removal
@@ -807,6 +915,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Dead-row GC also reconstructs the loop's canonical failure event when a
     // convention-named dispatch disappeared without a termination receipt.
     "node_failed",
+    // The merge reaper (x-07dc) emits the same kind the cleanup verb does when
+    // it takes a merged node's tree, so one removal, one event, wherever the
+    // caller lives.
+    "worktree_removed",
     // Terminal-stop sweep (daemon-emitted, x-fcbf): a fire-and-forget
     // `claude --bg` worker that finalize marked terminal was `claude stop`ped so
     // its slot frees instead of parking at an idle prompt forever.
@@ -855,6 +967,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "reconcile_deferred",
     "reconcile_done",
     "reconcile_error",
+    // Reign (king-emitted, x-7b36): the tenured-king skill journals these from
+    // the reigning session; audit resolves the names through this table.
+    "reign_armed",
+    "reign_checkin",
+    "reign_dispatch_exception",
     // Startup reconcile sweep (daemon-emitted, plan ab-70faa65b Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",
@@ -904,6 +1021,15 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // active_backlog decision events above, this is an EventEmitter emit, so it
     // is a first-class registered kind.
     "dispatch_deferred",
+    // Control-plane arms readout (x-1b88): the supervisor-level
+    // active_backlog tick row is an EventEmitter emit (the mission-level rows
+    // ride Journal::append and are exempt like the drain decision events).
+    "control_plane_tick",
+    // Evals demand (x-ab72, Python-emitted from the pr-watch tick's evals
+    // leg): the scheduled regression-tier run's outcome, and the could-not-
+    // fire row whose journal entries are the operator-notice rate bound.
+    "evals_scheduled_run",
+    "evals_stale",
     // Meta (daemon/worker-emitted)
     "event_payload_too_large",
     // Inside-leg state push (daemon-emitted, inside-out E3.2): a per-turn hook
@@ -924,6 +1050,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // verdict was stored/refreshed/cleared on a hook-less mux row, or a
     // provider's manifest failed to load.
     "screen_state_change",
+    // CI heal drive loop (pr-heal verb, x-974c): one row per --all --apply
+    // invocation carrying the per-tick counts, so the arm is visible in the
+    // journal even on a quiet cycle. Emitted even when every PR is skipped,
+    // for the same reason worktree_sweep is: a quiet repo must not read as a
+    // loop that never ran. The Python tick emits nothing for this family.
+    "pr_heal_tick",
     // NOTE: the a2a status-breakpoint kinds (task_started/task_done/blocked/
     // run_summary, x-dbaf) are NOT registered here. They are Python-defined in
     // cli/src/fno/events/schema.yaml; the parity gate partitions names (a kind
@@ -968,7 +1100,7 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "python", "skill_diff", "subagent", "target", "test"] },
+                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "python", "skill_diff", "subagent", "target", "test"] },
                         { "pattern": "^(worker|stream-worker):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"

@@ -5,9 +5,9 @@ Three layers covered:
 2. CLI flag ``--claims ab-XXX`` (runtime override; beats frontmatter).
 3. Title-similarity warning at intake when no claim was declared.
 
-The intake handler updates an existing idea-state node in place when a claim
-resolves; refuses non-idea targets; appends a fresh node when no claim is
-declared. The similarity scan runs only on the append path.
+The intake handler binds a plan to an existing node in any state when a
+claim resolves; appends a fresh node when no claim is declared. The
+similarity scan runs only on the append path.
 """
 from __future__ import annotations
 
@@ -641,15 +641,14 @@ def test_warn_similar_nodes_intake_hint_names_idea_state_top_candidate(capsys):
     assert re.search(r"--claims\s+idea1", err)
 
 
-def test_warn_similar_nodes_intake_hint_omits_claims_when_top_not_idea(capsys):
-    # Top candidate is done (not claimable upstream); the intake remedy informs
-    # only, no --claims hint.
+def test_warn_similar_nodes_intake_hint_names_claims_for_non_idea_top(capsys):
+    # Top candidate is done; intake can still claim it in place, so the
+    # remedy names the re-file hint.
     done_top = _node("done1", title="already shipped feature exactly twin", status="done", pr_number=9)
     new = _node("new", title="already shipped feature exactly", status="idea")
     _warn_similar_nodes(new, [done_top], intake_hint=True)
     err = capsys.readouterr().err
-    assert "--claims" not in err
-    assert "supersede" in err.lower()
+    assert "--claims done1" in err
 
 
 def test_warn_similar_nodes_without_intake_hint_omits_claims(capsys):
@@ -963,16 +962,39 @@ def test_intake_with_cli_claim_wins_over_frontmatter(fixture_graph, tmp_path, ca
     assert next(e for e in entries if e["id"] == "ab-1dea1234")["plan_path"] is None
 
 
-def test_intake_refuses_non_idea_target(fixture_graph, tmp_path, capsys):
-    plan = _write_quick_plan(tmp_path)
-    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
-        _intake_impl(plan_paths=[str(plan)], claims="ab-d0ne5678")
-    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) != 0
-    err = capsys.readouterr().err
-    assert "ab-d0ne5678" in err
-    # Graph unchanged.
-    entries = _read_entries(fixture_graph)
-    assert next(e for e in entries if e["id"] == "ab-d0ne5678")["plan_path"] == "plans/already.md"
+def test_intake_claims_non_idea_nodes(fixture_graph, tmp_path, capsys):
+    graph_file = fixture_graph
+    entries = _read_entries(graph_file)
+    entries.append(
+        _node(
+            "ab-1e5e0001",
+            title="Mid-flight feature",
+            status="in_progress",
+            locked_by="other-session",
+            locked_at="2026-09-05T00:00:00+00:00",
+        )
+    )
+    entries.append(_node("ab-b10cced1", title="Parked feature", status="blocked"))
+    graph_file.write_text(json.dumps({"entries": entries}) + "\n")
+
+    in_flight_dir = tmp_path / "in_flight"
+    parked_dir = tmp_path / "parked"
+    in_flight_dir.mkdir()
+    parked_dir.mkdir()
+    in_flight_plan = _write_quick_plan(
+        in_flight_dir, title="Bind the running node", claims="ab-1e5e0001"
+    )
+    parked_plan = _write_quick_plan(
+        parked_dir, title="Bind the parked node", claims="ab-b10cced1"
+    )
+    _intake_impl(plan_paths=[str(in_flight_plan)])
+    _intake_impl(plan_paths=[str(parked_plan)])
+    capsys.readouterr()
+    by_id = {e["id"]: e for e in _read_entries(graph_file)}
+    assert by_id["ab-1e5e0001"]["plan_path"] == str(in_flight_plan)
+    assert by_id["ab-1e5e0001"]["locked_by"] == "other-session"
+    assert by_id["ab-1e5e0001"]["locked_at"] == "2026-09-05T00:00:00+00:00"
+    assert by_id["ab-b10cced1"]["plan_path"] == str(parked_plan)
 
 
 def test_intake_invalid_claim_value_exits_nonzero(fixture_graph, tmp_path, capsys):

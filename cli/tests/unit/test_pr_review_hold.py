@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from fno.claims.core import acquire_claim
+from fno.claims.io import claim_path, read_claim_file, serialize_claim
+from fno.claims.types import now_ms
 from fno.pr import _review_hold
 from fno.pr._proc import Result, ToolMissing
 
@@ -42,6 +44,12 @@ def _worktree_list(entries):
         block += "detached\n" if branch is None else f"branch refs/heads/{branch}\n"
         blocks.append(block)
     return Result(returncode=0, stdout="\n".join(blocks) + "\n", stderr="")
+
+
+def _expire_claim(root: Path, key: str) -> None:
+    path = claim_path(key, root=root)
+    claim = read_claim_file(path)
+    path.write_text(serialize_claim(claim.model_copy(update={"expires_at": now_ms() - 1})))
 
 
 NO_WORKTREE = _fake_git({"worktree": _worktree_list([])})
@@ -132,9 +140,7 @@ def test_expired_hold_clears_but_never_silently(tmp_path: Path, monkeypatch, cap
         pid=DEAD_PID,
         root=tmp_path,
     )
-    from fno.claims import staleness
-
-    monkeypatch.setattr(staleness, "now_ms", lambda: 99_999_999_999_999)
+    _expire_claim(tmp_path, _review_hold.review_hold_key("feature/x"))
     emitted: list[dict] = []
     monkeypatch.setattr(_review_hold, "_emit_expired", lambda **kw: emitted.append(kw))
 
@@ -455,7 +461,7 @@ def test_release_clears_a_corrupted_lockfile(tmp_path: Path):
 
 
 def test_an_expired_hold_is_deleted_in_the_same_breath_as_its_receipt(
-    tmp_path: Path, monkeypatch, capsys
+    tmp_path: Path, capsys
 ):
     """The lapsed lockfile stops blocking HERE but still blocks the stdlib hook,
     which cannot judge expiry and denies on the file's mere presence. One
@@ -466,9 +472,7 @@ def test_an_expired_hold_is_deleted_in_the_same_breath_as_its_receipt(
 
     key = _review_hold.review_hold_key("feature/x")
     acquire_claim(key, "reviewer:sess-1", ttl_ms=60_000, pid=DEAD_PID, root=tmp_path)
-    from fno.claims import staleness
-
-    monkeypatch.setattr(staleness, "now_ms", lambda: 99_999_999_999_999)
+    _expire_claim(tmp_path, key)
 
     activity = _review_hold.review_activity(
         "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=NO_WORKTREE
@@ -477,3 +481,154 @@ def test_an_expired_hold_is_deleted_in_the_same_breath_as_its_receipt(
     assert "expired" in capsys.readouterr().err
     assert not claim_path(key, root=tmp_path).exists()
     assert claim_status(key, root=tmp_path)["state"] == "free"
+
+
+# ---- the review-cap invocation gate ----
+#
+# The two-round cap was enforced at the merge decision only, so rounds three
+# through five ran against a saturated, visible counter. The invocation gate
+# refuses a NEW hunting round at the spent budget, with the two carveouts the
+# attestation law grants: a scoped fix-verification (--verify-fixes is not a
+# round), and a rebase delta at or over the interdiff budget.
+
+
+def _chain_event(head: str, base: str) -> dict:
+    return {
+        "ts": "2026-09-04T12:00:00Z",
+        "head_sha": head,
+        "reviewed_base_sha": base,
+        "verdict": "pass",
+        "review_round": None,
+        "findings": [],
+        "findings_truncated": False,
+        "dispositions": [],
+    }
+
+
+def _spent_chain(last_head: str) -> list[dict]:
+    base = "b" * 40
+    return [
+        _chain_event("a" * 40, base),
+        _chain_event(last_head, base),
+    ]
+
+
+@pytest.fixture()
+def spent_gate(monkeypatch):
+    """Point the gate's chain read at a fixture and pin the budget at 2."""
+
+    def install(chain: list[dict]) -> None:
+        import fno.pr._coverage_gate as gate
+
+        monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: chain)
+        monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+
+    return install
+
+
+def test_fresh_budget_does_not_refuse(monkeypatch, tmp_path: Path) -> None:
+    import fno.pr._coverage_gate as gate
+
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: _spent_chain("b" * 40)[:1])
+    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    assert _review_hold.review_invocation_refusal("feature/x", "b" * 40, cwd=str(tmp_path)) == ""
+
+
+def test_spent_cap_refuses_a_new_round_at_the_same_head(monkeypatch, tmp_path: Path) -> None:
+    import fno.pr._coverage_gate as gate
+
+    last = "b" * 40
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: _spent_chain(last))
+    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    refusal = _review_hold.review_invocation_refusal("feature/x", last, cwd=str(tmp_path))
+    assert "the configured round cap is spent" in refusal
+    assert "merge on green CI" in refusal
+    assert "--verify-fixes" in refusal
+
+
+def test_verify_fixes_flag_passes_at_the_cap(monkeypatch, tmp_path: Path) -> None:
+    import fno.pr._coverage_gate as gate
+
+    last = "b" * 40
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: _spent_chain(last))
+    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    flags = ["--verify-fixes"]
+    assert _review_hold.review_invocation_refusal("feature/x", last, flags=flags, cwd=str(tmp_path)) == ""
+
+
+def test_rebase_delta_over_the_budget_passes_at_the_cap(monkeypatch, tmp_path: Path) -> None:
+    import fno.pr._coverage_gate as gate
+
+    last = "b" * 40
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: _spent_chain(last))
+    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    monkeypatch.setattr(_review_hold, "_interdiff_lines", lambda *a, **k: 250)
+    moved = "c" * 40
+    assert _review_hold.review_invocation_refusal("feature/x", moved, cwd=str(tmp_path)) == ""
+
+
+def test_rebase_delta_under_the_budget_still_refuses(monkeypatch, tmp_path: Path) -> None:
+    import fno.pr._coverage_gate as gate
+
+    last = "b" * 40
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: _spent_chain(last))
+    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    # A one-line fix commit moved the head: that is a round by any honest
+    # reading, and a sub-budget interdiff must not mint a free one.
+    monkeypatch.setattr(_review_hold, "_interdiff_lines", lambda *a, **k: 6)
+    moved = "c" * 40
+    assert "the configured round cap is spent" in _review_hold.review_invocation_refusal(
+        "feature/x", moved, cwd=str(tmp_path)
+    )
+
+
+def test_unmeasurable_interdiff_fails_open(monkeypatch, tmp_path: Path) -> None:
+    import fno.pr._coverage_gate as gate
+
+    last = "b" * 40
+    monkeypatch.setattr(gate, "attestation_chain", lambda *a, **k: _spent_chain(last))
+    monkeypatch.setattr(gate, "resolved_max_rounds", lambda cwd=None: 2)
+    # The gate blocks policy, not git problems: an unreadable measure must
+    # never wedge the review lane shut.
+    monkeypatch.setattr(_review_hold, "_interdiff_lines", lambda *a, **k: None)
+    moved = "c" * 40
+    assert _review_hold.review_invocation_refusal("feature/x", moved, cwd=str(tmp_path)) == ""
+
+
+def test_interdiff_mirror_matches_the_rust_fixture_numbers(tmp_path: Path) -> None:
+    """The Python interdiff is a mirror of review_freshness.rs, held to the
+    same fixture the Rust tests use: a 5-then-8 line rewrite measures 13, a
+    60-then-95 line rewrite measures 155. If the two implementations drift,
+    the invocation gate and the freshness gate answer one rebase differently."""
+    import subprocess
+
+    def git(repo: Path, *args: str) -> str:
+        out = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True)
+        return out.stdout.decode().strip()
+
+    def changed_repo(lines: int, head_lines: int) -> tuple[Path, str, str]:
+        repo = tmp_path / f"r{lines}-{head_lines}"
+        repo.mkdir()
+        git(repo, "init", "-q", "-b", "main")
+        git(repo, "config", "user.email", "t@t")
+        git(repo, "config", "user.name", "t")
+        (repo / "f.txt").write_text("".join(f"base{i}\n" for i in range(1, 101)))
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "base")
+        # Pin the base the way the Rust fixture does: the branch moves with
+        # every commit, so an unpinned base ref diffs against itself.
+        git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        (repo / "f.txt").write_text("".join(f"rev{i}\n" for i in range(1, lines + 1)))
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "reviewed")
+        reviewed = git(repo, "rev-parse", "HEAD")
+        (repo / "f.txt").write_text("".join(f"head{i}\n" for i in range(1, head_lines + 1)))
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "head")
+        head = git(repo, "rev-parse", "HEAD")
+        return repo, reviewed, head
+
+    repo, reviewed, head = changed_repo(5, 8)
+    assert _review_hold._interdiff_lines(str(repo), "origin/main", reviewed, head) == 13
+    repo, reviewed, head = changed_repo(60, 95)
+    assert _review_hold._interdiff_lines(str(repo), "origin/main", reviewed, head) == 155

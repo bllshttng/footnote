@@ -40,9 +40,11 @@ def _resolve_path(path: Optional[Path], type_: Optional[str]) -> Path:
     if path is not None:
         return Path(path)
     repo_root = _v2_repo_root()
-    if type_ is not None:
-        return repo_root / ".fno" / f"{type_}-state.md"
-    return repo_root / ".fno" / "target-state.md"
+    if type_ is None or type_ == "target":
+        from fno.paths import target_state_path_or_legacy
+
+        return target_state_path_or_legacy(repo_root)
+    return repo_root / ".fno" / f"{type_}-state.md"
 
 
 def _detect_type(path: Path) -> str:

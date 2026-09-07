@@ -171,6 +171,8 @@ def receipt(project_id: str, state_dir: str) -> str:
         f"project {project_id}: isolated\n"
         f"  state_dir  {state_dir}   "
         "(graph, ledger, briefs, agent registry, mail bus)\n"
+        "  The only fno file left in the checkout is .fno/config.toml; session\n"
+        "  state lives in the repo's space.\n"
         "  NOT isolated: the claude daemon namespace and any codex app-server.\n"
         "  Those are machine-global and fno does not own them. A session started here\n"
         "  shares them with your real fleet, so an ambient identity marker crosses this\n"

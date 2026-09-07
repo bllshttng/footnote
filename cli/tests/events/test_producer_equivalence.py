@@ -93,7 +93,11 @@ def _head(repo: Path) -> str:
 
 
 def _events(repo: Path) -> list[dict]:
-    path = repo / ".fno" / "events.jsonl"
+    """The journal the producers resolve (the repo's space, via the accessor);
+    a legacy checkout path goes quiet once a writer migrates it."""
+    from fno.paths import project_log
+
+    path = project_log("events.jsonl", project_root=repo)
     if not path.exists():
         return []
     return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]

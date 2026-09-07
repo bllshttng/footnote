@@ -7,8 +7,8 @@ hand-mangled file - triggers a FULL rebuild (~45 ms, ~9 MB) into a temp file
 that atomically replaces the index. There is NO incremental write path, by
 design: incremental sync means two writers, a drift window, and a stale index
 that answers confidently. This codebase's most-repeated defect class is a
-snapshot that lied; a hash gate plus a disposable cache is the shape that
-cannot lie - the worst case is a slow read, never a wrong one.
+snapshot that lied; a hash cache key plus a disposable cache is the shape
+that cannot lie - the worst case is a slow read, never a wrong one.
 
 Stdlib sqlite3 only. FTS5 ships in CPython's bundled sqlite on the common
 platforms; where it does not, :class:`SearchUnavailableError` lets the caller
@@ -16,6 +16,7 @@ degrade to the substring lane instead of failing.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import tempfile
@@ -34,14 +35,14 @@ class SearchUnavailableError(RuntimeError):
 
 
 def index_path(graph_path: Path) -> Path:
-    """The cache lives beside the graph, like the .sha256 sidecar."""
+    """The cache lives beside the graph."""
     return Path(str(graph_path) + ".fts5")
 
 
 def _graph_hash(graph_path: Path) -> str:
-    from fno.graph.load import _sha256_file
-
-    return _sha256_file(graph_path)
+    # A cache key, not a gate: the hash decides when to rebuild, never
+    # whether the graph is readable.
+    return hashlib.sha256(graph_path.read_bytes()).hexdigest()
 
 
 def _fts5_supported() -> bool:

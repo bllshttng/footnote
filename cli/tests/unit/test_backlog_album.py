@@ -178,8 +178,9 @@ def test_absent_archive_is_empty_not_an_error(tmp_path, monkeypatch):
 
 def test_legacy_completed_row_without_status_is_a_card(tmp_path, monkeypatch):
     # Pre-status-stamping sweep shape: completed_at is the terminal fact the
-    # archive subsystem itself reads (archive._is_done). A `ready` default
-    # must not evict a shipped card.
+    # archive subsystem itself reads (statuses.is_terminal_entry, which the
+    # album reaches through derived_status). A `ready` default must not evict
+    # a shipped card.
     archive = _route(tmp_path, monkeypatch)
     _seed_archive(
         archive,

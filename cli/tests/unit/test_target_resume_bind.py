@@ -14,8 +14,7 @@ import pytest
 from fno.claims import claim_status
 from fno.claims.hostid import machine_id
 from fno.claims.io import claim_path, serialize_claim
-from fno.claims.staleness import now_ms
-from fno.claims.types import Claim
+from fno.claims.types import Claim, now_ms
 from fno.target import resume_bind as rb
 from fno.target.manifest import manifest_identity
 

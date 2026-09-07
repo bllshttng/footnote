@@ -1,21 +1,13 @@
 """Scope-keyed king manifests and the freshness read.
 
-Why a separate file rather than a ``driver: king`` field on the target manifest.
-A king runs in the canonical checkout, where a target manifest may also exist,
-and a manifest whose name says target while its contents say king is how two
-sessions come to share one discriminator. The stop-hook shim already searches a
-candidate list, so a second candidate is the smaller real cost.
-
-Each crown scope owns ``.fno/kings/<scope>.md``. The registry row is authority:
-a leftover file with no live crown is inert, while a resumed session finds the
-same file through its current registry row instead of an unstable session id.
-
-``last_run_is_fresh`` is the second done-probe. A file test would be vacuous: it
-would pass the moment the manifest existed and say nothing about whether a walk
-ever terminated. This reads the events journal for the newest king
-``loop_terminated`` and asks whether it falls inside a window, which is a claim
-about the world rather than about a file.
+One manifest per crown scope at ``<space>/kings/<scope>.md``, separate from
+any target manifest: one file naming both drivers is how two sessions share
+a discriminator. The manifest is the durable crown record and a registry
+row its cache, so a leftover file is never inert: it is the record heal
+restores a lost row from. ``last_run_is_fresh`` reads the events journal,
+not file mtimes.
 """
+
 from __future__ import annotations
 
 import fcntl
@@ -25,24 +17,19 @@ import re
 import secrets
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-#: Iteration ceiling a king walk is allowed before it terminates on Budget.
-#: A non-converging king should cost a ceiling, not a night.
+#: Iteration ceiling before a walk terminates on Budget.
 DEFAULT_MAX_ITERATIONS = 40
 
-#: Respawn ceiling a crown scope allows before the walk refuses to respawn
-#: another king session and terminates on Budget. Mirrors the target
-#: self-handoff generation cap (default 4): a scope that keeps needing a new
-#: king is a defect to look at, not a loop to fund.
+#: Respawns allowed before the walk refuses another king session.
 DEFAULT_RESPAWN_CEILING = 4
 
-#: Both king arms end a walk, so both satisfy the freshness probe. The walk arm
-#: emits the runtime's ``loop_terminated``; the in-session stop arm emits
-#: ``termination``. Reading only one would report "no king walk in 24h" right
-#: after a king had in fact drained its board and exited.
+#: Both king arms end a walk: the walk arm emits ``loop_terminated``, the
+#: in-session stop arm ``termination``.
 _TERMINAL_TYPES = frozenset({"loop_terminated", "termination"})
 
 _WINDOW = re.compile(r"^(\d+)([smhd]?)$")
@@ -54,11 +41,7 @@ class KingLoopDisabled(RuntimeError):
 
 
 def king_loop_enabled() -> bool:
-    """Resolve ``config.king.enabled``, fail-safe to OFF.
-
-    An unreadable config resolves an autonomous loop to off, matching every
-    other gate resolver here.
-    """
+    """Resolve ``config.king.enabled``, fail-safe to OFF like every gate here."""
     try:
         from fno.config import load_settings
 
@@ -72,26 +55,16 @@ class KingManifestExists(RuntimeError):
 
 
 def king_state_root(cwd: Path | None = None) -> Path:
-    """Return the canonical checkout's ``.fno`` coordination root.
+    """The canonical-keyed coordination root, so a crown never lands in a
+    disposable linked worktree however ``cwd`` is spelled."""
+    from fno.paths import space_dir
 
-    King manifests survive worktree changes and are shared coordination state,
-    so ambient cwd must not move a crown into a disposable linked worktree.
-    """
-    from fno.paths import resolve_canonical_repo_root, resolve_canonical_worktree
-
-    if cwd is None:
-        return resolve_canonical_repo_root() / ".fno"
-    canonical = resolve_canonical_worktree(Path(cwd))
-    return (canonical if canonical is not None else Path(cwd).resolve()) / ".fno"
+    return space_dir(cwd)
 
 
 def king_manifest_path(scope: str, *, state_root: Optional[Path] = None) -> Path:
-    """Return the manifest path for one canonical crown scope.
-
-    Scope is registry data, but it becomes a filename here. Refuse path syntax
-    instead of normalizing it: two spellings of one scope must never select two
-    files, and no scope may escape the state root.
-    """
+    """The manifest path for one scope. Path syntax refuses (never
+    normalizes): two spellings must never select two files."""
     scope = scope.strip()
     if not scope or ".." in scope or "/" in scope or "\\" in scope or "\0" in scope:
         raise ValueError(f"unsafe king scope for manifest path: {scope!r}")
@@ -106,12 +79,8 @@ def resolve_king_manifest_path(
     state_root: Optional[Path] = None,
     registry=None,
 ) -> Optional[Path]:
-    """Resolve this live session's crowned scope to its existing manifest.
-
-    The row, not file presence, proves authority. Any unreadable, missing,
-    terminal, uncrowned, or unsafe reading returns ``None`` so stale state can
-    never capture an unrelated session.
-    """
+    """This live session's crowned manifest. The row, not file presence,
+    proves authority; any unreadable or terminal reading returns None."""
     if not harness_session_id:
         return None
     try:
@@ -135,17 +104,9 @@ def resolve_king_manifest_path(
 
 
 def _transcript_matchable_session_id(value: str) -> bool:
-    """Whether the stop hook's owner guard can ever match this id.
-
-    The guard compares the manifest id against the transcript basename
-    (equality, or a codex ``-<uuid>`` suffix), and every harness names
-    transcripts with a full canonical uuid. A registry short_id (8 hex) or a
-    row name parses fine as an identifier but matches NO transcript ever, so
-    arming with it writes a manifest the guard always rejects: the king's own
-    stop then exits 0 and the gate is silently off. uuid.UUID() alone would
-    accept the 8-hex short form, so the canonical 36-char round-trip is the
-    test.
-    """
+    """Whether the stop hook's owner guard can match this id against a
+    transcript basename: full 36-char uuids only (uuid.UUID() alone also
+    accepts 8-hex short forms, which match no transcript)."""
     try:
         return len(value) == 36 and str(uuid.UUID(value)) == value.lower()
     except (ValueError, AttributeError):
@@ -159,8 +120,20 @@ def arm_king_manifest(
     state_root: Optional[Path] = None,
     owner_pid: Optional[int] = None,
     owner_cwd: Optional[str] = None,
+    crown_level: Optional[int] = None,
+    crown_scope: Optional[str] = None,
+    crown_grantor: Optional[str] = None,
+    row: Any = None,
 ) -> Optional[Path]:
     """Refresh loop state at the moment a crown becomes authoritative."""
+    if row is not None:
+        owner_pid = owner_pid or getattr(row, "pid", None)
+        owner_cwd = owner_cwd or getattr(row, "cwd", None)
+        crown_level = crown_level if crown_level is not None else getattr(row, "crown_level", None)
+        crown_scope = crown_scope if crown_scope is not None else getattr(row, "crown_scope", None)
+        crown_grantor = (
+            crown_grantor if crown_grantor is not None else getattr(row, "crown_grantor", None)
+        )
     if state_root is None:
         state_root = _owner_state_root(owner_cwd)
     if not king_loop_enabled():
@@ -185,6 +158,9 @@ def arm_king_manifest(
             force=True,
             owner_pid=owner_pid,
             owner_cwd=owner_cwd,
+            crown_level=crown_level,
+            crown_scope=crown_scope,
+            crown_grantor=crown_grantor,
         )
         path.with_suffix(".cancelled").unlink(missing_ok=True)
     return path
@@ -234,13 +210,8 @@ def _utc_now() -> str:
 
 
 def mint_fno_id(pid: Optional[int] = None) -> str:
-    """``{ts}-kg{pid}-{6hex}``.
-
-    Three dash-separated segments, matching the target manifest's shape, because
-    ``split('-')[0]`` consumers depend on that count. The provenance infix goes
-    inside segment two rather than becoming a fourth segment, for the same
-    reason.
-    """
+    """``{ts}-kg{pid}-{6hex}``: three dash-separated segments like the target
+    manifest, because ``split('-')[0]`` consumers depend on that count."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{stamp}-kg{pid or os.getpid()}-{secrets.token_hex(3)}"
 
@@ -255,14 +226,15 @@ def write_manifest(
     force: bool = False,
     owner_pid: Optional[int] = None,
     owner_cwd: Optional[str] = None,
+    shape: str = "pass",
+    crown_level: Optional[int] = None,
+    crown_scope: Optional[str] = None,
+    crown_grantor: Optional[str] = None,
 ) -> dict[str, str]:
-    """Write the manifest once. Raises :class:`KingManifestExists` if it is there.
+    """Write the manifest once; raises KingManifestExists if it is there.
 
-    ``respawn_count`` starts at 0 on every write, including a force re-arm:
-    a successor coronation is a new reign generation, so it must not inherit
-    the predecessor's respawn bill. The count is bumped by the walk arm only.
-    ``wake_times`` starts empty for the same reason (see fno.king.wake), and
-    is rewritten by the pr-watch wake phase only.
+    ``respawn_count`` and ``wake_times`` start at 0 (a successor coronation
+    is a new reign generation). ``shape`` rides from birth.
     """
     path = Path(path)
     if path.exists() and not force:
@@ -274,6 +246,7 @@ def write_manifest(
         "fno_id": mint_fno_id(),
         "created_at": _utc_now(),
         "scope": scope,
+        "shape": shape if shape in ("pass", "court") else "pass",
         "harness": os.environ.get("FNO_HARNESS", "claude"),
         "harness_session_id": harness_session_id,
         "owner_pid": str(owner_pid or os.getpid()),
@@ -283,6 +256,12 @@ def write_manifest(
         "respawn_ceiling": str(respawn_ceiling),
         "wake_times": "",
     }
+    if crown_scope:
+        fields.update(
+            crown_level=str(crown_level),
+            crown_scope=crown_scope,
+            crown_grantor=crown_grantor or "human",
+        )
     body = "---\n" + "".join(f"{k}: {_dump(v)}\n" for k, v in fields.items()) + "---\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -318,6 +297,119 @@ def parse_manifest(path: Path) -> dict[str, str]:
     return out
 
 
+def _manifest_int(manifest: dict[str, str], key: str, default: int) -> int:
+    raw = manifest.get(key)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def respawn_ceiling(path: Path) -> int:
+    """Read the manifest ceiling with the Rust walk's default semantics."""
+    return _manifest_int(parse_manifest(path), "respawn_ceiling", DEFAULT_RESPAWN_CEILING)
+
+
+def at_respawn_ceiling(path: Path) -> bool:
+    """Whether the respawn budget is spent; the Rust walk is the authority."""
+    manifest = parse_manifest(path)
+    ceiling = _manifest_int(manifest, "respawn_ceiling", DEFAULT_RESPAWN_CEILING)
+    return ceiling > 0 and _manifest_int(manifest, "respawn_count", 0) >= ceiling
+
+
+@dataclass
+class ReignState:
+    """One read of who reigns, over what, and is it live. Unknowns answer
+    None with ``unknown_reason``, never a clean False."""
+
+    crowned: Optional[bool] = None
+    scope: Optional[str] = None
+    shape: Optional[str] = None
+    manifest_session: Optional[str] = None
+    manifest_path: Optional[str] = None
+    crown_on_manifest: Optional[bool] = None
+    registry_session: Optional[str] = None
+    live: Optional[bool] = None
+    split: Optional[bool] = None
+    unknown_reason: Optional[str] = None
+
+
+def _unknown_state(scope: Optional[str], reason: str) -> ReignState:
+    return ReignState(scope=scope, unknown_reason=reason)
+
+
+def reign_state(
+    scope: Optional[str] = None,
+    session_id: Optional[str] = None,
+    *,
+    state_root: Optional[Path] = None,
+) -> ReignState:
+    """Ask the Rust reign reader (``fno-agents reign-state``) who reigns;
+    Python never derives its own answer. Failures answer unknown, named.
+    """
+    import subprocess
+
+    from fno import paths
+    from fno.rust_binary import resolve_binary
+
+    harness = None
+    if scope is None and not session_id:
+        from fno.agents.self_stamp import resolve_self_identity
+
+        ident = resolve_self_identity()
+        session_id = ident.session_id or ""
+        harness = ident.harness or None
+
+    root = state_root if state_root is not None else _owner_state_root(None)
+    # The Rust reader joins <root>/kings itself; a suffixed root is a phantom path.
+    binary = resolve_binary()
+    if binary is None:
+        return _unknown_state(
+            scope,
+            "fno-agents binary not found: the reign reader lives in Rust. "
+            "Reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN.",
+        )
+    argv = [str(binary), "reign-state", "--root", str(root)]
+    # Alias map resolves from the checkout, not the space dir (no config.toml
+    # there); without this a repo-declared short_name misses its own king.
+    argv += ["--cwd", str(Path.cwd())]
+    if scope:
+        argv += ["--scope", scope]
+    if session_id:
+        argv += ["--session", session_id]
+    if harness:
+        argv += ["--harness", harness]
+    try:
+        argv += ["--registry", str(paths.agents_registry_path())]
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _unknown_state(scope, f"reign reader failed to run: {exc}")
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        return _unknown_state(scope, f"reign reader exited {proc.returncode}: {detail}")
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return _unknown_state(scope, f"reign reader emitted no JSON: {exc}")
+    keys = (
+        "crowned",
+        "shape",
+        "manifest_session",
+        "manifest_path",
+        "crown_on_manifest",
+        "registry_session",
+        "live",
+        "split",
+        "unknown_reason",
+    )
+    return ReignState(
+        **{k: payload.get(k) for k in keys},
+        scope=payload.get("scope") or scope,
+    )
+
+
 def parse_window(window: str) -> int:
     """``24h`` / ``90m`` / ``7d`` / ``30s`` / a bare second count -> seconds."""
     match = _WINDOW.match(window.strip())
@@ -341,13 +433,8 @@ def last_run_is_fresh(
     since_s: int,
     now_iso: Optional[str] = None,
 ) -> bool:
-    """True when a king ``loop_terminated`` landed inside the window.
-
-    Every failure answers False. A missing journal, a corrupt line, and a walk
-    that never ran are all "no evidence a king walk terminated recently", which
-    is what the probe asks. A corrupt line skips itself rather than the file, so
-    one bad row cannot hide a real termination underneath it.
-    """
+    """True when a king ``loop_terminated`` landed inside the window. Every
+    failure answers False (no evidence); a corrupt line skips itself."""
     now = _parse_ts(now_iso) if now_iso else datetime.now(timezone.utc).timestamp()
     if now is None:
         return False

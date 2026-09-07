@@ -74,6 +74,30 @@ def test_no_dispositions_posts_nothing(tmp_path, monkeypatch):
     assert calls == [], "a disposition-free round must not touch the network"
 
 
+def test_direct_call_treats_the_typer_default_as_no_pr(tmp_path, monkeypatch, capsys):
+    findings = tmp_path / "f.json"
+    findings.write_text(json.dumps(_payload(_DISPOSED)), encoding="utf-8")
+    monkeypatch.setattr(
+        "fno.pr._rest._slug_or_reason", lambda *args, **kwargs: ("own/repo", "")
+    )
+    monkeypatch.setattr(
+        "fno.pr._rest.resolve_current_pr_number_rest",
+        lambda: (None, "no PR for branch"),
+    )
+    monkeypatch.setattr(
+        "fno.pr._rest.fetch_pr_info_rest",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must resolve omitted PR")),
+    )
+
+    review_cli.post_dispositions(
+        findings_file=findings,
+        head=HEAD,
+        reviewer="code-review",
+    )
+
+    assert "no PR for branch" in capsys.readouterr().out
+
+
 class _FakeResult:
     def __init__(self, stdout: str = "", returncode: int = 0) -> None:
         self.returncode = returncode
@@ -158,3 +182,25 @@ def test_head_mismatch_refuses(tmp_path, monkeypatch):
     assert result.exit_code == 3
     assert "is not the attested head" in result.output
     assert posts == [], "a refused post must not write"
+
+
+def test_called_as_a_function_with_pr_none_resolves_the_branch_pr(tmp_path, monkeypatch):
+    """The attest path calls this as a plain function. Omitting ``pr`` there
+    hands the Typer OptionInfo default to the REST reader as a PR number, so
+    the caller passes ``pr=None`` and the branch resolver runs instead."""
+    findings = tmp_path / "f.json"
+    findings.write_text(json.dumps(_payload(_DISPOSED)), encoding="utf-8")
+    posts: list = []
+    _stub_rest(monkeypatch, posts)
+    resolved: list = []
+
+    def fake_resolve(**kwargs):
+        resolved.append(True)
+        return 7, ""
+
+    monkeypatch.setattr("fno.pr._rest.resolve_current_pr_number_rest", fake_resolve)
+    review_cli.post_dispositions(
+        findings_file=findings, head=HEAD, reviewer="code-review", pr=None
+    )
+    assert resolved == [True], "pr=None must resolve the branch's PR"
+    assert len(posts) == 1, "the resolved PR takes the round comment"

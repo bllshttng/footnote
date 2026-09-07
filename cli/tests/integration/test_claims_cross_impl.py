@@ -159,12 +159,20 @@ def events(_cwd: Path | None = None) -> list[dict]:
 
     Takes the old cwd argument and ignores it: which file the writers use is the
     property under test, so reading a hand-built `<cwd>/.fno/events.jsonl` would
-    assert the answer instead of observing it.
+    assert the answer instead of observing it. The claim lifecycle kinds are
+    ephemeral-class, so both implementations write them to the journal's
+    ``.ephemeral`` sibling (retention routing); the reader takes both files and
+    the wire contract under test is unchanged - both sides still share one
+    store and its mutex.
     """
-    p = Path(os.environ["FNO_EVENTS_PATH"])
-    if not p.exists():
-        return []
-    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    from fno.paths import journal_and_ephemeral_sibling
+
+    rows: list[dict] = []
+    for p in journal_and_ephemeral_sibling(Path(os.environ["FNO_EVENTS_PATH"])):
+        if not p.exists():
+            continue
+        rows.extend(json.loads(line) for line in p.read_text().splitlines() if line.strip())
+    return rows
 
 
 # --------------------------------------------------------------------------

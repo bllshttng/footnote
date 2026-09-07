@@ -142,11 +142,11 @@ def test_merge_allowed_authorizes_when_live_switch_armed(gp, monkeypatch, tmp_pa
 
 # ---- the coverage veto's refusal set (AC7-ERR / AC7-EDGE) ----
 #
-# The verified trap: `if proc.returncode != 3: return None` fails OPEN on
-# every exit but 3, so an IMPOSSIBLE verdict (exit 5) would silently permit
-# the exact merge it exists to stop. The set is {3, 5}; the fail-open posture
-# for genuine machinery failure (missing binary, timeout, an older
-# deployment's unknown-command exit) is deliberate and stays.
+# The refusal set is {3} and nothing else: exit 5 (the old round-cap lock)
+# is retired - reaching the configured rounds answers COVERED - so a stale
+# deployment's exit 5 fails OPEN like any other unexpected exit. The
+# fail-open posture for genuine machinery failure (missing binary, timeout,
+# an older deployment's unknown-command exit) is deliberate and stays.
 
 
 class _Proc:
@@ -156,21 +156,36 @@ class _Proc:
         self.stdout = ""
 
 
-def test_ac7_err_exit_five_denies_with_the_verbs_first_line(gp, monkeypatch):
+def test_ac7_err_exit_three_denies_with_the_verbs_first_line(gp, monkeypatch):
+    monkeypatch.setattr(
+        gp.subprocess,
+        "run",
+        lambda cmd, **kw: _Proc(
+            3,
+            "blocking finding(s) not terminal: h.py:302:security; a blocking "
+            "finding is cleared by fixing it and letting the next review "
+            "cover the fix delta\nsecond line\n",
+        ),
+    )
+    refusal = gp._fno_veto_refusal(["pr", "coverage-check", "42"], timeout=25, fallback="fb")
+    assert refusal is not None
+    assert refusal.startswith("blocking finding(s) not terminal")
+    assert "h.py:302:security" in refusal
+
+
+def test_retired_exit_five_fails_open(gp, monkeypatch):
+    """A stale fno deployment can still print the old cap refusal: the veto
+    treats every non-3 exit as machinery noise and opens."""
     monkeypatch.setattr(
         gp.subprocess,
         "run",
         lambda cmd, **kw: _Proc(
             5,
-            "review coverage is impossible to satisfy by further review: 3 "
-            "review rounds used (max 2) with blocking finding(s) still "
-            "non-terminal (h.py:302:security)\nsecond line\n",
+            "review coverage impossible: 3 review rounds used\nsecond line\n",
         ),
     )
     refusal = gp._fno_veto_refusal(["pr", "coverage-check", "42"], timeout=25, fallback="fb")
-    assert refusal is not None
-    assert refusal.startswith("review coverage is impossible to satisfy")
-    assert "3 review rounds used" in refusal
+    assert refusal is None
 
 
 def test_ac7_err_exit_three_still_denies(gp, monkeypatch):

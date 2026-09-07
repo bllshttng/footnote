@@ -123,14 +123,24 @@ def test_sent_separates_hosted_audit_from_durable_unclaimed(env):
         row["id"]: (row["delivery"], row["claimed"])
         for row in rows
     } == {
-        hosted: ("hosted", True),
+        # A hosted row has no cursor, so `claimed` is `null` rather than the
+        # unconditional `true` this test used to pin (the bug this node
+        # exists to fix): `is_deliverable` used to exclude hosted rows from
+        # the unclaimed scan entirely, so "not unclaimed" always read as
+        # claimed. See `landed` for what actually proves delivery now.
+        hosted: ("hosted", None),
         durable: ("durable", False),
     }
 
+    # Hosted rows now enter the outstanding scan too (they used to be
+    # excluded by `is_deliverable`, which is why `claimed` could only ever
+    # read `true` on one). With no recorded transcript coordinates on this
+    # test row, the landed check cannot prove it either way, so it stays
+    # outstanding right alongside the durable message.
     unclaimed = json.loads(
         _run("mail", "sent", "--unclaimed", "--json").stdout
     )
-    assert [row["id"] for row in unclaimed] == [durable]
+    assert [row["id"] for row in unclaimed] == [hosted, durable]
 
 
 def test_sent_does_not_call_a_just_sent_message_claimed(env):
@@ -284,7 +294,7 @@ def test_reader_2_sent_unclaimed_stops_counting_it(env):
     forever on a message the sender already retracted -- the exact symptom this
     verb exists to end."""
     from fno.config import load_settings
-    from fno.mail.cli import _sent_unclaimed
+    from fno.mail.landed import _sent_unclaimed
 
     mid = _send(MY_HANDLE, PEER, "retract me", ts=_ts_ago(3600))
     ttl = load_settings().inbox.unclaimed_ttl

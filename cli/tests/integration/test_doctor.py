@@ -29,16 +29,8 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    paths_mod._settings.cache_clear()
-    if hasattr(paths_mod, "resolve_repo_root"):
-        paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
     yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    paths_mod._settings.cache_clear()
-    if hasattr(paths_mod, "resolve_repo_root"):
-        paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
 
 
 def _write_settings(tmp_path: Path, content: str) -> Path:
@@ -356,18 +348,11 @@ def test_check_worktree_policy_scans_repo_local(
         "[[work.workspaces.default.projects]]\nname = \"repo\"\nworktre = \"never\"\n"
     )
 
-    # Stub resolve_repo_root to point at our fake repo. It carries a .cache_clear
-    # so the local teardown fixture (which clears the real lru_cache) doesn't trip
-    # over a bare function replacement.
-    class _StubRepoRoot:
-        @staticmethod
-        def cache_clear() -> None:
-            return None
+    # Stub resolve_repo_root to point at our fake repo.
+    def _stub_repo_root() -> Path:
+        return repo
 
-        def __call__(self) -> Path:
-            return repo
-
-    monkeypatch.setattr(_paths, "resolve_repo_root", _StubRepoRoot())
+    monkeypatch.setattr(_paths, "resolve_repo_root", _stub_repo_root)
     problems = check_worktree_policy()
     assert len(problems) == 1 and "worktre" in problems[0]
 

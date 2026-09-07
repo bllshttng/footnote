@@ -154,11 +154,11 @@ def test_resolve_self_identity_accepts_process_proven_canonical_row(monkeypatch)
     assert identity.harness == "claude"
 
 
-def test_self_stamp_passes_the_explicit_sentinel(monkeypatch):
-    """AC10-HP: the caller declares what it knows about itself. This layer
-    can prove nothing independent of the markers under test, so it passes
-    the sentinel - the self-blind decision is written at the call site, and
-    the detector still reports a foreign row under it."""
+def test_self_stamp_forwards_the_completed_canonical_pair(monkeypatch):
+    """AC10-HP, post-x-0992: the pair a stamp completes rides the collide
+    callback into the registry's agreement check. This layer computes nothing
+    about self on its own (the pair comes from claims.self_identity), and a
+    row the registry reads as the caller's OWN is never contention."""
     captured: dict = {}
 
     def fake_detector(session_id, *, self_binding):
@@ -179,7 +179,41 @@ def test_self_stamp_passes_the_explicit_sentinel(monkeypatch):
 
     identity = self_stamp.resolve_self_identity(env)
 
+    assert captured["self_binding"] == ("claude", "victim-session")
+    assert identity.rejected[0]["owner"] == "some-row"
+
+
+def test_self_stamp_passes_the_explicit_sentinel_without_an_id(monkeypatch):
+    """The sentinel rides exactly where nothing proves self: a name_only stamp
+    completes no pair, so the detector stays self-blind and a foreign row is
+    reported under it (the round-1 P1 shape). A session with NO stamp at all
+    resolves by the uncontended elimination instead and never consults the
+    registry - that fallback is where hand-started joined sessions live, and
+    colliding there read their own registered row as contention."""
+    captured: dict = {}
+
+    def fake_detector(session_id, *, self_binding):
+        captured["self_binding"] = self_binding
+        return "some-row" if session_id == "victim-session" else None
+
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: None,
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda _env: ("", ""),
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.row_owning_session_id", fake_detector
+    )
+
+    identity = self_stamp.resolve_self_identity(
+        {"FNO_HARNESS_NAME": "codex", "CODEX_THREAD_ID": "victim-session"}
+    )
+
     assert captured["self_binding"] is None
+    assert identity.disposition == "ambiguous"
     assert identity.rejected[0]["owner"] == "some-row"
 
 

@@ -34,12 +34,23 @@ mkdir -p "$tmp/bin" "$FIXCWD" "$tmp/projects/$FIXSLUG" "$tmp/codex/2026/07/20" "
 cd "$tmp" || { echo "FAIL: could not enter tmp"; exit 1; }
 
 # Shim `fno` to this worktree's source, so the shellout exercises the code under
-# test rather than whatever version happens to be installed.
-cat > "$tmp/bin/fno" <<EOF
+# test rather than whatever version happens to be installed. `mux` never
+# forwards: the Python front execs the `fno` on PATH for that verb, which is
+# this shim again, and the recursion runs until the runner kills it. attach
+# reaches the mux through `fno mux thread`, so the shim answers as a box with
+# no live mux server.
+restore_fno() {
+  cat > "$tmp/bin/fno" <<EOF
 #!/bin/sh
+if [ "\$1" = mux ]; then
+  echo "fno mux: no live mux server (heal-token shim)" >&2
+  exit 24
+fi
 exec "$VENV_PY" -c 'from fno.cli import app; app()' "\$@"
 EOF
-chmod +x "$tmp/bin/fno"
+  chmod +x "$tmp/bin/fno"
+}
+restore_fno
 
 # `resume` checks its provider CLI is on PATH and exits 14 BEFORE rendering, even
 # under --print-command. A CI runner has no claude, so without this stub the
@@ -141,13 +152,6 @@ grep -q "has exited" <<<"$err" || fail "attach did not reach the revival pointer
 # 7. The two heal_token guards that no other case reaches. Both swap in a stub
 #    `fno`, so they pin the Rust side's parsing rather than the healer's.
 stub_fno() { printf '%s\n' '#!/bin/sh' "$1" > "$tmp/bin/fno"; chmod +x "$tmp/bin/fno"; }
-restore_fno() {
-  cat > "$tmp/bin/fno" <<EOF
-#!/bin/sh
-exec "$VENV_PY" -c 'from fno.cli import app; app()' "\$@"
-EOF
-  chmod +x "$tmp/bin/fno"
-}
 ROW='{"name":"x","harness":"claude","cwd":"/w","log_path":"","short_id":"c655c326","harness_session_id":"'$CLAUDE_UUID'","status":"orphaned"}'
 
 # 7a. Exit code is read BEFORE stdout: a failed helper that prints parseable JSON

@@ -1,15 +1,21 @@
-"""The resolve-owned-identity proof policy and the launcher stamp (x-a0cd).
+"""The resolve-owned-identity verb resolves through claims.self_identity (x-0992).
 
-Measured live on a daemon-hosted codex thread under seatbelt: only self's
-ppid is readable, so every walk inside init's script chain returns None and
-the verb fell to collision-elimination, which rejected the worker's OWN
-spawn-minted row. The fix is the launcher stamp - the `fno do target init`
-CLI resolves the harness while ITS ppid read is still permitted and exports
-FNO_SESSION_HARNESS/FNO_SESSION_PID for the deeper verb - not registry rows
-as self-proof: a row proves only that some live session owns the id
-(round-1 P1)."""
+History this file used to pin: x-a0cd measured a daemon-hosted codex thread
+under seatbelt where only self's ppid is readable, so every walk inside init's
+script chain returned None and the verb fell to collision-elimination, which
+rejected the worker's OWN spawn-minted row. The launcher stamp
+(FNO_SESSION_HARNESS/FNO_SESSION_PID, exported by the `fno do target init` CLI
+while ITS ppid read is still permitted) fixed the walk half. x-0992 measured
+the other half: a PANE-spawned codex worker carries no FNO_HARNESS_SESSION_ID
+at all (the pane row is written after the child starts), so its stamp is
+name_only and the verb's former private own_binding construction - gated on a
+COMPLETE stamp - was always None. The verb now routes through
+resolve_self_identity, the one owned-identity implementation, and these tests
+pin the verb-level contract the hook parses."""
 
-from fno.target_cli import _registry_self_proof
+from typer.testing import CliRunner
+
+from fno.cli import app
 
 # The conftest's autouse _neutral_host_harness patches resolve_session_harness
 # to None; the stamp tests below pin the REAL function, captured at collection
@@ -18,41 +24,114 @@ from fno.claims import session_pid as _session_pid
 
 _REAL_RESOLVE_HARNESS = _session_pid.resolve_session_harness
 
-
-def _prove(**kwargs):
-    kwargs.setdefault("true_harness", None)
-    kwargs.setdefault("own_binding", None)
-    kwargs.setdefault("owning_row_harness", lambda sid: None)
-    return _registry_self_proof("codex", "thread-1", **kwargs)
+runner = CliRunner()
 
 
-def test_tree_proof_wins_when_harness_matches():
-    assert _prove(true_harness="codex") is True
+def _fields(result):
+    return {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in result.stdout.splitlines()
+        if "=" in line
+    }
 
 
-def test_tree_proof_contradicts_other_harness():
-    assert _prove(true_harness="claude") is False
+def _silent_walk_and_attester(monkeypatch, attested_id: str):
+    """Pin the sandbox shape: no harness ancestor to walk, so the attester's
+    witness stays env_only while it still names the env's own marker value -
+    exactly what a bare runner (and a seatbelt sandbox) produces for a single
+    codex family. A real runner's ancestry may or may not be readable, and the
+    verb's answer must not depend on which."""
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness", lambda from_pid=None: None
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda env=None: (attested_id, "env_only"),
+    )
 
 
-def test_own_binding_stamp_backed_by_same_harness_row_proves_self():
-    assert _prove(
-        own_binding=("codex", "thread-1"),
-        owning_row_harness=lambda sid: "codex",
-    ) is True
+def test_name_only_pane_stamp_resolves_without_row_or_proof(tmp_path, monkeypatch):
+    """The x-0992 repro, pinned: a pane-spawned codex worker's environment
+    (name_only stamp, both codex markers carrying the same uuid, no walk, no
+    row) resolves to HARNESS=codex with a non-empty SESSION_ID and no
+    COLLISION. The pre-fix verb answered ambiguous here, which stamped
+    harness=unknown/provider=claude onto a codex worker's manifest."""
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    mine = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
+    _silent_walk_and_attester(monkeypatch, mine)
+    monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
+    monkeypatch.setenv("CODEX_THREAD_ID", mine)
+    monkeypatch.setenv("CODEX_SESSION_ID", mine)
+
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["HARNESS"] == "codex"
+    assert fields["SESSION_ID"] == mine
+    assert fields["DISPOSITION"] == "single"
+    assert fields["COLLISION"] == ""
 
 
-def test_own_binding_row_harness_disagreement_stays_unproven():
-    assert _prove(
-        own_binding=("codex", "thread-1"),
-        owning_row_harness=lambda sid: "claude",
-    ) is None
+def test_name_only_with_live_row_and_no_witness_fails_closed(tmp_path, monkeypatch):
+    """The round-1 P1 shape, re-pinned: a name_only stamp does NOT complete an
+    own-pair from the marker under test (that would be circular), so a marker
+    naming another live session's id meets that row as CONTENTION and the
+    verb refuses, naming the owner. The stamp names the family, never the id
+    - only a process witness or the stamp's own id half proves self."""
+    from fno.agents.registry import register_existing_session
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    theirs = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
+    owner = register_existing_session(harness="codex", session_id=theirs, cwd="/x").name
+    _silent_walk_and_attester(monkeypatch, theirs)
+    monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
+    monkeypatch.setenv("CODEX_THREAD_ID", theirs)
+    monkeypatch.setenv("CODEX_SESSION_ID", theirs)
+
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["HARNESS"] == ""
+    assert fields["SESSION_ID"] == ""
+    assert fields["DISPOSITION"] == "ambiguous"
+    assert fields["COLLISION"] == owner
 
 
-def test_row_agreement_without_stamp_or_tree_never_proves():
-    """The round-1 P1 shape: a marker copied from another live same-harness
-    session meets that session's row, and the row must stay collision
-    evidence, never self-proof."""
-    assert _prove(owning_row_harness=lambda sid: "codex") is None
+def test_name_only_own_row_resolves_when_the_attester_witnesses(
+    tmp_path, monkeypatch
+):
+    """The real pane worker's resolution path: the spawn stamp names the
+    family, the launcher stamps the family proof (or the walk finds it), and
+    the attester witnesses the marker value from process ancestry. With that
+    independent ground the worker resolves its own identity even though its
+    own spawn-minted row already holds the id."""
+    from fno.agents.registry import register_existing_session
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    mine = "01a06d40-5f68-7da0-96cb-f57006ca2d2c"
+    register_existing_session(harness="codex", session_id=mine, cwd="/x")
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness", lambda from_pid=None: "codex"
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda env=None: (mine, "process"),
+    )
+    monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
+    monkeypatch.setenv("CODEX_THREAD_ID", mine)
+    monkeypatch.setenv("CODEX_SESSION_ID", mine)
+
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = _fields(result)
+    assert fields["HARNESS"] == "codex"
+    assert fields["SESSION_ID"] == mine
+    assert fields["DISPOSITION"] == "canonical"
+    assert fields["COLLISION"] == ""
 
 
 def test_session_harness_stamp_honored_while_pid_alive(monkeypatch):

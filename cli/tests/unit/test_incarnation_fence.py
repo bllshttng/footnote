@@ -7,8 +7,7 @@ from pathlib import Path
 
 from fno.claims.incarnation import incarnation_fence_blocks, resolve_fence_session_uuid
 from fno.claims.io import claim_path, serialize_claim
-from fno.claims.staleness import now_ms
-from fno.claims.types import Claim
+from fno.claims.types import Claim, now_ms
 
 
 def _wire(monkeypatch, status, *, own_pid=None):

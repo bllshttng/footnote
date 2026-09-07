@@ -81,7 +81,9 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _events(events_path: Path) -> list[dict]:
     """Decision events only: paired receipts (quota_rotation_declined et al.)
     share the journal since repo-root resolution landed them where
-    FNO_REPO_ROOT points, and no decision-count assertion means to count them."""
+    FNO_REPO_ROOT points, and no decision-count assertion means to count them.
+    control_plane_tick rows (the arms readout, one per advance call) are
+    bookkeeping, not decisions."""
     if not events_path.exists():
         return []
     return [
@@ -89,7 +91,8 @@ def _events(events_path: Path) -> list[dict]:
         for line in events_path.read_text().splitlines()
         if line.strip()
         and not (event := json.loads(line))["type"].startswith("claim_")
-        and event["type"] not in ("quota_rotation_declined", "dispatch_claim_observed")
+        and event["type"]
+        not in ("quota_rotation_declined", "dispatch_claim_observed", "control_plane_tick")
     ]
 
 
@@ -120,6 +123,28 @@ def test_disabled_dispatches_nothing(iso, monkeypatch):
     evs = _events(iso)
     assert len(evs) == 1 and evs[0]["type"] == "advance_skipped"
     assert evs[0]["data"]["reason"] == "disabled"
+
+
+def test_advance_writes_one_control_plane_tick_row(iso, monkeypatch):
+    """x-1b88: every advance call appends exactly one auto_continue arm row,
+    carrying the skip reason the decision matrix chose."""
+    monkeypatch.setenv("FNO_AUTO_CONTINUE", "0")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: "x")
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+
+    adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    rows = [
+        json.loads(line)
+        for line in iso.read_text().splitlines()
+        if json.loads(line)["type"] == "control_plane_tick"
+    ]
+    assert len(rows) == 1
+    data = rows[0]["data"]
+    assert data["arm"] == "auto_continue"
+    assert data["skip_reason"] == "disabled"
+    assert data["interval_s"] == 1800
+    assert data["scheduler"] == "session"
 
 
 def test_no_work(iso, monkeypatch):
@@ -211,7 +236,7 @@ def test_node_claim_predispatch_is_family2_loud(
     monkeypatch.setattr(
         target_cli,
         "_classify_node_claim",
-        lambda _node: (
+        lambda _node, **_: (
             claim_verdict,
             {
                 "state": claim_state,
@@ -882,7 +907,7 @@ def test_predispatch_auto_defers_before_birth_at_durable_failure_limit(monkeypat
     )
     monkeypatch.setattr(
         "fno.target_cli._classify_node_claim",
-        lambda _node: ("free", None),
+        lambda _node, **_: ("free", None),
         raising=False,
     )
     monkeypatch.setattr(
@@ -937,7 +962,7 @@ def test_predispatch_refuses_birth_when_auto_defer_write_fails(monkeypatch, caps
     monkeypatch.setattr("fno.notify._impl.send_notification", lambda *_a, **_k: (0, ""))
     monkeypatch.setattr(
         "fno.target_cli._classify_node_claim",
-        lambda _node: ("free", None),
+        lambda _node, **_: ("free", None),
         raising=False,
     )
     monkeypatch.setattr(
@@ -1115,6 +1140,125 @@ def test_spawn_worker_codex_receipt_with_only_session_id_key(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, receipt))
     identity = adv._spawn_worker("ab-2222aaaa", None, harness="codex")
     assert identity == "0198c0de-2222-7000-8000-00000000000b"
+
+
+# ---------------------------------------------------------------------------
+# x-7f1f task 1.1: the spawn receipt carries the substrate to the caller.
+# A headless dispatch is SYNCHRONOUS - subprocess.run returns only after the
+# one-shot worker finished - so the drain must know the substrate or it
+# fabricates a crash for a child that already succeeded.
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_worker_fills_receipt_out_param(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, _RECEIPT)
+    )
+    ev = tmp_path / "events.jsonl"
+    receipt: dict = {}
+    sid = adv._spawn_worker("ab-2222aaaa", None, events_path=ev, receipt=receipt)
+    row = json.loads(ev.read_text().splitlines()[-1])
+    assert row["type"] == adv.EVENT_SPAWNED
+    payload = row["data"]
+    assert receipt["short_id"] == payload["short_id"] == sid
+    assert receipt["substrate"] == payload["substrate"]
+    assert receipt["harness"] == payload["harness"]
+
+
+def test_spawn_worker_receipt_stays_empty_on_spawn_error(monkeypatch):
+    receipt: dict = {}
+    monkeypatch.setattr(
+        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(1, "", "daemon unreachable"),
+    )
+    with pytest.raises(adv.SpawnError):
+        adv._spawn_worker("ab-2222aaaa", None, receipt=receipt)
+    assert receipt == {}
+
+
+def _converge_env(monkeypatch, tmp_path):
+    """Silence the pre-spawn gates so _converge_one reaches the spawn seam."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    monkeypatch.setattr(adv, "_walker_live_at", lambda root: False)
+    monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda nid, root: None)
+    monkeypatch.setattr(
+        adv._autobrief, "resolve_dispatch_brief", lambda node_meta: ("", "")
+    )
+    monkeypatch.setattr(adv._route_resolve, "node_model", lambda *a, **k: None)
+
+
+def test_converge_one_dispatched_result_carries_substrate(monkeypatch, tmp_path):
+    _converge_env(monkeypatch, tmp_path)
+
+    def fake_spawn(node_id, root, slug, **kwargs):
+        kwargs["receipt"].update(
+            {"short_id": "headless", "substrate": "headless", "harness": "codex"}
+        )
+        return "headless"
+
+    monkeypatch.setattr(adv, "_spawn_worker", fake_spawn)
+    result = adv._converge_one(
+        {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
+    )
+    assert result.decision == "dispatched"
+    assert result.substrate == "headless"
+
+
+def test_converge_one_spawn_failure_leaves_receipt_empty(monkeypatch, tmp_path):
+    _converge_env(monkeypatch, tmp_path)
+    seen: dict = {}
+
+    def fake_spawn(node_id, root, slug, **kwargs):
+        seen["receipt"] = kwargs["receipt"]
+        raise adv.SpawnError("boom")
+
+    monkeypatch.setattr(adv, "_spawn_worker", fake_spawn)
+    result = adv._converge_one(
+        {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
+    )
+    assert result.decision == "failed"
+    assert seen["receipt"] == {}
+    assert result.substrate is None
+
+
+def test_converge_one_releases_reservation_when_outcome_is_not_dispatched(
+    monkeypatch, tmp_path
+):
+    """AC9-HP (x-41f7): a raise between a SUCCESSFUL spawn and the dispatched
+    receipt still returns the boot-window reservation. Spawn done, outcome not
+    a dispatch, is the exact span that held dispatch:x-e882 forever."""
+    _converge_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        adv, "_spawn_worker", lambda node_id, root, slug, **kwargs: "sid"
+    )
+    real_emit = adv._emit
+
+    def raise_after_spawn(event, data, path):
+        if event == adv.EVENT_DISPATCHED:
+            raise RuntimeError("journal unwritable")
+        real_emit(event, data, path)
+
+    monkeypatch.setattr(adv, "_emit", raise_after_spawn)
+    with pytest.raises(RuntimeError):
+        adv._converge_one(
+            {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
+        )
+    key = "dispatch:ab-1111aaaa"
+    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
+
+
+def test_converge_one_dispatched_keeps_the_reservation(monkeypatch, tmp_path):
+    """AC10-EDGE: a dispatch keeps the reservation - the boot-window bridge
+    until the worker owns node:<id>."""
+    _converge_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        adv, "_spawn_worker", lambda node_id, root, slug, **kwargs: "sid"
+    )
+    result = adv._converge_one(
+        {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
+    )
+    assert result.decision == "dispatched"
+    key = "dispatch:ab-1111aaaa"
+    assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "live"
 
 
 # ---------------------------------------------------------------------------
@@ -1788,7 +1932,9 @@ def _settings_ns(auto_merge=False, perm=""):
     import types
 
     return types.SimpleNamespace(
-        agents=types.SimpleNamespace(spawn_permission_mode=perm),
+        agents=types.SimpleNamespace(
+            defaults=types.SimpleNamespace(permission_mode=perm)
+        ),
         auto_merge=types.SimpleNamespace(
             grant="dispatch" if auto_merge else "none"
         ),
@@ -2170,7 +2316,9 @@ def test_quota_change_after_selection_cannot_rewrite_the_spawn(iso, monkeypatch)
 # ---------------------------------------------------------------------------
 # Autonomous permission-mode gate (_spawn_worker argv)
 #
-# US1 flips config.agents.spawn_permission_mode's default to "bypassPermissions".
+# US1: an unset config falls through to the SPAWN_PERMISSION_BUILTIN
+# "bypassPermissions" (formerly config.agents.spawn_permission_mode's own
+# default, collapsed onto agents.defaults.permission_mode, x-7198).
 # US2 gates the --permission-mode forward on the resolved harness being claude,
 # so a failover leg landing on codex/gemini (which the spawn seam exit-2 rejects
 # for a mapped mode) never carries the claude-native flag. US3 is that failover
@@ -2196,7 +2344,9 @@ def _spawn_argv(monkeypatch, *, provider, perm_config, permission_mode=None, sub
 
     resolved_harness = harness or (provider if provider in ("codex", "gemini") else "claude")
     fake_settings = SimpleNamespace(
-        agents=SimpleNamespace(spawn_permission_mode=perm_config),
+        agents=SimpleNamespace(
+            defaults=SimpleNamespace(permission_mode=perm_config)
+        ),
         dispatch=SimpleNamespace(auto_merge=False),
     )
     monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: fake_settings)
@@ -2248,10 +2398,13 @@ def test_codex_leg_skips_explicit_mode(iso, monkeypatch):
     assert _perm_of(cmd) is None
 
 
-def test_claude_leg_explicit_empty_opts_out(iso, monkeypatch):
-    """AC1-EDGE: an explicit "" forwards nothing (claude prompts normally)."""
+def test_claude_leg_empty_config_falls_to_builtin(iso, monkeypatch):
+    """x-7198: agents.defaults.permission_mode's empty string means unset (the
+    general SpawnDefaultsBlock convention), not opt-out - unlike the retired
+    spawn_permission_mode field, there is no longer a distinct "explicit empty"
+    signal, so an empty config resolves the built-in exactly like no config."""
     cmd = _spawn_argv(monkeypatch, provider="claude", perm_config="")
-    assert _perm_of(cmd) is None
+    assert _perm_of(cmd) == "bypassPermissions"
 
 
 def test_claude_leg_default_mode_positive(iso, monkeypatch):

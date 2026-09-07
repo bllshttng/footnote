@@ -69,6 +69,10 @@ Post-merge pruning is automated. Every gh-confirmed MERGED archive leg first min
 
 Every removal emits one `worktree_removed` event row (path, caller, claim read, reason). The row mirrors to the machine-global journal. Before this emission landed no removal path recorded anything, so a lost tree left no attributable evidence.
 
+### The DIRTY bucket under a done node (law d-cfcf5a8e)
+
+The merge reaper removes a done-and-merged node's tree whatever its git status, keeps the branch, and holds only unpushed work: a HEAD that is not an ancestor of origin/main is not dirt, and an unreadable origin holds too. The recoverability argument is the ruling: the branch is pushed, the transcript persists, the node records the PR, so removal is cheap and reversible and hoarding is not. An OPEN node's tree keeps the old boundary, report only; setup's own symlinks into canonical are the one discounted case (`reason=setup-links`). While a request's tree is held (unpushed, or a removal that failed) the request stays pending and echoes the hold at most once an hour, so a later pass takes the tree once the hold clears instead of tombstoning it forever.
+
 ## Commit-time salvage refs
 
 `scripts/setup/setup-worktree.sh` installs a shared `post-commit` dispatcher that runs the committing worktree's `hooks/worktree-salvage-ref.sh`. Every commit advances a local `refs/fno/salvage/<worktree>` ref so a detached or provider-killed worktree stays recoverable without a network dependency.

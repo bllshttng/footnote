@@ -17,7 +17,7 @@ Generate fresh codemap for structural awareness:
 fno doctor codemap --tokens 2048 2>/dev/null || true
 ```
 
-If `fno` is unavailable or `fno doctor codemap`'s deps are missing, skip this step silently. Read `.fno/codemap.md` if it exists. Top files in the output are the highest-importance nodes in the codebase - changes to these have wide blast radius and may need extra verification. This context informs the operator's execution and the sigma-review's risk assessment.
+If `fno` is unavailable or `fno doctor codemap`'s deps are missing, skip this step silently. Read the codemap in the repo's space (`fno-agents state path codemap`) if it exists. Top files in the output are the highest-importance nodes in the codebase - changes to these have wide blast radius and may need extra verification. This context informs the operator's execution and the sigma-review's risk assessment.
 
 ## Step 1b: Load Project Config (AUTO)
 

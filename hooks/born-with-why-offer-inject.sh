@@ -31,12 +31,27 @@ source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 source "$HOOK_DIR/../scripts/lib/events-lock.sh" 2>/dev/null || exit 0
 
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
-EVENTS="$REPO_ROOT/.fno/events.jsonl"
-# No journal means there is no cursor state to serialize. Keep this ahead of
-# lock acquisition because a fresh checkout does not have a .fno parent yet.
+# The project journal and the cursor both live in the repo's space, so every
+# worktree shares one daily offer budget. Resolution is deliberately
+# subprocess-free: the migration leaves a MOVED-TO pointer in the checkout, so
+# a stat finds the space; a fresh checkout has no journal at all and exits
+# before any expensive work, which is the posture the old hook had and the
+# smoke test's prompt-return bound still holds.
+EVENTS_DIR=""
+if [[ -f "$REPO_ROOT/.fno/MOVED-TO" ]]; then
+    EVENTS_DIR=$(head -n 1 "$REPO_ROOT/.fno/MOVED-TO" 2>/dev/null || true)
+fi
+if [[ -z "$EVENTS_DIR" && -f "$REPO_ROOT/.fno/events.jsonl" ]]; then
+    EVENTS_DIR="$REPO_ROOT/.fno"
+fi
+if [[ -z "$EVENTS_DIR" ]]; then
+    # Never migrated, never created: no journal to read, no offer to make.
+    exit 0
+fi
+EVENTS="$EVENTS_DIR/events.jsonl"
 [[ -f "$EVENTS" ]] || exit 0
 
-CURSOR="$REPO_ROOT/.fno/.think-offer-cursor"
+CURSOR="$EVENTS_DIR/.think-offer-cursor"
 if [[ -L "$CURSOR" ]]; then
     CURSOR=$(_resolve_event_symlink "$CURSOR") || exit 0
 fi

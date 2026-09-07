@@ -19,15 +19,14 @@
 //!   lines are already compact, so each matching line is emitted verbatim to
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
-use crate::claude_ask::{
-    family1_truth_state, family1_truth_state_for_resume, liveness_probe, locate_session, ClaudeHome,
-};
+use crate::claude_ask::{liveness_probe, locate_session, ClaudeHome};
 #[cfg(test)]
 use crate::manifest_lookup::parse_manifest_identity;
 use crate::manifest_lookup::{find_manifest_for_session, git_worktree_paths, ManifestIdentity};
 use crate::pane_relaunch::{mesh_identity_assignments, mux_pane_run_argv};
 use crate::paths::AgentsHome;
 use crate::state::REGISTRY_SCHEMA_VERSION;
+use crate::truth_probe::{family1_truth_state, family1_truth_state_for_resume};
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;
@@ -286,7 +285,7 @@ const ORPHAN_MARKER: &str = "                                          no _done 
 /// `paths.state_dir() / "events.jsonl"`. The Rust agents home is
 /// `state_dir/agents`, so the events log is the agents-home parent's
 /// `events.jsonl`.
-fn trace_events_path(home: &AgentsHome) -> PathBuf {
+pub(crate) fn trace_events_path(home: &AgentsHome) -> PathBuf {
     home.root()
         .parent()
         .map(|p| p.join("events.jsonl"))
@@ -388,24 +387,6 @@ const KNOWN_STATUSES: &[&str] = &[
     "exited",
     "permanent_dead",
 ];
-/// Registry schema versions this fno reads (current write version plus the older
-/// shapes it back-fills in memory). Each bump is forward-compat: a stale reader
-/// pinned to a lower set rejects a newer store instead of silently dropping a
-/// field. v10 (x-880e) removes the on-disk `provider` + per-provider session-id
-/// trio; a legacy v1..=v9 row still carries `provider`, read leniently below.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-];
-
-// The accepted set's upper bound MUST equal the version this binary writes, or
-// a freshly-written store would be rejected by its own reader. Compiler-enforced
-// so a future REGISTRY_SCHEMA_VERSION bump that forgets to widen the array fails
-// the build instead of drifting silently (type-design review, ab-a171ceb2).
-const _: () = assert!(
-    ACCEPTED_SCHEMA_VERSIONS[ACCEPTED_SCHEMA_VERSIONS.len() - 1] == REGISTRY_SCHEMA_VERSION as u64,
-    "ACCEPTED_SCHEMA_VERSIONS upper bound must equal REGISTRY_SCHEMA_VERSION"
-);
-
 /// Load the registry rows as raw JSON values, reproducing Python
 /// `registry.load_registry`:
 ///
@@ -449,9 +430,17 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
     // taken on one leaves no trace. Fixing only Python would have left this
     // path, the daemon, and mux still failing closed on the same file.
     let on_disk_version = obj.get("schema_version").and_then(Value::as_u64);
+    // Registry schema versions this fno reads: `1..=REGISTRY_SCHEMA_VERSION`
+    // (the current write version plus the older shapes it back-fills in
+    // memory). Each bump is forward-compat: a stale reader pinned to a lower
+    // set rejects a newer store instead of silently dropping a field. v10
+    // (x-880e) removes the on-disk `provider` + per-provider session-id trio;
+    // a legacy v1..=v9 row still carries `provider`, read leniently below. A
+    // range, not a list: the upper bound cannot drift from the version this
+    // binary writes.
     let mut read_forward = false;
     match on_disk_version {
-        Some(v) if ACCEPTED_SCHEMA_VERSIONS.contains(&v) => {}
+        Some(v) if (1..=REGISTRY_SCHEMA_VERSION as u64).contains(&v) => {}
         Some(v) if v > REGISTRY_SCHEMA_VERSION as u64 => {
             read_forward = true;
             eprintln!(
@@ -1546,7 +1535,7 @@ fn synthesized_name(short: &str) -> String {
 /// a registered-but-not-driven row the GC keeps (non-terminal, no confirmed-dead
 /// pid -> `gc_action` Keep).
 fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::RegistryEntry {
-    use crate::state::RegistryEntry;
+    use crate::state::{Lineage, RegistryEntry};
     let harness = if !id.harness.is_empty() {
         id.harness.clone()
     } else if id.harness_session_id.is_empty()
@@ -1594,7 +1583,6 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         requested_provider: None,
         requested_effort: None,
         harness: Some(harness),
-        harness_session_id: Some(session.clone()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         route_provider_id: None,
@@ -1603,7 +1591,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         cwd: id.owner_cwd.clone(),
         project_root: id.owner_cwd.clone(),
         session_id: None,
-        claude_session_uuid: if is_claude { Some(session) } else { None },
+        claude_session_uuid: is_claude.then(|| session.clone()),
         messaging_socket_path: None,
         codex_session_id: None,
         gemini_session_id: None,
@@ -1634,10 +1622,10 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         delivery_policy: None,
         sandbox_posture: None,
         spawn_trigger: None,
-        spawned_by_session: parent_session,
-        spawned_by_harness: parent_harness,
-        spawned_by_cwd: parent_cwd,
-        ..Default::default()
+        ..RegistryEntry::new(
+            Some(session),
+            Lineage::captured((parent_session, parent_harness, parent_cwd)),
+        )
     }
 }
 
@@ -2427,7 +2415,11 @@ fn acquire_named_session_claim(
 /// (fall through to a normal attach) or carries no revivable uuid (nothing to
 /// point at - never print an unusable command). Probes reality (locate_session +
 /// socket), never the registry `status` field, matching the resume smart verb.
-fn claude_attach_pointer(claude_home: &ClaudeHome, entry: &Value, name: &str) -> Option<String> {
+pub(crate) fn claude_attach_pointer(
+    claude_home: &ClaudeHome,
+    entry: &Value,
+    name: &str,
+) -> Option<String> {
     claude_attach_pointer_with_truth(claude_home, entry, name, family1_truth_state)
 }
 
@@ -2491,7 +2483,7 @@ fn shlex_quote(s: &str) -> String {
 /// printable non-ASCII (e.g. accented letters) stays literal, which is correct
 /// for every realistic agent name / cwd / short-id input. The rare divergence is
 /// non-ASCII code points that are non-printable above the C1 range (cv-b6bd4bf4).
-fn py_repr_str(s: &str) -> String {
+pub(crate) fn py_repr_str(s: &str) -> String {
     let has_single = s.contains('\'');
     let has_double = s.contains('"');
     let quote = if has_single && !has_double { '"' } else { '\'' };
@@ -2526,7 +2518,7 @@ fn py_repr_str(s: &str) -> String {
 /// `shutil.which`-style PATH lookup: true iff `name` resolves to an executable
 /// regular file (an absolute/relative path with a separator is checked directly;
 /// otherwise each `$PATH` entry is probed).
-fn which_on_path(name: &str) -> bool {
+pub(crate) fn which_on_path(name: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let is_exec = |p: &Path| -> bool {
         match fs::metadata(p) {
@@ -2555,7 +2547,7 @@ fn which_on_path(name: &str) -> bool {
 /// Deliberately a free function (not a `.emit()` method) so the crate's
 /// production-emit-kind scanner (which keys on `.emit(`/`.emit_fields(`) does
 /// not treat these Python-side audit kinds as Rust daemon event kinds.
-fn append_agents_event(events_path: &Path, kind: &str, fields: &[(&str, Value)]) {
+pub(crate) fn append_agents_event(events_path: &Path, kind: &str, fields: &[(&str, Value)]) {
     let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut parts: Vec<String> = fields
         .iter()
@@ -2599,7 +2591,7 @@ fn append_agents_event(events_path: &Path, kind: &str, fields: &[(&str, Value)])
 /// Read the registry rows for the subprocess-exec verbs. Thin alias over
 /// [`load_registry_entries`] (the validation + `"agents"`/`"entries"` key
 /// handling lives there) so resume/attach/logs and trace share one reader.
-fn read_registry_entries(path: &Path) -> Result<Vec<Value>, String> {
+pub(crate) fn read_registry_entries(path: &Path) -> Result<Vec<Value>, String> {
     load_registry_entries(path)
 }
 
@@ -2933,7 +2925,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     let identity = match mesh_identity_assignments(
         entry.get("name").and_then(Value::as_str).unwrap_or(&name),
         harness,
-        entry.get("fno_id").and_then(Value::as_str),
+        entry.get("node").and_then(Value::as_str),
     ) {
         Ok(a) => a,
         Err(why) => {
@@ -3423,8 +3415,7 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
         // x-0345 W1: same wrapper the resume arm carries. `which_on_path`
         // above deliberately read the UNWRAPPED plan.argv[0]; the wrap
         // happens inside mux_pane_run_argv.
-        let identity = match mesh_identity_assignments(&plan.name, "claude", plan.fno_id.as_deref())
-        {
+        let identity = match mesh_identity_assignments(&plan.name, "claude", plan.node.as_deref()) {
             Ok(a) => a,
             Err(why) => {
                 eprintln!("fno agents recover: {why}; refusing an unattributable pane relaunch");
@@ -3653,7 +3644,7 @@ pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
 
 /// Reproduce `_validate_lifecycle_name`: returns `Err((exit, message))` on a
 /// rejected name (the message is printed to stderr with a trailing newline).
-fn validate_lifecycle_name(name: &str) -> Result<(), (i32, String)> {
+pub(crate) fn validate_lifecycle_name(name: &str) -> Result<(), (i32, String)> {
     if name.is_empty() {
         return Err((2, "agent name must not be empty".to_string()));
     }
@@ -3685,7 +3676,7 @@ fn validate_lifecycle_name(name: &str) -> Result<(), (i32, String)> {
 /// (session, pane_id) pair, which is the same rule `agents_view::derive_rows`
 /// applies. A half-written field must not decide that one door drives the row
 /// and the other refuses it.
-fn is_codex_thread_row(entry: &Value) -> bool {
+pub(crate) fn is_codex_thread_row(entry: &Value) -> bool {
     entry
         .get("host_mode")
         .and_then(Value::as_str)
@@ -3697,526 +3688,6 @@ fn is_codex_thread_row(entry: &Value) -> bool {
             .unwrap_or("")
             .is_empty()
         && entry.get("mux").is_none_or(Value::is_null)
-}
-
-/// (x-296f) Attach through the harness's OWN declared `interactive_attach`
-/// form, or `None` when it declares none (the caller then keeps its refusal).
-///
-/// EXEC, never proxy: this replaces the process, so the terminal's child is
-/// the harness's own TUI and fno renders nothing. The argv is the same one the
-/// mux viewport renders from the declaration - one declaration, two doors,
-/// pinned byte-identical by `attach_argv_matches_the_mux_renderer`.
-///
-/// The row-shape predicate (`is_codex_thread_row`) is load-bearing: a declared
-/// form widens WHICH harnesses can attach, never which row shapes. Cursor
-/// Agent is not exempted - its row declares interactive_attach unsupported
-/// (a second --resume is a rival TUI, not a join), so the probe below reads
-/// "declares none" and the row keeps the generic arms.
-fn attach_via_declared_form(
-    harness: &str,
-    entry: &Value,
-    name: &str,
-    events_path: &Path,
-) -> Option<i32> {
-    if !is_codex_thread_row(entry) {
-        return None;
-    }
-    let render = |session: Option<&str>, short: Option<&str>| {
-        crate::harness_capabilities::render_session_argv_with_ids(
-            harness,
-            "interactive_attach",
-            session,
-            short,
-        )
-    };
-    // A form takes EXACTLY ONE id, and the renderer refuses the other spelling
-    // rather than ignoring it - so probe with a placeholder to learn whether
-    // this harness declares a form at all, before the row's real (possibly
-    // empty) ids can turn "declares none" and "declares one I cannot fill"
-    // into the same answer.
-    let declares =
-        render(Some("probe-session"), None).is_ok() || render(None, Some("probeid")).is_ok();
-    if !declares {
-        return None;
-    }
-    let session_id = entry
-        .get("harness_session_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let short_id = entry
-        .get("short_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let argv = match render(Some(session_id), None).or_else(|_| render(None, Some(short_id))) {
-        Ok(argv) => argv,
-        Err(_) => {
-            // A thread with no turns yet has no session id recorded, and the
-            // harness resolves a session BY the rollout its first turn writes.
-            // Name that rather than handing the operator the vendor's "no
-            // rollout found for thread id" (measured 2026-08-28,
-            // codex-cli 0.149.1).
-            eprintln!(
-                "{harness} worker {} has no session id on file yet; nothing to attach to. \
-                 Follow it instead: fno agents peek {} --follow",
-                py_repr_str(name),
-                name
-            );
-            append_agents_event(
-                events_path,
-                "agent_attach_refused",
-                &[
-                    ("name", Value::String(name.to_string())),
-                    ("provider", Value::String(harness.to_string())),
-                    ("reason", Value::String("no-session-id-yet".to_string())),
-                ],
-            );
-            return Some(13);
-        }
-    };
-    if !which_on_path(&argv[0]) {
-        eprintln!("{} not on PATH", argv[0]);
-        return Some(14);
-    }
-    // A TUI needs a terminal. Without this the exec still happens and the
-    // operator gets the vendor's bare "stdin is not a terminal" with no clue
-    // which command produced it or what to do instead.
-    // SAFETY: isatty performs no I/O and only reads the descriptor's mode.
-    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
-        eprintln!(
-            "attach needs a terminal ({harness} draws its own interface, and fno never renders \
-             one). From a script, read instead: fno agents peek {name} --follow"
-        );
-        append_agents_event(
-            events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.to_string())),
-                ("provider", Value::String(harness.to_string())),
-                ("reason", Value::String("no-tty".to_string())),
-            ],
-        );
-        return Some(13);
-    }
-    append_agents_event(
-        events_path,
-        "agent_attach_exec",
-        &[
-            ("name", Value::String(name.to_string())),
-            ("provider", Value::String(harness.to_string())),
-            ("session_id", Value::String(session_id.to_string())),
-        ],
-    );
-    // Replace this process: the terminal's child is the harness itself. A
-    // failed pre-exec inside the composed script still runs the attach, which
-    // produces the more specific of the two errors in the terminal the
-    // operator is already looking at.
-    use std::os::unix::process::CommandExt;
-    let mut command = std::process::Command::new(&argv[0]);
-    command.args(&argv[1..]);
-    if let Some(cwd) = entry
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
-        command.current_dir(cwd);
-    }
-    let err = command.exec();
-    eprintln!("fno agents attach: failed to exec {}: {err}", argv[0]);
-    Some(1)
-}
-
-/// (x-c198) Attach to a pi session by EXEC'ing pi's own TUI on the same
-/// session id, in the row's own cwd.
-///
-/// `None` means this is not a pi thread row and the caller should fall through
-/// to its refusal. `Some(code)` means this function owned the outcome.
-///
-/// One argv builder, two doors: the mux viewport's `Reach::Drive` arm runs the
-/// same command. Neither renders anything.
-///
-/// **This is a JOIN, and the cwd is what makes it one.** pi's session store is
-/// cwd-scoped, so the TUI finds the rpc lane's live session only when it runs
-/// in the same directory. Run elsewhere, the same argv CREATES a second
-/// session under one id and says nothing, which is the silent half of this
-/// harness. So the cwd is read off the row and the child is placed in it; a
-/// row with no cwd recorded is refused rather than defaulting to this
-/// process's own directory.
-fn attach_pi_session(entry: &Value, name: &str, events_path: &Path) -> Option<i32> {
-    // NOT `is_codex_thread_row`, and the difference is load-bearing. That
-    // predicate excludes a pane-hosted row, which is right for codex (its
-    // thread lives in a daemon, and a pane row's process already has a place)
-    // and wrong for every pi row fno can produce today: the pi spawn lane IS
-    // the pane lane, so gating on it refused every real row with "pi agents
-    // are one-shot", contradicting the docs shipped in the same change.
-    //
-    // pi needs neither exclusion, because a second pi on one session id is a
-    // measured-safe JOIN rather than a rival launch. What it does need is the
-    // PAIR: a session id, and the cwd that scopes it.
-    let session_id = entry
-        .get("harness_session_id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())?;
-    let cwd = entry
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|c| !c.is_empty());
-    let Some(cwd) = cwd else {
-        eprintln!(
-            "fno agents attach: registry row {name:?} records no cwd, and a pi session is \
-the pair (cwd, session id). Attaching from the wrong directory would CREATE a second session \
-under this id rather than joining the live one, so this is refused."
-        );
-        append_agents_event(
-            events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.to_string())),
-                ("provider", Value::String("pi".to_string())),
-                ("reason", Value::String("pi-row-has-no-cwd".to_string())),
-            ],
-        );
-        return Some(13);
-    };
-    if !which_on_path("pi") {
-        eprintln!("pi CLI not on PATH");
-        return Some(14);
-    }
-    // The cwd has to EXIST, and checking it here is what lets the NotFound arm
-    // below mean the binary and only the binary. A pruned worktree is this
-    // fleet's normal lifecycle, and `Command::current_dir` on a missing
-    // directory fails with ErrorKind::NotFound, which that arm would report as
-    // "pi CLI not on PATH" - sending an operator to reinstall pi over a stale
-    // registry row.
-    let cwd_path = Path::new(cwd);
-    if !cwd_path.is_dir() {
-        eprintln!(
-            "fno agents attach: the cwd recorded for {name:?} is gone: {cwd}. A pi session is \
-the pair (cwd, session id), so there is nothing here to attach to."
-        );
-        append_agents_event(
-            events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.to_string())),
-                ("provider", Value::String("pi".to_string())),
-                ("reason", Value::String("pi-row-cwd-missing".to_string())),
-                ("detail", Value::String(cwd.to_string())),
-            ],
-        );
-        return Some(13);
-    }
-
-    // The duplicate refusal, fired at the door where a human reads it. pi's own
-    // behaviour on an ambiguous id is to pick the OLDEST file and print
-    // nothing, which is how three sessions of real work became unreachable.
-    // An `Unknown` reading is NOT a duplicate and never blocks an attach: it
-    // means the store could not be read, and an unreadable store is evidence
-    // of nothing.
-    let lookup = crate::pi::lookup_sessions(cwd_path, session_id);
-    if let Some(refusal) = crate::pi::duplicate_resume_refusal(cwd_path, session_id, &lookup) {
-        eprintln!("fno agents attach: {refusal}");
-        append_agents_event(
-            events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.to_string())),
-                ("provider", Value::String("pi".to_string())),
-                (
-                    "reason",
-                    Value::String("pi-session-id-ambiguous".to_string()),
-                ),
-                ("session_id", Value::String(session_id.to_string())),
-            ],
-        );
-        return Some(13);
-    }
-
-    // An attach during a live CREATE is a second create, not a join, and the
-    // store cannot say so: a session's file appears at the first turn ATTEMPT,
-    // so for the first seconds of a spawn the lookup above reads `None` for a
-    // session that is being made right now. Joining is safe; creating twice is
-    // the silent race this whole lane exists to close, and the only instrument
-    // that sees the window is the claim the spawn holds across it.
-    //
-    // So this reads that claim and refuses while it is held. `Live` and
-    // `Suspect` both mean held: `Suspect` is an unexpired TTL whose holder is
-    // not provably alive, and the acquire path already declines to steal it.
-    // `Free`, `Stale` and `Corrupted` are not evidence of a create in flight
-    // and never block an attach - a refusal on an unreadable claim would fail
-    // closed against the operator over a file that proves nothing.
-    let create_key = crate::pi::create_claim_key(cwd_path, session_id);
-    let (claim_state, claim_record) = crate::claims::status(&create_key, None);
-    if crate::pi::attach_blocked_by_create(claim_state) {
-        let holder = claim_record
-            .as_ref()
-            .map(|r| r.holder.clone())
-            .unwrap_or_else(|| "an unnamed holder".to_string());
-        eprintln!(
-            "fno agents attach: a pi session CREATE is in flight for {session_id:?} in {cwd}, \
-held by {holder}. pi writes its session file at the first turn ATTEMPT, so the store cannot \
-tell a session being made right now from one that is absent, and attaching into that window \
-CREATES a second session under this id rather than joining. Wait for the holder to finish, \
-then attach again."
-        );
-        append_agents_event(
-            events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.to_string())),
-                ("provider", Value::String("pi".to_string())),
-                ("reason", Value::String("pi-create-in-flight".to_string())),
-                ("session_id", Value::String(session_id.to_string())),
-                ("detail", Value::String(holder)),
-            ],
-        );
-        return Some(13);
-    }
-
-    let argv = crate::pi::pi_attach_argv(session_id);
-    let mut command = std::process::Command::new(&argv[0]);
-    command.args(&argv[1..]);
-    command.current_dir(cwd);
-    // Inherit stdio so pi's TUI takes over this terminal; mirror its exit code.
-    match command.status() {
-        Ok(status) => {
-            let exit_code = status.code().unwrap_or(1);
-            append_agents_event(
-                events_path,
-                "agent_attached",
-                &[
-                    ("name", Value::String(name.to_string())),
-                    ("provider", Value::String("pi".to_string())),
-                    ("session_id", Value::String(session_id.to_string())),
-                    ("pi_exit", Value::from(exit_code)),
-                ],
-            );
-            Some(exit_code)
-        }
-        Err(exc) if exc.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("pi CLI not on PATH");
-            Some(14)
-        }
-        Err(exc) => {
-            eprintln!("fno agents attach: pi session attach failed: {exc}");
-            Some(1)
-        }
-    }
-}
-
-/// `fno-agents attach <name>` -- interactive attach to a running claude agent,
-/// a codex thread, or a pi session (every other harness is refused). Mirrors
-/// Python `dispatch.attach_agent` + the `cmd_attach` Typer wrapper.
-pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
-    let mut name: Option<String> = None;
-    for a in rest {
-        match a.as_str() {
-            other if other.starts_with("--") => {
-                eprintln!("fno-agents: unknown attach flag: {other}");
-                return 2;
-            }
-            other => {
-                if name.is_some() {
-                    eprintln!(
-                        "fno-agents: attach takes one NAME (got extra: {}).",
-                        echo_extra(other)
-                    );
-                    return 2;
-                }
-                name = Some(other.to_string());
-            }
-        }
-    }
-    let name = match name {
-        Some(n) => n,
-        None => {
-            eprintln!("fno-agents: attach needs a <name>");
-            return 2;
-        }
-    };
-
-    if let Err((code, msg)) = validate_lifecycle_name(&name) {
-        eprintln!("{msg}");
-        return code;
-    }
-
-    let entries = match read_registry_entries(&home.registry_json()) {
-        Ok(e) => e,
-        Err(exc) => {
-            eprintln!("registry read failed: {exc}");
-            return 12;
-        }
-    };
-    let entry = match resolve_entry_with_heal(&entries, &name, &home.registry_json()) {
-        Ok(e) => e,
-        Err(err) => {
-            eprintln!("{}", err.message());
-            return 2;
-        }
-    };
-    let entry = &entry;
-
-    let harness = entry
-        .get("harness")
-        .and_then(Value::as_str)
-        .or_else(|| entry.get("provider").and_then(Value::as_str))
-        .unwrap_or("");
-    let events_path = trace_events_path(home);
-
-    // (x-296f) A harness whose contract row DECLARES an interactive_attach
-    // form execs it - codex today, whatever a harness declares tomorrow -
-    // still gated on the thread-row shape. One mechanism replaces the old
-    // two: the declared `pre_exec` starts the harness's own service (codex's
-    // `app-server daemon start`) where a separate `ensure_codex_daemon`
-    // pre-flight used to refuse, and its `codex-daemon-unavailable` refusal
-    // event is gone with it. A failed daemon start still runs the attach and
-    // surfaces codex's own more specific error.
-    if harness != "claude" {
-        if let Some(code) = attach_via_declared_form(harness, entry, &name, &events_path) {
-            return code;
-        }
-    }
-
-    // (x-c198) A pi row execs pi's own TUI on the same session id, which JOINS
-    // the session its rpc lane is driving. pi declares no form (its argv
-    // carries env-dependent provider/model), so it keeps its own builder.
-    if harness == "pi" {
-        if let Some(code) = attach_pi_session(entry, &name, &events_path) {
-            return code;
-        }
-    }
-
-    // Every other non-claude harness refuses attach (claude and a declared
-    // thread are the only rows with a persistent session to attach to).
-    // `!= "claude"` instead of an allowlist so a provider added to the roster
-    // inherits the refusal rather than falling through to a claude-shaped
-    // attach (x-51f6 US1).
-    if harness != "claude" {
-        eprintln!(
-            "{harness} agents are one-shot; no persistent session to attach to. Use 'fno agents logs {name} --follow' for live output."
-        );
-        append_agents_event(
-            &events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.clone())),
-                ("provider", Value::String(harness.to_string())),
-                (
-                    "reason",
-                    Value::String("one-shot-provider-no-persistent-session".to_string()),
-                ),
-            ],
-        );
-        return 13;
-    }
-
-    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
-    if short_id.is_empty() {
-        eprintln!(
-            "registry entry {} has no short id on file; cannot attach.",
-            py_repr_str(&name)
-        );
-        return 12;
-    }
-
-    // Attach stays live-only, but a dead claude row (supervisor gone) with a
-    // recorded session uuid refuses with the exact revival commands instead of
-    // dead-ending in claude's own "session not found" (US3). The decision is a
-    // pure helper so it is testable without the exec path.
-    if let Some(msg) = claude_attach_pointer(&ClaudeHome::from_env(), entry, &name) {
-        eprintln!("{msg}");
-        append_agents_event(
-            &events_path,
-            "agent_attach_refused",
-            &[
-                ("name", Value::String(name.clone())),
-                ("provider", Value::String("claude".to_string())),
-                (
-                    "reason",
-                    Value::String("exited-revivable-pointer".to_string()),
-                ),
-            ],
-        );
-        return 13;
-    }
-
-    if !which_on_path("claude") {
-        eprintln!("claude CLI not on PATH");
-        return 14;
-    }
-
-    // x-d285: the inline attach consumes the canonical re-entry plan. A fresh
-    // claude process re-resolves its account namespace from ambient env, so a
-    // bare `claude attach` from the wrong shell lands in the wrong config
-    // namespace (the falsified "attach has nothing to do" premise). The plan
-    // restores the recorded account namespace and route settings together, or
-    // refuses before anything launches. A proven default row keeps the
-    // historical bare invocation: the plan carries no env and no --settings.
-    let plan = match crate::reentry::resolve_reentry(
-        &home.registry_json(),
-        &name,
-        crate::reentry::ReentryTransition::Attach,
-        None,
-        None,
-    ) {
-        Ok(p) => p,
-        Err(reason) => {
-            eprintln!("fno agents attach: refused: {reason}");
-            append_agents_event(
-                &events_path,
-                "agent_attach_refused",
-                &[
-                    ("name", Value::String(name.clone())),
-                    ("provider", Value::String("claude".to_string())),
-                    ("reason", Value::String("reentry-plan-refused".to_string())),
-                    ("detail", Value::String(reason)),
-                ],
-            );
-            return crate::reentry::REENTRY_REFUSED_EXIT;
-        }
-    };
-    let mut command = std::process::Command::new(&plan.argv[0]);
-    command.args(&plan.argv[1..]);
-    for (key, value) in &plan.env {
-        command.env(key, value);
-    }
-
-    // Inherit stdio so the claude TUI takes over; mirror its exit code.
-    match command.status() {
-        Ok(status) => {
-            let exit_code = status.code().unwrap_or(1);
-            append_agents_event(
-                &events_path,
-                "agent_attached",
-                &[
-                    ("name", Value::String(name.clone())),
-                    ("provider", Value::String("claude".to_string())),
-                    ("short_id", Value::String(short_id.to_string())),
-                    ("claude_exit", Value::from(exit_code)),
-                ],
-            );
-            exit_code
-        }
-        Err(exc) if exc.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("claude CLI not on PATH");
-            14
-        }
-        Err(exc) => {
-            append_agents_event(
-                &events_path,
-                "agent_attached",
-                &[
-                    ("name", Value::String(name.clone())),
-                    ("provider", Value::String("claude".to_string())),
-                    ("short_id", Value::String(short_id.to_string())),
-                    ("claude_exit", Value::Null),
-                    ("error", Value::String(exc.to_string())),
-                    ("error_type", Value::String("OSError".to_string())),
-                ],
-            );
-            eprintln!("claude attach failed: {exc}");
-            1
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4581,6 +4052,8 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
     let mut state: Option<String> = None;
     let mut reason: Option<String> = None;
     let mut ttl_ms: Option<u64> = None;
+    let mut model: Option<String> = None;
+    let mut effort: Option<String> = None;
 
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -4588,6 +4061,9 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
             "--session-id" => session_id = it.next(),
             "--state" => state = it.next(),
             "--reason" => reason = it.next(),
+            // The served model/effort axes, passed through verbatim.
+            "--model" => model = it.next(),
+            "--effort" => effort = it.next(),
             "--seq" => {
                 seq = Some(
                     it.next()
@@ -4615,7 +4091,9 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
         Some("working") => "working",
         Some("blocked") => "blocked",
         Some("done") => "done",
-        _ => return Err("report needs --state working|blocked|done".into()),
+        // The PostModelSwitch posture: no inside-leg transition.
+        Some("model") => "model",
+        _ => return Err("report needs --state working|blocked|done|model".into()),
     };
 
     let mut params = serde_json::Map::new();
@@ -4627,6 +4105,12 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
     }
     if let Some(t) = ttl_ms {
         params.insert("ttl_ms".into(), Value::Number(t.into()));
+    }
+    if let Some(m) = model {
+        params.insert("model".into(), Value::String(m));
+    }
+    if let Some(e) = effort {
+        params.insert("effort".into(), Value::String(e));
     }
     Ok(Value::Object(params))
 }
@@ -4669,283 +4153,6 @@ pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
             1
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// claim (hidden debug verb over the native claims module)
-// ---------------------------------------------------------------------------
-
-/// `fno-agents claim <acquire|release|status> <key> [flags]` — a thin front
-/// over [`crate::claims`], the native lockfile-protocol implementation.
-///
-/// Purpose: (a) the cross-impl compatibility matrix
-/// (`cli/tests/integration/test_claims_cross_impl.py`) drives the Rust side
-/// of the protocol through it, and (b) an ops escape hatch when the Python
-/// CLI is unavailable. It is deliberately HIDDEN — dispatched via `matches!`
-/// in `bin/client.rs` (the `mail-inject` pattern) so it stays out of
-/// `CLIENT_VERB_USAGE` / `RUST_CLIENT_VERBS`; `fno agents claim` remains the only
-/// operator CLI for claims.
-///
-/// Output is one JSON object on stdout. Exit codes: 0 success, 1 held by
-/// another live writer, 2 usage/validation/io error.
-pub fn run_claim(args: &[String]) -> i32 {
-    let Some(op) = args.first().map(String::as_str) else {
-        eprintln!("fno-agents: claim requires an operation: acquire|release|status|sweep");
-        return 2;
-    };
-    if op == "sweep" {
-        return run_claim_sweep(&args[1..]);
-    }
-    let Some(key) = args.get(1).filter(|k| !k.starts_with("--")).cloned() else {
-        eprintln!("fno-agents: claim {op} requires a key argument");
-        return 2;
-    };
-
-    let mut holder: Option<String> = None;
-    let mut opts = crate::claims::AcquireOpts::default();
-    let mut it = args[2..].iter();
-    while let Some(a) = it.next() {
-        let mut take = |name: &str| -> Option<String> {
-            let v = it.next().cloned();
-            if v.is_none() {
-                eprintln!("fno-agents: claim: {name} requires a value");
-            }
-            v
-        };
-        match a.as_str() {
-            "--holder" => holder = take("--holder"),
-            "--pid" => match take("--pid").and_then(|v| v.parse::<u32>().ok()) {
-                Some(p) => opts.pid = Some(p),
-                None => return 2,
-            },
-            "--pid-unavailable" => opts.pid_unavailable = true,
-            "--ttl-ms" => match take("--ttl-ms").and_then(|v| v.parse::<i64>().ok()) {
-                Some(t) => opts.ttl_ms = Some(t),
-                None => return 2,
-            },
-            "--reason" => match take("--reason") {
-                Some(r) => opts.reason = Some(r),
-                None => return 2,
-            },
-            "--metadata" => {
-                let Some(raw) = take("--metadata") else {
-                    return 2;
-                };
-                match serde_json::from_str::<Value>(&raw) {
-                    Ok(Value::Object(m)) => opts.metadata = Some(m),
-                    _ => {
-                        eprintln!("fno-agents: claim: --metadata must be a JSON object");
-                        return 2;
-                    }
-                }
-            }
-            "--root" => match take("--root") {
-                Some(r) => opts.root = Some(PathBuf::from(r)),
-                None => return 2,
-            },
-            "--json" | "-J" => {} // output is always JSON; accepted for symmetry
-            other => {
-                eprintln!("fno-agents: claim: unknown flag {other}");
-                return 2;
-            }
-        }
-    }
-
-    match op {
-        "acquire" => {
-            let Some(holder) = holder else {
-                eprintln!("fno-agents: claim acquire requires --holder");
-                return 2;
-            };
-            match crate::claims::acquire(&key, &holder, opts) {
-                crate::claims::AcquireOutcome::Acquired(rec) => {
-                    let mut out = serde_json::to_value(&rec)
-                        .unwrap_or_else(|_| Value::Object(Default::default()));
-                    if let Value::Object(m) = &mut out {
-                        m.insert("outcome".into(), Value::String("acquired".into()));
-                    }
-                    println!("{out}");
-                    0
-                }
-                crate::claims::AcquireOutcome::HeldByOther { holder, pid, host } => {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "outcome": "held_by_other",
-                            "holder": holder, "pid": pid, "host": host,
-                        })
-                    );
-                    1
-                }
-                crate::claims::AcquireOutcome::Error(e) => {
-                    eprintln!("fno-agents: claim acquire failed: {e}");
-                    2
-                }
-            }
-        }
-        "release" => {
-            let Some(holder) = holder else {
-                eprintln!("fno-agents: claim release requires --holder");
-                return 2;
-            };
-            match crate::claims::release(
-                &key,
-                &holder,
-                opts.root.as_deref(),
-                opts.events_dir.as_deref(),
-            ) {
-                Ok(()) => {
-                    println!("{}", serde_json::json!({"outcome": "released", "key": key}));
-                    0
-                }
-                Err(e) => {
-                    eprintln!("fno-agents: claim release failed: {e}");
-                    2
-                }
-            }
-        }
-        "status" => {
-            let (state, rec) = crate::claims::status(&key, opts.root.as_deref());
-            // Mirror the `fno agents claim status -J` dict shape so the compat
-            // matrix can diff the two implementations field-by-field.
-            let mut out = serde_json::Map::new();
-            out.insert("key".into(), Value::String(key));
-            out.insert("state".into(), Value::String(state.as_str().into()));
-            if let Some(rec) = rec {
-                out.insert("holder".into(), Value::String(rec.holder));
-                out.insert(
-                    "schema_version".into(),
-                    Value::Number(rec.schema_version.into()),
-                );
-                out.insert(
-                    "pid".into(),
-                    rec.pid.map(Value::from).unwrap_or(Value::Null),
-                );
-                out.insert("pid_unavailable".into(), Value::Bool(rec.pid_unavailable));
-                out.insert("host".into(), Value::String(rec.host));
-                // Liveness compares this, not host. Omitting it here would leave a
-                // caller that classifies ownership from status JSON on the mutable
-                // hostname, so the fix would not reach that path at all.
-                out.insert(
-                    "machine_id".into(),
-                    rec.machine_id.map(Value::from).unwrap_or(Value::Null),
-                );
-                out.insert("acquired_at".into(), Value::Number(rec.acquired_at.into()));
-                out.insert(
-                    "expires_at".into(),
-                    rec.expires_at.map(Value::from).unwrap_or(Value::Null),
-                );
-                if let Some(r) = rec.reason {
-                    out.insert("reason".into(), Value::String(r));
-                }
-                if let Some(h) = rec.harness {
-                    out.insert("harness".into(), Value::String(h));
-                }
-                if !rec.metadata.is_empty() {
-                    out.insert("metadata".into(), Value::Object(rec.metadata));
-                }
-            }
-            println!("{}", Value::Object(out));
-            0
-        }
-        other => {
-            eprintln!(
-                "fno-agents: unknown claim operation: {other} (use acquire|release|status|sweep)"
-            );
-            2
-        }
-    }
-}
-
-/// `fno-agents claim sweep [--json] [--root <dir>]` — read every `node:` /
-/// `dispatch:` lockfile in the claims dir, classify each with the canonical
-/// [`crate::claims::classify`], and print ONE JSON object:
-/// `{"claims": [{"key", "state", "holder", "host", "pid"}, ...]}`.
-///
-/// The mux shells this (bounded, fail-open) to overlay in-flight state onto
-/// work-queue cards — the verdict shape above is a pinned contract (additive
-/// fields allowed, renames are not; `state` uses `ClaimState::as_str`
-/// vocabulary and consumers treat only `"live"` as in-flight).
-///
-/// A missing/unreadable claims dir is an EMPTY sweep (exit 0), not an error:
-/// no claims means no overlay. Unparseable/newer-schema lockfiles are
-/// excluded from the payload and logged to stderr (never fatal).
-fn run_claim_sweep(args: &[String]) -> i32 {
-    let mut root: Option<PathBuf> = None;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--root" => match it.next() {
-                Some(r) => root = Some(PathBuf::from(r)),
-                None => {
-                    eprintln!("fno-agents: claim sweep: --root requires a value");
-                    return 2;
-                }
-            },
-            "--json" | "-J" => {} // output is always JSON; accepted for symmetry
-            other => {
-                eprintln!("fno-agents: claim sweep: unknown flag {other}");
-                return 2;
-            }
-        }
-    }
-    let Some(dir) = crate::claims::claims_dir_for(root.as_deref()) else {
-        // No resolvable claims root: same as an empty dir (fail-open).
-        println!("{}", serde_json::json!({"claims": []}));
-        return 0;
-    };
-    println!("{}", claim_sweep_payload(&dir));
-    0
-}
-
-/// Pure(ish) core of `claim sweep`: scan `dir` for `node:` / `dispatch:`
-/// lockfiles and build the pinned verdict object. Separated from
-/// [`run_claim_sweep`] so tests can drive it against a temp dir.
-fn claim_sweep_payload(dir: &Path) -> Value {
-    // Filename prefilter: keys are percent-encoded (`:` -> `%3A`), so only
-    // read files that can be node/dispatch claims; `.expired/` is a subdir
-    // and non-`.lock` names are skipped by the same test.
-    let node_pfx = crate::claims::encode_key("node:");
-    let dispatch_pfx = crate::claims::encode_key("dispatch:");
-    let mut claims: Vec<Value> = Vec::new();
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return serde_json::json!({ "claims": [] }),
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if !name.ends_with(".lock")
-            || !(name.starts_with(&node_pfx) || name.starts_with(&dispatch_pfx))
-        {
-            continue;
-        }
-        match crate::claims::read_claim_file(&entry.path()) {
-            Ok(rec) => {
-                // Trust the record's own key over the filename decode; a
-                // record whose key does not carry a sweep prefix is excluded
-                // (filename lied — treat like corruption, minus the noise).
-                if !(rec.key.starts_with("node:") || rec.key.starts_with("dispatch:")) {
-                    continue;
-                }
-                let state = crate::claims::classify(&rec, None);
-                claims.push(serde_json::json!({
-                    "key": rec.key,
-                    "state": state.as_str(),
-                    "holder": rec.holder,
-                    "host": rec.host,
-                    "pid": rec.pid,
-                }));
-            }
-            Err(crate::claims::ReadError::GoneAway) => continue,
-            Err(crate::claims::ReadError::Corrupted(e)) => {
-                eprintln!("fno-agents: claim sweep: skipping {name}: {e}");
-                continue;
-            }
-        }
-    }
-    claims.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
-    serde_json::json!({ "claims": claims })
 }
 
 #[cfg(test)]
@@ -4999,104 +4206,6 @@ mod tests {
         let mut nulled = thread.clone();
         nulled["mux"] = Value::Null;
         assert!(is_codex_thread_row(&nulled));
-    }
-
-    /// AC11-ERR (x-296f): a codex thread row with NO session id on file
-    /// refuses by naming the missing rollout and pointing at `peek --follow`.
-    /// The vendor's bare "no rollout found for thread id" never reaches the
-    /// operator through this door. It never returns `None` (the "not a
-    /// thread, use the refusal" answer), because that would print a message
-    /// saying codex has no persistent session when the row IS a thread.
-    #[test]
-    fn a_codex_thread_row_with_no_session_id_refuses_naming_the_rollout() {
-        let home = std::env::temp_dir().join(format!("fno-x296f-nosess-{}", std::process::id()));
-        std::fs::create_dir_all(&home).unwrap();
-        let events = home.join("events.jsonl");
-        let entry = json!({
-            "name": "cx", "harness": "codex", "cwd": "/w",
-            "host_mode": "interactive", "short_id": "",
-        });
-
-        let outcome = attach_via_declared_form("codex", &entry, "cx", &events);
-
-        assert_eq!(outcome, Some(13));
-        let log = std::fs::read_to_string(&events).unwrap_or_default();
-        assert!(
-            log.contains("no-session-id-yet"),
-            "the refusal must name its own reason in the event log: {log}"
-        );
-        std::fs::remove_dir_all(&home).ok();
-    }
-
-    /// AC11-ERR (x-296f): the same attach with stdin not a terminal refuses
-    /// by naming the terminal requirement, with its own event reason - not
-    /// the vendor's bare "stdin is not a terminal" with no clue which command
-    /// produced it.
-    #[test]
-    fn a_codex_thread_attach_without_a_tty_refuses_naming_the_terminal() {
-        // cargo test runs with stdin detached, so the isatty probe is false
-        // here by construction; the exec path is unreachable in this suite.
-        let home = std::env::temp_dir().join(format!("fno-x296f-notty-{}", std::process::id()));
-        std::fs::create_dir_all(&home).unwrap();
-        let events = home.join("events.jsonl");
-        let entry = json!({
-            "name": "cx", "harness": "codex", "cwd": "/w",
-            "host_mode": "interactive", "short_id": "",
-            "harness_session_id": "01a04546-28b2-7a41-ae4c-892bbeb8e295",
-        });
-
-        let outcome = attach_via_declared_form("codex", &entry, "cx", &events);
-
-        assert_eq!(outcome, Some(13));
-        let log = std::fs::read_to_string(&events).unwrap_or_default();
-        assert!(
-            log.contains("\"no-tty\""),
-            "the refusal must name its own reason in the event log: {log}"
-        );
-        std::fs::remove_dir_all(&home).ok();
-    }
-
-    /// AC12 / AC4 (x-296f): a codex row that is NOT thread-shaped answers
-    /// `None` - the caller keeps its verbatim refusal, exit code included -
-    /// and a harness that declares no form does the same whatever its shape.
-    #[test]
-    fn non_thread_rows_and_undeclaring_harnesses_fall_through_to_the_refusal() {
-        let home = std::env::temp_dir().join(format!("fno-x296f-fall-{}", std::process::id()));
-        std::fs::create_dir_all(&home).unwrap();
-        let events = home.join("events.jsonl");
-        let thread = json!({
-            "name": "cx", "harness": "codex", "cwd": "/w",
-            "host_mode": "interactive", "short_id": "",
-            "harness_session_id": "01a04546-28b2-7a41-ae4c-892bbeb8e295",
-        });
-
-        // A pane row: its process already has a place.
-        let mut pane = thread.clone();
-        pane["mux"] = json!({"session": "s", "pane_id": 4});
-        assert_eq!(
-            attach_via_declared_form("codex", &pane, "cx", &events),
-            None
-        );
-        // A one-shot ask row: not a thread either.
-        let ask = json!({
-            "name": "cx-ask", "harness": "codex", "cwd": "/w",
-            "short_id": "",
-            "harness_session_id": "01a04546-28b2-7a41-ae4c-892bbeb8e295",
-        });
-        assert_eq!(attach_via_declared_form("codex", &ask, "cx", &events), None);
-        // gemini declares nothing: even a thread-shaped row falls through.
-        let gm = json!({
-            "name": "gm", "harness": "gemini", "cwd": "/w",
-            "host_mode": "interactive", "short_id": "",
-            "harness_session_id": "01a04546-28b2-7a41-ae4c-892bbeb8e295",
-        });
-        assert_eq!(attach_via_declared_form("gemini", &gm, "gm", &events), None);
-        assert_eq!(
-            std::fs::read_to_string(&events).unwrap_or_default(),
-            "",
-            "a fall-through owns no outcome and emits no event"
-        );
-        std::fs::remove_dir_all(&home).ok();
     }
 
     // --- find_agent_entry (x-1b1e): parity with Python resolve_agent ----------
@@ -6039,7 +5148,7 @@ mod tests {
         let caller_cwd = std::env::current_dir().unwrap();
         let relative_registry = Path::new("relative/registry.json");
         let expected_registry = caller_cwd.join(relative_registry);
-        std::env::set_var("PATH", dir.path());
+        std::env::set_var("PATH", crate::path_with(dir.path()));
         std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
         std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
         let output =
@@ -6231,18 +5340,17 @@ mod tests {
         assert_eq!(code, 13);
     }
 
+    /// The shared helper snapshots git's path; hand-rolling it resolved by name.
     fn _git(repo: &Path, args: &[&str]) {
-        let st = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(st.success(), "git {:?} in {} failed", args, repo.display());
+        let out = crate::git_test_helpers::git_run(args, repo).unwrap();
+        assert!(out.status.success(), "git {args:?} failed in {repo:?}");
     }
 
     #[test]
     fn resolve_resume_cwd_picks_the_transcripts_worktree_over_the_stale_recorded_cwd() {
+        // Shells git: a sibling test blanks PATH, so this is the PATH-dependent
+        // work PATH_TEST_MUTEX covers.
+        let _p = crate::path_test_guard();
         // Registered at the canonical checkout; transcript under a worktree's
         // project dir (the EnterWorktree case). Resume must resolve to the
         // worktree, not the pre-EnterWorktree recorded cwd.
@@ -6667,26 +5775,19 @@ mod tests {
 
     #[test]
     fn gc_keeps_synthesized_idle_row() {
-        // An adopted orphan row (Idle, no pid, no exited_at) must survive the GC
-        // sweep: non-terminal + no confirmed-dead pid -> gc_action Keep, so the
-        // row stays addressable until the operator resumes it.
+        // An adopted orphan row named on no node must survive the retirement
+        // sweep: NoProvenance -> Keep, so the row stays addressable until the
+        // operator resumes it or a node names it.
         let row = crate::gc::GcRow {
-            status: crate::AgentStatus::Idle,
-            is_live: false,
-            pid_confirmed_dead: false,
+            origin: Some("spawn".into()),
+            crowned: false,
+            work: crate::graph_store::WorkState::NoProvenance,
+            transcript_age_s: Some(10_000),
             owns_worktree: true,
-            exited_at: None,
-            liveness_surface: true,
-            transcript_fresh: Some(false),
-            harness_session_gone: None,
-            dormant_done: false,
             worktree_clean: None,
-            probe: RowLiveness::Alive,
+            branch_merged: None,
         };
-        assert_eq!(
-            crate::gc::gc_action(&row, 1000, 60),
-            crate::gc::GcAction::Keep
-        );
+        assert_eq!(crate::gc::gc_decide(&row, 60).0, crate::gc::GcAction::Keep);
     }
 
     #[test]
@@ -7290,74 +6391,5 @@ mod tests {
         let parsed: Value = serde_json::from_str(line).expect("valid JSON line");
         assert_eq!(parsed["kind"], "agent_resumed");
         fs::remove_dir_all(&dir).ok();
-    }
-
-    // ---- claim sweep (x-54fa) --------------------------------------------
-
-    fn sweep_acquire(root: &std::path::Path, key: &str) {
-        let opts = crate::claims::AcquireOpts {
-            root: Some(root.to_path_buf()),
-            events_dir: Some(root.to_path_buf()),
-            ..Default::default()
-        };
-        match crate::claims::acquire(key, "test-holder", opts) {
-            crate::claims::AcquireOutcome::Acquired(_) => {}
-            other => panic!("acquire {key} failed: {other:?}"),
-        }
-    }
-
-    fn sweep_dir(root: &std::path::Path) -> PathBuf {
-        crate::claims::claims_dir_for(Some(root)).unwrap()
-    }
-
-    #[test]
-    fn claim_sweep_empty_or_missing_dir_is_empty_payload() {
-        let td = tempfile::TempDir::new().unwrap();
-        // Dir does not exist yet: empty payload, not an error (Boundaries:
-        // "must handle an empty claims directory").
-        let payload = claim_sweep_payload(&sweep_dir(td.path()));
-        assert_eq!(payload, serde_json::json!({"claims": []}));
-    }
-
-    #[test]
-    fn claim_sweep_reports_live_node_and_dispatch_claims() {
-        let td = tempfile::TempDir::new().unwrap();
-        sweep_acquire(td.path(), "node:x-ef41");
-        sweep_acquire(td.path(), "dispatch:x-ef41");
-        sweep_acquire(td.path(), "session:not-swept"); // out-of-scope prefix
-        let payload = claim_sweep_payload(&sweep_dir(td.path()));
-        let claims = payload["claims"].as_array().unwrap();
-        assert_eq!(claims.len(), 2, "session: claim must be excluded");
-        // Sorted by key: dispatch: before node:.
-        assert_eq!(claims[0]["key"], "dispatch:x-ef41");
-        assert_eq!(claims[1]["key"], "node:x-ef41");
-        for c in claims {
-            // Acquired by THIS live process => live.
-            assert_eq!(c["state"], "live");
-            assert_eq!(c["holder"], "test-holder");
-            assert_eq!(c["pid"], std::process::id());
-            assert!(c["host"].as_str().is_some_and(|h| !h.is_empty()));
-        }
-    }
-
-    #[test]
-    fn claim_sweep_excludes_corrupted_and_newer_schema_lockfiles() {
-        let td = tempfile::TempDir::new().unwrap();
-        sweep_acquire(td.path(), "node:x-good");
-        let dir = sweep_dir(td.path());
-        // Corrupted YAML under a sweep-prefixed name.
-        fs::write(dir.join("node%3Ax-bad.lock"), "{not yaml: [").unwrap();
-        // Newer schema writer: parse refuses, sweep excludes (does not crash).
-        fs::write(
-            dir.join("node%3Ax-newer.lock"),
-            "schema_version: 999\nkey: node:x-newer\nholder: h\nacquired_at: 1\npid: 1\nhost: x\n",
-        )
-        .unwrap();
-        // Non-lock and dot files are skipped.
-        fs::write(dir.join("node%3Ax-tmp.partial"), "x").unwrap();
-        let payload = claim_sweep_payload(&dir);
-        let claims = payload["claims"].as_array().unwrap();
-        assert_eq!(claims.len(), 1);
-        assert_eq!(claims[0]["key"], "node:x-good");
     }
 }

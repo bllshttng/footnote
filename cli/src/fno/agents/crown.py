@@ -1,41 +1,24 @@
 """The crown vocabulary: what a scope is, what rung it implies, and what a
-grantor may hand down.
+grantor may hand down. ``registry`` owns the three row fields; this module owns
+their meaning and touches no file.
 
-Everything about orchestrator authority that is not storage lives here.
-``registry`` owns the three fields on the row (``crown_level`` /
-``crown_scope`` / ``crown_grantor``) and nothing about their meaning; this
-module owns the meaning and touches no file.
-
-THE LADDER IS THREE RUNGS, AND EACH IS A FACT ABOUT THE SCOPE:
+THE LADDER IS THREE RUNGS, EACH A FACT ABOUT THE SCOPE:
 
     0   several projects   scope names 2+ config projects (a portfolio)
     1   one project        scope names one config project
-    2   one epic           scope is a backlog node with type == "epic"
+    2   a set of epics     every scope names a backlog node with type == "epic"
 
-There is deliberately no rung for an implementer. A node that is not an epic is
-work, not a territory, and nobody reigns for a day over a single task - so a
-crown aimed at one is REFUSED rather than stamped at some bottom rung. That
-refusal is the whole reason no caller passes a level: ``derive_crown_level``
-reads the rung off the scope, and a scope that names no territory has no rung to
-read, which is exactly the case that should fail.
+No rung for an implementer: a non-epic node is work, not territory, so a crown
+aimed at one is REFUSED - which is why no caller passes a level;
+``derive_crown_level`` reads the rung off the scope, and a scope naming no
+territory has none to read. Callers hand-type no altitude (the old surface let a
+backwards ladder - 0 is the TOP - silently mint wrong authority).
 
-The practical payoff is that the counter-intuitive part of the old surface is
-gone. Callers used to hand-type an altitude on a ladder whose direction reads
-backwards (0 is the TOP), and typing the wrong one silently minted authority at
-the wrong altitude. Now the only input is the territory, which the operator
-already knows by name.
-
-CANONICALIZATION CONTRACT: the one-live-crown guard (in ``dispatch`` and
-``mux_spawn``) compares a stored ``crown_scope`` to the requested one by exact
-equality, so it only stays correct while every stored scope IS canonical.
-``resolve_crown`` guarantees that for every crown it stamps (aliases resolved via
-``_canonical_project``, members sorted and deduped), so new-vs-new is safe. The
-gap is migration-only: a crown stamped by the OLD ``--crown level=,scope=`` path
-(before this redesign) could store a raw alias spelling that the equality guard
-would not match against the canonical form. That old path is deleted here, and
-the feature was unreleased, so no such row should exist outside development
-registries - if one does, re-crown it rather than relying on the guard to merge
-the spellings.
+CANONICALIZATION CONTRACT: the one-live-crown guard compares stored scopes by
+exact equality, so ``resolve_crown`` guarantees every stamp is canonical
+(aliases resolved, members sorted and deduped). The only gap is a pre-redesign
+``--crown level=,scope=`` row storing a raw alias spelling - that path is
+deleted and was unreleased; re-crown such a row rather than merging spellings.
 """
 from __future__ import annotations
 
@@ -68,40 +51,29 @@ class CrownScopeError(ValueError):
 #: must refuse rather than assume the most privileged answer.
 REGISTRY_UNREADABLE: Any = object()
 
-#: Sentinel for "the caller carries an agent identity but no registry row matches
-#: it." Distinct from ``None`` (an attended human with no identity at all) and
-#: from :data:`REGISTRY_UNREADABLE` (the registry could not be read): the registry
-#: WAS read, the caller claims to be an agent, but it is not joined - a
-#: just-spawned worker before its row lands, or a session that has not run
-#: ``/fno-me``. Such a caller holds no verified authority, so :func:`grant_error`
-#: refuses with the heal rather than authorize like a human. This is the third
-#: fail-open path: the first review's sentinel covered the registry EXCEPTION, and
-#: ``_find_by_session`` returns ``None`` on a clean miss WITHOUT raising, so the
-#: miss never reached that except branch.
+#: Sentinel for "the caller carries an agent identity but no registry row
+#: matches it": distinct from ``None`` (attended human) and
+#: :data:`REGISTRY_UNREADABLE` (read failed). The registry WAS read, the caller
+#: claims to be an agent, but is not joined - it holds no verified authority,
+#: so :func:`grant_error` refuses with the heal rather than authorize. Covers
+#: the clean-miss path ``_find_by_session`` answers with ``None``, not raising.
 AGENT_UNREGISTERED: Any = object()
 
 
 def calling_agent_row():
-    """The calling session's registry row.
+    """The calling session's registry row; :func:`grant_error` treats each
+    outcome differently:
 
-    Four outcomes, and :func:`grant_error` treats each differently:
-
-    - ``None`` - an attended human: no ``FNO_AGENT_SELF``, so no agent identity
-      to check against. A human may grant any scope.
+    - ``None`` - an attended human. A human may grant any scope.
     - an ``AgentEntry`` - a joined agent; :func:`grant_error` checks its crown.
-    - :data:`REGISTRY_UNREADABLE` - the caller HAS an agent identity, but the
-      registry could not be read to resolve it. This is NOT an attended human,
-      and flattening it to ``None`` would let a registry read failure promote
-      any spawned worker to human authority and mint crowns it has no right to
-      bestow - fail-open on the rule "you cannot hand down authority you do not
-      hold." Surfaced as a sentinel so the caller refuses instead.
-    - :data:`AGENT_UNREGISTERED` - the caller HAS an agent identity and the
-      registry was read, but no row matches it (a just-spawned worker before its
-      row lands, or a session that has not run ``/fno-me``). ``_find_by_session``
-      returns ``None`` on this clean miss WITHOUT raising, so without this
-      sentinel the miss would flow out as the attended-human ``None`` and
-      authorize any grant - the same fail-open as the exception path, one branch
-      over. Surfaced so :func:`grant_error` refuses with the heal instead.
+    - :data:`REGISTRY_UNREADABLE` - the caller HAS an agent identity but the
+      registry could not be read. Flattening this to ``None`` would let a read
+      failure promote any worker to human authority - fail-open on "you cannot
+      hand down authority you do not hold" - so it surfaces as a sentinel.
+    - :data:`AGENT_UNREGISTERED` - identity present, registry read, but no row
+      matches (a just-spawned worker, a session without ``/fno-me``). The clean
+      miss flows out as ``None`` without this sentinel, the same fail-open one
+      branch over; surfaces so :func:`grant_error` refuses with the heal.
 
     Resolved the same way ``fno whoami`` does, so "who am I" has one answer.
     """
@@ -263,46 +235,15 @@ def _canonical_project(name: str) -> Optional[str]:
         return None
 
 
-def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
-    """``scopes`` -> the (rung, stored scope) they imply, both derived together.
+def _epic_or_refuse(raw: str, *, graph_entry=None) -> str:
+    """``raw`` as a backlog epic id, or the refusal that names why not.
 
-    ONE call rather than a derive-then-encode pair, because the two answers must
-    agree and a caller holding them separately can mismatch them: the rung is
-    counted over CANONICAL project names, so a scope encoded from the raw
-    spelling would be a different territory than the one that was counted.
-
-    Raises :class:`CrownScopeError` when the scopes name no territory - the
-    refusal that keeps implementers uncrowned. Mixed scopes are refused rather
-    than coerced: a portfolio is projects, so naming a project and an epic
-    together is a mistake about what is being ruled, not a level-0 crown over
-    both.
+    One message set for the single-epic and epic-set paths alike: a member of
+    a set that is a typo or a non-epic node gets the same named remedy it
+    would get alone. ``graph_entry`` lets a set-resolving caller pass one
+    ``_graph_index`` read so members do not pay a full graph parse apiece.
     """
-    members = split_scope(canonical_scope(scopes))
-    if not members:
-        raise CrownScopeError("a crown needs a scope: name an epic or a project")
-
-    # Resolve aliases FIRST, then dedupe: `-k alpha -k a` is one project spelled
-    # twice, not a two-project portfolio.
-    resolved = [(m, _canonical_project(m)) for m in members]
-    projects = [canon for _, canon in resolved if canon]
-
-    if len(members) > 1:
-        unknown = [raw for raw, canon in resolved if not canon]
-        if unknown:
-            raise CrownScopeError(
-                f"a multi-scope crown rules PROJECTS, but {', '.join(unknown)} "
-                f"{'is not a configured project' if len(unknown) == 1 else 'are not configured projects'}. "
-                "Name projects from your config, or pass a single epic instead."
-            )
-        scope = canonical_scope(projects)
-        # One project named twice collapses to one project, not a portfolio.
-        return (0 if len(split_scope(scope)) > 1 else 1), scope
-
-    raw = members[0]
-    if projects:
-        return 1, projects[0]
-
-    entry = _graph_entry(raw)
+    entry = (graph_entry or _graph_entry)(raw)
     if entry is None:
         raise CrownScopeError(
             f"{raw!r} is neither a configured project nor a backlog node; "
@@ -315,7 +256,71 @@ def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
             f"If {raw} IS meant to be an epic: fno backlog update {raw} --type epic. "
             "Otherwise crown the epic above it, or its project."
         )
-    return 2, raw
+    return raw
+
+
+def _member_rung(raw: str, canon: Optional[str], *, graph_entry=None) -> str:
+    """One scope member spelled with its rung, for a mixed-rung refusal."""
+    if canon:
+        return f"{canon} (a project)"
+    entry = (graph_entry or _graph_entry)(raw)
+    if entry is not None and entry.get("type") == "epic":
+        return f"{raw} (an epic)"
+    if entry is not None:
+        return f"{raw} (a {entry.get('type') or 'node'}, not an epic)"
+    return f"{raw} (not a configured project or a known node)"
+
+
+def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
+    """``scopes`` -> the (rung, stored scope) they imply, both derived together.
+
+    ONE call rather than a derive-then-encode pair, because the two answers must
+    agree and a caller holding them separately can mismatch them: the rung is
+    counted over CANONICAL project names, so a scope encoded from the raw
+    spelling would be a different territory than the one that was counted.
+
+    Raises :class:`CrownScopeError` when the scopes name no territory - the
+    refusal that keeps implementers uncrowned. Mixed scopes are refused rather
+    than coerced: a portfolio is projects and rung 2 is a set of epics, so
+    naming a project and an epic together is a mistake about what is being
+    ruled, not a crown over both.
+    """
+    members = split_scope(canonical_scope(scopes))
+    if not members:
+        raise CrownScopeError("a crown needs a scope: name an epic or a project")
+
+    # Resolve aliases FIRST, then dedupe: `-k alpha -k a` is one project spelled
+    # twice, not a two-project portfolio.
+    resolved = [(m, _canonical_project(m)) for m in members]
+    projects = [canon for _, canon in resolved if canon]
+    non_projects = [raw for raw, canon in resolved if not canon]
+
+    if len(members) > 1:
+        if not non_projects:
+            scope = canonical_scope(projects)
+            # One project named twice collapses to one project, not a portfolio.
+            return (0 if len(split_scope(scope)) > 1 else 1), scope
+        # ONE graph parse serves every per-member refusal below; a graph this
+        # rung could not read answers None, and the per-call fallback keeps
+        # the single-read behavior for that machine.
+        by_id = _graph_index()
+        entry_of = _graph_entry if by_id is None else by_id.get
+        if not projects:
+            # Rung 2 rules a SET of epics, stored with the same separator: a
+            # king over two epics at once is one crown, not a failed portfolio.
+            return 2, canonical_scope(
+                [_epic_or_refuse(raw, graph_entry=entry_of) for raw in non_projects]
+            )
+        raise CrownScopeError(
+            "a multi-scope crown rules PROJECTS or EPICS, never both at once: "
+            f"{', '.join(_member_rung(raw, canon, graph_entry=entry_of) for raw, canon in resolved)}. "
+            "Name projects only (a portfolio) or epics only (a set)."
+        )
+
+    raw = members[0]
+    if projects:
+        return 1, projects[0]
+    return 2, _epic_or_refuse(raw)
 
 
 def derive_crown_level(scopes: list[str]) -> int:
@@ -339,9 +344,14 @@ def scope_contains(
     to, so a grantor can no longer hand down authority it does not hold.
 
     ``graph_entry`` overrides the per-call graph read (an ``id -> entry``
-    callable), so a caller scanning many rows pays one graph parse instead of
-    one per row.
+    callable). Omitted, the FIRST call resolves ``_graph_index`` once and
+    hands it down the set-membership recursion: a five-member grant costs
+    one graph parse, not five.
     """
+    if graph_entry is None:
+        by_id = _graph_index()
+        if by_id is not None:
+            graph_entry = by_id.get
     outer_members = _canonical_members(outer)
     inner_members = _canonical_members(inner)
     if not outer_members or not inner_members:
@@ -350,7 +360,16 @@ def scope_contains(
         return False  # a peer crown, not a subordinate one
 
     if len(inner_members) > 1:
-        return inner_members < outer_members
+        if inner_members < outer_members:
+            return True  # a portfolio inside a wider portfolio
+        # The other multi-member inner is a rung-2 epic set (mixed scopes are
+        # refused at resolve time). Epic ids never equal project names, so the
+        # subset test above cannot place it: a set is contained exactly when
+        # EVERY member is contained, member by member.
+        return all(
+            scope_contains(outer, m, graph_entry=graph_entry)
+            for m in split_scope(inner)
+        )
 
     name = next(iter(inner_members))
     if name in outer_members:
@@ -498,27 +517,70 @@ def _same_territory(a: Optional[str], b: Optional[str]) -> bool:
     return bool(left) and left == right
 
 
+def _territories_overlap(a: Optional[str], b: Optional[str]) -> bool:
+    """Do two stored scopes share ANY territory, aliases normalized?
+
+    The one-live-crown scans key on this, not on equality: a stored set
+    (a portfolio, or a rung-2 epic set) already rules each of its members,
+    so a second crown over any member alone is a double rule even though no
+    two stored strings are equal.
+    """
+    left, right = _territory_key(a), _territory_key(b)
+    return bool(left) and bool(right) and bool(left & right)
+
+
+def _derived_level(scope: Optional[str]) -> Optional[int]:
+    """The rung the SCOPE sits on, read off its members, never a stored number:
+    all projects is 1/0 by count, none is an epic set (2), a mix is ``None`` -
+    the undecidable case the rivalry guard fails closed on.
+    """
+    members = _canonical_members(scope)
+    if not members:
+        return None
+    project_members = {m for m in members if _canonical_project(m)}
+    if project_members and len(project_members) == len(members):
+        return 1 if len(members) == 1 else 0
+    if not project_members:
+        return 2
+    return None
+
+
+def _crown_rivals(
+    a_scope: Optional[str],
+    a_level: Optional[int],
+    b_scope: Optional[str],
+    b_level: Optional[int],
+) -> bool:
+    """Do two live crowns double-rule territory, ladder-aware?
+
+    The ladder's court is legitimate (a portfolio's court IS project kings),
+    so rivalry is rung-scoped: same rung double-rules on any shared member,
+    different rungs only on the same territory outright. Rungs derive from
+    the members - a row stamped ``level=0`` over ``e-1,e-2`` is exactly how a
+    bypass used to switch this guard off. Stored levels tie-break only when
+    derivation cannot classify either side; otherwise overlap surfaces.
+    """
+    a_rung = _derived_level(a_scope)
+    b_rung = _derived_level(b_scope)
+    if a_rung is None and b_rung is None:
+        if a_level is not None and b_level is not None and a_level != b_level:
+            return _same_territory(a_scope, b_scope)
+    elif a_rung is not None and b_rung is not None and a_rung != b_rung:
+        return _same_territory(a_scope, b_scope)
+    return _territories_overlap(a_scope, b_scope)
+
+
 def crown_scope_matches(held: Optional[str], requested: Optional[str]) -> bool:
     """Will the row-keyed king readers accept a crown over ``held`` for
     ``requested``? Territory equality, aliases normalized.
 
-    NOT a containment check, and the difference is the whole point. Grant
-    asks "may this crown bestow that scope", and answers yes for a strict
-    container. The readers ask something narrower and answer it with a
-    string: ``king_manifest_path`` builds ``kings/{crown_scope}.md`` from
-    the stored scope verbatim, and ``king done`` refuses on ``own != scope``.
-    Neither walks the ladder. So a project-level crown does NOT satisfy an
-    epic manifest, however cleanly it contains it.
-
-    A first cut of this helper accepted ``scope_contains`` on the reasoning
-    that grant already applies that rule. That silenced precisely the state
-    the warning exists to make loud: a king crowned over a project arms an
-    epic manifest, hears nothing, and then finds ``manifest-path`` exiting 1
-    and ``done`` refusing. Reuse the rule that matches the QUESTION, not the
-    rule that happens to live nearby.
-
-    A blank scope on either side answers False: a crown naming no territory
-    matches nothing, and neither does a manifest armed for nothing.
+    NOT a containment check: grant answers "may this crown bestow that scope"
+    with the ladder, while the readers answer a string question
+    (``kings/{crown_scope}.md`` built verbatim; ``done`` refuses on
+    ``own != scope``), so a project crown does NOT satisfy an epic manifest.
+    A first cut reused ``scope_contains`` and silenced exactly the state the
+    warning exists to make loud. Reuse the rule that matches the QUESTION.
+    A blank scope on either side answers False.
     """
     if not held or not requested:
         return False
@@ -640,16 +702,22 @@ def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
                 for row in rows
                 if row.name not in {holder_name, target.name}
                 and row.status not in TERMINAL_STATUSES
-                and _same_territory(row.crown_scope, scope)
+                and _crown_rivals(row.crown_scope, row.crown_level, scope, level)
             ),
             None,
         )
         if other is not None:
             raise CrownPromotionError(
-                f"cannot reclaim {scope!r}: live row {other.name!r} also "
-                "holds the scope"
+                f"cannot reclaim {scope!r}: live row {other.name!r} already "
+                f"holds overlapping territory ({other.crown_scope!r})"
             )
 
+        returned_by = (
+            getattr(holder, "harness_session_id", None)
+            or getattr(holder, "cc_session_id", None)
+            or getattr(holder, "short_id", None)
+            or holder.name
+        )
         armed = False
         unarmed_reason = ""
         try:
@@ -661,18 +729,14 @@ def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
                     getattr(target, "harness_session_id", None) or "",
                     owner_pid=getattr(target, "pid", None),
                     owner_cwd=getattr(target, "cwd", None),
+                    crown_level=level,
+                    crown_scope=scope,
+                    crown_grantor=returned_by,
                 )
                 is not None
             )
         except (OSError, ValueError) as exc:
             unarmed_reason = str(exc)
-
-        returned_by = (
-            getattr(holder, "harness_session_id", None)
-            or getattr(holder, "cc_session_id", None)
-            or getattr(holder, "short_id", None)
-            or holder.name
-        )
         for index, row in enumerate(rows):
             if row.name == holder_name:
                 rows[index] = replace(
@@ -736,13 +800,11 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     if denial is not None:
         raise CrownPromotionError(denial)
     grantor = "human" if caller is None else caller.name
-    # `grant_error` blesses an equal scope because SPAWN succession is legal
-    # there: that path vacates the caller and stamps the heir in one write.
-    # This path only stamps the target, so letting it through would leave two
-    # live crowns over one scope - which the holder scan below then refuses,
-    # naming the caller's OWN row as the blocker and offering three remedies
-    # that all contradict the refusal (re-scope yourself, reconcile yourself,
-    # stop yourself). Refuse here instead, where the remedy is reachable.
+    # `grant_error` blesses an equal scope because SPAWN succession vacates the
+    # caller and stamps the heir in one write; this path only stamps the target,
+    # so letting it through would leave two live crowns and the holder scan
+    # below would refuse naming the caller's OWN row. Refuse here, where the
+    # remedy is reachable.
     if caller is not None and _same_territory(
         getattr(caller, "crown_scope", None), scope
     ):
@@ -754,14 +816,11 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             "registry write, so the scope is never doubly ruled and never "
             "briefly unruled."
         )
-    # The authority check above ran OUTSIDE the lock, so the grantor's own
-    # crown can move between it and the stamp - a window that did not exist
-    # while every agent caller was refused outright. Re-running grant_error
-    # under the lock is not the fix: it calls scope_contains, which reads the
-    # GRAPH, and this file keeps graph I/O off the lock on purpose. So carry
-    # the scope authority was granted on and re-assert it under the lock as a
-    # plain attribute compare. Fails closed: an agent grantor whose crown moved
-    # mid-call is refused rather than allowed to bestow what it no longer holds.
+    # The authority check ran OUTSIDE the lock, so the grantor's crown can move
+    # before the stamp. Re-running grant_error under the lock would put graph
+    # I/O on the lock, so carry the granted scope and re-assert it under the
+    # lock as a plain compare. Fails closed: a grantor whose crown moved
+    # mid-call cannot bestow what it no longer holds.
     granting_scope = None if caller is None else getattr(caller, "crown_scope", None)
 
     from fno.agents.registry import (
@@ -778,13 +837,10 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             f"{exc}. `fno agents list` shows every handle you can crown."
         ) from exc
 
-    # A crown is stamped BY a grantor, never self-declared. That held for free
-    # while every agent caller was refused outright; once a king may grant, the
-    # invariant needs its own check, because the grantor recorded on the row
-    # would otherwise be the row itself. The succession refusal above does not
-    # cover this: it fires only on an EQUAL scope, so a king narrowing its own
-    # crown to a strict SUBSET sails past it and re-stamps itself, vacating the
-    # wider scope on the way. Identity, not territory, is the thing to test.
+    # Never self-declared: once a king may grant, the grantor recorded on the
+    # row could be the row itself. The succession refusal above fires only on
+    # an EQUAL scope, so narrowing to a strict SUBSET would sail past it -
+    # identity, not territory, is the test.
     if caller is not None and target_name == grantor:
         raise CrownPromotionError(
             f"refusing to crown {target_name!r}: that is this session, and a "
@@ -825,13 +881,10 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 "grant committed. `fno agents list` shows the handles you can crown."
             )
         if target.status in TERMINAL_STATUSES:
-            # Name the field, not just the value, and name a remedy that cannot
-            # contradict the refusal. This test reads the STORED status; `fno
-            # agents list` renders that column beside a freshly-computed
-            # `live_status`, and the two disagree exactly when a live row was
-            # stamped terminal by an earlier sweep. Pointing a caller at that
-            # reader (as this refusal used to) sends it to a column saying the
-            # row is live, with no way forward from there.
+            # Name the field and a remedy that cannot contradict the refusal:
+            # `fno agents list` renders this STORED status beside a
+            # freshly-computed `live_status`, and pointing the caller there (as
+            # this used to) shows a column saying the row is live.
             raise CrownPromotionError(
                 f"refusing to crown {target.name!r}: its STORED status is "
                 f"{target.status!r}, which is terminal. That is a recorded "
@@ -867,20 +920,27 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 "fno agents rm it, then crown the re-registered session."
             )
 
+        # An agent grantor's own row legitimately overlaps the delegated scope
+        # (grant_error verified a STRICT containment before the write), so the
+        # caller is not a second ruler; every other RIVAL live row is. Rivalry
+        # is ladder-aware, not bare overlap: a live portfolio over the scope's
+        # project is the new king's court, not a second ruler of it.
+        delegating = {target.name} | ({grantor} if caller is not None else set())
         holder = next(
             (
                 row
                 for row in rows
-                if row.name != target.name
+                if row.name not in delegating
                 and row.status not in TERMINAL_STATUSES
-                and _same_territory(row.crown_scope, scope)
+                and _crown_rivals(row.crown_scope, row.crown_level, scope, level)
             ),
             None,
         )
         if holder is not None:
             raise CrownPromotionError(
                 f"refusing to crown {target.name!r}: scope {scope!r} is already "
-                f"held by live row {holder.name!r}. Three ways out, cheapest "
+                f"held by live row {holder.name!r} (holding "
+                f"{holder.crown_scope!r}). Three ways out, cheapest "
                 "first:\n"
                 f"  re-scope the holder   fno agents crown {holder.name} --scope "
                 "<other territory>   (both sessions stay live; retry this "
@@ -899,6 +959,9 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 target.harness_session_id or target.cc_session_id or target.short_id or "",
                 owner_pid=target.pid,
                 owner_cwd=target.cwd,
+                crown_level=level,
+                crown_scope=scope,
+                crown_grantor=grantor,
             )
         except (OSError, ValueError) as exc:
             raise CrownPromotionError(
@@ -946,7 +1009,49 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     except Exception:
         # Advisory receipt data must never crash a crown that committed.
         receipt["stranded_subordinates"] = None
+    # The crown TYPES the verb: the holder learns it reigns through raw mail
+    # typed as the operator would. Plugin-qualified per harness (`$fno:` on
+    # codex, `/fno:` elsewhere).
+    target_row = next((r for r in rows_after if r.name == target_name), None)
+    target_harness = getattr(target_row, "harness", None) if target_row else None
+    address = target_name
+    if target_row is not None:
+        address = (
+            getattr(target_row, "harness_session_id", None)
+            or getattr(target_row, "cc_session_id", None)
+            or getattr(target_row, "short_id", None)
+            or target_name
+        )
+    prefix = "$fno:" if target_harness == "codex" else "/fno:"
+    receipt["reign_delivery"] = _send_reign_verb(address, f"{prefix}reign {scope}")
     return receipt
+
+
+def _send_reign_verb(address: str, verb: str) -> str:
+    """Mail the reign verb to a freshly crowned holder; never raises.
+
+    Advisory receipt data: a failure is named on the receipt, because a crowned
+    session that never receives the verb improvises the ritual. `--raw` types
+    the payload as the operator would, so a slash arrives as a command.
+    """
+    import subprocess
+    import sys
+
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [sys.executable, "-m", "fno.cli", "agents", "mail",
+             "send", address, verb, "--raw"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"not delivered ({exc})"
+    if proc.returncode == 0 and proc.stdout.strip():
+        return proc.stdout.strip().splitlines()[-1]
+    detail = (proc.stderr.strip() or proc.stdout.strip() or "no output").splitlines()[-1]
+    return f"not delivered (rc={proc.returncode}: {detail})"
 
 
 def _stranded_subordinates(
@@ -981,13 +1086,11 @@ def _stranded_subordinates(
         if row.name == target_name or row.status in TERMINAL_STATUSES:
             continue
         members = split_scope(row.crown_scope)
-        # A single-member scope that names no project is an epic id, whose
-        # containment lives in the graph. If the graph does not hold it,
-        # containment is UNKNOWABLE for this row. It is listed anyway rather
-        # than nulling the report: one stale crowned row must not silence
-        # the determinate answers for every other row, and naming a row
-        # that turns out fine costs an operator a glance, while a missing
-        # name costs the move's audit trail.
+        # A single-member scope naming no project is an epic id whose
+        # containment lives in the graph; without the graph it is UNKNOWABLE.
+        # List it anyway: one stale row must not silence every determinate
+        # answer, and a false name costs a glance while a missing one costs
+        # the audit trail.
         unresolvable = (
             len(members) == 1
             and members[0] not in by_id
@@ -1037,6 +1140,22 @@ def crown_validation_error(level: Any, scope: Any) -> Optional[str]:
             "crown scope must be canonical (sorted, deduped, no blank members); "
             f"got {scope!r}, want {canonical_scope(members)!r}"
         )
-    if len(members) > 1 and level != 0:
-        return f"a scope naming {len(members)} projects is level 0, not {level}"
+    if len(members) > 1 and level not in (0, 2):
+        return (
+            f"a scope naming {len(members)} members is level 0 (a portfolio of "
+            f"projects) or 2 (a set of epics), not {level}"
+        )
+    # The pairing the message above promises, on positive evidence only: where
+    # nothing resolves (no readable config) the runtime guards fail closed.
+    resolved = [_canonical_project(m) for m in members]
+    if level == 0 and len(members) > 1 and not any(resolved):
+        return (
+            f"level 0 is a portfolio of PROJECTS, but no member of {scope!r} "
+            "resolves to a configured project"
+        )
+    if level == 2 and any(resolved):
+        return (
+            f"level 2 is a SET OF EPICS, but {', '.join(m for m, r in zip(members, resolved) if r)} "
+            "resolve(s) to a configured project"
+        )
     return None

@@ -130,22 +130,8 @@ def _patch_settings(monkeypatch, *, state_dir=None, **backlog):
         config["state_dir"] = state_dir
     model = SettingsModel(config=config)
     monkeypatch.setattr("fno.config.load_settings", lambda: model)
-    # fno.paths._settings() caches independently of load_settings() and does
-    # not re-invoke it on a cache hit, so a stale value from an earlier test
-    # in this same worker process would otherwise survive the patch above
-    # untouched. Swap in a fresh, empty-cache wrapper (monkeypatch reverts to
-    # the untouched original at teardown) rather than clearing the real cache
-    # in place - clearing in place leaves it populated with THIS test's
-    # model for whichever test in this worker reads it next with no
-    # isolation of its own, which is exactly how a corrupt archive fixture
-    # from one test used to leak a stray warning into an unrelated test.
-    import functools
-
-    import fno.paths as paths_mod
-
-    monkeypatch.setattr(
-        paths_mod, "_settings", functools.cache(paths_mod._settings.__wrapped__)
-    )
+    # paths._settings() is an uncached delegation to load_settings(), so the
+    # patch above reaches every paths reader directly - no cache swap needed.
 
 
 def test_prefix_legacy_fallback_when_unset(monkeypatch):

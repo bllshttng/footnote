@@ -30,25 +30,7 @@ HANDLE = canonical_handle(SID)  # c35abbca (first-8), not 8baa7eea (last-8)
 def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
-    from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    import fno.paths as paths_mod
-    for fn in ("_settings", "resolve_repo_root"):
-        obj = getattr(paths_mod, fn, None)
-        if obj is not None:
-            try:
-                obj.cache_clear()  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
     yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    for fn in ("_settings", "resolve_repo_root"):
-        obj = getattr(paths_mod, fn, None)
-        if obj is not None:
-            try:
-                obj.cache_clear()  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
 
 
 def test_name_only_uses_canonical_handle_first_eight() -> None:

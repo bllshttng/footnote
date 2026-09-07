@@ -565,14 +565,12 @@ def test_config_fallback_ceiling_applied(graph_env, tmp_path, monkeypatch):
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     before = read_entries()
     # 3 groups exceed the config ceiling of 2 -> rejected, nothing created.
     result = _invoke(["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)])
     assert result.exit_code != 0
     assert read_entries() == before
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def test_invalid_config_ceiling_surfaced_not_swallowed(graph_env, tmp_path, monkeypatch):
@@ -586,7 +584,6 @@ def test_invalid_config_ceiling_surfaced_not_swallowed(graph_env, tmp_path, monk
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     before = read_entries()
     # --max-prs omitted -> reads config, which is invalid -> structured error.
@@ -594,7 +591,6 @@ def test_invalid_config_ceiling_surfaced_not_swallowed(graph_env, tmp_path, monk
     assert result.exit_code != 0
     assert "max_prs_per_epic" in result.output
     assert read_entries() == before
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def test_redecompose_clearing_waves_resets_details(graph_env):
@@ -854,7 +850,9 @@ def test_canonical_child_plan_path_shape_and_routing():
     # Filename is the `fno do plan path` shape with the child's created_at date...
     assert Path(p).name == "20260304-etl-search-x-abcd.md"
     # ...routed under the CHILD root's plans dir, not the epic's.
-    assert p.startswith("/repos/web/")
+    from fno.paths import space_dir
+
+    assert p.startswith(str(space_dir(Path("/repos/web")) / "plans"))
 
 
 def test_canonical_child_plan_path_corrupt_created_at_degrades(capsys):
@@ -1533,11 +1531,15 @@ def test_ac1_hp_child_born_at_canonical_name_in_child_project_dir(tmp_path, monk
     stub = _canonical(web_child)
     assert stub.exists(), f"stub not written: {stub}"
     # Routed under web's own plans dir, canonical name, still born-unlinked.
-    assert str(stub).startswith(str(web_root))
+    from fno.paths import space_dir
+
+    assert str(stub).startswith(str(space_dir(web_root) / "plans"))
     assert stub.name.endswith(f"-webui-{web_child['id']}.md")
     assert web_child["plan_path"] is None
     # The inherited backend child lands under the epic's root, not web's.
-    assert not str(_canonical(_child(children, "backend"))).startswith(str(web_root))
+    assert not str(_canonical(_child(children, "backend"))).startswith(
+        str(space_dir(web_root) / "plans")
+    )
 
 
 def test_ac1_edge_redecompose_across_day_is_idempotent(tmp_path, monkeypatch):
@@ -1611,7 +1613,9 @@ def test_redecompose_no_route_uses_persisted_child_cwd(tmp_path, monkeypatch):
     assert child_after["cwd"] == str(web_root)          # repo untouched (no route)
     stub = _canonical(child_after)
     assert stub.exists()
-    assert str(stub).startswith(str(web_root))          # under the child's own repo
+    from fno.paths import space_dir
+
+    assert str(stub).startswith(str(space_dir(web_root) / "plans"))          # under the child's own repo
     assert not str(stub).startswith(str(tmp_path / "internal"))  # not the epic dir
 
 

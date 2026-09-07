@@ -28,7 +28,7 @@ WRAPPED = (
     "    enabled: true\n"
     "    vault: myvault\n"
     "  agents:\n"
-    "    dead_row_grace: 7200\n"
+    "    max_live: 7\n"
 )
 
 

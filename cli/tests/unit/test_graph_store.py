@@ -174,7 +174,10 @@ def test_exited_keepers_are_zombies_until_drained(tmp_path, monkeypatch):
     )
 
     reaped = store_mod.drain_exited_keepers()
-    assert reaped == len(pids), f"drain must name every exited keeper; reaped {reaped}"
+    # >= not ==: the keeper ledger is shared with every earlier test on this
+    # worker, so the drain legitimately collects their exited stragglers too.
+    # The strong claim is the line below: THIS test's three are all collected.
+    assert reaped >= len(pids), f"drain must reap this test's keepers; reaped {reaped}"
     _assert_reaped_or_reused(pids)
 
 
@@ -713,6 +716,63 @@ def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
     assert (found, added) == (True, False)
     row = json.loads(path.read_text())["entries"][0]["sessions"][0]
     assert row["merge_grant"]["approved"] is True
+
+
+def test_ac1_hp_one_row_per_session_and_phase_whatever_the_harness_spelling(tmp_path):
+    """Two writers stamping the same (session_id, phase) - even with different
+    harness spellings - leave exactly one row: the second fills open
+    timestamps on the first instead of minting a twin."""
+    _plan, entry = _ready_plan_entry(tmp_path)
+    path = _make_graph(tmp_path, [entry])
+
+    found, added = append_session_record(
+        path, entry["id"], phase="do", harness="claude",
+        session_id="legacy-1", started_at="2026-09-04T10:00:00Z",
+    )
+    assert (found, added) == (True, True)
+    found, added = append_session_record(
+        path, entry["id"], phase="do", harness="unknown",
+        session_id="legacy-1", ended_at="2026-09-04T11:00:00Z",
+    )
+    assert (found, added) == (True, False)
+    rows = json.loads(path.read_text())["entries"][0]["sessions"]
+    assert len(rows) == 1
+    assert rows[0]["ended_at"] == "2026-09-04T11:00:00Z"
+
+
+def test_ac1_err_wrong_shape_harness_is_refused_and_writes_nothing(tmp_path):
+    """A codex-shaped id stamped `harness: claude` is the phantom-twin defect:
+    ValueError naming the shape and the harness, node unchanged. The same id
+    under its own harness stamps fine."""
+    _plan, entry = _ready_plan_entry(tmp_path)
+    path = _make_graph(tmp_path, [entry])
+    codex_id = "01a06886-9405-74a1-8afd-5b67baf89604"
+
+    with pytest.raises(
+        ValueError, match=r"is a codex id; refusing harness claude"
+    ):
+        append_session_record(
+            path, entry["id"], phase="do", harness="claude", session_id=codex_id,
+        )
+    assert json.loads(path.read_text())["entries"][0]["sessions"] == []
+
+    found, added = append_session_record(
+        path, entry["id"], phase="do", harness="codex", session_id=codex_id,
+    )
+    assert (found, added) == (True, True)
+
+    # A v4 id under claude is legal, and a grok thread carrying a minted v4
+    # id is never refused on shape.
+    found, added = append_session_record(
+        path, entry["id"], phase="review", harness="claude",
+        session_id="b936b571-e0aa-40ed-a07d-97acb9a87db1",
+    )
+    assert (found, added) == (True, True)
+    found, added = append_session_record(
+        path, entry["id"], phase="ship", harness="grok",
+        session_id="8ad8e13c-1111-4222-8333-444455556666",
+    )
+    assert (found, added) == (True, True)
 
 
 def test_open_do_row_persists_in_progress_and_closed_row_demotes(tmp_path):

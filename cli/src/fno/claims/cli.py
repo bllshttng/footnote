@@ -50,6 +50,7 @@ Three constraints shape the rest:
   A closed row, or one opened by an earlier real window under the same identity,
   is never touched.
 """
+
 from __future__ import annotations
 
 import json
@@ -60,6 +61,16 @@ from typing import Callable, List, Mapping, NamedTuple, Optional
 
 import typer
 
+# The core callables are resolved THROUGH the module at call time, never
+# bound here: a module-level `from .core import acquire_claim` snapshot is
+# frozen at this module's first import, and a worker whose first import lands
+# while a test's core stub is active captures the stub permanently - every
+# later `claim acquire` then prints success and writes nothing (the
+# xdist-scheduling flake in test_dispatch_barrier; see the regression test in
+# test_claims_cli.py). Constants and exception classes are safe to bind: the
+# suite patches functions, not classes.
+from . import core as _claims_core
+from . import io as _claims_io
 from .core import (
     HANDOVER_HOLDER_PREFIX as _HANDOVER_HOLDER_PREFIX,
     ClaimContended,
@@ -67,16 +78,11 @@ from .core import (
     ClaimGoneAway,
     ClaimHeldByOther,
     ClaimValidationError,
+    ClaimVerdictError,
+    ClaimVerdictUnavailable,
+    ClaimState,
     HolderMismatch,
-    acquire_claim,
-    claim_status,
-    force_release_claim,
-    list_claims_with_counts,
-    reap_dead_claims,
-    refresh_claim,
-    release_claim,
 )
-from .io import dedup_claims_roots, global_claims_root
 from fno.tombstones import tombstone_group_cls
 
 
@@ -163,7 +169,9 @@ def acquire(
         None, "--max-lanes", help="With --lane: concurrency cap (>=1; 1 == sequential)."
     ),
     reason: str = typer.Option("", "--reason", "-R", help="Optional rationale recorded in audit"),
-    ttl: str = typer.Option("", "--ttl", help="TTL expression like 30m, 1h, 3600s (omit => PID-liveness)"),
+    ttl: str = typer.Option(
+        "", "--ttl", help="TTL expression like 30m, 1h, 3600s (omit => PID-liveness)"
+    ),
     metadata: str = typer.Option("{}", "--metadata", help="JSON object passed verbatim"),
     pid: Optional[int] = typer.Option(
         None,
@@ -229,8 +237,7 @@ def acquire(
     # not enforced and nothing on stderr to say so.
     if max_lanes is not None:
         typer.echo(
-            "validation error: --max-lanes is the lane-slot cap and requires "
-            "--lane <id>",
+            "validation error: --max-lanes is the lane-slot cap and requires --lane <id>",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -257,6 +264,7 @@ def acquire(
     if pid is None and not pid_unavailable:
         try:
             from .session_pid import resolve_session_pid
+
             pid = resolve_session_pid()
         except Exception:
             pid = None  # degrade to acquire_claim's os.getpid() default
@@ -336,7 +344,7 @@ def acquire(
                 )
                 return
     try:
-        claim = acquire_claim(
+        claim = _claims_core.acquire_claim(
             key=key,
             holder=holder,
             reason=reason or None,
@@ -358,6 +366,9 @@ def acquire(
         raise typer.Exit(code=1)
     except (ClaimCorrupted, ClaimGoneAway) as exc:
         typer.echo(f"transient error: {exc}", err=True)
+        raise typer.Exit(code=3)
+    except (ClaimVerdictError, ClaimVerdictUnavailable) as exc:
+        typer.echo(f"native verdict unavailable: {exc}", err=True)
         raise typer.Exit(code=3)
     except ClaimContended as exc:
         # acquire_claim's own contention-retry-exhaustion guard: same
@@ -406,23 +417,27 @@ def release(
             "takes no --holder."
         ),
     ),
-    reason: str = typer.Option("", "--reason", "-R", help="With --force: required audit rationale."),
+    reason: str = typer.Option(
+        "", "--reason", "-R", help="With --force: required audit rationale."
+    ),
     strict: bool = typer.Option(False, "--strict", help="Raise if holder does not match"),
     stamp_do: bool = typer.Option(
-        False, "--stamp-do",
+        False,
+        "--stamp-do",
         help="Stamp a do provenance row (started_at from this claim's acquire time, "
-             "ended_at now). Set ONLY by a session releasing its OWN node claim at a "
-             "finished terminal - never a handoff, which runs under a successor's "
-             "identity and would mis-attribute the predecessor's window.",
+        "ended_at now). Set ONLY by a session releasing its OWN node claim at a "
+        "finished terminal - never a handoff, which runs under a successor's "
+        "identity and would mis-attribute the predecessor's window.",
     ),
     rollback_do: bool = typer.Option(
-        False, "--rollback-do",
+        False,
+        "--rollback-do",
         help="Remove the open do provenance row this claim's acquire opened. Set "
-             "by a releaser whose POST-ACQUIRE validation refused it: it took the "
-             "claim only to serialize, did no work, and must not leave the node "
-             "reading as in progress. Only an open row (no ended_at) whose "
-             "started_at matches this claim is removed. Mutually exclusive with "
-             "--stamp-do.",
+        "by a releaser whose POST-ACQUIRE validation refused it: it took the "
+        "claim only to serialize, did no work, and must not leave the node "
+        "reading as in progress. Only an open row (no ended_at) whose "
+        "started_at matches this claim is removed. Mutually exclusive with "
+        "--stamp-do.",
     ),
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
@@ -494,7 +509,7 @@ def release(
         )
         raise typer.Exit(code=2)
     try:
-        released = release_claim(
+        released = _claims_core.release_claim(
             key=key, holder=holder, strict=strict, root=_node_aware_root(key)
         )
     except HolderMismatch as exc:
@@ -523,9 +538,38 @@ def release(
             _stamp_do_on_release(key, released, holder)
         elif rollback_do:
             _rollback_do_on_release(key, released, holder)
+    elif released is None and key.startswith("node:"):
+        # release_claim's own docstring names four ways it returns None (the
+        # file is already gone, the holder does not match, the file is
+        # corrupted, the recovery mutex timed out) - in all four nothing was
+        # unlinked, so the do row this call would have touched stays as it
+        # was. Named here rather than silent, for both flags: a do row was
+        # never in play for any key type outside node: (the success branch
+        # above shares the same gate).
+        if stamp_do:
+            typer.echo(
+                f"do stamp skipped for {key}: release was a no-op "
+                "(nothing was unlinked, so no do row was closed)",
+                err=True,
+            )
+        elif rollback_do:
+            typer.echo(
+                f"do rollback skipped for {key}: release was a no-op "
+                "(nothing was unlinked, so no do row was dropped)",
+                err=True,
+            )
 
+    # released is None means nothing was unlinked - a false "released: true"
+    # here is the receipt that let the missing do-row close go unnoticed.
+    # None covers four causes (already gone, holder mismatch, corrupted
+    # file, recovery-mutex timeout) that this return value cannot tell
+    # apart, so the message names the fact (nothing was unlinked) rather
+    # than guessing a cause - "was not held by {holder}" was wrong for
+    # three of the four.
     if json_output:
-        typer.echo(json.dumps({"key": key, "released": True}))
+        typer.echo(json.dumps({"key": key, "released": released is not None}))
+    elif released is None:
+        typer.echo(f"no-op: {key} was not released (nothing was unlinked)")
     else:
         typer.echo(f"released: {key}")
 
@@ -575,9 +619,9 @@ def _do_row_coordinates(key: str, claim, holder: str, action: str):
         return None
     from datetime import datetime, timezone
 
-    started = datetime.fromtimestamp(
-        claim.acquired_at / 1000, tz=timezone.utc
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    started = datetime.fromtimestamp(claim.acquired_at / 1000, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
     return node_id, harness, session_id, started, effort
 
 
@@ -747,7 +791,7 @@ def refresh(
 ) -> None:
     """Extend a TTL claim's expires_at. No-op for PID-liveness claims."""
     try:
-        result = refresh_claim(key=key, holder=holder, ttl_ms=_parse_ttl(ttl), root=_node_aware_root(key))
+        result = _claims_core.refresh_claim(key=key, holder=holder, ttl_ms=_parse_ttl(ttl), root=_node_aware_root(key))
     except HolderMismatch as exc:
         typer.echo(f"holder mismatch: {exc}", err=True)
         raise typer.Exit(code=4)
@@ -759,6 +803,9 @@ def refresh(
         raise typer.Exit(code=2)
     except ClaimCorrupted as exc:
         typer.echo(f"corrupted claim: {exc}", err=True)
+        raise typer.Exit(code=3)
+    except (ClaimVerdictError, ClaimVerdictUnavailable) as exc:
+        typer.echo(f"native verdict unavailable: {exc}", err=True)
         raise typer.Exit(code=3)
     except ClaimContended as exc:
         # refresh_claim's own contention-retry-exhaustion guard; same exit
@@ -888,9 +935,7 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
             unresolved.append(entry)
         if r.row_id:
             by_session[str(r.row_id)] = entry
-    return RosterReading(
-        True, len(rows), index, "", by_session, len(unresolved), tuple(unresolved)
-    )
+    return RosterReading(True, len(rows), index, "", by_session, len(unresolved), tuple(unresolved))
 
 
 def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) -> dict:
@@ -910,9 +955,7 @@ def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) ->
             "roster_skip_reason": reading.reason,
         }
     candidates = [
-        row["name"]
-        for row in reading.unresolved_rows
-        if Path(row.get("cwd") or "").name == node_id
+        row["name"] for row in reading.unresolved_rows if Path(row.get("cwd") or "").name == node_id
     ]
     return {
         "roster_consulted": True,
@@ -1003,10 +1046,7 @@ def _roster_verdict_line(info: dict) -> str:
                 f"{names}. Confirm with: fno agents peek {candidates[0]}"
             )
         return scanned
-    scanned = (
-        f"{state}, no live worker found "
-        f"(roster scanned: {info['roster_rows_scanned']} rows)"
-    )
+    scanned = f"{state}, no live worker found (roster scanned: {info['roster_rows_scanned']} rows)"
     if workers:
         rendered = ", ".join(w["name"] for w in workers)
         return f"{scanned}; {len(workers)} finished session(s) resolved to it: {rendered}"
@@ -1048,11 +1088,17 @@ def status(
     compute a field it discards would tax every tool call to answer a question
     it never asked.
     """
-    info = claim_status(key=key, root=_node_aware_root(key))
+    info = _claims_core.claim_status(key=key, root=_node_aware_root(key))
     node_id = key[len("node:"):] if key.startswith("node:") else ""
     crosschecked = roster and bool(node_id) and info.get("state") in _UNHELD_STATES
     if crosschecked:
         info.update(_roster_crosscheck(node_id))
+        if info.get("roster_rows_unresolved", 0):
+            # A scanned row with no node join is an unanswered ownership read,
+            # not proof that this claim is free. Keep the raw claim fields, but
+            # make the composite verdict fail closed for dispatch consumers.
+            info["state"] = "unknown"
+            info["basis"] = "unresolved-roster-row"
     if json_output:
         typer.echo(json.dumps(info))
         return
@@ -1062,7 +1108,12 @@ def status(
         # this command straight into jq without --json, and a trailing prose
         # line makes that read fail exactly when the claim has lapsed, which is
         # the case the operator most needs a truthful answer for.
-        typer.echo(_roster_verdict_line(info), err=True)
+        line = _roster_verdict_line(info)
+        # Witness named when one answered: a verdict from a failing probe
+        # stays auditable on the loud line.
+        if info.get("session_basis"):
+            line += f"; session witness: {info['session_basis']}"
+        typer.echo(line, err=True)
 
 
 def _merge_claims_across_roots(
@@ -1091,7 +1142,7 @@ def _merge_claims_across_roots(
     best_row: dict[str, Optional[dict]] = {}
 
     for candidate_root, cdir in deduped_roots:
-        rows, _counts, states_by_key = list_claims_with_counts(
+        rows, _counts, states_by_key = _claims_core.list_claims_with_counts(
             prefix=prefix or None, include_stale=include_stale, root=candidate_root,
         )
         row_by_key = {r["key"]: r for r in rows}
@@ -1212,9 +1263,9 @@ def list_cmd(
     else:
         # _node_aware_root("") already resolves to None via claims_root_for's
         # own colon check, so no separate `if prefix` branch is needed here.
-        roots = [global_claims_root(), _node_aware_root(prefix)]
+        roots = [_claims_io.global_claims_root(), _node_aware_root(prefix)]
 
-    deduped_roots = dedup_claims_roots(roots)
+    deduped_roots = _claims_io.dedup_claims_roots(roots)
     all_rows, row_roots, totals = _merge_claims_across_roots(
         deduped_roots, prefix=prefix, include_stale=include_stale
     )
@@ -1274,23 +1325,21 @@ def list_cmd(
 HANDOVER_HOLDER_PREFIX = _HANDOVER_HOLDER_PREFIX
 
 
-
-
-
-
-
-
-
 def _node_settlement(reading: Optional[RosterReading] = None):
     """The closure-shaped reading ``sweep_verdict`` runs FIRST on a node claim
     (x-94f8): is this claim's own node still the holder's workplace?
 
     Two positive findings, both proven by FINDING things, never by failing to:
 
-      * The claim's node is terminal in the graph (done/superseded). The
-        closure release should have dropped the claim already; one that
-        outlived its node (pre-fix leaks, a closer that crashed mid-release)
-        protects nothing whoever holds it. Holder-independent evidence.
+      * The claim's node is terminal in the graph (done/superseded) and the
+        holder cannot be proven alive. The closure release should have
+        dropped the claim already; one that outlived its node (pre-fix
+        leaks, a closer that crashed mid-release) protects nothing once its
+        lease is spent or its pid is gone. A LIVE holder keeps the claim
+        until its own lease ends: measured 2026-09-05, this arm reaped four
+        unexpired, live-pid claims on closed nodes (x-a114 twice, x-04ce,
+        x-9223-node) on every sweep, killing active loop-check leases and
+        opening the dup-PR window each time.
       * The lease is EXPIRED and the holder's roster row resolves to a
         DIFFERENT node. An expired lease is the holder's own statement that
         it stopped renewing; a row on another node is where it went. An
@@ -1325,22 +1374,36 @@ def _node_settlement(reading: Optional[RosterReading] = None):
                 # "deferred:<ts>" row still carries deferral inside
                 # completed_at, and deferral is a returnable rung.
                 cache["terminal"] = frozenset(
-                    e.get("id")
-                    for e in read_graph(graph_json())
-                    if is_terminal_entry(e)
+                    e.get("id") for e in read_graph(graph_json()) if is_terminal_entry(e)
                 )
             except Exception:  # noqa: BLE001 - an unreadable graph proves nothing
                 cache["terminal"] = None
         return cache["terminal"]
 
-    def _probe(claim, now=None) -> Optional[bool]:
-        node_id = claim.key[len("node:"):]
+    def _probe(claim, native_verdict=None) -> Optional[bool]:
+        node_id = claim.key[len("node:") :]
         terminal = _terminal_ids()
         if terminal is not None and node_id in terminal:
+            # Closure settles a holder that cannot be proven alive, never one
+            # that can. Measured 2026-09-05 on four premature reaps (x-a114
+            # twice, x-04ce, x-9223-node): every one was an UNEXPIRED lease
+            # with a live recorded pid on a node the graph had closed, reaped
+            # by this arm on each sweep - a live session's loop-check lease
+            # (the follow-up-work shape) died with it, and every reap opened
+            # the dup-PR window the claim exists to close. An expired lease
+            # still settles here, as does a dead pid: the holder named its
+            # own end or the pid table ends it, and a closure release that
+            # crashed mid-way is exactly the leak this arm heals.
+            if native_verdict is not None and (
+                native_verdict.get("expired") is not True
+                and native_verdict.get("bucket") != "suspect"
+            ):
+                # Not expired and not dead-pid: the holder is proven live
+                # (bucket live) or unprobeable (offhost - unknown keeps, the
+                # same asymmetry the suspect buckets teach).
+                return None
             return True
-        from .staleness import is_expired
-
-        if not is_expired(claim, now=now):
+        if native_verdict is None or native_verdict.get("expired") is not True:
             return None
         if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
             # A launch window, never a settled abandonment: same reasoning as
@@ -1394,7 +1457,7 @@ def _transcript_activity(session_id: str, cwd: str):
         import time
 
         from fno.agents.watchdog import (
-            REAP_QUIET_AFTER_S,
+            QUIET_AFTER_S,
             finished_with_the_tree,
             tail_facts,
         )
@@ -1402,7 +1465,7 @@ def _transcript_activity(session_id: str, cwd: str):
         facts = tail_facts(session_id, cwd)
         if facts is None:
             return None
-        return finished_with_the_tree(facts, time.time(), REAP_QUIET_AFTER_S)
+        return finished_with_the_tree(facts, time.time(), QUIET_AFTER_S)
     except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
         return None
 
@@ -1418,13 +1481,13 @@ def _transcript_says_finished(session_id: str, cwd: str) -> bool:
         import time
 
         from fno.agents.watchdog import (
-            REAP_QUIET_AFTER_S,
+            QUIET_AFTER_S,
             finished_with_the_tree,
             tail_facts,
         )
 
         return finished_with_the_tree(
-            tail_facts(session_id, cwd), time.time(), REAP_QUIET_AFTER_S
+            tail_facts(session_id, cwd), time.time(), QUIET_AFTER_S
         )
     except Exception:  # noqa: BLE001 - an unreadable transcript proves nothing
         return False
@@ -1483,9 +1546,7 @@ def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optiona
         fno_bin = os.environ.get("FNO_BIN") or "fno"
 
         try:
-            return runner(
-                [fno_bin, *args], capture_output=True, text=True, timeout=10
-            )
+            return runner([fno_bin, *args], capture_output=True, text=True, timeout=10)
         except Exception:  # noqa: BLE001 - a probe never fails a sweep
             return None
 
@@ -1516,9 +1577,7 @@ def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optiona
             # A zero-pane session would only contribute an
             # ambiguous []; the probe never raises on a malformed row.
             continue
-        panes = _mux(
-            "mux", "pane", "ls", "--session", str(session), "--json"
-        )
+        panes = _mux("mux", "pane", "ls", "--session", str(session), "--json")
         if panes is None or getattr(panes, "returncode", 1) != 0:
             return None
         try:
@@ -1532,11 +1591,7 @@ def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optiona
             if not isinstance(pane, dict):
                 continue
             cwd_name = str(pane.get("cwd") or "").rstrip("/").rsplit("/", 1)[-1]
-            if (
-                pane.get("fno_id") in names
-                or pane.get("title") in names
-                or cwd_name in names
-            ):
+            if pane.get("fno_id") in names or pane.get("title") in names or cwd_name in names:
                 return False
     return True if saw_content else None
 
@@ -1640,8 +1695,10 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
                 cache["reading"] = first
         return cache["reading"]
 
-    def _probe(claim) -> Optional[bool]:
-        from .staleness import is_live
+    def _probe(claim, native_verdict=None) -> Optional[bool]:
+        native = native_verdict
+        if native is None:
+            return None
 
         if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
             # The launch window, not an abandoned session - but the window is
@@ -1652,12 +1709,12 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
             # check is local and cheap, so it runs before the pane subprocess;
             # the pane answer is cached per worker for the sweep's lifetime,
             # like the shared roster reading.
-            if is_live(claim):
+            if native is not None and native.get("state") == ClaimState.LIVE.value:
                 return None
             if _handover_pane_probe_blocked(claim):
                 return None
-            worker = claim.holder[len(HANDOVER_HOLDER_PREFIX):]
-            node_id = claim.key[len("node:"):] if claim.key.startswith("node:") else ""
+            worker = claim.holder[len(HANDOVER_HOLDER_PREFIX) :]
+            node_id = claim.key[len("node:") :] if claim.key.startswith("node:") else ""
             pane_key = f"pane_absent:{worker}"
             if pane_key not in cache:
                 cache[pane_key] = _mux_pane_absent_for(worker, node_id)
@@ -1678,7 +1735,7 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
             # a cwd to find the tree, and the claim carries one when its
             # writer stamped it. A finished tree is abandonment proven by
             # FINDING the end, never by failing to find the worker.
-            if is_live(claim):
+            if native is not None and native.get("state") == ClaimState.LIVE.value:
                 return None
             cwd = _claim_worktree_cwd(claim)
             if not cwd:
@@ -1697,10 +1754,13 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
 
     return _probe
 
+
 @cli.command(name="reap")
 def reap_cmd(
     apply: bool = typer.Option(
-        False, "--apply", help="Archive dead claims. Default is dry-run: report what would be reaped."
+        False,
+        "--apply",
+        help="Archive dead claims. Default is dry-run: report what would be reaped.",
     ),
     root: Optional[List[Path]] = typer.Option(
         None,
@@ -1735,7 +1795,7 @@ def reap_cmd(
     evidence. Exits 1 when any reapable file's move could not be confirmed.
     """
     optout_sink: list = []
-    summary = reap_dead_claims(
+    summary = _claims_core.reap_dead_claims(
         roots=list(root) if root else None,
         apply=apply,
         abandonment_probe=_abandonment_probe(),
@@ -1745,9 +1805,7 @@ def reap_cmd(
     if optout_sink:
         from fno.claims.optout_lease import restore_reaped_optouts
 
-        summary.setdefault("reap_failed", []).extend(
-            restore_reaped_optouts(optout_sink)
-        )
+        summary.setdefault("reap_failed", []).extend(restore_reaped_optouts(optout_sink))
 
     if json_output:
         typer.echo(json.dumps(summary))
@@ -1768,9 +1826,7 @@ def reap_cmd(
         if summary["kept_suspect_alive"]:
             suspect += f", {summary['kept_suspect_alive']} suspect (worker alive)"
         if summary["kept_suspect_unprobed"]:
-            suspect += (
-                f", {summary['kept_suspect_unprobed']} suspect (roster not consulted)"
-            )
+            suspect += f", {summary['kept_suspect_unprobed']} suspect (roster not consulted)"
         typer.echo(
             f"kept: {summary['kept_live']} live, {suspect}, "
             f"{summary['kept_offhost']} off-host, {summary['corrupted']} corrupted, "
@@ -1815,9 +1871,7 @@ def _acquire_lane(*, lane: str, max_lanes: int, ttl: str, json_output: bool) -> 
     from .lanes import acquire_lane_slot
 
     try:
-        claim = acquire_lane_slot(
-            max_lanes=max_lanes, lane_id=lane, ttl_ms=_parse_ttl(ttl or "1h")
-        )
+        claim = acquire_lane_slot(max_lanes=max_lanes, lane_id=lane, ttl_ms=_parse_ttl(ttl or "1h"))
     except ClaimValidationError as exc:
         typer.echo(f"validation error: {exc}", err=True)
         raise typer.Exit(code=2)
@@ -1848,7 +1902,7 @@ def _release_lane(*, lane: str, json_output: bool) -> None:
 def _force_release(*, key: str, reason: str, json_output: bool) -> None:
     """The former `claim force-release`. Archived to .expired/."""
     try:
-        force_release_claim(key=key, reason=reason, root=_node_aware_root(key))
+        _claims_core.force_release_claim(key=key, reason=reason, root=_node_aware_root(key))
     except ClaimValidationError as exc:
         typer.echo(f"validation error: {exc}", err=True)
         raise typer.Exit(code=2)

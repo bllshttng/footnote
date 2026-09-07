@@ -233,6 +233,25 @@ fn sandbox_policy_with_roots(resolved: Option<&Value>, state_dirs: &[String]) ->
     policy
 }
 
+/// The roots the thread lane carries onto every `turn/start`: the caller's
+/// state dirs plus the repo's git common dir, resolved by the same resolver
+/// the exec lane grants with. Both postures carry them. A `yolo` thread asks
+/// for `danger-full-access` on `thread/start`, but the server keeps its
+/// workspaceWrite default, and withholding the policy does not lift a sandbox -
+/// it keeps whatever the server already had, `.git` read-only included.
+///
+/// Fail-open like the exec lane's grant: an unresolvable root is skipped, so
+/// resolution can never break the spawn.
+fn granted_roots(cwd: &Path, state_dirs: &[String]) -> Vec<String> {
+    let mut roots = state_dirs.to_vec();
+    if let Some(git_dir) = crate::provider::git_common_dir(cwd) {
+        if !roots.iter().any(|root| root == &git_dir) {
+            roots.push(git_dir);
+        }
+    }
+    roots
+}
+
 /// `turn/start` takes a whole `sandboxPolicy` object, never a `writableRoots`
 /// delta, so the policy is built FROM the thread's own resolved posture
 /// (`resolved`) with only the roots widened. Hand-building the object instead
@@ -317,6 +336,87 @@ pub fn parse_resolved_sandbox(raw: &str) -> Option<Value> {
         .filter(|sandbox| sandbox.get("type").and_then(Value::as_str) == Some("workspaceWrite"))
         .cloned()
 }
+
+/// Resolve the thread lane's launch posture from BOTH spellings a spawn can
+/// use, or refuse.
+///
+/// `spawn_codex_thread_lane` read the `yolo` bool alone and dropped
+/// `permission_mode` on the floor. Dropping an axis is not neutral here: the
+/// lane then starts bounded, which is a SILENT downgrade of the exact posture
+/// the caller was trying to name. Both CLI front doors happen to refuse
+/// `--permission-mode` for codex today, so nothing reaches this with the key
+/// set - but the daemon RPC is the trust boundary, and a boundary that ignores
+/// a permission axis it does not understand is one caller away from the defect.
+///
+/// The vocabulary is codex's own, and it is the one `permission_pane_tokens`
+/// maps for the pane lane (`fno.agents.mux_spawn`): the `full-auto` and `yolo`
+/// shortcuts, or the explicit `<sandbox>:<approval>` pair. Keep the two in
+/// step; a third spelling invented here would be a second vocabulary for one
+/// axis.
+///
+/// Fail closed on anything else, and on both keys at once - "one knob at a
+/// time" is the rule the CLIs already enforce, and guessing which of two
+/// disagreeing postures a caller meant is how a bypass gets granted by
+/// accident.
+pub fn resolve_thread_posture(
+    yolo: Option<bool>,
+    permission_mode: Option<&str>,
+) -> Result<bool, String> {
+    let mode = permission_mode.map(str::trim).filter(|m| !m.is_empty());
+    let Some(mode) = mode else {
+        return Ok(yolo.unwrap_or(false));
+    };
+    if yolo == Some(true) {
+        return Err(format!(
+            "spawn carries both yolo=true and permission_mode {mode:?}; pass one \
+             (they are mutually exclusive, as on `fno agents spawn`)"
+        ));
+    }
+    match mode {
+        "yolo" => Ok(true),
+        "full-auto" => Ok(false),
+        _ => match mode.split_once(':') {
+            Some((sandbox, approval)) if !sandbox.is_empty() && !approval.is_empty() => {
+                match sandbox {
+                    "danger-full-access" => Ok(true),
+                    "workspace-write" | "read-only" => Ok(false),
+                    _ => Err(format!(
+                        "codex permission_mode {mode:?} names sandbox {sandbox:?}, which the \
+                         thread lane cannot resolve; use read-only, workspace-write, or \
+                         danger-full-access"
+                    )),
+                }
+            }
+            _ => Err(format!(
+                "codex permission_mode {mode:?} unmappable on the thread lane; use a shortcut \
+                 (full-auto, yolo) or the <sandbox>:<approval> form \
+                 (e.g. workspace-write:on-request)"
+            )),
+        },
+    }
+}
+
+/// The posture name the server reported, read WITHOUT the workspaceWrite
+/// filter [`parse_resolved_sandbox`] applies.
+///
+/// That filter answers `None` for two different worlds - a full-access thread
+/// and a response that carried no `sandbox` at all - which is fine where it is
+/// used (there is nothing to echo either way) and wrong for a RECORD. A row
+/// that omits the posture leaves the reader inferring which world it was, and
+/// this lane already cost one investigation a day on exactly that ambiguity.
+/// So the record gets the name the server used, or [`SANDBOX_POSTURE_UNKNOWN`].
+pub fn parse_resolved_sandbox_type(raw: &str) -> Option<String> {
+    serde_json::from_str::<Value>(raw)
+        .ok()?
+        .pointer("/result/sandbox/type")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+/// Recorded when `thread/start` reported no sandbox at all. An explicit value,
+/// never an absent key: absence is not evidence.
+pub const SANDBOX_POSTURE_UNKNOWN: &str = "unknown";
 
 pub fn parse_thread_start_response(raw: &str) -> Result<(String, String), ThreadStartError> {
     let value: Value = serde_json::from_str(raw).map_err(|_| ThreadStartError::InvalidResponse)?;
@@ -448,6 +548,10 @@ pub struct CodexThread {
     /// every per-turn override so the grant widens the roots and changes
     /// nothing else. `None` when the thread is not `workspaceWrite`.
     resolved_sandbox: Option<Value>,
+    /// The posture name the server reported, unfiltered, for the registry row.
+    /// `None` only until `thread/start` answers; recorded as
+    /// [`SANDBOX_POSTURE_UNKNOWN`] when the response named no sandbox.
+    resolved_sandbox_type: Option<String>,
     current_turn_id: Option<String>,
 }
 
@@ -477,9 +581,9 @@ impl CodexThread {
         Self::start_with_state_dirs(cwd, model, yolo, effort, &[]).await
     }
 
-    /// [`CodexThread::start`] plus the state-root grant this thread carries on
-    /// every turn (x-f22f). `yolo` drops the roots: that posture is already
-    /// `danger-full-access`, so a workspaceWrite policy would narrow it.
+    /// [`CodexThread::start`] plus the roots this thread carries on every turn
+    /// ([`granted_roots`]). Both postures carry them; only the `thread/start`
+    /// scalar differs.
     pub async fn start_with_state_dirs(
         cwd: impl Into<PathBuf>,
         model: Option<&str>,
@@ -491,7 +595,13 @@ impl CodexThread {
         // `launch` completes the app-server handshake as part of connecting,
         // so the driver is protocol-ready the moment it exists.
         let mut driver = Self::launch(cwd.clone()).await?;
-        let request = thread_start_request_with_options(1, &cwd, model, yolo, "never");
+        // Project assignment (x-dc97): the thread rolls up under its repo's
+        // ChatGPT Project instead of a cwd-keyed bucket. Resolution is
+        // fail-open and bounded; a None below drops the key and the request
+        // stays byte-identical to the unassigned form.
+        let project_id = crate::codex_inject::ensure_project_for_cwd(&cwd).await;
+        let request =
+            thread_start_request_with_options(1, &cwd, model, yolo, "never", project_id.as_deref());
         let response = driver.request(1, request).await?;
         let (thread_id, rollout_path) = parse_thread_start_response(&response)
             .map_err(|error| ThreadDriverError::Protocol(error.to_string()))?;
@@ -500,12 +610,9 @@ impl CodexThread {
         driver.effort = effort
             .filter(|effort| !effort.is_empty())
             .map(str::to_string);
-        driver.state_dirs = if yolo {
-            Vec::new()
-        } else {
-            state_dirs.to_vec()
-        };
+        driver.state_dirs = granted_roots(&cwd, state_dirs);
         driver.resolved_sandbox = parse_resolved_sandbox(&response);
+        driver.resolved_sandbox_type = parse_resolved_sandbox_type(&response);
         Ok(driver)
     }
 
@@ -553,12 +660,9 @@ impl CodexThread {
         driver.effort = effort
             .filter(|effort| !effort.is_empty())
             .map(str::to_string);
-        driver.state_dirs = if yolo {
-            Vec::new()
-        } else {
-            state_dirs.to_vec()
-        };
+        driver.state_dirs = granted_roots(&cwd, state_dirs);
         driver.resolved_sandbox = parse_resolved_sandbox(&response);
+        driver.resolved_sandbox_type = parse_resolved_sandbox_type(&response);
         Ok(driver)
     }
 
@@ -605,6 +709,7 @@ impl CodexThread {
             effort: None,
             state_dirs: Vec::new(),
             resolved_sandbox: None,
+            resolved_sandbox_type: None,
             current_turn_id: None,
         })
     }
@@ -890,6 +995,22 @@ impl CodexThread {
 
     pub fn cwd(&self) -> &Path {
         &self.cwd
+    }
+
+    /// The posture the server RESOLVED for this thread, for the registry row.
+    /// Distinct from the posture the spawn REQUESTED: a `yolo` thread asks for
+    /// `danger-full-access` and the app-server can still keep its
+    /// workspaceWrite default, so the two disagree and the row must not report
+    /// the request as if it were the outcome.
+    pub fn resolved_sandbox_posture(&self) -> &str {
+        self.resolved_sandbox_type
+            .as_deref()
+            .unwrap_or(SANDBOX_POSTURE_UNKNOWN)
+    }
+
+    /// The writable roots this thread carries onto every `turn/start`.
+    pub fn granted_writable_roots(&self) -> &[String] {
+        &self.state_dirs
     }
 
     /// The pid of the app-server SERVING this thread, which is the shared
@@ -1573,6 +1694,7 @@ fn thread_start_request_with_options(
     model: Option<&str>,
     yolo: bool,
     approval_policy: &str,
+    project_id: Option<&str>,
 ) -> String {
     let mut params = json!({
         "cwd": cwd,
@@ -1581,6 +1703,9 @@ fn thread_start_request_with_options(
     });
     if let Some(model) = model.filter(|model| !model.is_empty()) {
         params["model"] = json!(model);
+    }
+    if let Some(project_id) = project_id.filter(|id| !id.is_empty()) {
+        params["projectId"] = json!(project_id);
     }
     json!({"id": id, "method": "thread/start", "params": params}).to_string()
 }
@@ -1638,6 +1763,90 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(value["params"]["expectedTurnId"], "turn-1");
+    }
+
+    /// A spawn that spells its posture as `permission_mode` reaches the same
+    /// frame a `yolo` bool reaches. Asserted THROUGH the frame rather than on
+    /// the resolver's bool alone: the bool is an implementation detail and the
+    /// wire field is what the app-server reads.
+    #[test]
+    fn permission_mode_yolo_reaches_a_full_access_frame() {
+        let yolo = resolve_thread_posture(None, Some("yolo")).expect("yolo maps");
+        let frame: Value = serde_json::from_str(&thread_start_request_with_options(
+            1,
+            std::path::Path::new("/tmp/w"),
+            None,
+            yolo,
+            "never",
+            None,
+        ))
+        .unwrap();
+        assert_eq!(frame["params"]["sandbox"], "danger-full-access");
+
+        // The explicit pair form resolves off its sandbox half, not its name.
+        let paired =
+            resolve_thread_posture(None, Some("danger-full-access:never")).expect("pair maps");
+        let frame: Value = serde_json::from_str(&thread_start_request_with_options(
+            1,
+            std::path::Path::new("/tmp/w"),
+            None,
+            paired,
+            "never",
+            None,
+        ))
+        .unwrap();
+        assert_eq!(frame["params"]["sandbox"], "danger-full-access");
+    }
+
+    /// The bounded spellings stay bounded, and an absent axis is byte-identical
+    /// to reading the bare bool - the shape every spawn takes today.
+    #[test]
+    fn resolve_thread_posture_keeps_the_bounded_spellings_bounded() {
+        assert_eq!(resolve_thread_posture(None, None), Ok(false));
+        assert_eq!(resolve_thread_posture(Some(true), None), Ok(true));
+        assert_eq!(resolve_thread_posture(Some(false), None), Ok(false));
+        // An empty value is UNSET, not a mode: the bool still decides.
+        assert_eq!(resolve_thread_posture(Some(true), Some("")), Ok(true));
+        assert_eq!(resolve_thread_posture(None, Some("full-auto")), Ok(false));
+        assert_eq!(
+            resolve_thread_posture(None, Some("workspace-write:on-request")),
+            Ok(false)
+        );
+        assert_eq!(
+            resolve_thread_posture(None, Some("read-only:untrusted")),
+            Ok(false)
+        );
+    }
+
+    /// Fail closed, and say which value: a permission axis the lane cannot
+    /// resolve must never fall through to bounded. Bounded is a plausible
+    /// answer, which is what makes the silent version of this so hard to see.
+    #[test]
+    fn resolve_thread_posture_refuses_rather_than_degrading() {
+        for mode in [
+            "accept-edits",
+            "bypassPermissions",
+            "danger-full-access",
+            ":never",
+        ] {
+            let err = resolve_thread_posture(None, Some(mode))
+                .expect_err("an unmappable mode must refuse");
+            assert!(
+                err.contains(mode),
+                "refusal must name the value it could not map; got: {err}"
+            );
+        }
+        // An unknown sandbox half is refused even though the pair form parses.
+        let err = resolve_thread_posture(None, Some("full-access:never"))
+            .expect_err("an unknown sandbox must refuse");
+        assert!(err.contains("full-access"), "got: {err}");
+        // One knob at a time, the rule the CLIs already enforce.
+        let err = resolve_thread_posture(Some(true), Some("full-auto"))
+            .expect_err("two postures at once must refuse");
+        assert!(
+            err.contains("mutually exclusive"),
+            "refusal must name the conflict; got: {err}"
+        );
     }
 
     /// AC11: the resume request carries the recorded posture, so a daemon
@@ -1785,6 +1994,36 @@ mod tests {
         assert!(parse_resolved_sandbox(r#"{"id":1,"result":{}}"#).is_none());
     }
 
+    /// The RECORD's read is unfiltered, and that is the whole difference from
+    /// `parse_resolved_sandbox` above. That one answers `None` for a
+    /// full-access thread AND for a response naming no sandbox, which is fine
+    /// where it is used (nothing to echo either way) and useless in a row: the
+    /// reader cannot tell which world produced the blank. Asserting the
+    /// full-access spelling POSITIVELY is the point - a test that only checked
+    /// the workspaceWrite arm would pass against the filtered reader too.
+    #[test]
+    fn resolved_sandbox_type_is_read_unfiltered_for_the_record() {
+        let bounded =
+            r#"{"id":1,"result":{"sandbox":{"type":"workspaceWrite","writableRoots":[]}}}"#;
+        assert_eq!(
+            parse_resolved_sandbox_type(bounded).as_deref(),
+            Some("workspaceWrite")
+        );
+        let full = r#"{"id":1,"result":{"sandbox":{"type":"dangerFullAccess"}}}"#;
+        assert_eq!(
+            parse_resolved_sandbox_type(full).as_deref(),
+            Some("dangerFullAccess")
+        );
+        // The filtered reader collapses this arm; the record's must not.
+        assert!(parse_resolved_sandbox(full).is_none());
+        // Only a response that named NO sandbox is genuinely unknown.
+        assert_eq!(parse_resolved_sandbox_type(r#"{"id":1,"result":{}}"#), None);
+        assert_eq!(
+            parse_resolved_sandbox_type(r#"{"id":1,"result":{"sandbox":{"type":""}}}"#),
+            None
+        );
+    }
+
     /// `thread/start` keeps the SCALAR field and its exact spelling. The
     /// app-server rejects the docs' `workspaceWrite` spelling outright
     /// (`-32600 unknown variant`), so the code is right and the doc is wrong;
@@ -1797,10 +2036,45 @@ mod tests {
             None,
             false,
             "never",
+            None,
         ))
         .unwrap();
         assert_eq!(value["params"]["sandbox"], "workspace-write");
         assert!(value["params"].get("sandboxPolicy").is_none());
+    }
+
+    /// The assigned form carries `params.projectId` (x-dc97): the thread lane's
+    /// whole side of the assignment contract is one conditional key on the map
+    /// it already builds for `model`.
+    #[test]
+    fn thread_start_carries_the_resolved_project_id() {
+        let value: Value = serde_json::from_str(&thread_start_request_with_options(
+            1,
+            std::path::Path::new("/tmp/w"),
+            None,
+            false,
+            "never",
+            Some("proj-1"),
+        ))
+        .unwrap();
+        assert_eq!(value["params"]["projectId"], "proj-1");
+    }
+
+    /// No resolvable project -> NO key at all, never an empty string: the
+    /// protocol reads an explicit empty projectId as a CLEAR, so an absent
+    /// resolution must omit the field the way today's request does.
+    #[test]
+    fn thread_start_without_a_project_omits_the_key_entirely() {
+        let value: Value = serde_json::from_str(&thread_start_request_with_options(
+            1,
+            std::path::Path::new("/tmp/w"),
+            None,
+            false,
+            "never",
+            None,
+        ))
+        .unwrap();
+        assert!(value["params"].get("projectId").is_none());
     }
 
     #[test]

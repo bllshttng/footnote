@@ -151,7 +151,9 @@ def test_ac3_err_hook_serialization_failure_leaves_cursor_for_retry(monkeypatch)
     monkeypatch.setattr(
         cursor_mod, "scan_unread", lambda handle: [msg] if handle == "cl-abcd1234" else []
     )
-    monkeypatch.setattr(mail_cli, "_sent_unclaimed", lambda handle, ttl: [])
+    from fno.mail import landed as landed_mod
+
+    monkeypatch.setattr(landed_mod, "_sent_unclaimed", lambda handle, ttl: [])
     advances: list[tuple[str, str]] = []
     monkeypatch.setattr(
         cursor_mod,
@@ -211,7 +213,9 @@ def test_ac3_err_hook_output_failure_retries_then_acks_once(
     monkeypatch.setattr(
         cursor_mod, "scan_unread", lambda handle: [msg] if handle == "cl-abcd1234" else []
     )
-    monkeypatch.setattr(mail_cli, "_sent_unclaimed", lambda handle, ttl: [])
+    from fno.mail import landed as landed_mod
+
+    monkeypatch.setattr(landed_mod, "_sent_unclaimed", lambda handle, ttl: [])
     advances: list[tuple[str, str]] = []
     monkeypatch.setattr(
         cursor_mod,
@@ -266,7 +270,9 @@ def test_ac2_hp_hook_json_is_flushed_before_cursor_advances(monkeypatch) -> None
     monkeypatch.setattr(
         cursor_mod, "scan_unread", lambda handle: [msg] if handle == "cl-abcd1234" else []
     )
-    monkeypatch.setattr(mail_cli, "_sent_unclaimed", lambda handle, ttl: [])
+    from fno.mail import landed as landed_mod
+
+    monkeypatch.setattr(landed_mod, "_sent_unclaimed", lambda handle, ttl: [])
 
     def _advance(handle, msg_id):
         observed["handle"] = handle

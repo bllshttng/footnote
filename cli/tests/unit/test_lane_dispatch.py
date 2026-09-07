@@ -478,7 +478,9 @@ def test_dispatch_reservation_skips_node_already_being_dispatched(tmp_path, monk
 def test_lane_receipt_preserves_family2_refusal_reason(tmp_path, monkeypatch, reason):
     ready = _nodes(("n-a", "code"))
     calls = _wire(monkeypatch, tmp_path, ready)
-    monkeypatch.setattr(advance, "_node_dispatch_block_reason", lambda *_a: reason)
+    monkeypatch.setattr(
+        advance, "_node_dispatch_block_reason", lambda *_a, **_kw: reason
+    )
 
     receipts = advance.dispatch_lanes(1, project_root=tmp_path, claims_root=tmp_path / "claims")
 
@@ -492,7 +494,7 @@ def test_lane_preflight_error_returns_receipts_and_releases_slots(
     ready = _nodes(("n-a", "code"), ("n-b", "docs"))
     calls = _wire(monkeypatch, tmp_path, ready)
 
-    def fail_preflight(*_args):
+    def fail_preflight(*_args, **_kwargs):
         raise OSError("claim observation failed")
 
     monkeypatch.setattr(advance, "_node_dispatch_block_reason", fail_preflight)

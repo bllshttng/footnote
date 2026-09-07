@@ -26,6 +26,7 @@ Plan ACs covered:
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -467,3 +468,75 @@ def test_default_from_name_is_fno(workdir, fake_codex_create):
         lock_handle=_FakeLockHandle(),
     )
     assert fake_codex_create.call_args.kwargs["from_name"] == "fno"
+
+
+# ---------------------------------------------------------------------------
+# Project assignment (x-dc97)
+# ---------------------------------------------------------------------------
+
+
+def test_assign_codex_project_detached_execs_the_verb(workdir, monkeypatch):
+    """The helper execs the hidden fno-agents verb detached, never waiting."""
+    import subprocess
+
+    from fno.agents.codex_project import assign_project_detached
+
+    popen = MagicMock()
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: workdir / "fno-agents")
+
+    assign_project_detached(workdir, "thread-1")
+
+    assert popen.call_count == 1
+    argv = popen.call_args.args[0]
+    assert argv[1] == "codex-assign-project"
+    assert "--thread-id" in argv and argv[argv.index("--thread-id") + 1] == "thread-1"
+    assert popen.call_args.kwargs["start_new_session"] is True
+
+
+def test_assign_codex_project_detached_fails_open(workdir, monkeypatch):
+    """Empty session id or a missing binary leaves nothing behind, no raise."""
+    import subprocess
+
+    from fno.agents.codex_project import assign_project_detached
+
+    popen = MagicMock()
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
+
+    assign_project_detached(workdir, "")
+    assign_project_detached(workdir, "thread-1")  # binary None -> no exec
+
+    assert popen.call_count == 0
+
+
+def test_codex_thread_spawn_forwards_node_to_rust_client(monkeypatch, tmp_path):
+    from fno import rust_binary
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/fake/fno-agents"))
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout='{"harness_session_id":"thread-node"}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", fake_run)
+    session_id = dispatch_mod._codex_thread_spawn(
+        name="worker-X",
+        message="msg",
+        cwd=tmp_path,
+        from_name="fno",
+        model=None,
+        yolo=False,
+        node="x-535c",
+    )
+
+    assert session_id == "thread-node"
+    assert "--node" in seen["argv"]
+    assert seen["argv"][seen["argv"].index("--node") + 1] == "x-535c"

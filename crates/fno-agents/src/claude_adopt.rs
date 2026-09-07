@@ -20,7 +20,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use crate::claude_roster::RosterWorker;
-use crate::state::{update_registry, RegistryEntry, StateError, HOST_MODE_ATTACHED};
+use crate::state::{update_registry, Lineage, RegistryEntry, StateError, HOST_MODE_ATTACHED};
 use crate::AgentStatus;
 
 /// The single-writer claim holder for an adopted session: `pty:<short_id>`. The
@@ -135,9 +135,70 @@ pub fn provider_from_route_settings(model: Option<&str>) -> Option<String> {
     }
 }
 
-/// Build the registry row for an adopted held session. Pure (the `now` stamp is
-/// injected) so the row shape is asserted without a clock or a live spawn.
-/// `host_mode = "attached"` distinguishes it from a footnote-spawned interactive
+/// One frontmatter scalar from a king manifest: `key: value`, quotes stripped,
+/// empty reads as absent. The line-scan idiom `cleanup_king_manifest` uses; a
+/// full parser lives in loopcheck (shrink-only) and carries no crown fields.
+pub(crate) fn manifest_field(content: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&prefix))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// The crown a live king manifest records for exactly this session, or `None`
+/// (x-f0d2). The manifest is the durable crown record and a registry row its
+/// cache, so when a row vanishes and the healer mints its replacement, the
+/// crown comes back from the file, keyed by harness session id, never by
+/// name. Scans `<space>/kings/*.md` for the project the row belongs to (the
+/// same space every king writer uses), in sorted order: two manifests naming
+/// one session (a stale vacated scope beside the live one) must pick the same
+/// winner run to run, for the same reason `court_orphans` sorts its walk.
+/// The transcript check is EXISTENCE, not freshness - `transcript_activity`
+/// returns Some for any readable transcript and its age is not compared here.
+/// What actually bounds the restore to a live holder is the caller: adoption
+/// runs only for roster sessions, so the session being re-rowed is live. A
+/// future caller without that bound must add the age-window check itself.
+pub fn crown_from_king_manifests(
+    session_id: &str,
+    cwd: &Path,
+) -> Option<(u32, String, Option<String>)> {
+    if session_id.is_empty() {
+        return None;
+    }
+    let kings = crate::paths::space_dir(cwd).join("kings");
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(kings)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    paths.sort();
+    for path in paths {
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if manifest_field(&content, "harness_session_id").as_deref() != Some(session_id) {
+            continue;
+        }
+        if transcript_activity(session_id).is_none() {
+            return None;
+        }
+        let level = manifest_field(&content, "crown_level")?.parse().ok()?;
+        let scope = manifest_field(&content, "crown_scope")?;
+        return Some((level, scope, manifest_field(&content, "crown_grantor")));
+    }
+    None
+}
+
+/// Build the registry row for an adopted held session. The `now` stamp is
+/// injected so the row shape is asserted without a clock; the crown restore
+/// reads the king manifests and the holder transcript, both env-overridable
+/// (`FNO_SPACES_DIR`, `FNO_CLAUDE_PROJECTS_DIR`). `host_mode = "attached"`
+/// distinguishes it from a footnote-spawned interactive
 /// PTY; `claude_session_uuid` is the full resume key AND the row's identity,
 /// `pid`/`pid_start_time` are the EXTERNAL claude worker's (for reuse-detection).
 ///
@@ -153,6 +214,14 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
     // session that found the worker, and that session is the best answer the
     // registry can hold for "who is responsible for this row".
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
+    // x-f0d2: the crown restored from a live manifest naming this session,
+    // or none. Computed once, before the literal, so the row and the file can
+    // never disagree about what was restored.
+    let (crown_level, crown_scope, crown_grantor) =
+        match crown_from_king_manifests(&w.session_id, Path::new(&w.cwd)) {
+            Some((level, scope, grantor)) => (Some(level), Some(scope), grantor),
+            None => (None, None, None),
+        };
     RegistryEntry {
         name: adopted_name(&short),
         // Birth marker: a claude worker found in the roster, not one footnote
@@ -193,7 +262,6 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         requested_provider: None,
         requested_effort: None,
         harness: Some("claude".into()),
-        harness_session_id: Some(w.session_id.clone()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         route_provider_id: None,
@@ -221,19 +289,23 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         exited_at: None,
         mux: None,
         screen_state: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_grantor: None,
+        crown_level,
+        crown_scope,
+        crown_grantor,
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
         spawn_trigger: None,
-        spawned_by_session: parent_session,
-        spawned_by_harness: parent_harness,
-        spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
-        ..Default::default()
+        ..RegistryEntry::new(
+            Some(w.session_id.clone()),
+            Lineage {
+                session: parent_session,
+                harness: parent_harness,
+                cwd: parent_cwd,
+            },
+        )
     }
 }
 
@@ -405,6 +477,7 @@ mod tests {
 
     #[test]
     fn mint_sets_attached_marker_and_resume_key() {
+        let _root = crate::paths::DeclaredRoot::declare("mint_sets_attached_marker_an");
         let e = mint_adopted_entry(&worker(), "2026-06-27T17:00:00Z");
         assert_eq!(e.name, "cc-a1b2c3d4");
         assert_eq!(e.harness_name(), "claude");
@@ -572,6 +645,7 @@ mod tests {
         let _guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _root = crate::paths::DeclaredRoot::declare_held("adopt_fills_model_and_provid");
         // The full adopt path: the transcript states the model, the route
         // files name its provider, and the row carries both plus a verified
         // basis - the premise the attest-model guard needs.
@@ -604,6 +678,7 @@ mod tests {
 
     #[test]
     fn upsert_refresh_keeps_a_stamped_node() {
+        let _root = crate::paths::DeclaredRoot::declare("upsert_refresh_keeps_a_stamp");
         // A spawn-stamped node survives a re-adopt: adoption observed nothing
         // about the node, so replacing the row must not erase the stamp.
         let dir = std::env::temp_dir().join(format!(
@@ -626,7 +701,130 @@ mod tests {
     }
 
     #[test]
+    fn adopted_row_restores_crown() {
+        // x-f0d2: the manifest is the durable crown record, the row its cache.
+        // A manifest naming the adopted session holder restores the crown
+        // triple onto the minted row, keyed by session id, never by name.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
+        let projects = seed_transcript("crown-live", uuid, &[transcript_line("glm-5.3")]);
+        let spaces = std::env::temp_dir().join(format!(
+            "fno-adopt-crown-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let kings = spaces.join("-Users-x-code-proj").join("kings");
+        std::fs::create_dir_all(&kings).unwrap();
+        std::fs::write(
+            kings.join("x-dede.md"),
+            format!(
+                "---\nscope: x-dede\nharness_session_id: {uuid}\ncrown_level: 2\ncrown_scope: x-dede\ncrown_grantor: operator\n---\n"
+            ),
+        )
+        .unwrap();
+        std::env::set_var("FNO_SPACES_DIR", &spaces);
+
+        let e = mint_adopted_entry(&worker(), "2026-09-05T00:00:00Z");
+        assert_eq!(e.crown_level, Some(2));
+        assert_eq!(e.crown_scope.as_deref(), Some("x-dede"));
+        assert_eq!(e.crown_grantor.as_deref(), Some("operator"));
+
+        std::env::remove_var("FNO_SPACES_DIR");
+        std::fs::remove_dir_all(&spaces).ok();
+        std::fs::remove_dir_all(&projects).ok();
+    }
+
+    #[test]
+    fn the_restore_picks_one_manifest_deterministically_when_two_name_a_session() {
+        // Two manifests naming one session (a stale vacated scope beside the
+        // live one) must pick the same winner run to run: the walk is sorted,
+        // so the path-first manifest wins regardless of directory order.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
+        let projects = seed_transcript("crown-two", uuid, &[transcript_line("glm-5.3")]);
+        let spaces = std::env::temp_dir().join(format!(
+            "fno-adopt-crowntwo-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let kings = spaces.join("-Users-x-code-proj").join("kings");
+        std::fs::create_dir_all(&kings).unwrap();
+        // Written later but sorted first: the sort, not write order, decides.
+        std::fs::write(
+            kings.join("zzz-scope.md"),
+            format!(
+                "---\nscope: zzz-scope\nharness_session_id: {uuid}\ncrown_level: 2\ncrown_scope: zzz-scope\n---\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            kings.join("aaa-scope.md"),
+            format!(
+                "---\nscope: aaa-scope\nharness_session_id: {uuid}\ncrown_level: 1\ncrown_scope: aaa-scope\n---\n"
+            ),
+        )
+        .unwrap();
+        std::env::set_var("FNO_SPACES_DIR", &spaces);
+
+        let e = mint_adopted_entry(&worker(), "2026-09-05T00:00:00Z");
+        assert_eq!(e.crown_level, Some(1));
+        assert_eq!(e.crown_scope.as_deref(), Some("aaa-scope"));
+
+        std::env::remove_var("FNO_SPACES_DIR");
+        std::fs::remove_dir_all(&spaces).ok();
+        std::fs::remove_dir_all(&projects).ok();
+    }
+
+    #[test]
+    fn adopted_row_restores_no_crown_for_a_dead_holder() {
+        // Same manifest, no transcript behind the holder session: the crown
+        // stays with the file and the minted row carries none. A crown whose
+        // holder is gone must not ride a heal back onto a row.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
+        let spaces = std::env::temp_dir().join(format!(
+            "fno-adopt-crowndead-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let kings = spaces.join("-Users-x-code-proj").join("kings");
+        std::fs::create_dir_all(&kings).unwrap();
+        std::fs::write(
+            kings.join("x-dede.md"),
+            format!(
+                "---\nscope: x-dede\nharness_session_id: {uuid}\ncrown_level: 2\ncrown_scope: x-dede\n---\n"
+            ),
+        )
+        .unwrap();
+        std::env::set_var("FNO_SPACES_DIR", &spaces);
+
+        let e = mint_adopted_entry(&worker(), "2026-09-05T00:00:00Z");
+        assert_eq!(e.crown_level, None);
+        assert_eq!(e.crown_scope, None);
+        assert_eq!(e.crown_grantor, None);
+
+        std::env::remove_var("FNO_SPACES_DIR");
+        std::fs::remove_dir_all(&spaces).ok();
+    }
+
+    #[test]
     fn attached_row_is_not_interactive_and_not_one_shot() {
+        let _root = crate::paths::DeclaredRoot::declare("attached_row_is_not_interact");
         // Reconcile must NOT treat an adopted row as a footnote-managed
         // interactive worker, nor settle it as a finished one-shot ask.
         let e = mint_adopted_entry(&worker(), "2026-06-27T17:00:00Z");
@@ -638,6 +836,7 @@ mod tests {
 
     #[test]
     fn upsert_replaces_by_session_uuid() {
+        let _root = crate::paths::DeclaredRoot::declare("upsert_replaces_by_session_u");
         let dir = std::env::temp_dir().join(format!(
             "fno-adopt-upsert-{}-{}",
             std::process::id(),
@@ -671,6 +870,7 @@ mod tests {
 
     #[test]
     fn upsert_refresh_carries_a_declared_delivery_policy_forward() {
+        let _root = crate::paths::DeclaredRoot::declare("upsert_refresh_carries_a_dec");
         // x-e21e: the replace path swaps the WHOLE row for a fresh mint, which
         // would silently revert a session's self-declared bus-only stamp to
         // injectable on re-adopt -- the delivery defect again, one adopt later.

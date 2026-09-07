@@ -105,3 +105,15 @@ bundles:
         dest: references/cli-tool-mapping.md
       - source: scripts/validate-plan.sh
         dest: scripts/validate-plan.sh
+
+  # The tenured king. The minion contract, court operations, and the CLI
+  # command map are canonical in king-for-a-day; reign bundles them so the
+  # skill is portable the way drivers must be.
+  - skill: reign
+    files:
+      - source: skills/king-for-a-day/references/minion-clause.md
+        dest: references/minion-clause.md
+      - source: skills/king-for-a-day/references/court-operations.md
+        dest: references/court-operations.md
+      - source: skills/king-for-a-day/references/cli-commands.md
+        dest: references/cli-commands.md

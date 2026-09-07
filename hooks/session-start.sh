@@ -45,16 +45,6 @@ prime_plugin_root_pointer() {
 }
 prime_plugin_root_pointer || true
 
-# ── .fno gitignore housekeeping (best-effort, idempotent) ────────────
-# Keep machine-specific .fno/ session state (incl. target-state.md) out of the
-# project repo so personal state never leaks into an open-source checkout. The
-# helper no-ops when .fno/ is already ignored / absent / outside a git tree.
-ensure_fno_gitignored() {
-    local helper="$PLUGIN_ROOT/hooks/helpers/ensure-fno-gitignored.sh"
-    [[ -f "$helper" ]] && bash "$helper" 2>/dev/null || true
-}
-ensure_fno_gitignored || true
-
 # ── heal a wired Claude WorktreeRemove hook after a plugin move ──────
 # That hook lives in ~/.claude/settings.json (claude rm runs with no session,
 # so it never loads plugin hooks) and holds an ABSOLUTE script path. A plugin

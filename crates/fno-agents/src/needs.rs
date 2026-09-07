@@ -23,14 +23,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Default fold window when `--since-epoch` is absent: the last 24h.
-const DEFAULT_WINDOW_SECS: u64 = 24 * 60 * 60;
+pub const DEFAULT_WINDOW_SECS: u64 = 24 * 60 * 60;
 
 /// `fires` floor for `review_wedged`: the loop must have re-checked at least
 /// this many times before a green-PR block counts as wedged (a fresh block
 /// during a normal review wait is not yet a wedge). Hardcoded heuristic, not a
 /// config knob - tune the const if it misfires (ponytail: no config for a value
 /// that never changes); a hidden `--fires-floor` overrides it for tests.
-const DEFAULT_FIRES_FLOOR: u64 = 2;
+pub const DEFAULT_FIRES_FLOOR: u64 = 2;
 
 /// Below this age, a pile of unharvested carve-outs or stale claims is not yet
 /// a needs-me item - only a pile that has actually gone stale belongs in the
@@ -559,9 +559,9 @@ fn expand_eq(rest: &[String]) -> Vec<String> {
     out
 }
 
-/// Default event/ledger sources: project `.fno/events.jsonl` + global
+/// Default event/ledger sources: the repo's space journal + global
 /// `~/.fno/events.jsonl` + `~/.fno/questions.jsonl` + `~/.fno/ledger.json`.
-fn default_sources(home: &AgentsHome) -> (Vec<PathBuf>, PathBuf) {
+fn default_sources(home: &AgentsHome, cwd: &Path) -> (Vec<PathBuf>, PathBuf) {
     let fno_dir = home
         .root()
         .parent()
@@ -569,7 +569,7 @@ fn default_sources(home: &AgentsHome) -> (Vec<PathBuf>, PathBuf) {
         .unwrap_or_else(|| PathBuf::from(".fno"));
     let global_events = fno_dir.join("events.jsonl");
     let questions = fno_dir.join("questions.jsonl");
-    let project_events = PathBuf::from(".fno").join("events.jsonl");
+    let project_events = crate::paths::space_dir(cwd).join("events.jsonl");
     let ledger = fno_dir.join("ledger.json");
     (vec![project_events, global_events, questions], ledger)
 }
@@ -750,7 +750,7 @@ pub fn stale_claim_item(claims: &[ClaimAge], now_ms: i64) -> Option<NeedItem> {
 /// Best-effort: an unreadable registry or a probe failure degrades to no
 /// items, never a crash of `fno agents needs`.
 fn refused_worker_items(home: &AgentsHome) -> Vec<NeedItem> {
-    refused_worker_items_with(home, crate::claude_ask::family1_truth_probe_many)
+    refused_worker_items_with(home, crate::truth_probe::family1_truth_probe_many)
 }
 
 /// [`refused_worker_items`] with the batch probe injected, so a test can count
@@ -762,7 +762,7 @@ fn refused_worker_items(home: &AgentsHome) -> Vec<NeedItem> {
 /// where the question is liveness.
 fn refused_worker_items_with(
     home: &AgentsHome,
-    truth_fn: impl Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>,
+    truth_fn: impl Fn(&[String]) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
 ) -> Vec<NeedItem> {
     let registry = match crate::daemon::load_registry_asserted(&home.registry_json()) {
         Ok(r) => r,
@@ -863,46 +863,23 @@ fn scan_claim_ages(dir: &Path) -> Vec<ClaimAge> {
     out
 }
 
-/// The `fno-agents needs` verb. Read-only; exits 0 on empty/corrupt input (only
-/// a usage error exits 2), so the overlay caller never sees a failure it must
-/// handle beyond a nonzero exit.
-pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
-    let args = match parse_args(rest) {
-        Ok(a) => a,
-        Err(msg) => {
-            eprintln!("fno-agents: {msg}");
-            return 2;
-        }
-    };
-
-    let (default_events, default_ledger) = default_sources(home);
-    let explicit_events = !args.events_override.is_empty();
-    let mut event_paths = if explicit_events {
-        args.events_override
-    } else {
-        default_events
-    };
-    // `fno inbox outstanding ask` appends to the CANONICAL checkout's
-    // `.fno/events.jsonl` (never a linked worktree's), while the default
-    // project journal above is cwd-relative and this verb inherits the
-    // caller's cwd. Without the canonical journal in the set, a question
-    // asked from a worktree is invisible to the fold.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let canonical = crate::paths::canonical_repo_root(&cwd);
-    if let Some(root) = &canonical {
-        let canonical_events = root.join(".fno").join("events.jsonl");
-        let cwd_events = cwd.join(".fno").join("events.jsonl");
-        if !explicit_events
-            && canonical_events != cwd_events
-            && !event_paths.contains(&canonical_events)
-        {
-            event_paths.push(canonical_events);
-        }
-    }
-    let ledger_path = args.ledger_override.unwrap_or(default_ledger);
-
+/// The whole needs fold over explicit sources: events read + fold + the three
+/// non-event legs (carveout age, stale claims, refused workers) + liveness
+/// stamp. Shared by the `needs` verb and the king board's in-process needs
+/// read, so the two surfaces cannot drift (the king board is why this is `pub`).
+/// `cwd` anchors the carveout leg: the verb passes the process cwd it inherits,
+/// the board passes its own resolved cwd (the process cwd is not guaranteed to
+/// be the project for an in-process caller).
+pub fn collect_needs_items(
+    home: &AgentsHome,
+    event_paths: &[PathBuf],
+    ledger_path: &Path,
+    since: u64,
+    fires_floor: u64,
+    cwd: &Path,
+) -> Vec<NeedItem> {
     let mut events_raw = String::new();
-    for p in &event_paths {
+    for p in event_paths {
         if let Ok(content) = std::fs::read_to_string(p) {
             events_raw.push_str(&content);
             if !content.ends_with('\n') {
@@ -910,12 +887,9 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
             }
         }
     }
-    let ledger_raw = std::fs::read_to_string(&ledger_path).unwrap_or_default();
+    let ledger_raw = std::fs::read_to_string(ledger_path).unwrap_or_default();
 
-    let since = args
-        .since_epoch
-        .unwrap_or_else(|| now_secs().saturating_sub(DEFAULT_WINDOW_SECS));
-    let mut items = fold(&events_raw, &ledger_raw, since, args.fires_floor);
+    let mut items = fold(&events_raw, &ledger_raw, since, fires_floor);
 
     // Carve-out-age and stale-claim legs: durable on-disk state, not events,
     // so they are read directly here (IO layer) rather than folded from
@@ -924,7 +898,7 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     // canonical checkout's `.fno/` (`resolve_carveout_root` on the write
     // side); a worktree only sees it through a skip-if-missing symlink, so
     // read the canonical path directly and fall back to cwd outside a repo.
-    let carveouts_path = canonical
+    let carveouts_path = crate::paths::canonical_repo_root(cwd)
         .map(|r| r.join(".fno").join("carveouts.jsonl"))
         .unwrap_or_else(|| PathBuf::from(".fno").join("carveouts.jsonl"));
     let carveouts_raw = std::fs::read_to_string(&carveouts_path).unwrap_or_default();
@@ -939,7 +913,56 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     }
     items.extend(refused_worker_items(home));
 
-    let items = stamp_liveness(items);
+    stamp_liveness(items)
+}
+
+/// The `fno-agents needs` verb. Read-only; exits 0 on empty/corrupt input (only
+/// a usage error exits 2), so the overlay caller never sees a failure it must
+/// handle beyond a nonzero exit.
+pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
+    let args = match parse_args(rest) {
+        Ok(a) => a,
+        Err(msg) => {
+            eprintln!("fno-agents: {msg}");
+            return 2;
+        }
+    };
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let (default_events, default_ledger) = default_sources(home, &cwd);
+    let explicit_events = !args.events_override.is_empty();
+    let mut event_paths = if explicit_events {
+        args.events_override
+    } else {
+        default_events
+    };
+    // One journal per space: the cwd journal and the canonical journal are the
+    // same file now (the worktree fork is what the spaces move retired), so
+    // this push collapses to a no-op and stays only as the shape's record.
+    let canonical = crate::paths::canonical_repo_root(&cwd);
+    if let Some(root) = &canonical {
+        let canonical_events = crate::paths::space_dir(root).join("events.jsonl");
+        let cwd_events = crate::paths::space_dir(&cwd).join("events.jsonl");
+        if !explicit_events
+            && canonical_events != cwd_events
+            && !event_paths.contains(&canonical_events)
+        {
+            event_paths.push(canonical_events);
+        }
+    }
+    let ledger_path = args.ledger_override.unwrap_or(default_ledger);
+
+    let since = args
+        .since_epoch
+        .unwrap_or_else(|| now_secs().saturating_sub(DEFAULT_WINDOW_SECS));
+    let items = collect_needs_items(
+        home,
+        &event_paths,
+        &ledger_path,
+        since,
+        args.fires_floor,
+        &cwd,
+    );
 
     if args.json {
         println!(
@@ -1055,8 +1078,8 @@ mod tests {
         home
     }
 
-    fn refused_probe(model: &str) -> crate::claude_ask::TruthProbe {
-        crate::claude_ask::TruthProbe {
+    fn refused_probe(model: &str) -> crate::truth_probe::TruthProbe {
+        crate::truth_probe::TruthProbe {
             state: "working".into(),
             reachability: Some("reachable".into()),
             basis: Some("transcript".into()),
@@ -1064,6 +1087,7 @@ mod tests {
             last_event_at: None,
             last_message: None,
             observed_model: serde_json::json!({"kind": "observed", "model": model}),
+            harness_title: None,
         }
     }
 
@@ -1658,6 +1682,7 @@ mod tests {
 
     #[test]
     fn question_index_is_a_default_source_and_ask_is_folded_as_evidence() {
+        let _root = crate::paths::DeclaredRoot::declare("question_index_is_a_default_");
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().join(".fno");
         let home = AgentsHome::at(state_dir.join("agents"));
@@ -1670,7 +1695,7 @@ mod tests {
         )
         .unwrap();
 
-        let (sources, _) = default_sources(&home);
+        let (sources, _) = default_sources(&home, tmp.path());
         let events = sources
             .iter()
             .filter_map(|path| std::fs::read_to_string(path).ok())

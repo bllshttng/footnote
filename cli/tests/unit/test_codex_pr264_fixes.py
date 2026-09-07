@@ -8,7 +8,6 @@ Finding D: plain-relative predicate in paths.py rejects env vars anywhere.
 from __future__ import annotations
 
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Generator
 
@@ -25,36 +24,16 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-    if hasattr(paths_mod, "resolve_repo_root"):
-        try:
-            paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
     yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    if hasattr(paths_mod, "_settings"):
-        try:
-            paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-    if hasattr(paths_mod, "resolve_repo_root"):
-        try:
-            paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
-
 def _set_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str) -> None:
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text(content, encoding="utf-8")
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
+    # The declaration key is unchanged by a content rewrite; drop the entry.
+    from fno.config import _load_settings_at
+
+    _load_settings_at.cache_clear()
 
 
 # ===========================================================================
@@ -157,9 +136,6 @@ def test_health_load_config_failsopen_on_invalid_settings(
     # Wire FNO_CONFIG to point at the bad settings file
     monkeypatch.setenv("FNO_CONFIG", str(bad_settings))
     # Clear caches so the new bad settings are picked up
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     # Call with user_settings=None (default) so _paths.config_file() is called
     # Should not raise; should return defaults
@@ -215,9 +191,6 @@ def test_collision_load_thresholds_failsopen_on_invalid_settings(
     # Wire FNO_CONFIG to point at the bad settings file
     monkeypatch.setenv("FNO_CONFIG", str(bad_settings))
     # Clear caches so the new bad settings are picked up
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     # Call with user_settings=None (default) so _paths.config_file() is called
     # Should not raise; should return defaults
@@ -277,18 +250,12 @@ def test_shell_stub_regenerates_per_call(
     # Change settings - custom plans_dir - then call again
     from fno import config as config_mod
     import fno.paths as paths_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     _set_settings(
         monkeypatch,
         tmp_path,
         "schema_version: 1\nconfig:\n  plans_dir: '.fno/my-custom-plans'\n",
     )
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     result2 = runner.invoke(
         app,
@@ -341,9 +308,6 @@ def test_plans_dir_with_env_var_in_middle_expands(
 
     from fno import config as config_mod
     import fno.paths as paths_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    if hasattr(paths_mod, "_settings"):
-        paths_mod._settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.paths import plans_dir
 

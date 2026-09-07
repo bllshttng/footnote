@@ -1076,8 +1076,23 @@ def thread_lane(harness: str) -> str:
     ``attach``  the harness owns the live session; a client re-attaches to it.
     ``keeper``  the harness persists a transcript only; fno must hold the pty.
     ``none``    no resume form at all, so no lane can be built.
+
+    Two independent signals answer ``attach``: a declared ``interactive_attach``
+    form (a CLI attach subcommand fno can shell out to), OR ``features.attach``
+    reading ``native`` (fno can reach a live session some other way - a
+    daemon-owned process, a keeper-hosted portal - even with no such
+    subcommand). This split exists for a harness that ships no attach
+    subcommand at all, yet has a real, working thread destination reached
+    through the daemon-kept lane - a fact its own ``features.attach`` claim
+    already records (x-df08). A row with no ``features.attach`` stanza at
+    all reads as absent, never as a claim, so this never promotes a row
+    silently.
     """
-    forms = capabilities(harness)["resume_strategy"]["forms"]
+    caps = capabilities(harness)
+    attach_claim = (caps.get("features") or {}).get("attach") or {}
+    if attach_claim.get("state") == "native":
+        return "attach"
+    forms = caps["resume_strategy"]["forms"]
     if forms.get("interactive_attach", {}).get("kind") != "unsupported":
         return "attach"
     if forms.get("interactive_resume", {}).get("kind") != "unsupported":

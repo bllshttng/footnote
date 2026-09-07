@@ -4,10 +4,12 @@ description: "Natural-language remote control for the `fno agents` worker mesh. 
 argument-hint: "<verb> [args]  |  [handoff] <ab-xxxxxxxx | feature | doc-path | /command> [provider] [drive] [yolo] [model <name>] [effort <value>] [as <name>] [merge]"
 metadata:
   internal: false
-requires:
-  binaries:
-    - "fno >= 0.1"
-    - "jq >= 1.6"
+  requires:
+    binaries:
+      - "fno >= 0.1"
+      - "jq >= 1.6"
+    harness:
+      - spawn
 ---
 
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->

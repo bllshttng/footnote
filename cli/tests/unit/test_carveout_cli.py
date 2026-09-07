@@ -47,7 +47,6 @@ def ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # empty that has nothing to do with the behavior under test.
     import fno.paths as paths_mod
 
-    paths_mod.resolve_repo_root.cache_clear()
     path = tmp_path / ".fno" / "carveouts.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

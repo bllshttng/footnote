@@ -226,22 +226,24 @@ def _coverage_logs(
 ) -> tuple[Optional[Path], Optional[Path], Optional[str]]:
     """The logs a coverage read consults: ``(project, global, slug)``, either None.
 
-    The project entry is read UNSCOPED (a repo-local file needs no scoping) and
-    the global entry SCOPED by ``slug``. Both can be None; see the same-file case
-    below, which is why the project entry is optional rather than always present.
-
-    The global log is None when it cannot be scanned safely - no ``~/.fno``, the
-    same file as the project log, or no resolvable git-remote slug. Without a
-    slug nothing in the cross-project log can be attributed to this repo, so
+    The project entry is the repo's SPACE journal - scoped by construction,
+    because the slug is in its path - so it reads unscoped. The global entry is
+    read SCOPED by ``slug``. The global log is None when it cannot be scanned
+    safely - no ``~/.fno`` or no resolvable git-remote slug. Without a slug
+    nothing in the cross-project log can be attributed to this repo, so
     scanning it could only produce a cross-repo false positive.
 
     Separate from the scan so a caller that only wants to NAME the logs (the
     refusal text) does not read tens of MB of JSONL to learn two filenames.
     """
     root = _repo_root(cwd)
-    project_path = (
-        project_events if project_events is not None else root / ".fno" / "events.jsonl"
-    )
+    if project_events is not None:
+        project_path = project_events
+    else:
+        # project_log: producers write the space journal; a raw .fno path goes
+        # quiet once any writer migrates it, and every PR then reads unreviewed.
+        from fno.paths import project_log
+        project_path = project_log("events.jsonl", project_root=root)
     try:
         from fno import paths as _paths
 
@@ -254,14 +256,6 @@ def _coverage_logs(
         slug = _repo_identity(root)
     except Exception:  # noqa: BLE001 - no global log -> project log alone
         return project_path, None, None
-    if global_path == project_path:
-        # The two resolve to ONE file when the git top-level is $HOME (a
-        # `git init ~` dotfiles checkout). The project log is normally read
-        # unscoped because it is repo-local; here it IS the cross-project
-        # journal, so an unscoped read would let any repo's PR N satisfy this
-        # repo's guard. Drop the unscoped read and keep only the scoped one -
-        # and with no identity to scope by, nothing here is safe to read.
-        return None, (global_path if slug else None), slug
     if not slug:
         return project_path, None, slug
     return project_path, global_path, slug
@@ -643,13 +637,15 @@ def _is_after(candidate: str, baseline_ts: str, baseline: Optional[datetime]) ->
 
 
 def _is_covered(data: Optional[dict]) -> bool:
-    """Whether a coverage event reports a real pass (covered AND count > 0)."""
+    """Whether a coverage event reports covered, keyed on the WORD alone.
+
+    The count is a fact beside the word, never a conjunct of it: a budget
+    spent on fail rounds reads covered with passed_count 0, and every reader
+    that tested ``covered AND count > 0`` reported zero reviews on a PR two
+    rounds were spent reviewing."""
     if not data or data.get("coverage") != "covered":
         return False
-    try:
-        return int(data.get("reviewed_count") or 0) > 0
-    except (TypeError, ValueError):
-        return False
+    return True
 
 
 def _tiling_chain(data: dict) -> set[str]:
@@ -927,6 +923,7 @@ def read_review_coverage(
     shaped = {
         "coverage": latest.get("coverage", "unknown"),
         "reviewed_count": latest.get("reviewed_count"),
+        "passed_count": latest.get("passed_count"),
         "self_attested_count": latest.get("self_attested_count"),
         "head_sha": latest.get("head_sha"),
         "stale_verdicts": latest.get("stale_verdicts", []),
@@ -935,7 +932,7 @@ def read_review_coverage(
     # number (x-027b). Keys stay absent when the row predates them, and the
     # status payload reads that absence as "no row at this head" rather than
     # re-deriving a floor from events.
-    for _key in ("rounds_used", "rounds_max", "rounds_exhausted", "impossible"):
+    for _key in ("rounds_used", "rounds_max", "rounds_exhausted"):
         if latest.get(_key) is not None:
             shaped[_key] = latest[_key]
     if latest.get("reason"):

@@ -15,9 +15,13 @@ from fno.pr import _merge
 
 
 def _events(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+    from fno.paths import journal_and_ephemeral_sibling
+
+    lines: list[str] = []
+    for candidate in journal_and_ephemeral_sibling(path):
+        if candidate.exists():
+            lines.extend(candidate.read_text().splitlines())
+    return [json.loads(ln) for ln in lines if ln.strip()]
 
 
 def _fake_graph(tmp_path: Path, entries: list[dict]) -> Path:

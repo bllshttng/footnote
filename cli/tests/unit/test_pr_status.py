@@ -1395,6 +1395,17 @@ def test_ready_skips_the_coverage_conjunct_on_a_no_lane_repo(monkeypatch, capsys
     assert out["ready_blockers"] == []
 
 
+def _journal(tmp_path):
+    """The journal the reader resolves (the repo's space, via project_log);
+    a legacy .fno path goes quiet once the first read migrates it, so a
+    re-seed there lands where nobody looks."""
+    from fno.paths import project_log
+
+    journal = project_log("events.jsonl", project_root=tmp_path)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    return journal
+
+
 def _lane_fetch(monkeypatch, *, state="OPEN", head="h1"):
     monkeypatch.setattr(
         _status,
@@ -1760,8 +1771,7 @@ def test_local_pass_conjunct_is_satisfiable_on_the_real_read_path(
         "fno.pr._merge._code_review_attestation_required",
         lambda repo, pr_number=0: True,
     )
-    events = tmp_path / ".fno" / "events.jsonl"
-    events.parent.mkdir(parents=True)
+    events = _journal(tmp_path)
     covered_row = {
         "ts": "2026-08-17T00:00:00Z",
         "type": "review_coverage",
@@ -1853,8 +1863,7 @@ def test_read_review_coverage_from_events(tmp_path):
 
     from fno.pr._reviews import read_review_coverage
 
-    events = tmp_path / ".fno" / "events.jsonl"
-    events.parent.mkdir(parents=True)
+    events = _journal(tmp_path)
     events.write_text(
         json.dumps(
             {"type": "review_coverage", "data": {"pr": 7, "coverage": "covered", "review_state": "reviewed", "reviewed_count": 1, "head_sha": "a"}}
@@ -1866,6 +1875,7 @@ def test_read_review_coverage_from_events(tmp_path):
         "coverage": "uncovered",
         "review_state": "unreviewed",
         "reviewed_count": 0,
+        "passed_count": None,
         "self_attested_count": None,
         "head_sha": "a",
         "stale_verdicts": [],
@@ -1955,8 +1965,7 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
 
     from fno.pr._reviews import read_review_coverage
 
-    events = tmp_path / ".fno" / "events.jsonl"
-    events.parent.mkdir(parents=True)
+    events = _journal(tmp_path)
     events.write_text(
         json.dumps(
             {
@@ -2011,8 +2020,7 @@ def test_status_distinguishes_current_review_from_stale_history(
     head = _commit_reviewed_history(tmp_path)
     _lane_fetch(monkeypatch, head=head)
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
-    events = tmp_path / ".fno" / "events.jsonl"
-    events.parent.mkdir(parents=True, exist_ok=True)
+    events = _journal(tmp_path)
 
     def write_event(verdicts):
         events.write_text(
@@ -2113,8 +2121,7 @@ def test_refused_verdict_without_freshness_is_not_reported_stale(tmp_path):
     from fno.pr._reviews import read_review_coverage
 
     head = _commit_reviewed_history(tmp_path)
-    events = tmp_path / ".fno" / "events.jsonl"
-    events.parent.mkdir(parents=True)
+    events = _journal(tmp_path)
     events.write_text(
         _json.dumps(
             {
@@ -2177,8 +2184,7 @@ def test_malformed_verdict_cannot_hide_beside_fresh_review(
             "freshness": "fresh",
         },
     }[malformed_kind]
-    events = tmp_path / ".fno" / "events.jsonl"
-    events.parent.mkdir(parents=True)
+    events = _journal(tmp_path)
     events.write_text(
         _json.dumps(
             {
@@ -2222,8 +2228,7 @@ def _git(tmp_path, *args: str) -> str:
 
 
 def _review_coverage_event(tmp_path, pr: int, head: str, verdict: dict) -> None:
-    events = tmp_path / ".fno" / "events.jsonl"
-    events.parent.mkdir(parents=True)
+    events = _journal(tmp_path)
     events.write_text(
         _json.dumps(
             {
@@ -2753,8 +2758,7 @@ def test_status_recomputes_a_missing_coverage_row(monkeypatch, capsys, tmp_path)
         "read_optional_review_state",
         lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
     )
-    events = tmp_path / ".fno" / "events.jsonl"
-    events.parent.mkdir(parents=True)
+    events = _journal(tmp_path)
 
     def fake_verb(pr_number, cwd, head):
         events.write_text(
@@ -2812,8 +2816,7 @@ def test_status_prints_degraded_recompute_reason_on_stderr(monkeypatch, capsys, 
         "read_optional_review_state",
         lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
     )
-    events = tmp_path / ".fno" / "events.jsonl"
-    events.parent.mkdir(parents=True)
+    events = _journal(tmp_path)
 
     def fake_verb(pr_number, cwd, head):
         events.write_text(
@@ -3172,7 +3175,7 @@ def _rounds_status_on(monkeypatch, capsys, tmp_path, events_text, gate_row=None)
 
     _no_floor(monkeypatch)
     (tmp_path / ".fno").mkdir(exist_ok=True)
-    (tmp_path / ".fno" / "events.jsonl").write_text(events_text, encoding="utf-8")
+    _journal(tmp_path).write_text(events_text, encoding="utf-8")
     head = f"{4:040x}"
     monkeypatch.setattr(
         _status,
@@ -3258,7 +3261,8 @@ _HARD = {
 def test_payload_carries_the_budget_from_the_gate_row(monkeypatch, capsys, tmp_path):
     """The gate's row reads rounds_used 5 against a budget of 2: the payload
     carries the pair verbatim, with no second axis key - `rounds_axis` is
-    the deleted floor's vocabulary and must stay dead (x-027b)."""
+    the deleted floor's vocabulary and must stay dead (x-027b). The spent
+    budget is not a blocker: at the cap the review phase is complete."""
     text = "\n".join(
         [
             _rounds_event(0, "fail", [_HARD]),
@@ -3277,9 +3281,9 @@ def test_payload_carries_the_budget_from_the_gate_row(monkeypatch, capsys, tmp_p
     assert out["rounds_exhausted"] is True
     assert "rounds_axis" not in out
     assert "rounds_axis_note" not in out
-    # And the same chain holds ready back through the re-derived conjunct.
-    assert out["ready"] is False
-    assert "review_coverage_impossible" in out["ready_blockers"]
+    # A covered row holds ready back on nothing else, cap spent or not.
+    assert out["ready"] is True
+    assert not [b for b in out["ready_blockers"] if b.startswith("review_coverage_")]
 
 
 def test_payload_reports_the_gate_budget_on_a_bot_heavy_pr(

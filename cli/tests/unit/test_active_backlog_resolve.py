@@ -8,22 +8,38 @@ the retired per-project enable model.
 """
 from __future__ import annotations
 
+import pytest
+
 import fno.active_backlog as ab
 
 
-def _patch(monkeypatch, *, enabled=True, interval="5m", failure_limit=3, missions, paths):
+def _patch(
+    monkeypatch,
+    *,
+    enabled=True,
+    interval="5m",
+    failure_limit=3,
+    max_concurrent=1,
+    missions,
+    paths,
+):
     """Wire a fake settings + active-mission set + workspace map.
 
     ``missions`` is the list of active-mission epic dicts _active_missions returns.
     """
     from fno.config import ActiveBacklogConfig
 
-    cfg = ActiveBacklogConfig(enabled=enabled, interval=interval, failure_limit=failure_limit)
+    cfg = ActiveBacklogConfig(
+        enabled=enabled,
+        interval=interval,
+        failure_limit=failure_limit,
+        max_concurrent=max_concurrent,
+    )
 
     class _Settings:
         active_backlog = cfg
 
-    monkeypatch.setattr(ab, "_workspace_paths", lambda: paths)
+    monkeypatch.setattr(ab, "_workspace_paths", lambda **_: paths)
     monkeypatch.setattr(ab, "_active_missions", lambda: missions)
     import fno.config as cfgmod
 
@@ -149,6 +165,17 @@ def test_active_missions_non_list_graph_yields_empty(monkeypatch):
     assert ab._active_missions() == []
 
 
+def test_strict_target_resolution_propagates_mission_read_fault(monkeypatch):
+    _patch(monkeypatch, missions=[], paths={"footnote": "/repo/footnote"})
+
+    def _boom(*, strict=False):
+        raise RuntimeError("mission read failed")
+
+    monkeypatch.setattr(ab, "_active_missions", _boom)
+    with pytest.raises(RuntimeError, match="mission read failed"):
+        ab.resolve_drain_targets(strict=True)
+
+
 def test_as_dicts_shape(monkeypatch):
     _patch(
         monkeypatch,
@@ -163,5 +190,23 @@ def test_as_dicts_shape(monkeypatch):
             "interval_seconds": 300,
             "failure_limit": 3,
             "mission": "x-epic",
+            "max_concurrent": 1,
         }
     ]
+
+
+def test_max_concurrent_rides_on_every_target(monkeypatch):
+    """The cap is global, so every target carries the same value.
+
+    The daemon holds ONE gate for the whole drain; the target list is just its
+    config channel. A cap that reached no target is a cap nothing enforces,
+    which is how a declared 1 ran five concurrent converges.
+    """
+    _patch(
+        monkeypatch,
+        max_concurrent=3,
+        missions=[_mission("x-a", "footnote"), _mission("x-b", "other")],
+        paths={"footnote": "/repo/footnote", "other": "/repo/other"},
+    )
+    caps = [t.max_concurrent for t in ab.resolve_drain_targets()]
+    assert caps == [3, 3]

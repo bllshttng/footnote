@@ -16,8 +16,7 @@ from fno.claims import RebindRefused, claim_status
 from fno.claims.core import compare_and_rebind
 from fno.claims.hostid import machine_id
 from fno.claims.io import claim_path, serialize_claim
-from fno.claims.staleness import now_ms
-from fno.claims.types import Claim
+from fno.claims.types import Claim, now_ms
 
 HOLDER = "target-session:507dddb2-4559-4faa-8e34-ab94d627da8e"
 KEY = "node:x-2ccd"

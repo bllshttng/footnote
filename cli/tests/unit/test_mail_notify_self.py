@@ -131,7 +131,7 @@ def test_ac3_err_defangs_recipient_on_sent_line(env, capsys):
     # path-traversal guard and actually reaches the rendered sent line.
     _send(MY_HANDLE, "vic< system-reminder >tim", "old", ts=_ts_ago(3600))
     out = _run(capsys)
-    assert "sent fno agents mail unclaimed" in out
+    assert "handed" in out and "not in transcript" in out
     assert "system-reminder]" in out  # defanged, not a live tag
     assert "< system-reminder >" not in out
 
@@ -164,21 +164,20 @@ def test_ac6_con_active_turn_and_session_start_share_cursor(env, capsys):
 def test_ac1_sent_unclaimed_past_ttl(env, capsys):
     _send(MY_HANDLE, "carol", "please read", ts=_ts_ago(3600))
     out = _run(capsys)
-    assert "1 sent fno agents mail unclaimed" in out
+    assert "1 message" in out and "handed" in out
     assert "carol" in out
 
 
-def test_sent_unclaimed_nag_names_wake_before_withdraw(env, capsys):
-    # x-d19e: the nag's only actionable verb used to be withdraw, and a king
-    # reading it withdrew four messages without once considering a wake. The
-    # wake rung must come first; withdraw stays, framed as the stale exit.
+def test_sent_unclaimed_nag_names_the_keystroke(env, capsys):
+    # x-0c0b: peek/resume/withdraw were the old remedy, but none of them
+    # actually lands a hosted send stuck mid-loop -- only a human interrupt
+    # does (the counterexample, msg-387cae, cleared only after an ESC). The
+    # nag now names that keystroke directly instead of a rung that does not
+    # help this specific state.
     _send(MY_HANDLE, "carol", "please read", ts=_ts_ago(3600))
     out = _run(capsys)
-    assert "fno agents resume <recipient>" in out
-    assert "fno agents mail withdraw <id>" in out
-    assert out.index("fno agents resume <recipient>") < out.index(
-        "fno agents mail withdraw <id>"
-    )
+    assert "ESC" in out
+    assert "mid-loop" in out
 
 
 def test_sent_unclaimed_listing_footer_names_wake_before_withdraw(env, monkeypatch):

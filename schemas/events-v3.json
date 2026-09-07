@@ -4,7 +4,12 @@
   "title": "events.jsonl line (v3)",
   "description": "One line of events.jsonl. The unified Python/fno + Rust/fno-agents envelope: type (not kind), payload nested under data.",
   "type": "object",
-  "required": ["ts", "type", "source", "data"],
+  "required": [
+    "ts",
+    "type",
+    "source",
+    "data"
+  ],
   "properties": {
     "ts": {
       "type": "string",
@@ -18,7 +23,28 @@
       "type": "string",
       "anyOf": [
         {
-          "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "python", "skill_diff", "subagent", "target", "test"]
+          "enum": [
+            "active-backlog",
+            "agents",
+            "approvals",
+            "backlog",
+            "bash",
+            "config",
+            "daemon",
+            "fno-loop",
+            "hook",
+            "loop",
+            "megatron",
+            "megawalk",
+            "migration",
+            "observer",
+            "pr-heal",
+            "python",
+            "skill_diff",
+            "subagent",
+            "target",
+            "test"
+          ]
         },
         {
           "pattern": "^(worker|stream-worker):.+$"

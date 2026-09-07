@@ -76,7 +76,10 @@ trap 'rm -rf "$_TMP"' EXIT
 
 make_git_repo "$_TMP"
 
-MANIFEST="$_TMP/.fno/target-state.md"
+# The manifest lives in the repo's space; pin the spaces root into the
+    # sandbox and resolve the path the way the hook does.
+export FNO_SPACES_DIR="$_TMP/spaces"
+MANIFEST="$(cd "$_TMP" && fno do state path target-state 2>/dev/null || echo "$_TMP/.fno/target-state.md")"
 
 # Run init with minimal env (TARGET_START=1, TARGET_INPUT, TARGET_SIZE=M)
 INIT_OUTPUT=$(

@@ -68,6 +68,11 @@ fn serve_queries(listener: UnixListener, duration: Duration) {
     }
 }
 
+/// Serializes the env-seam tests: FNO_TEST_*_HOLD_MS is process-global, so a
+/// parallel run of this binary would race one test's env write into another
+/// test's bind. Same shape as the persistence suite's PTY_GATE.
+static ENV_SEAM_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn proto_fresh_bind_wins() {
     let scratch = Scratch::new("fresh");
@@ -289,6 +294,118 @@ fn proto_bind_race_converges_on_exactly_one_server() {
     }
     let winners: i32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
     assert_eq!(winners, 1, "exactly one racer may own the socket");
+}
+
+#[test]
+fn proto_startup_marker_removed_mid_acquire_is_a_retry_not_an_error() {
+    // The guard's owner removes its marker at exit. A racer parked between
+    // its own create-AlreadyExists and the marker read used to escape
+    // bind_or_probe as Err(ENOENT) when the owner's exit landed inside that
+    // window - observed once in CI on the cold-start race above. The
+    // FNO_TEST_MARKER_HOLD_MS seam (test-only, never set in production)
+    // parks the racer IN the window; the holder's exit lands there by
+    // construction; the NotFound read must retry the loop, which then owns
+    // the path and binds. Without the fix this test errors ENOENT every
+    // run; with it, deterministically green.
+    let scratch = Scratch::new("guard-exit");
+    let sock = scratch.path("gx.sock");
+    let listener = match bind_or_probe(&sock) {
+        Ok(BindOutcome::Bound(l)) => l,
+        Ok(BindOutcome::AlreadyRunning) => panic!("fresh path reported a live server"),
+        Err(e) => panic!("fresh path errored: {e}"),
+    };
+    // The holder exits 250ms in, while the racer below is parked until
+    // 400ms: the marker+socket removal always lands inside the read window.
+    // A real server's exit removes its marker and socket (SocketGuard); a
+    // bare listener drop does neither, so this staging holder removes them
+    // by hand to play the exit faithfully.
+    let holder_sock = sock.clone();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        drop(listener);
+        let _ = std::fs::remove_file(&holder_sock);
+        let _ = std::fs::remove_file(fno::proto::startup_sidecar_path(&holder_sock));
+    });
+    // The seam below is process-global env; the gate makes the test safe
+    // under a parallel run of this binary, not just the CI serial contract.
+    let _seam_gate = ENV_SEAM_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("FNO_TEST_MARKER_HOLD_MS", "400");
+    let outcome = bind_or_probe(&sock);
+    std::env::remove_var("FNO_TEST_MARKER_HOLD_MS");
+    holder.join().unwrap();
+    match outcome {
+        Ok(BindOutcome::Bound(l)) => drop(l),
+        Ok(BindOutcome::AlreadyRunning) => {}
+        Err(e) => panic!("a marker removed mid-acquire must retry, not error: {e}"),
+    }
+}
+
+/// Set an env var for the enclosing scope and remove it on drop, so one
+/// test's seam cannot leak into a later one. The seam variables here are
+/// test-only (never set outside tests), so removal is the production state.
+struct EnvVar {
+    key: &'static str,
+}
+
+impl EnvVar {
+    fn hold(key: &'static str, value: &str) -> Self {
+        std::env::set_var(key, value);
+        EnvVar { key }
+    }
+}
+
+impl Drop for EnvVar {
+    fn drop(&mut self) {
+        std::env::remove_var(self.key);
+    }
+}
+
+#[test]
+fn proto_racer_waits_out_a_live_marker_instead_of_binding_over_a_starter() {
+    // The CI two-server shape (e3f94c3c, persistence_two_cold_clients): a
+    // racer used to bind while the marker owner sat between acquire and
+    // serve. The owner then lost its bind, read the silent winner as a stale
+    // socket, unlinked it, and rebound - two live servers, server_count 2.
+    // The racer now waits the live marker out and converges on the winner;
+    // binding while another starter holds the marker is the old behavior
+    // this pins out. FNO_TEST_OWNED_HOLD_MS parks the winner between its
+    // marker and its bind, so the old racer's bind lands inside the window
+    // deterministically. The env seam is process-global; ENV_SEAM_GATE makes
+    // the test safe under a parallel run, not just the CI serial contract.
+    let _seam_gate = ENV_SEAM_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = Scratch::new("wait-out");
+    let sock = scratch.path("wo.sock");
+    let _guard = EnvVar::hold("FNO_TEST_OWNED_HOLD_MS", "400");
+    let sock_for_winner = sock.clone();
+    let winner = std::thread::spawn(move || {
+        let l = match bind_or_probe(&sock_for_winner).unwrap() {
+            BindOutcome::Bound(l) => l,
+            BindOutcome::AlreadyRunning => panic!("the winner found another server"),
+        };
+        serve_queries(l, Duration::from_secs(5));
+    });
+    // The winner holds its marker (parked pre-bind). The racer must wait it
+    // out and converge on the winner once it serves - never return Bound.
+    let marker = fno::proto::startup_sidecar_path(&sock);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the winner never acquired its startup marker"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let sock_for_racer = sock.clone();
+    let racer = std::thread::spawn(move || bind_or_probe(&sock_for_racer));
+    let racer_outcome = racer.join().unwrap();
+    match racer_outcome {
+        Ok(BindOutcome::AlreadyRunning) => {}
+        Ok(BindOutcome::Bound(_)) => {
+            panic!("the racer bound while a live starter held the marker")
+        }
+        Err(e) => panic!("the racer errored instead of converging: {e}"),
+    }
+    winner.join().unwrap();
 }
 
 #[test]

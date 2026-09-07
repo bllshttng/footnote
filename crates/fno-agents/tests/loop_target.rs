@@ -1253,9 +1253,12 @@ fn driver_persist_history_called_per_iteration() {
 
 // ── king walk arm ─────────────────────────────────────────────────────────────
 
-/// Write a per-scope king manifest under `<dir>/.fno/kings/<scope>.md`.
+/// Write a per-scope king manifest under the test's resolved project space.
 fn write_king_manifest(dir: &Path, scope: &str, fno_id: &str, count: u64, ceiling: u64) {
-    let kings = dir.join(".fno").join("kings");
+    let kings = dir
+        .join("spaces")
+        .join(fno_agents::paths::space_slug(dir))
+        .join("kings");
     fs::create_dir_all(&kings).unwrap();
     let content = format!(
         "---\nfno_id: {fno_id}\nscope: {scope}\nharness: claude\nharness_session_id: k-sess\nbudget_max_iterations: 40\nrespawn_count: {count}\nrespawn_ceiling: {ceiling}\n---\n"
@@ -1263,13 +1266,70 @@ fn write_king_manifest(dir: &Path, scope: &str, fno_id: &str, count: u64, ceilin
     fs::write(kings.join(format!("{scope}.md")), content).unwrap();
 }
 
+/// Pin a CLEAN board at `dir`: the graph carries only the scope epic, closed
+/// done so the crown reads drained, and the config makes the in-process
+/// collector resolve it on a bare machine (no global config, no `~/.fno`).
+/// Every shelled source (gh, fno-py) is stubbed in `dir/bin` so no read
+/// degrades into an unreadable row the loop would treat as work. The board
+/// is read in process since the port, so a stub `fno` can no longer serve
+/// it - except the drain read, which the walk shells and the stub answers.
+fn pin_clean_board(dir: &Path, scope: &str) {
+    let fno_dir = dir.join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
+    let graph = dir.join("graph.json");
+    fs::write(
+        &graph,
+        format!(
+            "{{\"entries\":[{{\"id\":\"{scope}\",\"type\":\"epic\",\"status\":\"done\",\"completed_at\":\"2026-08-18T00:00:00Z\",\"priority\":\"p1\"}}]}}"
+        ),
+    )
+    .unwrap();
+    fs::write(dir.join("lane.md"), "").unwrap();
+    fs::write(
+        fno_dir.join("config.toml"),
+        format!(
+            "[paths]\ngraph_json = \"{}\"\noperator_lane = \"{}\"\n\n[work.workspaces]\n",
+            graph.display(),
+            dir.join("lane.md").display()
+        ),
+    )
+    .unwrap();
+    let bin_dir = dir.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(bin_dir.join("gh"), "#!/bin/sh\necho '[]'\n").unwrap();
+    fs::write(
+        bin_dir.join("fno-py"),
+        "#!/bin/sh\ncase \"$*\" in\n  *\"backlog ready\"*) echo '[]';;\n  *) echo '{}';;\nesac\n",
+    )
+    .unwrap();
+    fs::write(
+        bin_dir.join("fno"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; \
+             then echo '{{\"scope\":\"{scope}\",\"undelivered\":0}}'; exit 0; fi\necho '{{}}'\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    for stub in ["gh", "fno-py", "fno"] {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bin_dir.join(stub), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 /// A stub `fno` binary whose `inbox board` prints the given actionable count.
+/// The board read went in process, so its board half is inert; the dispatch
+/// tests that call it pass on the scope queue's own unreadable row. The
+/// drain read the king walk shells answers with the same count, so a
+/// workable stub board stays a workable stub scope.
 fn write_stub_fno_board(dir: &Path, actionable: u64) {
     write_stub_binary(
         dir,
         "fno",
         &format!(
-            "if [ \"$1\" = \"inbox\" ]; then echo '{{\"actionable\": {actionable}, \"unreadable\": 0, \"queues\": []}}'; exit 0; fi\nexit 1"
+            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"drain\" ]; then \
+             echo '{{\"scope\":\"epic-x\",\"undelivered\": {actionable}}}'; exit 0; fi\n\
+             if [ \"$1\" = \"inbox\" ]; then echo '{{\"actionable\": {actionable}, \"unreadable\": 0, \"queues\": []}}'; exit 0; fi\nexit 1"
         ),
     );
 }
@@ -1298,7 +1358,7 @@ fn king_walk_proceeds_past_driver_validation_into_preflight() {
     write_stub_driver(&lib_dir, "claude-code", 2, "exit 0");
     let bin_dir = dir.path().join("bin");
     write_stub_binary(&bin_dir, "claude", "exit 0");
-    write_stub_fno_board(&bin_dir, 0);
+    pin_clean_board(dir.path(), "epic-x");
     write_king_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
 
     let (stdout, stderr, code) = run_verb(
@@ -1474,8 +1534,14 @@ fn king_walk_dispatches_past_a_prior_reign_terminal_and_bills_one_respawn() {
         Some(1),
         "board still actionable burns to Budget\nstdout={stdout}\nstderr={stderr}"
     );
-    let manifest =
-        fs::read_to_string(dir.path().join(".fno").join("kings").join("epic-x.md")).unwrap();
+    let manifest = fs::read_to_string(
+        dir.path()
+            .join("spaces")
+            .join(fno_agents::paths::space_slug(dir.path()))
+            .join("kings")
+            .join("epic-x.md"),
+    )
+    .unwrap();
     assert!(
         manifest.contains("respawn_count: 1"),
         "one walk invocation bills exactly one respawn: {manifest}"
@@ -1545,8 +1611,14 @@ fn king_wake_mode_dispatches_past_a_spent_ceiling_without_billing_it() {
         env_dump.contains("BEFORE your first board read"),
         "the drain instruction must order itself before the board read: {env_dump}"
     );
-    let manifest =
-        fs::read_to_string(dir.path().join(".fno").join("kings").join("epic-x.md")).unwrap();
+    let manifest = fs::read_to_string(
+        dir.path()
+            .join("spaces")
+            .join(fno_agents::paths::space_slug(dir.path()))
+            .join("kings")
+            .join("epic-x.md"),
+    )
+    .unwrap();
     assert!(
         manifest.contains("respawn_count: 4"),
         "a wake must not spend the failure-retry budget: {manifest}"
@@ -1627,7 +1699,7 @@ fn king_wake_mode_over_an_empty_board_terminates_nowork() {
     );
     let bin_dir = dir.path().join("bin");
     write_stub_binary(&bin_dir, "claude", "exit 0");
-    write_stub_fno_board(&bin_dir, 0);
+    pin_clean_board(dir.path(), "epic-x");
     write_king_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
 
     let (stdout, stderr, code) = run_verb(

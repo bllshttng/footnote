@@ -981,6 +981,8 @@ struct View {
     /// The whole-machine resource meter, rendered in the status row. Off by
     /// default: it needs `macmon` on PATH, which fno core does not depend on.
     resource_meter_on: bool,
+    /// (x-e763) Ask before stop/remove. Default false: a stop means stop.
+    confirm_lifecycle: bool,
     /// The meter's latest one-line reading, or None before the first sample
     /// (and after a failed one - the row then says the sensor is unavailable
     /// and shows no number).
@@ -1062,6 +1064,11 @@ struct View {
     /// Pending escape bytes in answer-overlay mode (same split-arrow safety as
     /// [`View::sel_esc`]).
     ans_esc: Vec<u8>,
+    /// (x-4433) The activity feed overlay, prefix+e: the fold's rows newest
+    /// first, its cursor, and the needs-fold generation/single-flight
+    /// discipline. `None` closed.
+    feed: Option<feed_view::FeedOverlay>,
+    feed_esc: Vec<u8>,
     /// (x-feec) The event-derived needs-me leg: the last `fno-agents needs` fold
     /// result while the overlay is open (`None` = live-only, not yet fetched
     /// this open). Merged with the live badge leg by [`View::needs_queue`].
@@ -1497,60 +1504,17 @@ fn parse_macmon_sample(raw: &[u8]) -> Option<String> {
     Some(line)
 }
 
-/// A pending destructive/costly action awaiting the operator's one-keypress
-/// confirm. `label` is the entity name shown in the prompt; `action` is what
-/// Enter commits (x-a496 dispatch, extended by x-96e8 with squad removal).
-struct ConfirmAction {
-    action: ConfirmKind,
-    label: String,
-}
+mod confirm;
 
-/// What a confirmed [`ConfirmAction`] sends on Enter.
-enum ConfirmKind {
-    /// Start a targeted session on a work-queue card's node (x-a496).
-    Dispatch { node: String },
-    /// Close a whole workspace (x-96e8). `panes` is the blast radius named in
-    /// the prompt; `last` warns that removing the session's only squad ends it.
-    RemoveSquad {
-        squad: u64,
-        panes: usize,
-        last: bool,
-    },
-    /// Stop a live agent row (x-76ea). The captured `name`, not the row index,
-    /// commits - a row that raced out between confirm and Enter resolves to the
-    /// server's stale-name refusal.
-    StopAgent { name: String },
-    /// Remove an exited agent row (x-76ea). Same captured-name commit.
-    RemoveAgent { name: String },
-    /// Bulk-reap every exited fno-agent registry row (x-7561, uppercase `X`).
-    /// No payload - the server's reap verb owns the candidate set.
-    ReapAgents,
-    /// Stop a live external claude-daemon row by stable `attach_id` (x-7561).
-    /// The captured attach id, not the row index, commits; `name` is cosmetic.
-    StopExternal { attach_id: String, name: String },
-    /// Remove a stopped external tombstone by `attach_id` (x-7561). Same
-    /// captured-id commit; the server gates rm on a persisted `stopped` state.
-    RemoveExternal { attach_id: String, name: String },
-    /// Dismiss a member TOMBSTONE from its squad's member list (x-8f11). A
-    /// tombstone is not a registry agent, so RemoveAgent cannot reach it.
-    DismissMember { squad: u64, attach_id: String },
-    /// Remove every exited row in one section (x-f300). The SECTION commits, not
-    /// the row list: the set is re-folded on Enter, so rows that died or were
-    /// reaped while the prompt sat open are handled honestly. `dead` is the count
-    /// the prompt showed, kept only to name it.
-    ClearDead {
-        key: SectionKey,
-        squad: Option<u64>,
-        dead: usize,
-    },
-    /// Close one tab (the tab menu's destructive item). The captured stable
-    /// [`TabId`], not a view index, commits: `CloseTab` closes the SENDER'S
-    /// VIEWED tab server-side, so Enter first selects the captured tab then
-    /// closes it. The id is re-resolved at Enter (the ClearDead re-fold
-    /// precedent): a tab that raced out between arm and Enter is a notice,
-    /// never a bare CloseTab closing whatever is viewed now.
-    CloseTab { tab: TabId },
-}
+pub(crate) use confirm::{remove_dead, ConfirmAction, ConfirmKind, CLEAR_DEAD_MAX};
+
+// The needs overlay's projection + render, moved out of this file (file
+// budget); the feed overlay answers its own question from its own module and
+// reuses join_fold_row's join keys for its deep link (x-4433).
+mod feed_view;
+mod needs_view;
+use feed_view::{feed_hit, feed_overlay_lines, feed_selected_line, FeedOverlay};
+pub(crate) use needs_view::{needs_overlay_lines, NeedsProjection};
 
 /// The move-tab / move-pane destination picker's state (x-96e8, cursored by
 /// x-3e17). Was a bare `(MoveSrc, Vec<u64>)` tuple, which had nowhere to keep a
@@ -1751,6 +1715,14 @@ fn build_keys_modal() -> KeysModal {
         )),
         None,
     );
+    // (x-b5d1) The glyph legend rides the modal tail, after the notes: the
+    // x7683 pin holds the notes above the 64-row fold, and the legend is
+    // reference material the same scroll reaches. Generated from the same
+    // lattice table the rows and the header band render - one source, so
+    // the modal cannot drift from what the screen draws. Inert rows.
+    for row in glyph_legend::legend_rows() {
+        add(row, None);
+    }
     KeysModal {
         popup: Popup::new(rows, Anchor::Center),
         row_events: events,
@@ -1989,25 +1961,6 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         glyph: glyph.into(),
         label: label.into(),
     };
-    // A live row cannot be removed - the server refuses `RemoveAgent` on one
-    // with "still live - stop it first". Rendering the entry greyed beside Stop
-    // says the row CAN be removed and names the precondition, where leaving it
-    // out of the live menus entirely said the action does not exist. Disabled
-    // contributes zero targets (`PopupRow::cells`), so it carries no action and
-    // the actions vector stays aligned with the selectable rows. (x-d545) The
-    // hint carries the key too: the one moment the menu could teach the byte
-    // that WILL remove the row one keypress later is this one, so the glyph
-    // (resolved through the menu scope, never a literal) rides beside the
-    // precondition.
-    let inert = |glyph: &str, label: &str| PopupRow::Entry {
-        glyph: glyph.into(),
-        label: label.into(),
-        hint: format!(
-            "{} stop first",
-            crate::keys::menu_key_for("remove-row").unwrap_or_default()
-        ),
-        enabled: false,
-    };
     add(PopupRow::Header(agent.name.clone()), &[]);
     add(PopupRow::Rule, &[]);
     if agent.exited {
@@ -2054,7 +2007,10 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         );
         add(PopupRow::Rule, &[]);
         add(entry_acc("■", "Stop", "stop-row"), &[MenuAction::Stop]);
-        add(inert("✕", "Remove"), &[]);
+        add(
+            entry_acc("✕", "Remove", "remove-row"),
+            &[MenuAction::Remove],
+        );
     } else if agent.attach_id.is_some() {
         // Paneless bg row: the motivating case - open as a tab or a split pane.
         // Open-here leads (repoint the focused viewer). The client can't know viewer-ness, so the
@@ -2083,7 +2039,10 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         add(entry_acc("◉", "Peek", "peek-row"), &[MenuAction::Peek]);
         add(entry_acc("✉", "Mail", "mail-row"), &[MenuAction::Mail]);
         add(entry_acc("■", "Stop", "stop-row"), &[MenuAction::Stop]);
-        add(inert("✕", "Remove"), &[]);
+        add(
+            entry_acc("✕", "Remove", "remove-row"),
+            &[MenuAction::Remove],
+        );
     } else {
         // A live row that is neither pane-hosted nor attachable here.
         add(entry_acc("◉", "Peek", "peek-row"), &[MenuAction::Peek]);
@@ -2092,7 +2051,10 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
             add(entry("↩", "Reattach"), &[MenuAction::Reattach]);
         }
         add(entry_acc("■", "Stop", "stop-row"), &[MenuAction::Stop]);
-        add(inert("✕", "Remove"), &[]);
+        add(
+            entry_acc("✕", "Remove", "remove-row"),
+            &[MenuAction::Remove],
+        );
     }
     // Diff is common to every row state: it reads the row's worktree,
     // which an exited or paneless row has just as much as a live pane-hosted
@@ -2192,31 +2154,6 @@ fn build_card_menu(
         actions,
     }
 }
-/// The command that clears ONE dead row, by what kind of row it is. Three
-/// stores hold dead rows and each has its own verb: a member TOMBSTONE lives in
-/// the squad's member list (`RemoveAgent` resolves only against the agent
-/// registry, so it would answer "no such agent" and leave the row on screen), an
-/// EXTERNAL row routes by its stable attach_id (x-7561), and a registry row goes
-/// by name. One mapping so the row menu and the bulk clear cannot disagree.
-fn remove_dead(a: &AgentRow) -> Command {
-    match (a.tombstone, a.squad, a.external, a.attach_id.clone()) {
-        (true, Some(squad), _, Some(attach_id)) => Command::DismissMember { squad, attach_id },
-        (_, _, true, Some(attach_id)) => Command::RemoveExternal {
-            attach_id,
-            name: a.name.clone(),
-        },
-        _ => Command::RemoveAgent {
-            name: a.name.clone(),
-        },
-    }
-}
-
-/// How many rows one clear-dead may remove. Each row costs the server a
-/// `fno agents rm` subprocess (`agent_action` spawns one per command, unbounded),
-/// so an unbounded fan-out would let a long-lived section stampede the daemon.
-/// ponytail: a flat cap, repeat to clear the rest; the upgrade is a section-scoped
-/// bulk verb server-side, which the single-process `ReapAgents` already models.
-const CLEAR_DEAD_MAX: usize = 25;
 
 /// (x-f300) The section-header context menu. A workspace section (`squad`
 /// present) offers `Rename` - menu parity with selector `r`. `Clear dead` is
@@ -2386,6 +2323,7 @@ pub(crate) enum AuxAction {
     /// The whole-machine resource meter: flip the status-row meter, persist
     /// `resource_meter.enabled`, start or stop the sampler.
     ToggleResourceMeter,
+    ToggleConfirmLifecycle,
     /// (x-f75e) Apply the named mux theme now: swap the in-memory theme, then
     /// persist via `fno config set mux.theme`. The picker lists the shipped
     /// names, so this carries one of them.
@@ -2877,6 +2815,7 @@ impl View {
             agent_sort,
             status_on: true,
             resource_meter_on: false,
+            confirm_lifecycle: view_store::load_confirm_lifecycle(),
             resource_meter_text: None,
             resource_meter_refresh: 5,
             resource_meter_gate: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2898,6 +2837,8 @@ impl View {
             sideline_offset: 0,
             answers: None,
             ans_esc: Vec::new(),
+            feed: None,
+            feed_esc: Vec::new(),
             needs_fold: None,
             mine_fold: None,
             needs_fold_at: None,
@@ -3169,69 +3110,6 @@ impl View {
             .collect()
     }
 
-    /// The roster row a fold item joins to: a name / node / session-id match
-    /// against a layout row's name or its cwd basename (`cwd_base`, now carried
-    /// on every row since x-6851 US3, not only orphans).
-    fn join_fold_row(&self, item: &crate::needs_overlay::FoldItem) -> Option<&AgentRow> {
-        let keys: Vec<&str> = [
-            item.name.as_deref(),
-            item.node.as_deref(),
-            Some(item.session_id.as_str()),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        self.layout.agents.iter().find(|a| {
-            keys.iter().any(|k| a.name == *k)
-                || a.cwd_base.as_deref().is_some_and(|c| keys.contains(&c))
-        })
-    }
-
-    /// The two-lane overlay projection: MINE first (open before done, file
-    /// order preserved within each group - the operator wrote that order),
-    /// then the operator-filtered needs queue (already worst-first). Each
-    /// lane is capped independently at ten so a noisy lane never crowds the
-    /// other out; `*_total` carries the true count for the footer.
-    fn needs_projection(&self) -> NeedsProjection {
-        let mut mine: Vec<crate::needs_overlay::MineItem> =
-            self.mine_fold.clone().unwrap_or_default();
-        mine.sort_by_key(|m| m.done);
-        let mine_total = mine.len();
-        let mine_shown = mine.len().min(MINE_CAP);
-        let mut rows: Vec<NeedsOverlayRow> = mine
-            .into_iter()
-            .take(MINE_CAP)
-            .map(NeedsOverlayRow::Mine)
-            .collect();
-
-        // Questions lead the NEED section (x-f730 task 2.3): a real operator
-        // question, with an asker to answer back to, outranks a bare
-        // carveout/claims pile. Ranked by the record's own `rank` (x-7979
-        // already orders these); an unranked row sorts last within the group
-        // rather than floating to the front on a missing field.
-        let mut questions: Vec<crate::needs_overlay::QuestionItem> =
-            self.questions_fold.clone().unwrap_or_default();
-        questions.sort_by_key(|q| q.rank.unwrap_or(u32::MAX));
-        let need = self.needs_operator_queue();
-        let need_total = questions.len() + need.len();
-        let need_shown = need_total.min(NEEDS_CAP);
-        rows.extend(
-            questions
-                .into_iter()
-                .map(NeedsOverlayRow::Question)
-                .chain(need.into_iter().map(NeedsOverlayRow::Need))
-                .take(NEEDS_CAP),
-        );
-
-        NeedsProjection {
-            rows,
-            mine_shown,
-            mine_total,
-            need_shown,
-            need_total,
-        }
-    }
-
     /// The THEY NEED YOU footer state: a failed fold degrades loudly
     /// (AC2-ERR), an unfetched fold reads as still folding, else it has
     /// landed. The lane is fed by two independent legs (events, questions);
@@ -3380,7 +3258,6 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
-        self.court.close();
         self.search = None;
         self.rename = None;
         self.move_pick = None;
@@ -3401,7 +3278,6 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
-        self.court.close();
         self.search = None;
         self.rename = None;
         self.create = None;
@@ -3425,7 +3301,6 @@ impl View {
         self.sel_hover_armed = false;
         self.answers = None;
         self.yard = None;
-        self.court.close();
         self.search = None;
         // A half-typed workspace name is dropped too (gemini review): the
         // confirm owns the bottom row, and resuming a hidden create overlay
@@ -3457,7 +3332,6 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
-        self.court.close();
         self.search = None;
         self.move_pick = None;
         self.attach_place = None;
@@ -3897,7 +3771,6 @@ impl View {
         self.menu_usurping_open()
             || self.answers.is_some()
             || self.yard.is_some()
-            || self.court.is_open()
             || self.peek.is_some()
             || self.digest.is_some()
     }
@@ -3931,7 +3804,6 @@ impl View {
             || self.nav.is_some()
             || self.answers.is_some()
             || self.yard.is_some()
-            || self.court.is_open()
             || self.digest.is_some()
     }
 
@@ -4089,9 +3961,11 @@ impl View {
                     self.resource_meter_on,
                     "resource meter (needs macmon)",
                 ));
+                rows.push(toggle(self.confirm_lifecycle, "confirm before stop/remove"));
                 actions.push(AuxAction::ToggleHoverFocus);
                 actions.push(AuxAction::ToggleStatus);
                 actions.push(AuxAction::ToggleResourceMeter);
+                actions.push(AuxAction::ToggleConfirmLifecycle);
             }
             SettingsTab::Theme => {
                 // The four shipped palettes; the active one is marked. Enter on a
@@ -6373,13 +6247,15 @@ impl View {
     }
 
     /// Sideline rows the cursor can occupy: the full terminal height (the
-    /// sideline owns row 0 since x-cd67 US1) minus the bottom chrome row.
-    /// `draw_bottom_row` repaints the last row over the sideline when it is
-    /// chrome, and [`sideline_row_at`] excludes it from hit-testing, so it must
-    /// not count as a scroll slot - else follow-cursor scroll would park the
-    /// last row under the status bar (invisible, unclickable).
+    /// sideline owns row 0 since x-cd67 US1) minus the bottom chrome row,
+    /// minus the court block's rows at the bottom. The block is the
+    /// subtraction point's only second customer, so `clamp_sideline_offset`
+    /// and `reveal_focus_row` inherit the shrunk window without a second
+    /// fix.
     fn sideline_visible_rows(&self) -> usize {
-        (self.term.0 as usize).saturating_sub(self.bottom_row_is_chrome() as usize)
+        (self.term.0 as usize)
+            .saturating_sub(self.bottom_row_is_chrome() as usize)
+            .saturating_sub(self.court_block_rows())
     }
 
     /// Follow-the-cursor sideline scroll (x-a621): move [`View::sideline_offset`]
@@ -6822,6 +6698,23 @@ impl View {
                 // two lanes, which a flat `sel + 1` no longer can.
                 Some(projection.selected_line(sel)),
             );
+        } else if let Some(f) = &self.feed {
+            // x-4433: the activity feed, newest first, cursor-followed. Same
+            // chrome + viewport as the needs overlay beside it.
+            let lines = feed_overlay_lines(f);
+            let chrome =
+                chrome::Chrome::new("activity feed", Anchor::Center).footer("⏎ goto · q close");
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &lines,
+                &self.theme,
+                Some(feed_selected_line(f.sel)),
+            );
         } else if let Some(yv) = &self.yard {
             // (x-b2bf) The yard: the fleet as f[no]nimals. The
             // crowd is one eye glyph per roster citizen (each glyph computed
@@ -6841,24 +6734,6 @@ impl View {
                 yard_overlay_lines(&crowd, sel, identity, frame as usize, self.yard_footer());
             let chrome =
                 chrome::Chrome::new("the yard", Anchor::Center).footer("n/N pick · q close");
-            draw_lines_overlay(
-                &mut cells,
-                rows,
-                cols,
-                overlay_origin,
-                overlay_dims,
-                &chrome,
-                &lines,
-                &self.theme,
-                None,
-            );
-        } else if self.court.is_open() {
-            // (x-3cb3) The court: what the machine is holding, and the cap
-            // that decides whether another lane fits. Read-only - every key
-            // closes it.
-            let lines = self.court.lines();
-            let chrome = chrome::Chrome::new("the court", Anchor::Center)
-                .footer("any key closes · prefix+C reopens");
             draw_lines_overlay(
                 &mut cells,
                 rows,
@@ -7291,7 +7166,7 @@ impl View {
                 c += 1;
             }
         }
-        let help = "? for keys ";
+        let help = "? keys · glyphs ";
         let start = cols.saturating_sub(help.chars().count());
         if start > c {
             for (i, ch) in help.chars().enumerate() {
@@ -7335,7 +7210,7 @@ impl View {
                     s.tab.is_none() && s.squad == *squad
                 }
                 (
-                    ConfirmKind::StopAgent { name } | ConfirmKind::RemoveAgent { name },
+                    ConfirmKind::StopAgent { name, .. } | ConfirmKind::RemoveAgent { name, .. },
                     DisplayRow::Agent(a),
                 ) => a.name == *name,
                 (
@@ -7364,6 +7239,9 @@ impl View {
                 format!("close workspace {label} ({panes} panes)?")
             }
             ConfirmKind::StopAgent { .. } => format!("stop {label}?"),
+            ConfirmKind::RemoveAgent { measure: true, .. } => {
+                format!("measure and remove {label}?")
+            }
             ConfirmKind::RemoveAgent { .. } => format!("remove {label}?"),
             ConfirmKind::ReapAgents => "reap all exited fno agents?".to_string(),
             ConfirmKind::StopExternal { .. } => format!("stop {label}?"),
@@ -8173,12 +8051,15 @@ impl View {
         // an agent row indents by the depth computed over exactly the set that
         // paints - never a re-derivation over a different visibility set.
         let (display, row_depths) = self.display_rows_with_depths();
+        // (x-aeab) The reservation is the court block's rendered line count.
+        let (block_rows, block_lines) = self.court_block_layout(rows);
+        let list_rows = rows - block_rows;
         for (i, drow) in display.into_iter().enumerate().skip(off) {
             // (x-cd67 US1) The sideline owns the full column height including
             // row 0; the tab strip moved right of the divider. Display row `i`
             // paints at outer row `i - off` (was `TAB_BAR_ROWS + (i - off)`).
             let r = i - off;
-            if r >= rows {
+            if r >= list_rows {
                 break;
             }
             // (x-b186) The density button is pinned to the top painted row, so
@@ -8629,6 +8510,12 @@ impl View {
                 }
             }
         }
+        // (x-aeab) The court block: three glance lines minimized, the full
+        // reading expanded, pinned to the bottom rows of the column. The row
+        // list already stopped above it; the block renders DIM so it reads as
+        // chrome beside the live rows, and the painter truncates to the panel
+        // width - the same rule every sideline row follows.
+        court_block::paint_court_block(cells, block_lines, list_rows, rows, cols, text_w);
         // The divider column, now full terminal height (the sideline owns row
         // 0 too; the strip sits right of the divider) - x-cd67 US1.
         //
@@ -9537,26 +9424,6 @@ enum NeedsOverlayId {
     Need(NeedKind, String),
 }
 
-struct NeedsProjection {
-    rows: Vec<NeedsOverlayRow>,
-    mine_shown: usize,
-    mine_total: usize,
-    need_shown: usize,
-    need_total: usize,
-}
-
-impl NeedsProjection {
-    fn selected_line(&self, sel: usize) -> usize {
-        if sel < self.mine_shown {
-            // instruction + MINE heading
-            2 + sel
-        } else {
-            // instruction + MINE heading/rows/footer + THEY NEED YOU heading
-            4 + self.mine_shown + sel.saturating_sub(self.mine_shown)
-        }
-    }
-}
-
 /// Cap on rendered rows (worst-first, so the cap drops only the least severe);
 /// the footer states the drop count. Matches the sideline card cap.
 const NEEDS_CAP: usize = 10;
@@ -10024,151 +9891,6 @@ pub(crate) enum NeedsFooter {
     AsOf,
 }
 
-/// Build the needs-me overlay lines (x-feec, two-laned by x-f730): MINE (the
-/// operator's own priorities) above THEY NEED YOU (the severity-ranked union
-/// + the selected row's answer options), each with its own state footer, on
-/// the shared inverse-video chrome. `sel` is pre-clamped by the caller and
-/// indexes `projection.rows` (MINE rows first, then need rows) - a `▸` marks
-/// the selected row wherever it falls. An answerable row lists its numbered
-/// options only when it is the selected NEED row; a focus-only row is tagged.
-/// Always renders both headings - an empty NEED lane shows "nothing needs
-/// you", so the overlay never opens blank. Layout is pinned 1:1 with
-/// [`NeedsProjection::selected_line`]: MINE rows occupy exactly
-/// `mine_shown` lines and need rows exactly `need_shown` (or one "nothing
-/// needs you" line), with no extra divider row between them.
-fn needs_overlay_lines(
-    projection: &NeedsProjection,
-    sel: usize,
-    mine_footer: NeedsFooter,
-    need_footer: NeedsFooter,
-) -> Vec<String> {
-    let mine_rows = &projection.rows[..projection.mine_shown];
-    let need_rows = &projection.rows[projection.mine_shown..];
-
-    let mut lines = vec![pad_to(
-        " needs me · digit answers · n/N cycle · ⏎ goto · q close",
-        ANSWER_OVERLAY_W,
-    )];
-
-    lines.push(pad_to(" MINE", ANSWER_OVERLAY_W));
-    for (i, row) in mine_rows.iter().enumerate() {
-        let NeedsOverlayRow::Mine(item) = row else {
-            continue;
-        };
-        let marker = if i == sel { '▸' } else { ' ' };
-        let check = if item.done { '✓' } else { ' ' };
-        lines.push(pad_to(
-            &format!(" {marker} [{check}] {}", item.text),
-            ANSWER_OVERLAY_W,
-        ));
-    }
-    let mine_footer_line = match mine_footer {
-        NeedsFooter::Folding => "   folding...".to_string(),
-        NeedsFooter::Degraded => "   MINE unavailable".to_string(),
-        NeedsFooter::AsOf if projection.mine_total > projection.mine_shown => format!(
-            "   {} of {} shown",
-            projection.mine_shown, projection.mine_total
-        ),
-        NeedsFooter::AsOf => String::new(),
-    };
-    lines.push(pad_to(&mine_footer_line, ANSWER_OVERLAY_W));
-
-    lines.push(pad_to(" THEY NEED YOU", ANSWER_OVERLAY_W));
-    if need_rows.is_empty() {
-        lines.push(pad_to("   nothing needs you", ANSWER_OVERLAY_W));
-    } else {
-        for (i, row) in need_rows.iter().enumerate() {
-            let idx = projection.mine_shown + i;
-            let marker = if idx == sel { '▸' } else { ' ' };
-            match row {
-                NeedsOverlayRow::Question(q) => {
-                    // Render `ask` as the headline (falls back to the prose
-                    // question when the asker gave no one-liner); the prose
-                    // itself appears only when selected, below.
-                    let stale = if q.live == Some(false) { "  STALE" } else { "" };
-                    lines.push(pad_to(
-                        &format!(
-                            " {marker} {} {}{stale}",
-                            need_glyph(NeedKind::Question),
-                            q.ask.as_deref().unwrap_or(&q.question)
-                        ),
-                        ANSWER_OVERLAY_W,
-                    ));
-                }
-                NeedsOverlayRow::Need(r) => {
-                    let tag = match r.kind {
-                        NeedKind::BlockedFocusOnly => "  ⚠ focus",
-                        _ => "",
-                    };
-                    lines.push(pad_to(
-                        &format!(
-                            " {marker} {} {}  {}{tag}",
-                            need_glyph(r.kind),
-                            r.name,
-                            r.reason
-                        ),
-                        ANSWER_OVERLAY_W,
-                    ));
-                }
-                NeedsOverlayRow::Mine(_) => {}
-            }
-        }
-        let selected_need = sel
-            .checked_sub(projection.mine_shown)
-            .and_then(|i| need_rows.get(i));
-        match selected_need {
-            Some(NeedsOverlayRow::Need(r)) => {
-                if let Some(ans) = r.answerable.as_ref() {
-                    if !ans.prompt.is_empty() {
-                        lines.push(pad_to(
-                            &format!("   {}", ans.prompt.replace('\n', " ")),
-                            ANSWER_OVERLAY_W,
-                        ));
-                    }
-                    for o in &ans.options {
-                        lines.push(pad_to(
-                            &format!("     {}. {}", o.idx, o.label),
-                            ANSWER_OVERLAY_W,
-                        ));
-                    }
-                }
-            }
-            Some(NeedsOverlayRow::Question(q)) => {
-                // The prose beneath the headline - only when `ask` was used
-                // as the headline above; if there was no `ask`, the headline
-                // already IS the question and repeating it would be noise.
-                if q.ask.is_some() && !q.question.is_empty() {
-                    lines.push(pad_to(
-                        &format!("   {}", q.question.replace('\n', " ")),
-                        ANSWER_OVERLAY_W,
-                    ));
-                }
-                for (i, opt) in q.options.iter().enumerate() {
-                    lines.push(pad_to(&format!("     {}. {opt}", i + 1), ANSWER_OVERLAY_W));
-                }
-                if q.live == Some(false) {
-                    lines.push(pad_to(
-                        "   the answer is recorded but reaches no session",
-                        ANSWER_OVERLAY_W,
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
-    let need_footer_line = match need_footer {
-        NeedsFooter::Folding => "   folding events...".to_string(),
-        NeedsFooter::Degraded => "   events fold unavailable - live badges only".to_string(),
-        NeedsFooter::AsOf if projection.need_total > projection.need_shown => format!(
-            "   {} of {} shown",
-            projection.need_shown, projection.need_total
-        ),
-        NeedsFooter::AsOf => "   as of now".to_string(),
-    };
-    lines.push(pad_to(&need_footer_line, ANSWER_OVERLAY_W));
-    lines
-}
-
 /// (x-b2bf) The yard overlay's open state: the crowd cursor plus the open
 /// timestamp that drives frame cycling.
 struct YardSel {
@@ -10285,43 +10007,16 @@ fn agent_lane_fg(a: &AgentRow, st: LatticeState, fallback: Color) -> Color {
 }
 
 fn lattice_style(s: LatticeState, accent: Color) -> LatticeStyle {
-    match s {
-        LatticeState::Working => LatticeStyle {
-            glyph: '●',
-            flags: cell_flags::BOLD,
-            fg: Color::Default,
-        },
-        LatticeState::Idle => LatticeStyle {
-            glyph: '○',
-            flags: 0,
-            fg: Color::Default,
-        },
-        LatticeState::Blocked => LatticeStyle {
-            glyph: '▲',
-            flags: cell_flags::BOLD,
-            fg: accent,
-        },
-        LatticeState::DoneUnseen => LatticeStyle {
-            glyph: '✓',
-            flags: cell_flags::BOLD,
-            fg: Color::Default,
-        },
-        LatticeState::Exited => LatticeStyle {
-            glyph: '✗',
-            flags: cell_flags::DIM,
-            fg: Color::Default,
-        },
-        LatticeState::Unmeasured => LatticeStyle {
-            glyph: '?',
-            flags: cell_flags::DIM,
-            fg: Color::Default,
-        },
-        LatticeState::Empty => LatticeStyle {
-            glyph: '∅',
-            flags: cell_flags::DIM,
-            fg: Color::Default,
-        },
-    }
+    let (glyph, flags, fg) = match s {
+        LatticeState::Working => ('●', cell_flags::BOLD, Color::Default),
+        LatticeState::Idle => ('○', 0, Color::Default),
+        LatticeState::Blocked => ('▲', cell_flags::BOLD, accent),
+        LatticeState::DoneUnseen => ('✓', cell_flags::BOLD, Color::Default),
+        LatticeState::Exited => ('✗', cell_flags::DIM, Color::Default),
+        LatticeState::Unmeasured => ('?', cell_flags::DIM, Color::Default),
+        LatticeState::Empty => ('∅', cell_flags::DIM, Color::Default),
+    };
+    LatticeStyle { glyph, flags, fg }
 }
 
 /// The glyph + flags for a state, with no color. For every caller that does not
@@ -11040,8 +10735,8 @@ async fn attach_and_run(
                 | ServerMsg::TabClosed { .. }
                 // (v60, x-7b5e) Bulk restore answers a one-shot `fno mux
                 // workspace restore` control connection, never an attached
-                // client.
-                | ServerMsg::WorkspaceRestored { .. },
+                // client. (v71) The prune reload is the same one-shot shape.
+                | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
@@ -11132,6 +10827,12 @@ async fn attach_and_run(
     let (needs_tx, mut needs_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::needs_overlay::FoldOutcome)>();
 
+    // x-4433: the activity feed leg, the needs fold's exact shape - off the UI
+    // loop, gen-tagged, one fold in flight; a result for a closed/superseded
+    // overlay is discarded.
+    let (feed_tx, mut feed_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, crate::feed_overlay::FoldResult)>();
+
     // x-f730 task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
     // generation - a mutation always applies wherever the overlay currently
@@ -11152,9 +10853,10 @@ async fn attach_and_run(
     let (yard_tx, mut yard_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::yard_overlay::YardItem>>)>();
 
-    // (x-3cb3) The court fold leg, same shape as the yard's.
+    // (x-aeab) The court fold leg: single-flight + the TTL are the whole
+    // concurrency contract; no generation to supersede.
     let (court_tx, mut court_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(u64, Option<crate::court_overlay::Court>)>();
+        tokio::sync::mpsc::unbounded_channel::<Option<crate::court_overlay::Court>>();
 
     // x-84d7: the Connections modal's read fold runs off the UI loop and reports
     // back here, tagged with the generation it was kicked under, so a slow `fno`
@@ -11241,6 +10943,22 @@ async fn attach_and_run(
                 let _ = tx.send((gen, result));
             });
         }
+        // x-4433: kick a wanted feed fold off the UI loop, same discipline.
+        if let Some(f) = view.feed.as_mut() {
+            if f.want && !f.inflight {
+                f.want = false;
+                f.inflight = true;
+                let tx = feed_tx.clone();
+                let gen = f.gen;
+                let since = crate::digest_overlay::now_secs()
+                    .saturating_sub(NEEDS_WINDOW_SECS)
+                    .to_string();
+                tokio::spawn(async move {
+                    let result = crate::feed_overlay::feed_now(&since).await;
+                    let _ = tx.send((gen, result));
+                });
+            }
+        }
         // x-f730 task 2.2: kick a queued MINE mutation off the UI loop.
         // `mine_acting` is already set by the stdin handler at enqueue time
         // (mirrors `Connections::acting`), so a second x/d/add press before
@@ -11272,10 +10990,10 @@ async fn attach_and_run(
                 let _ = tx.send((gen, result));
             });
         }
-        if let Some(gen) = view.court.take_want() {
+        if view.court.take_want() {
             let tx = court_tx.clone();
             tokio::spawn(async move {
-                let _ = tx.send((gen, crate::court_overlay::fold_now().await));
+                let _ = tx.send(crate::court_overlay::fold_now().await);
             });
         }
         // x-84d7: kick a wanted Connections read off the UI loop, at most one in
@@ -11388,6 +11106,13 @@ async fn attach_and_run(
                     .map(|(_, _, start)| *start + PANE_DRAG_TIMEOUT),
             )
             .min();
+        // (x-b2bf) The yard's frame cycling is a flavour channel on a timer:
+        // while the overlay is open, wake at the next frame boundary so the
+        // spotlight animates on an otherwise idle terminal (nothing else
+        // redraws there). Re-armed each loop pass, so the cadence holds until
+        // the overlay closes; closed -> no deadline, no wakeups.
+        // (x-aeab) Refresh timer; the deadline is None while a fold runs.
+        let court_tick = view.court.refresh_deadline();
         // (x-b2bf) The yard's frame cycling is a flavour channel on a timer:
         // while the overlay is open, wake at the next frame boundary so the
         // spotlight animates on an otherwise idle terminal (nothing else
@@ -11509,8 +11234,8 @@ async fn attach_and_run(
                     | ServerMsg::TabLocation { .. }
                     | ServerMsg::TabClosed { .. }
                     // (v60, x-7b5e) Bulk restore answers a one-shot control
-                    // connection only.
-                    | ServerMsg::WorkspaceRestored { .. }) => {}
+                    // connection only. (v71) The prune reload is the same shape.
+                    | ServerMsg::WorkspaceRestored { .. } | ServerMsg::SquadReloaded { .. }) => {}
                 Ok(ServerMsg::Copy { text }) => {
                     // Land the server-extracted selection on the clipboard: local
                     // exec first, OSC 52 to the outer terminal as fallback
@@ -11719,14 +11444,11 @@ async fn attach_and_run(
                     }
                 }
             }
-            Some((gen, result)) = court_rx.recv() => {
-                // (x-3cb3) The court fold landed. `apply` owns the merge
-                // discipline (gen guard, degrade-loud, no age restamp on a
-                // failure) and answers whether anything changed on screen.
-                if view.court.apply(gen, result) {
-                    if let Err(e) = compositor.draw(&view.compose()) {
-                        break Err(format!("draw: {e}"));
-                    }
+            Some(result) = court_rx.recv() => {
+                // (x-aeab) The fold landed; `apply` owns the merge rules.
+                view.court.apply(result);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
                 }
             }
             Some((gen, outcome)) = needs_rx.recv() => {
@@ -11788,6 +11510,28 @@ async fn attach_and_run(
                     // A superseded fold returned while the current overlay still
                     // needs one (re-opened past the cache): kick a fresh fold.
                     view.needs_want = true;
+                }
+            }
+            Some((gen, outcome)) = feed_rx.recv() => {
+                // x-4433: a feed fold landed; apply only to the still-open,
+                // same-generation overlay - a result for a closed/superseded
+                // open is discarded (the needs arm's contract, one consumer).
+                if let Some(f) = view.feed.as_mut() {
+                    if gen == f.gen {
+                        f.inflight = false;
+                        match outcome {
+                            Ok(items) => {
+                                f.items = items;
+                                f.sel = 0;
+                                f.error = None;
+                            }
+                            // Keep prior rows visible; render the typed reason.
+                            Err(e) => f.error = Some(e),
+                        }
+                        if let Err(e) = compositor.draw(&view.compose()) {
+                            break Err(format!("draw: {e}"));
+                        }
+                    }
                 }
             }
             Some(result) = mine_act_rx.recv() => {
@@ -12004,11 +11748,20 @@ async fn attach_and_run(
                     None => std::future::pending().await,
                 }
             }, if yard_tick.is_some() => {
-                // Frame advance only: compose() recomputes the frame index
-                // from elapsed, so the wake just repaints.
+                // Frame advance only: compose() uses the elapsed time, so the
+                // wake repaints (and re-arms the next deadline next pass).
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
+            }
+            _ = async {
+                match court_tick {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if court_tick.is_some() => {
+                // The wake itself is a no-op: the next loop pass runs
+                // take_want at the top and spawns the refresh if due.
             }
             _ = async {
                 match seam_drag_deadline {
@@ -12893,13 +12646,8 @@ async fn handle_stdin(
     if view.yard.is_some() {
         return yard_keys(view, &passthrough, sock_w).await;
     }
-    if view.court.is_open() {
-        // Read-only overlay: ANY key closes it, and no byte leaks into a
-        // pane (the answer-overlay invariant).
-        if !passthrough.is_empty() {
-            view.court.close();
-        }
-        return Ok(StdinFlow::Continue);
+    if view.feed.is_some() {
+        return feed_view::feed_keys(view, &passthrough, sock_w).await;
     }
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
@@ -13088,7 +12836,18 @@ async fn dispatch_event(
                 view.yard_want = true;
             }
         }
-        Event::OpenCourt => view.court.open(),
+        Event::OpenFeed => {
+            // x-4433: open the activity feed. Prior rows render instantly; a
+            // fresh fold is always armed and merges in when it lands - the
+            // overlay never blocks on it, and a failed fold degrades loudly.
+            let gen = view
+                .feed
+                .as_ref()
+                .map(|f| f.gen.wrapping_add(1))
+                .unwrap_or(0);
+            view.feed = Some(feed_view::open_overlay(view.feed.take(), gen));
+        }
+        Event::OpenCourt => view.court.toggle(),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
             // Chrome changed size: report the new content area so rects
@@ -13383,35 +13142,16 @@ async fn confirm_keys(
         // notice will render at the row, not only the tab bar.
         view.arm_row_stamp(&action.action);
         let row_name = match &action.action {
-            ConfirmKind::StopAgent { name }
-            | ConfirmKind::RemoveAgent { name }
+            ConfirmKind::StopAgent { name, .. }
+            | ConfirmKind::RemoveAgent { name, .. }
             | ConfirmKind::StopExternal { name, .. }
             | ConfirmKind::RemoveExternal { name, .. } => Some(name.clone()),
             _ => None,
         };
-        let cmds = match action.action {
-            ConfirmKind::Dispatch { node } => vec![Command::DispatchNode {
-                node,
-                account: view.active_account.clone(),
-            }],
-            ConfirmKind::RemoveSquad { squad, .. } => vec![Command::RemoveSquad(squad)],
-            ConfirmKind::StopAgent { name } => vec![Command::StopAgent { name }],
-            ConfirmKind::RemoveAgent { name } => vec![Command::RemoveAgent { name }],
-            ConfirmKind::ReapAgents => vec![Command::ReapAgents],
-            ConfirmKind::StopExternal { attach_id, name } => {
-                vec![Command::StopExternal { attach_id, name }]
-            }
-            ConfirmKind::RemoveExternal { attach_id, name } => {
-                vec![Command::RemoveExternal { attach_id, name }]
-            }
-            ConfirmKind::DismissMember { squad, attach_id } => {
-                vec![Command::DismissMember { squad, attach_id }]
-            }
-            // Handled (and returned) before this one-command table is reached.
-            ConfirmKind::CloseTab { .. } => unreachable!("CloseTab commits above"),
-            // Re-fold on Enter, not at open: the prompt may have sat for a while
-            // and the honest set is whatever is dead NOW.
+        let cmds: Vec<Command> = match action.action {
             ConfirmKind::ClearDead { key, squad, .. } => {
+                // Re-fold on Enter, not at open: the prompt may have sat for a
+                // while and the honest set is whatever is dead NOW.
                 let dead = view.section_dead_rows(&key, squad);
                 let total = dead.len();
                 let picked: Vec<Command> = dead
@@ -13429,6 +13169,21 @@ async fn confirm_keys(
                 }
                 picked
             }
+            // Handled (and returned) before this table is reached.
+            kind @ ConfirmKind::CloseTab { .. } => {
+                let _ = kind;
+                unreachable!("CloseTab commits above")
+            }
+            kind => match kind {
+                ConfirmKind::Dispatch { node } => vec![Command::DispatchNode {
+                    node,
+                    account: view.active_account.clone(),
+                }],
+                other => match other.command() {
+                    Some(cmd) => vec![cmd],
+                    None => Vec::new(),
+                },
+            },
         };
         if cmds.is_empty() {
             view.set_notice("nothing left to clear".into());
@@ -14163,12 +13918,6 @@ async fn execute_row_menu_action(
         // returns above. Visible refusal over a silent no-op.
         MenuAction::OpenPlan => view.set_notice("action does not apply to an agent".into()),
         MenuAction::Stop | MenuAction::Remove => {
-            // A confirm owns the bottom row; a too-short terminal refuses rather
-            // than arm an invisible prompt (matching the selector's stop/reap).
-            if view.term.0 < MIN_ROWS_FOR_STATUS {
-                view.set_notice("terminal too short for the confirm prompt".into());
-                return Ok(());
-            }
             let kind = match action {
                 MenuAction::Stop => match (a.external, a.attach_id.clone()) {
                     (true, Some(id)) => ConfirmKind::StopExternal {
@@ -14177,6 +13926,8 @@ async fn execute_row_menu_action(
                     },
                     _ => ConfirmKind::StopAgent {
                         name: a.name.clone(),
+                        sid: a.harness_session_id.clone(),
+                        pane_id: a.pane_id,
                     },
                 },
                 // Remove routes by row KIND through [`remove_dead`], the same
@@ -14191,6 +13942,9 @@ async fn execute_row_menu_action(
                     }
                     _ => ConfirmKind::RemoveAgent {
                         name: a.name.clone(),
+                        sid: a.harness_session_id.clone(),
+                        pane_id: a.pane_id,
+                        measure: agent_lattice_state(&a) == LatticeState::Unmeasured,
                     },
                 },
             };
@@ -14200,10 +13954,41 @@ async fn execute_row_menu_action(
                 .display_rows()
                 .iter()
                 .position(|r| matches!(r, DisplayRow::Agent(row) if row.name == a.name));
-            view.open_confirm(ConfirmAction {
-                action: kind,
-                label: a.name.clone(),
-            });
+            // (x-e763) The confirm pref arms the overlay; the default (off)
+            // dispatches the SAME command the confirm would commit, so the two
+            // paths cannot disagree about what a gesture sends. The
+            // too-short-terminal guard rides the confirm branch only: it exists
+            // so the prompt is visible, which the default never shows.
+            if view.confirm_lifecycle {
+                // A confirm owns the bottom row; a too-short terminal refuses
+                // rather than arm an invisible prompt (matching the selector's
+                // stop/reap).
+                if view.term.0 < MIN_ROWS_FOR_STATUS {
+                    view.set_notice("terminal too short for the confirm prompt".into());
+                    return Ok(());
+                }
+                view.open_confirm(ConfirmAction {
+                    action: kind,
+                    label: a.name.clone(),
+                });
+            } else {
+                // The confirm path stamps the row when it commits; the default
+                // dispatch gets the same treatment, so the outcome notice
+                // renders at the row either way.
+                view.arm_row_stamp(&kind);
+                let sent = match kind.command() {
+                    Some(cmd) => {
+                        write_msg(sock_w, &ClientMsg::Command(cmd))
+                            .await
+                            .map_err(|e| format!("lifecycle dispatch send failed: {e}"))?;
+                        true
+                    }
+                    None => false,
+                };
+                if sent {
+                    view.reanchor_after_row_commit(Some(a.name.as_str()));
+                }
+            }
         }
         // Only ever built alongside `MenuTarget::Section`, which returned above.
         // A Notice rather than `unreachable!` - a panic here would take the whole
@@ -14545,6 +14330,17 @@ async fn execute_aux_action(
                 Err(_) => "status row applied this session; save failed".into(),
             };
             view.set_notice(notice);
+            view.reopen_settings_keeping_sel();
+        }
+        AuxAction::ToggleConfirmLifecycle => {
+            view.confirm_lifecycle = !view.confirm_lifecycle;
+            view_store::save_confirm_lifecycle(view.confirm_lifecycle);
+            let enabled = if view.confirm_lifecycle {
+                "true"
+            } else {
+                "false"
+            };
+            view.set_notice(format!("confirm before stop/remove: {enabled}"));
             view.reopen_settings_keeping_sel();
         }
         AuxAction::ToggleResourceMeter => {
@@ -15735,12 +15531,23 @@ async fn selector_keys(
                 // the stop. An external row without an attach_id (degenerate)
                 // falls through to the by-name path, which the server refuses.
                 let agent = match view.display_rows().get(cur) {
-                    Some(DisplayRow::Agent(a)) if !a.tombstone && a.pane_id.is_none() => {
-                        Some((a.name.clone(), a.exited, a.external, a.attach_id.clone()))
-                    }
+                    Some(DisplayRow::Agent(a)) if !a.tombstone && a.pane_id.is_none() => Some((
+                        a.name.clone(),
+                        a.exited,
+                        a.external,
+                        a.attach_id.clone(),
+                        a.harness_session_id.clone(),
+                        // (x-b5d1) The row's lattice state decides whether the
+                        // remove carries the measure flag: a `?` row measures
+                        // (rm's daemon gate) instead of paying a stop leg
+                        // that times out against a session nothing answers.
+                        agent_lattice_state(a) == LatticeState::Unmeasured,
+                    )),
                     _ => None,
                 };
-                if let Some((name, exited, external, attach_id)) = agent {
+                if let Some((name, exited, external, attach_id, harness_session_id, unmeasured)) =
+                    agent
+                {
                     if view.term.0 < MIN_ROWS_FOR_STATUS {
                         view.set_notice("terminal too short for the confirm prompt".into());
                         continue;
@@ -15759,7 +15566,12 @@ async fn selector_keys(
                         // confirm - a live row is stopped as part of its
                         // removal, never as a second ceremony. Stop-only lives
                         // on the row menu's Stop.
-                        _ => ConfirmKind::RemoveAgent { name: name.clone() },
+                        _ => ConfirmKind::RemoveAgent {
+                            name: name.clone(),
+                            sid: harness_session_id,
+                            pane_id: None,
+                            measure: unmeasured,
+                        },
                     };
                     // (x-f191 scope a+c) The slot feeds the post-commit
                     // re-anchor: the sideline stays open and the cursor stays
@@ -17124,3 +16936,17 @@ fn map_color(c: Color) -> CtColor {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "client_tests/court_block_tests.rs"]
+mod court_block_tests;
+
+#[cfg(test)]
+#[path = "client_tests/feed_view_tests.rs"]
+mod feed_view_tests;
+
+#[path = "client/court_block.rs"]
+mod court_block;
+
+#[path = "client/glyph_legend.rs"]
+mod glyph_legend;

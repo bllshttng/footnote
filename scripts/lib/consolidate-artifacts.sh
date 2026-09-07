@@ -29,7 +29,25 @@
 
 set -uo pipefail
 
-STATE_DIR="${STATE_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.fno}"
+# STATE_DIR is this worktree's slice of the repo's space (per-phase artifacts
+# are worktree-local); CONSOLIDATED_DIR sits at the SPACE root so consolidated
+# files persist across worktree archival - the job the old setup-worktree.sh
+# symlink did. Both resolve through the owning verb, with the legacy checkout
+# path as the fallback for an fno predating it.
+_state_dir_default() {
+    local p
+    p=$(fno-agents state path target-state 2>/dev/null || true)
+    if [[ -n "$p" ]]; then
+        dirname "$p"
+    else
+        printf '%s\n' "$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.fno"
+    fi
+}
+STATE_DIR="${STATE_DIR:-$(_state_dir_default)}"
+
+REPO_TL=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+SPACE_DIR=$(dirname "$(fno-agents state path events 2>/dev/null || true)")
+[[ -z "$SPACE_DIR" || "$SPACE_DIR" == "." ]] && SPACE_DIR="$REPO_TL/.fno"
 
 read_state_field() {
     local field="$1" state_file="$STATE_DIR/target-state.md"
@@ -72,7 +90,7 @@ fi
 # scripts/lib/archive-artifacts.sh stale-sweep loop for the foreign-sid
 # filter that triggers the race.
 ARTIFACTS_DIR="$STATE_DIR/artifacts"
-CONSOLIDATED_DIR="$ARTIFACTS_DIR/consolidated"
+CONSOLIDATED_DIR="$SPACE_DIR/artifacts/consolidated"
 mkdir -p "$ARTIFACTS_DIR" "$CONSOLIDATED_DIR"
 
 # Collect per-phase artifact files for this session. Sort lexicographically

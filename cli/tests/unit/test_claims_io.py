@@ -106,6 +106,42 @@ def test_yaml_omits_machine_id_when_absent(tmp_path):
     assert read_claim_file(path).machine_id is None
 
 
+def test_yaml_round_trip_session_id(tmp_path):
+    """session_id must reach DISK, not just the model, the same as harness and
+    machine_id: readers resolve identity through the registry row keyed by
+    this field, never by parsing holder."""
+    claim = _make_claim(session_id="abc123")
+    text = serialize_claim(claim)
+    assert "session_id: abc123" in text
+
+    path = tmp_path / "sid.lock"
+    path.write_text(text)
+    assert read_claim_file(path).session_id == "abc123"
+
+
+def test_yaml_omits_session_id_when_absent(tmp_path):
+    """A pre-change claim has no session_id; the writer must not invent one as
+    null, matching the absent-not-null discipline the other optional fields
+    follow."""
+    text = serialize_claim(_make_claim(session_id=None))
+    assert "session_id" not in text
+
+    path = tmp_path / "nosid.lock"
+    path.write_text(text)
+    assert read_claim_file(path).session_id is None
+
+
+def test_yaml_without_session_id_key_reads_none(tmp_path):
+    """AC2: a claim record written before this change (no session_id key)
+    parses with session_id=None and does not crash."""
+    path = tmp_path / "legacy.lock"
+    path.write_text(
+        "schema_version: 1\nkey: node:x\nholder: h\nacquired_at: 1\npid: 2\nhost: hh\n"
+    )
+    parsed = read_claim_file(path)
+    assert parsed.session_id is None
+
+
 def test_yaml_round_trip_ttl_serializes_expires_at(tmp_path):
     claim = _make_claim(expires_at=1747641660000)
     text = serialize_claim(claim)
@@ -286,11 +322,16 @@ def test_claims_dir_honors_env_when_root_none(tmp_path, monkeypatch):
     assert claims_dir() == tmp_path / ".fno/claims"
 
 
-def test_claims_dir_defaults_to_cwd_without_env(tmp_path, monkeypatch):
-    """No root + no env => cwd-local (unchanged legacy behavior)."""
+def test_claims_dir_defaults_to_the_repo_space_without_env(tmp_path, monkeypatch):
+    """No root + no env => the repo's space (no claims dir inside a checkout)."""
     monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
     monkeypatch.chdir(tmp_path)
-    assert claims_dir() == tmp_path / ".fno/claims"
+    from fno.paths import space_dir, space_slug
+
+    # The slug is a cross-language wire format (fno-agents::paths swaps the
+    # same separators); a golden value here catches a one-sided drift.
+    assert space_slug(Path("/repos/web")) == "-repos-web"
+    assert claims_dir() == space_dir(tmp_path) / "claims"
 
 
 def test_global_claims_root_env_then_home(tmp_path, monkeypatch):

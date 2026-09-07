@@ -34,12 +34,6 @@ app = _live_lint_command()
 runner = CliRunner()
 
 
-def _clear_repo_root_cache() -> None:
-    # resolve_repo_root() is @cache'd per process; clear it around tests that
-    # pin FNO_REPO_ROOT so the env override is re-read.
-    paths.resolve_repo_root.cache_clear()
-
-
 def _write_provider(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
@@ -225,11 +219,7 @@ def test_flock_pattern_degrades_when_script_absent(tmp_path: Path, monkeypatch) 
     the verb exits 2 with an actionable stderr message - never bash's 127 and
     never a Python traceback."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))  # empty dir -> no script
-    _clear_repo_root_cache()
-    try:
-        result = runner.invoke(app, ["flock-pattern"])
-    finally:
-        _clear_repo_root_cache()
+    result = runner.invoke(app, ["flock-pattern"])
 
     assert result.exit_code == 2  # exit 2, not 127, not 0
     assert "flock-pattern" in result.stderr
@@ -243,7 +233,6 @@ def test_flock_pattern_runs_script_when_present(tmp_path: Path, monkeypatch) -> 
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "lint-flock-pattern.sh").write_text("#!/bin/bash\nexit 0\n")
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    _clear_repo_root_cache()
 
     calls: dict[str, list[str]] = {}
 
@@ -255,10 +244,7 @@ def test_flock_pattern_runs_script_when_present(tmp_path: Path, monkeypatch) -> 
         return _Result()
 
     monkeypatch.setattr("fno.lint_cli.subprocess.run", _fake_run)
-    try:
-        result = runner.invoke(app, ["flock-pattern"])
-    finally:
-        _clear_repo_root_cache()
+    result = runner.invoke(app, ["flock-pattern"])
 
     assert result.exit_code == 7  # script's exit code preserved, not remapped
     assert calls["argv"][0] == "bash"
@@ -271,7 +257,6 @@ def test_flock_pattern_forwards_dispatch_path(tmp_path: Path, monkeypatch) -> No
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "lint-flock-pattern.sh").write_text("#!/bin/bash\nexit 0\n")
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    _clear_repo_root_cache()
 
     calls: dict[str, list[str]] = {}
 
@@ -283,12 +268,9 @@ def test_flock_pattern_forwards_dispatch_path(tmp_path: Path, monkeypatch) -> No
         return _Result()
 
     monkeypatch.setattr("fno.lint_cli.subprocess.run", _fake_run)
-    try:
-        result = runner.invoke(
-            app, ["flock-pattern", "--dispatch-path", "/tmp/dispatch.py"]
-        )
-    finally:
-        _clear_repo_root_cache()
+    result = runner.invoke(
+        app, ["flock-pattern", "--dispatch-path", "/tmp/dispatch.py"]
+    )
 
     assert result.exit_code == 0
     assert "/tmp/dispatch.py" in calls["argv"]
@@ -372,13 +354,11 @@ def test_count_and_reader_read_the_same_diff(tmp_path: Path, monkeypatch) -> Non
 
     cwd = os.getcwd()
     os.chdir(repo)
-    _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
         lint_cli._style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
-        _clear_repo_root_cache()
         os.chdir(cwd)
 
     numstat = [argv for argv in seen if "--numstat" in argv]
@@ -415,13 +395,11 @@ def test_style_gate_reports_no_violations_for_a_pure_rename(tmp_path: Path) -> N
     repo, _new, _old = _repo_with_renamed_doc(tmp_path)
     cwd = os.getcwd()
     os.chdir(repo)
-    _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
         violations, inspected, changed, unexplained, _exempted = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
-        _clear_repo_root_cache()
         os.chdir(cwd)
 
     assert changed == 1, "the renamed doc must still be reported as a changed file"
@@ -518,14 +496,12 @@ def test_a_files_scope_matching_nothing_refuses(tmp_path: Path) -> None:
     repo, _new, _old = _repo_with_renamed_doc(tmp_path)
     cwd = os.getcwd()
     os.chdir(repo)
-    _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
         with pytest.raises(typer.Exit) as exc:
             _style_added_lines("base", [Path("docs/nothing-here")])
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
-        _clear_repo_root_cache()
         os.chdir(cwd)
     assert exc.value.exit_code == 2
 
@@ -548,7 +524,6 @@ def test_a_scope_naming_a_path_the_branch_renamed_away_is_allowed(
     repo, _new, old = _repo_with_renamed_doc(tmp_path)
     cwd = os.getcwd()
     os.chdir(repo)
-    _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
         violations, inspected, changed, unexplained, _exempted = _style_added_lines(
@@ -556,7 +531,6 @@ def test_a_scope_naming_a_path_the_branch_renamed_away_is_allowed(
         )
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
-        _clear_repo_root_cache()
         os.chdir(cwd)
 
     # A pure rename authors nothing, so the honest answer is a clean zero
@@ -600,12 +574,10 @@ def test_the_guard_reaches_renamed_files(tmp_path: Path, monkeypatch) -> None:
 
     cwd = os.getcwd()
     os.chdir(repo)
-    _clear_repo_root_cache()
     monkeypatch.setenv("FNO_REPO_ROOT", str(repo))
     try:
         _v, _inspected, _changed, unexplained, _exempted = _style_added_lines("base", None)
     finally:
-        _clear_repo_root_cache()
         os.chdir(cwd)
 
     assert unexplained == ["docs/b.md"], (
@@ -644,13 +616,11 @@ def test_a_deletion_only_edit_is_an_explained_zero(tmp_path: Path) -> None:
 
     cwd = os.getcwd()
     os.chdir(repo)
-    _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
         _v, inspected, changed, unexplained, _exempted = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
-        _clear_repo_root_cache()
         os.chdir(cwd)
 
     assert changed == 2 and inspected == 1, "positive control: one line was added"
@@ -691,13 +661,11 @@ def test_style_gate_still_fails_when_the_parser_loses_added_lines(
 
     cwd = os.getcwd()
     os.chdir(repo)
-    _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
         _v, inspected, changed, unexplained, _exempted = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
-        _clear_repo_root_cache()
         os.chdir(cwd)
 
     assert changed == 1 and inspected == 0
@@ -740,13 +708,11 @@ def test_the_guard_catches_a_partial_parser_loss_not_only_a_total_one(
 
     cwd = os.getcwd()
     os.chdir(repo)
-    _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
         _v, inspected, _changed, unexplained, _exempted = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
-        _clear_repo_root_cache()
         os.chdir(cwd)
 
     assert inspected == 1, "the receipt reports what was actually read"
@@ -792,13 +758,11 @@ def test_a_failing_git_diff_is_not_reported_as_a_clean_tree(
     monkeypatch.setattr("fno.lint_cli.subprocess.run", _fail_diffs)
     cwd = os.getcwd()
     os.chdir(repo)
-    _clear_repo_root_cache()
     monkeypatch.setenv("FNO_REPO_ROOT", str(repo))
     try:
         with pytest.raises(typer.Exit) as exc:
             _style_added_lines("base", None)
     finally:
-        _clear_repo_root_cache()
         os.chdir(cwd)
     assert exc.value.exit_code == 2
 
@@ -820,13 +784,11 @@ def test_relative_files_paths_resolve_against_the_repo_root(tmp_path: Path) -> N
     def _run(cwd_dir: Path, scope: Path):
         cwd = os.getcwd()
         os.chdir(cwd_dir)
-        _clear_repo_root_cache()
         os.environ["FNO_REPO_ROOT"] = str(repo)
         try:
             return _style_added_lines("base", [scope])
         finally:
             os.environ.pop("FNO_REPO_ROOT", None)
-            _clear_repo_root_cache()
             os.chdir(cwd)
 
     from_root = _run(repo, Path("docs"))
@@ -862,12 +824,10 @@ def test_every_git_call_pins_the_rename_limit(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr("fno.lint_cli.subprocess.run", _spy)
     cwd = os.getcwd()
     os.chdir(repo)
-    _clear_repo_root_cache()
     monkeypatch.setenv("FNO_REPO_ROOT", str(repo))
     try:
         _style_added_lines("base", None)
     finally:
-        _clear_repo_root_cache()
         os.chdir(cwd)
 
     from fno.lint_cli import _pinned_diff_argv
@@ -957,13 +917,11 @@ def test_a_file_skipped_by_its_exception_marker_is_named_not_just_uncounted(
 
     cwd = os.getcwd()
     os.chdir(repo)
-    _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
         _v, inspected, changed, _unexplained, exempted = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
-        _clear_repo_root_cache()
         os.chdir(cwd)
 
     assert exempted == ["docs/exempt.md"], (
@@ -1007,13 +965,11 @@ def test_a_file_git_says_added_lines_to_but_gone_from_the_tree_is_flagged(
 
     cwd = os.getcwd()
     os.chdir(repo)
-    _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
         _v, _inspected, _changed, unexplained, _exempted = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
-        _clear_repo_root_cache()
         os.chdir(cwd)
 
     assert unexplained == ["docs/gone.md"], (
@@ -1049,13 +1005,11 @@ def test_a_deleted_file_stays_a_silent_legitimate_zero(tmp_path: Path) -> None:
 
     cwd = os.getcwd()
     os.chdir(repo)
-    _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
         _v, inspected, _changed, unexplained, _exempted = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
-        _clear_repo_root_cache()
         os.chdir(cwd)
 
     assert unexplained == [], "a deletion adds no lines, so it is an explained zero"
@@ -1146,7 +1100,7 @@ def test_state_files_table_records_exactly_one_unowned_state_file() -> None:
     from fno.paths import STATE_FILES
 
     unowned = {row.filename for row in STATE_FILES if row.resolver is None}
-    assert unowned == {"target-state.md"}
+    assert unowned == set()
 
 
 def test_state_roots_rule_a_fires_on_a_hand_built_events_path(tmp_path: Path) -> None:
@@ -1378,22 +1332,41 @@ def test_state_roots_rule_b_stays_silent_on_the_repo_s_real_negatives() -> None:
     )
 
 
-def test_state_roots_rule_b_fires_on_the_live_load_settings_specimen() -> None:
+def test_state_roots_rule_b_fires_on_a_zero_arg_root_cache_specimen(
+    tmp_path: Path,
+) -> None:
     """The control that proves the rule reaches the offence, not a lookalike.
 
-    `load_settings` is the epic's own live R5 specimen and its body calls no
-    resolver by name - it reaches the root through `_candidate_paths`. A rule
-    that matched only the resolver names would run green against the exact
-    case it was written for.
+    The four retired x-3d21 specimens are keyed on their declaration now, so
+    the live tree holds no rule-B hit. This synthetic specimen is the positive
+    control that the rule still fires on the shape it was written for - a
+    zero-argument cache whose body reaches a state root.
     """
     from fno.lint_cli import _zero_arg_root_cache_violations
 
+    src = tmp_path / "cli" / "src" / "fno"
+    src.mkdir(parents=True)
+    (src / "specimen.py").write_text(
+        "from functools import lru_cache\n"
+        "import os\n"
+        "\n"
+        "@lru_cache(maxsize=1)\n"
+        "def specimen():\n"
+        "    return os.getcwd()\n",
+        encoding="utf-8",
+    )
+
     hit = {
+        (rel, symbol)
+        for rel, symbol, _msg in _zero_arg_root_cache_violations(tmp_path)
+    }
+    assert ("cli/src/fno/specimen.py", "specimen") in hit
+
+    live = {
         (rel, symbol)
         for rel, symbol, _msg in _zero_arg_root_cache_violations(_real_repo_root())
     }
-
-    assert ("cli/src/fno/config/__init__.py", "load_settings") in hit
+    assert live == set()
 
 
 def test_state_roots_baseline_covers_the_whole_live_census() -> None:
@@ -1413,7 +1386,10 @@ def test_state_roots_baseline_covers_the_whole_live_census() -> None:
     assert len(baseline) > 20, "the ratchet lost its census"
     assert any(rule == "A" and rel.endswith(".rs") for rule, rel, _ in findings)
     assert any(rule == "A" and rel.endswith(".py") for rule, rel, _ in findings)
-    assert ("B", "cli/src/fno/config/__init__.py", "load_settings") in findings
+    # The four x-3d21 specimens are keyed on their declaration; rule B's live
+    # census is empty and its ratchet stays armed via the synthetic-specimen
+    # control above.
+    assert not any(rule == "B" for rule, rel, _ in findings)
 
     assert findings - baseline == set()
     assert baseline - findings == set()

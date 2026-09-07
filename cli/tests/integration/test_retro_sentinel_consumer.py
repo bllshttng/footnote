@@ -366,8 +366,11 @@ def test_graphql_down_rest_up_files_no_review_nodes(tmp_path: Path):
 #    canonical carveout_root, and a non-silent consume. --
 
 def _write_carveout(root: Path, cv_id: str, session_id: str = "sX") -> Path:
-    """Seed a one-line carveouts.jsonl under `root`/.fno/."""
-    ledger = root / ".fno" / "carveouts.jsonl"
+    """Seed a one-line carveouts.jsonl in the repo's space ledger."""
+    from fno.carveout.core import CARVEOUTS_NAME
+    from fno.paths import project_log
+
+    ledger = project_log(CARVEOUTS_NAME, project_root=root)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text(
         json.dumps(

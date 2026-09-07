@@ -54,17 +54,7 @@ def _load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str):
 
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     return config_mod.load_settings()
-
-
-@pytest.fixture(autouse=True)
-def _clear_settings_cache():
-    from fno import config as config_mod
-
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
-    yield
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 # --- the pure surface --------------------------------------------------------

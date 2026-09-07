@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/ci/smoke-duration-report.sh <shard-name> <elapsed-seconds> <cap-minutes>
 #
-# Reads ONE smoke shard's own duration and says whether it is approaching its
-# cap, on the run that produced it, with no stored state.
+# Reads ONE smoke shard's own duration and says whether it is approaching or
+# has reached its cap, on the run that produced it, with no stored state.
 #
 # WHY THIS EXISTS. The shards already emitted their duration and nothing read
 # it. That is not a small gap: the suite grew from a 17.2-minute median to 32.2
@@ -43,8 +43,17 @@ say() { printf 'smoke-duration: %s\n' "$*"; }
 # Every number this script reads is forced to base 10. Bash arithmetic treats a
 # leading zero as octal, so a caller passing `08` aborted the script under
 # `set -u` before it printed any verdict, which is the one output a reader
-# needs. A digit-only string check is not enough on its own.
-as_int() { printf '%s' "$((10#${1#0}))" 2>/dev/null || printf '0'; }
+# needs. A digit-only string check is not enough on its own. Stripping must
+# also survive an all-zero input: `${1#0}` alone leaves an empty base, and a
+# bare `$((10#))` is a fatal expansion error on bash 5 (where the knob's own
+# margin-0 call died) while bash 3 merely mumbles - the loop keeps every
+# version on the same path.
+as_int() {
+    local n="${1:-}"
+    while [ "$n" != "${n#0}" ]; do n="${n#0}"; done
+    [ -n "$n" ] || n=0
+    printf '%s' "$((10#$n))"
+}
 
 is_digits() { case "${1:-}" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 
@@ -63,6 +72,27 @@ if is_digits "$WARN_PCT_RAW"; then
     fi
 else
     say "SMOKE_WARN_PCT=$WARN_PCT_RAW is not a number; using 80."
+fi
+
+# Seconds from the cap at which a run is called a TIMEOUT. A job killed by
+# timeout-minutes reports `cancelled` - the same word a superseding push
+# produces - and its EXIT trap never runs, so nothing inside the job said
+# TIMEOUT. The trap-based verdict therefore covers the band just under the cap
+# too: a run this close to the cap either hit it or finished with no margin,
+# and the reader must not have to subtract timestamps to tell. Measured kills
+# landed 15-45s of teardown past their cap, so 90s covers both sides.
+TIMEOUT_MARGIN_RAW="${SMOKE_TIMEOUT_MARGIN_SECS:-90}"
+
+TIMEOUT_MARGIN_SECS=90
+if is_digits "$TIMEOUT_MARGIN_RAW"; then
+    _margin="$(as_int "$TIMEOUT_MARGIN_RAW")"
+    if [ "$_margin" -le "$((24 * 3600))" ]; then
+        TIMEOUT_MARGIN_SECS="$_margin"
+    else
+        say "SMOKE_TIMEOUT_MARGIN_SECS=$TIMEOUT_MARGIN_RAW is out of range; using 90."
+    fi
+else
+    say "SMOKE_TIMEOUT_MARGIN_SECS=$TIMEOUT_MARGIN_RAW is not a number; using 90."
 fi
 
 if [ "$#" -gt 3 ]; then
@@ -101,20 +131,34 @@ cap_secs=$(( $(as_int "$cap_min") * 60 ))
 pct=$((secs * 100 / cap_secs))
 threshold=$((cap_secs * WARN_PCT / 100))
 
+# The margin is a band below the cap, so it is bounded against the cap it is
+# subtracted from, not just by its own sanity range: a margin at or above the
+# cap puts even a healthy run inside the timeout band.
+if [ "$TIMEOUT_MARGIN_SECS" -ge "$cap_secs" ]; then
+    TIMEOUT_MARGIN_SECS=$(( cap_secs / 2 ))
+    say "SMOKE_TIMEOUT_MARGIN_SECS=$TIMEOUT_MARGIN_RAW meets or exceeds the ${cap_min}m cap; using ${TIMEOUT_MARGIN_SECS}s."
+fi
+
 verdict=ok
 [ "$secs" -ge "$threshold" ] && verdict=approaching
+[ "$secs" -ge "$((cap_secs - TIMEOUT_MARGIN_SECS))" ] && verdict=timeout
 
 # A positive verdict word on EVERY run. A reader can then tell "the checker ran
 # and this was fine" from "the checker never ran", which the absence of a
 # warning alone cannot do.
 say "shard=$shard seconds=$secs cap=${cap_min}m pct=${pct} verdict=${verdict}"
 
-if [ "$verdict" = approaching ]; then
-    msg="$shard took ${secs}s, ${pct}% of its ${cap_min}m cap (warns at ${WARN_PCT}%). Split again or cut work; do not raise the cap."
-    # An annotation surfaces in the PR's Checks tab without anyone opening a
-    # log. That visibility is the entire difference between this and the line
-    # it sits beside.
-    printf '::warning title=smoke shard approaching its cap::%s\n' "$msg"
+if [ "$verdict" != ok ]; then
+    if [ "$verdict" = timeout ]; then
+        msg="$shard hit its ${cap_min}m timeout cap (${secs}s, within ${TIMEOUT_MARGIN_SECS}s of the cap). A job the cap kills reports 'cancelled' with no failed assertion; this is the receipt that says TIMEOUT. Split again or cut work; do not raise the cap."
+        printf '::warning title=smoke shard hit its timeout cap::%s\n' "$msg"
+    else
+        msg="$shard took ${secs}s, ${pct}% of its ${cap_min}m cap (warns at ${WARN_PCT}%). Split again or cut work; do not raise the cap."
+        # An annotation surfaces in the PR's Checks tab without anyone opening a
+        # log. That visibility is the entire difference between this and the line
+        # it sits beside.
+        printf '::warning title=smoke shard approaching its cap::%s\n' "$msg"
+    fi
     # Attempt the append rather than probing for permission. A `-w` test on the
     # containing DIRECTORY passes while the file itself is unwritable, and the
     # redirect then fails silently, leaving no summary entry and no reason why.

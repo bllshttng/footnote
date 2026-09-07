@@ -7,7 +7,6 @@ import typer
 import typer.main
 from click.testing import CliRunner
 
-from fno import paths
 from fno.agents.registry import AgentEntry
 from fno.lint_cli import lint
 
@@ -24,11 +23,7 @@ runner = CliRunner()
 
 def _invoke(monkeypatch, repo: Path, *args: str):
     monkeypatch.setenv("FNO_REPO_ROOT", str(repo))
-    paths.resolve_repo_root.cache_clear()
-    try:
-        return runner.invoke(app, ["field-coverage", *args])
-    finally:
-        paths.resolve_repo_root.cache_clear()
+    return runner.invoke(app, ["field-coverage", *args])
 
 
 def _write_source_fixture(repo: Path, *, required: list[str], extra: list[str]) -> None:
@@ -68,10 +63,20 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     payload = json.loads(result.output)["source"]
     # v25 added the three spawn-stamped route-identity fields
     # (route_provider_id, model_name, account_record_id): 45 -> 48 declared,
-    # all accounted as storage_only in schemas/agents-list-row.json.
-    assert payload["declared_count"] == 51
-    assert payload["required_count"] == 41
-    assert payload["accounted_count"] == 51
+    # all accounted as storage_only in schemas/agents-list-row.json. v26
+    # added the served facts (liveness, liveness_measured_at, harness_title):
+    # 48 -> 54 declared, accounted as rust_only (the Rust row projects them).
+    # x-7955: substrate moved out of storage_only into the projected key set.
+    # The reign parent-edge change adds required spawned_by_session on top:
+    # 41 -> 43 required, declared unchanged at 54 (it was already a declared
+    # v26 leaf). v27 added launch_account_source, storage_only: 54 -> 55.
+    # v28 added adopted_by_session (the adoption voucher, x-5283),
+    # storage_only: 55 -> 56. v29 added resolved_sandbox and
+    # granted_writable_roots (the codex thread lane's resolved posture vs
+    # the sandbox_posture request), storage_only: 56 -> 58.
+    assert payload["declared_count"] == 58
+    assert payload["required_count"] == 43
+    assert payload["accounted_count"] == 58
     assert payload["known_gaps"] == {}
 
 

@@ -113,6 +113,7 @@ fn opencode_bg_worker_completes_unattended_over_serve() {
         &cwd,
         None,
         None,
+        None,
     );
     std::env::remove_var("FNO_WORKER_ADD_DIRS");
     assert_eq!(outcome.exit_code, 0, "dispatch failed: {}", outcome.stderr);

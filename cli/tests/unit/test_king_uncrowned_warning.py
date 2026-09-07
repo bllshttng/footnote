@@ -112,6 +112,13 @@ def test_the_warning_never_raises_when_the_registry_is_unreadable(
         (None, "x-b76b", False),
         ("", "x-b76b", False),
         ("x-b76b", "", False),
+        # A rung-2 set: same set spelled in any order is one territory, but a
+        # MEMBER is not the whole scope - the readers key on the stored scope,
+        # so a set crown must not satisfy a single-member manifest.
+        ("x-1,x-2", "x-2,x-1", True),
+        ("x-1,x-2", "x-1", False),
+        ("x-1", "x-1,x-2", False),
+        ("x-1,x-2", "x-1,x-3", False),
     ],
 )
 def test_crown_scope_matches_answers_equality_and_absence(held, requested, matches):

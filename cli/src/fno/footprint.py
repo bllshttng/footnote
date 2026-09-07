@@ -9,6 +9,7 @@ of an attributable fno process.
 
 from __future__ import annotations
 
+import re
 import shlex
 from pathlib import Path
 from typing import NamedTuple
@@ -42,6 +43,13 @@ class Footprint(NamedTuple):
     # Whole-machine on purpose: a test a person started competes for the same
     # box as a lane.
     test_process_count: int = 0
+    # The Claude Code background daemon's idle pre-warm pool. Not fleet CPU:
+    # these are not fno processes and fno never bounds or sweeps them. Measured
+    # because they can hold most of the machine, and a load refusal that cannot
+    # name them sends its reader after the wrong cause.
+    spare_pool_process_count: int = 0
+    spare_pool_cpu_cores: float = 0.0
+    spare_pool_rss_gb: float = 0.0
 
 
 #: argv[0] basenames that are a test runner on their own.
@@ -72,6 +80,30 @@ def is_test_runner(command: str) -> bool:
     return False
 
 
+#: argv[1] tokens the Claude Code background daemon gives its pre-warm pool.
+#: Both spellings are live: a pool child runs `claude bg-spare ...` while the
+#: app-bundle path runs `claude --bg-pty-host ...`.
+_CLAUDE_SPARE_POOL_ARGS = frozenset(
+    {"bg-spare", "bg-pty-host", "--bg-spare", "--bg-pty-host"}
+)
+
+
+def is_claude_spare_pool(command: str) -> bool:
+    """True for a Claude Code background-daemon pre-warm process.
+
+    These are not fno processes. fno never bounds or sweeps them: a spare is
+    what a new bg session is claimed from, so culling the pool disarms the
+    dispatch path it serves. They are counted only so a refusal can name them.
+
+    Matched on argv[0] plus argv[1], never a substring scan of the whole
+    command line: a claude session whose PROMPT says bg-spare is a session.
+    """
+    argv = command.split()
+    if len(argv) < 2:
+        return False
+    return argv[0].rsplit("/", 1)[-1] == "claude" and argv[1] in _CLAUDE_SPARE_POOL_ARGS
+
+
 class _Process(NamedTuple):
     pid: int
     ppid: int | None
@@ -79,6 +111,51 @@ class _Process(NamedTuple):
     cpu_percent: float
     rss_kb: int
     command: str
+
+
+#: The `worktrees/<name>` tail a cluster of commands shares - the one line
+#: that explains a spike ("that tree's test suite is running").
+_WORKTREE_RE = re.compile(r"[\w~./-]*worktrees/[\w.-]+")
+
+
+def top_consumers(sustained: list[tuple[float, str]], n: int = 5) -> list[dict]:
+    """Top programs by summed ps ``%cpu``, with the worktree a cluster calls home.
+
+    Aggregates the rows :func:`parse_footprint` already kept - no second ps
+    pass. The name is argv[0]'s basename; ``worktree`` names the tree the
+    most of that program's rows run from, with how many, so "a worker is
+    running its test suite" stays one line instead of a mystery.
+    """
+    programs: dict[str, dict] = {}
+    for cpu_percent, command in sustained:
+        argv = command.split()
+        name = Path(argv[0]).name if argv else command
+        entry = programs.setdefault(
+            name, {"name": name, "procs": 0, "cpu": 0.0, "trees": {}}
+        )
+        entry["procs"] += 1
+        entry["cpu"] += cpu_percent
+        match = _WORKTREE_RE.search(command)
+        if match:
+            entry["trees"][match.group(0)] = entry["trees"].get(match.group(0), 0) + 1
+    ranked = sorted(
+        programs.values(), key=lambda e: (-e["cpu"], -e["procs"], e["name"])
+    )[:n]
+    consumers: list[dict] = []
+    for entry in ranked:
+        tree, tree_procs = (
+            max(entry["trees"].items(), key=lambda kv: kv[1]) if entry["trees"] else (None, 0)
+        )
+        consumers.append(
+            {
+                "name": entry["name"],
+                "procs": entry["procs"],
+                "cpu_pct": round(entry["cpu"], 1),
+                "worktree": tree,
+                "worktree_procs": tree_procs,
+            }
+        )
+    return consumers
 
 
 def _elapsed_seconds(value: str) -> int:
@@ -240,11 +317,18 @@ def parse_footprint(
     measured_cpu_percent = 0.0
     sustained: list[tuple[float, str]] = []
     test_process_count = 0
+    spare_pool_count = 0
+    spare_pool_cpu_percent = 0.0
+    spare_pool_rss_kb = 0
     for pid, process in processes.items():
         if not is_excluded(pid):
             measured_cpu_percent += process.cpu_percent
             if is_test_runner(process.command):
                 test_process_count += 1
+            if is_claude_spare_pool(process.command):
+                spare_pool_count += 1
+                spare_pool_cpu_percent += process.cpu_percent
+                spare_pool_rss_kb += process.rss_kb
         if not is_attributed(pid):
             continue
 
@@ -282,4 +366,7 @@ def parse_footprint(
         top=sustained,
         unparsed_lines=unparsed_lines,
         test_process_count=test_process_count,
+        spare_pool_process_count=spare_pool_count,
+        spare_pool_cpu_cores=spare_pool_cpu_percent / 100,
+        spare_pool_rss_gb=spare_pool_rss_kb / (1024 * 1024),
     )

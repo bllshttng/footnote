@@ -2,10 +2,11 @@
 name: fix
 description: "Repair a broken state. Routes to the fast one-fix-per-iteration loop with auto-revert (fix, default) or the scientific-method hypothesis loop (investigate). Use when: 'fix all errors', 'make tests pass', 'fix the build', 'debug this', 'investigate this failure'."
 argument-hint: "[fix|investigate]  (fix: [from-debug] [--scope <glob>] [--guard <cmd>] [--category test|type|lint|build] [Iterations: N])"
-requires:
-  binaries:
-    - "fno >= 0.1"
-    - "git >= 2.0"
+metadata:
+  requires:
+    binaries:
+      - "fno >= 0.1"
+      - "git >= 2.0"
 ---
 
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->

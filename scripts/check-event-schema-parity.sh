@@ -344,13 +344,25 @@ collisions = python_types & rust_kinds
 # BOTH languages, one schema.yaml entry documenting the shared payload.
 # Everything else that lands in both sets is an accidental name reuse and
 # still fails below. x-a879: the registry removal instrument fires at the
-# Rust and Python write choke points by design.
+# Rust and Python write choke points by design. control_plane_tick: the shape
+# is owned by tick_ledger.rs; Rust daemon arms and the Python arms (until they
+# port) both emit it at the same scheduled-tick boundary.
 dual_owner_kinds = {
     "registry_row_removed",
+    "registry_rows_lost",
     "agent_removed",
     "merge_cleanup_requested",
     "merge_cleanup_completed",
     "merge_cleanup_refused",
+    # worktree_removed: the archive path emits it (Python) and the merge
+    # reaper emits it (Rust) at the same removal boundary.
+    "worktree_removed",
+    "control_plane_tick",
+    # Evals demand: the pr-watch tick's evals leg (Python) is the only
+    # emitter; the rows ride the daemon's journal, so the Rust known-kind
+    # table carries them for acceptance without emitting.
+    "evals_scheduled_run",
+    "evals_stale",
 }
 collisions -= dual_owner_kinds
 if collisions:

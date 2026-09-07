@@ -126,6 +126,21 @@ REGISTRY = [
         "required": r"resolve_provider|provider_for",
         "why": "a raw provider read bypasses the resolver; the resolver does not exist yet",
     },
+    {
+        "name": "spawn-placement-flag-reach",
+        # Reader half, cross-language: a placement flag advertised on the
+        # Python spawn surface must also appear in the Rust client's argv
+        # match - the runtime that actually runs the spawn. The reverse
+        # half lives in `reach_only`: flags the Rust lane owns outright
+        # (placement moved Rust-only), which must keep their match arm even
+        # though the Python surface no longer advertises them. Deleting the
+        # advertisement, or deleting the arms, is itself a finding.
+        "glob": "cli/src/fno/agents/cli.py",
+        "site": r"^\s*\"(--(?:split|tab|at))\",\s*$",
+        "must_appear_in": "crates/fno-agents/src/bin/client.rs",
+        "reach_only": ["--portal"],
+        "why": "a placement flag advertised with no Rust match arm exits 2 on the default runtime",
+    },
 ]
 
 def tracked(pattern):
@@ -221,10 +236,16 @@ def engine_b():
     return dups
 
 def engine_r():
-    """Returns (offenders, vacuous). offender key: name:file::function."""
+    """Returns (offenders, vacuous). offender key: name:file::function (or
+    name:flag for a cross-language entry)."""
     offenders = []
     vacuous = []
     for entry in REGISTRY:
+        if "must_appear_in" in entry:
+            cross_offenders, cross_vacuous = engine_r_cross(entry)
+            offenders.extend(cross_offenders)
+            vacuous.extend(cross_vacuous)
+            continue
         site_re = re.compile(entry["site"])
         req_re = re.compile(entry["required"])
         matches = 0
@@ -248,6 +269,48 @@ def engine_r():
         if matches == 0:
             vacuous.append(entry["name"])
     return sorted(set(offenders)), vacuous
+
+
+def engine_r_cross(entry):
+    """The cross-language reader half: every flag the advertised surface
+    matches must also appear in the reach file, and every `reach_only` flag
+    must appear there even though nothing advertises it. An advertisement
+    that matches nothing, with the reach gone too, is vacuous - either half
+    deleted alone must fail."""
+    offenders = []
+    vacuous = []
+    advertised = set()
+    for rel in tracked(entry["glob"]):
+        try:
+            text = open(os.path.join(ROOT, rel), encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        for line in text.splitlines():
+            # Comment text is not a site: a prose mention neither offends
+            # nor keeps a dead advertisement alive.
+            if line.lstrip().startswith("#"):
+                continue
+            m = re.match(entry["site"], line)
+            if m:
+                advertised.add(m.group(1))
+    watched = advertised | set(entry.get("reach_only", []))
+    reach_hits = set()
+    reach_path = os.path.join(ROOT, entry["must_appear_in"])
+    if os.path.isfile(reach_path):
+        reach_text = open(reach_path, encoding="utf-8", errors="replace").read()
+        # The reach is the argv MATCH ARM, not any literal: a flag table
+        # entry alone never dispatched anything (that was the defect).
+        reach_hits = {
+            flag
+            for flag in watched
+            if re.search(r'"' + re.escape(flag) + r'"[^\n]*=>', reach_text)
+        }
+    for flag in sorted(watched):
+        if flag not in reach_hits:
+            offenders.append(f"{entry['name']}:{flag}")
+    if not advertised and not reach_hits:
+        vacuous.append(entry["name"])
+    return offenders, vacuous
 
 def function_spans(lines):
     """Outermost def spans with class-body scope reset (nested defs fold into
@@ -432,6 +495,20 @@ self_test() {
     mkdir -p "$1/cli/src/fno/agents"
     printf 'def lane_provider(row):\n    return resolve_provider(row.provider)\n' > "$1/cli/src/fno/agents/spawn_gate.py"
   }
+  # The placement advertisement + reach pair. The canary advertises a flag
+  # the reach file never names; the clean tree names both watched flags.
+  write_placement_ad() {
+    mkdir -p "$1/cli/src/fno/agents"
+    printf 'def cmd_spawn():\n    "--split",\n' > "$1/cli/src/fno/agents/cli.py"
+  }
+  write_placement_reach_missing() {
+    mkdir -p "$1/crates/fno-agents/src/bin"
+    printf 'fn build() {\n    // no placement arms here\n}\n' > "$1/crates/fno-agents/src/bin/client.rs"
+  }
+  write_placement_reach_full() {
+    mkdir -p "$1/crates/fno-agents/src/bin"
+    printf 'fn build() {\n    "--split" | "-x" => {}\n    "--portal" => {}\n}\n' > "$1/crates/fno-agents/src/bin/client.rs"
+  }
 
   # Canary fixture: one violation per engine.
   mkdir -p "$tmp/canary/cli/src/fno/agents/harnesses" "$tmp/canary/docs"
@@ -442,6 +519,8 @@ self_test() {
   printf 'def build_child_env():\n    spawn_env = dict(os.environ)\n    return spawn_env\n' > "$tmp/canary/cli/src/fno/agents/harnesses/canary.py"
   write_compliant_graph "$tmp/canary"
   write_compliant_gate "$tmp/canary"
+  write_placement_ad "$tmp/canary"
+  write_placement_reach_missing "$tmp/canary"
 
   : > "$tmp/empty-baseline.txt"
 
@@ -466,6 +545,8 @@ self_test() {
   printf 'from fno.harness_identity import scrub_ambient_identity\ndef build_child_env():\n    spawn_env = dict(os.environ)\n    scrub_ambient_identity(spawn_env)\n    return spawn_env\n' > "$tmp/clean/cli/src/fno/agents/harnesses/canary.py"
   write_compliant_graph "$tmp/clean"
   write_compliant_gate "$tmp/clean"
+  write_placement_ad "$tmp/clean"
+  write_placement_reach_full "$tmp/clean"
 
   out="$(run_scan "$tmp/clean" "$tmp/empty-baseline.txt" check 2>&1)"
   # Finding lines carry a two-space indent; the OK summary does not. Matching

@@ -31,11 +31,26 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+def _journal_text(path: Path) -> str:
+    """A journal plus its .ephemeral sibling (retention routing):
+    ephemeral-class rows like claim_acquired land in the sibling, so a reader
+    that wants the full stream reads both files. The shared derivation resolves
+    the journal first so a symlinked journal still finds its sibling."""
+    from fno.paths import journal_and_ephemeral_sibling
+
+    parts = [
+        p.read_text(encoding="utf-8") if p.exists() else ""
+        for p in journal_and_ephemeral_sibling(path)
+    ]
+    return "".join(parts)
+
+
 def _rows(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
+    # No existence gate on the journal itself: an all-ephemeral space has no
+    # events.jsonl at all, only the sibling, and gating here would hide rows
+    # _journal_text would have found.
     rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in _journal_text(path).splitlines():
         if not line.strip():
             continue
         try:

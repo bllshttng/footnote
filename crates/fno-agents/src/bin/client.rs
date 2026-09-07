@@ -16,6 +16,7 @@ use fno_agents::drift::drift_warning;
 use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
 use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
+use fno_agents::spawn_gate::machine_status_line;
 use fno_agents::usage::{verb_usage, CLIENT_VERB_USAGE};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
@@ -26,8 +27,11 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "ask",
     "attach",
     "bash-census",
+    "board",
     "claim",
+    "codex-assign-project",
     "codex-loaded-threads",
+    "court-orphans",
     "detect",
     "digest",
     "drive",
@@ -46,6 +50,9 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "manifest-eval",
     "manifest-for-session",
     "needs",
+    "notify-watch",
+    "orphan-reap",
+    "feed",
     "ping",
     "pr-heal",
     "probe-run",
@@ -55,6 +62,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "recover",
     "reentry-plan",
     "rename",
+    "reign-shape",
+    "reign-state",
     "report",
     "review-coverage",
     "review-summary",
@@ -64,6 +73,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "rm",
     "session-start-bytes",
     "spawn",
+    "state",
     "status",
     "stop",
     "subscribe",
@@ -123,6 +133,16 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::manifest::run_manifest_eval(&args[1..]);
     }
 
+    // `orphan-reap` is the hidden reap lever for orphaned cargo test binaries:
+    // the daemon's 300s sweep and a human on a wedged box both run
+    // it binary-direct. Same `matches!` treatment as `mail-inject` so it stays
+    // out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the routable-verb
+    // parity guard - it reads one ps snapshot and prints, it is not an
+    // `fno agents` verb.
+    if matches!(verb, "orphan-reap") {
+        return fno_agents::orphan_reap::run_orphan_reap(&args[1..]);
+    }
+
     // `reentry-plan` is the INTERNAL machine resolver behind every
     // Claude re-entry door (x-d285): the Rust/Python attach+resume arms and
     // the mux gestures consume its verdict instead of each rebuilding a
@@ -163,6 +183,16 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::codex_inject::run_review_start(&args[1..]).await;
     }
 
+    // `codex-assign-project` is the hidden project-assignment verb (x-dc97):
+    // resolve or create the repo's codex project for --cwd, and when
+    // --thread-id is given, assign that bound thread to it. The Python headless
+    // create lane shells this binary fire-and-forget after `thread.started`.
+    // Same `matches!` treatment as `review-start` so it stays out of
+    // CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the routable-verb parity guard.
+    if matches!(verb, "codex-assign-project") {
+        return fno_agents::codex_inject::run_codex_assign_project(&args[1..]).await;
+    }
+
     // `claim` is the HIDDEN debug front over the native claims module
     // (`fno_agents::claims`): the cross-impl compatibility matrix drives the
     // Rust side of the lockfile protocol through it, and it doubles as an ops
@@ -171,7 +201,7 @@ async fn run(args: Vec<String>) -> i32 {
     // and it stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS — `fno agents claim`
     // remains the only operator CLI for claims.
     if matches!(verb, "claim") {
-        return fno_agents::client_verbs::run_claim(&args[1..]);
+        return fno_agents::claim_verbs::run_claim(&args[1..]);
     }
 
     // `detect` is the HIDDEN debug front over the screen-manifest fallback
@@ -220,6 +250,16 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::loopcheck::run_loop_check(&args[1..]);
     }
 
+    // `state path` is the shell-hook surface for project-space path resolution
+    // (matched with `matches!` like `version`/`mail-inject`: a binary-direct
+    // verb that stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and so out
+    // of the client<->router parity guard; the verb-surface ratchet's binary
+    // probe reads the unknown-verb refusal, so the verb IS registered in
+    // ALL_CLIENT_ACTIONS like every direct dispatch). No daemon, from cwd.
+    if matches!(verb, "state") {
+        return fno_agents::state_path::run(&args[1..]);
+    }
+
     // `probe-run`: see its own doc in loopcheck.rs. Direct dispatch.
     if verb == "probe-run" {
         return fno_agents::loopcheck::run_probe_run(&args[1..]);
@@ -249,15 +289,49 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::kill_criteria::run_kill_check(&args[1..]);
     }
 
+    // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see
+    // loop_reign.rs doc). Direct dispatch, daemon-free reads; the Python
+    // `fno agents king shape` shell and escalate's client invoke the binary
+    // directly rather than routing through the agents verb set.
+    if matches!(verb, "reign-state") {
+        return fno_agents::loop_reign::run_reign_state(&args[1..]);
+    }
+    if matches!(verb, "reign-shape") {
+        return fno_agents::loop_reign::run_reign_shape(&args[1..]);
+    }
+
     // `graph-get`/`bash-census`/`session-start-bytes` (x-997a): daemon-free reads, not routable `fno agents` verbs (same reasoning as kill-check).
     if verb == "graph-get" {
         return fno_agents::graph_get::run_graph_get(&args[1..]);
+    }
+    // `court-orphans` (x-f0d2): the orphan-crown sweep for `fno agents court`,
+    // daemon-free read; `==` dispatch like graph-get, and registered in
+    // ALL_CLIENT_ACTIONS like every direct dispatch the ratchet counts.
+    if verb == "court-orphans" {
+        return fno_agents::loop_reign::run_court_orphans(&args[1..]);
     }
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
     }
     if verb == "session-start-bytes" {
         return fno_agents::session_start_bytes::run_session_start_bytes(&args[1..]);
+    }
+
+    // `board` (x-25b8): the king board collector, read-only, daemon-free. Not a
+    // routable `fno agents` verb (same `matches!` treatment as graph-get): the
+    // Python surface is `fno inbox board` / `fno king board`, whose typer
+    // command shells HERE and renders, and the stop hook reads the collector
+    // in-process. Matched with `==` beside graph-get so the routable-verb
+    // parity guard does not see it - no advertised fno verb is added.
+    if verb == "board" {
+        return fno_agents::king_board::run_board(&args[1..]);
+    }
+
+    // `notify-watch` (x-87fb): the operator-notice sampler, read-only,
+    // daemon-free. Same `==` treatment as `board`: a read-only collector, not
+    // a routable `fno agents` verb, so no advertised fno verb is added.
+    if verb == "notify-watch" {
+        return fno_agents::operator_notice::run_notify_watch_verb(&args[1..]);
     }
 
     // `verify-evidence`: Rust port of scripts/lib/verify-event-evidence.sh
@@ -295,7 +369,7 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::client_verbs::run_adopt(&args[1..], &AgentsHome::from_env());
     }
     if verb == "attach" {
-        return fno_agents::client_verbs::run_attach(&args[1..], &AgentsHome::from_env());
+        return fno_agents::attach::run_attach(&args[1..], &AgentsHome::from_env());
     }
     // `recover` (x-d285): hidden-but-invocable manual restoration of a recorded
     // session under its account/route, with explicit two-id selection. Reads
@@ -351,19 +425,36 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::needs::run_needs(&args[1..], &AgentsHome::from_env()).await;
     }
 
+    // `feed` (x-4433): one projection joining questions.jsonl + graph.json
+    // into an ordered feed whose rows carry the node id + session id the mux
+    // deep link resolves. Read-only, daemon-free like `needs`: it dispatches
+    // here before build_request. events.jsonl is deliberately NOT a source
+    // (72% ticks; lifecycle derives from the graph, never copied).
+    if verb == "feed" {
+        return fno_agents::feed::run_feed(&args[1..], &AgentsHome::from_env()).await;
+    }
+
     // `status` reports on a *running* daemon: it must NOT lazy-start one just to
     // describe it as up. A down daemon is exit 13 (AC10-ERR).
     if verb == "status" {
-        // status takes no further args; reject extras rather than silently
-        // ignoring a mistyped flag the way other verbs would not (Codex P3).
-        if args.len() > 1 {
+        // `--json`/`-J` selects the machine payload; the default renders the
+        // human arms table + daemon lines. Anything else is rejected rather
+        // than silently ignored (Codex P3).
+        let rest = &args[1..];
+        let json_out = rest.iter().any(|a| a == "--json" || a == "-J");
+        let extras: Vec<&str> = rest
+            .iter()
+            .map(String::as_str)
+            .filter(|a| *a != "--json" && *a != "-J")
+            .collect();
+        if !extras.is_empty() {
             eprintln!(
-                "fno-agents: status takes no arguments (got: {})",
-                args[1..].join(" ")
+                "fno-agents: status takes no arguments other than --json/-J (got: {})",
+                extras.join(" ")
             );
             return 2;
         }
-        return run_status().await;
+        return run_status(json_out).await;
     }
 
     // `restart` swaps a stale daemon for one built from the current binary
@@ -637,6 +728,14 @@ async fn run(args: Vec<String>) -> i32 {
             return 127;
         }
         if let Some(code) = maybe_run_spawn(&home, &params, &agent_name) {
+            if code == 0 {
+                // A placement failure never recolors the spawn verdict: the
+                // receipt is the truth, the worker is live, and a nonzero here
+                // reads as spawn failure to a retrying caller - a duplicate.
+                if let Err(detail) = place_thread_portal_after_spawn(&params, &agent_name) {
+                    eprintln!("{detail}");
+                }
+            }
             return code;
         }
         // No client-side handler matched: fall through to the daemon RPC below.
@@ -735,6 +834,15 @@ async fn run(args: Vec<String>) -> i32 {
     // Snapshot before `params` moves into the request: the relocated gate
     // honors the same spawn-control flags the shared construction reads.
     let daemon_gate_flags = gate_flags_from_params(&params);
+    // (x-9b60) Same snapshot for the portal placement: it rides the
+    // daemon's response, after the receipt.
+    let thread_portal_params = if method == "agent.spawn"
+        && params.get("substrate").and_then(|v| v.as_str()) == Some("thread")
+    {
+        Some(params.clone())
+    } else {
+        None
+    };
     let req = Request::new(1, method, params);
 
     let daemon_spawn_gate = if daemon_bound_thread_spawn {
@@ -814,6 +922,16 @@ async fn run(args: Vec<String>) -> i32 {
                     && result.get("stopped").and_then(Value::as_bool) == Some(false)
                 {
                     return 18;
+                }
+                // (x-9b60) The daemon-bound thread lane (codex and every other
+                // attach-with-server harness): the RPC created the row, so the
+                // portal places here, after the receipt, exactly as the
+                // client-side lanes do.
+                if let Some(place_params) = &thread_portal_params {
+                    if let Err(detail) = place_thread_portal_after_spawn(place_params, &agent_name)
+                    {
+                        eprintln!("{detail}");
+                    }
                 }
                 0
             }
@@ -969,13 +1087,38 @@ fn maybe_run_opencode_ask(home: &AgentsHome, params: &Value, name: &str) -> Opti
 fn validate_spawn_placement(params: &Value, substrate: &str) -> Result<(), String> {
     let squad = params.get("squad").and_then(Value::as_str);
     let split = params.get("split").and_then(Value::as_str);
+    let at = params.get("at").and_then(Value::as_str);
+    let tab = params.get("tab").and_then(Value::as_str);
+    let portal = params.get("portal").and_then(Value::as_u64);
 
     if squad.is_some_and(|name| name.trim().is_empty()) {
         return Err("--workspace/-s needs a nonblank workspace name".into());
     }
-    if (squad.is_some() || split.is_some()) && substrate != "pane" {
+    // (x-9b60) A portal is the pane a thread hosts: the placement flags are
+    // legal for a thread WHEN --portal names it, refused for a bare thread
+    // where they mean nothing. Mirrors Python's placement_refusal, the one
+    // contract both runtimes read; the portal's 0-255 range is enforced at
+    // the parse arm, so a bad index never reaches this check.
+    if portal.is_some() && substrate != "bg" {
         return Err(
-            "--workspace/-s and --split/-x apply only to --substrate pane \
+            "--portal applies only to --substrate thread; a pane hosts its \
+             own geometry and headless hosts no session at all"
+                .into(),
+        );
+    }
+    if at.is_some() && substrate == "bg" {
+        return Err("--at applies only to --substrate pane (a thread has no calling pane)".into());
+    }
+    let placement_requested = squad.is_some() || split.is_some() || at.is_some() || tab.is_some();
+    if placement_requested && substrate == "bg" && portal.is_none() {
+        return Err("--workspace/-s, --split/-x, and --tab on --substrate \
+             thread need --portal N: a thread hosts no pane until a portal \
+             opens one, so the placement has nothing to place"
+            .into());
+    }
+    if placement_requested && portal.is_none() && substrate != "pane" {
+        return Err(
+            "--workspace/-s, --split/-x, --at, and --tab apply only to --substrate pane \
              (bg/headless have no pane geometry)"
                 .into(),
         );
@@ -985,6 +1128,9 @@ fn validate_spawn_placement(params: &Value, substrate: &str) -> Result<(), Strin
             "--split/-x must be left, right, up, or down (got {:?})",
             split.unwrap_or_default()
         ));
+    }
+    if tab.is_some_and(|selector| selector.trim().is_empty()) {
+        return Err("--tab needs a nonblank selector or pane-group name".into());
     }
     Ok(())
 }
@@ -1011,7 +1157,7 @@ fn validate_effort_for_spawn(
     if value.is_empty() {
         return Err("--effort must be non-empty".to_string());
     }
-    if matches!(provider, "gemini" | "agy") {
+    if matches!(provider, "gemini") {
         return Err(format!(
             "harness {} has no reasoning-effort surface; omit --effort",
             provider
@@ -1034,6 +1180,69 @@ fn validate_effort_for_spawn(
 /// - no resolvable / unknown provider: stderr usage error + exit 2.
 ///
 /// Returns `Some(exit_code)` when handled client-side, `None` to fall through.
+/// (x-9b60) One-call portal placement on the Rust lanes, the twin of the
+/// Python `thread_portal.place_thread_portal`: a thread spawn with
+/// `--portal` ends with the portal open, through the same `fno mux thread`
+/// reach a manual second command would type. The worker is already live, so
+/// a placement failure is reported AFTER the spawn receipt and never
+/// un-spawns anyone; the exit code stays the spawn's, because a nonzero
+/// here reads as spawn failure to a retrying caller - a duplicate worker.
+fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), String> {
+    let Some(portal) = params.get("portal").and_then(Value::as_u64) else {
+        return Ok(());
+    };
+    let mut args = vec![
+        "mux".to_string(),
+        "thread".to_string(),
+        name.to_string(),
+        "--portal".to_string(),
+        portal.to_string(),
+    ];
+    for (flag, key) in [
+        ("--workspace", "squad"),
+        ("--split", "split"),
+        ("--at", "at"),
+        ("--tab", "tab"),
+    ] {
+        if let Some(v) = params.get(key).and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                args.push(flag.to_string());
+                args.push(v.to_string());
+            }
+        }
+    }
+    let out = std::process::Command::new("fno")
+        .args(&args)
+        .output()
+        .map_err(|e| {
+            format!(
+                "portal {portal} placement failed: {e} (the worker is live; \
+                 place it with 'fno mux thread {name} --portal {portal}')"
+            )
+        })?;
+    if !out.status.success() {
+        let raw = if out.stderr.is_empty() {
+            &out.stdout
+        } else {
+            &out.stderr
+        };
+        let detail = String::from_utf8_lossy(raw).trim().to_string();
+        let detail = if detail.is_empty() {
+            "no output".to_string()
+        } else {
+            detail
+        };
+        return Err(format!(
+            "portal {portal} placement failed: {detail} (the worker is live; \
+             place it with 'fno mux thread {name} --portal {portal}')"
+        ));
+    }
+    if !out.stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(&out.stdout));
+    }
+    Ok(())
+}
+
 fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
     use fno_agents::agy_ask::dispatch_agy_once_with_effort;
     use fno_agents::claude_ask::{
@@ -1487,7 +1696,14 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // on the serve IS the worker (steering/mail over the API is a filed
         // follow-up).
         ("opencode", "bg") => emit!(fno_agents::opencode_serve::dispatch_opencode_serve(
-            home, name, &message, from_name, &cwd, model, effort,
+            home,
+            name,
+            &message,
+            from_name,
+            &cwd,
+            model,
+            effort,
+            params.get("node").and_then(|v| v.as_str()),
         )),
 
         ("agy", "headless") => {
@@ -1505,15 +1721,16 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         ("codex", "bg") => None,
 
         // The three arms above stay NAMED rather than lane-routed, because
-        // they are three different ownership models and only two of them are
-        // what the contract says they are: claude's thread is hosted by the
-        // detached client itself, codex's by its own app-server, and
-        // opencode's by a serve-hosted HTTP session. opencode is the
-        // deliberate exception - its capability row declares
-        // `interactive_attach` unsupported, so the derived lane reads
-        // `keeper`, while its serve lane is built and working. Routing this
-        // match on the derived lane would send a working path to a refusal;
-        // the mismatch belongs to the capability row, not here.
+        // they are three different ownership models: claude's thread is
+        // hosted by the detached client itself, codex's by its own
+        // app-server, and opencode's by a serve-hosted HTTP session -
+        // `thread_lane` classifies all three `attach` (each answers "the
+        // harness owns the live session; a client re-attaches"), but that one
+        // label can't tell a client-side re-attach apart from a daemon-owned
+        // serve process, and each needs its own dispatch call. (Before x-df08,
+        // opencode's row read `keeper` here - a stale answer this match arm
+        // had to route around by name; the row now agrees with the dispatch
+        // below.)
         //
         // The REFUSAL is derived, because a provider name list goes stale the
         // moment a lane is built and then misdirects the reader it was meant
@@ -1552,9 +1769,23 @@ fn bg_substrate_refusal(harness: &str) -> String {
         py_repr(harness)
     );
     let tail = "use --substrate headless for a one-shot";
-    let lane = fno_agents::harness_capabilities::HarnessContract::packaged()
-        .ok()
-        .and_then(|contract| contract.thread_lane(harness).ok());
+    let contract = fno_agents::harness_capabilities::HarnessContract::packaged().ok();
+    // A refused command_surface (a deprecated harness, e.g. gemini) has no
+    // dispatch lane at all - check this BEFORE thread_lane, which would
+    // otherwise describe a retired harness as future lane work (PR 1355
+    // review, P2). Mirrors harness_map._refused_reason's wording so both
+    // runtimes name the same gap the same way.
+    if let Some(caps) = contract.as_ref().and_then(|c| c.capabilities(harness).ok()) {
+        if caps.command_surface == "refused" {
+            return format!(
+                "harness {} has no maintained footnote dispatch lane and is deprecated; \
+                 route this work to its successor 'agy' (or a claude/codex/opencode harness) \
+                 - no prose build brief is generated",
+                py_repr(harness)
+            );
+        }
+    }
+    let lane = contract.and_then(|contract| contract.thread_lane(harness).ok());
     match lane {
         // No resume form at all, so there is no lane for fno to build.
         Some("none") => {
@@ -1628,9 +1859,13 @@ fn retired_verb_pointer(verb: &str) -> Option<&'static str> {
 }
 
 /// Dispatch `fno-agents status`: probe an already-running daemon and print its
-/// `status-v1.json`. Exit 13 when the daemon is down (no lazy-start).
-async fn run_status() -> i32 {
+/// `status-v1.json` (with `--json`), or the human arms table plus daemon lines
+/// (default). The control-plane arms readout is read straight from the event
+/// journals, so it survives a down daemon: exit 13 still signals the daemon,
+/// but the arms rows print either way.
+async fn run_status(json_out: bool) -> i32 {
     let home = AgentsHome::from_env();
+    let arms = arms_readout(&home);
     let req = Request::new(1, "agent.status", Value::Object(Map::new()));
     match call_if_running(&home, &req).await {
         Ok(resp) => match resp.payload {
@@ -1638,11 +1873,21 @@ async fn run_status() -> i32 {
                 eprintln!("fno-agents: {}", err.message);
                 exit_code_for(err.code)
             }
-            ResponsePayload::Ok(result) => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&result).unwrap_or_default()
-                );
+            ResponsePayload::Ok(mut result) => {
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert(
+                        "arms".into(),
+                        serde_json::to_value(&arms).unwrap_or(Value::Null),
+                    );
+                }
+                if json_out {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result).unwrap_or_default()
+                    );
+                } else {
+                    print_status_human(&result, &arms);
+                }
                 // Drift warning (ab-1891cdff), stderr-only so --json/automation
                 // consumers of stdout are never contaminated. We already hold the
                 // status payload, so classify from it without a second RPC.
@@ -1658,25 +1903,134 @@ async fn run_status() -> i32 {
             }
         },
         Err(ClientError::DaemonNotRunning) => {
+            // The arms table is exactly what a dead control plane needs to
+            // show; print it beside the down-daemon signal rather than nothing.
+            let payload = json!({
+                "schema_version": 1,
+                "daemon": null,
+                "arms": arms,
+            });
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_default()
+                );
+            } else {
+                print_status_human(&payload, &arms);
+            }
             eprintln!("fno-agents: daemon not running");
             13
         }
         Err(e) => {
+            // Unreachable daemon (socket error, timeout, ...): same degraded
+            // shape as DaemonNotRunning - the arms readout stands on its own.
+            let payload = json!({
+                "schema_version": 1,
+                "daemon": null,
+                "arms": arms,
+            });
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_default()
+                );
+            } else {
+                print_status_human(&payload, &arms);
+            }
             eprintln!("fno-agents: {e}");
             1
         }
     }
 }
 
-/// `fno agents reap`: manual dead-row garbage collection (x-b1aa). Runs the same
+/// The control-plane arms rows, from the journals the arms write (agents home
+/// + the global mirror) plus their `.1` rotations.
+fn arms_readout(home: &AgentsHome) -> Vec<fno_agents::tick_ledger::ArmStatus> {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // The global journal derives from the agents root we already hold (its
+    // parent dir), never a hand-built path: the root is the declared resolver
+    // surface, so an FNO_AGENTS_HOME override reaches this scan by construction.
+    let global = home
+        .root()
+        .parent()
+        .map(|p| p.join("events.jsonl"))
+        .unwrap_or_else(|| home.events_jsonl());
+    let journals = vec![home.events_jsonl(), global];
+    fno_agents::tick_ledger::read_arms(&journals, now_unix)
+}
+
+/// The human render: one line per arm (red rows first-class), then the daemon
+/// block the JSON payload carries.
+fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus]) {
+    println!("control-plane arms:");
+    for arm in arms {
+        let verdict = if arm.stale { "STALE" } else { "ok" };
+        let age = match arm.age_s {
+            Some(s) => format!("{s}s ago"),
+            None => "never".to_string(),
+        };
+        let skip = arm
+            .skip_reason
+            .as_deref()
+            .map(|r| format!(" skip={r}"))
+            .unwrap_or_default();
+        let acted = arm.acted.map(|n| format!(" acted={n}")).unwrap_or_default();
+        let scheduler = arm
+            .scheduler
+            .as_deref()
+            .map(|s| format!(" via={s}"))
+            .unwrap_or_default();
+        let detail = arm
+            .detail
+            .as_deref()
+            .map(|d| format!(" {d}"))
+            .unwrap_or_default();
+        println!(
+            "  {:<16} {:<5} {:>10}{}{}{}{}",
+            arm.arm, verdict, age, acted, skip, scheduler, detail
+        );
+    }
+    let Some(daemon) = result.get("daemon").and_then(Value::as_object) else {
+        return;
+    };
+    let state = daemon.get("state").and_then(Value::as_str).unwrap_or("?");
+    let pid = daemon.get("pid").and_then(Value::as_u64);
+    let uptime = daemon.get("uptime_secs").and_then(Value::as_u64);
+    println!(
+        "daemon: {state}{}{}",
+        pid.map(|p| format!(" pid={p}")).unwrap_or_default(),
+        uptime
+            .map(|u| format!(" uptime={}s", u))
+            .unwrap_or_default(),
+    );
+    if let Some(agents) = result.get("agents").and_then(Value::as_object) {
+        println!(
+            "agents: total={} by_status={}",
+            agents.get("total").and_then(Value::as_u64).unwrap_or(0),
+            agents
+                .get("by_status")
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "{}".into())
+        );
+    }
+    // Best-effort: a machine whose footprint cannot be read prints no line
+    // rather than a stale or fabricated one.
+    if let Some(line) = machine_status_line() {
+        println!("machine: {line}");
+    }
+}
+
+/// `fno agents reap`: manual row retirement (x-c672). Runs the same
 /// `gc_sweep` the daemon runs on its idle tick, operating on the registry
-/// directly under the shared flock (no daemon required), and reports what it did:
-/// the count removed and, for each row KEPT, the specific gate that kept it
-/// (dirty/unprobed worktree, no positive corroboration yet - x-9de7 task 5 -
-/// or the liveness re-check itself, x-98ab) so a stuck row is never silent
-/// and invisible, and a zero-reap pass over a live fleet is never silent
-/// about the rows it kept. The grace window is resolved
-/// from `config.agents.dead_row_grace` exactly as the daemon does.
+/// directly under the shared flock (no daemon required), and reports what it
+/// did: every row retired with its basis, and for each row KEPT, the named
+/// gate holding it, so a stuck row is never silent and invisible, and a
+/// zero-reap pass over a live fleet is never silent about the rows it kept.
+/// The grace window is resolved from `config.agents.retire_grace_s` exactly
+/// as the daemon does.
 ///
 /// `--dry-run` runs the identical classification with no registry write and no
 /// `agent_row_reaped` event - a reaper an operator cannot rehearse is one they
@@ -1698,13 +2052,9 @@ fn run_reap(rest: &[String]) -> i32 {
     }
     let home = AgentsHome::from_env();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let grace_for_harness = |harness: &str| {
-        std::time::Duration::from_secs(fno_agents::agents_config::dead_row_grace_secs(
-            &cwd, harness,
-        ))
-    };
+    let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
     let summary = if dry_run {
-        fno_agents::daemon::gc_sweep_dry_run(&home, &grace_for_harness)
+        fno_agents::daemon::gc_sweep_dry_run(&home, grace_secs)
     } else {
         // Source "daemon" matches the event schema's declared source for
         // agent_row_reaped; the manual verb is the same operation as the tick.
@@ -1712,7 +2062,7 @@ fn run_reap(rest: &[String]) -> i32 {
         fno_agents::daemon::gc_sweep(
             &home,
             &emitter,
-            &grace_for_harness,
+            grace_secs,
             fno_agents::agents_config::reap_receipt_retain_days(&cwd),
         )
     };
@@ -1876,6 +2226,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--cwd",
         "--message",
         "--name",
+        "--node",
         "--session-id",
         "--status",
         "--progress",
@@ -1887,6 +2238,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--workspace",
         "--squad",
         "--split",
+        "--portal",
+        "--tab",
+        "--at",
         "--permission-mode",
         "--effort",
         "--add-dir",
@@ -1977,6 +2331,25 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--split" | "-x" => {
                 params.insert("split".into(), str_arg(&mut it, "-x/--split")?);
             }
+            // (x-9b60) The portal placement trio, same spellings the mux
+            // thread verb uses. Parsed here so the default Rust runtime
+            // accepts what the help advertises; the placement itself runs
+            // after the spawn receipt (place_thread_portal_after_spawn).
+            "--portal" => {
+                let raw = str_arg(&mut it, "--portal")?;
+                match raw.as_str().and_then(|s| s.parse::<u8>().ok()) {
+                    Some(n) => {
+                        params.insert("portal".into(), Value::from(n));
+                    }
+                    None => return Err("--portal takes an index 0-255".into()),
+                }
+            }
+            "--tab" => {
+                params.insert("tab".into(), str_arg(&mut it, "--tab")?);
+            }
+            "--at" => {
+                params.insert("at".into(), str_arg(&mut it, "--at")?);
+            }
             "--from" => {
                 // `promote <name> --from <session-uuid>`: the session to resume
                 // interactively. Forwarded as `resume_id` (the daemon infers the
@@ -1995,6 +2368,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             // fallback below keeps a direct `fno-agents spawn <name>` working.
             "--name" => {
                 params.insert("name".into(), str_arg(&mut it, "--name")?);
+            }
+            "--node" => {
+                params.insert("node".into(), str_arg(&mut it, "--node")?);
             }
             "--session-id" => {
                 params.insert("session_id".into(), str_arg(&mut it, "--session-id")?);
@@ -2647,10 +3023,13 @@ fn format_success(
                 notes.push(format!("event record not written: {reason}"));
             }
             if result.get("worktree_outcome").and_then(Value::as_str) == Some("removed") {
-                let bytes = result
-                    .get("reclaimed_bytes")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
+                // `null` means the size walk hit its budget on a large or
+                // slow-storage tree - print `unmeasured`, never a `0` that
+                // reads identically to "measured, nothing to reclaim".
+                let bytes = match result.get("reclaimed_bytes").and_then(Value::as_u64) {
+                    Some(n) => n.to_string(),
+                    None => "unmeasured".to_string(),
+                };
                 notes.push(format!(
                     "WARNING: worktree removed by guarded cleanup (reclaimed_bytes={bytes})"
                 ));
@@ -2814,22 +3193,48 @@ fn fetch_discovered_sessions(
     // early return made `--status orphaned` drop through Rust a row that Python
     // prints -- one runtime-dependent answer to one question. The row-level
     // filter at the bottom is the single place status is applied.
-    let mut cmd = Command::new("fno");
-    cmd.args(["agents", "discovered-json"]);
-    cmd.env("FNO_AGENTS_RUNTIME", "python");
+    let mut argv = vec!["agents".to_string(), "discovered-json".to_string()];
     if let Some(c) = cwd_filter {
-        cmd.args(["--cwd", c]);
+        argv.push("--cwd".into());
+        argv.push(c.into());
     }
     // Without this the rendered surface disagrees with the Python one:
     // `--harness claude` would list every discovered codex/opencode session.
     // An empty value is "no filter" on the Python side, so forwarding it would
     // make the two runtimes disagree again in the other direction.
     if let Some(p) = provider_filter.filter(|p| !p.is_empty()) {
-        cmd.args(["--harness", p]);
+        argv.push("--harness".into());
+        argv.push(p.into());
     }
-    let output = match cmd.output() {
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return Vec::new(),
+
+    // Every `fno agents list` on the box runs this, so several terminals asking
+    // at once each paid their own Python cold start for one answer. The latch
+    // is keyed on the argv above, so a run with a different `--cwd` or
+    // `--harness` is a different flight and keeps its own answer.
+    let key = fno_agents::single_flight::flight_key(&argv);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let flight = fno_agents::single_flight::run_or_join(
+        &key,
+        fno_agents::agents_config::single_flight_ttl(&cwd),
+        fno_agents::agents_config::single_flight_join_budget(&cwd),
+        // No outer deadline to subtract from: this path has no caller-supplied
+        // budget, so the wait it may have spent changes nothing about the run.
+        |_spent| {
+            let mut cmd = Command::new("fno");
+            cmd.args(&argv);
+            cmd.env("FNO_AGENTS_RUNTIME", "python");
+            // Fail-open by contract, and the same rule the latch needs: only a
+            // clean run is worth sharing, so a failure spends no cache entry
+            // and the next caller retries for real.
+            match cmd.output() {
+                Ok(o) if o.status.success() => Some(o.stdout),
+                _ => None,
+            }
+        },
+    );
+    let output = match flight.stdout {
+        Some(bytes) => bytes,
+        None => return Vec::new(),
     };
     let parsed: Value = match serde_json::from_slice(&output) {
         Ok(v) => v,

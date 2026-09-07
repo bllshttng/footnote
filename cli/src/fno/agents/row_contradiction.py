@@ -121,8 +121,10 @@ def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
     if _spawning_outlived_by_a_live_pid(row, now=now):
         # The movement-derived state with a basis naming the contradiction:
         # a bare `spawning` for a working row is the stored token standing in
-        # for a measurement nobody took (x-d401 / x-0248).
-        projected["status"] = "live"
+        # for a measurement nobody took (x-d401 / x-0248). The process is
+        # confirmed there and the transcript is unread, so the served word is
+        # `quiet`, never a `live` token (x-c672).
+        projected["status"] = "quiet"
         projected["basis"] = "stale-spawning-live-pid"
 
     # Both keys ALWAYS ride the row, as `reachability`/`basis` and

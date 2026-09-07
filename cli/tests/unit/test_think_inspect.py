@@ -22,15 +22,20 @@ def _result(argv: list[str], cwd: Path | None = None, timeout: int = 10):
     raise AssertionError(f"unexpected argv: {argv}")
 
 
-def test_receipt_collects_grounding_without_writes(tmp_path: Path) -> None:
+def test_receipt_collects_grounding_without_writes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.paths import worktree_space_dir
     from fno.think_inspect import build_receipt
 
+    monkeypatch.setenv("FNO_SPACES_DIR", str(tmp_path / "spaces"))
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "prisma").mkdir()
     (repo / "prisma" / "schema.prisma").write_text("model User {}\n")
-    (repo / ".fno").mkdir()
-    (repo / ".fno" / "codemap.md").write_text("# Map\n\n## Database Schema\n\n### public.users\n")
+    artifact = worktree_space_dir(repo) / "codemap.md"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("# Map\n\n## Database Schema\n\n### public.users\n")
     (repo / "AGENTS.md").write_text(
         "# Agents\n\n## Pitfalls corpus (capped)\n\n"
         "### Guards can lie\n\nTrap.\n\n- graduates-to: lint\n- added: 2026-07-25\n\n"
@@ -97,7 +102,7 @@ def test_receipt_collects_grounding_without_writes(tmp_path: Path) -> None:
     assert receipt["database"] == {
         "detected": True,
         "signals": ["prisma/schema.prisma"],
-        "schema_artifact": ".fno/codemap.md",
+        "schema_artifact": "codemap.md",
         "schema_status": "grounded",
     }
     assert receipt["pitfalls"]["entries"] == ["Guards can lie"]
@@ -210,13 +215,17 @@ def test_receipt_resolves_paths_from_requested_repository(monkeypatch, tmp_path:
     assert receipt["pitfalls"]["retro_syntheses"] == [str(retro)]
 
 
-def test_schema_artifact_older_than_schema_source_is_stale(tmp_path: Path) -> None:
+def test_schema_artifact_older_than_schema_source_is_stale(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.paths import worktree_space_dir
     from fno.think_inspect import build_receipt
 
+    monkeypatch.setenv("FNO_SPACES_DIR", str(tmp_path / "spaces"))
     repo = tmp_path / "repo"
     (repo / "prisma").mkdir(parents=True)
-    (repo / ".fno").mkdir()
-    artifact = repo / ".fno" / "codemap.md"
+    artifact = worktree_space_dir(repo) / "codemap.md"
+    artifact.parent.mkdir(parents=True)
     artifact.write_text("## Database Schema\n")
     schema = repo / "prisma" / "schema.prisma"
     schema.write_text("model User {}\n")

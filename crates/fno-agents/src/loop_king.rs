@@ -14,25 +14,27 @@
 //! hardcoded to `/target --resume` and `Unit.extra_env` was read by nothing,
 //! so the spawned session was a target resume that did not know it was a king.
 //! The lifecycle those defects sat on is now real: manifests are per-scope at
-//! `.fno/kings/<scope>.md`, coronation arms them, `fno agents king done`
+//! `<space>/kings/<scope>.md`, coronation arms them, `fno agents king done`
 //! expires them, and a leftover file is inert without a live registry crown.
 //!
 //! The rebuild fixes the identity split at the source: the walk keys its unit
 //! per invocation (`{fno_id}-w{nanos}`), so no prior king terminal can close
 //! it, and bounds dispatch-bearing walk invocations with an explicit manifest
 //! counter rather than by key collision. What `bill_one_respawn` charges is a
-//! walk that found an actionable board and dispatched a king - at most once
+//! walk that found an undelivered scope and dispatched a king - at most once
 //! per invocation, billed only after the NoWork return - so the counter is a
 //! dispatch budget, never a failure-retry count. At the ceiling the walk
 //! terminates on Budget before dispatching.
 //!
 //! ## What this arm is for
 //!
-//! The in-session arm (`loop-check --driver king`) holds an awake king working
-//! until its board is clean. It cannot help a king that is already gone: a
-//! stop hook does not fire in a session that exited or is rate-limited. This
-//! arm is the outside half. It respawns a king while the board is non-empty
-//! and terminates `NoWork` when it is not.
+//! The in-session arm (`loop-check --driver king`) holds an awake king while
+//! its crown scope has undelivered nodes. It uses actionable board rows to
+//! choose work, but an empty board is a quiet beat while delivery is in flight,
+//! not completion. It cannot help a king that is already gone: a stop hook does
+//! not fire in a session that exited or is rate-limited. This arm is the outside
+//! half. It respawns a king while the scoped delivery count is nonzero and
+//! terminates `NoWork` only when that count reaches zero.
 //!
 //! It does NOT cover the other edge, a king that correctly exited on an empty
 //! board and now needs waking because the board refilled. Nothing in this
@@ -53,6 +55,7 @@
 //! close to do.
 
 use crate::loop_runtime::{CloseOutcome, Evidence, LoopError, Queue, Unit};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
@@ -82,7 +85,7 @@ pub struct KingQueue {
     respawn_count: u64,
     respawn_ceiling: u64,
     /// One walk invocation bills exactly one respawn, even though `next()`
-    /// re-derives the unit while the board holds actionable rows.
+    /// re-derives the unit while the scope holds undelivered nodes.
     billed: bool,
     /// Wake mode (`--wake`): the walk is executing a wake the caller already
     /// gated, so it neither spends nor is refused by the failure budget above.
@@ -90,21 +93,34 @@ pub struct KingQueue {
     /// the CALLER before invoking the walk; an operator running `--wake` by
     /// hand is deliberately bypassing a rate limit, not a safety limit.
     wake: bool,
+    /// Successor mode (`--wake-successor`): the wake fired because the holder
+    /// is GONE, so the dispatch this walk performs is a new king generation -
+    /// exactly what the respawn budget exists to bound. Unlike an ordinary
+    /// wake (a parked holder resuming, normal operation billed to the wake
+    /// ledger alone), a successor bills `respawn_count` and is refused by the
+    /// respawn ceiling like any walk respawn. There is no second respawn
+    /// budget: same counter, same ceiling.
+    successor: bool,
 }
 
 impl KingQueue {
-    /// Read `.fno/kings/<scope>.md` from `repo_root` and construct the queue.
+    /// Read `<space>/kings/<scope>.md` from `repo_root` and construct the queue.
     ///
     /// A missing manifest is an error, not an empty queue. An empty queue
     /// would terminate `NoWork` and report success, which is the
     /// absence-as-evidence trap: "no work" and "nobody told me what I am
     /// watching" would produce the same clean exit.
-    pub fn from_manifest(
+    ///
+    /// The successor modifier is a parameter, not a second constructor: only
+    /// the wake phase passes `true` (a dead holder's replacement); every
+    /// other caller passes `false` and never mints successors.
+    pub fn from_manifest_full(
         repo_root: &Path,
         scope: &str,
         fno_bin: String,
         wake: bool,
         wake_holder: Option<&str>,
+        successor: bool,
     ) -> Result<Self, LoopError> {
         let home = crate::paths::AgentsHome::from_env();
         Self::from_manifest_with_registry(
@@ -113,6 +129,7 @@ impl KingQueue {
             fno_bin,
             wake,
             wake_holder,
+            successor,
             &home.registry_json(),
         )
     }
@@ -121,12 +138,14 @@ impl KingQueue {
     /// decision is unit-testable without mutating process env (a set_var race
     /// against parallel tests reading the same env would test the scheduler,
     /// not the guard).
+    #[allow(clippy::too_many_arguments)]
     pub fn from_manifest_with_registry(
         repo_root: &Path,
         scope: &str,
         fno_bin: String,
         wake: bool,
         wake_holder: Option<&str>,
+        successor: bool,
         registry_path: &Path,
     ) -> Result<Self, LoopError> {
         let scope = scope.trim();
@@ -140,10 +159,7 @@ impl KingQueue {
                 "unsafe king scope for the walk: {scope:?}"
             )));
         }
-        let state_root =
-            crate::paths::canonical_repo_root(repo_root).unwrap_or_else(|| repo_root.to_path_buf());
-        let manifest_path = state_root
-            .join(".fno")
+        let manifest_path = crate::paths::space_dir(repo_root)
             .join("kings")
             .join(format!("{scope}.md"));
         let content = fs::read_to_string(&manifest_path).map_err(|_| {
@@ -180,7 +196,7 @@ impl KingQueue {
         // the one row the guard must not outvote. Any OTHER live holder - or
         // a hand-run --wake that names nobody - still refuses, so the flag
         // can never double a reigning king.
-        if let Some(live_holder) = live_crown_holder_in(registry_path, &scope) {
+        if let Some(live_holder) = live_crown_holder_in(registry_path, &scope, repo_root) {
             let caller_named_this_row = wake && wake_holder == Some(live_holder.as_str());
             if !caller_named_this_row {
                 return Err(LoopError::Queue(format!(
@@ -202,7 +218,15 @@ impl KingQueue {
             manifest_path,
             billed: false,
             wake,
+            successor,
         })
+    }
+
+    /// Whether this walk's dispatches count against the respawn budget. An
+    /// ordinary wake does not (the caller's wake ledger is its bound); a
+    /// successor does, because each successor IS a king generation.
+    fn respawn_accounted(&self) -> bool {
+        !self.wake || self.successor
     }
 
     /// The walk refuses to respawn another king past the manifest ceiling.
@@ -238,12 +262,72 @@ impl KingQueue {
         self.respawn_ceiling
     }
 
-    fn board_actionable(&self) -> Result<i64, LoopError> {
-        let board =
-            crate::loopcheck::read_king_board(&self.fno_bin, &self.cwd, &self.manifest_path)
-                .map_err(LoopError::Queue)?;
-        Ok(board.actionable)
+    /// The reign's work test for this crown: see `scope_undelivered_count`.
+    fn scope_undelivered(&self) -> Result<i64, LoopError> {
+        scope_undelivered_count(&self.fno_bin, &self.cwd, &self.scope)
     }
+}
+
+/// The reign's work test as a free read: crown nodes not done and not
+/// superseded, answered by the one Python seam that compiles a scope. The
+/// goal text keys completion on that count, so every termination decision
+/// reads it and no queue: a row with a driver leaves the actionable board
+/// while its work is unshipped. An unreadable answer is an error, never
+/// zero - a caller that cannot see the scope must not certify it drained.
+pub(crate) fn scope_undelivered_count(
+    fno_bin: &str,
+    cwd: &Path,
+    scope: &str,
+) -> Result<i64, LoopError> {
+    scope_undelivered_count_with_timeout(
+        fno_bin,
+        cwd,
+        scope,
+        crate::loopcheck::stopgate_read_timeout(),
+    )
+}
+
+fn scope_undelivered_count_with_timeout(
+    fno_bin: &str,
+    cwd: &Path,
+    scope: &str,
+    timeout: std::time::Duration,
+) -> Result<i64, LoopError> {
+    let out = crate::loopcheck::bounded_read(
+        std::ffi::OsStr::new(fno_bin),
+        &["agents", "king", "drain", scope],
+        cwd,
+        "king drain",
+        timeout,
+    )
+    .map_err(|error| {
+        LoopError::Queue(format!("king drain for {scope} failed: {}", error.render()))
+    })?;
+    if !out.status.success() {
+        let detail = String::from_utf8_lossy(&out.stderr_tail);
+        return Err(LoopError::Queue(format!(
+            "king drain for {scope} failed ({}): {}",
+            out.status,
+            detail.trim().chars().take(200).collect::<String>()
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let trimmed = stdout.trim();
+    let payload: serde_json::Value = serde_json::from_str(trimmed).map_err(|_| {
+        LoopError::Queue(format!(
+            "king drain for {scope} returned no JSON (exit {}): {}",
+            out.status,
+            trimmed.chars().take(200).collect::<String>()
+        ))
+    })?;
+    payload
+        .get("undelivered")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            LoopError::Queue(format!(
+                "king drain payload for {scope} carries no undelivered count"
+            ))
+        })
 }
 
 /// `{fno_id}-w{nanos}`: unique per invocation by the nanosecond clock, and
@@ -282,14 +366,147 @@ pub(crate) fn mint_walk_key(fno_id: &str) -> String {
 /// verdict instead of parking it at the dispatch cap.
 pub(crate) const WALK_SESSION_KEY_ENV: &str = "FNO_KING_WALK_SESSION_KEY";
 
-/// The name of any live registry row holding a crown over `scope`, if the
-/// registry is readable and such a row exists. An unreadable registry answers
-/// `None` (fail-open to the recovery path): the walk's whole job is reviving
-/// scopes whose registry state is suspect, and refusing on a read error would
-/// strand exactly those, while the live-holder refusal above catches the
-/// double-rule case whenever the registry CAN be read.
-fn live_crown_holder_in(registry_path: &Path, scope: &str) -> Option<String> {
+/// The alias-normalized member set of one stored crown scope, through the
+/// same {alias: canonical} project map the Python guard canonicalizes with -
+/// a row stored as `alpha` and a walk for the short name `a` are one
+/// territory, not two.
+fn canonical_members(scope: &str, projects: &HashMap<String, String>) -> HashSet<String> {
+    scope
+        .split(',')
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(|m| projects.get(m).cloned().unwrap_or_else(|| m.to_string()))
+        .collect()
+}
+
+/// The rung a scope sits on, derived from its members the way resolve_crown
+/// derives it: 2+ projects is a portfolio (0), one project is 1, and epics
+/// are 2. `None` marks a mixed scope no legal writer produces; the caller
+/// treats it as fail-closed.
+fn derived_scope_level(scope: &str, projects: &HashMap<String, String>) -> Option<u32> {
+    let members: Vec<String> = scope
+        .split(',')
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(|m| projects.get(m).cloned().unwrap_or_else(|| m.to_string()))
+        .collect();
+    let is_project = |m: &String| projects.contains_key(m.as_str());
+    match members.len() {
+        0 => None,
+        1 => Some(if is_project(&members[0]) { 1 } else { 2 }),
+        _ => {
+            if members.iter().all(is_project) {
+                Some(0)
+            } else if members.iter().all(|m| !is_project(m)) {
+                Some(2)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Do two live crowns double-rule territory, ladder-aware? The ladder's
+/// documented shape is that a portfolio king's court IS project kings and a
+/// project king's court IS epic kings, so a live row over `alpha,beta` and a
+/// walk reviving a king over `alpha` are two legitimate crowns. Rivalry is
+/// rung-scoped: same rung double-rules on any shared member (a set-holder
+/// rules each member), different rungs only on the same territory outright.
+/// Both rungs are DERIVED from the members, never read from stored levels: a
+/// row stamped `level=0` over epic members is exactly how a stored number
+/// switches this guard off. The stored levels remain only as a tie-breaker
+/// when derivation cannot classify either side; their overlap surfaces.
+fn crown_rivals(
+    held: &str,
+    held_level: Option<u32>,
+    requested: &str,
+    requested_level: Option<u32>,
+    projects: &HashMap<String, String>,
+) -> bool {
+    let left = canonical_members(held, projects);
+    let right = canonical_members(requested, projects);
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    let held_rung = derived_scope_level(held, projects);
+    let requested_rung = derived_scope_level(requested, projects);
+    match (held_rung, requested_rung) {
+        (Some(a), Some(b)) if a != b => left == right,
+        (None, None) => match (held_level, requested_level) {
+            (Some(a), Some(b)) if a != b => left == right,
+            _ => left.intersection(&right).next().is_some(),
+        },
+        _ => left.intersection(&right).next().is_some(),
+    }
+}
+
+/// Do two stored crown scopes share a member, aliases normalized? A
+/// set-holder reigns over each member, so a holder scan after one member
+/// must still find it (`reign`'s scope form). Rung-agnostic on purpose: the
+/// question is "who reigns here", and a portfolio king reigns over each of
+/// its projects too.
+pub(crate) fn scopes_overlap(
+    held: &str,
+    requested: &str,
+    projects: &HashMap<String, String>,
+) -> bool {
+    let left = canonical_members(held, projects);
+    !left.is_empty()
+        && canonical_members(requested, projects)
+            .intersection(&left)
+            .next()
+            .is_some()
+}
+
+/// Territory equality, aliases normalized (`_same_territory`'s Rust twin).
+pub(crate) fn same_territory(a: &str, b: &str, projects: &HashMap<String, String>) -> bool {
+    let left = canonical_members(a, projects);
+    !left.is_empty() && left == canonical_members(b, projects)
+}
+
+/// `crown_rivals` for sibling modules (`reign`'s multiple-holders warning).
+pub(crate) fn crown_rivals_pub(
+    held: &str,
+    held_level: Option<u32>,
+    requested: &str,
+    requested_level: Option<u32>,
+    projects: &HashMap<String, String>,
+) -> bool {
+    crown_rivals(held, held_level, requested, requested_level, projects)
+}
+
+/// The name of any live registry row double-ruling `scope`, if the registry is
+/// readable and such a row exists. An unreadable registry answers `None`
+/// (fail-open to the recovery path): the walk's whole job is reviving scopes
+/// whose registry state is suspect, and refusing on a read error would strand
+/// exactly those, while the live-holder refusal above catches the double-rule
+/// case whenever the registry CAN be read.
+///
+/// The PROJECT MAP is the other axis, and it fails the other way. Rung
+/// derivation reads it; an `Err` swallowed to an empty map derives every
+/// member as non-project (rung 2), the stored row keeps its true level, and
+/// the cross-rung exemption then compares a corrupted rung against a real one
+/// - a live portfolio reads as a court rather than a rival, and the walk
+/// crowns a second king on one member. So an unreadable map downgrades the
+/// check to raw-member overlap: any shared member blocks the walk, the same
+/// rule as the same-rung case. An unrelated scope still recovers.
+fn live_crown_holder_in(registry_path: &Path, scope: &str, repo_root: &Path) -> Option<String> {
+    live_crown_holder_in_with_projects(
+        registry_path,
+        scope,
+        &crate::king_board::project_map(repo_root),
+    )
+}
+
+fn live_crown_holder_in_with_projects(
+    registry_path: &Path,
+    scope: &str,
+    projects: &Result<HashMap<String, String>, String>,
+) -> Option<String> {
     let registry = crate::state::load_registry(registry_path).ok()?;
+    let config_unreadable = projects.is_err();
+    let projects = projects.clone().unwrap_or_default();
+    let scope_level = derived_scope_level(scope, &projects);
     let is_terminal = |row: &crate::state::RegistryEntry| {
         matches!(
             row.status,
@@ -303,7 +520,15 @@ fn live_crown_holder_in(registry_path: &Path, scope: &str) -> Option<String> {
         .entries
         .iter()
         .filter(|row| !is_terminal(row))
-        .find(|row| row.crown_scope.as_deref() == Some(scope))
+        .find(|row| {
+            row.crown_scope.as_deref().is_some_and(|held| {
+                if config_unreadable {
+                    scopes_overlap(held, scope, &projects)
+                } else {
+                    crown_rivals(held, row.crown_level, scope, scope_level, &projects)
+                }
+            })
+        })
         .map(|row| row.name.clone())
 }
 
@@ -445,16 +670,16 @@ impl KingQueue {
 
 impl Queue for KingQueue {
     fn next(&mut self) -> Result<Option<Unit>, LoopError> {
-        if !self.wake && self.at_respawn_ceiling() {
+        if self.respawn_accounted() && self.at_respawn_ceiling() {
             return Ok(None);
         }
-        // Stays in wake mode too: a spurious trigger over an empty board must
+        // Stays in wake mode too: a spurious trigger over a drained scope must
         // still terminate NoWork, or a missed mail flag spawns a king with
         // nothing to do.
-        if self.board_actionable()? == 0 {
+        if self.scope_undelivered()? == 0 {
             return Ok(None);
         }
-        if !self.wake && !self.bill_one_respawn()? {
+        if self.respawn_accounted() && !self.bill_one_respawn()? {
             return Ok(None);
         }
         Ok(Some(Unit {
@@ -474,7 +699,8 @@ impl Queue for KingQueue {
     /// check reports Budget rather than queueing a past-ceiling respawn.
     /// Wake mode drops the ceiling term for the same reason `next()` does.
     fn has_pending(&mut self) -> Result<bool, LoopError> {
-        Ok((self.wake || !self.at_respawn_ceiling()) && self.board_actionable()? > 0)
+        Ok((!self.respawn_accounted() || !self.at_respawn_ceiling())
+            && self.scope_undelivered()? > 0)
     }
 
     /// Inert close: see the module doc for why this does nothing.
@@ -514,7 +740,8 @@ mod tests {
 
     #[test]
     fn bumps_the_counter_and_preserves_every_other_line() {
-        let dir = std::env::temp_dir().join(format!("kingbump-{}", std::process::id()));
+        let _root = crate::paths::DeclaredRoot::declare("kingbump");
+        let dir = _root.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("k.md");
         fs::write(
@@ -533,7 +760,8 @@ mod tests {
 
     #[test]
     fn bills_a_manifest_that_predates_the_counter() {
-        let dir = std::env::temp_dir().join(format!("kingbump-old-{}", std::process::id()));
+        let _root = crate::paths::DeclaredRoot::declare("kingbump-old");
+        let dir = _root.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("k.md");
         fs::write(&path, "---\nfno_id: k-1\nscope: epic-x\n---\n").unwrap();
@@ -548,8 +776,13 @@ mod tests {
         // An explicit ceiling of 0 is the unbounded spelling (the budget is
         // the only bound); reading it as "at ceiling" would refuse every
         // respawn for a scope that deliberately disabled the counter.
-        let dir = std::env::temp_dir().join(format!("kingq-{}", std::process::id()));
-        let kings = dir.join(".fno").join("kings");
+        let _root = crate::paths::DeclaredRoot::declare("kingq");
+        let dir = _root.path().to_path_buf();
+        // space_dir resolves through FNO_SPACES_DIR and HOME, which are
+        // process-global and shared by every test thread. Take the env lock
+        // and pin the spaces root here, so the resolution is race-free and
+        // never touches the real $HOME.
+        let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         let path = kings.join("k.md");
         fs::write(
@@ -557,19 +790,132 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_ceiling: 0\n---\n",
         )
         .unwrap();
-        let q = KingQueue::from_manifest(&dir, "k", "fno".to_string(), false, None).unwrap();
+        let q = KingQueue::from_manifest_full(&dir, "k", "fno".to_string(), false, None, false)
+            .unwrap();
         assert_eq!(q.respawn_ceiling(), 0);
         assert!(!q.at_respawn_ceiling());
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn refuses_an_unsafe_scope_and_names_the_manifest_it_tried() {
-        let err =
-            KingQueue::from_manifest(Path::new("."), "../escape", "fno".to_string(), false, None)
-                .err()
-                .expect("escape scope must refuse");
+        let _root = crate::paths::DeclaredRoot::declare("kingscope");
+        let err = KingQueue::from_manifest_full(
+            Path::new("."),
+            "../escape",
+            "fno".to_string(),
+            false,
+            None,
+            false,
+        )
+        .err()
+        .expect("escape scope must refuse");
         assert!(err.to_string().contains("unsafe king scope"));
+    }
+
+    #[test]
+    fn termination_reads_the_scope_drain_not_the_actionable_board() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _root = crate::paths::DeclaredRoot::declare("kingdrain");
+        let dir = _root.path().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        // Same env-lock and pin as the ceiling test: space_dir reads global
+        // state, and an unlocked read raced another test's env mutation.
+        let kings = crate::paths::space_dir(&dir).join("kings");
+        fs::create_dir_all(&kings).unwrap();
+        fs::write(
+            kings.join("k.md"),
+            "---\nfno_id: k-1\nscope: epic-x\nrespawn_ceiling: 0\n---\n",
+        )
+        .unwrap();
+        let registry = dir.join("no-registry.json");
+        let stub = |body: &str, name: &str| -> String {
+            let path = dir.join(name);
+            fs::write(&path, format!("#!/bin/sh\necho '{body}'\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_string_lossy().to_string()
+        };
+
+        // The 2026-09-06 incident state: every row driven, nothing shipped. An
+        // inbox-board read answers zero here; the drain read must not.
+        let undelivered = stub(r#"{"scope":"epic-x","undelivered":4}"#, "fno-drain-some");
+        let mut q = KingQueue::from_manifest_with_registry(
+            &dir,
+            "k",
+            undelivered,
+            false,
+            None,
+            false,
+            &registry,
+        )
+        .unwrap();
+        assert!(
+            q.next().unwrap().is_some(),
+            "an undelivered scope re-derives the unit"
+        );
+
+        let drained = stub(r#"{"scope":"epic-x","undelivered":0}"#, "fno-drain-none");
+        let mut q0 = KingQueue::from_manifest_with_registry(
+            &dir, "k", drained, false, None, false, &registry,
+        )
+        .unwrap();
+        assert!(
+            q0.next().unwrap().is_none(),
+            "a drained scope terminates NoWork"
+        );
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
+    }
+
+    #[test]
+    fn drain_rejects_json_from_a_failed_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _root = crate::paths::DeclaredRoot::declare("kingdrain-failed");
+        let dir = _root.path().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fno-drain-failed");
+        fs::write(
+            &path,
+            "#!/bin/sh\necho '{\"scope\":\"epic-x\",\"undelivered\":0}'\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = scope_undelivered_count(path.to_str().unwrap(), &dir, "epic-x");
+
+        assert!(
+            result.is_err(),
+            "a failed drain must not certify a clean scope"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drain_kills_a_hung_command_inside_its_read_bound() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fno-drain-hung");
+        fs::write(&path, "#!/bin/sh\nsleep 1\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let started = std::time::Instant::now();
+        let result = scope_undelivered_count_with_timeout(
+            path.to_str().unwrap(),
+            dir.path(),
+            "epic-x",
+            std::time::Duration::from_millis(100),
+        );
+
+        let error = result.expect_err("a hung drain must not certify a scope");
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "drain exceeded its wall-clock bound: {:?}",
+            started.elapsed()
+        );
     }
 
     fn write_registry(dir: &Path, status: &str, scope: Option<&str>) -> PathBuf {
@@ -593,14 +939,17 @@ mod tests {
 
     #[test]
     fn a_live_crown_holder_read_from_the_registry_refuses_the_walk() {
-        let dir = std::env::temp_dir().join(format!("kinglive-{}", std::process::id()));
-        let kings = dir.join(".fno").join("kings");
+        let _root = crate::paths::DeclaredRoot::declare("kinglive");
+        let dir = _root.path().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        // Env lock + pin: space_dir reads process-global state.
+        let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         fs::write(kings.join("k.md"), "---\nfno_id: k-1\nscope: epic-x\n---\n").unwrap();
         let registry = write_registry(&dir, "busy", Some("epic-x"));
 
         assert_eq!(
-            live_crown_holder_in(&registry, "epic-x"),
+            live_crown_holder_in(&registry, "epic-x", &dir),
             Some("reigning-king".to_string())
         );
         // The same registry through the walk: an ordinary walk refuses, and a
@@ -615,6 +964,7 @@ mod tests {
             "fno".to_string(),
             false,
             None,
+            false,
             &registry,
         );
         assert!(plain.is_err(), "an ordinary walk never doubles a live row");
@@ -624,6 +974,7 @@ mod tests {
             "fno".to_string(),
             true,
             None,
+            false,
             &registry,
         );
         assert!(
@@ -636,6 +987,7 @@ mod tests {
             "fno".to_string(),
             true,
             Some("reigning-king"),
+            false,
             &registry,
         );
         assert!(
@@ -648,28 +1000,246 @@ mod tests {
             "fno".to_string(),
             true,
             Some("someone-else"),
+            false,
             &registry,
         );
         assert!(
             wrong_row.is_err(),
             "naming a row other than the live holder never doubles a live one"
         );
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn live_crown_holder_in_set() {
+        // A rung-2 crown is stored as the canonical comma-joined set. The
+        // guard must answer set membership: a live king over {epic-a,epic-b}
+        // already reigns over epic-a alone, so a walk recovering either
+        // member - or the joined name itself - finds the holder.
+        let _root = crate::paths::DeclaredRoot::declare("kingset");
+        let dir = _root.path().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        let registry = write_registry(&dir, "busy", Some("epic-a,epic-b"));
+
+        assert_eq!(
+            live_crown_holder_in(&registry, "epic-a", &dir),
+            Some("reigning-king".to_string())
+        );
+        assert_eq!(
+            live_crown_holder_in(&registry, "epic-b", &dir),
+            Some("reigning-king".to_string())
+        );
+        assert_eq!(
+            live_crown_holder_in(&registry, "epic-a,epic-b", &dir),
+            Some("reigning-king".to_string())
+        );
+        assert_eq!(live_crown_holder_in(&registry, "epic-c", &dir), None);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_terminal_or_absent_holder_leaves_the_scope_recoverable() {
-        let dir = std::env::temp_dir().join(format!("kingdead-{}", std::process::id()));
+        let _root = crate::paths::DeclaredRoot::declare("kingdead");
+        let dir = _root.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
         let exited = write_registry(&dir, "exited", Some("epic-x"));
-        assert_eq!(live_crown_holder_in(&exited, "epic-x"), None);
+        assert_eq!(live_crown_holder_in(&exited, "epic-x", &dir), None);
         let uncrowned = write_registry(&dir, "busy", None);
-        assert_eq!(live_crown_holder_in(&uncrowned, "epic-x"), None);
+        assert_eq!(live_crown_holder_in(&uncrowned, "epic-x", &dir), None);
         assert_eq!(
-            live_crown_holder_in(&dir.join("no-such-registry.json"), "epic-x"),
+            live_crown_holder_in(&dir.join("no-such-registry.json"), "epic-x", &dir),
             None,
             "an unreadable registry fails open to the recovery path"
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    fn write_registry_with_level(
+        dir: &Path,
+        status: &str,
+        scope: Option<&str>,
+        level: u32,
+    ) -> PathBuf {
+        let row = serde_json::json!({
+            "name": "reigning-king",
+            "cwd": "/tmp",
+            "status": status,
+            "created_at": "2026-08-23T00:00:00Z",
+            "crown_level": scope.map(|_| level),
+            "crown_scope": scope,
+            "crown_grantor": scope.map(|_| "human"),
+        });
+        let path = dir.join("registry.json");
+        fs::write(
+            &path,
+            serde_json::json!({"schema_version": 11, "agents": [row]}).to_string(),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn a_live_portfolio_king_does_not_block_a_project_kings_walk() {
+        // The ladder's shape: a portfolio king's court IS project kings, so a
+        // live row over {alpha,beta} must not stop the walk from reviving an
+        // orphaned king over alpha. Bare member overlap refused exactly that
+        // recovery. The map is injected Ok: rung derivation needs real
+        // projects, and an env without a readable config must not decide this
+        // test.
+        let _root = crate::paths::DeclaredRoot::declare("kingcourt");
+        let dir = _root.path().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        let registry = write_registry_with_level(&dir, "busy", Some("alpha,beta"), 0);
+
+        let mut map = HashMap::new();
+        map.insert("alpha".to_string(), "alpha".to_string());
+        map.insert("beta".to_string(), "beta".to_string());
+        assert_eq!(
+            live_crown_holder_in_with_projects(&registry, "alpha", &Ok(map)),
+            None
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_set_holder_still_blocks_a_walk_over_one_member() {
+        let _root = crate::paths::DeclaredRoot::declare("kingset2");
+        let dir = _root.path().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        let registry = write_registry_with_level(&dir, "busy", Some("epic-a,epic-b"), 2);
+
+        assert_eq!(
+            live_crown_holder_in(&registry, "epic-a", &dir),
+            Some("reigning-king".to_string())
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_mislabeled_row_still_blocks_the_walk() {
+        // A row stamped level 0 over epic members: derivation reads rung 2 on
+        // BOTH sides, so overlap decides and the stored number cannot switch
+        // the guard off.
+        let _root = crate::paths::DeclaredRoot::declare("kingmislab");
+        let dir = _root.path().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        let registry = write_registry_with_level(&dir, "busy", Some("epic-a,epic-b"), 0);
+        let projects: Result<HashMap<String, String>, String> = Ok(HashMap::new());
+
+        assert_eq!(
+            live_crown_holder_in_with_projects(&registry, "epic-a", &projects),
+            Some("reigning-king".to_string())
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_project_map_fails_closed_not_silent() {
+        // An Err map swallowed to empty derives the walk scope as rung 2 while
+        // the stored row keeps rung 0; the cross-rung exemption then reads a
+        // live portfolio as a court and crowns a second king on one member.
+        // Unreadable config must downgrade to raw overlap, which blocks.
+        let _root = crate::paths::DeclaredRoot::declare("kingnomap");
+        let dir = _root.path().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        let registry = write_registry_with_level(&dir, "busy", Some("alpha,beta"), 0);
+
+        let projects: Result<HashMap<String, String>, String> =
+            Err("no work.workspaces in any candidate config.toml".to_string());
+        assert_eq!(
+            live_crown_holder_in_with_projects(&registry, "alpha", &projects),
+            Some("reigning-king".to_string())
+        );
+        // An unrelated scope still recovers: raw overlap answers, not a blanket
+        // refusal.
+        assert_eq!(
+            live_crown_holder_in_with_projects(&registry, "gamma", &projects),
+            None
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn alias_spellings_share_one_territory_in_the_walk_guard() {
+        // Python normalizes every member through the project map before
+        // comparing; a raw trim let a row stored as 'alpha' and a walk for
+        // the short name 'a' miss each other - the double-rule the guard
+        // exists to stop.
+        let _root = crate::paths::DeclaredRoot::declare("kingalias");
+        let dir = _root.path().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        let config = dir.join(".fno").join("config.toml");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(
+            &config,
+            "[work.workspaces.ws1]\nprojects = [{ name = \"alpha\", short_name = \"a\" }]\n",
+        )
+        .unwrap();
+        // project_map reads `<cwd>/.fno/config.toml`, so the registry dir's
+        // own .fno carries the map.
+        let registry = write_registry_with_level(&dir, "busy", Some("alpha"), 1);
+
+        assert_eq!(
+            live_crown_holder_in(&registry, "a", &dir),
+            Some("reigning-king".to_string())
+        );
+        let aliased_row = {
+            let mut rows = serde_json::json!({"schema_version": 11, "agents": []});
+            rows["agents"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "name": "reigning-king",
+                    "cwd": "/tmp",
+                    "status": "busy",
+                    "created_at": "2026-08-23T00:00:00Z",
+                    "crown_level": 1,
+                    "crown_scope": "a",
+                    "crown_grantor": "human",
+                }));
+            let path = dir.join("registry2.json");
+            fs::write(&path, rows.to_string()).unwrap();
+            path
+        };
+        assert_eq!(
+            live_crown_holder_in(&aliased_row, "alpha", &dir),
+            Some("reigning-king".to_string())
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_successor_wake_is_refused_by_the_respawn_ceiling_like_any_walk() {
+        // Wake mode normally drops the ceiling term (the caller's wake ledger
+        // is the bound there); a successor is a king generation, so the
+        // respawn budget binds it. The gate fires before any board read, so
+        // this needs no live fno binary to prove the refusal.
+        let _root = crate::paths::DeclaredRoot::declare("kingsucc");
+        let dir = _root.path().to_path_buf();
+        // Env lock + pin: space_dir reads process-global state.
+        let kings = crate::paths::space_dir(&dir).join("kings");
+        fs::create_dir_all(&kings).unwrap();
+        fs::write(
+            &kings.join("k.md"),
+            "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 4\nrespawn_ceiling: 4\n---\n",
+        )
+        .unwrap();
+        let mut q = KingQueue::from_manifest_full(
+            &dir,
+            "k",
+            "fno".to_string(),
+            true,
+            Some("reigning-king"),
+            true,
+        )
+        .unwrap();
+        assert!(q.at_respawn_ceiling());
+        assert!(
+            q.next().is_ok_and(|unit| unit.is_none()),
+            "an at-ceiling successor yields no unit, before any board read"
+        );
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -678,8 +1248,10 @@ mod tests {
         // Two walks raced past the stale ceiling check; the loser sees the
         // locked increment return a count PAST the ceiling and must yield no
         // unit. Simulated by bumping the file between construction and next().
-        let dir = std::env::temp_dir().join(format!("kingrace-{}", std::process::id()));
-        let kings = dir.join(".fno").join("kings");
+        let _root = crate::paths::DeclaredRoot::declare("kingrace");
+        let dir = _root.path().to_path_buf();
+        // Env lock + pin: space_dir reads process-global state.
+        let kings = crate::paths::space_dir(&dir).join("kings");
         fs::create_dir_all(&kings).unwrap();
         let path = kings.join("k.md");
         fs::write(
@@ -687,7 +1259,8 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 3\nrespawn_ceiling: 4\n---\n",
         )
         .unwrap();
-        let mut q = KingQueue::from_manifest(&dir, "k", "fno".to_string(), false, None).unwrap();
+        let mut q = KingQueue::from_manifest_full(&dir, "k", "fno".to_string(), false, None, false)
+            .unwrap();
         assert!(!q.at_respawn_ceiling(), "3 of 4 is under the ceiling");
         // The concurrent winner bills the ceiling first...
         assert_eq!(bump_respawn_count(&path).unwrap(), 4);
@@ -696,6 +1269,7 @@ mod tests {
             !q.bill_one_respawn().unwrap(),
             "the race loser must not dispatch"
         );
+        fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
         fs::remove_dir_all(&dir).ok();
     }
 }

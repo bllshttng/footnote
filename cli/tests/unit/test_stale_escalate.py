@@ -29,7 +29,7 @@ def _tail(text: str, age_s: float):
     from fno.agents.watchdog import TailFacts
 
     return TailFacts(
-        [(_NOW - age_s, text)], _NOW - age_s, text, "assistant", text, "text"
+        [(_NOW - age_s, text)], _NOW - age_s, text, "assistant", text
     )
 
 

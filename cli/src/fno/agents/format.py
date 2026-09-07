@@ -211,6 +211,10 @@ def serialize_entry(
         # `session_id` (the resume-target id, which is the 8-hex jobId for
         # claude) and from `short_id` (the transport key).
         "harness_session_id": entry.harness_session_id,
+        # The lane the row was spawned on ("pane"|"thread"|"headless"), read
+        # from the registry record and never inferred from mux or thread_id:
+        # a paneless pane row and a thread row would then read identically.
+        "substrate": getattr(entry, "substrate", None),
         # The two identity axes, stated explicitly (x-dfe7): `thread_id` is
         # the stable fno identity one worker keeps across succession, and
         # `current_session_id` is the address delivery follows NOW. They are
@@ -290,6 +294,10 @@ def serialize_entry(
         "crown_level": entry.crown_level,
         "crown_scope": entry.crown_scope,
         "crown_grantor": entry.crown_grantor,
+        # The parent edge the orphan check keys on. Null is a real answer (an
+        # ambiguous identity resolve records no lineage rather than a wrong
+        # one): this worker is invisible to its spawner's orphan check.
+        "spawned_by_session": getattr(entry, "spawned_by_session", None),
         # How this session came to exist: "operator" for one a human started by
         # hand, "spawn" for a footnote-created worker, null for a row nothing
         # stamped. The reap lane REFUSES on "operator", so a human auditing that

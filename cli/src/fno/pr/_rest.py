@@ -146,7 +146,7 @@ def _redact_userinfo(text: str) -> str:
 
     A remote URL reaches an operator-facing sentence, and that sentence is
     published: it rides the coverage note into the `fno/review-coverage`
-    commit status on GitHub, and into `.fno/events.jsonl`. A CI-shaped clone
+    commit status on GitHub, and into the project event journal. A CI-shaped clone
     carries its token in the userinfo (`https://x-access-token:ghs_...@host/
     owner/repo.git`), and such a remote reaches the non-GitHub arm precisely
     BECAUSE its host is not github.com - so the credential is exactly what

@@ -188,6 +188,18 @@ The mux squad store uses the exact worker identity pair `(harness, harness_sessi
 
 The agents lifecycle store at `~/.fno/agents/events.jsonl` owns `agent_spawned` receipts. The repository-local `.fno/events.jsonl` is a project event journal and is not a spawn-receipt source. Persistent thread receipts emit `substrate: thread`; `bg` remains an input alias during the compatibility window, while pane receipts continue to emit `substrate: pane`.
 
+### The registry is keyed by identity. Harness facts are served, never stored
+
+The registry's primary key is the pair `(harness, harness_session_id)`. The row's `name` is a mutable label and an alias. Two rows can share a label. A writer that cannot prove the identity it is writing to must refuse. Every lifecycle verb (stop, remove, mail, respawn) resolves its target by identity first. Only a caller that supplied no identity falls back to the label. A stored snapshot field is never the truth about a live session. Status, a pid, an init-time manifest claim: each is at best a stale measurement.
+
+Readers get facts served with their measurement time instead. The reconcile sweep is the only writer of `liveness` (`alive|dead|unmeasured`). It always pairs the word with `liveness_measured_at`. While the stamp is young, a reader trusts the pair. An old stamp sends the reader back to the status ladder. The sweep's transcript-tail batch also reads the harness's own title for the session. Sources: claude's Ctrl+R `agent-name` transcript record, codex's threads index, opencode's session store. The sweep stores the title only as its diff baseline, emits `agent_renamed` on change, and never rewrites the label. A `/model` inside a worker reports through the PostModelSwitch hook. The daemon stamps `model_basis: verified` on a real change and emits `agent_model_changed`. The spawn-time `requested_model` is untouched.
+
+The daemon's `agent.watch` RPC is the subscription face of that registry. It serves the full document on connect. It serves again whenever the registry's (mtime, len) stamp moves, which is what any write does to the file. Otherwise it answers a bare version echo, so a subscriber pays one stat per idle tick. The mux sideline subscribes through it. Reading `registry.json` directly is the degraded fallback for the supported no-daemon shape. The fallback announces itself with one log line.
+
+### Mail origin and crown are separate axes
+
+Mail `origin` is a channel claim and is floored to `peer` whenever the caller has an agent identity. A crown is ambient sender standing. The renderer uses the sender's full session ID to read its live registry row. The message cannot assert a crown with an origin value, body text, or flag. The trailer reports that verified rung and scope separately from the content's warrant. It never implies operator authority, and the recipient can still challenge the ruling. An unreadable registry grants no crown.
+
 ### Registry row removal is never silent
 
 Every registry row removal announces itself at the write choke point, whatever door drops the row. The remover stages a recovery receipt under `<agents home>/reap-receipts/` first. It then emits one `registry_row_removed` event per row into the same lifecycle store, naming the row and the remover. A row with no resumable identity still announces, with `receipt_staged: false`. `update_registry` is the only removal door in both languages (Rust `state.rs`, Python `registry.py`), so a removal with no event cannot exist. `agent_row_reaped` remains the reap door's own richer event. `registry_row_removed` fires for every door beside it.

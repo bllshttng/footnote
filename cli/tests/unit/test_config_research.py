@@ -29,7 +29,6 @@ def _load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str):
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     return config_mod.load_settings()
 
 
@@ -39,7 +38,6 @@ def _config_get(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, conte
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     from fno.cli import app
 
     return CliRunner().invoke(app, ["config", "get", key])

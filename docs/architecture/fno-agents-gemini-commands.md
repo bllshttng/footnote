@@ -170,7 +170,7 @@ The gemini integration was developed against gemini CLI 0.42.0 and the following
 | stop | no-op between asks; emits `agent_stopped` event | Mirror of codex; PTY signal-the-pgid is not yet wired |
 | rm | deletes registry row; preserves on-disk session files | Mirror of codex; gemini owns `~/.gemini/tmp/` |
 | reconcile | tri-state probe via `gemini_session_reachable` | Same code path as claude / codex through the lifted base class |
-| attach | exit 13 + placeholder hint (interactive attach not yet supported) | `agent_attach_refused` event with `provider="gemini"` |
+| attach | exit 13, refused by name: the gemini row declares no `features.attach` claim, so it reads `unmeasured` and the refusal names the probe that settles it | `agent_attach_refused` event with `provider="gemini"`, reason `features-attach-unmeasured` |
 
 ## Forward compatibility
 

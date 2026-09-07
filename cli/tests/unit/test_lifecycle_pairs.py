@@ -83,6 +83,12 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
     # -- self-inverse: the same verb reverses itself --
     Pair("backlog", "rank", "rank"),
     Pair("backlog", "update", "update"),
+    # requeue releases a dead worker's wedge (open do row + claim); update
+    # --locked-by re-locks the node, returning it to in_progress.
+    Pair("backlog", "requeue", "update"),
+    # contain stamps contained_in + parent; its correction is update's
+    # --parent null flag, which the contain epilog names verbatim.
+    Pair("backlog", "contain", "update"),
     # -- corrections whose forward transition is not a verb in this app --
     Pair(
         "backlog",
@@ -103,13 +109,13 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
     "backlog": frozenset({
         "add", "advance", "album", "annotate", "archive", "archive-dedupe-ids",
         "bases", "backfill-deferred-kind", "batch", "board", "capture", "carveout",
-        "collisions", "cost",
+        "collisions", "contain", "cost",
         "decide", "decide-reindex", "decide-retract", "decisions", "decompose", "defer",
         "demand", "dispatch-lanes", "discover", "done", "encounter", "epic", "find", "get", "groom",
         "idea", "intake", "join", "lane-fill", "lanes", "maintain", "migrate-difficulty",
         "migrate-priorities", "migrate-updated-at", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",
-        "rank", "ready", "reconcile", "reconcile-findings", "rehash", "retro",
+        "rank", "ready", "reconcile", "reconcile-findings", "requeue", "retro",
         "relatedness", "remove", "render-views", "reopen", "reprioritize", "roadmap",
         "session", "status", "stuck-epics", "supersede", "task", "triage",
         "unarchive", "unclaim", "undefer", "undispatched", "unqueue", "unsupersede", "update",

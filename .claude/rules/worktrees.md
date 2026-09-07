@@ -1,6 +1,6 @@
 # Worktree convention
 
-The single place that says where git worktrees go and what to do after creating one. Loaded every session via `AGENTS.md`. Skill defaults that place worktrees elsewhere lose to this rule.
+The single place that says where git worktrees go and what to do after creating one. Skill defaults that place them elsewhere lose to this rule.
 
 Read [worktree-mechanics](../../docs/architecture/worktree-mechanics.md) for hook internals, removal, cargo storage, and the Bash isolation map. Before editing the `WorktreeCreate` hook: a non-zero exit on the wrong payload shape CREATES the worktree you meant to block. In a worktree, Bash refuses `$` expansion, `$(...)`, and loops. Use `printenv`, fno verbs, or `bash <file>`.
 
@@ -25,17 +25,17 @@ bash scripts/setup/setup-worktree.sh
 
 **`EnterWorktree` by NAME fails here**: name-only defers and the caller hard-fails with no worktree. So add first, enter by path. Any path in `git worktree list` is enterable, and a `/target` cold-start reads it from the `fno target start` receipt. A shell `cd` will not do. It does not persist across tool calls.
 
-Setup links shared state from canonical: vault symlink, per-file `.fno/` state, gitignored `.claude/` subdirs, harness config roots. It warns and skips real files. Tracked files come from git checkout.
+Setup links shared state from canonical: vault symlink, gitignored `.claude/` subdirs, harness config roots. It warns and skips real files. Tracked files come from git checkout.
 
 ## Removal
 
 The removal contract, missing until 174 trees piled up (74 GB). Three buckets, one trigger, one gate:
 
-- **DIRTY** - never touched by any automatic path. Report only.
+- **DIRTY** - the merge reaper takes a done-and-merged tree whatever its git status; unpushed HEAD still holds (law d-cfcf5a8e).
 - **clean + unmerged** - never auto-pruned. Report the branch so a human judges (open PR or abandoned work).
 - **clean + merged** - prune the TREE, keep the BRANCH. The tree is a checkout. The branch is the work.
-- **Trigger: MERGE, never node-done.** A done node can sit on an unmerged branch whose only checkout is that tree. The post-merge ritual is the home.
-- **Gate: `reapable`** (`fno agents workspace worktree reapable`). The tool enforces the buckets, not each caller.
+- **Trigger: MERGE, never node-done.** Mint sites: `fno do pr merge`, the post-merge ritual; the daemon reaper pays after a grace window.
+- **Gate: `reapable`** (`fno agents workspace worktree reapable`) enforces the buckets, not each caller.
 - **Backstop: the daemon's daily `cleanup --merged` sweep** - the ritual only sees its own PRs.
 
 Verb: `fno agents workspace worktree cleanup --merged` (dry-run default, `--apply` executes, from canonical). Orders, guards, and events in [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
@@ -65,4 +65,4 @@ Exception: `/speculate` keeps its own `.claude/worktrees/<name>` placement even 
 
 ## Override semantics
 
-An explicit in-conversation user request for a different path outranks this rule; note that `.fno/` state links will not exist there. Do not solicit overrides.
+An explicit in-conversation user request for a different path outranks this rule. Project state resolves through the repo's space regardless of worktree. Do not solicit overrides.

@@ -194,7 +194,7 @@
         "pid_alive": true
       },
       "expected": {
-        "status": "live",
+        "status": "quiet",
         "basis": "stale-spawning-live-pid"
       }
     },
@@ -254,7 +254,7 @@
         "pid_alive": true
       },
       "expected": {
-        "status": "live",
+        "status": "quiet",
         "basis": "stale-spawning-live-pid"
       }
     },

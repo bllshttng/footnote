@@ -8,6 +8,8 @@
 #   soft-outside-hooks: `--soft` flag in cli/ or skills/ (allowed under hooks/)
 #   unwrapped-set-gate: `bash .../set-gate.sh ...` not wrapped in
 #                       `if !`/`||`/`&&` and not under `set -e` at file scope
+#   gate-lane-journal:  a hand-built <root>/.fno/events.jsonl under
+#                       cli/src/fno/pr/ or cli/src/fno/review/
 #
 # Exit codes:
 #   0  clean
@@ -115,6 +117,39 @@ done < <(
         | grep -v '/tests/' \
         || true
 )
+
+# Rule 4: gate-lane-journal
+# The merge-gate lane must resolve its event journal through fno.paths
+# (project_log / project_events_json): a hand-built <root>/.fno/events.jsonl
+# here is what read a migrated-away file and reported covered PRs unreviewed.
+# Scoped to these two directories on purpose: the remaining production sites
+# are a per-lane paydown, and their live count is named below so the debt is
+# read rather than inferred.
+HAND_BUILT_JOURNAL='\.fno["'"'"' /,()]{0,10}events\.jsonl'
+while IFS= read -r hit; do
+    [[ -z "$hit" ]] && continue
+    echo "hand-built project journal at $hit" >&2
+    remediation "resolve through fno.paths project_log(\"events.jsonl\", project_root=...) or project_events_json() instead"
+    violations=$((violations + 1))
+done < <(
+    grep -rEn "$HAND_BUILT_JOURNAL" \
+        --include='*.py' \
+        cli/src/fno/pr cli/src/fno/review 2>/dev/null \
+        || true
+)
+
+# The debt outside the gate lane, same pattern: real hand-built sites (hooks
+# today) that stay legal until their own lane sweeps them.
+remaining_hand_built=$(
+    grep -rEn "$HAND_BUILT_JOURNAL" \
+        --include='*.py' --include='*.rs' --include='*.sh' \
+        cli/src crates hooks scripts 2>/dev/null \
+        | grep -v '/tests/' \
+        | grep -vE '^cli/src/fno/(pr|review)/' \
+        | grep -v 'scripts/lint/events-discipline.sh' \
+        | grep -c . || true
+)
+printf '  note: %s hand-built journal site(s) or references remain outside the gate lane; sweep them lane by lane\n' "$remaining_hand_built" >&2
 
 if [[ $violations -gt 0 ]]; then
     echo "events-discipline: $violations violation(s) found" >&2

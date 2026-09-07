@@ -55,6 +55,7 @@ from typing import Any, Literal, NamedTuple, Optional
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
 from fno.agents.naming import agent_name
+from fno.control_plane import emit_tick, scheduler_from_env
 from fno.provenance import autobrief as _autobrief
 
 _LOG = logging.getLogger(__name__)
@@ -168,6 +169,10 @@ class AdvanceResult:
     node_id: Optional[str] = None
     short_id: Optional[str] = None
     detail: Optional[str] = None
+    # Resolved substrate of the launch ("bg" | "thread" | "headless"); set on
+    # dispatched results only. "headless" is synchronous: the worker already
+    # ran and released its claim before this result exists.
+    substrate: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Make an invalid (decision, event) combination a loud construction
@@ -1314,9 +1319,11 @@ def _spawn_worker(
     dispatch_account: Optional[str] = None,
     permission_mode: Optional[str] = None,
     node: Optional[dict] = None,
+    dispatch_reservation: Optional[tuple] = None,
     caller: str = "unknown",
     events_path: Optional[Path] = None,
     grid_reason: Optional[str] = None,
+    receipt: Optional[dict] = None,
 ) -> str:
     """Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
 
@@ -1420,6 +1427,32 @@ def _spawn_worker(
     # reach the resolver too, or the command follows the stage table instead.
     launch_axis = _launch_harness_axis(launch, node_cwd)
     node_verb = (verb or "").strip() or None
+    # x-0961: "declared nothing" and "declaration eaten by a lossy feed" used
+    # to produce a byte-identical dispatch. The `verb` param collapses both to
+    # None; only the node dict carries the difference, so the receipt names it
+    # - and reads the DICT alone, never the verb param, so a caller whose verb
+    # diverges from the dict surfaces as verb=builtin beside verb_source=
+    # declared (the mismatch this field exists to expose) instead of a receipt
+    # that launders the divergence. A dict without the key at all can only
+    # come from a projection that dropped it - the exact silent loss this
+    # names out loud. Canonicalized the same way the resolver's allowlist rung
+    # does, so receipt and command agree on the spelling.
+    if isinstance(node, dict) and "dispatch_verb" in node:
+        verb_source = (
+            "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
+        )
+    else:
+        verb_source = "field-absent"
+        print(
+            f"advance: WARNING: dispatching {node_id} without knowing whether it "
+            f"declared a verb: the node dict {caller} passed carries no "
+            "dispatch_verb key. The selection projection feeding this dispatcher "
+            "is lossy (x-0961); fix the projection, not the node.",
+            file=sys.stderr,
+        )
+    receipt_verb = node_verb or "builtin"
+    if receipt_verb.startswith("/fno:"):
+        receipt_verb = "/" + receipt_verb[len("/fno:"):]
     resolve_kwargs: dict = {
         "harness": ((harness or "").strip() or launch_axis or None),
         "node_id": node_id,
@@ -1464,12 +1497,17 @@ def _spawn_worker(
     # default, byte-identical to today.
     if model:
         cmd += ["--model", model]
-    # x-dfa4: an explicit permission_mode wins; else the autonomous-dispatcher
-    # config default (config.agents.spawn_permission_mode). Both empty = unchanged.
+    # x-dfa4: an explicit permission_mode wins; else the operator's spawn
+    # default (config.agents.defaults.permission_mode); else the built-in
+    # unattended answer (x-7198). Never unset for a claude dispatch below.
     mode = (permission_mode or "").strip()
     if not mode and settings_obj is not None:
         try:
-            mode = (settings_obj.agents.spawn_permission_mode or "").strip()
+            from fno.agents.spawn_defaults import SPAWN_PERMISSION_BUILTIN
+
+            mode = (
+                settings_obj.agents.defaults.permission_mode or ""
+            ).strip() or SPAWN_PERMISSION_BUILTIN
         except Exception:  # noqa: BLE001 - fail-safe to unset (unchanged)
             mode = ""
     # CLAUDE-ONLY, mirroring dispatch-node.sh: the spawn seam exit-2 rejects a
@@ -1490,6 +1528,13 @@ def _spawn_worker(
     # and the events into the account's home where nothing looks (x-c33e).
     if dispatch_account:
         cmd += ["--dispatch-account", dispatch_account]
+    # x-0961: the worker-to-node join. Without --node the registry row carries
+    # node: null, so no instrument can answer which worker is on which node;
+    # every manual spawn passes it, which is why manual dispatches joined and
+    # advance dispatches did not.
+    cmd += ["--node", node_id]
+    if node_slug:
+        cmd += ["--slug", node_slug]
     cmd += ["--name", agent_name, target_cmd]
 
     # The brief (US3) rides the spawn subprocess env as TARGET_BRIEF (never the
@@ -1517,6 +1562,17 @@ def _spawn_worker(
     # merge so the resolver's own value (either way) is the only one that lands.
     base_env = {k: v for k, v in os.environ.items() if k != "TARGET_NO_MERGE"}
     run_env = {**base_env, **merged_env} if merged_env else (base_env or None)
+    # x-0961: the caller's dispatch:<id> reservation and the --node spawn
+    # door's own family-2 guard collide - the door acquires the SAME key,
+    # sees a foreign `advance:<pid>` holder it must never clear, and refuses
+    # with reservation-held. Hand the reservation over: release ours just
+    # before shelling the door, and the door's O_EXCL acquisition (its
+    # reservation plus the node:<id> handover) immediately re-closes the
+    # sub-second window. A racing dispatcher in that window is refused by the
+    # door's own atomic node-handover, so the release cannot double-dispatch.
+    if dispatch_reservation is not None:
+        _res_key, _res_holder, _res_root = dispatch_reservation
+        _safe_release(_res_key, _res_holder, _res_root)
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=600, env=run_env
     )
@@ -1524,6 +1580,17 @@ def _spawn_worker(
         stderr = (proc.stderr or "").strip()
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
             raise SpawnAlreadyRunning(f"agent {agent_name} already exists")
+        # The --node door's family-2 guard dedups (a peer door won the node
+        # handover, or our released reservation was re-taken mid-launch) by
+        # refusing with already-running. That is the benign skip the caller's
+        # own reservation used to produce, not a spawn failure - including the
+        # race where we handed the reservation over and lost the re-acquire.
+        if (
+            proc.returncode == 2
+            and "node dispatch refused" in stderr
+            and "verdict=already-running" in stderr
+        ):
+            raise SpawnAlreadyRunning(f"door refused {node_id}: {stderr[:120]}")
         raise SpawnError(
             f"fno agents spawn exited {proc.returncode}: "
             f"{(stderr or proc.stdout or '').strip()[:200]}"
@@ -1573,6 +1640,8 @@ def _spawn_worker(
             "account": dispatch_account or "",
             "substrate": substrate,
             "command": target_cmd,
+            "verb": receipt_verb,
+            "verb_source": verb_source,
             "cwd": node_cwd or "",
             "caller": caller,
             "grid": grid_why or "",
@@ -1580,6 +1649,19 @@ def _spawn_worker(
         },
         events_path,
     )
+    if receipt is not None:
+        # Filled from the same values the EVENT_SPAWNED row carries, so the
+        # row and the receipt cannot disagree (the row has no harness-
+        # independent form; prov is what it records).
+        receipt.update(
+            {
+                "short_id": launch_identity,
+                "substrate": substrate,
+                "harness": prov,
+                "verb": receipt_verb,
+                "verb_source": verb_source,
+            }
+        )
     return launch_identity
 
 
@@ -1935,6 +2017,12 @@ def dispatch_lanes(
             report["skipped"] = 0
         return []
 
+    from fno.claims.verdict import claim_verdicts
+
+    native_verdicts = claim_verdicts(
+        [key for node in selected for key in (f"node:{node['id']}", f"dispatch:{node['id']}")]
+    )
+
     canonical = _canonical_root()
     ev_path = events_path or _events_path(project_root or canonical)
 
@@ -1963,7 +2051,9 @@ def dispatch_lanes(
             # The lane slot (parallel-lane:<id>) is invisible to the sequential
             # advance()/dispatch-node.sh path, which dedups on node:<id> +
             # dispatch:<id>. Guard with the same dispatch:<id> reservation.
-            block_reason = _node_dispatch_block_reason(node_id, str(root))
+            block_reason = _node_dispatch_block_reason(
+                node_id, str(root), native_verdicts=native_verdicts
+            )
             dispatch_key = f"dispatch:{node_id}"
             dispatch_holder = f"advance:{os.getpid()}"
             dispatch_root = _claims_root_for(dispatch_key)
@@ -2000,86 +2090,101 @@ def dispatch_lanes(
         # re-anchored to the worker's lifecycle in target_cli._maybe_reconcile_lane_slot
         # (LD#8) once its target-init claims the node. Both are released on the
         # failure path below.
+        #
+        # Reserve-to-outcome span (x-41f7), mirroring _converge_one: every exit
+        # that is not a dispatch returns the boot-window reservation, so a raise
+        # between acquire and the dispatched receipt cannot strand the bridge.
+        dispatched = False
         try:
-            eff_harness = harness if harness is not None else node.get("provider")
-            resolved_model = _route_resolve.node_model(
-                node, explicit=model, provider=eff_harness, resolve_difficulty=False
-            )
-            # The grid must decide BEFORE the worktree is placed: placement is
-            # harness-keyed (claude-native vs external base), so it has to agree
-            # with the harness the spawn will actually use. Threading the result
-            # into both decisions keeps placement and spawn one decision. A
-            # DECLINE pins too: an unpinned spawn re-consults the grid at the
-            # spawn seam, and a capacity change in between could land the worker
-            # on a harness the worktree was not keyed for.
-            lane_grid_harness, lane_grid_model, lane_grid_why = _grid_lane_for(
-                node, model=resolved_model, provider=eff_harness
-            )
-            lane_placement_harness = _lane_harness(
-                lane_grid_harness or eff_harness, str(root)
-            )
-            worktree = _ensure_lane_worktree(
-                node_id,
-                canonical_root=root,
-                harness=lane_placement_harness,
-            )
-            # A never-policy lane runs in the canonical checkout in place; seeding
-            # a per-lane config.local.toml there would write into canonical .fno.
-            if worktree.resolve() != root.resolve():
-                _seed_lane_local_settings(
-                    worktree, node_id, _base_project_id(root)
+            try:
+                eff_harness = harness if harness is not None else node.get("provider")
+                resolved_model = _route_resolve.node_model(
+                    node, explicit=model, provider=eff_harness, resolve_difficulty=False
                 )
-            _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
-            short_id = _spawn_worker(
-                node_id,
-                str(worktree),
-                slug,
-                model=lane_grid_model or resolved_model,
-                provider=lane_grid_harness or eff_harness,
-                vendor=vendor,
-                # The placement value unconditionally: a grid pick is always a
-                # fixed point of _lane_harness today, and if that ever stops
-                # holding, the raw pick would reopen the split this pins shut.
-                harness=lane_placement_harness,
-                verb=node.get("dispatch_verb"),
-                brief=_brief,
-                node=node,
-                caller="dispatch_lanes",
-                events_path=ev_path,
-                # The door resolved the grid, so the seam's own consult never
-                # runs and the reason field would be blank on the busiest door.
-                grid_reason=lane_grid_why,
-            )
-        except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
-            # Release BOTH the boot-window reservation and the dispatch-time lane
-            # slot so the node returns to the pool (a later tick re-dispatches it).
-            _safe_release(dispatch_key, dispatch_holder, dispatch_root)
-            _LOG.warning("dispatch_lanes: lane %s skipped: %s", node_id, exc)
-            _skip(str(exc)[:200])
-            continue
+                # The grid must decide BEFORE the worktree is placed: placement is
+                # harness-keyed (claude-native vs external base), so it has to agree
+                # with the harness the spawn will actually use. Threading the result
+                # into both decisions keeps placement and spawn one decision. A
+                # DECLINE pins too: an unpinned spawn re-consults the grid at the
+                # spawn seam, and a capacity change in between could land the worker
+                # on a harness the worktree was not keyed for.
+                lane_grid_harness, lane_grid_model, lane_grid_why = _grid_lane_for(
+                    node, model=resolved_model, provider=eff_harness
+                )
+                lane_placement_harness = _lane_harness(
+                    lane_grid_harness or eff_harness, str(root)
+                )
+                worktree = _ensure_lane_worktree(
+                    node_id,
+                    canonical_root=root,
+                    harness=lane_placement_harness,
+                )
+                # A never-policy lane runs in the canonical checkout in place; seeding
+                # a per-lane config.local.toml there would write into canonical .fno.
+                if worktree.resolve() != root.resolve():
+                    _seed_lane_local_settings(
+                        worktree, node_id, _base_project_id(root)
+                    )
+                _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
+                lane_receipt: dict = {}
+                short_id = _spawn_worker(
+                    node_id,
+                    str(worktree),
+                    slug,
+                    model=lane_grid_model or resolved_model,
+                    provider=lane_grid_harness or eff_harness,
+                    vendor=vendor,
+                    # The placement value unconditionally: a grid pick is always a
+                    # fixed point of _lane_harness today, and if that ever stops
+                    # holding, the raw pick would reopen the split this pins shut.
+                    harness=lane_placement_harness,
+                    verb=node.get("dispatch_verb"),
+                    brief=_brief,
+                    node=node,
+                    dispatch_reservation=(dispatch_key, dispatch_holder, dispatch_root),
+                    caller="dispatch_lanes",
+                    events_path=ev_path,
+                    receipt=lane_receipt,
+                    # The door resolved the grid, so the seam's own consult never
+                    # runs and the reason field would be blank on the busiest door.
+                    grid_reason=lane_grid_why,
+                )
+            except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
+                _LOG.warning("dispatch_lanes: lane %s skipped: %s", node_id, exc)
+                _skip(str(exc)[:200])
+                continue
 
-        # Dispatched. Leave dispatch:<id> to expire by TTL: the worker now owns
-        # (or is acquiring) node:<id> and reconciles its lane slot at target init.
-        _emit(
-            EVENT_DISPATCHED,
-            {
-                "node_id": node_id,
-                "short_id": short_id,
-                "agent_name": _worker_agent_name(node_id, slug),
-                "lane": True,
-                "worktree": str(worktree),
-                "brief": _brief_tag,
-            },
-            ev_path,
-        )
-        receipts.append(
-            {
-                "node_id": node_id,
-                "status": "dispatched",
-                "short_id": short_id,
-                "worktree": str(worktree),
-            }
-        )
+            # Dispatched. Leave dispatch:<id> to expire by TTL: the worker now
+            # owns (or is acquiring) node:<id> and reconciles its lane slot at
+            # target init. (_skip released the slot on every other exit; the
+            # finally below released the reservation.)
+            _emit(
+                EVENT_DISPATCHED,
+                {
+                    "node_id": node_id,
+                    "short_id": short_id,
+                    "agent_name": _worker_agent_name(node_id, slug),
+                    "lane": True,
+                    "worktree": str(worktree),
+                    "verb": lane_receipt.get("verb", "builtin"),
+                    "verb_source": lane_receipt.get("verb_source", "field-absent"),
+                    "brief": _brief_tag,
+                },
+                ev_path,
+            )
+            receipts.append(
+                {
+                    "node_id": node_id,
+                    "status": "dispatched",
+                    "short_id": short_id,
+                    "worktree": str(worktree),
+                }
+            )
+            dispatched = True
+        finally:
+            if not dispatched:
+                _safe_release(dispatch_key, dispatch_holder, dispatch_root)
+
     if report is not None:
         report["dispatched"] = sum(
             receipt.get("status") == "dispatched" for receipt in receipts
@@ -2993,12 +3098,13 @@ def _observe_node_claim(
     *,
     enforce_failure_limit: bool = True,
     emit: bool = True,
+    native_info: Optional[dict] = None,
 ) -> DispatchClaimObservation:
     """Family-2 pre-dispatch verdict shared by Python and shell routes."""
     try:
         from fno.target_cli import _classify_node_claim
 
-        verdict, info = _classify_node_claim(node_id)
+        verdict, info = _classify_node_claim(node_id, info=native_info)
     except Exception:  # noqa: BLE001 - an unreadable claim must not crash advance
         verdict, info = "free", None
     info = info or {}
@@ -3037,6 +3143,8 @@ def _observe_node_claim(
             holder=holder,
             truth_status=truth,
             action=action,
+            # Session witness basis, only when the classifier reported one.
+            **({"session_basis": info["session_basis"]} if info.get("session_basis") else {}),
         )
     if emit and claim_state in ("stale", "suspect"):
         message = (
@@ -3056,30 +3164,48 @@ def _observe_node_claim(
     )
 
 
-def _node_dispatch_block_reason(node_id: str, node_cwd: Optional[str] = None) -> Optional[str]:
+def _node_dispatch_block_reason(
+    node_id: str,
+    node_cwd: Optional[str] = None,
+    *,
+    native_verdicts: Optional[dict[str, dict]] = None,
+) -> Optional[str]:
     """One pre-birth decision for node ownership plus boot reservation."""
-    observation = _observe_node_claim(node_id, node_cwd)
+    native_info = None
+    if native_verdicts is not None:
+        native_info = native_verdicts.get(f"node:{node_id}")
+        if native_info is None:
+            return "claim-verdict-unavailable"
+    observation = _observe_node_claim(node_id, node_cwd, native_info=native_info)
     if observation.blocks_dispatch:
         return observation.refusal_reason
-    if _claim_is_live(f"dispatch:{node_id}"):
+    if _claim_is_live(f"dispatch:{node_id}", verdicts=native_verdicts):
         return "already-claimed"
     return None
 
 
-def _claim_is_live(key: str, node_cwd: Optional[str] = None) -> bool:
+def _claim_is_live(
+    key: str,
+    node_cwd: Optional[str] = None,
+    *,
+    verdicts: Optional[dict[str, dict]] = None,
+) -> bool:
     # "occupied" for dispatch: a live OR a suspect claim (x-ba4b) blocks
     # selection. suspect = TTL-unexpired, dead pid (respawned worker); the TTL
     # still protects the slot, so selection must skip it, never steal.
+    if verdicts is not None and key not in verdicts:
+        return True
     if key.startswith("node:"):
-        return _observe_node_claim(key.removeprefix("node:"), node_cwd).blocks_dispatch
+        info = verdicts.get(key) if verdicts is not None else None
+        return _observe_node_claim(
+            key.removeprefix("node:"), node_cwd, native_info=info
+        ).blocks_dispatch
 
-    from fno.claims.core import claim_status
+    from fno.claims.verdict import claim_verdicts
 
     try:
-        return claim_status(key, root=_claims_root_for(key)).get("state") in (
-            "live",
-            "suspect",
-        )
+        rows = verdicts or claim_verdicts([key], root=_claims_root_for(key))
+        return rows.get(key, {}).get("state") in ("live", "suspect")
     except Exception:  # noqa: BLE001 - a probe error must not crash advance
         return False
 
@@ -3175,6 +3301,12 @@ def advance(
     # does not describe the armed value it is attached to.
     armed, rank = _auto_continue_resolve(project_root)
 
+    def _tick(acted: int, skip_reason: Optional[str], detail: str = "") -> None:
+        """One auto-continue arm row: what this advance did, or why not."""
+        emit_tick("auto_continue", scheduler=scheduler_from_env(), interval_s=1800,
+                  acted=acted, skip_reason=skip_reason,
+                  detail=(f"closed={closed_node_id or '-'} {detail}")[:200] or None)
+
     def skip(
         reason: str,
         *,
@@ -3195,6 +3327,7 @@ def advance(
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
+        _tick(0, reason, f"node={node_id or '-'} reason={reason}")
         return AdvanceResult(
             "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail
         )
@@ -3204,6 +3337,7 @@ def advance(
         if closed_node_id:
             data["closed_node_id"] = closed_node_id
         _emit(EVENT_FAILED, data, ev_path)
+        _tick(0, "spawn-failed", f"node={node_id} error={error[:120]}")
         return AdvanceResult(
             "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
         )
@@ -3337,6 +3471,7 @@ def advance(
         else:
             eff_provider = provider if provider is not None else node.get("provider")
         _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
+        next_receipt: dict = {}
         short_id = _spawn_worker(
             node_id,
             node_cwd,
@@ -3350,8 +3485,10 @@ def advance(
             node=node,
             verb=node.get("dispatch_verb"),
             brief=_brief,
+            dispatch_reservation=(dispatch_key, holder, dispatch_root),
             caller="advance",
             events_path=ev_path,
+            receipt=next_receipt,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -3386,6 +3523,8 @@ def advance(
             "node_id": node_id,
             "short_id": short_id,
             "agent_name": _worker_agent_name(node_id, node.get("slug") or node.get("title")),
+            "verb": next_receipt.get("verb", "builtin"),
+            "verb_source": next_receipt.get("verb_source", "field-absent"),
             "brief": _brief_tag,
             "rank": rank,
             **({"closed_node_id": closed_node_id} if closed_node_id else {}),
@@ -3394,9 +3533,13 @@ def advance(
     )
     if verbose:
         print(
-            f"advance: dispatched {node_id} -> target worker {short_id} (brief={_brief_tag})",
+            f"advance: dispatched {node_id} -> target worker {short_id} "
+            f"(verb={next_receipt.get('verb', 'builtin')} "
+            f"source={next_receipt.get('verb_source', 'field-absent')} "
+            f"brief={_brief_tag})",
             file=sys.stderr,
         )
+    _tick(1, None, f"node={node_id} worker={short_id}")
     # Wake the active-backlog drain daemon (node x-c070): a successor may now be
     # unblocked. Best-effort; the poll floor is the guarantee.
     try:
@@ -3454,10 +3597,12 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
     # itself some other node's `parent` is an epic, and `/target` builds its
     # leaves, not the box. Mirror cmd_next's `_pick_ready` exclusion on this
     # edge-following path so a now-unblocked epic dependent is skipped here too.
-    parent_ids = {
-        e.get("parent") for e in entries
-        if isinstance(e, dict) and isinstance(e.get("parent"), str)
-    }
+    # `_container_ids` is the one implementation (an owner of only contained
+    # children is a delivery unit, not a box), so this path cannot drift from
+    # `next`.
+    from fno.graph.cli import _container_ids
+
+    parent_ids = _container_ids(entries)
     # Shared guard inputs (dead-ancestor + stale-ready quarantine): the same
     # selection_guards() the `next` picker applies, so a converge dispatch never
     # revives a leaf under a killed epic or a long-abandoned ready node.
@@ -3536,16 +3681,36 @@ def _walker_live_at(project_root: str) -> bool:
     claims root from this process's, so check it there explicitly. A live walker
     there will pick the node up itself; spawning would double-launch into that
     repo (codex P2). Best-effort: a probe error never blocks dispatch."""
-    from fno.claims.core import claim_status
+    from fno.claims.verdict import claim_verdicts
 
     try:
         # live OR suspect (x-ba4b): a suspect walker claim is still an occupied
         # lane; treat it as live so we never double-launch into that repo.
-        return claim_status(
-            f"walker:{project_root}", root=Path(project_root)
-        ).get("state") in ("live", "suspect")
+        key = f"walker:{project_root}"
+        state = claim_verdicts([key], root=Path(project_root)).get(key, {}).get("state")
+        return state in ("live", "suspect")
     except Exception:  # noqa: BLE001 - a probe error must not block dispatch
         return False
+
+
+def _converge_gate(child: dict, root: str) -> Optional[str]:
+    """The pre-spawn refusal reason for one child, or None to dispatch.
+
+    The two gates ``_converge_one`` applied inline, extracted so the
+    ``--explain --epic`` preview runs the SAME classifier against the SAME
+    child and cannot describe a selection the drain would not make (x-7f1f).
+    """
+    # The spawned worker runs in the target repo, not this one. If that project
+    # already has a live walker, let it claim the node - spawning here would launch
+    # a second target into that repo (codex P2). Checked at the target root because
+    # its walker claim lives under that root's .fno/claims.
+    if _walker_live_at(root):
+        return "walker-live"
+    # Already being worked? Same liveness gate as advance() step 4. This is what
+    # makes epic-advance idempotent (AC1-EDGE): a re-run finds the first pass's workers
+    # holding node:<id> and dispatches nothing, WITHOUT depending on the 3-min
+    # dispatch TTL still being live.
+    return _node_dispatch_block_reason(child["id"], root)
 
 
 def _converge_one(
@@ -3576,6 +3741,8 @@ def _converge_one(
     Emits exactly one of advance_dispatched / advance_skipped / advance_failed
     (LD#12) and returns the matching AdvanceResult. Never raises: a spawn failure
     releases the reservation (node stays re-dispatchable) and resolves to failed.
+    Every exit that is not a dispatch releases the reservation (x-41f7), so only
+    a dispatched worker keeps the boot-window bridge.
     """
     node_id = node_meta["id"]
     slug = node_meta.get("slug") or node_meta.get("title")
@@ -3607,20 +3774,12 @@ def _converge_one(
             "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
         )
 
-    # The spawned worker runs in the target repo, not this one. If that project
-    # already has a live walker, let it claim the node - spawning here would launch
-    # a second target into that repo (codex P2). Checked at the target root because
-    # its walker claim lives under that root's .fno/claims.
-    if _walker_live_at(root):
-        return skip("walker-live")
-
-    # Already being worked? Same liveness gate as advance() step 4. This is what
-    # makes epic-advance idempotent (AC1-EDGE): a re-run finds the first pass's workers
-    # holding node:<id> and dispatches nothing, WITHOUT depending on the 3-min
-    # dispatch TTL still being live.
-    block_reason = _node_dispatch_block_reason(node_id, root)
-    if block_reason:
-        return skip(block_reason)
+    # The pre-spawn gates, shared verbatim with the --explain preview
+    # (_converge_gate): a live walker in the target repo, then the node-claim
+    # liveness gate.
+    gate = _converge_gate(node_meta, root)
+    if gate:
+        return skip(gate)
 
     from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim
 
@@ -3642,52 +3801,75 @@ def _converge_one(
     except Exception as exc:  # noqa: BLE001
         return skip("claim-error", detail=str(exc))
 
+    # Reserve-to-outcome span (x-41f7): every exit that is not a dispatch
+    # returns the boot-window reservation, so a raise between acquire and the
+    # dispatched receipt can no longer strand the bridge (dispatch:x-e882 was
+    # held forever by exactly that shape).
+    dispatched = False
     try:
-        eff_provider = provider if provider is not None else node_meta.get("provider")
-        _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node_meta)
-        short_id = _spawn_worker(
-            node_id,
-            root,
-            slug,
-            model=_route_resolve.node_model(
-                node_meta, explicit=model, provider=eff_provider, resolve_difficulty=False
-            ),
-            provider=eff_provider,
-            verb=node_meta.get("dispatch_verb"),
-            brief=_brief,
-            node=node_meta,
-            caller="_converge_one",
-            events_path=ev_path,
-        )
-    except SpawnAlreadyRunning:
-        _safe_release(dispatch_key, holder, dispatch_root)
-        return skip("already-claimed")
-    except Exception as exc:  # noqa: BLE001
-        _safe_release(dispatch_key, holder, dispatch_root)
-        return failed(str(exc))
+        try:
+            eff_provider = provider if provider is not None else node_meta.get("provider")
+            _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node_meta)
+            spawn_receipt: dict = {}
+            short_id = _spawn_worker(
+                node_id,
+                root,
+                slug,
+                model=_route_resolve.node_model(
+                    node_meta, explicit=model, provider=eff_provider, resolve_difficulty=False
+                ),
+                provider=eff_provider,
+                verb=node_meta.get("dispatch_verb"),
+                brief=_brief,
+                node=node_meta,
+                dispatch_reservation=(dispatch_key, holder, dispatch_root),
+                caller="_converge_one",
+                events_path=ev_path,
+                receipt=spawn_receipt,
+            )
+        except SpawnAlreadyRunning:
+            return skip("already-claimed")
+        except Exception as exc:  # noqa: BLE001
+            return failed(str(exc))
 
-    _emit(
-        EVENT_DISPATCHED,
-        _tag(
-            {
-                "node_id": node_id,
-                "short_id": short_id,
-                "agent_name": _worker_agent_name(node_id, slug),
-                "cross_project": cross_project,
-                "brief": _brief_tag,
-            }
-        ),
-        ev_path,
-    )
-    if verbose:
-        _scope = f"mission {mission} " if mission else ""
-        _kind = "cross-project" if cross_project else "same-project"
-        print(
-            f"advance: dispatched {_scope}{_kind} {node_id} -> "
-            f"target worker {short_id} (--cwd {root}) (brief={_brief_tag})",
-            file=sys.stderr,
+        _emit(
+            EVENT_DISPATCHED,
+            _tag(
+                {
+                    "node_id": node_id,
+                    "short_id": short_id,
+                    "agent_name": _worker_agent_name(node_id, slug),
+                    "cross_project": cross_project,
+                    "verb": spawn_receipt.get("verb", "builtin"),
+                    "verb_source": spawn_receipt.get("verb_source", "field-absent"),
+                    "brief": _brief_tag,
+                }
+            ),
+            ev_path,
         )
-    return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
+        if verbose:
+            _scope = f"mission {mission} " if mission else ""
+            _kind = "cross-project" if cross_project else "same-project"
+            print(
+                f"advance: dispatched {_scope}{_kind} {node_id} -> "
+                f"target worker {short_id} (--cwd {root}) "
+                f"(verb={spawn_receipt.get('verb', 'builtin')} "
+                f"source={spawn_receipt.get('verb_source', 'field-absent')} "
+                f"brief={_brief_tag})",
+                file=sys.stderr,
+            )
+
+        dispatched = True
+        return AdvanceResult(
+            "dispatched",
+            EVENT_DISPATCHED,
+            node_id=node_id,
+            short_id=short_id,
+            substrate=spawn_receipt.get("substrate"),
+        )
+    finally:
+        if not dispatched:
+            _safe_release(dispatch_key, holder, dispatch_root)
 
 
 def _dispatch_one_dependent(
@@ -3894,48 +4076,6 @@ def _ready_leaf_children(epic_id: str) -> list[dict]:
     return [n for n in nodes if isinstance(n, dict) and n.get("id")]
 
 
-def _live_workers_by_project() -> dict[str, int]:
-    """Count occupied per-project lanes to seed max_lanes.
-
-    max_lanes is a per-project concurrency cap, so a project that already has a
-    worker occupies a lane and the epic advance must count it before deciding how many
-    MORE to dispatch. Counts BOTH live/suspect ``node:<id>`` claims (a running
-    worker) AND live/suspect ``dispatch:<id>`` reservations (the boot-window
-    bridge a just-dispatched worker holds before it owns node:<id>) - else an
-    immediate rerun during that boot window would under-count the lane and
-    over-dispatch a second same-project child past the cap (codex P2). Deduped by
-    node id so a child holding both claims counts once. Best-effort: any read
-    fault degrades to an empty map (no seed), never blocks the pass.
-    """
-    counts: dict[str, int] = {}
-    try:
-        from fno.claims.core import list_claims
-        from fno.claims.io import global_claims_root
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json
-
-        root = global_claims_root()
-        occupied: set[str] = set()
-        for prefix in ("node:", "dispatch:"):
-            for claim in list_claims(prefix=prefix, include_stale=False, root=root):
-                key = claim.get("key")
-                if isinstance(key, str):
-                    occupied.add(key.removeprefix(prefix))
-        if not occupied:
-            return counts
-        by_id = {
-            e["id"]: e for e in read_graph(graph_json())
-            if isinstance(e, dict) and isinstance(e.get("id"), str)
-        }
-        for nid in occupied:
-            proj = (by_id.get(nid) or {}).get("project")
-            if proj:
-                counts[proj] = counts.get(proj, 0) + 1
-    except Exception:  # noqa: BLE001 - a live-count read must never block the epic advance
-        return counts
-    return counts
-
-
 def _binding_provider() -> Optional[str]:
     """The configured provider with the least lane headroom, or None.
 
@@ -4110,20 +4250,20 @@ def advance_epic(
         _emit(EVENT_MISSION_DEACTIVATED, {"epic_id": canon, "reason": "stop"}, ev_path)
         return AdvanceEpicResult(canon, deactivated=True)
 
-    # Same opt-in gate as advance()/advance_dependents. A live walker owning THIS
-    # repo would pick nodes up itself; the epic-advance verb is the explicit converge tool, so a
-    # global walker is a skip. (Per-child, a foreign-repo walker is handled in
-    # _converge_one's own _walker_live_at.) Unlike the merge-advance path, this
-    # standalone epic verb has no paired advance() call to record the decision, so
-    # emit the skip receipt here or a gated epic advance is silent in the event stream
-    # (codex P2 - LD#12 parity).
+    # Same opt-in gate as advance()/advance_dependents. Unlike the merge-advance
+    # path, this standalone epic verb has no paired advance() call to record the
+    # decision, so emit the skip receipt here or a gated epic advance is silent in
+    # the event stream (codex P2 - LD#12 parity). There is deliberately NO
+    # whole-pass `walker:` guard here (x-7f1f): `_walker_key()` resolves THIS
+    # process's canonical repo root, so one live walker in the epic repo refused
+    # the entire pass, including every child living in a different repository.
+    # `_converge_one` probes `_walker_live_at(root)` per child against that
+    # child's own root, which covers the epic's own repo more accurately and
+    # leaves the other repos reachable.
     armed, rank = _auto_continue_resolve(project_root)
     if not armed:
         _emit(EVENT_SKIPPED, {"reason": "disabled", "mission": canon, "rank": rank}, ev_path)
         return AdvanceEpicResult(canon, error="disabled")
-    if _claim_is_live(_walker_key()):
-        _emit(EVENT_SKIPPED, {"reason": "walker-live", "mission": canon, "rank": rank}, ev_path)
-        return AdvanceEpicResult(canon, error="walker-live")
 
     # All descendants already done -> mission complete: verify the cascade closed
     # the epic, deactivate, emit a no-op receipt. (_container_ids guaranteed at

@@ -21,13 +21,20 @@ N implementations of one operation is a defect class this repo already
 documents, so they now call `fno agents workspace worktree reapable` and an equivalence test
 pins that they agree. When the verb cannot be reached, every caller keeps its
 own fail-closed default, which is today's behaviour exactly.
+
+The same argument reaches one class of untracked content: the symlinks
+`setup-worktree.sh` writes. On `.claude/worktrees/x-ba96` (2026-09-06) they were
+the tree's ENTIRE difference, so footnote dirtied it at creation and the DIRTY
+rule protected that dirt forever. Such a link holds no human work, so it is
+discounted and named; everything else untracked still blocks.
 """
 from __future__ import annotations
 
+import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 # Unmerged (conflict) codes, per `git status` docs. These matter because two of
 # them carry only `D` and `A` letters: reading `DD` ("both deleted") as two
@@ -35,6 +42,10 @@ from typing import Optional, Union
 # letters alone are not enough to classify a line; the conflict set is checked
 # first.
 _UNMERGED = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
+
+# What `setup-worktree.sh` links, canonical-relative: these five roots, and
+# anything one level under `.claude/`. A shape, not a list: the script's grows.
+_SETUP_LINK_ROOTS = frozenset({"internal", ".agents", ".codex", ".codex-plugin", ".gemini"})
 
 
 @dataclass(frozen=True)
@@ -45,6 +56,7 @@ class Verdict:
     reason: str
     detail: str = ""
     recoverable_deletions: int = 0
+    discounted: tuple[str, ...] = field(default_factory=tuple)
 
     def line(self) -> str:
         """The one-line receipt the bash and Rust callers parse.
@@ -56,7 +68,8 @@ class Verdict:
         head = (
             f"reapable={'yes' if self.reapable else 'no'} "
             f"reason={self.reason} "
-            f"recoverable_deletions={self.recoverable_deletions}"
+            f"recoverable_deletions={self.recoverable_deletions} "
+            f"discounted={len(self.discounted)}"
         )
         if self.detail:
             head += f" detail={self.detail}"
@@ -66,6 +79,58 @@ class Verdict:
 def _path_of(entry: str) -> str:
     """The path from a porcelain line, minus the two status chars and a space."""
     return entry[3:].strip() if len(entry) > 3 else entry.strip()
+
+
+def _canonical_root(worktree: Path) -> Optional[Path]:
+    """The main checkout this worktree links back to, or None if unresolvable."""
+    args = ["git", "rev-parse", "--git-common-dir"]
+    try:
+        r = subprocess.run(args, cwd=str(worktree), capture_output=True, text=True, timeout=30.0)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    common = Path(r.stdout.strip())
+    if not common.is_absolute():
+        common = worktree / common
+    return common.parent
+
+
+def _accepts(here: str, rel: str) -> bool:
+    """Does a link at ``here`` sitting over target ``rel`` read as setup's?
+
+    Setup writes each link at the same relative path as its target, one
+    directory deeper at most, so the two must agree. Without that, a hand-made
+    ``vault -> $CANONICAL/internal`` reaps under a receipt claiming setup wrote
+    it. The boundary is a whole segment: ``x.agents`` is not ``.agents``.
+    """
+    parent, _, name = rel.rpartition("/")
+    if not name or not (rel in _SETUP_LINK_ROOTS or parent == ".claude"):
+        return False
+    return here == rel or here.endswith("/" + rel)
+
+
+def _is_setup_link(link: Path, worktree: Path, canonical: Path) -> bool:
+    """Did setup-worktree.sh write this symlink?
+
+    Read the link ONE hop first: setup writes an absolute ``$CANONICAL/$rel``,
+    so the raw target IS the attribution, and resolving follows ``internal``
+    (itself a symlink) out of the checkout. The realpath pairs are the fallback
+    for a canonical reached by a different spelling (``/tmp`` vs ``/private``).
+    """
+    try:
+        target = os.readlink(link)
+        here = link.relative_to(worktree).as_posix()
+    except (OSError, ValueError):
+        return False
+    if not os.path.isabs(target):
+        return False
+    for base in (str(canonical), os.path.realpath(canonical)):
+        for candidate in (target, os.path.realpath(target)):
+            rel = os.path.relpath(candidate, base)
+            if not rel.startswith("..") and _accepts(here, rel):
+                return True
+    return False
 
 
 def is_linked_worktree(path: Union[str, Path]) -> bool:
@@ -142,14 +207,19 @@ def branch_merged(path: Union[str, Path]) -> Optional[bool]:
     return None
 
 
-def classify(porcelain: str) -> Verdict:
+def classify(porcelain: str, discount: Optional[Callable[[str], bool]] = None) -> Verdict:
     """Classify `git status --porcelain` output. Pure: no clock, no disk.
 
     Blocking, in precedence order: an unmerged conflict, untracked content,
     then any staged or unstaged modification of tracked content. Everything
     else is a deletion of a tracked file, which is recoverable from HEAD.
+
+    `discount` names untracked paths carrying no human work. It is asked about
+    `??` lines only, so tracked and unmerged dirt block as before; omit it and
+    this answers exactly what it always answered.
     """
     deletions = 0
+    discounted: list[str] = []
     for raw in porcelain.splitlines():
         if not raw.strip():
             continue
@@ -157,12 +227,19 @@ def classify(porcelain: str) -> Verdict:
         if code in _UNMERGED:
             return Verdict(False, "unmerged", _path_of(raw))
         if code == "??":
-            return Verdict(False, "untracked", _path_of(raw))
+            path = _path_of(raw)
+            if discount is not None and discount(path):
+                discounted.append(path)
+                continue
+            return Verdict(False, "untracked", path)
         letters = set(code) - {" "}
         if letters == {"D"}:
             deletions += 1
             continue
         return Verdict(False, "modified-tracked", _path_of(raw))
+    if discounted:
+        detail = ", ".join(discounted)
+        return Verdict(True, "setup-links", detail, deletions, tuple(discounted))
     return Verdict(True, "clean", "", deletions)
 
 
@@ -175,9 +252,14 @@ def reapable(path: Union[str, Path]) -> Verdict:
     target = Path(path)
     if not target.is_dir():
         return Verdict(False, "probe-failed", "path is not a directory")
+    # `-uall`, so every untracked entry is a FILE. The default collapses a
+    # directory to one line, and judging that from disk asks about children git
+    # does not track: `.gitignore` carries `**/.claude/hooks/`, so a worktree
+    # whose `cli/.claude/` holds setup's links beside an ignored `hooks/` read
+    # as real work and stayed in the kept-forever bucket this exists to empty.
     try:
         r = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain", "--untracked-files=all"],
             cwd=str(target),
             capture_output=True,
             text=True,
@@ -187,4 +269,15 @@ def reapable(path: Union[str, Path]) -> Verdict:
         return Verdict(False, "probe-failed", f"git-error: {exc}")
     if r.returncode != 0:
         return Verdict(False, "probe-failed", "git status exited non-zero")
-    return classify(r.stdout)
+
+    # Resolved on the first untracked line and not before, so a clean tree
+    # still costs one `git status` and nothing else.
+    canonical: list[Optional[Path]] = []
+
+    def _discount(rel: str) -> bool:
+        if not canonical:
+            canonical.append(_canonical_root(target))
+        root = canonical[0]
+        return root is not None and _is_setup_link(target / rel, target, root)
+
+    return classify(r.stdout, _discount)

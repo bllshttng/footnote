@@ -62,9 +62,11 @@ def infer_invoking_harness(env: Optional[Mapping[str, str]] = None) -> Optional[
     """Return the invoking harness name from env markers, or None if unclear.
 
     Inference never guesses: it returns a harness only when markers identify
-    exactly one distinct harness. Multiple markers for that same harness (for
-    example Codex's thread id plus its legacy session id) agree; markers naming
-    different harnesses remain ambiguous and fall through to None.
+    exactly one distinct harness. Multiple markers for that same harness agree
+    when they carry the same id; two DIFFERENT ids of one family (the durable
+    codex thread id against the legacy codex session id) are a disagreement
+    and fall through to None, exactly as markers naming different harnesses
+    do (x-0992).
     """
     environ = os.environ if env is None else env
     return resolve_harness_identity(environ).harness

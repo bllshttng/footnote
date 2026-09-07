@@ -31,12 +31,7 @@ from fno.adapters.providers.usage import (
     probe_usage_detail,
 )
 
-# Captured at import time, before the autouse keychain stub replaces the module
-# attribute: the one test that exercises the Keychain lookup itself needs the
-# real function, not the stub.
-from fno.adapters.providers.usage import (  # noqa: E402  isort:skip
-    _read_claude_keychain_blobs as _real_keychain_read,
-)
+from fno.adapters.providers import managed as managed_mod  # noqa: E402  isort:skip
 
 
 @pytest.fixture
@@ -50,12 +45,23 @@ def state_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _isolate_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never touch the real macOS Keychain in tests (would leak a dev's token).
 
-    Default to 'no keychain blobs'; a test that wants a Keychain token opts in
-    by re-patching _read_claude_keychain_blobs.
+    One seam for the whole tree: `binding.credential_blobs` and
+    `managed.canonical_slot_blobs` both reach the Keychain through this. A test
+    that wants a Keychain token opts in by patching `usage.credential_blobs`.
     """
-    import fno.adapters.providers.usage as usage_mod
+    from fno.adapters.providers import managed
 
-    monkeypatch.setattr(usage_mod, "_read_claude_keychain_blobs", lambda cfg: [])
+    monkeypatch.setattr(managed, "_read_claude_keychain_item", lambda _s: None)
+
+
+# Captured before the autouse stub replaces the module attribute: the one test
+# that exercises the Keychain lookup itself needs the real function.
+_real_keychain_item = managed_mod._read_claude_keychain_item
+
+
+def _blob(token: str) -> str:
+    """One credential blob carrying ``token``, the shape claude stores."""
+    return json.dumps({"claudeAiOauth": {"accessToken": token}})
 
 
 def _claude_record(creds: Path) -> ProviderRecord:
@@ -222,8 +228,8 @@ class TestProbeFailOpen:
         import fno.adapters.providers.usage as usage_mod
 
         monkeypatch.setattr(
-            usage_mod, "_read_claude_keychain_blobs",
-            lambda cfg: [
+            usage_mod, "credential_blobs",
+            lambda harness, root: [
                 json.dumps({"claudeAiOauth": {"accessToken": "stale"}}),
                 json.dumps({"claudeAiOauth": {"accessToken": "live"}}),
             ],
@@ -275,22 +281,25 @@ class TestProbeFailOpen:
         # Evidence 2b: the unscoped Keychain item belongs to whoever occupies the
         # shared ~/.claude slot. A record with its own dir must never borrow it -
         # that is how a per-account probe reports the ACTIVE account's usage.
-        import fno.adapters.providers.usage as usage_mod
+        from fno.adapters.providers import binding, managed
 
+        # The autouse fixture stubs the Keychain reader; this one test is about
+        # that reader, so it puts the real one back over its own `security`.
+        monkeypatch.setattr(managed, "_read_claude_keychain_item", _real_keychain_item)
         seen: list[str] = []
 
-        def _fake_security(args: list[str], **kwargs: object):  # noqa: ANN001
+        class _Out:
+            returncode = 44  # errSecItemNotFound: absent, not a failed read
+            stdout = ""
+            stderr = ""
+
+        def _fake_security(args: list[str]):  # noqa: ANN001
             seen.append(args[args.index("-s") + 1])
-
-            class _Out:
-                returncode = 1
-                stdout = ""
-
             return _Out()
 
-        monkeypatch.setattr(usage_mod.sys, "platform", "darwin")
-        monkeypatch.setattr(usage_mod.subprocess, "run", _fake_security)
-        _real_keychain_read(tmp_path)
+        monkeypatch.setattr(managed.sys, "platform", "darwin")
+        monkeypatch.setattr(managed, "_run_security", _fake_security)
+        binding.credential_blobs("claude", tmp_path)
         assert len(seen) == 1
         assert seen[0].startswith("Claude Code-credentials-")
 
@@ -1066,8 +1075,6 @@ class TestDispatchOneQuotaDefer:
         # FNO_EVENTS_PATH for the whole pytest process and it outranks the root,
         # so a test reading <root>/.fno/events.jsonl back must name that file.
         monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-        from fno import paths
-        paths.resolve_repo_root.cache_clear()
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True)
@@ -1107,8 +1114,6 @@ class TestDispatchOneQuotaDefer:
         # FNO_EVENTS_PATH for the whole pytest process and it outranks the root,
         # so a test reading <root>/.fno/events.jsonl back must name that file.
         monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-        from fno import paths
-        paths.resolve_repo_root.cache_clear()
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True)
@@ -1151,8 +1156,6 @@ class TestRequiredBotHeadroomCheck:
         # FNO_EVENTS_PATH for the whole pytest process and it outranks the root,
         # so a test reading <root>/.fno/events.jsonl back must name that file.
         monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
-        from fno import paths
-        paths.resolve_repo_root.cache_clear()
         monkeypatch.chdir(tmp_path)
         # Config: one required bot backed by codex.
         review = SimpleNamespace(github_apps=["chatgpt-codex-connector"], required_bots=None)
@@ -1447,8 +1450,8 @@ class TestUntaintedStampDrift:
         rec = self._record()
         self._slot(tmp_path, monkeypatch)
         monkeypatch.setattr(
-            usage_mod, "_read_claude_keychain_blobs",
-            lambda cfg: [json.dumps({"claudeAiOauth": {"accessToken": "unscoped"}})],
+            usage_mod, "credential_blobs",
+            lambda harness, root: [_blob("slot-token"), _blob("unscoped")],
         )
         used: list[str] = []
         self._arm(
@@ -1462,6 +1465,39 @@ class TestUntaintedStampDrift:
         assert snap is not None and snap.windows[0].used_pct == 22.0
         # The mismatching bearer was never spent on a usage request.
         assert used == ["unscoped"]
+
+    def test_a_login_during_the_reading_discards_it_with_a_positive_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2-RACE: identity is proven before the request, which stops another
+        account's numbers being FETCHED. The window after the request is a
+        different one: a sign-in there would file the old generation's reading
+        under the new principal. Discarding it is only half the answer -
+        `identity_changed` is the marker that says a reading existed and why it
+        was dropped, which an absent snapshot cannot say."""
+        import fno.adapters.providers.usage as usage_mod
+
+        rec = self._record()
+        self._slot(tmp_path, monkeypatch)
+        reads = {"n": 0}
+
+        def _blobs(_harness, _root):
+            reads["n"] += 1
+            token = "unscoped" if reads["n"] == 1 else "rotated"
+            return [_blob("slot-token"), _blob(token)]
+
+        monkeypatch.setattr(usage_mod, "credential_blobs", _blobs)
+        used: list[str] = []
+        self._arm(
+            monkeypatch, rec,
+            verdicts={"slot-token": "mismatch", "unscoped": "match"},
+            used=used, root=tmp_path,
+        )
+
+        snap, reason = usage_mod._probe_claude(rec, now=1000.0)
+
+        assert used == ["unscoped"]  # the reading really happened
+        assert snap is None and reason == "identity_changed"
 
     def test_every_candidate_unattributable_reports_unknown_and_repairs_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1574,9 +1610,11 @@ class TestPrincipalEvidenceTTL:
         from fno.adapters.providers import managed
 
         managed.note_slot_principal("claude", tmp_path, "acct-a", "tok-1", now=1000.0)
+        # The proof time rides along, so a reader can render a real observation
+        # age instead of restamping every cached answer as brand new.
         assert managed.cached_slot_principal(
             "claude", tmp_path, "tok-1", now=1000.0 + 60
-        ) == "acct-a"
+        ) == ("acct-a", 1000.0)
         assert managed.cached_slot_principal(
             "claude", tmp_path, "tok-1", now=1000.0 + 100_000
         ) is None
@@ -1659,9 +1697,11 @@ def test_quota_probe_is_scoped_to_the_node_repository(state_path: Path, monkeypa
     )
     import fno.adapters.providers.runtime_state as rs
 
-    monkeypatch.setattr(
-        rs, "refresh_usage", lambda pid, **k: seen.update(refresh=k.get("repo_root"))
-    )
+    def _probe(pid, **k):
+        seen.update(refresh=k.get("repo_root"))
+        return rs.UsageRefresh(None, "probe-failed")
+
+    monkeypatch.setattr(rs, "refresh_usage_detailed", _probe)
     evaluate_quota_signal("p1", priority="p2", now=1000.0, repo_root=tmp_path)
     assert seen["quota"] == tmp_path
     assert seen["refresh"] == tmp_path
@@ -1679,10 +1719,10 @@ def test_a_lost_persist_does_not_turn_exhausted_into_unknown(state_path: Path, m
 
     monkeypatch.setattr(loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True))
     # The probe returns a walled snapshot; the disk keeps nothing.
-    monkeypatch.setattr(
-        rs, "refresh_usage",
-        lambda pid, **k: _snap(pid, UsageWindow("5h", 100.0, 9e18), probed_at=1000.0),
-    )
+    def _probe(pid, **k):
+        return rs.UsageRefresh(_snap(pid, UsageWindow("5h", 100.0, 9e18), probed_at=1000.0))
+
+    monkeypatch.setattr(rs, "refresh_usage_detailed", _probe)
     sig = evaluate_quota_signal("p1", priority="p2", now=1000.0)
     assert sig.state is HeadroomState.EXHAUSTED
     assert sig.defer and sig.cutover

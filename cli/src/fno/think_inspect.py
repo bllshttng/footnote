@@ -332,7 +332,8 @@ def _database(repo: Path) -> dict[str, Any]:
         if _DB_ENV_KEYS.search(text):
             signal_paths.append(path)
     signals = sorted(dict.fromkeys(signals))
-    artifact = repo / ".fno" / "codemap.md"
+    from fno.paths import worktree_space_dir
+    artifact = worktree_space_dir(repo) / "codemap.md"
     grounded = False
     try:
         grounded = "## Database Schema" in artifact.read_text(encoding="utf-8")
@@ -359,7 +360,7 @@ def _database(repo: Path) -> dict[str, Any]:
     return {
         "detected": bool(signals) or grounded,
         "signals": signals,
-        "schema_artifact": ".fno/codemap.md" if artifact.exists() else None,
+        "schema_artifact": "codemap.md" if artifact.exists() else None,
         "schema_status": status,
     }
 

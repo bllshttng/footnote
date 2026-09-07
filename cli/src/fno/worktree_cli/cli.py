@@ -444,7 +444,7 @@ def _worktree_ensure(
         ):
             typer.echo(
                 f"worktree ensure: {policy_receipt}; "
-                f"reusing worktree at {wt}",
+                f"reusing worktree at {wt} created=false",
                 err=True,
             )
             typer.echo(str(wt))
@@ -482,7 +482,7 @@ def _worktree_ensure(
     ):
         typer.echo(
             f"worktree ensure: {policy_receipt}; reusing {br} at {existing} "
-            f"(policy resolves {wt}; a branch has one checkout)",
+            f"(policy resolves {wt}; a branch has one checkout) created=false",
             err=True,
         )
         typer.echo(str(existing))
@@ -527,7 +527,8 @@ def _worktree_ensure(
     # location, incl. a harness-native->external degradation - the resolver already
     # collapsed a non-native harness to `external`, so pol.policy is the true mode).
     typer.echo(
-        f"worktree ensure: {policy_receipt}; worktree at {wt}{base_note}",
+        f"worktree ensure: {policy_receipt}; worktree at {wt}{base_note} "
+        f"created=true",
         err=True,
     )
     typer.echo(str(wt))  # the ONLY stdout line -> the caller's $wt
@@ -540,14 +541,15 @@ def reapable(
 ) -> None:
     """Say whether removing <path> can destroy anything. Read-only.
 
-    Prints one line, e.g. `reapable=yes reason=clean recoverable_deletions=76`.
-    Exit 0 when reapable, 1 when something blocks. The three removal call sites
-    (the --merged sweep, archive-worktree.sh, the Rust row-GC probe) read this
-    instead of each deciding for itself.
+    Prints one line, e.g. `reapable=yes reason=clean recoverable_deletions=76
+    discounted=0`. Exit 0 when reapable, 1 when something blocks. The three
+    removal call sites (the --merged sweep, archive-worktree.sh, the Rust
+    row-GC probe) read this instead of each deciding for itself.
 
     A missing tracked file never blocks: HEAD holds its content, so removal
-    loses nothing. Modified tracked content, untracked files, and unmerged
-    conflicts do block, and a probe that cannot answer blocks too.
+    loses nothing. Nor do the symlinks setup-worktree.sh writes, which
+    `reason=setup-links` and `detail` name. Modified tracked content, other
+    untracked files, unmerged conflicts and an unanswerable probe do block.
     """
     from fno.worktree_reapable import reapable as _classify
 

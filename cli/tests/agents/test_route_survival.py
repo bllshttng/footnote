@@ -819,7 +819,7 @@ def test_registry_json_emits_the_new_keys_on_every_row(tmp_path, monkeypatch) ->
 # One row per door that re-enters or re-launches a Claude session:
 #
 #   door                 owned by                      wired in
-#   attach (inline)      dispatch.attach_agent         2.1
+#   attach (inline)      crates/fno-agents client_verbs run_attach (reentry.rs plan; no Python leg)
 #   resume live wake     resume_cli wake arm           2.1
 #   resume dead          resume_cli --resume arm       2.1
 #   mux attach           crates/fno server AttachAgent 2.2 (cargo matrix)
@@ -849,7 +849,7 @@ def _routed_glm_row(tmp_path, monkeypatch, *, launch_account="makers"):
     """The operator's failing shape: routed GLM worker on an isolated account."""
     path = _routed_claude_row(tmp_path, monkeypatch)
     if launch_account is not None:
-        from fno.agents.registry import load_registry, update_registry
+        from fno.agents.registry import update_registry
 
         def _stamp(rows):
             for r in rows:
@@ -859,117 +859,6 @@ def _routed_glm_row(tmp_path, monkeypatch, *, launch_account="makers"):
 
         update_registry(_stamp)
     return path
-
-
-def _capture_claude_invocation(monkeypatch):
-    """Capture every claude argv + env the attach/resume paths would run."""
-    import fno.agents.harnesses.claude as claude_mod
-
-    captured: list[dict] = []
-
-    def _fake_run(argv, **kwargs):
-        captured.append({"argv": list(argv), "env": kwargs.get("env")})
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr(claude_mod, "_subprocess_run", _fake_run)
-    return captured
-
-
-def _no_mux(monkeypatch):
-    import fno.agents.mux_spawn as mux_mod
-
-    monkeypatch.setattr(
-        mux_mod,
-        "_run_mux",
-        lambda *a, **k: subprocess.CompletedProcess([], 24, "", "no server"),
-    )
-
-
-def _attach(name: str = "router"):
-    from fno.agents.dispatch import attach_agent
-
-    return attach_agent(name)
-
-
-def test_matrix_attach_routed_row_carries_account_and_route(tmp_path, monkeypatch) -> None:
-    """Door: inline attach. Routed row: the claude invocation must carry the
-    account namespace and the route settings, never ambient env."""
-    import fno.agents.account_env as account_env_mod
-
-    class _Overlay:
-        account_id = "makers"
-        env = {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
-        lane = "config-dir"
-
-    monkeypatch.setattr(
-        account_env_mod, "resolve_account_overlay", lambda _id: _Overlay()
-    )
-    _routed_glm_row(tmp_path, monkeypatch)
-    _no_mux(monkeypatch)
-    captured = _capture_claude_invocation(monkeypatch)
-    monkeypatch.setattr(
-        "fno.agents.dispatch.is_provider_available", lambda p: True
-    )
-    _attach()
-    assert captured, "a claude attach must have run"
-    argv, env = captured[0]["argv"], captured[0]["env"]
-    assert argv[:2] == ["claude", "attach"], argv
-    assert "--settings" in argv, f"the recorded route must ride the argv: {argv}"
-    assert env and env.get("CLAUDE_CONFIG_DIR") == "/acct/makers/.claude", (
-        f"the recorded account namespace must ride the env: {env}"
-    )
-
-
-def test_matrix_attach_unknown_account_refuses_before_claude(tmp_path, monkeypatch) -> None:
-    """Door: inline attach. A routed row with no launch-account evidence
-    refuses; bare `claude attach` is never observed."""
-    from fno.agents.dispatch import DispatchAskError
-
-    _routed_glm_row(tmp_path, monkeypatch, launch_account=None)
-    _no_mux(monkeypatch)
-    captured = _capture_claude_invocation(monkeypatch)
-    monkeypatch.setattr(
-        "fno.agents.dispatch.is_provider_available", lambda p: True
-    )
-    with pytest.raises(DispatchAskError) as exc:
-        _attach()
-    assert not captured, "no claude process may start on a refused row"
-    assert "launch account" in str(exc.value)
-
-
-def test_matrix_attach_default_row_stays_bare(tmp_path, monkeypatch) -> None:
-    """Door: inline attach. Default-Anthropic control: a proven default row
-    keeps the historical bare invocation."""
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import AgentEntry, write_registry
-
-    write_registry(
-        [
-            AgentEntry(
-                name="plain",
-                cwd=str(tmp_path),
-                log_path="",
-                harness="claude",
-                short_id="deadbeef",
-                harness_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-                launch_account="default",
-            )
-        ]
-    )
-    _no_mux(monkeypatch)
-    captured = _capture_claude_invocation(monkeypatch)
-    monkeypatch.setattr(
-        "fno.agents.dispatch.is_provider_available", lambda p: True
-    )
-    result = _attach("plain")
-    assert result.exit_code == 0
-    assert captured[0]["argv"] == ["claude", "attach", "deadbeef"]
-    # env is None today (inherit). Once the resolver lands it may pass an
-    # explicit env, but a default row must NOT pin a foreign account dir.
-    env = captured[0]["env"] or {}
-    assert not env.get("CLAUDE_CONFIG_DIR") or env["CLAUDE_CONFIG_DIR"] == str(
-        Path.home() / ".claude"
-    )
 
 
 def test_matrix_resume_routed_row_wakes_under_the_binding(tmp_path, monkeypatch) -> None:
@@ -1037,7 +926,6 @@ def test_matrix_spawn_resume_inherits_the_recorded_account(tmp_path, monkeypatch
     """Door: spawn --resume (revive). The revived row inherits the source
     row's launch account - the transcript lives under the config dir it was
     created in, so the account is a fact about the transcript."""
-    from types import SimpleNamespace
 
     from fno.agents import dispatch
     from fno.agents.harnesses.base import ProviderResult

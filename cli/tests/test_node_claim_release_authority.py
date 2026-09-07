@@ -47,12 +47,14 @@ SCAN_DIRS = ["cli/src/fno", "scripts", "skills", "hooks", "crates"]
 # A NEW entry here requires an equivalent justification (a holder-verified,
 # single-authority release at a sanctioned lifecycle boundary).
 ALLOWLIST = {
-    # `fno backlog unclaim`/`release`: the sanctioned one-shot un-claim verb. Its
-    # lockfile release is holder-verified - it drops the lock ONLY when the
-    # holder is stale (PID dead / TTL expired) or matches the invoking session,
-    # and REFUSES a live foreign holder (warn + point at force-release). Single
-    # authority at an explicit operator lifecycle boundary (x-a747).
-    "cli/src/fno/graph/cli.py",
+    # `fno backlog unclaim`/`release`/`requeue`: the sanctioned one-shot un-claim
+    # and queue-return verbs. Their lockfile release is holder-verified - it
+    # drops the lock ONLY when the holder is stale (PID dead / TTL expired) or
+    # matches the invoking session, and REFUSES a live foreign holder (warn +
+    # point at force-release). Single authority at an explicit operator
+    # lifecycle boundary (x-a747). Lives in graph/requeue.py since the
+    # queue-return subject moved there out of the over-budget graph/cli.py.
+    "cli/src/fno/backlog/requeue.py",
     # init-target-state.sh: the acquire-then-validate refusal (x-e957). Releases
     # the claim THIS SAME BLOCK acquired one line earlier, with the holder it
     # just minted, when the post-acquire containment read says the node was

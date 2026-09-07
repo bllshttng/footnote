@@ -967,3 +967,18 @@ def test_execute_retask_refuses_unsupported_harness_before_clear():
 
     assert receipt["reason"] == "unsupported_switch_strategy"
     assert receipt["cleared"] is False
+
+
+def test_thread_viewport_refusal_names_the_substrate_and_cause() -> None:
+    """AC6-EDGE: an absent thread ref reads as a row defect, not a broken pipe."""
+    from fno.agents.retask import RetaskTransportError, resolve_thread_viewport
+
+    entry = _row(harness="claude", substrate="thread", mux=None, fno_id=None)
+
+    with pytest.raises(RetaskTransportError) as excinfo:
+        resolve_thread_viewport(entry)
+
+    message = str(excinfo.value)
+    assert "worker_has_no_thread_ref" in message
+    assert entry.name in message
+    assert "thread" in message

@@ -52,12 +52,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
+use tokio::sync::Semaphore;
 
 use crate::claims::{self, ClaimState};
 use crate::events::EventEmitter;
@@ -135,6 +136,16 @@ pub struct DrainConfig {
     pub mission: String,
     /// Cross-tick consecutive-failure limit (the circuit breaker).
     pub failure_limit: u32,
+    /// The mission's poll interval, for the control-plane tick row's staleness.
+    pub interval_seconds: u64,
+    /// 1-based position and population of this mission in the drain rotation
+    /// (epic-id order), `None` when it is the only drainable mission. Readout-only:
+    /// the arms-table detail prints `mission=x (1 of 4 draining)` so one row sampled
+    /// from a many-mission drain cannot read as the whole population. The base is
+    /// labeled because the mux band counts all graph-active missions - a mission
+    /// with no workspace path drains nowhere but still renders - and two bare `of
+    /// N` suffixes with different N read as a contradiction.
+    pub rotation: Option<(usize, usize)>,
 }
 
 /// What one [`mission_drain_tick`]'s reconcile did, for tests. Dispatch itself
@@ -221,21 +232,7 @@ fn node_has_pr_ref(cfg: &DrainConfig, node_id: &str) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
         return true;
     };
-    // A ref must be USABLE, not merely present: `pr_number` an integer and
-    // `pr_url` a non-empty string, matching what the CLI's node_pr_refs can
-    // actually derive a ref from. An empty pr_url is not evidence of a ship.
-    if v.get("pr_number").and_then(|n| n.as_u64()).is_some() {
-        return true;
-    }
-    if v.get("pr_url")
-        .and_then(|u| u.as_str())
-        .is_some_and(|u| !u.trim().is_empty())
-    {
-        return true;
-    }
-    v.get("additional_prs")
-        .and_then(|a| a.as_array())
-        .is_some_and(|a| !a.is_empty())
+    value_has_usable_pr_ref(&v)
 }
 
 /// Reconcile passes a ref-less `DonePRGreen` must persist across before it counts
@@ -580,6 +577,120 @@ fn resolve_crash(
     );
 }
 
+/// Does a parsed `fno backlog get` node carry a USABLE PR reference? `pr_number`
+/// an integer and `pr_url` a non-empty string, matching what the CLI's
+/// node_pr_refs can actually derive a ref from. An empty pr_url is not evidence
+/// of a ship.
+fn value_has_usable_pr_ref(v: &serde_json::Value) -> bool {
+    if v.get("pr_number").and_then(|n| n.as_u64()).is_some() {
+        return true;
+    }
+    if v.get("pr_url")
+        .and_then(|u| u.as_str())
+        .is_some_and(|u| !u.trim().is_empty())
+    {
+        return true;
+    }
+    v.get("additional_prs")
+        .and_then(|a| a.as_array())
+        .is_some_and(|a| !a.is_empty())
+}
+
+/// Did a SYNCHRONOUS (headless) child already reach a terminal state? The
+/// one-shot worker ran to completion before its dispatch returned, so graph
+/// state is the only evidence left. FAIL-OPEN: an unreadable or unparseable
+/// read reports closed, never a fabricated failure (same discipline as
+/// `node_has_pr_ref`).
+fn sync_child_completed(cfg: &DrainConfig, node_id: &str) -> bool {
+    let read = || -> Option<serde_json::Value> {
+        let out = retry_etxtbsy(|| {
+            fno_cmd(&cfg.fno_bin)
+                .args(["backlog", "get", node_id])
+                .current_dir(&cfg.cwd)
+                .output()
+        })
+        .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        serde_json::from_slice(&out.stdout).ok()
+    };
+    let Some(v) = read() else {
+        return true;
+    };
+    let stamped = |key: &str| {
+        v.get(key)
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| !t.trim().is_empty())
+    };
+    stamped("completed_at") || stamped("deferred_at") || value_has_usable_pr_ref(&v)
+}
+
+/// Resolve a synchronous (headless) child on the spot instead of holding it
+/// open for crash reconcile (x-7f1f). A completed/deferred/PR'd node records a
+/// success; a node with none of those goes through `map_outcome` as
+/// `CloseOutcome::Parked`, so the streak, the defer and the journal row stay
+/// one implementation with the detached path.
+fn resolve_sync_child(
+    cfg: &DrainConfig,
+    breaker: &mut CircuitBreaker,
+    journal: &Journal,
+    node_id: &str,
+) {
+    if sync_child_completed(cfg, node_id) {
+        breaker.record_success(node_id);
+        let _ = journal.append(
+            "active_backlog_sync_resolved",
+            json!({"node_id": node_id, "resolution": "success"}),
+        );
+        return;
+    }
+    // Journal the sync branch under its own reason BEFORE map_outcome's rows,
+    // so the event stream can tell a synchronous resolve from a detached one.
+    let _ = journal.append(
+        "active_backlog_sync_resolved",
+        json!({"node_id": node_id, "resolution": "not-closed"}),
+    );
+    let message = "synchronous child finished with no completion, defer or PR ref in graph state";
+    let ur = UnitResult {
+        unit_id: node_id.to_string(),
+        evidence: Evidence {
+            reason: TerminationReason::NoProgress,
+            message: message.to_string(),
+        },
+        close: CloseOutcome::Parked(message.to_string()),
+    };
+    map_outcome(
+        cfg,
+        breaker,
+        journal,
+        &TerminationReason::NoProgress,
+        Some(&ur),
+    );
+}
+
+/// One child row from the `advance --epic --json` receipt's `children[]`, the
+/// shared vocabulary with the per-child journal events at advance.py:3638.
+/// Every field defaulted so an evolving receipt never fails the parse.
+#[derive(Debug, Default, Deserialize)]
+struct AdvanceChild {
+    #[serde(default)]
+    node_id: String,
+    #[serde(default)]
+    decision: String,
+    #[serde(default)]
+    reason: String,
+    /// Resolved launch substrate. `Some("headless")` is SYNCHRONOUS:
+    /// `subprocess.run` returned only after the one-shot worker finished, so
+    /// the child must be resolved from graph state now, never held open for
+    /// crash reconcile. None on an older CLI's receipt (enqueue as detached,
+    /// the old behavior) - and None is what the CLI writes for skipped and
+    /// failed rows, so this must stay Option: a plain String rejects the
+    /// explicit null and voids the whole receipt parse.
+    #[serde(default)]
+    substrate: Option<String>,
+}
+
 /// The `fno backlog advance --epic <id> --json` receipt, the only fields the
 /// mission drain reads. `#[serde(default)]` on every field so a partial or
 /// evolving receipt never fails the parse (a missing field defaults benignly).
@@ -589,10 +700,78 @@ struct AdvanceEpicReceipt {
     deactivated: bool,
     #[serde(default)]
     all_done: bool,
-    /// Node ids `advance --epic` dispatched this pass (fire-and-forget), to be
-    /// reconciled from events on later ticks.
+    /// Every child the pass considered this tick, dispatched or not - the
+    /// honest signal `mission_drain_tick` was previously discarding. THE
+    /// enqueue authority: `dispatched` (the receipt's human-facing id list)
+    /// is substrate-blind and can no longer be trusted to say what is held
+    /// open.
     #[serde(default)]
-    dispatched: Vec<String>,
+    children: Vec<AdvanceChild>,
+    /// A receipt-level gate error (e.g. `"disabled"`, `"walker-live"`) reported
+    /// with no children, distinct from a truly exhausted mission.
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Facts about one `dispatch_mission` pass beyond the fire-and-forget dispatch
+/// ids, used only by `mission_drain_tick` to name an honest skip reason when
+/// nothing new dispatched. `ready` is how many children the pass considered;
+/// `reason` is the shared per-child skip reason when every child in the pass
+/// agrees, or `"skipped-mixed"` when they don't; `error` is a receipt-level
+/// gate error reported with no children.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct DispatchFacts {
+    ready: usize,
+    reason: Option<String>,
+    error: Option<String>,
+    /// Children resolved synchronously this pass (dispatched headless rows):
+    /// real work the tick did even though nothing entered `pending`.
+    sync_resolved: usize,
+}
+
+fn undispatched_count(cfg: &DrainConfig) -> Result<usize, String> {
+    let out = retry_etxtbsy(|| {
+        fno_cmd(&cfg.fno_bin)
+            .args(["backlog", "undispatched", "--json"])
+            .current_dir(&cfg.cwd)
+            .output()
+    })
+    .map_err(|error| error.to_string())?;
+    if !out.status.success() {
+        return Err(format!("exit {:?}", out.status.code()));
+    }
+    let receipt: Value = serde_json::from_slice(&out.stdout).map_err(|error| error.to_string())?;
+    if receipt.get("status").and_then(Value::as_str) != Some("ok") {
+        return Err("observer status was not ok".to_string());
+    }
+    receipt
+        .get("rows")
+        .and_then(Value::as_array)
+        .filter(|rows| rows.iter().all(Value::is_object))
+        .map(Vec::len)
+        .ok_or_else(|| "missing valid rows array".to_string())
+}
+
+fn facts_from_receipt(receipt: &AdvanceEpicReceipt) -> DispatchFacts {
+    let ready = receipt.children.len();
+    let reason = if ready == 0 {
+        None
+    } else {
+        let mut reasons = receipt.children.iter().map(|c| c.reason.as_str());
+        let first = reasons.next().unwrap_or("");
+        if !first.is_empty() && reasons.all(|r| r == first) {
+            Some(first.to_string())
+        } else {
+            Some("skipped-mixed".to_string())
+        }
+    };
+    DispatchFacts {
+        ready,
+        reason,
+        error: receipt.error.clone(),
+        // Set later, by the dispatch loop that actually resolves the rows.
+        sync_resolved: 0,
+    }
 }
 
 /// Dispatch the mission by shelling K1's converge core, recording each dispatched
@@ -605,9 +784,10 @@ struct AdvanceEpicReceipt {
 /// gone mission is caught by the loop's re-resolve, not guessed at here.
 fn dispatch_mission(
     cfg: &DrainConfig,
+    breaker: &mut CircuitBreaker,
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
-) -> MissionDispatch {
+) -> (MissionDispatch, DispatchFacts) {
     let out = match retry_etxtbsy(|| {
         fno_cmd(&cfg.fno_bin)
             // --continuation: never reactivate the mission and retire an inactive
@@ -630,14 +810,14 @@ fn dispatch_mission(
                 "active_backlog_skip",
                 json!({"reason": "advance-epic-failed", "mission": cfg.mission, "detail": detail}),
             );
-            return MissionDispatch::Continue;
+            return (MissionDispatch::Continue, DispatchFacts::default());
         }
         Err(e) => {
             let _ = journal.append(
                 "active_backlog_skip",
                 json!({"reason": "advance-epic-failed", "mission": cfg.mission, "detail": format!("{e}")}),
             );
-            return MissionDispatch::Continue;
+            return (MissionDispatch::Continue, DispatchFacts::default());
         }
     };
     let receipt: AdvanceEpicReceipt = match serde_json::from_slice(&out.stdout) {
@@ -647,27 +827,72 @@ fn dispatch_mission(
                 "active_backlog_skip",
                 json!({"reason": "advance-epic-unparseable", "mission": cfg.mission, "detail": format!("{e}")}),
             );
-            return MissionDispatch::Continue;
+            return (MissionDispatch::Continue, DispatchFacts::default());
         }
     };
+    let mut facts = facts_from_receipt(&receipt);
     if receipt.deactivated || receipt.all_done {
-        return MissionDispatch::Retire;
+        return (MissionDispatch::Retire, facts);
     }
     let mut new_ids = Vec::new();
-    for node_id in &receipt.dispatched {
+    for child in &receipt.children {
+        match child.decision.as_str() {
+            "dispatched" => {}
+            "failed" => {
+                // A spawn failure is a real failure: before x-7f1f a failed
+                // child never entered pending, so failure_limit never tripped
+                // and the drain retried the node forever. Feed the SAME
+                // map_outcome policy with the row's reason; it never enters
+                // pending. A skipped row means "not now" and must never touch
+                // the breaker (walker-live, lane-cap, already-claimed, ...).
+                let message = if child.reason.is_empty() {
+                    "advance reported the spawn failed".to_string()
+                } else {
+                    format!("advance reported the spawn failed: {}", child.reason)
+                };
+                let ur = UnitResult {
+                    unit_id: child.node_id.clone(),
+                    evidence: Evidence {
+                        reason: TerminationReason::NoProgress,
+                        message: message.clone(),
+                    },
+                    close: CloseOutcome::Parked(message),
+                };
+                map_outcome(
+                    cfg,
+                    breaker,
+                    journal,
+                    &TerminationReason::NoProgress,
+                    Some(&ur),
+                );
+                continue;
+            }
+            _ => continue,
+        }
+        // Synchronous (headless) dispatch: subprocess.run returned only after
+        // the one-shot worker finished and released its claim, so there is
+        // nothing to reconcile later - the crash floor would fabricate a crash
+        // on tick 3, every time (x-7f1f). Resolve from graph state now.
+        if child.substrate.as_deref() == Some("headless") {
+            resolve_sync_child(cfg, breaker, journal, &child.node_id);
+            facts.sync_resolved += 1;
+            continue;
+        }
         // Guard against re-recording a still-pending node (a prior tick's
         // dispatch whose worker has not yet closed): advance already dedups by
-        // live claim, but a boot-window respawn could echo the id.
-        if pending.iter().any(|p| p.node_id == *node_id) {
+        // live claim, but a boot-window respawn could echo the id. An older
+        // CLI's receipt carries no substrate key and lands here: enqueued as
+        // detached, today's behavior.
+        if pending.iter().any(|p| p.node_id == child.node_id) {
             continue;
         }
         pending.push(PendingDispatch {
-            node_id: node_id.clone(),
+            node_id: child.node_id.clone(),
             session_id: None,
             ticks: 0,
             stamp_waits: 0,
         });
-        new_ids.push(node_id.clone());
+        new_ids.push(child.node_id.clone());
     }
     if !new_ids.is_empty() {
         let _ = journal.append(
@@ -675,21 +900,84 @@ fn dispatch_mission(
             json!({"mission": cfg.mission, "dispatched": new_ids, "fire_and_forget": true}),
         );
     }
-    MissionDispatch::Continue
+    (MissionDispatch::Continue, facts)
 }
 
 /// One mission drain tick: reconcile prior dispatches (feeding the breaker), then
 /// dispatch the mission's currently-ready children. Reconcile runs FIRST so a
 /// child that just auto-deferred is excluded from this tick's `advance --epic`
 /// selection. Synchronous (the loop offloads it to a blocking task).
+///
+/// Every tick also appends one `control_plane_tick` row (arm `active_backlog`),
+/// so the arms readout can tell a draining mission from a dead supervisor.
 pub fn mission_drain_tick(
     cfg: &DrainConfig,
     breaker: &mut CircuitBreaker,
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
 ) -> MissionDispatch {
+    let pending_before = pending.len();
     reconcile_pending(cfg, breaker, pending, journal);
-    dispatch_mission(cfg, pending, journal)
+    let closed = pending_before.saturating_sub(pending.len()) as u64;
+    let pre_dispatch = pending.len();
+    let (outcome, facts) = dispatch_mission(cfg, breaker, pending, journal);
+    let newly_dispatched = (pending.len() - pre_dispatch) as u64;
+    let sync_closed = facts.sync_resolved as u64;
+    let skip_reason: Option<String> = match outcome {
+        MissionDispatch::Retire => Some("mission_retired".to_string()),
+        MissionDispatch::Continue if closed + newly_dispatched + sync_closed > 0 => None,
+        // Something dispatched by an earlier tick is still running: a full
+        // spawn lane on THIS pass does not make that stale.
+        MissionDispatch::Continue if !pending.is_empty() => Some("in_flight".to_string()),
+        MissionDispatch::Continue => {
+            if let Some(err) = &facts.error {
+                // The `disabled` / `walker-live` early returns stop
+                // masquerading as a genuinely exhausted mission.
+                Some(format!("gate:{err}"))
+            } else if facts.ready == 0 {
+                // True exhaustion: the pass found nothing at all.
+                Some("no_work".to_string())
+            } else {
+                // Children found, none dispatched: name the real skip reason
+                // (e.g. `lane-cap`) instead of collapsing it into no_work.
+                facts.reason.clone()
+            }
+        }
+    };
+    let rotation = cfg
+        .rotation
+        .map(|(pos, total)| format!(" ({pos} of {total} draining)"))
+        .unwrap_or_default();
+    let detail = format!(
+        "mission={}{} ready={} closed={} dispatched={} sync={} pending={}{}",
+        cfg.mission,
+        rotation,
+        facts.ready,
+        closed,
+        newly_dispatched,
+        sync_closed,
+        pending.len(),
+        match skip_reason.as_deref() {
+            Some("no_work") => match undispatched_count(cfg) {
+                Ok(count) => format!(" stranded={count}"),
+                Err(error) => {
+                    eprintln!("active-backlog: board-wide stranded count unavailable: {error}");
+                    " stranded=unknown".to_string()
+                }
+            },
+            _ => String::new(),
+        }
+    );
+    crate::tick_ledger::emit_tick(
+        journal,
+        "active_backlog",
+        "daemon",
+        closed + newly_dispatched + sync_closed,
+        skip_reason.as_deref(),
+        Some(&detail),
+        cfg.interval_seconds.max(1),
+    );
+    outcome
 }
 
 // ── target resolution + resident supervisor ─────────────────────────────────────
@@ -709,18 +997,110 @@ pub struct ResolvedTarget {
     /// mission is skipped by the supervisor.
     #[serde(default)]
     pub mission: Option<String>,
+    /// GLOBAL ceiling on concurrent converge runs across every mission, from
+    /// `config.active_backlog.max_concurrent`. Every target carries the same
+    /// value; the target list is just the daemon's one config channel. An
+    /// older receipt that omits it parses to the serial default of 1.
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: u32,
+}
+
+fn default_max_concurrent() -> u32 {
+    1
+}
+
+/// The drain's ONE converge gate: `max_concurrent` permits shared by every
+/// mission loop.
+///
+/// The cap was declared and read by nothing for a release, so a config saying
+/// 1 ran five concurrent `advance --epic` children (one per active mission) at
+/// 27-38% CPU each and held the machine's load above the spawn gate's refusal
+/// trigger for hours. Holding it here, where the converge runs are launched, is
+/// what makes the declared number bind.
+#[derive(Debug)]
+pub struct ConvergeGate {
+    sem: Semaphore,
+    /// Permits currently issued. `Semaphore` exposes only what is *available*,
+    /// which says nothing about capacity while converges hold permits, so the
+    /// total is tracked here to compute a resize delta.
+    total: AtomicU32,
+}
+
+impl ConvergeGate {
+    pub fn new(cap: u32) -> Self {
+        let cap = cap.max(1);
+        Self {
+            sem: Semaphore::new(cap as usize),
+            total: AtomicU32::new(cap),
+        }
+    }
+
+    /// Re-sync the gate to `cap` so a config change lands without a daemon
+    /// restart. Growing adds permits at once. Shrinking can only forget permits
+    /// that are FREE, so the total records what actually went and the next
+    /// resync retries the remainder as in-flight converges hand theirs back.
+    /// ponytail: a shrink while every permit stays continuously busy can lag
+    /// the declared cap until a mission goes idle; each mission's own poll
+    /// floor (minutes, not this 60s resync) makes that idle gap routine in
+    /// practice. Upgrade path if it ever bites: a permit wrapper that forgets
+    /// itself on return while a shrink is still pending, instead of this
+    /// snapshot-based forget.
+    pub fn resize(&self, cap: u32) {
+        let cap = cap.max(1);
+        let old = self.total.load(Ordering::SeqCst);
+        if cap > old {
+            self.sem.add_permits((cap - old) as usize);
+            self.total.store(cap, Ordering::SeqCst);
+        } else if cap < old {
+            let forgotten = self.sem.forget_permits((old - cap) as usize) as u32;
+            self.total.store(old - forgotten, Ordering::SeqCst);
+        }
+    }
+
+    /// The cap the gate is currently enforcing.
+    pub fn capacity(&self) -> u32 {
+        self.total.load(Ordering::SeqCst)
+    }
 }
 
 /// Shell `fno config active-backlog --json` to discover enabled drain targets.
 /// Best-effort: any failure (missing fno, non-zero exit, unparseable output)
 /// yields an empty list, so the feature simply stays dormant.
 pub fn resolve_targets(fno_bin: &str) -> Vec<ResolvedTarget> {
+    resolve_targets_report(fno_bin).0
+}
+
+/// [`resolve_targets`] plus the failure detail the supervisor reports in its
+/// tick row: an empty target list from a broken resolver (`env_broken`, the
+/// missing-click class) is a different arm state from an empty list because
+/// nothing is enabled (`no_missions`).
+pub fn resolve_targets_report(fno_bin: &str) -> (Vec<ResolvedTarget>, Option<String>) {
     match fno_cmd(fno_bin)
         .args(["config", "active-backlog", "--json"])
         .output()
     {
-        Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).unwrap_or_default(),
-        _ => Vec::new(),
+        Ok(o) if o.status.success() => match serde_json::from_slice(&o.stdout) {
+            Ok(targets) => (targets, None),
+            Err(e) => (
+                Vec::new(),
+                Some(format!("active-backlog receipt unparseable: {e}")),
+            ),
+        },
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            (
+                Vec::new(),
+                Some(format!(
+                    "active-backlog resolve exited {}: {}",
+                    o.status,
+                    stderr.chars().take(120).collect::<String>()
+                )),
+            )
+        }
+        Err(e) => (
+            Vec::new(),
+            Some(format!("active-backlog resolve failed: {e}")),
+        ),
     }
 }
 
@@ -821,13 +1201,19 @@ fn journal_for(cwd: &Path) -> Journal {
 /// carries no mission id (a malformed receipt). No driver-lib preflight: the
 /// worker drivers are resolved per CHILD project inside `advance --epic`, not at
 /// the epic's cwd, so the epic project need not itself be drivable.
-fn drain_config_for(target: &ResolvedTarget, fno_bin: &str) -> Option<DrainConfig> {
+fn drain_config_for(
+    target: &ResolvedTarget,
+    fno_bin: &str,
+    rotation: Option<(usize, usize)>,
+) -> Option<DrainConfig> {
     let mission = target.mission.clone()?;
     Some(DrainConfig {
         cwd: PathBuf::from(&target.cwd),
         fno_bin: fno_bin.to_string(),
         mission,
         failure_limit: target.failure_limit,
+        interval_seconds: target.interval_seconds,
+        rotation,
     })
 }
 
@@ -907,6 +1293,9 @@ pub async fn run_supervisor(
     // above, so a sinks-only project fans out without opting into the drain.
     let mut fanout_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
     let recheck = Duration::from_secs(60);
+    // ONE gate for the whole drain: `max_concurrent` bounds concurrent converge
+    // runs across every mission, never per mission.
+    let gate = Arc::new(ConvergeGate::new(1));
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -916,7 +1305,12 @@ pub async fn run_supervisor(
         tasks.retain(|_, h| !h.is_finished());
         fanout_tasks.retain(|_, h| !h.is_finished());
 
-        let targets = resolve_targets(&fno_bin);
+        let (targets, resolve_failure) = resolve_targets_report(&fno_bin);
+        // Re-sync the cap every recheck so `fno config set` lands without a
+        // daemon restart. With no targets there is nothing to gate.
+        if let Some(cap) = targets.iter().map(|t| t.max_concurrent).max() {
+            gate.resize(cap);
+        }
         let fanout_targets = resolve_fanout_targets(&fno_bin);
         // `live` keeps the daemon out of idle-exit while ANY supervised work
         // exists - drain OR fanout. A sink-only project (no active_backlog) must
@@ -926,6 +1320,33 @@ pub async fn run_supervisor(
             !targets.is_empty() || !fanout_targets.is_empty(),
             Ordering::SeqCst,
         );
+
+        // The arm's supervisor-level tick row, ONLY while no mission loop is
+        // live to write its own (fresher) rows: it says why the drain has
+        // nothing to do - a broken resolver (env_broken, the class that ticked
+        // silently for hours because its Python env lacked click) or simply no
+        // enabled missions. ab_live covers the fanout family too.
+        if targets.is_empty() {
+            let _ = emitter.emit(
+                crate::tick_ledger::EVENT_TYPE,
+                &serde_json::json!({
+                    "arm": "active_backlog",
+                    "scheduler": "daemon",
+                    "acted": 0,
+                    "skip_reason": if resolve_failure.is_some() { "env_broken" } else { "no_missions" },
+                    "detail": format!(
+                        "targets=0 ab_live={} fanouts={}{}",
+                        !fanout_targets.is_empty(),
+                        fanout_targets.len(),
+                        resolve_failure.as_deref().map(|f| format!(" resolve={f}")).unwrap_or_default()
+                    ),
+                    // The recheck cadence this row actually rides, not the
+                    // configured drain interval: staleness must bound the
+                    // supervisor's own 60s loop.
+                    "interval_s": 60,
+                }),
+            );
+        }
 
         for target in targets {
             // Key by mission (epic id). A target with no mission is a malformed
@@ -941,6 +1362,7 @@ pub async fn run_supervisor(
                     fno_bin.clone(),
                     emitter.clone(),
                     Arc::clone(&shutdown),
+                    Arc::clone(&gate),
                 )));
             }
         }
@@ -996,6 +1418,7 @@ async fn mission_drain_loop(
     fno_bin: String,
     emitter: EventEmitter,
     shutdown: Arc<AtomicBool>,
+    gate: Arc<ConvergeGate>,
 ) {
     // A malformed target with no mission is filtered by the supervisor before
     // spawn; default to empty so this never panics if one slips through (the
@@ -1016,21 +1439,52 @@ async fn mission_drain_loop(
 
         // Re-resolve this mission's liveness. If its epic dropped out of the
         // target set (mission_active cleared externally), exit the loop (the
-        // supervisor will not respawn it).
-        let current = resolve_targets(&fno_bin)
-            .into_iter()
-            .find(|t| t.mission.as_deref() == Some(mission.as_str()));
-        let Some(t) = current else {
+        // supervisor will not respawn it). The position in this list (already
+        // epic-id ordered) names the rotation in the tick's detail row; a lone
+        // mission prints no `(1 of 1)` - that reads as a fault, not a count.
+        let all = resolve_targets(&fno_bin);
+        let Some(pos) = all
+            .iter()
+            .position(|t| t.mission.as_deref() == Some(mission.as_str()))
+        else {
             break;
         };
+        let t = &all[pos];
         let interval = Duration::from_secs(t.interval_seconds.max(1));
+        let rotation = (all.len() >= 2).then_some((pos + 1, all.len()));
 
-        let Some(cfg) = drain_config_for(&t, &fno_bin) else {
+        let Some(cfg) = drain_config_for(t, &fno_bin, rotation) else {
             // Malformed target (no mission id); back off and re-check.
             sleep_interruptible(interval, &shutdown).await;
             continue;
         };
         let journal = journal_for(&cfg.cwd);
+
+        // Take a converge slot before the tick shells `advance --epic`. A
+        // mission that must wait SAYS so first and then waits its turn: a
+        // skipped mission starves silently, and an unlogged wait reads as one.
+        let permit = match gate.sem.try_acquire() {
+            Ok(p) => p,
+            Err(_) => {
+                crate::tick_ledger::emit_tick(
+                    &journal,
+                    "active_backlog",
+                    "daemon",
+                    0,
+                    Some("converge_cap"),
+                    Some(&format!(
+                        "mission={} queued for 1 of {} converge slot(s)",
+                        cfg.mission,
+                        gate.capacity()
+                    )),
+                    cfg.interval_seconds.max(1),
+                );
+                match gate.sem.acquire().await {
+                    Ok(p) => p,
+                    Err(_) => break,
+                }
+            }
+        };
 
         // The tick is synchronous; offload so the async runtime is never stalled.
         // Move the breaker AND pending set in and hand them back so the streak
@@ -1043,7 +1497,10 @@ async fn mission_drain_loop(
             let outcome = mission_drain_tick(&cfg, &mut b, &mut p, &journal);
             (outcome, b, p)
         });
-        match handle.await {
+        let tick_result = handle.await;
+        // Hand the slot back the moment the converge is over, before any wait.
+        drop(permit);
+        match tick_result {
             Ok((outcome, b, p)) => {
                 breaker = b;
                 pending = p;
@@ -1121,14 +1578,19 @@ mod tests {
     }
 
     #[test]
-    fn advance_epic_receipt_parses_dispatched_and_liveness() {
-        // The mission drain reads only dispatched + deactivated + all_done.
+    fn advance_epic_receipt_parses_children_and_substrate() {
+        // children[] is THE enqueue authority; substrate decides detached vs
+        // synchronous (x-7f1f).
         let r: AdvanceEpicReceipt = serde_json::from_slice(
             br#"{"epic_id":"x-e","error":null,"activated":true,"deactivated":false,
-                 "all_done":false,"dispatched":["x-a","x-b"],"children":[]}"#,
+                 "all_done":false,"dispatched":["x-a"],
+                 "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"},
+                             {"node_id":"x-b","decision":"dispatched","substrate":"headless"}]}"#,
         )
         .unwrap();
-        assert_eq!(r.dispatched, vec!["x-a", "x-b"]);
+        assert_eq!(r.children.len(), 2);
+        assert_eq!(r.children[0].substrate.as_deref(), Some("thread"));
+        assert_eq!(r.children[1].substrate.as_deref(), Some("headless"));
         assert!(!r.deactivated);
         assert!(!r.all_done);
     }
@@ -1136,9 +1598,9 @@ mod tests {
     #[test]
     fn advance_epic_receipt_defaults_on_partial_json() {
         // A minimal / evolving receipt must never fail the parse (every field
-        // defaults benignly): no dispatched nodes, mission still live.
+        // defaults benignly): no children, mission still live.
         let r: AdvanceEpicReceipt = serde_json::from_slice(br#"{"epic_id":"x-e"}"#).unwrap();
-        assert!(r.dispatched.is_empty());
+        assert!(r.children.is_empty());
         assert!(!r.deactivated && !r.all_done);
     }
 
@@ -1251,6 +1713,8 @@ mod tests {
             fno_bin,
             mission: "x-epic".to_string(),
             failure_limit,
+            interval_seconds: 300,
+            rotation: None,
         }
     }
 
@@ -1855,19 +2319,73 @@ mod tests {
         p.display().to_string()
     }
 
+    /// `backlog advance --epic` answers `advance_json`; `backlog get` answers
+    /// `node_json`; every other verb appends its argv to `record`. For the
+    /// synchronous-child tests, which read graph state AND fire defers.
+    fn stub_fno_advance_and_get(
+        dir: &std::path::Path,
+        record: &std::path::Path,
+        advance_json: &str,
+        node_json: &str,
+    ) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\n\
+                 if [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
+                 cat <<'JSON'\n{advance_json}\nJSON\nexit 0; fi\n\
+                 if [ \"$2\" = \"get\" ]; then printf '%s' '{node_json}'; exit 0; fi\n\
+                 echo \"$@\" >> \"{}\"\nexit 0\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
+    fn stub_fno_advance_with_observer(
+        dir: &std::path::Path,
+        advance_json: &str,
+        observer_json: &str,
+        observer_marker: Option<&std::path::Path>,
+    ) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        let observer = observer_marker
+            .map(|path| format!("printf 'called' > '{}'\n", path.display()))
+            .unwrap_or_default();
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == advance ]]; then \\
+                 cat <<'JSON'\n{advance_json}\nJSON\nelif [[ \"$1\" == backlog && \"$2\" == undispatched ]]; then \\
+                 {observer}printf '%s' '{observer_json}'\nfi\nexit 0\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
     #[test]
     fn dispatch_mission_records_dispatched_and_continues() {
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let fno = stub_fno_advance(
             &tmp.path().join("bin"),
-            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a","x-b"]}"#,
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":["x-a","x-b"],
+                "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"},
+                            {"node_id":"x-b","decision":"dispatched","substrate":"thread"}]}"#,
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
         let mut pending = Vec::new();
 
-        let outcome = dispatch_mission(&cfg, &mut pending, &journal);
+        let (outcome, _facts) = dispatch_mission(&cfg, &mut breaker, &mut pending, &journal);
         assert_eq!(outcome, MissionDispatch::Continue);
         assert_eq!(
             pending
@@ -1882,6 +2400,121 @@ mod tests {
     }
 
     #[test]
+    fn mission_drain_tick_appends_one_control_plane_tick_row() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,
+                "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"}]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        let outcome = mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        assert_eq!(outcome, MissionDispatch::Continue);
+        let rows: Vec<serde_json::Value> = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "control_plane_tick")
+            .collect();
+        assert_eq!(rows.len(), 1, "exactly one arm row per tick");
+        let data = &rows[0]["data"];
+        assert_eq!(data["arm"], "active_backlog");
+        assert_eq!(data["scheduler"], "daemon");
+        assert_eq!(data["acted"], 1);
+        assert_eq!(data["interval_s"], 300);
+        assert!(data["skip_reason"].is_null());
+        assert!(data["detail"].as_str().unwrap().contains("dispatched=1"));
+    }
+
+    #[test]
+    fn mission_drain_tick_does_not_read_stranded_count_after_dispatch() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join("observer-called");
+        let fno = stub_fno_advance_with_observer(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,
+                "children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"}]}"#,
+            r#"{"status":"ok","rows":[{}]}"#,
+            Some(&marker),
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        assert!(!marker.exists(), "stranded observer should be no-work only");
+    }
+
+    #[test]
+    fn tick_detail_names_the_rotation_when_many_missions() {
+        // The arms table shows ONE row per arm (newest tick wins), so a drain
+        // with several active missions must say which sample it is: `mission=x
+        // (1 of 4)`. Without it one mission's row reads as the whole rotation.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":[]}"#,
+        );
+        let mut cfg = test_cfg(tmp.path(), fno, 3);
+        cfg.rotation = Some((1, 4));
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let detail = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .map(|v| v["data"]["detail"].as_str().unwrap().to_string())
+            .expect("one tick row");
+        assert!(
+            detail.contains("mission=x-epic (1 of 4 draining) "),
+            "rotation named in: {detail}"
+        );
+    }
+
+    #[test]
+    fn tick_detail_omits_rotation_when_single_mission() {
+        // Control half: a lone mission still names itself, and a bare `(1 of 1)`
+        // never prints - it reads as a fault, not a count.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","deactivated":false,"all_done":false,"dispatched":[]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let detail = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .map(|v| v["data"]["detail"].as_str().unwrap().to_string())
+            .expect("one tick row");
+        assert!(
+            detail.contains("mission=x-epic ready="),
+            "mission named bare in: {detail}"
+        );
+        assert!(!detail.contains("1 of 1"), "no bare (1 of 1) in: {detail}");
+    }
+
+    #[test]
     fn dispatch_mission_retires_on_deactivated() {
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1891,9 +2524,10 @@ mod tests {
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
         let mut pending = Vec::new();
         assert_eq!(
-            dispatch_mission(&cfg, &mut pending, &journal),
+            dispatch_mission(&cfg, &mut breaker, &mut pending, &journal).0,
             MissionDispatch::Retire
         );
     }
@@ -1908,9 +2542,10 @@ mod tests {
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
         let mut pending = Vec::new();
         assert_eq!(
-            dispatch_mission(&cfg, &mut pending, &journal),
+            dispatch_mission(&cfg, &mut breaker, &mut pending, &journal).0,
             MissionDispatch::Retire
         );
     }
@@ -1922,17 +2557,18 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let fno = stub_fno_advance(
             &tmp.path().join("bin"),
-            r#"{"epic_id":"x-epic","dispatched":["x-a"]}"#,
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-a","decision":"dispatched","substrate":"thread"}]}"#,
         );
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
         let mut pending = vec![PendingDispatch {
             node_id: "x-a".to_string(),
             session_id: None,
             ticks: 2,
             stamp_waits: 0,
         }];
-        dispatch_mission(&cfg, &mut pending, &journal);
+        dispatch_mission(&cfg, &mut breaker, &mut pending, &journal);
         assert_eq!(pending.len(), 1, "x-a already pending must not be re-added");
     }
 
@@ -1945,14 +2581,554 @@ mod tests {
         let fno = stub_fno_advance(&tmp.path().join("bin"), "wedged python traceback");
         let cfg = test_cfg(tmp.path(), fno, 3);
         let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
         let mut pending = Vec::new();
         assert_eq!(
-            dispatch_mission(&cfg, &mut pending, &journal),
+            dispatch_mission(&cfg, &mut breaker, &mut pending, &journal).0,
             MissionDispatch::Continue
         );
         assert!(pending.is_empty());
         assert!(journal_lines(&project_journal)
             .iter()
             .any(|l| l.contains("advance-epic-unparseable")));
+    }
+
+    #[test]
+    fn mission_drain_tick_names_lane_cap_instead_of_no_work() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"children":[{"node_id":"x-a","decision":"skipped","reason":"lane-cap"}],"dispatched":[]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        let outcome = mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+        assert_eq!(outcome, MissionDispatch::Continue);
+
+        let rows: Vec<serde_json::Value> = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "control_plane_tick")
+            .collect();
+        let data = &rows[0]["data"];
+        assert_eq!(data["skip_reason"], "lane-cap");
+        let detail = data["detail"].as_str().unwrap();
+        assert!(detail.contains("ready=1"), "detail was {detail}");
+        assert!(detail.contains("pending=0"), "detail was {detail}");
+    }
+
+    #[test]
+    fn mission_drain_tick_reports_no_work_only_when_truly_exhausted() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"children":[],"dispatched":[]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let rows: Vec<serde_json::Value> = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "control_plane_tick")
+            .collect();
+        assert_eq!(rows[0]["data"]["skip_reason"], "no_work");
+    }
+
+    #[test]
+    fn mission_drain_tick_reports_stranded_board_rows_on_no_work() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let observer = r#"{"status":"ok","rows":[{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}]}"#;
+        let fno = stub_fno_advance_with_observer(
+            &tmp.path().join("bin"),
+            r#"{"children":[],"dispatched":[]}"#,
+            observer,
+            None,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let row = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .expect("one tick row");
+        assert_eq!(row["data"]["skip_reason"], "no_work");
+        let detail = row["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("mission=x-epic"), "detail was {detail}");
+        assert!(detail.contains("stranded=25"), "detail was {detail}");
+    }
+
+    #[test]
+    fn mission_drain_tick_names_unknown_stranded_count_on_observer_failure() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance_with_observer(
+            &tmp.path().join("bin"),
+            r#"{"children":[],"dispatched":[]}"#,
+            "not-json",
+            None,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let row = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .expect("one tick row");
+        let detail = row["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("stranded=unknown"), "detail was {detail}");
+        assert!(!detail.contains("stranded=0"), "detail was {detail}");
+    }
+
+    #[test]
+    fn mission_drain_tick_names_unknown_stranded_count_on_observer_error() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance_with_observer(
+            &tmp.path().join("bin"),
+            r#"{"children":[],"dispatched":[]}"#,
+            r#"{"status":"error","rows":[]}"#,
+            None,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let row = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["type"] == "control_plane_tick")
+            .expect("one tick row");
+        let detail = row["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("stranded=unknown"), "detail was {detail}");
+        assert!(!detail.contains("stranded=0"), "detail was {detail}");
+    }
+
+    #[test]
+    fn mission_drain_tick_names_gate_error_instead_of_no_work() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(&tmp.path().join("bin"), r#"{"error":"disabled"}"#);
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+
+        let rows: Vec<serde_json::Value> = journal_lines(&project_journal)
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "control_plane_tick")
+            .collect();
+        assert_eq!(rows[0]["data"]["skip_reason"], "gate:disabled");
+    }
+
+    // ── synchronous children (x-7f1f) ────────────────────────────────────────
+
+    #[test]
+    fn dispatch_mission_resolves_synchronous_child_on_the_spot() {
+        // A headless dispatch already ran to completion - subprocess.run returned
+        // only after the worker released its claim - so it must never enter
+        // pending: the crash floor would fabricate a crash on tick 3, every time.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("record");
+        let fno = stub_fno_advance_and_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-h","decision":"dispatched","substrate":"headless"}]}"#,
+            r#"{"id":"x-h","completed_at":"2026-09-06T12:00:00Z"}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        let (outcome, facts) = dispatch_mission(&cfg, &mut breaker, &mut pending, &journal);
+        assert_eq!(outcome, MissionDispatch::Continue);
+        assert_eq!(facts.sync_resolved, 1);
+        assert!(pending.is_empty(), "a synchronous child is never held open");
+        assert_eq!(breaker.consecutive_failures("x-h"), 0);
+        let lines = journal_lines(&project_journal);
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("active_backlog_sync_resolved") && l.contains("success")));
+        assert!(!lines.iter().any(|l| l.contains("active_backlog_parked")));
+        assert!(
+            !record.exists(),
+            "no defer on a completed synchronous child"
+        );
+    }
+
+    #[test]
+    fn synchronous_child_not_closed_trips_breaker_and_defers_once() {
+        // A synchronous child with no completion, no defer and no PR ref scores
+        // as a failure per tick through the SAME map_outcome policy, and trips
+        // the breaker exactly once at failure_limit - the detached path's
+        // behaviour.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("record");
+        let fno = stub_fno_advance_and_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-h","decision":"dispatched","substrate":"headless"}]}"#,
+            r#"{"id":"x-h"}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        for _ in 0..3 {
+            mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+        }
+        let defers = std::fs::read_to_string(&record)
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains("backlog defer x-h"))
+            .count();
+        assert_eq!(defers, 1, "exactly one defer at failure_limit=3");
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("active_backlog_parked")));
+    }
+
+    #[test]
+    fn dispatch_mission_enqueues_older_receipt_without_substrate() {
+        // An older CLI's child rows carry no substrate key: enqueued as
+        // detached, today's behaviour - never synchronously resolved.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-a","decision":"dispatched"}]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        dispatch_mission(&cfg, &mut breaker, &mut pending, &journal);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|p| p.node_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["x-a"]
+        );
+        assert_eq!(breaker.consecutive_failures("x-a"), 0);
+    }
+
+    #[test]
+    fn mixed_receipt_with_null_substrate_still_enqueues() {
+        // The CLI's --json receipt writes `"substrate": null` for every skipped
+        // or failed child row (AdvanceResult.substrate is None there), so a
+        // MIXED receipt - one dispatched child beside one already-claimed skip -
+        // is the common shape, not an edge. A substrate field that rejects null
+        // fails the WHOLE receipt parse and the drain enqueues nothing.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fno = stub_fno_advance(
+            &tmp.path().join("bin"),
+            r#"{"epic_id":"x-epic","children":[
+                {"node_id":"x-a","decision":"dispatched","substrate":"thread"},
+                {"node_id":"x-b","decision":"skipped","reason":"already-claimed","substrate":null}]}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        dispatch_mission(&cfg, &mut breaker, &mut pending, &journal);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|p| p.node_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["x-a"],
+            "a skipped sibling must not void the dispatched child"
+        );
+        assert!(!journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("advance-epic-unparseable")));
+    }
+
+    #[test]
+    fn failed_child_feeds_the_circuit_breaker() {
+        // Before x-7f1f a failed child never entered pending, so failure_limit
+        // never tripped and the drain retried the node forever. Three
+        // consecutive failed receipts at failure_limit 3 defer exactly once.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("record");
+        let fno = stub_fno_advance_and_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-1111","decision":"failed","reason":"daemon unreachable"}]}"#,
+            r#"{}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let defers = || -> usize {
+            std::fs::read_to_string(&record)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.contains("backlog defer x-1111"))
+                .count()
+        };
+        let mut pending = Vec::new();
+
+        for _ in 0..3 {
+            mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+        }
+        assert_eq!(defers(), 1, "exactly one defer at failure_limit=3");
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("active_backlog_parked")));
+    }
+
+    #[test]
+    fn skipped_child_never_touches_the_breaker() {
+        // walker-live, lane-cap, already-claimed, no-project, unmapped-project
+        // all arrive as skips: "not now", not "this node is broken". Ten ticks
+        // must leave the streak at zero and fire no defer.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("record");
+        let fno = stub_fno_advance_and_get(
+            &tmp.path().join("bin"),
+            &record,
+            r#"{"epic_id":"x-epic","children":[{"node_id":"x-2222","decision":"skipped","reason":"lane-cap"}]}"#,
+            r#"{}"#,
+        );
+        let cfg = test_cfg(tmp.path(), fno, 3);
+        let (journal, _pj) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+
+        for _ in 0..10 {
+            mission_drain_tick(&cfg, &mut breaker, &mut pending, &journal);
+        }
+        assert_eq!(breaker.consecutive_failures("x-2222"), 0);
+        assert!(!record.exists(), "no defer on a skipped child");
+    }
+
+    /// A stub `fno` for the converge-cap tests: it answers `config
+    /// active-backlog --json` with `targets_json`, and every `backlog advance
+    /// --epic` writes `S`, holds the slot for 300ms, writes `E`, then prints a
+    /// benign receipt. The S/E log is the positive marker: overlap in it is
+    /// concurrent converge runs measured directly, never a config read.
+    fn stub_fno_converge(
+        dir: &std::path::Path,
+        log: &std::path::Path,
+        targets_json: &str,
+    ) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\n\
+                 if [[ \"$1\" == config && \"$2\" == active-backlog ]]; then \
+                 cat <<'JSON'\n{targets_json}\nJSON\nexit 0; fi\n\
+                 if [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
+                 echo S >> \"{log}\"\nsleep 0.3\necho E >> \"{log}\"\n\
+                 printf '%s' '{{\"epic_id\":\"x-e\",\"deactivated\":false,\"all_done\":false,\"children\":[]}}'\nexit 0; fi\n\
+                 exit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
+    /// One drain target line for the stub's `config active-backlog` receipt.
+    fn converge_target(index: usize, cwd: &std::path::Path, cap: u32) -> String {
+        format!(
+            r#"{{"project":"p{index}","cwd":"{cwd}","interval_seconds":1,"failure_limit":3,"mission":"x-m{index}","max_concurrent":{cap}}}"#,
+            cwd = cwd.display()
+        )
+    }
+
+    /// The greatest number of converge runs that overlapped, replayed from the
+    /// stub's S/E log, plus how many ran at all. A cap enforced as a permanent
+    /// block would show a low overlap AND a low run count, so both are read.
+    fn peak_and_total(log: &std::path::Path) -> (usize, usize) {
+        let mut running = 0usize;
+        let mut peak = 0usize;
+        let mut total = 0usize;
+        for line in journal_lines(log) {
+            match line.trim() {
+                "S" => {
+                    running += 1;
+                    total += 1;
+                    peak = peak.max(running);
+                }
+                "E" => running = running.saturating_sub(1),
+                _ => {}
+            }
+        }
+        (peak, total)
+    }
+
+    /// Run `missions` real [`mission_drain_loop`]s through one shared gate of
+    /// `cap` permits for `run_ms`, then hand back the temp dir so a caller can
+    /// read the journal it wrote.
+    async fn drive_missions(
+        tmp: &std::path::Path,
+        cap: u32,
+        missions: usize,
+        run_ms: u64,
+    ) -> String {
+        std::env::set_var("HOME", tmp);
+        let log = tmp.join("converges.log");
+        let targets: Vec<String> = (0..missions)
+            .map(|i| converge_target(i, tmp, cap))
+            .collect();
+        let fno = stub_fno_converge(&tmp.join("bin"), &log, &format!("[{}]", targets.join(",")));
+
+        let resolved = resolve_targets(&fno);
+        assert_eq!(
+            resolved.len(),
+            missions,
+            "the stub must resolve every mission"
+        );
+        let gate = Arc::new(ConvergeGate::new(cap));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let emitter = EventEmitter::new(tmp.join("emitter.jsonl"), "test");
+        let mut handles = Vec::new();
+        for target in resolved {
+            handles.push(tokio::spawn(mission_drain_loop(
+                target,
+                fno.clone(),
+                emitter.clone(),
+                Arc::clone(&shutdown),
+                Arc::clone(&gate),
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(run_ms)).await;
+        shutdown.store(true, Ordering::SeqCst);
+        for h in handles {
+            let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+        }
+        log.display().to_string()
+    }
+
+    /// The cap is GLOBAL: three missions, one slot, one converge at a time.
+    /// Asserted on overlapping converge runs across consecutive ticks, which is
+    /// what five concurrent `advance --epic` children looked like in the field.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_slot_serializes_every_mission() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let log = drive_missions(tmp.path(), 1, 3, 2500).await;
+        let (peak, total) = peak_and_total(std::path::Path::new(&log));
+        assert!(
+            total >= 3,
+            "every mission must get a turn, saw {total} converge(s)"
+        );
+        assert_eq!(
+            peak, 1,
+            "max_concurrent=1 must admit one converge at a time"
+        );
+    }
+
+    /// The converse, so the cap is not shipped as a permanent block: three slots
+    /// admit three at once, and the fourth mission still runs once one frees.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn three_slots_admit_three_and_queue_the_fourth() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let log = drive_missions(tmp.path(), 3, 4, 2500).await;
+        let (peak, total) = peak_and_total(std::path::Path::new(&log));
+        assert_eq!(
+            peak, 3,
+            "max_concurrent=3 must admit three converges at once"
+        );
+        assert!(
+            total >= 4,
+            "the queued mission must still run, saw {total} converge(s)"
+        );
+    }
+
+    /// A queued mission is visible in the drain receipt rather than silently
+    /// starved: its tick row names the cap it is waiting on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_queued_mission_writes_a_tick_row_naming_the_cap() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        drive_missions(tmp.path(), 1, 2, 1500).await;
+
+        let rows = journal_lines(&tmp.path().join(".fno").join("events.jsonl"));
+        let queued: Vec<&String> = rows
+            .iter()
+            .filter(|l| l.contains("\"skip_reason\":\"converge_cap\""))
+            .collect();
+        assert!(!queued.is_empty(), "a queued mission must write a tick row");
+        assert!(
+            queued[0].contains("queued for 1 of 1 converge slot(s)"),
+            "the row must name the cap: {}",
+            queued[0]
+        );
+        assert!(
+            queued[0].contains("mission=x-m"),
+            "the row must name the mission: {}",
+            queued[0]
+        );
+    }
+
+    #[test]
+    fn resolved_target_defaults_max_concurrent_to_one() {
+        let t: ResolvedTarget = serde_json::from_slice(
+            br#"{"project":"p","cwd":"/repo","interval_seconds":5,"failure_limit":3,"mission":"x-e"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            t.max_concurrent, 1,
+            "an older receipt is serial, not unbounded"
+        );
+    }
+
+    #[test]
+    fn gate_grows_and_shrinks_with_the_config() {
+        let gate = ConvergeGate::new(1);
+        assert_eq!(gate.capacity(), 1);
+        gate.resize(3);
+        assert_eq!(gate.capacity(), 3);
+        let held = gate.sem.try_acquire().unwrap();
+        gate.resize(1);
+        assert_eq!(gate.capacity(), 1);
+        // A shrink can only forget FREE permits; the held one stays issued so
+        // the next resync collects it rather than losing the shrink.
+        gate.resize(0);
+        assert_eq!(gate.capacity(), 1, "zero is clamped to a serial drain");
+        drop(held);
     }
 }

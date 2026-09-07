@@ -135,5 +135,50 @@ RT5="$TMP/run5"; mkdir -p "$RT5"; sink11="$TMP/sink11"
 { has '133;C' <"$sink11" && [[ -z "$(find "$TMP" -maxdepth 1 -name '*pwn*' 2>/dev/null)" ]]; } \
   && pass "T11 non-numeric FNO_PANE degrades to emit, no escape" || fail "T11 expected contained degrade-emit"
 
+# --- report-payload lane: what ARGS reach `fno-agents report` ---
+
+# A recording stub in place of the no-op one: every invocation appends its argv
+# (newline-joined) to a file, so the assertions read the exact parameters the
+# hook passed, never the marker lane's bytes.
+REC="$TMP/args.log"; : >"$REC"
+RECSTUB="$TMP/fno-agents-rec"
+cat >"$RECSTUB" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >>"$REC"
+exit 0
+STUB
+chmod +x "$RECSTUB"
+
+# report_via <state> <payload-json> -> nothing; readers use rec_last.
+# A FRESH session id per call is what defeats the hook's 120s transition gate;
+# the callers below embed unique sids in their payloads.
+RT6="$TMP/run6"; mkdir -p "$RT6"
+report_via() {
+  local state="$1" payload="$2"
+  ( cd "$TMP" && printf '%s' "$payload" | \
+      FNO_TURN_MARKER_TTY="$(mktemp "$TMP/sink.XXXXXX")" \
+      XDG_RUNTIME_DIR="$RT6" \
+      FNO_AGENTS_BIN="$RECSTUB" \
+      bash "$HOOK" "$state" ) >/dev/null 2>&1
+}
+
+# T12: a PostModelSwitch payload carrying model + effort passes both through.
+report_via model '{"session_id":"rep-1","hook_event_name":"PostModelSwitch","to_model":"glm-5.3[1m]","effort":{"level":"xhigh"}}'
+grep -q -- '--model glm-5.3\[1m\]' "$REC" && grep -q -- '--effort xhigh' "$REC" \
+  && pass "T12 PostModelSwitch passes --model and --effort" || fail "T12 expected --model and --effort in report args"
+
+# T13 (AC11-EDGE): a payload with NO effort object sends no --effort, and the
+# daemon-side row effort is left to the axis that actually owns it.
+report_via working '{"session_id":"rep-2","hook_event_name":"UserPromptSubmit"}'
+! tail -n 1 "$REC" | grep -q -- '--effort' \
+  && pass "T13 hook input without effort sends no --effort" || fail "T13 expected no --effort in report args"
+
+# T14: a payload whose effort is a bare STRING (not the {"level": ...} object)
+# still reports, with the string as the effort: the parse never aborts on the
+# shape, so the state report rides along instead of being skipped whole.
+report_via model '{"session_id":"rep-3","hook_event_name":"PostModelSwitch","to_model":"glm-5.3[1m]","effort":"high"}'
+tail -n 1 "$REC" | grep -q -- '--model glm-5.3\[1m\]' && tail -n 1 "$REC" | grep -q -- '--effort high' \
+  && pass "T14 string effort parses and rides the report" || fail "T14 expected --effort high from a string effort payload"
+
 printf '[inside-leg] %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

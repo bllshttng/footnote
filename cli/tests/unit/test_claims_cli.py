@@ -75,12 +75,12 @@ def test_acquire_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypa
     """acquire_claim's contention-retry-exhaustion ClaimContended must be
     caught and mapped to exit 1 (same "retry later" code as
     ClaimHeldByOther), not escape as an uncaught traceback."""
-    import fno.claims.cli as claims_cli
+    import fno.claims.core as claims_core
 
     def _raise(*args, **kwargs):
         raise ClaimContended("acquire_claim gave up after 5 contention retries on 'k'")
 
-    monkeypatch.setattr(claims_cli, "acquire_claim", _raise)
+    monkeypatch.setattr(claims_core, "acquire_claim", _raise)
     result = runner.invoke(cli, ["acquire", "k", "--holder", "h1"])
     assert result.exit_code == 1
     assert "contention error" in result.output
@@ -90,12 +90,12 @@ def test_acquire_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypa
 def test_refresh_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypatch):
     """Same as acquire's: refresh_claim's contention-exhaustion ClaimContended
     must be caught, not escape as an uncaught traceback."""
-    import fno.claims.cli as claims_cli
+    import fno.claims.core as claims_core
 
     def _raise(*args, **kwargs):
         raise ClaimContended("refresh_claim gave up after 5 contention retries on 'k'")
 
-    monkeypatch.setattr(claims_cli, "refresh_claim", _raise)
+    monkeypatch.setattr(claims_core, "refresh_claim", _raise)
     result = runner.invoke(cli, ["refresh", "k", "--holder", "h1"])
     assert result.exit_code == 1
     assert "contention error" in result.output
@@ -104,12 +104,12 @@ def test_refresh_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypa
 
 def test_refresh_expired_claim_is_named_non_success(cwd_tmp, monkeypatch):
     """Core's atomic expiry refusal must not render as a PID-liveness no-op."""
-    import fno.claims.cli as claims_cli
+    import fno.claims.core as claims_core
 
     def _raise(*args, **kwargs):
         raise ClaimValidationError("claim 'k' expired before refresh")
 
-    monkeypatch.setattr(claims_cli, "refresh_claim", _raise)
+    monkeypatch.setattr(claims_core, "refresh_claim", _raise)
     result = runner.invoke(cli, ["refresh", "k", "--holder", "h1"])
     assert result.exit_code == 2
     assert "expired before refresh" in result.output
@@ -225,6 +225,59 @@ def test_release_strict_mismatch_exits_4(cwd_tmp):
     runner.invoke(cli, ["acquire", "k", "--holder", "h1"])
     result = runner.invoke(cli, ["release", "k", "--holder", "h2", "--strict"])
     assert result.exit_code == 4
+
+
+def test_release_no_claim_reports_no_op(cwd_tmp):
+    """No file for the key means release_claim returns None: nothing was
+    unlinked. The old receipt printed 'released: <key>' anyway; that false
+    positive is the exact gap x-2146 traces 386 unclosed do rows to. The
+    verb stays idempotent (exit 0), only the words change."""
+    result = runner.invoke(cli, ["release", "node:never-acquired", "--holder", "h"])
+    assert result.exit_code == 0
+    assert "no-op" in result.output
+    assert "released:" not in result.output
+
+
+def test_release_no_claim_json_reports_released_false(cwd_tmp):
+    result = runner.invoke(cli, ["release", "node:never-acquired", "--holder", "h", "--json"])
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    assert parsed == {"key": "node:never-acquired", "released": False}
+
+
+def test_release_stamp_do_skipped_on_no_op_names_the_key(cwd_tmp):
+    """--stamp-do on a release that unlinked nothing must not write a do row
+    silently omitting one: the skip is named, and exit stays 0."""
+    result = runner.invoke(
+        cli, ["release", "node:never-acquired", "--holder", "h", "--stamp-do"]
+    )
+    assert result.exit_code == 0
+    assert "do stamp skipped" in result.output
+    assert "node:never-acquired" in result.output
+
+
+def test_release_stamp_do_no_op_on_non_node_key_is_silent(cwd_tmp):
+    """A do row was never in play for a non-node: key (the success branch at
+    line 536 only stamps node: keys), so the no-op skip message must not
+    fire either - it would falsely imply a do row existed for this key."""
+    result = runner.invoke(
+        cli, ["release", "dispatch:never-acquired", "--holder", "h", "--stamp-do"]
+    )
+    assert result.exit_code == 0
+    assert "do stamp skipped" not in result.output
+
+
+def test_release_rollback_do_skipped_on_no_op_names_the_key(cwd_tmp):
+    """The rollback_do sibling of the stamp_do no-op skip above: a release
+    that unlinked nothing must not silently drop the rollback message
+    either, the same false-positive-by-omission class the stamp_do skip
+    fixes."""
+    result = runner.invoke(
+        cli, ["release", "node:never-acquired", "--holder", "h", "--rollback-do"]
+    )
+    assert result.exit_code == 0
+    assert "do rollback skipped" in result.output
+    assert "node:never-acquired" in result.output
 
 
 def test_status_free(cwd_tmp):
@@ -839,7 +892,8 @@ def test_free_node_reports_unresolved_roster_rows(cwd_tmp, fake_roster):
     r = runner.invoke(cli, ["status", "node:x-76d1", "--json"])
     assert r.exit_code == 0
     info = json.loads(r.output)
-    assert info["state"] == "free"
+    assert info["state"] == "unknown"
+    assert info["basis"] == "unresolved-roster-row"
     assert info["roster_rows_scanned"] == 1
     assert info["roster_rows_unresolved"] == 1
     assert info["roster_unresolved_candidates"] == ["t-x76d1-near-miss"]
@@ -989,7 +1043,11 @@ def test_a_held_node_never_pays_for_the_crosscheck(cwd_tmp, monkeypatch):
         raise AssertionError("roster consulted for a held node")
 
     monkeypatch.setattr("fno.agents.watchdog.fleet_rows", _boom)
-    acquire_claim(key="node:x-held", holder="target-session:s", ttl_ms=60_000)
+    # status routes a node: key to the GLOBAL root; acquire with the same
+    # explicit root so both legs read one dir (cwd_tmp collapses them).
+    acquire_claim(
+        key="node:x-held", holder="target-session:s", ttl_ms=60_000, root=cwd_tmp
+    )
     r = runner.invoke(cli, ["status", "node:x-held", "--json"])
     info = json.loads(r.output)
     assert info["state"] == "live"
@@ -1019,3 +1077,48 @@ def test_handover_refuses_transient_cli_pid(monkeypatch, cwd_tmp):
     )
     assert result.exit_code == 2
     assert "--handover-from needs a durable pid" in result.output
+
+
+def test_a_stub_captured_at_import_never_answers_for_the_cli(cwd_tmp):
+    """The claims CLI binds the core callables at module import, and a
+    worker's first import of this module can land while another test's core
+    stub is active (the spawn-guard handlers import this module lazily). The
+    stub was then captured for the worker's whole life: every later
+    `claim acquire` printed success and wrote nothing. The reload stages that
+    first-import race deterministically; the positive marker is the claim
+    FILE on disk, which a captured stub never produces."""
+    import importlib
+    from types import SimpleNamespace
+
+    import fno.claims.cli as claims_cli_module
+    import fno.claims.core as claims_core
+
+    saved = claims_core.acquire_claim
+
+    def _stub(*_a, **_k):
+        return SimpleNamespace(holder="ME", pid=os.getpid())
+
+    claims_core.acquire_claim = _stub
+    try:
+        importlib.reload(claims_cli_module)
+    finally:
+        claims_core.acquire_claim = saved
+    try:
+        result = runner.invoke(
+            cli,
+            [
+                "acquire", "node:N",
+                "--holder", "target-session:sid-captured",
+                "--ttl", "1m",
+                "--pid", str(os.getpid()),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        claim_file = cwd_tmp / ".fno" / "claims" / "node%3AN.lock"
+        assert claim_file.exists(), (
+            f"acquire printed success but wrote no claim: {result.output}"
+        )
+    finally:
+        # Drop whatever this reload captured so later tests get the real
+        # function even when the assertion above fails.
+        importlib.reload(claims_cli_module)

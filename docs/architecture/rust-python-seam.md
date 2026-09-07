@@ -10,7 +10,7 @@ The measured evidence: the tree contains zero FFI. No `pyo3`, no `maturin`, no `
 
 The reasoning. A `maturin` build step couples the Python wheel to a compiled artifact on every platform. The install contract of a pure-Python package becomes a build matrix. The repo already ships one generated cross-language artifact, `harness_capabilities.toml`, and its freshness needs its own CI tripwire. Adding an ABI to that surface buys fine-grained ownership at the price of a per-platform build. The seam's traffic does not pay for it: the crossing sites are low-frequency verb shells and bounded reads, not hot in-process calls.
 
-The socket of the store keeper does not weaken this ruling. It is a process boundary. A separate `fno-agents-worker` process serves one graph file over a local AF_UNIX socket. This is the pane-keeper model applied to the graph store. No library link, no shared address space, and no ABI exist between the sides. The socket is the one transport that does not spawn a command. The dependency direction requires it: `fno-agents` depends on `fno`, never the reverse. A consumer that lives in `fno` cannot link the store, so it must speak the socket protocol.
+The socket of the store keeper does not weaken this ruling. It is a process boundary. A separate `fno-agents-worker` process serves one graph file over a local AF_UNIX socket. This is the pane-keeper model applied to the graph store. No library link, no shared address space, and no ABI exist between the sides. The socket is the one transport that does not spawn a command. The dependency direction requires it: `fno-agents` depends on `fno`, never the reverse. A consumer that lives in `fno` cannot link the store, so it must speak the socket protocol. That dependency is a dev-dependency only. Production code in `fno-agents` reaches the mux through the `fno` binary, never by linking the crate. That is why the attach verb's portal reach is a crossing and not a call.
 
 The consequence, and it is arithmetic, not preference. A subprocess has no cheap call, so a port must carry a decision's whole fact set or it adds a spawn. Moving half a decision across a process boundary trades one crossing for another and splits the fact set in two. Every later port proposal that splits a decision from its facts is refused by this paragraph, without re-arguing the build matrix.
 
@@ -24,13 +24,13 @@ The counting rule, in words, so a reader can audit it without reading the lint. 
 
 A resolver is detected by shape, never by name. Four helpers carry obvious spellings: `fno_bin` in `crates/fno/src/server.rs:2843`, `fno_bin` in `crates/fno/src/yard_overlay.rs:49`, `fno_bin` in `crates/fno-agents/src/scrape.rs:174`, and `loopcheck_fno_bin` in `crates/fno-agents/src/loopcheck.rs:3934`. Twelve more functions resolve the porcelain inline, among them `fno_cmd` in `loop_dispatch.rs:136`, `durable_session_pid` in `claims.rs:2138`, and `best_effort_notify` in `loopcheck.rs:3942`. A first count that grepped one literal and four helper names reported 29 sites across 10 files. The real number is 56 across 18. That 48 percent shortfall is the worked example of a single-literal grep. It is why the resolver rule matches the env-key shape instead of a name list.
 
-The write path is the asymmetry that matters, and the store port moved where it lives. The bytes of `graph.json` have one writer: the store publish pipeline in `crates/fno-agents/src/graph_store.rs`. The pipeline runs inside the keeper process and serializes every publish under the store's bounded lock. It writes the backup file and the hash sidecar together with the bytes. The Python porcelain verbs stay the only mutation surface on the CLI side. They reach the pipeline over the keeper socket (`cli/src/fno/graph/store.py` is the client). The mux used to shell the porcelain for its reorder verbs and read the verdict. Now the native store client (`crates/fno/src/store_client.rs`) speaks the same socket protocol, and the write itself adds no seam crossing. The one crossing a native write pays is the detached `fno backlog render-views` replay it fires after landing: the views are Python-owned, so the write crosses back once for the renderer. It is baselined with the rest. Reads keep one deliberately duplicated leg. `crates/fno/src/backlog_view.rs` parses the file itself for its read-only snapshots. The direction law forbids linking the store, and a socket round-trip per snapshot read costs more than the duplicate. The seam is no longer duplicated reads on both sides with writes held by Python. It is one store, two socket clients, and one native read mirror.
+The write path is the asymmetry that matters, and the store port moved where it lives. The bytes of `graph.json` have one writer: the store publish pipeline in `crates/fno-agents/src/graph_store.rs`. The pipeline runs inside the keeper process and serializes every publish under the store's bounded lock. It writes the backup file together with the bytes. The Python porcelain verbs stay the only mutation surface on the CLI side. They reach the pipeline over the keeper socket (`cli/src/fno/graph/store.py` is the client). The mux used to shell the porcelain for its reorder verbs and read the verdict. Now the native store client (`crates/fno/src/store_client.rs`) speaks the same socket protocol, and the write itself adds no seam crossing. The one crossing a native write pays is the detached `fno backlog render-views` replay: the views are Python-owned, so the write crosses back once. It is baselined with the rest. Reads keep one deliberately duplicated leg. `crates/fno/src/backlog_view.rs` parses the file itself for its read-only snapshots. The direction law forbids linking the store, and a socket round-trip per snapshot read costs more than the duplicate. The seam is no longer duplicated reads on both sides with writes held by Python. It is one store, two socket clients, and one native read mirror.
 
 ## The ownership rule
 
 Rust owns what must not stop: the daemon, the PTY, the loop, liveness, and the claim protocol its own decisions read. Python owns what a user types and what reads the graph: the CLI verb surface, `graph.json`, and config resolution.
 
-When the caller does not own the decision the answer feeds, the crossing is legitimate. When the caller owns it, the crossing is not. `finalize` shelling `fno backlog` to record an outcome is legitimate: it writes a Python-owned record through the single writer. The daemon shelling `claim list` to decide its own sweep is not. The caller owns the decision. The fact set belongs on the caller's side of the seam.
+When the caller does not own the decision the answer feeds, the crossing is legitimate. When the caller owns it, the crossing is not. `finalize` shelling `fno backlog` to record an outcome is legitimate: it writes a Python-owned record through the single writer. The daemon's former `claim list` shell-out was not: the daemon owned the sweep decision, so the claim fact set now lives natively beside it.
 
 ## The classification
 
@@ -47,8 +47,8 @@ The table classifies the crossing sites, one line of reason each. The pass that 
 | `client_verbs.rs:3087` | conforming | resume delegation by exec, exit code and signals carried by the child |
 | `client_verbs.rs:3155` | conforming | pane launch through the one front door to the mux server |
 | `client_verbs.rs:3463` | conforming | recovery relaunch through the same single door |
+| `attach.rs:28` | conforming | attach reaches the mux thread portal through the same door; the server owns the thread pane, and the fno crate is a dev-only dependency here |
 | `daemon.rs:1468` | conforming | reapable predicate read from its one implementation, shared by three callers |
-| `daemon.rs:3477` | violating | the daemon reads `claim list` to decide its own worktree sweep, a caller-owned decision fed across the seam |
 | `daemon.rs:3486` | conforming | the cleanup sweep executes through the verb that owns the buckets and guards |
 | `daemon.rs:3530` | conforming | stale-question reconcile routed through the verb that owns it, no apply form |
 | `daemon.rs:7876` | conforming | pane kill through the only path to the server that owns pane state |
@@ -74,7 +74,7 @@ The table classifies the crossing sites, one line of reason each. The pass that 
 | `spawn_gate.rs:378` | conforming | gate-escape telemetry through the event emit path |
 | `backlog_view.rs:69` | conforming | snapshot read through the only writer, schema owned by the source |
 | `client.rs:2470` | conforming | update probe through the update policy owner, bounded |
-| `client.rs:2649` | conforming | workspace prune through the front door, counts owned by the verb |
+| `client.rs:2649` | conforming | workspace prune through the front door, counts owned by the verb; an applied run sends `SquadReload` to every live server so the file and memory agree; an orphaned worker tab (its stored member judged Dead) closes by default, used shells stay opt-in |
 | `client.rs:14413` | conforming | config write through the CLI, the same monopoly as the graph |
 | `connections_view.rs:1240` | conforming | config and combo reads through the config owner, fail-open |
 | `connections_view.rs:1278` | conforming | user-initiated verbs dispatched through the CLI surface |
@@ -97,9 +97,9 @@ The table classifies the crossing sites, one line of reason each. The pass that 
 
 ## The refusal of consumer-driven scoping
 
-`claims.rs:5-8` states the pattern this seam must stop minting: "Scope is consumer-driven: acquire / release / status plus the liveness classifier - exactly what the daemon/adopt/drive/stream-worker call sites need. Everything else (list, refresh, force-release, lane slots) remains Python-only."
+Before this port, `claims.rs` stated the pattern this seam must stop minting: a consumer-driven Rust subset where `list` and the rest of the decision's fact set stayed Python-only. The native claim list, sweep classification, and batch verdict door now close that gap.
 
-What that scope produces is predictable. Today's caller needs today's verbs, so the port moves today's verbs. Tomorrow's caller needs `list`, and `list` is on the far side of the seam, so tomorrow's caller shells back. Each new consumer adds a crossing instead of removing one, and the two implementations drift on the verbs nobody moved.
+The old scope produced a predictable regression. Today's caller needed today's verbs, so the port moved today's verbs. Tomorrow's caller needed `list`, and `list` was on the far side of the seam, so tomorrow's caller shelled back. The complete fact-set port removes that crossing and leaves Python with one batch door instead of a second classifier.
 
 The replacement rule: port a decision's whole fact set, or do not port the decision. Under the process-only ruling this is arithmetic. A port that carries half a fact set adds a spawn per missing fact.
 
@@ -118,6 +118,6 @@ The store port is the counter-example, and it names its own costs. It removed th
 
 Order ports topologically over the crossing dependency graph, not by risk. Risk ranks the claim classifier first on the inventory page because nothing pins it. Dependency says which port can land first, and the two orders disagree.
 
-The first real edge: `claim list` becomes Rust-owned before the daemon's reap decision can be. Porting the decision first makes the daemon shell for the facts it no longer owns, which adds a crossing. Port the fact set, then the decision, in that order, and the crossing count falls instead of rotating.
+The first real edge landed: `claim list` and the sweep fact set became Rust-owned before the daemon's reap decision moved. The daemon now reads the native list directly, so the crossing count falls instead of rotating.
 
-The two violating sites above are where that order starts. `daemon.rs:3477` waits for the claim fact set. `provider.rs:544` waits for the plan-path fact set, and the remedy is carrying the fact set, never a native re-implementation that raises axis two.
+The remaining violating site is `provider.rs:544`, which waits for the plan-path fact set. The remedy is carrying that fact set, never a native re-implementation that raises axis two.

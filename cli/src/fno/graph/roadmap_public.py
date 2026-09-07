@@ -194,10 +194,9 @@ def _state_file_collisions(path: Path) -> list[str]:
             # default row rather than be refused and then overwritten anyway.
             gc.GRAPH_ARCHIVE_JSON,
             gc.LEDGER_JSON,
-            # the sha256 sidecar, the corruption-recovery backup, and the
+            # the corruption-recovery backup, and the
             # flock whose inode an os.replace would swap out from under the
             # mutation mutex
-            Path(str(gc.GRAPH_JSON) + ".sha256"),
             Path(str(gc.GRAPH_JSON) + ".bak"),
             Path(str(gc.GRAPH_JSON) + ".lock"),
         ):

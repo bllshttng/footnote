@@ -69,7 +69,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 
 **Observing = `fno agents peek <handle>`** (`--lines`, `--follow`): tails a transcript peer or pane worker via its mux ref; `fno agents logs <name>` is registry-scoped.
 
-**You are one of many agents (the mesh).** The loop is backlog -> spawn -> target -> mail: pull work with `fno backlog next`, spawn a peer into any project via `fno agents spawn --cwd <repo-root> "/target <node>"` (the `--cwd` is load-bearing - never do another project's work inline), coordinate over `fno agents mail send <handle>`. Spawned workers are roster citizens; a hand-started session joins via `/fno-me`. `fno mux` hosts all of it as watchable, drivable panes.
+**You are one of many agents (the mesh).** The loop is backlog -> spawn -> target -> mail: pull work with `fno backlog next`, spawn a peer into any project via `fno agents spawn --cwd <repo-root> "/target <node>"` (the `--cwd` is load-bearing - never do another project's work inline), coordinate over `fno agents mail send <handle>`. Spawned workers are roster citizens; a hand-started session joins via `/fno-me`. `fno mux` hosts all of it as watchable, drivable panes. A slash-verb seed also resolves an unattended `--permission-mode` (`agents.defaults.permission_mode`, built-in `bypassPermissions`).
 
 **Citizens vs limbs.** `fno agents spawn` makes an addressable, durable roster citizen. A native subagent is a one-shot, observable-only limb. Spawn work that must outlive you, hold a claim, or receive mail. Use a limb for a result consumed next turn. [Details](docs/architecture/coordination.md).
 
@@ -93,6 +93,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 | "Mark node `<id>` done" | `fno backlog done <id>` (NOT a skill) |
 | "Review my changes" | `/fno:review` |
 | "Which task next?" | `fno backlog next` / `ready` |
+| "Reign as the crowned king" | `/fno:reign <scope>` |
 | "What state am I in after compaction?" | `fno whoami` then `fno whoami status` |
 | "Open a PR" | `/fno:pr create` |
 | "Wait for external review" | `/fno:pr check` |

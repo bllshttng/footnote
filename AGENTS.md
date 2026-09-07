@@ -33,19 +33,11 @@ Traps a fresh agent re-hits because they are not yet a lint, guard or refusal. I
 
 AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read, proving this corpus reached its harness. A unit test asserts it: `kdc-delivery-sentinel-1932`.
 
-### Claim snapshots and liveness probes have both lied
-
-Manifest snapshots, process argv and liveness probes have each lied about a live session. Only the live lockfile and the transcript stayed truthful. A manifest's `target_claim_*` fields are an init-time snapshot and can name a respawned supervisor pid. A row's argv-derived fields can outlive the process they describe. Verify ownership against the live lockfile (`fno agents claim status node:<id>`, real holder) and liveness against the transcript, never a stored snapshot.
-
-- specimens: manifest `target_claim_*` fields are an init-time snapshot, never ownership truth.
-- graduates-to: transcript-keyed liveness.
-- added: 2026-07-23
-
 ### Assert a positive marker, never an absence
 
 An absence has three explanations: the real outcome, "the instrument never ran", or a pipeline loss. In the third case, the instrument ran, it HIT, and the pipeline ate the output before anything read it. Require a marker only the outcome produces, pinned to the measured thing, not a matching word. A positive control validates the TOOL, not the TARGET. A green control aimed at the wrong SYMBOL still reads as proof. Before trusting a zero, name the behavior's symbol: for a Python capability, use the function name, not the CLI spelling. Never truncate or post-process a search whose zero you intend to trust.
 
-- specimens: 2026-08-23. Repo-wide grep found `manifest-path`. `head -6` buried it behind a JSON fixture. It produced a wrong p1 root cause. `grep -c` through rtk returned 0 on a read diff containing the string. Quoted-token regex missed bare tokens in a whitespace-split docstring. It nearly closed a live node as resolved-elsewhere. 2026-08-30. zsh ate the `:c` in unquoted `$SHA:crates/...` as a parameter modifier. `git show` got `rates/...`, failed, and `grep -c` printed a clean false 0. Quote the whole pathspec. Same date. `stat` prints LOCAL time. A hand-appended Z turned a 3-minute-old config write into a seven-hour one and falsified an elimination. Print the offset with `%z`.
+- specimens: 2026-08-23 to 08-30. Five false zeros, five causes: `head -6` truncation; the rtk wrapper; a quoted-token regex against bare tokens; zsh eating `:c` in an unquoted `$SHA:path`, so `git show` failed and `grep -c` printed a clean 0; and `stat` printing LOCAL time, where a hand-appended Z aged a 3-minute write to seven hours (print `%z`). 2026-09-06. A diff-RANGE fault, not a search fault: `git show <merge> -- path` returned 0 for a symbol its patch adds 3x, because a merge's combined diff drops hunks matching one parent, while `--stat` showed 112 changed lines in that file. Use `git diff <merge>^1 <merge>`. Control: grep the same fetch for a token you expect present.
 - graduates-to: An assert helper rejects absence-only success and zero-hit probes without a positive control. Honest exit codes answering the wrong question still need a verdict verb.
 - added: 2026-07-27
 
@@ -54,7 +46,7 @@ An absence has three explanations: the real outcome, "the instrument never ran",
 `fno agents mail send` injects as user-shaped text, indistinguishable from operator typing. So a "can the agent do X unprompted?" probe sent by mail tests the USER-TRIGGERED path and cannot fail. Reading that as proof of autonomy is the receipt-can-lie shape: a snapshot that a call was accepted, not that an agent can make it unaided. The valid test is a run with no user-shaped prompt in the transcript.
 
 - specimens: 2026-08-05, a `/code-review` probe mailed to a worker succeeded and was read as proof of self-invocation; the mail was the user-shaped trigger.
-- graduates-to: a probe distinguishing user-shaped injection from an autonomous tool call, or a lint flagging a capability claim evidenced only by a mail probe.
+- graduates-to: a probe separating user-shaped injection from an autonomous tool call, or a lint demanding evidence beyond a mail probe.
 - added: 2026-08-05
 
 ### Codex RPC
@@ -62,7 +54,7 @@ An absence has three explanations: the real outcome, "the instrument never ran",
 `fno agents mail send <full-session-id> --raw '/review'` fires daemon RPC: NATIVE verbs only. --raw types verbatim. fno verbs want $fno:target. A /fno: reads as prose.
 
 - specimens: mail_inject.rs, mux_cli.rs
-- graduates-to: submit receipt
+- graduates-to: Codex RPC dispatch returns a submit receipt naming the accepted verb.
 - added: 2026-08-24
 
 ## Repository
@@ -115,7 +107,9 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 - **Lifecycle:** `intake -> triage -> ready/next -> done`. Side states: `blocked`, `deferred` (`defer`/`undefer`), `superseded`.
 - **Priority:** `p0`..`p3` (default `p2`); orthogonal to `--size S|M|L`.
 - **Editing:** `fno backlog update <id>` in place (`--details`, `--domain`, `--size`, `--priority`, ...). Never recreate via `idea` (dupes).
-- **Board == work order:** non-Done cards share a rank suffix (live-epic children before epics, then priority, then created_at); project lane is a board-only display prefix; `rank <id> --top` floats a card and makes it run next; `_kanban_column` is the sole column authority. [backlog-board-ordering](docs/architecture/backlog-board-ordering.md).
+- **Operator asks:** file with `fno backlog idea "..." --source-kind operator_request`. `fno inbox operator status` reads the operator-turn queue, `ack` disposes a turn.
+- **Subtasks:** `fno backlog contain <owner> <id>...` folds existing nodes into a feature with no plan. They stay on the board, never dispatch alone, and close on the owner's merge. Never defer to mean contained.
+- **Board == work order:** non-Done cards share a rank suffix (live-epic children before epics, then priority, then created_at); project lane is a board-only display prefix; `rank <id> --top` orders, never dispatches; `_kanban_column` is the sole column authority. [backlog-board-ordering](docs/architecture/backlog-board-ordering.md).
 - **Hygiene:** `fno backlog groom` (daily pass), `triage health [--check]`, `maintain [--apply]`, `reconcile` (auto-fires on SessionStart), `advance` (merge-triggered auto-continue, opt-in).
 - **Demand signal:** `fno backlog encounter <id> --evidence "..."`, one per node per session, evidence required. `fno backlog demand` ranks by divergence, never re-ranks. [usage](docs/backlog-usage.md#demand-signal-what-the-agents-keep-hitting).
 
@@ -124,7 +118,7 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 **Waves + executors.** Plans declare waves in `00-INDEX.md`; `skills/execute/orchestrator.py` routes tasks to agents by keyword. Executor resolves via task block -> plan frontmatter -> surface inference: `do`/`tdd` (archer, default) or `impeccable` (frontend-executor). [executor-resolution](skills/execute/references/executor-resolution.md).
 
 **Looping.**
-- *In-session:* `hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop/allow from external truth only: `<promise>` intent, done() reads (PR exists, CI green, every `config.review.required_bots` bot reviewed with no unaddressed blocking finding), any plan-declared `done_probes`, a backstop fingerprint, and budget. Terminal-allow invokes `fno-agents finalize` (idempotent).
+- *In-session:* `hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop/allow from external truth only: `<promise>` intent, done() reads (PR exists, CI green, every `config.review.required_bots` bot reviewed with no unaddressed blocking finding, and either no open finding or the configured rounds spent), any plan-declared `done_probes`, a backstop fingerprint, and budget. Terminal-allow invokes `fno-agents finalize` (idempotent).
 - *Cross-session:* `fno-agents loop run` drives `--driver target`, stopping on a `TerminationReason` (DonePRGreen, DoneAdvisory, DoneDelivery, NoWork, Budget, NoProgress, Interrupted). [unified-loop](docs/architecture/unified-loop.md).
 - Distress: `<help reason="..." evidence="...">...</help>`. Cancel target: `touch .fno/.target-cancelled`; king: `fno agents king cancel --scope <scope>`. Subprocess agents return `RESULT: BLOCKED`.
 - Shared iteration protocol: do ONE thing -> verify mechanically -> keep or discard -> repeat ([iteration-loop](skills/target/references/iteration-loop.md)).
@@ -133,15 +127,15 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 
 NEVER edit these directly (a `PreToolUse` hook detects it). Use `fno backlog` / `fno do state`:
 - `~/.fno/graph.json` - the backlog graph; mutate via `fno backlog` only.
-- `.fno/target-state.md` - immutable session manifest after init; only legal post-init write is first-fill of empty `plan_path` via `fno do state set`.
+- `<space>/worktrees/<name>/target-state.md` - immutable manifest. Only post-init write is first-fill of `plan_path` via `fno do state set`.
 
 | File | Default | Purpose | Owner |
 |------|---------|---------|-------|
 | `paths.graph_json()` | `~/.fno/graph.json` (+ `.md` Kanban) | Feature dependency graph | backlog |
 | `paths.ledger_json()` | `~/.fno/ledger.json` | Execution history + cost | target |
 | `paths.briefs_dir()` | `~/.fno/briefs/{id}.md` | Sidecar discovery briefs | backlog |
-| `.fno/target-state.md` | project-relative | Immutable session manifest | target |
-| `.fno/STATE.md` / `SUMMARY.md` / `00-INDEX.md` | project-relative | Wave progress / completion / strategy | /execute, operator, /blueprint |
+| `<space>/worktrees/<name>/target-state.md` | repo space | Immutable session manifest | target |
+| `<space>/worktrees/<name>/STATE.md` / `SUMMARY.md` / `00-INDEX.md` | repo space | Wave progress / completion / strategy | /execute, operator, /blueprint |
 | `{plan_path}.artifacts/` | plan-relative | Quick-plan sidecar | target stop hook |
 
 Paths resolve via `fno.paths`; override under `config.paths.*`; check with `fno config doctor`. [path-config](docs/path-config.md). A state-root TOP-LEVEL write needs an owner + lifetime in [state-root-inventory](docs/state-root-inventory.md); session-keyed files go in a subfolder.
@@ -174,11 +168,12 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 
 ## CLI subsystems (summary + doc)
 
-- **`fno agents claim`** - the one work-claim primitive; atomic lockfiles under `.fno/claims/`. `target init` already claims the node - never `claim acquire` manually. [coordination](docs/architecture/coordination.md).
+- **`fno agents claim`** - the one work-claim primitive with atomic lockfiles. `target init` already claims the node - never `claim acquire` manually. [coordination](docs/architecture/coordination.md).
 - **`fno agents mail` - native review.** A worker runs the native review via Skill; raw mail is the fallback. The stop gate and `fno do pr merge` enforce code review; `review.self_review_required = false` needs a live claim, expires after `review.optout_ttl_minutes`, and disarms unattended auto-merge. [review lanes](docs/architecture/review-lanes.md).
 - **`fno inbox decide`** - records a ruling per subject. `fno inbox decisions X` recovers it, newest first. [decision-record](docs/architecture/decision-record.md).
+- **`fno agents feed`** - one projection joining questions.jsonl + graph.json into an ordered activity feed; rows carry the node id + session id the mux `prefix+e` overlay deep-links through the sideline's own attach path. [activity-feed](docs/architecture/activity-feed.md).
 - **`fno whoami` / `fno whoami status`** - read-only self-introspection; run when confused after compaction.
-- **`fno do target start <node>`** - one-verb worktree cold-start (ensure off `origin/main` -> heal `.fno` symlink -> `target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
+- **`fno do target start <node>`** - one-verb worktree cold-start (ensure off `origin/main` -> `target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
 - **Spawn substrate** - `fno agents spawn --substrate <pane|thread|headless>`. `pane` and `thread` are both interactive and attachable. `pane` is default and mux-hosted. `thread` is persistent and hosts no pane until one is created; view: a **portal**, 0-indexed, several at once ([portals](docs/architecture/portals.md)). `headless` is the only non-interactive substrate, one-shot. `bg` is a one-release alias naming that same interactive `thread`.
 - **`fno mux workspace restore`** - one verb resumes every worker member of a mux session through its own harness's declared resume form after a reboot or server kill; every member it cannot bring back is named with the reason. [workspace-restore](docs/architecture/workspace-restore.md).
 - **Pane keeper** - a worker pane's pty master lives in a keeper, not the server. A fresh server re-adopts the SAME pid. Plain panes still die with the server. `fno mux pane keeper list` reads survivors, and the page answers why not the daemon. [pane-keeper](docs/architecture/pane-keeper.md).

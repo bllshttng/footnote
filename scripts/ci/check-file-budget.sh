@@ -160,9 +160,12 @@ live_count() {
     echo "$_CACHED_COUNT"
 }
 
+# Paths are repo-relative, so a leading glob is what reaches a nested file.
+# `test_*.py` alone matched only a repo-root test, and every python test in
+# this repo lives under cli/, so the whole test tree counted as production.
 is_test_path() {
     case "$1" in
-        *_tests.rs | */tests/* | test_*.py | *_test.py) return 0 ;;
+        *_tests.rs | */tests/* | test_*.py | */test_*.py | *_test.py) return 0 ;;
         *) return 1 ;;
     esac
 }

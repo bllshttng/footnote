@@ -145,17 +145,12 @@ def _prepare(body: str, *extra: str):
 
 
 def test_default_pane_body_violating_style_refuses_before_envelope(stubbed_transport):
-    """The measured bypass: identical prose refused by mail used to pass here."""
-    # One 26-word sentence: rule 1 caps a sentence at 25 words.
-    body = (
-        "the refusal says use --raw for a bare submit keystroke and the next "
-        "command rejects that form because the arity guard still demands a "
-        "text flag"
-    )
+    """Pane sends ride the relay contract: the word cap is the gate."""
+    body = " ".join(["w"] * 81)
     result = _prepare(body)
     assert result.exit_code == 1, result.output
     assert "style" in result.output.lower(), result.output
-    assert "rule 1" in result.output, result.output
+    assert "81 words" in result.output and "80 words" in result.output, result.output
     assert "</fno_mail>" not in result.output, "a refused body must not render"
 
 

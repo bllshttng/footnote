@@ -56,12 +56,10 @@ def resolve_carveout_root() -> Path:
     - not per-session state like ``target-state.md``. A carve-out captured
     inside a linked worktree must survive that worktree's archival so the
     retro-triage harvest (which runs from the main checkout at merge) can still
-    find it; ``setup-worktree.sh`` does NOT symlink ``carveouts.jsonl``, so a
-    worktree-local ledger is simply lost on teardown (ab-44408b6e). Resolving
-    the PATH to canonical (vs symlinking the file) also co-locates the ledger
-    with its ``.lock.d`` mutex, so concurrent writers across worktrees actually
-    serialize - a per-worktree file + symlink would keep the lock
-    worktree-local and not cross-serialize appends.
+    find it. The ledger itself lands in the repo's space via
+    :func:`fno.paths.project_log` (co-located with its ``.lock.d`` mutex, so
+    concurrent writers across worktrees serialize - a per-worktree file would
+    keep the lock worktree-local and not cross-serialize appends, ab-44408b6e).
 
     Uses ``git worktree list --porcelain`` (the PR #400 pattern, robust across
     ``--separate-git-dir`` layouts), via
@@ -125,10 +123,16 @@ def resolve_session_id(repo_root: Path) -> Optional[str]:
     ``session_id`` fallback), then the ``$CLAUDECODE_SESSION_ID`` env var.
     None means the caller records the
     carve-out unscoped (capture is never lost over a missing session).
+
+    The manifest comes from its owning resolver, never built by hand. A worktree
+    session's lives in the project SPACE, and a hand-built path missed it, filed
+    the carve-out unscoped, and covered nothing at the fidelity gate.
     """
     import os
 
-    state_path = repo_root / ".fno" / "target-state.md"
+    from fno.paths import target_state_path_or_legacy
+
+    state_path = target_state_path_or_legacy(repo_root)
     if state_path.exists():
         try:
             from fno.state.io import read_frontmatter

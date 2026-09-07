@@ -1200,7 +1200,7 @@ def _shell_fno_result(argv: List[str], what: str) -> Optional[subprocess.Complet
     """
     # 15s bounds an append-only event emit. The task-claim settle is a full
     # graph mutation behind the fleet-wide flock (recompute, JSON write,
-    # sha256 sidecar, whole-board render), and a SIGKILL mid-settle strands a
+    # whole-board render), and a SIGKILL mid-settle strands a
     # pid-anchored claim that never goes stale, so the row reads peer-held for
     # the rest of the run. Give a settle the longer bound.
     timeout = 120 if "task" in argv[:4] else 15

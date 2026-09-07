@@ -2851,9 +2851,13 @@ def test_project_log_still_wins_when_it_is_newer(monkeypatch, tmp_path):
     _write_coverage(
         global_dir / "events.jsonl", 781, repo="github.com/bllshttng/footnote", ts="2026-08-08T01:00:00Z", count=1
     )
-    _write_coverage(
-        canonical / ".fno" / "events.jsonl", 781, ts="2026-08-08T02:00:00Z", count=5
-    )
+    # The project log the gate reads is the space journal (x-d2e9); the legacy
+    # checkout path is only a migration source now, so seed the real one.
+    from fno.paths import project_log
+
+    project_journal = project_log("events.jsonl", project_root=canonical)
+    project_journal.parent.mkdir(parents=True, exist_ok=True)
+    _write_coverage(project_journal, 781, ts="2026-08-08T02:00:00Z", count=5)
 
     cov, _note = _merge._review_coverage_for_pr(781, str(canonical))
     assert cov is not None and cov["reviewed_count"] == 5
@@ -2928,23 +2932,30 @@ def test_equal_timestamps_take_the_safer_verdict(monkeypatch, tmp_path):
 
 
 def test_repo_rooted_at_the_global_log_still_scopes(monkeypatch, tmp_path):
-    """When the git top-level IS the state dir (a `git init ~` dotfiles
-    checkout), the project log and the global journal are ONE file. The project
-    read is normally unscoped because it is repo-local; here that would let any
-    repo's PR N satisfy this repo's guard, so the unscoped read must drop out."""
+    """Two repos rooted under the SAME home must not satisfy each other's
+    guards. The space move replaced the old same-file hazard (a `git init ~`
+    checkout where the project log WAS the global journal) with slug-keyed
+    journals: each repo's space path carries its own slug, so a foreign row
+    cannot even be addressed. The scoping that survives is the GLOBAL log's,
+    which is still one cross-project file - a foreign row there must refuse,
+    and the repo's own row must cover."""
     from fno import paths
 
-    root = _git_repo(tmp_path / "home", "git@github.com:org-a/widget.git")
-    events = root / ".fno" / "events.jsonl"
-    monkeypatch.setattr(paths, "global_events_json", lambda: events)
+    home = tmp_path / "home"
+    root = _git_repo(home / "widget", "git@github.com:org-a/widget.git")
+    foreign = _git_repo(home / "gadget", "git@github.com:org-b/gadget.git")
+    monkeypatch.setattr(paths, "global_events_json", lambda: root / ".fno" / "events.jsonl")
 
-    _write_coverage(events, 781, repo="github.com/org-b/widget")
+    # A foreign repo's row lands in the FOREIGN repo's space journal; repo A's
+    # guard reads only its own journal (empty) plus the scoped global (no row).
+    foreign_events = foreign / ".fno" / "events.jsonl"
+    _write_coverage(foreign_events, 781, repo="github.com/org-b/gadget")
     assert _merge._review_coverage_for_pr(781, str(root))[0] is None, (
-        "a foreign repo's event must not satisfy the guard even when the two "
-        "logs are the same file"
+        "a foreign repo's event must not satisfy this repo's guard"
     )
 
-    _write_coverage(events, 781, repo="github.com/org-a/widget")
+    # The repo's own row in its own journal covers.
+    _write_coverage(root / ".fno" / "events.jsonl", 781, repo="github.com/org-a/widget")
     assert _merge._review_coverage_for_pr(781, str(root))[0] is not None
 
 
@@ -2956,7 +2967,11 @@ def test_corrupt_line_does_not_wedge_the_gate(monkeypatch, tmp_path):
     canonical = _git_repo(tmp_path / "canonical", "git@github.com:bllshttng/footnote.git")
     _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
 
-    events = canonical / ".fno" / "events.jsonl"
+    # The project log the gate reads is the space journal (x-d2e9).
+    from fno.paths import project_log
+
+    events = project_log("events.jsonl", project_root=canonical)
+    events.parent.mkdir(parents=True, exist_ok=True)
     events.write_text('{"type": "review_coverage", TRUNCATED\n', encoding="utf-8")
     _write_coverage(events, 781)
 

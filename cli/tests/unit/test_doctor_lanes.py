@@ -41,13 +41,14 @@ def _macmon_sample(**overrides):
     return sample
 
 
-def _footprint(*, tests: int = 3, gap: str | None = None):
+def _footprint(*, tests: int = 3, gap: str | None = None, top=()):
     """A footprint reading stand-in: only the fields the census reads."""
     return SimpleNamespace(
         fleet_cpu_cores=0.5,
         rss_gb=1.9,
         test_process_count=tests,
         attribution_gap=gap,
+        top=list(top),
     )
 
 
@@ -405,3 +406,74 @@ def test_json_payload_carries_the_census(monkeypatch) -> None:
     assert census["kings"] == 2
     assert census["workers"] == 4
     assert census["tests"] == 3
+
+
+def test_the_load_arm_names_the_whole_load_vocabulary(monkeypatch) -> None:
+    """x-aeab: the panel cannot label what the arm never emits. The 5m/15m
+    averages and the ceiling's factors ride on the value object beside the
+    1m figure they contextualize."""
+    from fno import doctor_footprint
+
+    snapshot = SimpleNamespace(
+        load_1m=184.9,
+        load_5m=122.3,
+        load_15m=143.8,
+        max_load_per_cpu=8.0,
+        load_ceiling=96.0,
+        load_cpu_count=12,
+        spawn_load_status="exceeded",
+    )
+    monkeypatch.setattr(doctor_footprint, "_spawn_load_snapshot", lambda: snapshot)
+    monkeypatch.setattr(doctor_footprint, "_cpu_capacity_cores", lambda: 12)
+
+    arm = {a.name: a for a in dl.read_lanes().arms}["spawn load"]
+
+    assert arm.value["load_1m"] == 184.9
+    assert arm.value["load_5m"] == 122.3
+    assert arm.value["load_15m"] == 143.8
+    assert arm.value["ceiling"] == 96.0
+    assert arm.value["max_load_per_cpu"] == 8.0
+    assert arm.value["load_cpu_count"] == 12
+
+
+def test_the_census_carries_top_consumers_from_the_ps_read(monkeypatch) -> None:
+    """x-aeab: name what is saturating the box, from rows a read already
+    performed - never a second instrument."""
+    _healthy_reading(monkeypatch)
+    monkeypatch.setattr(
+        dl,
+        "_fleet_snapshot",
+        lambda: (
+            _footprint(
+                top=[
+                    (210.0, "/usr/local/bin/python3 fno-py doctor test"),
+                    (45.0, "fno-agents-worker --worktree .fno/worktrees/x-b1ee"),
+                ]
+            ),
+            _rows(6),
+            None,
+            421,
+        ),
+    )
+
+    census = dl.read_lanes().census
+
+    top = census["top_consumers"]
+    assert top[0]["name"] == "python3"
+    assert top[0]["procs"] == 1
+    assert top[0]["cpu_pct"] == 210.0
+    assert census["top_consumers"][1]["worktree"] == ".fno/worktrees/x-b1ee"
+    assert census["top_consumers"][1]["worktree_procs"] == 1
+
+
+def test_a_dark_footprint_leaves_top_consumers_none(monkeypatch) -> None:
+    """A reading that failed names so; the panel prints a degrade, never a
+    fabricated consumer list."""
+    _healthy_reading(monkeypatch)
+    monkeypatch.setattr(
+        dl, "_fleet_snapshot", lambda: (None, _rows(6), "ps unavailable", 5)
+    )
+
+    census = dl.read_lanes().census
+
+    assert census["top_consumers"] is None

@@ -470,8 +470,12 @@ def record_hosted_delivery(
     from_model: Optional[str] = None,
     to_kind: Optional[str] = None,
     word_count: Optional[int] = None,
+    to_session: Optional[str] = None,
+    to_harness: Optional[str] = None,
 ) -> Envelope:
-    """Append one audit-only record after confirmed hosted delivery."""
+    """Append one audit-only record after confirmed hosted delivery. ``to_session``/
+    ``to_harness`` name the session actually injected into, for the landed check."""
+    meta = {k: v for k, v in (("to_session", to_session), ("to_harness", to_harness)) if v}
     env = Envelope.new(
         id=msg_id,
         thread=thread or msg_id,
@@ -488,6 +492,7 @@ def record_hosted_delivery(
         from_model=from_model,
         to_kind=to_kind,
         word_count=word_count,
+        meta=meta or None,
     )
     append(env)
     return env
@@ -614,6 +619,40 @@ def withdrawn_ids(msgs: list[Envelope]) -> set[str]:
         # "withdrawn: msg-xxxx" line about a message it had no power to retract.
         out.add(m.id)
         target_id = (m.meta or {}).get("withdraws")
+        target = by_id.get(target_id) if isinstance(target_id, str) else None
+        if target is None or target.from_ != m.from_ or target.to != m.to:
+            continue
+        out.add(target.id)
+    return out
+
+
+#: Durable proof one id reached its recipient's transcript. Never deliverable.
+LANDED_KIND = "landed"
+
+
+def record_landed(*, msg_id: str, sender: str, recipient: str) -> Envelope:
+    """Append one control row proving ``msg_id`` reached ``recipient``'s transcript."""
+    env = Envelope.new(
+        from_=sender,
+        to=recipient,
+        kind=LANDED_KIND,
+        body="",
+        meta={"landed": msg_id},
+    )
+    append(env)
+    return env
+
+
+def landed_ids(msgs: list[Envelope]) -> set[str]:
+    """Ids proven landed by a same-sender/recipient ``record_landed`` row (mirrors
+    ``withdrawn_ids``). The control row's own id is never added -- unlike a
+    withdrawal, a landed message must stay visible."""
+    by_id = {m.id: m for m in msgs}
+    out: set[str] = set()
+    for m in msgs:
+        if m.kind != LANDED_KIND:
+            continue
+        target_id = (m.meta or {}).get("landed")
         target = by_id.get(target_id) if isinstance(target_id, str) else None
         if target is None or target.from_ != m.from_ or target.to != m.to:
             continue

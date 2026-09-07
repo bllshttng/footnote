@@ -27,15 +27,18 @@ class IdentityAmbiguousError(RuntimeError):
 
 def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
     """Resolve owned identity with the runtime registry collision witness."""
-    def collide(_harness: str, session_id: str) -> Optional[str]:
+    def collide(
+        _harness: str, session_id: str, own_pair: Optional[tuple[str, str]]
+    ) -> Optional[str]:
         from fno.agents.registry import row_owning_session_id
 
-        # This layer resolves identity from scratch: it holds no binding it
-        # can prove independently of the markers under test, so the explicit
-        # sentinel is the written self-blind decision. The canonical-proven
-        # guard in claims.self_identity disables this detector exactly where
-        # a proven self would matter.
-        return row_owning_session_id(session_id, self_binding=None)
+        # own_pair is the canonical pair claims.self_identity completed from
+        # the spawn stamp plus the same family's marker (None when it could
+        # not). The registry applies the agreement check: a row matching the
+        # pair on both halves is this worker's own and never contention, a
+        # pair of None keeps this detector self-blind exactly where nothing
+        # proves self.
+        return row_owning_session_id(session_id, self_binding=own_pair)
 
     return _resolve_self_identity(env, collide=collide)
 

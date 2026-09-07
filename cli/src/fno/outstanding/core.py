@@ -134,10 +134,7 @@ class Outstanding:
     @property
     def empty(self) -> bool:
         return (
-            self.carveout_total == 0
-            and not self.questions
-            and not self.captures
-            and not self.lane
+            self.carveout_total == 0 and not self.questions and not self.captures and not self.lane
         )
 
     def as_dict(self) -> "dict[str, Any]":
@@ -320,9 +317,7 @@ def _resolve_question_liveness(
                 pass
             send.close()
 
-    process = context.Process(
-        target=resolve_all, name="fno-question-liveness", daemon=True
-    )
+    process = context.Process(target=resolve_all, name="fno-question-liveness", daemon=True)
     process.start()
     send.close()
     answers: "dict[str, bool]" = {}
@@ -392,10 +387,7 @@ def read_open_questions(
         clock=clock,
         resolver=resolver,
     )
-    open_qs = [
-        replace(q, live=False if not q.asker else resolved.get(q.asker))
-        for q in open_qs
-    ]
+    open_qs = [replace(q, live=False if not q.asker else resolved.get(q.asker)) for q in open_qs]
     # A stale asker never outranks a reachable one, even when it blocks more.
     # Within each liveness lane, unblock the most nodes first, then honor the
     # questions that have waited longest. No auto-expiry: age only ranks.
@@ -409,6 +401,36 @@ def read_open_questions(
         )
     )
     return open_qs
+
+
+def read_answered_questions() -> "list[dict[str, Any]]":
+    """Every closed-with-answer question, oldest first, asker joined in: the
+    closed event names who closed, not who asked, so the fold joins against
+    the question's own event (a missing ask event leaves asker None). The
+    king wake phase reads this machine-wide index for its strongest trigger."""
+
+    asked: "dict[str, dict[str, Any]]" = {}
+    answered: "list[dict[str, Any]]" = []
+    for rec in _read_question_events(questions_path(), missing_hint=False):
+        data = rec.get("data")
+        if not isinstance(data, dict) or not str(data.get("question_id") or ""):
+            continue
+        qid = str(data["question_id"])
+        if rec.get("type") == QUESTION_EVENT:
+            asked[qid] = data
+        elif rec.get("type") == QUESTION_CLOSED_EVENT and data.get("answer"):
+            origin = asked.get(qid) or {}
+            answered.append(
+                {
+                    "id": qid,
+                    "asker": origin.get("asker") or None,
+                    "question": str(origin.get("question") or ""),
+                    "answer": str(data["answer"]),
+                    "closed_ts": str(rec.get("ts") or ""),
+                }
+            )
+    answered.sort(key=lambda a: (a["closed_ts"], a["id"]))
+    return answered
 
 
 def _capture_project_roots(root: Path) -> "list[Path]":
@@ -776,9 +798,7 @@ def render(
         lines.append("")
 
     if outstanding.carveout_total:
-        split = ", ".join(
-            f"{n} {kind}" for kind, n in sorted(outstanding.carveout_by_kind.items())
-        )
+        split = ", ".join(f"{n} {kind}" for kind, n in sorted(outstanding.carveout_by_kind.items()))
         head = f"{_plural(outstanding.carveout_total, 'carve-out')} unharvested"
         if outstanding.carveout_root:
             head += f" from {outstanding.carveout_root}"
@@ -860,10 +880,8 @@ def render(
                 "answering still records the decision."
             )
         if len(outstanding.questions) > QUESTION_RENDER_CAP:
-            lines.append(
-                f"  Showing {len(shown)} of {len(outstanding.questions)} open questions."
-            )
-        lines.append("  Answer with: fno inbox outstanding clear <id> --answer \"...\"")
+            lines.append(f"  Showing {len(shown)} of {len(outstanding.questions)} open questions.")
+        lines.append('  Answer with: fno inbox outstanding clear <id> --answer "..."')
         lines.append("")
 
     if outstanding.captures:

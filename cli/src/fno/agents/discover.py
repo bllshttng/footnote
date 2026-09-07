@@ -37,7 +37,7 @@ from fno import paths
 from fno.agents.fs_scan import path_exists_strict, scan_files
 from fno.agents.reachability import (
     REACHABLE,
-    WIRE_STATUS,
+    rendered_activity,
     Reachability,
     classify_progress,
     classify_reachability,
@@ -1147,12 +1147,17 @@ class DiscoveredSession:
             "pid": self.pid,
             "cwd": self.cwd,
             "project": self.project,
-            "status": WIRE_STATUS[reach.verdict],
+            "status": rendered_activity(
+                truth_state=self.truth_state,
+                age_s=reach.age_s,
+                reachability=reach.verdict,
+            ),
             # The evidence, not just the word derived from it. Reducing the
             # verdict to a bare `status` here left this lane unable to say
-            # whether a `live` came from a transcript reading or an `orphaned`
-            # from a fired falsifier -- on the one list surface whose rows are
-            # ALL derived, and which the Rust path re-serves verbatim.
+            # whether a `writing` came from a transcript reading or an
+            # `orphaned` from a fired falsifier -- on the one list surface
+            # whose rows are ALL derived, and which the Rust path re-serves
+            # verbatim.
             "reachability": reach.verdict,
             "basis": reach.basis,
             "progress": progress.verdict,
@@ -1294,6 +1299,10 @@ def _live_claude_procs(psutil_mod) -> list[tuple[int, str]]:
     scan below to live sessions' dirs only — never the full 454-dir / 13k-file
     store (the plan's no-full-scan contract). Best-effort: any psutil failure
     yields fewer rows, never raises.
+
+    Cmdline is launch-time evidence: it says how a process was started, never
+    what state it is in now; liveness verdicts come from
+    ``fno.agents.session_truth``, not this walk.
     """
     out: list[tuple[int, str]] = []
     try:
@@ -1747,11 +1756,28 @@ def _resolve_aliases(live: list[dict], name_map_path: Path) -> dict[str, str]:
                     time.sleep(min(_ALIAS_LOCK_POLL_SECONDS, remaining))
             try:
                 stored = _load_name_map(name_map_path)
+                # A row's own legible alias outranks the legacy file.
+                row_aliases: dict[str, str] = {}
+                try:
+                    from fno.agents.registry import load_registry
+                    for entry in load_registry():
+                        cands = [
+                            a
+                            for a in (getattr(entry, "aliases", None) or [])
+                            if a and not _is_accreted(a) and not LEGACY_HANDLE_RE.fullmatch(a)
+                        ]
+                        sid = entry.harness_session_id or entry.short_id
+                        if cands and sid:
+                            row_aliases[sid] = cands[0]
+                except (OSError, ValueError):
+                    row_aliases = {}
                 # Retire any alias whose session is no longer live.
                 pruned = {sid: nm for sid, nm in stored.items() if sid in live_sids}
                 for r in live:
                     sid = r["session_id"]
-                    if (
+                    if sid in row_aliases:
+                        aliases[sid] = row_aliases[sid]
+                    elif (
                         sid in pruned
                         and isinstance(pruned[sid], str)
                         and pruned[sid]
@@ -2113,6 +2139,10 @@ class ReachableSession:
     # directory would fail to revive a recipient that lives in another repo.
     # None means no store recorded one and the caller must fall back.
     cwd: Optional[str] = None
+    # The transcript source matched the file itself, so it hands over the
+    # path; a truth read must not re-derive it through the lossy cwd decode
+    # (a decoded cwd can be None when the project dir no longer exists).
+    transcript_path: Optional[Path] = None
 
 
 class StoreReadError(Exception):
@@ -2142,7 +2172,7 @@ class StoreReadError(Exception):
 # decoded from a transcript directory name is a lossy GUESS, while a registry
 # or roster row records the path verbatim. A verbatim cwd must be able to
 # correct a decoded one even though the decoding source ranks higher overall.
-_Hits = list[tuple[str, str, Optional[str], bool]]
+_Hits = list[tuple[str, str, Optional[str], bool, Optional[Path]]]
 
 
 def _decode_project_dir(name: str) -> Optional[str]:
@@ -2184,19 +2214,26 @@ def _alias_to_session_ids(token: str, name_map_path: Optional[Path]) -> tuple[li
     only addressable by its alias to exit 16 with nothing queued.
     """
     path = name_map_path or default_name_map_path()
+    stored: dict = {}
     try:
-        exists = path_exists_strict(path)
-    except OSError:
-        return [], False
-    if not exists:
-        return [], True
-    try:
-        stored = json.loads(path.read_text(encoding="utf-8"))
+        if path_exists_strict(path):
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(stored, dict):
+                return [], False
     except (OSError, ValueError, UnicodeDecodeError):
         return [], False
-    if not isinstance(stored, dict):
-        return [], False
-    return [sid for sid, alias in stored.items() if isinstance(sid, str) and alias == token], True
+    hits = [sid for sid, alias in stored.items() if isinstance(sid, str) and alias == token]
+    # The rows are the primary name store: their aliases resolve past the file.
+    try:
+        from fno.agents.registry import load_registry
+        for entry in load_registry():
+            if token in (getattr(entry, "aliases", None) or []):
+                sid = entry.harness_session_id or entry.short_id
+                if sid and sid not in hits:
+                    hits.append(sid)
+    except (OSError, ValueError):
+        pass
+    return hits, True
 
 
 def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, bool]:
@@ -2236,7 +2273,9 @@ def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, 
         sid = path.name[: -len(".jsonl")]
         if _token_matches(token, sid) and sid not in seen:
             seen.add(sid)
-            hits.append((sid, "claude", _decode_project_dir(path.parent.name), False))
+            hits.append(
+                (sid, "claude", _decode_project_dir(path.parent.name), False, path)
+            )
     return hits, True
 
 
@@ -2305,6 +2344,7 @@ def _reachable_from_registry(token: str, registry_path: Optional[Path]) -> tuple
                     harness,
                     cwd if isinstance(cwd, str) and cwd else None,
                     True,
+                    None,
                 )
             )
     return hits, True
@@ -2358,7 +2398,9 @@ def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> tuple[_Hit
         if _token_matches(token, sid) and sid not in seen:
             seen.add(sid)
             cwd = row.get("cwd")
-            hits.append((sid, "claude", cwd if isinstance(cwd, str) and cwd else None, True))
+            hits.append(
+                (sid, "claude", cwd if isinstance(cwd, str) and cwd else None, True, None)
+            )
     return hits, True
 
 
@@ -2370,7 +2412,7 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
     but never enough to claim liveness.
     """
     try:
-        from fno.graph.load import GraphCorruptionError, load_graph
+        from fno.graph.load import load_graph
     except ImportError:
         return [], False
     try:
@@ -2379,10 +2421,10 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
         # Every other load_graph caller takes the filtered default, so no other
         # consumer has to guard against a row it cannot index.
         entries = load_graph(keep_malformed=True)
-    except (OSError, ValueError, GraphCorruptionError):
-        # Corrupt, torn, or hash-mismatched: unreadable, NOT empty. Reporting
-        # empty here would let a graph problem masquerade as "this token names
-        # nothing" and drop the mail.
+    except (OSError, ValueError):
+        # Unparseable or unreadable: NOT empty. Reporting empty here would let
+        # a graph problem masquerade as "this token names nothing" and drop
+        # the mail.
         return [], False
     hits: _Hits = []
     # Node stamps carry their own harness, so identity is the pair (x-c670).
@@ -2421,6 +2463,7 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
                         harness,
                         cwd if isinstance(cwd, str) and cwd else None,
                         True,
+                        None,
                     )
                 )
     return hits, not malformed
@@ -2435,7 +2478,9 @@ def _reachable_from_harness_stores(token: str) -> tuple[_Hits, bool]:
         hits = complete_store_hits(token)
     except AgentResolutionError:
         return [], False
-    return [(hit.session_id, hit.harness, hit.cwd or None, True) for hit in hits], True
+    return [
+        (hit.session_id, hit.harness, hit.cwd or None, True, None) for hit in hits
+    ], True
 
 
 def resolve_reachable(
@@ -2470,11 +2515,17 @@ def resolve_reachable(
     if not token or not token.strip():
         return None, []
 
+    from fno.agents.registry import RegistryVersionError
+
     pdir = projects_dir or default_projects_dir()
     # A friendly <project>-<short8> alias must keep working once its session
     # falls out of the live listing; resolve it to real uuids and match those
     # alongside the raw token.
-    alias_sids, alias_ok = _alias_to_session_ids(token, name_map_path)
+    try:
+        alias_sids, alias_ok = _alias_to_session_ids(token, name_map_path)
+        degraded: list[str] = []
+    except RegistryVersionError:  # torn store: degrade, never a clean miss
+        alias_sids, alias_ok, degraded = [], True, ["registry"]
 
     sources = (
         ("transcript", lambda t: _reachable_from_transcripts(t, pdir)),
@@ -2485,7 +2536,8 @@ def resolve_reachable(
     )
     tokens = [token, *alias_sids]
 
-    degraded: list[str] = [] if alias_ok else ["alias-map"]
+    if not alias_ok:
+        degraded.append("alias-map")
     # Keyed on (harness, normalized id). Harness is load-bearing: an id string
     # is only unique WITHIN a harness, so folding on the id alone merges a
     # claude session with a codex one that happens to share it, and the merged
@@ -2503,12 +2555,16 @@ def resolve_reachable(
                 if source not in degraded:
                     degraded.append(source)
                 continue
-            for sid, agent, cwd, verbatim in hits:
+            for sid, agent, cwd, verbatim, tpath in hits:
                 key = (agent, session_identity_key(sid))
                 prior = found.get(key)
                 if prior is None:
                     found[key] = ReachableSession(
-                        session_id=sid, source=source, agent=agent, cwd=cwd
+                        session_id=sid,
+                        source=source,
+                        agent=agent,
+                        cwd=cwd,
+                        transcript_path=tpath,
                     )
                     cwd_verbatim[key] = verbatim and cwd is not None
                     continue
@@ -2524,6 +2580,7 @@ def resolve_reachable(
                         source=prior.source,
                         agent=prior.agent,
                         cwd=cwd,
+                        transcript_path=prior.transcript_path,
                     )
                     cwd_verbatim[key] = verbatim
 

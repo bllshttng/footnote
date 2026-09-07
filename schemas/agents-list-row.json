@@ -20,6 +20,7 @@
     "last_message_at_basis",
     "last_reconciled_at",
     "status",
+    "substrate",
     "reachability",
     "basis",
     "progress",
@@ -35,6 +36,7 @@
     "crown_level",
     "crown_scope",
     "crown_grantor",
+    "spawned_by_session",
     "mux",
     "origin",
     "delivery_policy",
@@ -54,7 +56,8 @@
     "predecessor_session_ids": "Ordered, deduplicated succession history (v18): every retired id the current session succeeded, oldest first. Empty for a worker never re-minted. A predecessor id still ADDRESSES the row (mail naming A lands on the row that now answers as B), but only a full-id resume may consume it exactly.",
     "forked_from_session_id": "The immediate origin of a BRANCH row (v18): the live session this parallel fork split from. None on every non-branch row, including a succession successor - succession is one row plus a chain, never a fork edge. A branch renders as its own row; this key is the visible edge between the two live workers.",
     "provider": "The registry's spawn-stamped model vendor (v15+ axis), never inferred from `harness`. Restored to the projection by x-f273: the pre-v15 alias that carried the HARNESS value under this name was removed for lying, and that removal kept hiding the real vendor axis the rename had just created, so `fno agents list` answered null for a field the writer stored (30 of 31 live rows lost, 2026-08-22). `observed_model` remains the transcript-derived reading of what actually answered; this key answers which vendor's lane the row was minted for. Both serializers emit it or the parity asserts fail.",
-    "effort": "The selected reasoning-effort value, passed through verbatim from the registry. It is a separate axis from harness, provider, model, and account; fno does not validate it against a provider or model allowlist."
+    "effort": "The selected reasoning-effort value, passed through verbatim from the registry. It is a separate axis from harness, provider, model, and account; fno does not validate it against a provider or model allowlist.",
+    "spawned_by_session": "The parent session id this row was spawned by, or null when the spawn could not resolve an owned identity. The orphan check and any lineage reader key on it; emitting it here lets `agents list -J` debug what `registry-json` already reports, instead of measuring nothing and concluding the hook is broken."
   },
   "removed": {
     "model": "OMITTED FROM THE ROW PROJECTION. Registry storage records intended model configuration, while `observed_model` is the actual transcript-derived reading. Do not expose intended configuration as though it were observed runtime truth.",
@@ -76,9 +79,17 @@
   "rust_only": {
     "$comment": "Keys the Rust daemon projection emits on top of `required`. A harmless superset: the Python list surface has no equivalent source field.",
     "keys": [
+      "harness_title",
+      "liveness",
+      "liveness_measured_at",
       "pid",
       "project_root"
     ]
+  },
+  "rust_only_notes": {
+    "harness_title": "The last title the HARNESS reported for the session (claude's Ctrl+R agent-name record; codex/opencode's index title), served from the same truth probe the row's `status` came from with the sweep-stored last-seen value as fallback. Sits beside `name`, never in it: the label is fno's, the title is the harness's, and a rename fires `agent_renamed` instead of rewriting the label.",
+    "liveness": "The SERVED liveness verdict (`alive|dead|unmeasured`), written ONLY by the reconcile sweep and always paired with `liveness_measured_at`. It never replaces the stored `status`: a reading older than two sweep budgets reads as stale, and the age rides beside it.",
+    "liveness_measured_at": "The measurement stamp of `liveness`; the age a reader computes from it is part of the fact, never decoration."
   },
   "python_only": {
     "$comment": "Keys the Python serializer emits on top of `required`. Add one only when the Rust projection genuinely CANNOT answer the same question, never because it was easier. The reachability triple was briefly listed here, which was the wrong call and is worth recording: a triple emitted Python-side only was missing from the daemon projection that the mux table and fleetview read, while peek and the daemon's own census comment both sent readers to `fno agents list` to find it. Both serializers now emit it from the same `fno agents truth --json` probe. Which serializer is reachable, measured 2026-08-20: `fno agents list` is served by the PYTHON `serialize_entry`. The Rust `fno` binary forwards every non-mux subcommand to the Python CLI, and crates/fno/src/server.rs:1205 reaches the daemon's own view by shelling back out to `agents list --json`. The daemon's `agent.list` projection answers the RPC its consumers make. Earlier revisions of this comment claimed the reverse and sent a reader building an operator-facing column toward the serializer nobody was reading. `dnd` (x-481e) meets the bar the triple did not: it is the remaining time on a busy-mode hold, read from a clock whose directory is resolved by fno's own path config (`fno.paths.state_dir()`), which the daemon does not load. The daemon emits the raw `delivery_policy` it stores, which answers 'is mail held'; `dnd` answers 'until when' and only the config-aware side can. The one operator-facing DND column is the Python table, so nothing that renders it is missing it. Four values, and a consumer must handle all four: a duration (`~4m`, `~30s`) for a timed hold; `held` for a policy with no expiry recorded; `?` when the clock could not be read, which is NOT the same as no hold and must never render as the empty cell; and null when mail is flowing despite the flag, which is the lapsed-hold case.",
@@ -90,14 +101,17 @@
     "$comment": "AgentEntry fields intentionally omitted from the list-row projection. The field's registry.py docstring owns the reason; do not duplicate those rationales here.",
     "keys": [
       "account_record_id",
+      "adopted_by_session",
       "aliases",
       "cc_session_id",
       "exited_at",
       "fno_id",
+      "granted_writable_roots",
       "host_mode",
       "inside_leg",
       "keeper_child_pid",
       "launch_account",
+      "launch_account_source",
       "mcp_channel_id",
       "messaging_socket_path",
       "model_name",
@@ -105,6 +119,7 @@
       "related_session_id",
       "requested_effort",
       "requested_provider",
+      "resolved_sandbox",
       "route_provider_id",
       "route_settings_path",
       "sandbox_posture",
@@ -112,8 +127,7 @@
       "spawn_trigger",
       "spawned_by_cwd",
       "spawned_by_harness",
-      "spawned_by_session",
-      "substrate"
+      "spawned_by_session"
     ]
   },
   "known_gaps": {}

@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# codemap-fresh.sh - Check if .fno/codemap.md is within 24 hours
+# codemap-fresh.sh - Check if the codemap (repo's space, worktree slice) is within 24 hours
 # Contract: stdout one line "codemap-fresh {pass|fail|warn|unknown} {message}"
 # Exit: always 0
 
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-CODEMAP="$REPO_ROOT/.fno/codemap.md"
+CODEMAP="$(fno-agents state path codemap 2>/dev/null || true)"
+[[ -z "$CODEMAP" ]] && CODEMAP="$REPO_ROOT/.fno/codemap.md"
 
 if [[ ! -f "$CODEMAP" ]]; then
-    echo "codemap-fresh warn codemap not found at .fno/codemap.md (run: /target to generate)"
+    echo "codemap-fresh warn codemap not found at $CODEMAP (run: /target to generate)"
     exit 0
 fi
 

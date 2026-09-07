@@ -34,7 +34,6 @@ import posixpath
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -47,6 +46,7 @@ from xml.etree import ElementTree
 import click
 
 from fno.hermetic import neutralise, poison
+from fno.test_runner import run_suite_bounded, test_timeout_seconds, wait_or_kill_group
 
 _TAIL_LINES = 40
 
@@ -304,19 +304,25 @@ def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
     looks stalled - a watcher can `tail -f` the log. Returns the first non-zero
     child exit code, else 0.
     """
+    timeout = test_timeout_seconds()
     rc = 0
     with open(log, "w", encoding="utf-8") as fh:
         for cmd in cmds:
-            print(f"running: {' '.join(map(str, cmd))} | log: {log}", flush=True)
+            print(
+                f"running: {' '.join(map(str, cmd))} | log: {log} | timeout: {timeout}s",
+                flush=True,
+            )
             fh.write(f"$ {' '.join(map(str, cmd))}\n")
             fh.flush()
             try:
-                proc = subprocess.run(cmd, env=env, stdout=fh, stderr=subprocess.STDOUT)
+                rc_cmd = run_suite_bounded(
+                    cmd, env, timeout, stdout=fh, stderr=subprocess.STDOUT
+                )
             except OSError as exc:
                 sys.stderr.write(f"fno doctor test: failed to run {cmd[0]}: {exc}\n")
                 return 127
-            if proc.returncode != 0:
-                rc = proc.returncode
+            if rc_cmd != 0:
+                rc = rc_cmd
                 break  # first failure wins; its output is the log tail
     if rc == 0:
         lines = [ln.rstrip() for ln in _tail(log, 5) if ln.strip()]
@@ -360,13 +366,12 @@ def _run(args: Sequence[str], stream: bool = False) -> int:
     cmd = [interp, "-m", "pytest", *pytest_args]
     if stream:
         try:
-            proc = subprocess.run(cmd, env=env)  # inherit stdio; no pipe, no mask
+            return run_suite_bounded(cmd, env, test_timeout_seconds())
         except OSError as exc:
             # FileNotFoundError (missing) AND PermissionError (present but not
             # executable) are both OSError; either means we could not run it.
             sys.stderr.write(f"fno doctor test: failed to run interpreter {interp}: {exc}\n")
             return 127
-        return proc.returncode
     return _run_captured([cmd], env, _log_path(root))
 
 
@@ -431,18 +436,23 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
     else:
         base = ["cargo", "test", "-q"]
     cap_tail: list[str] = []
+    timeout = test_timeout_seconds()
     if threads is None:
-        sys.stdout.write(f"fno doctor test rust: lanes {lanes_note}; runner default parallelism\n")
+        sys.stdout.write(
+            f"fno doctor test rust: lanes {lanes_note}; runner default parallelism; timeout {timeout}s\n"
+        )
     elif override:
         sys.stdout.write(
-            f"fno doctor test rust: lanes {lanes_note}; user parallelism flag wins, cap not applied\n"
+            f"fno doctor test rust: lanes {lanes_note}; user parallelism flag wins, cap not applied; timeout {timeout}s\n"
         )
     else:
         if nextest:
             base = [*base, "--test-threads", str(threads)]
         else:
             cap_tail = ["--", "--test-threads", str(threads)]
-        sys.stdout.write(f"fno doctor test rust: lanes {lanes_note}; test threads capped at {threads}\n")
+        sys.stdout.write(
+            f"fno doctor test rust: lanes {lanes_note}; test threads capped at {threads}; timeout {timeout}s\n"
+        )
 
     if "--manifest-path" in cargo_args:
         cmds = [[*base, *cargo_args]]
@@ -457,16 +467,15 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
 
     env = _child_env(root)
     if stream:
-        rc = 0
         for cmd in cmds:
             try:
-                proc = subprocess.run(cmd, env=env)
+                rc = run_suite_bounded(cmd, env, timeout)
             except OSError as exc:
                 sys.stderr.write(f"fno doctor test: failed to run {cmd[0]}: {exc}\n")
                 return 127
-            if proc.returncode != 0:
-                return proc.returncode
-        return rc
+            if rc != 0:
+                return rc
+        return 0
     return _run_captured(cmds, env, _log_path(root))
 
 
@@ -572,7 +581,8 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
      'FAKE_BIN="$(mktemp -d)"\n'
      'for p in codex gemini opencode; do printf "%s\\n%s\\n" "#!/bin/sh" "exit 0" > "$FAKE_BIN/$p"; chmod +x "$FAKE_BIN/$p"; done\n'
      'PATH="$FAKE_BIN:$PATH" uv run pytest --tb=short -q '
-     "tests/agents/test_rust_verb_parity.py tests/agents/test_ask_e2e_dispatch.py"),
+     "tests/agents/test_rust_verb_parity.py tests/agents/test_ask_e2e_dispatch.py "
+     "tests/unit/test_claims_core.py::TestSessionWitnessVerdicts"),
     # Same shard contract as the parity suites above: the wrapper carries the
     # @requires_rust marker, so in the pytest shard (binary deleted) it skips,
     # and here, after the build step, it runs for real. Never inside the
@@ -596,7 +606,8 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
      "bash tests/target/test_backfill_plan.sh\n"
      "bash tests/target/test_detect_pending_plan.sh\n"
      "bash tests/target/test_plan_mode_e2e.sh"),
-    ("bg-dispatch + ready-gated auto-launch harness", ".", "bash tests/test-bg-dispatch.sh"),
+    ("bg-dispatch harness", ".", "bash tests/test-bg-dispatch.sh"),
+    ("init claim-wait harness", ".", "bash tests/test-init-claim-wait.sh"),
     ("dispatch grant posture harness", ".", "bash tests/target/test_dispatch_grant_posture.sh"),
     ("agent skill harness", ".",
      "bash tests/skills/test_agent_normalize.sh\n"
@@ -647,15 +658,12 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("State-roots ratchet (declared root, R4/R5)", "cli", "uv run fno-py doctor lint state-roots"),
     ("Agent field coverage accounting", "cli", "uv run fno-py doctor lint field-coverage"),
     ("In-N-Out menu-cap ratchet", "cli", "uv run fno-py doctor lint menu-caps"),
+    ("Spawn flag-ownership ratchet (owner + provenance per flag)", "cli", "uv run fno-py doctor lint spawn-flag-owners"),
     ("Verb-surface ratchet (real count, both binaries)", "cli", "uv run fno-py doctor lint verb-ratchet"),
     ("Schema parity self-test", ".", "bash scripts/tests/check-event-schema-parity-selftest.sh"),
     ("Schema parity check (Python side)", ".", "bash scripts/check-event-schema-parity.sh"),
-    ("Registry schema parity selftest", ".", "bash scripts/ci/check-registry-schema-parity.sh --selftest"),
-    ("Registry schema parity check", ".", "bash scripts/ci/check-registry-schema-parity.sh"),
     ("Provider vocabulary parity selftest", ".", "bash tests/ci/test_provider_vocabulary_parity.sh"),
     ("Provider vocabulary parity check", ".", "bash scripts/ci/check-provider-vocabulary-parity.sh"),
-    ("Spawn lineage parity selftest", ".", "bash tests/ci/test_spawn_lineage_parity.sh"),
-    ("Spawn lineage parity check", ".", "bash scripts/ci/check-spawn-lineage-parity.sh"),
     ("Reviewer descriptor parity selftest", ".",
      "bash scripts/ci/check-reviewer-descriptor-parity.sh --selftest"),
     ("Reviewer descriptor parity check", ".",
@@ -666,6 +674,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("preflight orchestration self-test", ".", "bash tests/ci/test_preflight.sh"),
     ("changed/full CI job-boundary guard", ".", "bash tests/ci/test_changed_smoke_workflow.sh"),
     ("smoke duration reporter self-test", ".", "bash tests/ci/test_smoke_duration_report.sh"),
+    ("workflow timeout-comment guard", ".", "bash scripts/ci/check-workflow-timeout-comments.sh"),
 )
 
 # Owned shell-harness trees: a new file here runs with zero registry edits.
@@ -1355,6 +1364,7 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
 # build; selection has to carry it along.
 _RUST_BIN_MARKER = "target/debug/fno-agents"
 _RUST_BUILD_STEP = "Build fno-agents debug binary (for journey tests)"
+_CLAIM_DOOR_NAME = "fno-agents-claim-door"
 
 
 def _needs_rust_binary(root: Path, rel: str) -> bool:
@@ -1393,13 +1403,17 @@ def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, st
         steps.append((f"Pytest (changed subset, {len(targets)} file(s))", ".",
                       f"uv run --project cli pytest --tb=short -q{par} "
                       + " ".join(shlex.quote(t) for t in targets)))
+    # The pytest shard DELETES the debug binary on exit (the @requires_rust
+    # seam), so any shell harness after pytest needs a build of its own there;
+    # after a warm pre-build it is a no-op (~0.1s), never a second compile.
     if any(_needs_rust_binary(root, rel) for rel in shell_rels) and _RUST_BUILD_STEP in by_name:
-        if not (pytest_targets and build_selected):
-            steps.append(by_name[_RUST_BUILD_STEP])
+        steps.append(by_name[_RUST_BUILD_STEP])
     for rel in shell_rels:
         steps.append((rel, ".", f"bash {shlex.quote(rel)}"))
     shell_targets = set(shell_rels)
     for name in sorted({s["target"] for s in selections if s["kind"] == "step"}):
+        if name == _RUST_BUILD_STEP:
+            continue
         step = by_name[name]
         if name == _RUST_BUILD_STEP and steps and steps[0] == step:
             continue  # already placed ahead of pytest; never run the build twice
@@ -1408,6 +1422,49 @@ def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, st
             continue  # every harness it wraps is already selected directly
         steps.append(step)
     return steps
+
+
+_TARGET_BIN_RELS = (
+    "crates/fno-agents/target/debug/fno-agents",
+    "crates/fno-agents/target/release/fno-agents",
+)
+
+
+def _scrub_target_bins(root: Path) -> None:
+    """Remove the checkout's target/ binaries: the parity-test marker."""
+    for rel in _TARGET_BIN_RELS:
+        try:
+            (root / rel).unlink()
+        except OSError:
+            pass
+
+
+def _pin_claim_door(env: dict[str, str], binary: Path) -> None:
+    """Pin the claim door: the env name outranks PATH in resolve_binary.
+
+    Never touches PATH. Hook harnesses shell bare `fno-agents` and route on
+    its absence (spaces fallback); a PATH-visible binary would flip those
+    writes onto space paths mid-shard.
+    """
+    env["FNO_AGENTS_BIN"] = str(binary)
+
+
+def _preserve_claim_door(root: Path, env: dict[str, str]) -> None:
+    """Keep the native claim reader available after the Rust-marker scrub."""
+    candidates = [Path(v) for v in (env.get("FNO_AGENTS_BIN"), env.get("FNO_AGENTS_FRONT")) if v]
+    candidates += [root / rel for rel in _TARGET_BIN_RELS]
+    source = next((c for c in candidates if c.is_file() and os.access(c, os.X_OK)), None)
+    if source is None:
+        return
+    preserved_dir = _sandbox() / _CLAIM_DOOR_NAME
+    preserved_dir.mkdir(parents=True, exist_ok=True)
+    preserved = preserved_dir / "fno-agents"
+    shutil.copyfile(source, preserved)
+    preserved.chmod(source.stat().st_mode & 0o777)
+    # The scrub unlinks the target/ copies this function may have been handed,
+    # so a BIN inherited from the job env goes dead at exactly the moment the
+    # claim consumers run. Re-point it at the preserved copy.
+    _pin_claim_door(env, preserved)
 
 
 def _write_changed_receipt(path: str, payload: dict) -> None:
@@ -1421,6 +1478,46 @@ def _write_changed_receipt(path: str, payload: dict) -> None:
             fh.write("\n")
     except OSError:
         pass  # a receipt we cannot write is not a reason to fail the packet
+
+
+def _changed_packet_counts(selections: Sequence[dict]) -> tuple[int, int]:
+    """(pytest files, shell harnesses) the packet maps, deduped by target.
+
+    One spelling for both consumers of the counts: the estimate prices them
+    and the receipt line prints them.
+    """
+    pytest_files = len({s["target"] for s in selections if s["kind"] == "pytest"})
+    shell = len({s["target"] for s in selections if s["kind"] == "shell"})
+    return pytest_files, shell
+
+
+def _estimate_changed_minutes(root: Path, selections: Sequence[dict]) -> int:
+    """Minutes the changed packet plausibly needs, from its selection alone.
+
+    The packet scales with the diff, so its CI cap must too; this estimate is
+    what the changed-smoke cap is sized from. Constants are measured ceilings,
+    not guesses: the full tree runs 894 pytest files in a 1036s step under
+    xdist (about 1.2s a file), so 1.5 tenths of a minute (9s) a file carries
+    roughly 7x headroom; a shell harness is at most about a minute (the stress
+    contract is 35.9s a trial, one trial in changed mode); provisioning
+    includes runner setup plus a cold cargo build, so it gets a flat 5 with
+    the build step adding 3 more. It is deliberately generous: the cost of
+    over-estimating is a wider ceiling on one job, the cost of
+    under-estimating is a run killed by its own cap with no receipt.
+    """
+    pytest_files, shell = _changed_packet_counts(selections)
+    structural = {s["target"] for s in selections if s["kind"] == "step"}
+    # The build is priced whether it arrives as an explicit rust-family
+    # selection or is injected by _changed_steps for a harness whose content
+    # needs the binary - one spelling of does-the-packet-build.
+    shell_rels = sorted({s["target"] for s in selections if s["kind"] == "shell"})
+    build = 1 if (_RUST_BUILD_STEP in structural
+                  or any(_needs_rust_binary(root, rel) for rel in shell_rels)) else 0
+    # Tenths of a minute, so the arithmetic stays in integers. The build is
+    # priced at 3 on its own; the other structural steps at 1 each.
+    tenths = 50 + (pytest_files * 3) // 2 + shell * 10 \
+        + (len(structural) - build) * 10 + build * 30
+    return max(15, -(-tenths // 10))
 
 
 def _run_changed(root: Path, opts: dict, env: dict) -> int:
@@ -1446,9 +1543,19 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     steps = _changed_steps(root, selections)
     select_s = time.monotonic() - t0
 
+    estimate = _estimate_changed_minutes(root, selections)
     print(f"smoke: base={opts['base'] or resolved_base} "
           f"head={opts['head'] or candidate[:12]} changed={len(paths)} "
           f"selected={len(steps)} unmapped={len(unmapped)}", flush=True)
+    # One line both callers size from: the CI sizer job clamps it into a job
+    # ceiling, and the run job refuses the packet when the estimate cannot fit
+    # the ceiling it was given. Printed raw (unclamped) so the fit comparison
+    # sees the real number.
+    pytest_files, shell = _changed_packet_counts(selections)
+    print(f"smoke: changed-estimate minutes={estimate} "
+          f"pytest_files={pytest_files} "
+          f"shell={shell} "
+          f"steps={len(steps)}", flush=True)
     for s in selections:
         print(f"  select  {s['rule']:20} {s['path']} -> {s['target']}", flush=True)
     for u in unmapped:
@@ -1481,18 +1588,17 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
         return CHANGED_RC_PREREQ
 
     # Same faithful-ordering guard the full run applies: the pytest step must
-    # see NO fno-agents binary so the @requires_rust parity tests skip, as they
-    # do in CI. preflight deliberately preserves target/ across runs, so without
-    # this the packet runs ~15 tests the full gate skips - and a failure there
-    # aborts preflight on a discrepancy the gate would never report. Any journey
-    # harness that needs the binary is preceded by its build step (above).
+    # see NO checkout fno-agents binary so the @requires_rust parity tests skip,
+    # as they do in CI. The claim door is preserved outside target/ first.
     if any(n.startswith("Pytest (changed subset") for n, _, _ in steps):
-        for rel in ("crates/fno-agents/target/debug/fno-agents",
-                    "crates/fno-agents/target/release/fno-agents"):
-            try:
-                (root / rel).unlink()
-            except OSError:
-                pass
+        if _RUST_BUILD_STEP in {name for name, _, _ in steps}:
+            # The changed-smoke job has Rust but no setup build. Its selected
+            # build step must run before claim tests, so keep the target path
+            # present and pin the door at the fresh build.
+            _pin_claim_door(env, root / "crates/fno-agents/target/debug/fno-agents")
+        else:
+            _preserve_claim_door(root, env)
+            _scrub_target_bins(root)
 
     e0 = time.monotonic()
     results, rc = _execute_steps(root, env, steps, keep_going=opts["keep_going"])
@@ -1850,12 +1956,8 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     # keeps using whatever binary is already on disk.
     _DELETE_TRIGGERS = {"Pytest (unit + integration)", _RUST_BUILD_STEP}
     if _DELETE_TRIGGERS & {names[i] for i in selected}:
-        for rel in ("crates/fno-agents/target/debug/fno-agents",
-                    "crates/fno-agents/target/release/fno-agents"):
-            try:
-                (root / rel).unlink()
-            except OSError:
-                pass
+        _preserve_claim_door(root, env)
+        _scrub_target_bins(root)
 
     results, first_rc = _execute_steps(
         root, env, [steps[i] for i in selected], keep_going,
@@ -1920,7 +2022,8 @@ def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) ->
     + os.killpg, never the `timeout` binary: that is absent on macOS (a recorded
     trap) and exits 127, measuring nothing. start_new_session makes the child a
     group leader so killpg reaches its grandchildren too, since a shell harness
-    spawns subprocesses a direct SIGKILL would orphan.
+    spawns subprocesses a direct SIGKILL would orphan. The wait/kill ladder is
+    shared with the suite runner (`wait_or_kill_group`).
     """
     start = time.monotonic()
     proc = subprocess.Popen(
@@ -1928,31 +2031,7 @@ def _run_bounded(cmd: Sequence[str], env: dict, cwd: Path, kill_bound_s: int) ->
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    try:
-        rc = proc.wait(timeout=kill_bound_s)
-        killed = False
-    except subprocess.TimeoutExpired:
-        # ProcessLookupError is the TOCTOU window where the child exited between
-        # the timeout and getpgid; wait() reaps it. PermissionError is NOT caught:
-        # start_new_session makes us own the group so it is near-impossible, and
-        # if it ever surfaces a loud crash beats a wedged proc.wait() with no kill.
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
-        rc = proc.returncode if proc.returncode is not None else 124
-        killed = True
-    except KeyboardInterrupt:
-        # The harness runs in its own session (start_new_session), so it does not
-        # share the terminal's SIGINT and would outlive a Ctrl-C with all its
-        # grandchildren. Kill the group before re-raising so nothing is orphaned.
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
-        raise
+    rc, killed = wait_or_kill_group(proc, kill_bound_s)
     return rc, time.monotonic() - start, killed
 
 

@@ -97,41 +97,6 @@ def sender_from_transcript_text(
     return None
 
 
-def _read_own_transcript_text() -> Optional[str]:
-    """The invoking session's own transcript text, or ``None`` when it cannot be
-    resolved or read (no ambient identity, no transcript path, unreadable store).
-
-    ponytail: reads the whole transcript. A received message is near the tail,
-    but it can be older; whole-file is the simple correct read. Bound to a tail
-    window only if a profiler ever says transcript size hurts.
-
-    Import kept local (not module-level): this module is imported lazily from
-    inside ``cmd_drain_self``, so a module-level ``from fno.harness_identity
-    import resolve_harness_identity`` binds whatever that name pointed to at
-    the moment of THAT first import - permanently, since the module is cached
-    in ``sys.modules`` thereafter. A test that monkeypatches
-    ``harness_identity.resolve_harness_identity`` and happens to trigger this
-    module's first import while the patch is active poisons every later caller
-    in the same process; monkeypatch's teardown only reverts the attribute on
-    ``fno.harness_identity``, not this module's separate name binding.
-    """
-    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
-
-    try:
-        ident = require_self_identity()
-    except IdentityAmbiguousError:
-        return None
-    if not ident.session_id or not ident.harness:
-        return None
-    path = _transcript_path(ident.harness, ident.session_id)
-    if path is None:
-        return None
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-
-
 def _candidate_stores() -> list[tuple[str, str]]:
     """Every ``(harness, session_id)`` store this process could own, deduped.
 
@@ -183,6 +148,21 @@ def resolve_live_sender(msg_id: str) -> Optional[str]:
     return None
 
 
+def mail_ids_in_transcript(harness: str, session_id: str) -> Optional[set[str]]:
+    """Every ``<fno_mail id="...">`` id in ``(harness, session_id)``'s own
+    transcript. ``None`` (not an empty set) means a read failure, never
+    evidence of absence. Parameterized out of ``present_mail_ids`` below so
+    a landed check proving a message reached a DIFFERENT session reuses it."""
+    path = _transcript_path(harness, session_id)
+    if path is None:
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return set(_ID_RE.findall(text.replace('\\"', '"')))  # JSONL-escapes quotes
+
+
 def present_mail_ids() -> Optional[set[str]]:
     """Every ``<fno_mail id="...">`` id already in the invoking session's OWN
     transcript, or ``None`` when the transcript cannot be resolved or read.
@@ -196,17 +176,21 @@ def present_mail_ids() -> Optional[set[str]]:
     drop. An empty set means "read it; nothing matched," which is a safe
     print-everything because the transcript genuinely carries none of these ids.
     """
+    # Imported here, not at module scope: see `truth_status.py`'s sys.modules trap.
+    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
+
     # Still routes through the single-store pick `resolve_live_sender` no longer
     # uses: with no msg_id there is no receipt to prove a candidate with, so the
     # fix below does not transfer. On a leaked identity this reads the wrong
     # store and the dedup no-ops, which reprints rather than drops - the safe
     # direction, but a guard on one of two paths. Needs its own answer.
-    text = _read_own_transcript_text()
-    if text is None:
+    try:
+        ident = require_self_identity()
+    except IdentityAmbiguousError:
         return None
-    # JSONL-escaped envelopes arrive with \\"; normalize so the regex matches the
-    # raw form too (mirrors sender_from_transcript_text).
-    return set(_ID_RE.findall(text.replace('\\"', '"')))
+    if not ident.session_id or not ident.harness:
+        return None
+    return mail_ids_in_transcript(ident.harness, ident.session_id)
 
 
 def _transcript_path(harness: str, session_id: str) -> Optional[Path]:

@@ -40,7 +40,6 @@ def _load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str):
 
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     return config_mod.load_settings()
 
 
@@ -153,5 +152,4 @@ def test_resolver_never_raises_on_bad_settings(
     monkeypatch.setenv("FNO_CONFIG", str(bad))
     from fno import config as config_mod
 
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     assert _resolver()(project_root=tmp_path) is False

@@ -524,7 +524,10 @@ pub fn run_finalize(args: &[String]) -> i32 {
     let delivery_ship = predicates.delivery_ship;
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let project_events = a.events.unwrap_or_else(|| cwd.join(".fno/events.jsonl"));
+    let project_events = a
+        .events
+        .clone()
+        .unwrap_or_else(|| crate::paths::space_dir(&cwd).join("events.jsonl"));
     let global_events = a.global_events.unwrap_or_else(|| {
         home.clone()
             .unwrap_or_else(|| cwd.clone())
@@ -1004,7 +1007,7 @@ the operator's shell"
 }
 
 fn shadow_run_needs_finalize_done(cwd: &Path, run: &str) -> bool {
-    let path = cwd.join(".fno/run-log.jsonl");
+    let path = run_log_path(cwd);
     if !path.exists() {
         return false;
     }
@@ -1014,13 +1017,39 @@ fn shadow_run_needs_finalize_done(cwd: &Path, run: &str) -> bool {
     )
 }
 
+/// The per-worktree run log: the worktree slice of the repo's space. A legacy
+/// checkout-local journal is migrated on first write; until then a read falls
+/// back to it so a pre-space daemon's journal is still honored (AC7-EDGE).
+fn run_log_path(cwd: &Path) -> PathBuf {
+    let new = crate::paths::worktree_space_dir(cwd).join("run-log.jsonl");
+    if new.exists() {
+        return new;
+    }
+    let old = cwd.join(".fno/run-log.jsonl");
+    if old.exists() {
+        if old.is_symlink() || crate::paths::migrate_from_checkout(&old, &new) {
+            if new.exists() {
+                return new;
+            }
+        } else {
+            eprintln!(
+                "finalize: run log pending migration: {} (space path {})",
+                old.display(),
+                new.display()
+            );
+            return old;
+        }
+    }
+    new
+}
+
 fn record_finalize_done(
     cwd: &Path,
     run: &str,
     project_events: &Path,
     global_events: &Path,
 ) -> bool {
-    let path = cwd.join(".fno/run-log.jsonl");
+    let path = run_log_path(cwd);
     if !path.exists() {
         return true;
     }
@@ -2126,7 +2155,7 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
 /// withhold to the coverage authority (x-0eaf). Missing/unreadable -> false
 /// (fall back to the per-app check).
 fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
-    let path = cwd.join(".fno").join("events.jsonl");
+    let path = crate::paths::events_path(cwd);
     let Ok(content) = fs::read_to_string(&path) else {
         return false;
     };
@@ -2197,7 +2226,7 @@ fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
 /// The head_sha from the latest covered review_coverage event (matching the
 /// current HEAD), or None. Used to pin the auto-merge arm. (x-0eaf)
 fn covered_head_from_event(cwd: &Path) -> Option<String> {
-    let path = cwd.join(".fno").join("events.jsonl");
+    let path = crate::paths::events_path(cwd);
     let content = fs::read_to_string(&path).ok()?;
     let head = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -2486,6 +2515,14 @@ fn is_do_stamp_terminal(reason: &str) -> bool {
 ///
 /// Log-only and never retried: a guard skip is a designed outcome, and retrying
 /// one would spin.
+///
+/// Also the do row's CLOSE, not only its backstop open: it now passes
+/// `--ended-at` alongside `--started-at`, so a do row that `claim release
+/// --stamp-do` never closed (the common case - a do session's claim is
+/// commonly freed by something other than `release`) still gets `ended_at`
+/// here, at its own finish line. `append_session_record`'s duplicate-fill is
+/// the same one `release --stamp-do` uses: it fills only timestamps the row
+/// left open, so when release already closed the row this is a no-op.
 fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
     let Some(node) = m.graph_node_id.as_deref() else {
         return;
@@ -2514,14 +2551,15 @@ fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
         );
     }
 
-    let mut cmd = Command::new("fno");
-    cmd.args(["backlog", "session", "add", node, "--phase", "do"]);
-    cmd.args(["--require-session", session]);
-    if let Some(plan) = m.plan_path.as_deref() {
-        cmd.args(["--guard-plan", plan]);
-    }
-    cmd.args(["--started-at", created_at]);
-    let ok = cmd
+    let args = do_stamp_args(
+        node,
+        session,
+        m.plan_path.as_deref(),
+        created_at,
+        &now_rfc3339_utc(),
+    );
+    let ok = Command::new("fno")
+        .args(&args)
         .current_dir(cwd)
         .status()
         .map(|s| s.success())
@@ -2529,6 +2567,36 @@ fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
     if !ok {
         eprintln!("finalize: do stamp failed for node {node} (non-fatal)");
     }
+}
+
+/// Pure argument-vector builder for the `do` row stamp, split out so the
+/// `--ended-at` flag is assertable without a subprocess.
+fn do_stamp_args(
+    node: &str,
+    session: &str,
+    plan_path: Option<&str>,
+    started_at: &str,
+    ended_at: &str,
+) -> Vec<String> {
+    let mut args = vec![
+        "backlog".to_string(),
+        "session".to_string(),
+        "add".to_string(),
+        node.to_string(),
+        "--phase".to_string(),
+        "do".to_string(),
+        "--require-session".to_string(),
+        session.to_string(),
+    ];
+    if let Some(plan) = plan_path {
+        args.push("--guard-plan".to_string());
+        args.push(plan.to_string());
+    }
+    args.push("--started-at".to_string());
+    args.push(started_at.to_string());
+    args.push("--ended-at".to_string());
+    args.push(ended_at.to_string());
+    args
 }
 
 /// True when `initial_head..HEAD` holds a non-merge commit on HEAD's own
@@ -3414,6 +3482,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn do_stamp_args_carries_ended_at() {
+        let args = do_stamp_args(
+            "x-2146",
+            "sess-1",
+            Some("plan.md"),
+            "2026-09-06T18:00:00Z",
+            "2026-09-06T18:30:00Z",
+        );
+        assert!(args.contains(&"--started-at".to_string()));
+        assert!(args.contains(&"2026-09-06T18:00:00Z".to_string()));
+        assert!(args.contains(&"--ended-at".to_string()));
+        assert!(args.contains(&"2026-09-06T18:30:00Z".to_string()));
+        assert!(args.contains(&"--guard-plan".to_string()));
+    }
+
+    #[test]
+    fn do_stamp_args_omits_guard_plan_when_absent() {
+        let args = do_stamp_args(
+            "x-2146",
+            "sess-1",
+            None,
+            "2026-09-06T18:00:00Z",
+            "2026-09-06T18:30:00Z",
+        );
+        assert!(!args.contains(&"--guard-plan".to_string()));
+    }
+
     // ── x-1951: arm auto-merge at the green gate, not at PR creation ────────
 
     #[test]
@@ -3429,6 +3525,7 @@ mod tests {
             expires_at: Some(20),
             reason: None,
             harness: None,
+            session_id: None,
             pid_provenance: None,
             machine_id: None,
             metadata: serde_json::Map::new(),
@@ -3785,6 +3882,7 @@ mod tests {
 
     #[test]
     fn finalize_done_closes_a_sealing_shadow_run() {
+        let _root = crate::paths::DeclaredRoot::declare("finalize_done_closes_a_seali");
         let dir = tempfile::tempdir().unwrap();
         let run = "20260823T060900Z-cx73523-e04109";
         let log = dir.path().join(".fno/run-log.jsonl");
@@ -3801,14 +3899,19 @@ mod tests {
         let events = dir.path().join("events.jsonl");
         assert!(record_finalize_done(dir.path(), run, &events, &events));
 
+        // The legacy checkout-local journal migrates into the worktree slice of
+        // the space on first resolve; fold THAT log, not the vacated path.
+        let moved = run_log_path(dir.path());
+        assert_ne!(moved, log, "the legacy path is migrated, not reused");
         assert_eq!(
-            crate::run_state::fold_run_state(&log, run).unwrap(),
+            crate::run_state::fold_run_state(&moved, run).unwrap(),
             crate::run_state::RunState::Closed
         );
     }
 
     #[test]
     fn finalize_done_is_already_complete_for_an_aborted_shadow_run() {
+        let _root = crate::paths::DeclaredRoot::declare("finalize_done_is_already_com");
         let dir = tempfile::tempdir().unwrap();
         let run = "20260823T060900Z-cx73523-e04109";
         let log = dir.path().join(".fno/run-log.jsonl");
@@ -3823,8 +3926,9 @@ mod tests {
 
         let events = dir.path().join("events.jsonl");
         assert!(record_finalize_done(dir.path(), run, &events, &events));
+        let moved = run_log_path(dir.path());
         assert_eq!(
-            crate::run_state::fold_run_state(&log, run).unwrap(),
+            crate::run_state::fold_run_state(&moved, run).unwrap(),
             crate::run_state::RunState::Aborted
         );
         assert!(!events.exists(), "aborted runs need no finalize transition");

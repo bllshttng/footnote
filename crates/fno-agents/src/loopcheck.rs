@@ -10,7 +10,15 @@
 use crate::{
     cancel_sentinel::check_cancel_sentinel, check_supersession::latest_per_name,
     completion_output::allow_output, delivery_completion::pr_passes,
+    disposition_gate::disposition_blockers_on_chain, king_termination::read_king_board,
 };
+// The integration tests reach the blocker predicates through loopcheck, the
+// facade they have always imported from; the predicates live in
+// disposition_gate since the line-budget refactor moved them there.
+// DispositionBlocker rides the pub use too: it is the return type of the
+// facade's `disposition_blockers`, and a private import made it unnameable
+// through the facade it is published under.
+pub use crate::disposition_gate::{blockers_withhold, DispositionBlocker};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -42,17 +50,13 @@ pub enum TerminationReason {
     /// path closes it, and DonePRGreen always wins when observable.
     DoneAwaitingMerge,
     /// A PR is green, mergeable, and nothing objected - but nothing reviewed it
-    /// either (coverage 0 or Unknown). The old gate named this state
-    /// `DonePRGreen` because its three conjuncts all ask "did anyone object"
-    /// and none asks "did anyone review" (x-0eaf). Terminal on the first
-    /// evaluation (no loop iteration spent waiting - that is what keeps the
-    /// PR #214 wedge from returning), and deliberately NOT a ship reason (out
-    /// of finalize.SHIP_REASONS -> no plan stamp/graduate), shaped exactly like
-    /// `DoneAwaitingMerge`: never merges, never marks the node done. The
-    /// autonomous merge is refused structurally because `should_arm_auto_merge`
-    /// arms only on `DonePRGreen`; a human (or out-of-band) merge then the
-    /// reconcile path closes it. The discriminator is coverage, NOT the
-    /// `attended` manifest field (x-be78: that field lies for spawned workers).
+    /// either (coverage 0 or Unknown; the old conjuncts all asked "did anyone
+    /// object", never "did anyone review", x-0eaf). Terminal on the first
+    /// evaluation (no iteration spent waiting) and NOT a ship reason, shaped
+    /// like `DoneAwaitingMerge`: `should_arm_auto_merge` arms only on
+    /// `DonePRGreen`, so a human merge plus reconcile closes it. The
+    /// discriminator is coverage, NOT the `attended` manifest field (x-be78:
+    /// that field lies for spawned workers).
     DoneUnreviewed,
     /// Work complete (PR open, green, HEAD shipped) but `done()` fails because a
     /// required review bot is rate-limited: it posted a usage-limit (quota)
@@ -298,12 +302,6 @@ pub(crate) struct Settings {
     /// absent, normalized to true (the obligation defaults ON); `false` is the
     /// documented escape hatch.
     self_review_required: Option<bool>,
-    /// config.review.require_corroboration (default false): when true, a PR
-    /// whose only coverage is the author's own (self_attested) local
-    /// attestation reads as uncovered. Recorded policy, not a proof upgrade:
-    /// an other_session attestation is still not "independent", but it is a
-    /// SECOND session, which is what this key demands.
-    require_corroboration: Option<bool>,
     /// config.review.posture: the named rung of the review ladder.
     /// None = unset, which resolves through the legacy inference (mirroring
     /// `fno.config.resolve_review_posture`) or the shipped self_review floor.
@@ -312,16 +310,16 @@ pub(crate) struct Settings {
     posture: Option<String>,
     /// config.review.github_approval_satisfies (default true): a non-author
     /// human GitHub APPROVED review counts toward coverage on its own and
-    /// satisfies the corroboration term. GitHub refuses an author's approval
+    /// satisfies coverage on its own. GitHub refuses an author's approval
     /// of their own PR server-side; the gate still asserts the property
     /// itself (an unreadable PR author fails closed to "exclude"). The limit:
     /// GitHub's refusal is per identity, not per human - a second account
     /// with its own token can still self-approve.
     github_approval_satisfies: Option<bool>,
     /// config.review.max_rounds (default 2, clamped at least 1 at read): the
-    /// review-round budget before the gate reports IMPOSSIBLE. More rounds
-    /// than this across the whole life of the PR, with blocking findings
-    /// still non-terminal, means re-reviewing cannot clear it. A round is one
+    /// review-round budget. Once this many rounds pass, the review obligation
+    /// is discharged: the gate reads covered and the PR merges on green CI.
+    /// A round is one
     /// reviewed HEAD, so two verdicts at one unchanged head are one round.
     /// CI failures, lint failures and rebases are not rounds, and a pass
     /// refunds nothing: it is one round like any other verdict.
@@ -339,12 +337,10 @@ pub(crate) struct Settings {
     nudge_overrides: Vec<NudgeOverride>,
     /// Top-level `done_probes` (x-a534): the repo-wide probe list, evaluated
     /// alongside the plan's own. The file is FLAT, so this reads off the TOML
-    /// root, not out of a `config` table.
-    ///
-    /// None = key absent (no project gate). Some(Ok(list)) = the declaration.
-    /// Some(Err(why)) = present but not an array of strings, which maps to the
-    /// plan side's `Unparseable` and BLOCKS - a config key that degrades to
-    /// no-gate is a guardrail that disappears when you typo it.
+    /// root, not out of a `config` table. None = key absent (no project gate);
+    /// Some(Err(why)) = present but not an array of strings, which BLOCKS - a
+    /// config key that degrades to no-gate is a guardrail that disappears when
+    /// you typo it.
     done_probes: Option<Result<Vec<String>, String>>,
 }
 
@@ -764,15 +760,6 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
         if let Some(v) = review.get("reviewers") {
             s.reviewers = value_as_reviewers(v);
         }
-        if let Some(v) = review.get("require_corroboration") {
-            // String spellings parse the way pydantic's lax bool coerces them
-            // ("true"/"false"/"yes"/"no"/"on"/"off"/"1"/"0"), so the two gates
-            // cannot disagree on a config that loads at all. Anything else
-            // stays None -> false here; the Python config loader rejects it,
-            // so no config can load green on one side and parse false on the
-            // other.
-            s.require_corroboration = lax_bool(v);
-        }
         if let Some(v) = review.get("posture") {
             // Only a name the ladder carries is kept; anything else (a typo,
             // a non-string) stays None so the legacy inference decides. The
@@ -786,7 +773,7 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
             }
         }
         if let Some(v) = review.get("github_approval_satisfies") {
-            // Same lax-bool contract as require_corroboration: one coercion
+            // One coercion contract for every lax-bool review leaf:
             // for every config bool, so the two gates cannot disagree on a
             // config that loads at all. Malformed stays None -> true (the
             // default-ON direction), matching the Python loader's rejection.
@@ -795,7 +782,8 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
         if let Some(v) = review.get("max_rounds") {
             // An integer at least 1, read-side clamped; anything else stays
             // None -> the default 2, so a typo cannot zero the budget (a
-            // missing cap fires IMPOSSIBLE on every second round).
+            // missing cap discharges the review obligation on every second
+            // round).
             let parsed = v
                 .as_integer()
                 .or_else(|| v.as_str().and_then(|raw| raw.trim().parse::<i64>().ok()));
@@ -981,229 +969,11 @@ fn detect_intent_from_text(text: &str) -> Intent {
     Intent::None
 }
 
-fn parse_xml_attr(tag_text: &str, attr: &str) -> Option<String> {
+pub(crate) fn parse_xml_attr(tag_text: &str, attr: &str) -> Option<String> {
     let pattern = format!(r#"{attr}=""#);
     let start = tag_text.find(&pattern)? + pattern.len();
     let end = tag_text[start..].find('"')?;
     Some(tag_text[start..start + end].to_string())
-}
-
-// ── <help> distress -> blocked event (x-77a0) ────────────────────────────────
-
-/// A `<help reason="..." evidence="...">` distress tag parsed from the
-/// stopping message. Deliberately NOT an `Intent` variant: a help tag never
-/// changes the stop decision; it fires a side channel that tells the parent
-/// spawn lineage the session is stuck without stopping it.
-#[derive(Debug, PartialEq)]
-struct HelpDistress {
-    reason: String,
-    evidence: Option<String>,
-}
-
-/// First `<help ...>` opening tag whose name is exactly `help` (a raw
-/// `find("<help")` would also match `<helper>`). An empty or missing reason
-/// still parses: the events schema permits a reason-less blocked row, and the
-/// distress itself is the signal.
-fn extract_help_distress(text: &str) -> Option<HelpDistress> {
-    let mut from = 0usize;
-    while let Some(rel) = text[from..].find("<help") {
-        let start = from + rel;
-        let after = &text[start + "<help".len()..];
-        let boundary = after
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_whitespace() || c == '>' || c == '/');
-        if boundary {
-            let tag_end = after.find('>')?;
-            let tag = &text[start..start + "<help".len() + tag_end + 1];
-            return Some(HelpDistress {
-                reason: parse_xml_attr(tag, "reason").unwrap_or_default(),
-                evidence: parse_xml_attr(tag, "evidence"),
-            });
-        }
-        from = start + "<help".len();
-    }
-    None
-}
-
-/// The NEWEST assistant entry's text from a transcript, or None. The
-/// distress parse's transcript-only fallback (agy / opencode stop hooks carry
-/// no `last_assistant_message` payload). Newest-entry-only mirrors the
-/// intent read's newest-entry rule for `watching`: an older entry's distress
-/// was handled at its own stop.
-fn newest_assistant_text(transcript_path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(transcript_path).ok()?;
-    for line in content.lines().rev() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let role = val
-            .pointer("/message/role")
-            .or_else(|| val.get("role"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if role != "assistant" {
-            continue;
-        }
-        let text = extract_assistant_text(&val);
-        if !text.is_empty() {
-            return Some(text);
-        }
-    }
-    None
-}
-
-/// True when the project log already carries a `blocked` row for this run
-/// with this reason. The stop hook re-fires on every turn end, so without
-/// this a session whose newest message still carries the same distress would
-/// re-mail the parent on each fire.
-fn blocked_distress_already_emitted(project_events: &Path, run: &str, reason: &str) -> bool {
-    let Ok(file) = std::fs::File::open(project_events) else {
-        return false;
-    };
-    use std::io::BufRead;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    while reader.read_line(&mut line).unwrap_or(0) > 0 {
-        if let Ok(v) = serde_json::from_str::<Value>(&line) {
-            if v.get("type").and_then(|t| t.as_str()) == Some("blocked")
-                && v.get("run").and_then(|r| r.as_str()) == Some(run)
-                && v.pointer("/data/reason").and_then(|r| r.as_str()) == Some(reason)
-            {
-                return true;
-            }
-        }
-        line.clear();
-    }
-    false
-}
-
-/// Free-text cap shared with the emit CLI (`_PROTOCOL_DATA_STR_CAP`) and
-/// finalize's run_summary cap, so a Rust-emitted reason can never outgrow the
-/// rows every other producer writes.
-const BLOCKED_DATA_STR_CAP: usize = 500;
-
-/// Emit the `blocked` x-dbaf event natively (x-77a0) and push it to the
-/// parent handle. The push leg and the emit-CLI auto-push shipped with zero
-/// emitters: the advisory `--emit-boundary blocked` instruction predates this
-/// and demonstrably never fires in real runs, so a king swept on a timeout
-/// instead of being told. The stop hook is the one surface that mechanically
-/// reads every session's message, which makes it the emitter that cannot be
-/// skipped. Envelope mirrors finalize's run_summary (the schema's blocked row
-/// is the same x-dbaf family); the push shells the same Python resolver
-/// finalize shells, so lineage resolution lives in one place. Best-effort
-/// throughout: a write or push failure logs one stderr note and never changes
-/// the stop verdict.
-fn emit_help_distress_blocked(
-    project_events: &Path,
-    global_events: &Path,
-    cwd: &Path,
-    run: &str,
-    node: Option<&str>,
-    distress: &HelpDistress,
-) {
-    if !append_blocked_event(project_events, global_events, run, node, distress) {
-        return;
-    }
-    push_blocked_to_parent(cwd, run, node, &distress.reason);
-}
-
-/// Append the deduped `blocked` envelope to both logs. Returns whether a row
-/// was written (false = duplicate, or the durable append failed and no push
-/// may ride it - AC1-FR ordering, same as the emit CLI: a push with no
-/// durable record is the receipt-can-lie shape).
-fn append_blocked_event(
-    project_events: &Path,
-    global_events: &Path,
-    run: &str,
-    node: Option<&str>,
-    distress: &HelpDistress,
-) -> bool {
-    let cap = |s: &str| -> String { s.chars().take(BLOCKED_DATA_STR_CAP).collect() };
-    let reason = cap(&distress.reason);
-    // Dedup on the CAPPED reason (codex round on PR 1282): the stored row
-    // carries the capped value, so comparing the raw one missed on every
-    // >500-char distress and re-emitted on each stop.
-    if blocked_distress_already_emitted(project_events, run, &reason) {
-        return false;
-    }
-    let mut data = serde_json::json!({"reason": reason});
-    if let Some(ev) = distress.evidence.as_deref() {
-        data["evidence"] = serde_json::json!(cap(ev));
-    }
-    let mut env = serde_json::json!({
-        "ts": now_rfc3339_utc(),
-        "v": 1,
-        "type": "blocked",
-        "source": "target",
-        "run": run,
-        "data": data,
-    });
-    if let Some(n) = node {
-        env["node"] = serde_json::json!(n);
-    }
-    if let Err(error) =
-        crate::claims::append_event_line(project_events, &env, std::time::Duration::from_secs(2))
-    {
-        eprintln!(
-            "loop-check: blocked write to {} failed (non-fatal): {error}",
-            project_events.display()
-        );
-        return false;
-    }
-    if project_events != global_events {
-        if let Err(error) =
-            crate::claims::append_event_line(global_events, &env, std::time::Duration::from_secs(2))
-        {
-            eprintln!(
-                "loop-check: blocked mirror to {} failed (non-fatal): {error}",
-                global_events.display()
-            );
-        }
-    }
-    true
-}
-
-/// Push leg, mirroring finalize's `push_run_summary_to_parent` (a missing
-/// `fno` / no spawn lineage is a silent skip; the events.jsonl row already
-/// landed independently). Routed through `bounded_read` - the one bounded
-/// transport every `fno` child reachable from the stop decision uses - so a
-/// wedged `fno` cannot hang the fire (self-review finding: an unbounded
-/// `.output()` here had exactly that shape).
-fn push_blocked_to_parent(cwd: &Path, run: &str, node: Option<&str>, reason: &str) {
-    let mut args: Vec<&str> = vec![
-        "doctor",
-        "event",
-        "push-parent",
-        "--type",
-        "blocked",
-        "--run",
-        run,
-        "--reason",
-        reason,
-    ];
-    if let Some(n) = node {
-        args.push("--node");
-        args.push(n);
-    }
-    match bounded_read(
-        std::ffi::OsStr::new("fno"),
-        &args,
-        cwd,
-        "blocked_parent_push",
-        std::time::Duration::from_secs(15),
-    ) {
-        // The push's own exit status is not load-bearing (the resolver exits
-        // 0 on a no-lineage skip), and a timeout means the push MAY have
-        // fired - either way the durable row already landed, which is the
-        // record every reader joins on.
-        Ok(_) => {}
-        Err(error) => log_bounded_read_error("blocked parent push skipped (non-fatal)", &error),
-    }
 }
 
 /// Extract `last_assistant_message` from the Stop-hook stdin JSON
@@ -1751,9 +1521,14 @@ pub use crate::review_freshness::{
 };
 
 // Child modules named by their question (the file budget's remedy): the
-// coverage row's state deriver and the receipt line live there, not here.
+// coverage row's state deriver, the receipt line, and attestation authorship
+// live there, not here.
+mod authorship;
 mod coverage_receipt;
 mod review_state;
+use authorship::carry_author_session_forward;
+pub use authorship::AttestationOrigin;
+use authorship::{classify_attestation_origin, default_attestation_origin};
 pub use coverage_receipt::coverage_receipt_line;
 
 /// Whether a `review_attestation` line is about the PR under evaluation.
@@ -2340,7 +2115,7 @@ fn scan_unrecorded_decisions(
 /// head", never "clean at this head"). A findings-free fail and a RETRACTION
 /// never satisfy (the bystander and revoked-pass shapes stay unsatisfied).
 /// Authorship is unknowable inside this scan, so the disposition read is
-/// fail-open on corroboration; the `reviewed` conjunction re-runs the
+/// fail-open on origin; the `reviewed` conjunction re-runs the
 /// disposition scan WITH authorship downstream and a solo author's decline
 /// still withholds there.
 /// `unattested_reviewers` plus the count of unparseable lines that LOOK like
@@ -2480,7 +2255,7 @@ pub fn unattested_reviewers_scan(
         .iter()
         .any(|(name, p)| !*p && fail_carries.get(name) == Some(&true));
     let disposition_clear = any_answerable_fail && {
-        let blockers = disposition_blockers_on_chain(&chain, false);
+        let blockers = disposition_blockers_on_chain(&chain);
         !blockers_withhold(&blockers, rounds_exhausted)
     };
     let out = reviewers
@@ -2651,7 +2426,6 @@ fn read_pr_info(
     author_session: Option<&str>,
     pr_selector: Option<&str>,
     prefetched_pr_json: Option<Value>,
-    require_corroboration: bool,
     github_approval_satisfies: bool,
     max_rounds: i64,
     // The resolved `review.carry_interdiff_lines` (law d-608344c1): how many
@@ -2892,6 +2666,15 @@ fn read_pr_info(
     // a missing file is empty (the local axis then contributes nothing, which
     // is correct - no evidence of a local review).
     let events_text = std::fs::read_to_string(events_path).unwrap_or_default();
+    // Authorship carry-forward: when this process resolved no manifest
+    // session, the previous coverage row's recorded author FOR THIS PR (the
+    // scan filters on the number; the events file is project-wide) stands
+    // in, so a re-read from a manifest-less cwd classifies against the
+    // historical author instead of landing every local verdict Unmeasured.
+    let carried_author = author_session
+        .map(str::to_string)
+        .or_else(|| carry_author_session_forward(&events_text, number));
+    let author_session = carried_author.as_deref();
     let (
         latest_review_ts,
         reviewed,
@@ -2900,7 +2683,6 @@ fn read_pr_info(
         stale_bots,
         unaddressed_findings,
         coverage,
-        impossible,
         hard_finding_present,
     ) = if login_skipped {
         // No GitHub logins to poll (nothing configured, or no_external): skip
@@ -2919,11 +2701,11 @@ fn read_pr_info(
         // "uncovered" and an instrument-health receipt for reviews that were
         // never queried. A fresh local pass still rescues it inside
         // classify_coverage (positive evidence).
-        // One classification pass over a tiling, as (coverage, self-attested
-        // predicate, blockers): the round-budget refresh below re-runs it so
-        // every conjunct downstream reads the SAME budget, never a mix.
+        // One classification pass over a tiling, as (coverage, blockers): the
+        // round-budget refresh below re-runs it so every conjunct downstream
+        // reads the SAME budget, never a mix.
         let classify_with = |tiling: &RangeTiling| {
-            let mut coverage = classify_coverage_tiled(
+            let coverage = classify_coverage_tiled(
                 &[],
                 &[],
                 &events_text,
@@ -2937,22 +2719,13 @@ fn read_pr_info(
                 pr_author.as_deref(),
                 github_approval_satisfies,
             );
-            // Same capture-then-apply order as the external-read arm below: the
-            // predicate reads the pre-downgrade report, and the `reviewed` verdict
-            // needs the same corroboration term or the loop finishes DonePRGreen
-            // on a self-attested-only row the merge verb refuses (round 3: the
-            // solo lane - reviewers configured, no bots, no optional lane - takes
-            // this arm every time).
-            let self_attested_alone = coverage.rests_on_self_attestation_alone();
-            coverage.apply_corroboration_policy(require_corroboration);
             // Locked Decision 1: the pass condition is disposition-complete.
             // Non-terminal blocking findings withhold `reviewed` here exactly as
-            // the Python merge gate refuses on them.
-            let blockers =
-                disposition_blockers(&events_text, &head_branch, head_sha, self_attested_alone);
-            (coverage, self_attested_alone, blockers)
+            // the Python merge gate refuses on them - below the cap only.
+            let blockers = disposition_blockers(&events_text, &head_branch, head_sha);
+            (coverage, blockers)
         };
-        let (mut coverage, mut self_attested_alone, mut blockers) = classify_with(&tiling);
+        let (mut coverage, mut blockers) = classify_with(&tiling);
         // The reviewer scan above read the pre-refresh budget too; a local
         // mut so the arm's tuple below answers from whatever budget this arm
         // ends on.
@@ -2996,26 +2769,14 @@ fn read_pr_info(
                                 );
                                 tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
                                 tiling.rounds_max = max_rounds;
-                                // The impossible axis stays events-only: the
-                                // refresh widened the budget to both axes, and
-                                // recomputing the events count explicitly (not
-                                // reusing the pre-refresh value) keeps that
-                                // true even if a future caller refreshes twice.
-                                tiling.events_rounds_exhausted = rounds_since_last_pass(
-                                    &events_text,
-                                    &head_branch,
-                                    head_sha,
-                                    None,
-                                ) >= max_rounds.max(1);
                                 // The classification and the reviewer scan
                                 // above judged the pre-refresh budget; re-run
                                 // both so the in-classify spent-budget
-                                // discharge, the withhold/impossible
-                                // conjuncts, and the unattested reviewer's
-                                // cap-yield all read the refreshed one.
-                                let (re_coverage, re_alone, re_blockers) = classify_with(&tiling);
+                                // discharge, the withhold conjunct, and the
+                                // unattested reviewer's cap-yield all read the
+                                // refreshed one.
+                                let (re_coverage, re_blockers) = classify_with(&tiling);
                                 coverage = re_coverage;
-                                self_attested_alone = re_alone;
                                 blockers = re_blockers;
                                 let (re_unattested, _re_malformed) = unattested_reviewers_scan(
                                     events_path,
@@ -3040,15 +2801,12 @@ fn read_pr_info(
         }
         (
             "none".to_string(),
-            reviewers_ok
-                && CoverageReport::corroboration_term(require_corroboration, self_attested_alone)
-                && !blockers_withhold(&blockers, tiling.rounds_exhausted),
+            reviewers_ok && !blockers_withhold(&blockers, tiling.rounds_exhausted),
             Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
             coverage,
-            blockers_impossible(&blockers, tiling.events_rounds_exhausted),
             blockers.iter().any(|b| b.hard),
         )
     } else {
@@ -3257,10 +3015,6 @@ fn read_pr_info(
             rounds_since_last_pass(&events_text, &head_branch, head_sha, Some(reviews_arr));
         tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
         tiling.rounds_max = max_rounds;
-        // Same split as the no-external arm above: the budget widens to both
-        // axes, the impossible axis stays events-only.
-        tiling.events_rounds_exhausted =
-            rounds_since_last_pass(&events_text, &head_branch, head_sha, None) >= max_rounds.max(1);
         let comments_arr: &[Value] = reviews_json
             .get("comments")
             .and_then(|v| v.as_array())
@@ -3287,10 +3041,6 @@ fn read_pr_info(
             pr_author.as_deref(),
             github_approval_satisfies,
         );
-        // The predicate reads the pre-downgrade report (the policy below only
-        // flips the covered state, preserving verdicts), so capture it first.
-        let self_attested_alone = coverage.rests_on_self_attestation_alone();
-        coverage.apply_corroboration_policy(require_corroboration);
         mark_owed_verdicts(&mut coverage, required_bots);
         let local_recovery = local_recovery_from_refusal(
             &info.reviewer_refused,
@@ -3298,16 +3048,10 @@ fn read_pr_info(
             &info.stale_bots,
             &coverage,
         );
-        // The corroboration policy must reach the `reviewed` verdict itself,
-        // not only the coverage axis: the DonePRGreen conjunct below reads
-        // this field and never consults coverage, so without this line the
-        // loop can finish a PR the merge gate refuses on the same row - the
-        // two surfaces this repo keeps unified would split under the flag.
-        // Locked Decision 1, same conjunct as the solo lane arm.
-        let blockers =
-            disposition_blockers(&events_text, &head_branch, head_sha, self_attested_alone);
+        // Locked Decision 1, same conjunct as the solo lane arm: the pass
+        // condition is disposition-complete, withheld below the cap only.
+        let blockers = disposition_blockers(&events_text, &head_branch, head_sha);
         let reviewed = (info.all_required_passed() || local_recovery)
-            && CoverageReport::corroboration_term(require_corroboration, self_attested_alone)
             && unaddressed.is_empty()
             && reviewers_ok
             && !blockers_withhold(&blockers, tiling.rounds_exhausted);
@@ -3319,19 +3063,14 @@ fn read_pr_info(
             info.stale_bots,
             unaddressed,
             coverage,
-            blockers_impossible(&blockers, tiling.events_rounds_exhausted),
             blockers.iter().any(|b| b.hard),
         )
     };
-    // The IMPOSSIBLE predicate rides the row beside the raw budget flag, so
-    // the status surface can name it without re-running the disposition scan.
-    // The hard axis rides beside it: the standing waiver's condition is hard
-    // findings alone, independent of the budget. The predicate reads the
-    // events-only exhaustion: a bot-heavy PR whose local lane still has
-    // rounds is never impossible (the `cap_verdict` split on the Python
-    // side; held equal by the shared corpus).
+    // The hard axis rides the row: the standing operator-law waiver's
+    // condition is hard findings alone, independent of the budget, and it
+    // only ever consults this below the cap - at the cap the configured
+    // rounds discharge every open finding.
     let mut tiling = tiling;
-    tiling.impossible = impossible;
     tiling.hard_blocker = hard_finding_present;
 
     // Emit coverage every gate eval so the Python readers (the merge primitive
@@ -3757,11 +3496,9 @@ fn best_effort_notify(title: &str, body: &str) {
         return;
     }
     // var_os avoids a lossy UTF-8 conversion on a path/binary env value and
-    // hands the raw OsString straight to Command (gemini review).
+    // hands the raw OsString straight to the spawn (gemini review).
     let fno_bin = std::env::var_os("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|| "fno".into());
-    let _ = Command::new(fno_bin)
-        .args(["inbox", "notify", title, body])
-        .spawn();
+    crate::operator_notice::notify_operator_with(&fno_bin, title, body, None);
 }
 
 /// Post a bot's review trigger to the PR once, returning true on success (x-b167
@@ -4806,8 +4543,7 @@ fn resolve_posture_config(settings: &Settings) -> PostureConfig {
         let n = r.trim().trim_start_matches('/');
         n != "declare" && n != "sigma"
     });
-    let corroboration = settings.require_corroboration.unwrap_or(false);
-    let any_signal = github || declared_none || peers || corroboration || floor_off || self_named;
+    let any_signal = github || declared_none || peers || floor_off || self_named;
     let value = if declared_none && !github && !peers {
         "tests_pass"
     } else if github && peers {
@@ -4828,10 +4564,6 @@ fn resolve_posture_config(settings: &Settings) -> PostureConfig {
         } else {
             "self_and_peer"
         }
-    } else if corroboration {
-        // The author's own attestation reads uncovered under corroboration,
-        // so the honest legacy reading is the rung demanding non-self evidence.
-        "independent_review"
     } else if self_named {
         "self_review"
     } else if floor_off {
@@ -5810,26 +5542,9 @@ impl Coverage {
     }
 }
 
-/// Authorship of a local attestation: did the authoring session emit it, did a
-/// different session, or is that unknowable. Computed from the attestation's
-/// `attester_session_id` against the manifest's `harness_session_id`.
+/// Authorship of a local attestation lives in [`authorship`]: the enum, its
+/// classifier, and the manifest fallback all answer one question.
 ///
-/// Recorded, never gating. `coverage_count` does not read this field: every
-/// `Reviewed` verdict counts regardless of origin, `SelfAttested` included.
-///
-/// The middle state is deliberately not `Independent`. The manifest names the
-/// session that ran `fno do target init` in the worktree, so a self-handoff
-/// successor or a second agent in a shared worktree is a different session and
-/// is still not independent. A match is strong evidence of self-attestation; a
-/// mismatch is weak evidence of anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttestationOrigin {
-    SelfAttested,
-    OtherSession,
-    Unknown,
-}
-
 /// How a local attestation was scoped to this PR: it is scopeable while
 /// scope lasts (`attested_branch`: it named this PR's head branch, or it pins
 /// this PR's exact head sha), or it predates the `branch` field and was
@@ -5871,13 +5586,12 @@ pub struct ReviewerVerdict {
     /// and a PR whose only attestation is self-attested is covered. Whether
     /// that should stay true is a later gate decision, not this field.
     /// Only meaningful on `local_attestation` verdicts; github_app and
-    /// human approvals carry `Unknown` (omitted on serialize) since a GitHub
-    /// login has no session to compare. Defaults to `Unknown` so every
-    /// pre-existing attestation lands there unchanged.
-    #[serde(
-        skip_serializing_if = "is_attestation_origin_unknown",
-        default = "default_attestation_origin"
-    )]
+    /// human approvals carry `Unknown` since a GitHub login has no session
+    /// to compare. Defaults to `Unknown` so every pre-existing attestation
+    /// lands there unchanged. `Unknown` serializes as `"unknown"`, never
+    /// as an absent key: a consumer reading absent as "not self_attested"
+    /// once cleared a PR whose only review was the author's own.
+    #[serde(default = "default_attestation_origin")]
     pub attestation_origin: AttestationOrigin,
     /// The commit this reviewer actually read: a github_app review object's
     /// `.commit.oid`, or a local attestation's `data.head_sha`. Empty when
@@ -5924,6 +5638,14 @@ pub struct ReviewerVerdict {
     /// keeps today's exact semantics.
     #[serde(skip_serializing_if = "is_true", default = "default_true")]
     pub required: bool,
+    /// Whether the review behind this verdict PASSED: a local attestation with
+    /// `verdict == pass`, or a GitHub review object that approved. The counted
+    /// axis (`Reviewed`) says the reviewer READ the head whatever it concluded
+    /// (x-aecc), so the pass subset lives here and reaches the row only as the
+    /// aggregate `passed_count` - never serialized per verdict, because no
+    /// reader keys on it and the schema stays byte-stable.
+    #[serde(skip)]
+    pub passed: bool,
 }
 
 /// The one counting rule for human GitHub approvals: a `reviewed` verdict
@@ -5971,48 +5693,6 @@ impl CoverageReport {
             .count()
     }
 
-    /// The corroboration term of the `reviewed` verdict, shared by BOTH read
-    /// arms (external reads and login_skipped): DonePRGreen reads the field
-    /// and never consults coverage, so each arm must splice this term or the
-    /// loop can finish a PR the merge verb refuses on the same row.
-    fn corroboration_term(require_corroboration: bool, self_attested_alone: bool) -> bool {
-        !(require_corroboration && self_attested_alone)
-    }
-
-    /// Whether every counted review verdict rests on the author's own
-    /// (self_attested) local attestation: no GitHub App review, no second
-    /// session. Unmeasured origins (Unknown) are NOT self-attestation, so an
-    /// unmeasured row fails open - it is not proof of corroboration, but it is
-    /// not proof of its absence either.
-    pub fn rests_on_self_attestation_alone(&self) -> bool {
-        let mut counted = 0usize;
-        let mut self_attested = 0usize;
-        for v in &self.verdicts {
-            if v.verdict != CoverageVerdict::Reviewed
-                || !human_approval_counts(v, self.github_approval_satisfies)
-            {
-                continue;
-            }
-            counted += 1;
-            if v.producer == CoverageProducer::LocalAttestation
-                && v.attestation_origin == AttestationOrigin::SelfAttested
-            {
-                self_attested += 1;
-            }
-        }
-        counted > 0 && counted == self_attested
-    }
-
-    /// Apply `config.review.require_corroboration`: a covered report whose
-    /// whole count is the author's own attestation reads as uncovered. The
-    /// verdicts stay on the event, so the evidence trail is reconstructable;
-    /// the VERDICT is what the merge gate reads.
-    pub fn apply_corroboration_policy(&mut self, on: bool) {
-        if on && self.rests_on_self_attestation_alone() {
-            self.coverage = Coverage::Covered(0);
-        }
-    }
-
     pub fn coverage_count(&self) -> Option<usize> {
         match &self.coverage {
             Coverage::Unknown => None,
@@ -6027,6 +5707,21 @@ impl CoverageReport {
             ),
         }
     }
+
+    /// The pass subset of the counted verdicts: reviews that concluded PASS,
+    /// against [`Self::coverage_count`]'s "the reviewer read the head" whatever
+    /// it concluded. At a discharged budget the two can differ by design - a
+    /// spent round with declined findings reads reviewed without passing.
+    pub fn passed_count(&self) -> usize {
+        self.verdicts
+            .iter()
+            .filter(|v| {
+                v.verdict == CoverageVerdict::Reviewed
+                    && human_approval_counts(v, self.github_approval_satisfies)
+                    && v.passed
+            })
+            .count()
+    }
 }
 
 fn is_false(b: &bool) -> bool {
@@ -6039,28 +5734,6 @@ fn is_true(b: &bool) -> bool {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_attestation_origin() -> AttestationOrigin {
-    AttestationOrigin::Unknown
-}
-
-fn is_attestation_origin_unknown(o: &AttestationOrigin) -> bool {
-    matches!(o, AttestationOrigin::Unknown)
-}
-
-/// Label a local attestation's authorship from its emitting session vs the
-/// worktree's authoring session. A match is `SelfAttested`; a non-empty
-/// mismatch is `OtherSession` (NOT "independent" - a self-handoff successor or
-/// a shared-worktree sibling is a different session and still not independent);
-/// an empty/absent attester, or an unknown author, is `Unknown`. Failing open
-/// on unknown authorship keeps the pre-change verdict set byte-identical.
-fn classify_attestation_origin(attester: Option<&str>, author: Option<&str>) -> AttestationOrigin {
-    match (attester, author) {
-        (Some(a), Some(auth)) if a == auth => AttestationOrigin::SelfAttested,
-        (Some(_), Some(_)) => AttestationOrigin::OtherSession,
-        _ => AttestationOrigin::Unknown,
-    }
 }
 
 /// One reviewer's latest attestation, the commit it pinned, and whether that
@@ -6131,126 +5804,16 @@ pub struct RangeTiling {
     /// prints the gate's pair verbatim instead of re-reading config (one
     /// producer per number; x-027b).
     pub rounds_max: i64,
-    /// Whether `rounds_used` exceeds the resolved `config.review.max_rounds`.
-    /// Advisory on this struct - the merge gate re-derives before refusing -
-    /// but the status surface reads it to name its own blocker.
+    /// Whether `rounds_used` reaches the resolved `config.review.max_rounds`.
+    /// At the cap the review obligation is satisfied - the merge gate
+    /// discharges every open finding - so this flag OPENS the gate, never
+    /// closes it.
     pub rounds_exhausted: bool,
-    /// Whether the EVENTS axis alone exhausted the budget. `rounds_exhausted`
-    /// counts both axes (a bot round IS a round); the IMPOSSIBLE conjunct
-    /// reads this field instead, because only an attestation can carry the
-    /// `fixed` disposition that clears a hard finding - a chain with local
-    /// rounds left is never impossible, whatever the bot axis spent. Mirrors
-    /// `cap_verdict` in `_coverage_gate.py`; the two are held equal by the
-    /// shared corpus.
-    pub events_rounds_exhausted: bool,
-    /// Whether the exhausted budget leaves a HARD non-terminal finding (a
-    /// CONFIRMED correctness or security finding): only those keep the
-    /// IMPOSSIBLE verdict. Every other non-terminal finding is filed at the
-    /// cap and the PR merges (the operator's ruling on the round cap).
-    /// Filled by `read_pr_info` after the disposition scan, since it needs
-    /// the corroboration state the arms compute.
-    pub impossible: bool,
     /// Whether ANY hard non-terminal finding remains, budget aside. The
-    /// standing operator-law waiver consults this: it may waive an uncovered
-    /// review but never an unresolved CONFIRMED correctness or security
-    /// finding, whatever the round budget says. `impossible` above is the
-    /// conjunction with a spent budget; this is the hard axis alone.
+    /// standing operator-law waiver consults this below the cap: it may waive
+    /// an uncovered review but never an unresolved CONFIRMED correctness or
+    /// security finding. At the cap the budget discharges it like any other.
     pub hard_blocker: bool,
-}
-
-// --- The disposition-complete pass condition, Rust gate side ----------------
-//
-// Locked Decision 1: a head is covered when the chain tiles AND every
-// finding in that chain is TERMINAL. Locked Decision 6: the gate re-derives
-// blocking from the per-finding primitives with its own copy of the rule and
-// never trusts the producer's `findings_blocking` count.
-
-/// The gate's own copy of the harmless-category allowlist, held equal to
-/// `DEFAULT_NONBLOCKING_CATEGORIES` on the Python side by tests (Locked
-/// Decision 6: two implementations, one corpus).
-const GATE_NONBLOCKING_CATEGORIES: &[&str] = &[
-    "style",
-    "formatting",
-    "naming",
-    "docs",
-    "typo",
-    "nit",
-    "simplification",
-    "test-coverage",
-];
-
-fn gate_finding_blocks(primitive: &Value) -> bool {
-    if primitive
-        .get("has_required_fields")
-        .and_then(|v| v.as_bool())
-        != Some(true)
-    {
-        return true;
-    }
-    let verdict = primitive
-        .get("verdict")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if verdict.trim().eq_ignore_ascii_case("confirmed") {
-        return true;
-    }
-    let category = primitive
-        .get("category")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let lowered = category.trim().to_lowercase();
-    !GATE_NONBLOCKING_CATEGORIES.contains(&lowered.as_str())
-}
-
-/// One non-terminal blocking finding, named by its finding_key plus the axis
-/// that failed, for the block message and the emitted row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DispositionBlocker {
-    pub finding_key: String,
-    /// "open", "fixed-unreviewed", "declined-uncorroborated",
-    /// "declined-without-reason", or "truncated-remainder".
-    pub axis: &'static str,
-    /// A CONFIRMED correctness or security finding (or the truncated
-    /// remainder, which cannot be inspected). At the round cap only a hard
-    /// blocker withholds the merge; the rest are filed as nodes.
-    pub hard: bool,
-}
-
-/// The two categories the round cap can never file away: a finding the
-/// reviewer CONFIRMED as a correctness or security defect. The class gate is
-/// what makes file-the-remainder safe - noise can be filed, a confirmed bug
-/// cannot - so this reads the same primitive fields `gate_finding_blocks`
-/// re-derives from, never the producer's count.
-const HARD_CATEGORIES: &[&str] = &["correctness", "security"];
-
-fn hard_finding(primitive: &Value) -> bool {
-    let verdict = primitive
-        .get("verdict")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if !verdict.trim().eq_ignore_ascii_case("confirmed") {
-        return false;
-    }
-    let category = primitive
-        .get("category")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-    HARD_CATEGORIES.contains(&category.as_str())
-}
-
-/// Whether the blockers still withhold `reviewed`. Under the budget every
-/// blocker withholds. At the cap only a hard one does: the rest are filed by
-/// the merge gate and the PR merges (one review stays the floor - an empty
-/// chain never reaches here with rounds spent).
-pub fn blockers_withhold(blockers: &[DispositionBlocker], rounds_exhausted: bool) -> bool {
-    blockers.iter().any(|b| b.hard || !rounds_exhausted)
-}
-
-/// The IMPOSSIBLE predicate: rounds spent AND a hard blocker remains.
-pub fn blockers_impossible(blockers: &[DispositionBlocker], rounds_exhausted: bool) -> bool {
-    rounds_exhausted && blockers.iter().any(|b| b.hard)
 }
 
 /// The branch-scoped `review_attestation` chain, oldest first: branch match
@@ -6288,137 +5851,17 @@ fn in_scope_chain(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<V
 /// The non-terminal blocking findings in the PR's attestation chain.
 ///
 /// Terminal means: fixed (and a LATER round reviewed the fix delta),
-/// non-blocking by the gate's own re-derivation, or declined WITH
-/// corroboration the author cannot mint alone (`self_attested_alone` is the
-/// coverage row's existing predicate - a disposition pass carries its own
-/// corroboration requirement, independent of
-/// `config.review.require_corroboration`, because a disposition pass can be
-/// gamed by declining and a clean review cannot). Pure: scans the events
-/// text, no IO. An empty chain has no findings and blocks nothing.
+/// non-blocking by the gate's own re-derivation, or declined WITH a recorded
+/// reason. Origin never gates: whoever attested the disposition, the
+/// terminality is the same. Pure: scans the events text, no IO. An empty
+/// chain has no findings and blocks nothing.
 pub fn disposition_blockers(
     events_text: &str,
     head_branch: &str,
     head_sha: &str,
-    self_attested_alone: bool,
 ) -> Vec<DispositionBlocker> {
     let chain = in_scope_chain(events_text, head_branch, head_sha);
-    disposition_blockers_on_chain(&chain, self_attested_alone)
-}
-
-/// [`disposition_blockers`] over an already-collected chain (the caller that
-/// parsed the events once passes the same chain to every predicate).
-fn disposition_blockers_on_chain(
-    chain: &[Value],
-    self_attested_alone: bool,
-) -> Vec<DispositionBlocker> {
-    if chain.is_empty() {
-        return Vec::new();
-    }
-    let last_round = chain.len().saturating_sub(1);
-
-    let mut findings: Vec<(String, &Value, usize)> = Vec::new(); // key, primitive, raised round
-    let mut dispositions: std::collections::HashMap<String, (&str, &str)> =
-        std::collections::HashMap::new(); // key -> (disposition, reason)
-    let mut truncated = false;
-    for (index, val) in chain.iter().enumerate() {
-        if val
-            .pointer("/data/findings_truncated")
-            .and_then(|v| v.as_bool())
-            == Some(true)
-        {
-            truncated = true;
-        }
-        for primitive in val
-            .pointer("/data/findings")
-            .and_then(|v| v.as_array())
-            .map(|a| a.as_slice())
-            .unwrap_or(&[])
-        {
-            if let Some(key) = primitive.get("finding_key").and_then(|v| v.as_str()) {
-                if !key.is_empty() {
-                    if let Some(slot) = findings.iter_mut().find(|(k, _, _)| k == key) {
-                        slot.1 = primitive;
-                        slot.2 = index;
-                    } else {
-                        findings.push((key.to_string(), primitive, index));
-                    }
-                }
-            }
-        }
-        for entry in val
-            .pointer("/data/dispositions")
-            .and_then(|v| v.as_array())
-            .map(|a| a.as_slice())
-            .unwrap_or(&[])
-        {
-            let key = entry
-                .get("finding_key")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let disposition = entry
-                .get("disposition")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-            if !key.is_empty() {
-                dispositions.insert(key.to_string(), (disposition, reason));
-            }
-        }
-    }
-
-    let mut blockers: Vec<DispositionBlocker> = Vec::new();
-    if truncated {
-        blockers.push(DispositionBlocker {
-            finding_key: "(truncated remainder)".to_string(),
-            axis: "truncated-remainder",
-            hard: true,
-        });
-    }
-    for (key, primitive, raised) in &findings {
-        if !gate_finding_blocks(primitive) {
-            continue; // non-blocking by class: no action clears the gate
-        }
-        match dispositions.get(key) {
-            None => blockers.push(DispositionBlocker {
-                finding_key: key.clone(),
-                axis: "open",
-                hard: hard_finding(primitive),
-            }),
-            Some(("fixed", _)) => {
-                // Terminal only when a LATER round reviewed the fix delta.
-                if *raised >= last_round {
-                    blockers.push(DispositionBlocker {
-                        finding_key: key.clone(),
-                        axis: "fixed-unreviewed",
-                        hard: hard_finding(primitive),
-                    });
-                }
-            }
-            Some(("declined", reason)) => {
-                if reason.trim().is_empty() {
-                    blockers.push(DispositionBlocker {
-                        finding_key: key.clone(),
-                        axis: "declined-without-reason",
-                        hard: hard_finding(primitive),
-                    });
-                } else if self_attested_alone {
-                    blockers.push(DispositionBlocker {
-                        finding_key: key.clone(),
-                        axis: "declined-uncorroborated",
-                        hard: hard_finding(primitive),
-                    });
-                }
-            }
-            // A "nonblocking" disposition over a gate-blocking finding: the
-            // gate's re-derivation wins (Locked Decision 6).
-            Some(_) => blockers.push(DispositionBlocker {
-                finding_key: key.clone(),
-                axis: "open",
-                hard: hard_finding(primitive),
-            }),
-        }
-    }
-    blockers
+    disposition_blockers_on_chain(&chain)
 }
 
 /// Run `git rev-list` and return its commit lines, oldest first only when
@@ -6584,10 +6027,6 @@ pub fn compute_range_tiling(
     tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha, None);
     tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
     tiling.rounds_max = max_rounds;
-    // Events-only here by construction (no review objects in hand yet), so
-    // the impossible axis starts equal to the budget axis; each refresh
-    // below widens `rounds_used` to both axes and leaves this one alone.
-    tiling.events_rounds_exhausted = tiling.rounds_exhausted;
     // The merge base decides where coverage must start. An unresolvable one
     // answers the whole question fail-closed.
     let merge_out = git_bounded(git_bin, &["merge-base", head_sha, base_ref], cwd);
@@ -6834,6 +6273,7 @@ fn local_refused_verdicts(events_text: &str, head_sha: &str) -> Vec<ReviewerVerd
             // A refusal row records an attempt that RAN and declined: real
             // work with a real remedy, always owed its own name.
             required: true,
+            passed: false,
         });
     }
     out
@@ -7083,6 +6523,7 @@ fn local_attestation_verdict(
         // The local lane is the config-floored reviewer (`self_review_required`);
         // its verdict is always owed, whatever the required bot list says.
         required: true,
+        passed: lp.is_pass,
     }
 }
 
@@ -7244,6 +6685,9 @@ pub fn classify_coverage_tiled(
             // fallbacks keep a responded-but-outdated verdict RECORDED rather
             // than dropped, which is what makes the tightening auditable.
             let (verdict, reviewed_sha, fresh) = bot_verdict(login, reviews, comments, freshness);
+            // A bot `reviewed` verdict means the predicate read an approval or
+            // clean-pass marker, so the pass subset counts it.
+            let passed = verdict == CoverageVerdict::Reviewed;
             verdicts.push(ReviewerVerdict {
                 producer: CoverageProducer::GithubApp,
                 name: login.to_string(),
@@ -7260,6 +6704,7 @@ pub fn classify_coverage_tiled(
                 // the resolved required set (mark_owed_verdicts) is what may
                 // downgrade an optional login, never this scan.
                 required: true,
+                passed,
             });
         }
         // (3) Known-App reviewers NOT in the configured list still count
@@ -7284,6 +6729,8 @@ pub fn classify_coverage_tiled(
                     reviewer_context: None,
                     // Not in any configured list, so a fortiori not owed.
                     required: false,
+                    // A recorded GitHub review read with an approving state.
+                    passed: fresh.counts(),
                 });
             }
         }
@@ -7343,6 +6790,8 @@ pub fn classify_coverage_tiled(
                     reviewer_context: None,
                     // Not in any configured list, so a fortiori not owed.
                     required: false,
+                    // An APPROVED review object is a pass by definition.
+                    passed: fresh.counts(),
                 });
             }
         }
@@ -7362,18 +6811,14 @@ pub fn classify_coverage_tiled(
     // dispositioned ANSWERS this head and counts exactly like a pass here.
     // The pass condition is answered-at-this-head, never clean-at-this-head,
     // so declining everything terminates the loop instead of demanding the
-    // "reviewer finds nothing" outcome that made it unkillable. Three guards
+    // "reviewer finds nothing" outcome that made it unkillable. Two guards
     // keep the promotion honest (review findings 1-2): the pair's OWN chain
     // must have raised keyed findings (a bystander's findings-free fail never
-    // rides another reviewer's dispositions), a RETRACTION entry never
-    // promotes (it revokes, it never covers), and terminality is read with
-    // the pass-only authorship basis - `read_pr_info` re-runs the disposition
-    // scan with a `self_attested_alone` that INCLUDES these fail verdicts, so
-    // a solo author's decline still withholds `reviewed` there. The ROW
-    // itself may read covered on that solo shape (mirroring the solo-pass
-    // default path); the merge gate's disposition pass is the surface that
-    // refuses it, and `fno do pr status`'s ready conjunct does not re-derive
-    // dispositions - a documented split (x-aecc review 2, finding 2).
+    // rides another reviewer's dispositions), and a RETRACTION entry never
+    // promotes (it revokes, it never covers). Terminality reads the chain
+    // alone: origin never gates, so the author's own decline is terminal
+    // exactly as a second session's. Below the cap the disposition scan still
+    // withholds on any open finding; at the cap the budget discharges it.
     let rounds_exhausted = tiling.map(|t| t.rounds_exhausted).unwrap_or(false);
     let answered_fail = |lp: &LocalPass| {
         !lp.is_pass
@@ -7390,13 +6835,7 @@ pub fn classify_coverage_tiled(
     }
     if local_passes.iter().any(|lp| answered_fail(lp)) {
         let chain = in_scope_chain(events_text, head_branch, head_sha);
-        let basis = CoverageReport {
-            coverage: Coverage::Covered(0),
-            verdicts: verdicts.clone(),
-            github_approval_satisfies,
-        };
-        let blockers =
-            disposition_blockers_on_chain(&chain, basis.rests_on_self_attestation_alone());
+        let blockers = disposition_blockers_on_chain(&chain);
         if !blockers_withhold(&blockers, rounds_exhausted) {
             for lp in local_passes.iter().filter(|lp| answered_fail(lp)) {
                 verdicts.push(local_attestation_verdict(
@@ -7549,6 +6988,9 @@ pub fn classify_coverage_tiled(
                     reviewer_context: lp.reviewer_context.clone(),
                     // Local-attestation lane: always owed.
                     required: true,
+                    // A cap-arm rescue: the attestation said fail, and only the
+                    // spent budget discharged it.
+                    passed: false,
                 });
             }
         }
@@ -7613,15 +7055,17 @@ pub fn classify_coverage_tiled(
 
 /// Build the `review_coverage` event payload. The per-reviewer verdicts
 /// serialize via their serde derives (producer/verdict snake_cased);
-/// `reviewed_count` is included only when coverage is `Covered` (omitted, not
-/// null, when Unknown, matching the schema).
+/// `reviewed_count` and `passed_count` ride EVERY row: a review that happened
+/// with findings open must not read as zero reviews, whatever the coverage
+/// word says (the fail rounds count as reviews - the operator's round-cap
+/// ruling).
 ///
 /// `repo` is the git-remote slug, and it is what makes this event safe to write
 /// into the CROSS-PROJECT `~/.fno/events.jsonl`: `pr` alone is a bare integer,
 /// so a reader scanning the global log for PR 781 would otherwise accept
 /// another repo's PR 781 as coverage for this one. Omitted (not null) when the
 /// slug is unresolvable, and a reader must then decline to match it globally.
-fn coverage_event_data(
+pub fn coverage_event_data(
     pr: i64,
     rep: &CoverageReport,
     head_sha: &str,
@@ -7631,7 +7075,7 @@ fn coverage_event_data(
     coverage_event_data_tiled(pr, rep, head_sha, repo, author_session, None)
 }
 
-fn coverage_event_data_tiled(
+pub fn coverage_event_data_tiled(
     pr: i64,
     rep: &CoverageReport,
     head_sha: &str,
@@ -7690,17 +7134,28 @@ fn coverage_event_data_full(
         // `independent_count`: the schema is explicit that `other_session` is
         // not independence, and this must not launder that.
         //
-        // Emitted ONLY when authorship was measured. classify_attestation_origin
-        // labels every verdict Unknown when `author_session` is None, so
-        // `self_attested_count()` would read 0 while the truth is unmeasured -
-        // a measured-zero shape (x-62a1: an aggregate reporting a state its
-        // inputs do not support). The field is omitted instead, never 0, so
-        // the day a gate enforces it, absence reads unmeasured rather than
-        // "no self-attest" and cannot serve as the bypass.
+        // Emitted only when an author session was established. With none,
+        // classify_attestation_origin labels a present-attester verdict
+        // Unmeasured (or Unknown when the attester is absent too), so
+        // `self_attested_count()` would read 0 while the truth is unmeasured
+        // - a measured-zero shape (x-62a1: an aggregate reporting a state
+        // its inputs do not support). The field is omitted instead, never 0,
+        // so the day a gate enforces it, absence reads unmeasured rather
+        // than "no self-attest" and cannot serve as the bypass. After a
+        // carry-forward the session may be the HISTORICAL author's, so the
+        // count is telemetry about the carried identity, not a proof this
+        // process measured anything.
         if author_session.is_some() {
             data["self_attested_count"] = serde_json::json!(rep.self_attested_count());
         }
+    } else {
+        // Unknown rows keep the honest measured count rather than omitting
+        // it: the coverage word is unmeasured, the review count is not - the
+        // GitHub read can fail after two attestations landed, and silence
+        // there reads downstream as "nobody reviewed".
+        data["reviewed_count"] = serde_json::json!(rep.coverage_count().unwrap_or(0));
     }
+    data["passed_count"] = serde_json::json!(rep.passed_count());
     if let Some(author_session_id) = author_session {
         data["author_session_id"] = serde_json::json!(author_session_id);
     }
@@ -7725,16 +7180,12 @@ fn coverage_event_data_full(
         // burned its rounds. Advisory: every gate surface re-derives before
         // refusing or blocking (Locked Decision 6: never trust a producer
         // count), so a stored flag here is an audit trail, never an input.
-        // `events_rounds_exhausted` rides along so the audit row shows the
-        // axis the impossible verdict actually read.
         data["rounds_used"] = serde_json::json!(t.rounds_used);
         // The budget beside the count, so the row is the one producer of the
         // pair: `fno do pr status` reads both from here instead of re-reading
         // config (x-027b: two readers of one number disagreed on PR 1380).
         data["rounds_max"] = serde_json::json!(t.rounds_max);
         data["rounds_exhausted"] = serde_json::json!(t.rounds_exhausted);
-        data["events_rounds_exhausted"] = serde_json::json!(t.events_rounds_exhausted);
-        data["impossible"] = serde_json::json!(t.impossible);
     }
     if let Some(p) = posture {
         data["review_posture"] = serde_json::json!({
@@ -8576,7 +8027,7 @@ pub(crate) fn resolve_review_inputs(
 ) -> ReviewInputs {
     let project_events = events_path
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| cwd.join(".fno/events.jsonl"));
+        .unwrap_or_else(|| crate::paths::events_path(cwd));
 
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let global_events = global_events_path
@@ -8677,16 +8128,9 @@ pub(crate) fn resolve_review_inputs(
                 // a global Some(true). Same overlay rule as required_bots.
                 merged.self_review_required = local.self_review_required;
             }
-            if local.require_corroboration.is_some() {
-                // Same presence rule: a project-local policy flip is honored by
-                // load_settings_for_repo on the Python merge/status/doctor
-                // side, so omitting it here made the loop gate read the global
-                // file only and the two surfaces split on one config (round 3).
-                merged.require_corroboration = local.require_corroboration;
-            }
             if local.posture.is_some() {
                 // Same presence rule: the rung is a project policy
-                // leaf like corroboration, so a local explicit posture must
+                // leaf, so a local explicit posture must
                 // override the global file and the inference must not silently
                 // read the global-only view.
                 merged.posture = local.posture;
@@ -8906,7 +8350,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     let ledger_path = parsed
         .ledger_path
         .clone()
-        .unwrap_or_else(|| cwd.join(".fno/ledger.json"));
+        .unwrap_or_else(|| crate::paths::ledger_path(&cwd));
 
     // Now timestamp
     let now: DateTime<Utc> = if let Some(ref s) = parsed.now_override {
@@ -8931,19 +8375,26 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // NEWEST entry only on the transcript fallback (mirroring the intent
     // read's newest-entry rule for watching): a distress in an older entry
     // was handled at that entry's own stop, and re-reading it here would
-    // re-fire it. The fallback matters because the agy and opencode stop
-    // hooks are transcript-only invocations - `last_assistant_message` is
-    // always absent there (codex round on PR 1282) - and the emitter must
+    // re-fire it. The fallback matters because the agy, opencode, and codex
+    // stop hooks are transcript-only invocations - `last_assistant_message`
+    // is always absent there (codex round on PR 1282) - and the emitter must
     // not silently not exist on those harnesses.
     let node_id = scan_manifest_field(&manifest_content, "graph_node_id").or_else(|| {
         scan_manifest_field(&manifest_content, "target_claim_key")
             .and_then(|k| k.strip_prefix("node:").map(|s| s.to_string()))
     });
-    let distress_text: Option<String> = last_assistant_message
-        .clone()
-        .or_else(|| newest_assistant_text(&transcript_path));
-    if let Some(distress) = distress_text.as_deref().and_then(extract_help_distress) {
-        emit_help_distress_blocked(
+    let distress_text: Option<String> = last_assistant_message.clone().or_else(|| {
+        crate::distress::newest_assistant_text_via_reader(
+            &loopcheck_fno_bin(),
+            &transcript_path,
+            &cwd,
+        )
+    });
+    if let Some(distress) = distress_text
+        .as_deref()
+        .and_then(crate::distress::extract_help_distress)
+    {
+        crate::distress::emit_help_distress_blocked(
             &project_events,
             &global_events,
             &cwd,
@@ -9038,9 +8489,15 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // canonical root's journal while a worktree stop gate reads its own cwd's
     // - a record on any of the three paths clears the gate.
     let unrecorded = if session_id != "unknown" {
+        // One journal per space: the cwd's journal IS the canonical journal for
+        // this repo (the old worktree-vs-canonical fork is what the spaces move
+        // retired), so the union collapses to the two live journals.
         let mut journals = vec![project_events.clone(), global_events.clone()];
         if let Some(canon) = crate::paths::canonical_repo_root(&cwd) {
-            journals.push(canon.join(".fno/events.jsonl"));
+            let canonical_journal = crate::paths::events_path(&canon);
+            if !journals.contains(&canonical_journal) {
+                journals.push(canonical_journal);
+            }
         }
         scan_unrecorded_decisions(&journals, &session_id)
     } else {
@@ -9897,7 +9354,6 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             &global_events,
             &repo_slug,
             manifest.harness_session_id.as_deref(),
-            settings.require_corroboration.unwrap_or(false),
             settings.github_approval_satisfies.unwrap_or(true),
             settings.max_rounds.unwrap_or(2).max(1),
             carry_interdiff_lines_resolved(&settings),
@@ -10836,7 +10292,6 @@ fn run_done(
     global_events_path: &Path,
     repo_slug: &str,
     author_session: Option<&str>,
-    require_corroboration: bool,
     github_approval_satisfies: bool,
     max_rounds: i64,
     carry_interdiff_lines: usize,
@@ -10862,7 +10317,6 @@ fn run_done(
         author_session,
         None,
         None,
-        require_corroboration,
         github_approval_satisfies,
         max_rounds,
         carry_interdiff_lines,
@@ -11346,7 +10800,7 @@ thread_local! {
 /// Effective bound for one stop-gate read: the configured ceiling (flag or
 /// production default) clamped to whatever remains of this fire's aggregate
 /// budget, floored so the answer is always a positive killable bound.
-fn stopgate_read_timeout() -> std::time::Duration {
+pub(crate) fn stopgate_read_timeout() -> std::time::Duration {
     STOPGATE_READS.with(|cell| {
         let (override_ms, _) = *cell.borrow();
         let configured = if override_ms > 0 {
@@ -11457,7 +10911,7 @@ impl GhReadError {
         }
     }
 
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         match self.kind {
             ReadErrorKind::TimedOut => format!(
                 "external read '{}' timed out after {:.1}s and was killed; retrying next fire",
@@ -11501,7 +10955,7 @@ pub(crate) fn bounded_read_diagnostic(context: &str, error: &GhReadError) -> Str
     )
 }
 
-fn log_bounded_read_error(context: &str, error: &GhReadError) {
+pub(crate) fn log_bounded_read_error(context: &str, error: &GhReadError) {
     eprintln!("{}", bounded_read_diagnostic(context, error));
 }
 
@@ -12794,6 +12248,11 @@ pub(crate) struct KingManifest {
     pub(crate) fno_id: String,
     pub(crate) scope: String,
     pub(crate) created_at: Option<String>,
+    /// The crowned session the manifest names; `loop_reign`'s split read keys
+    /// on it. Empty on manifests written before identity fields existed.
+    pub(crate) harness_session_id: Option<String>,
+    /// `pass` | `court`; absent reads as `pass`, never a third shape.
+    pub(crate) shape: String,
     pub(crate) max_iterations: u64,
     pub(crate) respawn_count: u64,
     pub(crate) respawn_ceiling: u64,
@@ -12822,6 +12281,8 @@ pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
             "fno_id" => out.fno_id = value,
             "scope" => out.scope = value,
             "created_at" => out.created_at = Some(value),
+            "harness_session_id" => out.harness_session_id = Some(value),
+            "shape" => out.shape = value,
             "budget_max_iterations" => {
                 if let Ok(n) = value.parse::<u64>() {
                     out.max_iterations = n;
@@ -12845,121 +12306,6 @@ pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
     } else {
         None
     }
-}
-
-/// What `fno inbox board --json` answered, or why it could not be read.
-pub(crate) struct KingBoard {
-    pub(crate) actionable: i64,
-    /// The first row of the first actionable non-empty queue, for the block
-    /// reason. A block that only says "work remains" tells the king nothing
-    /// about what to do next.
-    pub(crate) top_row: Option<String>,
-    pub(crate) unreadable: i64,
-    /// Every actionable row identity on this board, `queue:id`.
-    ///
-    /// This is the progress signal. A row present on the previous fire and
-    /// absent now is something the king actually cleared, which is a positive
-    /// marker read from external truth rather than a self-report. The first cut
-    /// keyed progress solely on a `king_action` event, and nothing anywhere
-    /// emitted one, so the dry-fire counter climbed monotonically and every
-    /// king terminated NoProgress on its third fire no matter what it had
-    /// dispatched. A consumer with no producer is the corpus trap inverted.
-    ///
-    /// Note this is NOT board size. The board refills while the king works, so
-    /// the count can rise on the same fire that a row leaves, and that fire is
-    /// still progress.
-    pub(crate) actionable_ids: Vec<String>,
-}
-
-fn row_identity(queue: &str, row: &Value) -> String {
-    let id = row
-        .get("id")
-        .or_else(|| row.get("key"))
-        .or_else(|| row.get("number"))
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| row.to_string());
-    format!("{queue}:{}", id.trim_matches('"'))
-}
-
-pub(crate) fn parse_king_board(stdout: &str) -> Option<KingBoard> {
-    let value: Value = serde_json::from_str(stdout).ok()?;
-    let actionable = value.get("actionable")?.as_i64()?;
-    let unreadable = value
-        .get("unreadable")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let mut top_row = None;
-    let mut actionable_ids: Vec<String> = Vec::new();
-    if let Some(queues) = value.get("queues").and_then(|q| q.as_array()) {
-        for queue in queues {
-            let name = queue.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-            if queue.get("status").and_then(|v| v.as_str()) == Some("unreadable") {
-                if top_row.is_none() {
-                    let err = queue.get("error").and_then(|v| v.as_str()).unwrap_or("");
-                    top_row = Some(format!("{name} is unreadable: {err}"));
-                }
-                continue;
-            }
-            if queue.get("actionable").and_then(|v| v.as_bool()) != Some(true) {
-                continue;
-            }
-            for row in queue
-                .get("rows")
-                .and_then(|v| v.as_array())
-                .unwrap_or(&vec![])
-            {
-                let identity = row_identity(name, row);
-                if top_row.is_none() {
-                    top_row = Some(identity.clone());
-                }
-                actionable_ids.push(identity);
-            }
-        }
-    }
-    Some(KingBoard {
-        actionable,
-        top_row,
-        unreadable,
-        actionable_ids,
-    })
-}
-
-pub(crate) fn read_king_board(
-    fno_bin: &str,
-    cwd: &Path,
-    state_path: &Path,
-) -> Result<KingBoard, String> {
-    // The board's own exit code is non-zero when any queue is unreadable, and
-    // it still prints a full payload in that case. So the payload is parsed
-    // regardless of that exit code; only an absent or unparseable one is a read
-    // failure, and that one blocks, because a king that cannot see its board
-    // must not certify itself finished.
-    let state_arg = state_path.to_string_lossy().into_owned();
-    let read = bounded_read(
-        fno_bin.as_ref(),
-        &["inbox", "board", "--json", "--state", &state_arg],
-        cwd,
-        "king_board",
-        stopgate_read_timeout(),
-    )
-    .map_err(|e| match e.kind {
-        ReadErrorKind::TimedOut => e.render(),
-        ReadErrorKind::Failed => {
-            format!("cannot run {fno_bin} inbox board: {}", e.stderr_tail)
-        }
-        ReadErrorKind::Unrunnable => {
-            format!("cannot run {fno_bin} inbox board: {}", e.stderr_tail)
-        }
-    })?;
-    let stdout = String::from_utf8_lossy(&read.stdout);
-    parse_king_board(&stdout).ok_or_else(|| {
-        let stderr = String::from_utf8_lossy(&read.stderr_tail);
-        format!(
-            "unparseable board output (exit {}): {}",
-            read.status.code().unwrap_or(-1),
-            stderr.trim().chars().take(300).collect::<String>()
-        )
-    })
 }
 
 fn king_output(
@@ -12998,24 +12344,18 @@ pub(crate) struct KingFireHistory {
 
 /// Count how many king loop-check fires have landed with no NEW work done.
 ///
-/// Progress is a positive marker, never board size: the board refills while the
-/// king works, because dispatching and merging both create future work, so the
-/// actionable COUNT can rise on the very fire that clears a row.
+/// Progress is a positive marker, never board size: the board refills while
+/// the king works, so the actionable count can rise on the very fire that
+/// clears a row. Two things count, and the first is the one that fires.
 ///
-/// Two things count as progress, and the first is the one that actually fires.
-///
-/// 1. A row identity present on the previous fire and absent now. That is
-///    external truth, read back off the board, and it needs no producer. The
-///    first cut had only rule 2, and NOTHING in this repo emitted the event it
-///    keyed on, so `dry` climbed monotonically and every king terminated
-///    NoProgress on its third fire regardless of how much it had dispatched.
-///    A consumer with zero producers is the corpus's path-uniqueness trap
-///    inverted, and it made the loop useless.
+/// 1. A row identity present on the previous fire and absent now: external
+///    truth off the board, needing no producer. The first cut had only rule
+///    2, nothing emitted the event it keyed on, and every king terminated
+///    NoProgress on its third fire no matter how much it dispatched.
 /// 2. A `king_action` naming a target id this run has not acted on before.
-///    Kept so a real producer works the day one lands. Re-acting on the same id
-///    is deliberately NOT progress: `stalled_holder` rows can survive the only
-///    action a king has for them, and a counter that reset on a repeat would
-///    never converge.
+///    Re-acting on the same id is NOT progress: `stalled_holder` rows can
+///    outlive the only action a king has for them, and a reset-on-repeat
+///    counter would never converge.
 pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFireHistory {
     let Ok(content) = std::fs::read_to_string(events_path) else {
         return KingFireHistory {
@@ -13123,7 +12463,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let project_events = parsed
         .events_path
         .clone()
-        .unwrap_or_else(|| parsed.cwd.join(".fno/events.jsonl"));
+        .unwrap_or_else(|| crate::paths::events_path(&parsed.cwd));
     let global_events = parsed
         .global_events_path
         .clone()
@@ -13232,12 +12572,69 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     };
 
     if board.actionable == 0 {
-        let message = if board.unreadable > 0 {
-            "board clean on every readable queue; exiting NoWork"
+        if board.operator_questions_unreadable {
+            return (
+                0,
+                king_output(
+                    "block",
+                    None,
+                    "board clean but outstanding operator questions are unreadable; blocking completion",
+                    0,
+                    dry,
+                ),
+            );
+        }
+        let open_question = board
+            .operator_question_sessions
+            .iter()
+            .any(|owner| owner == &session_id);
+        if open_question {
+            return (
+                0,
+                king_output(
+                    "block",
+                    None,
+                    "board clean but an operator question raised by this reign remains open",
+                    0,
+                    dry,
+                ),
+            );
+        }
+        // The goal keys completion on the crown draining, not on any queue
+        // (2026-09-06 ruling): a board reading clean while nodes sit driven
+        // but unshipped is a quiet beat, never a finish line. An unreadable
+        // drain read must not certify the scope drained, so it skips this
+        // exit and the dry-fire ceiling below bounds the wait.
+        let undelivered = if manifest.scope.is_empty() {
+            0
         } else {
-            "board clean; exiting NoWork"
+            crate::loop_king::scope_undelivered_count(&parsed.fno_bin, &parsed.cwd, &manifest.scope)
+                .unwrap_or(i64::MAX)
         };
-        return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
+        if undelivered == 0 {
+            let message = if board.unreadable > 0 {
+                "board clean on every readable queue; exiting NoWork"
+            } else {
+                "board clean; exiting NoWork"
+            };
+            return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
+        }
+        let message = if undelivered == i64::MAX {
+            "board quiet but scope delivery is unreadable; blocking completion".to_string()
+        } else {
+            format!("board quiet; {undelivered} scope nodes still undelivered")
+        };
+        emit(
+            "king_loop_check",
+            serde_json::json!({
+                "session_id": session_id,
+                "actionable": 0,
+                "undelivered": undelivered,
+                "actionable_ids": [],
+                "cleared": false,
+            }),
+        );
+        return (0, king_output("block", None, &message, 0, dry + 1));
     }
 
     // The ceiling `fno agents king init --max-iterations` advertises. Before this it
@@ -13355,14 +12752,14 @@ fn observe_decision(args: &[String], output: &str) {
     };
     let project_events = parsed
         .events_path
-        .unwrap_or_else(|| parsed.cwd.join(".fno/events.jsonl"));
+        .unwrap_or_else(|| crate::paths::events_path(&parsed.cwd));
     let global_events = parsed.global_events_path.unwrap_or_else(|| {
         std::env::var("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/tmp"))
             .join(".fno/events.jsonl")
     });
-    let run_log = parsed.cwd.join(".fno/run-log.jsonl");
+    let run_log = crate::paths::worktree_space_dir(&parsed.cwd).join("run-log.jsonl");
     if transition == crate::run_state::RunEvent::TerminalDecided
         && matches!(
             crate::run_state::fold_run_state(&run_log, &session_id),
@@ -13412,26 +12809,17 @@ pub fn run_loop_check_capture(args: &[String]) -> (i32, String) {
 }
 
 /// `fno-agents review-coverage --cwd <dir> [--pr <n>] [--head <sha>] ...`
-/// (x-3a3f). The standalone review_coverage producer.
+/// (x-3a3f). The standalone review_coverage producer. The only writer of the
+/// event used to be `read_pr_info` past a streak counter inside `decide()`,
+/// so a session with no target manifest could never produce the row the
+/// merge gate demands. This verb exposes the SAME computation through the
+/// SAME resolver and emitter to every path that can reach the gate.
 ///
-/// The only thing that could WRITE a `review_coverage` event used to be
-/// `read_pr_info` under `run_done`, which `decide()` reaches only past a streak
-/// counter - so a session with no target manifest (no stop hook at all) could
-/// never produce the row the merge gate demands, making that gate unsatisfiable
-/// for a shape that can still open a PR. This verb exposes the SAME computation
-/// with the SAME resolver (`resolve_review_inputs`) and the SAME emitter
-/// (`read_pr_info` itself, untouched) to every path that can reach the gate.
-///
-/// Read-only against GitHub (nudge posting lives outside `read_pr_info`),
-/// append-only against the two event logs. It has NO way to assert coverage
-/// without performing the reads: there is no --force, no --assume-covered, and
-/// no config key that skips the coverage guard. A caller wanting a green gate
-/// must cause a review to exist.
-///
-/// Exit contract: 0 = a `review_coverage` row was emitted (covered or
-/// uncovered, the number says which); 3 = no PR for the selector (nothing to
-/// cover); 4 = the gh read failed and the emitted row is `unknown`; 2 = bad
-/// arguments. stdout is always one JSON object.
+/// Read-only against GitHub, append-only against the two event logs. There
+/// is no --force and no key that skips the guard: a caller wanting green
+/// must cause a review to exist. Exit contract: 0 = row emitted, covered or
+/// not, the number says which; 3 = no PR; 4 = gh read failed, the row is
+/// `unknown`; 2 = bad arguments. stdout is one JSON object.
 pub fn run_review_coverage(args: &[String]) -> i32 {
     let (code, json) = decide_review_coverage(args);
     if code != 0 {
@@ -13601,15 +12989,12 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         author_harness_override.as_deref(),
     );
 
-    // Authorship: --session-id, else the manifest's harness_session_id when one
-    // exists, else None. Resolve it before the PR-head read so even an unknown
-    // row from that read failure keeps the established event shape.
-    let author_session = session_id.or_else(|| {
-        std::fs::read_to_string(cwd.join(".fno/target-state.md"))
-            .ok()
-            .and_then(|content| scan_manifest_field(&content, "harness_session_id"))
-            .filter(|s| s != "null")
-    });
+    // Authorship: --session-id, else the manifest's harness_session_id
+    // (authorship::resolve_manifest_author). The historical carry-forward
+    // happens inside read_pr_info, where the PR number is known: the events
+    // file is project-wide, so a carry computed before the number resolves
+    // cannot be filtered and would hand this PR a foreign PR's author.
+    let author_session = session_id.or_else(|| authorship::resolve_manifest_author(&cwd));
 
     // Head precedence is explicit --head, then the named PR's head, then the
     // local checkout for the branch-inference path. A failed named-PR read
@@ -13743,7 +13128,6 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         author_session.as_deref(),
         pr.as_deref(),
         prefetched_pr_json,
-        inputs.settings.require_corroboration.unwrap_or(false),
         inputs.settings.github_approval_satisfies.unwrap_or(true),
         inputs.settings.max_rounds.unwrap_or(2).max(1),
         carry_interdiff_lines_resolved(&inputs.settings),
@@ -13790,7 +13174,23 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     &pr_info.coverage,
                     &head_sha,
                     &inputs.repo_slug,
-                    author_session.as_deref(),
+                    // The same author read_pr_info classified with: the
+                    // measured session, else the PR-filtered carry-forward.
+                    // Recomputed rather than threaded back so PrInfo keeps its
+                    // shape; deterministic, and idempotent across the row
+                    // read_pr_info just wrote (its own author_session_id now
+                    // answers the scan).
+                    author_session
+                        .as_deref()
+                        .map(str::to_string)
+                        .or_else(|| {
+                            carry_author_session_forward(
+                                &std::fs::read_to_string(&inputs.project_events)
+                                    .unwrap_or_default(),
+                                pr_info.number,
+                            )
+                        })
+                        .as_deref(),
                     Some(&pr_info.range_tiling),
                     pr_info.posture.as_ref(),
                 )
@@ -15240,17 +14640,20 @@ mod tests {
         let data = coverage_event_data(826, &rep, "h", "", Some("sess-author"));
         assert_eq!(data["coverage"], serde_json::json!("covered"));
         assert_eq!(data["reviewed_count"], serde_json::json!(2));
+        // The pass subset: both verdicts came from pass attestations.
+        assert_eq!(data["passed_count"], serde_json::json!(2));
         assert_eq!(data["self_attested_count"], serde_json::json!(1));
         assert_eq!(data["author_session_id"], serde_json::json!("sess-author"));
     }
 
     #[test]
     fn coverage_event_omits_self_attested_count_when_authorship_unmeasured() {
-        // The manifest-less recompute shape: no author session, so every
-        // attestation classifies Unknown and self_attested_count() would read
-        // 0 while the truth is UNMEASURED. A measured zero and an unmeasured
-        // one must not serialize identically - the field is omitted, never 0,
-        // so a future gate on it cannot read absence-of-measurement as
+        // The manifest-less recompute shape: no author session, so an
+        // attested line classifies Unmeasured (a concrete attester, no
+        // comparison possible) and self_attested_count() reads 0 while the
+        // truth is UNMEASURED. A measured zero and an unmeasured one must
+        // not serialize identically - the field is omitted, never 0, so a
+        // future gate on it cannot read absence-of-measurement as
         // absence-of-self-attestation (the x-62a1 aggregate shape).
         let events = attestation_line("code-review", "h", "pass");
         let rep = classify_coverage(
@@ -15265,11 +14668,12 @@ mod tests {
             "h",
         );
         assert_eq!(rep.coverage, Coverage::Covered(1));
-        // Every origin is Unknown - the direct statement of "unmeasured".
+        // No verdict carries a MEASURED classification - the direct statement
+        // of "unmeasured" authorship.
         assert!(rep
             .verdicts
             .iter()
-            .all(|v| v.attestation_origin == AttestationOrigin::Unknown));
+            .all(|v| v.attestation_origin == AttestationOrigin::Unmeasured));
         let data = coverage_event_data(826, &rep, "h", "", None);
         assert_eq!(data["reviewed_count"], serde_json::json!(1));
         assert!(
@@ -15554,31 +14958,11 @@ mod tests {
     }
 
     #[test]
-    fn require_corroboration_parses_the_string_spellings_pydantic_accepts() {
-        // The two gates must read one config one way: pydantic coerces
-        // require_corroboration = "true" to true, so the string spellings
-        // parse here too instead of silently reading false.
-        let mut s = Settings::default();
-        let review: serde_json::Value =
-            serde_json::from_str(r#"{"require_corroboration": "true"}"#).unwrap();
-        if let Some(v) = review.get("require_corroboration") {
-            s.require_corroboration = v.as_bool().or_else(|| {
-                v.as_str()
-                    .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
-                        "true" | "yes" | "on" | "y" | "t" | "1" => Some(true),
-                        "false" | "no" | "off" | "n" | "f" | "0" => Some(false),
-                        _ => None,
-                    })
-            });
-        }
-        assert_eq!(s.require_corroboration, Some(true));
-    }
-
-    #[test]
     fn github_approval_satisfies_parses_lax_bool_spellings_and_defaults_on() {
         // Absent -> None -> unwrap_or(true), the default-ON direction; the
-        // pydantic string spellings parse the same way require_corroboration's
-        // do, so one config cannot load true on one gate and false on the other.
+        // pydantic string spellings parse the same way on every lax-bool
+        // review leaf, so one config cannot load true on one gate and false
+        // on the other.
         let absent = parse_settings("[review]\n");
         assert_eq!(absent.github_approval_satisfies, None);
         assert_eq!(absent.github_approval_satisfies.unwrap_or(true), true);
@@ -15685,11 +15069,11 @@ mod tests {
     }
 
     #[test]
-    fn project_local_require_corroboration_overlays_the_global_file() {
-        // The per-field overlay merge listed every review field except
-        // require_corroboration, so a project-local flip was read from the
-        // GLOBAL file only and the loop gate finished DonePRGreen on a row
-        // the Python merge/status/doctor surfaces refused (round 3).
+    fn retired_require_corroboration_key_still_parses() {
+        let _root = crate::paths::DeclaredRoot::declare("retired_require_corroboratio");
+        // The key is retired: origin never gates. A config that still
+        // carries it must load clean, and the merged settings keep the
+        // fields that still gate.
         let dir = tempfile::tempdir().unwrap();
         let global = dir.path().join("global.toml");
         std::fs::write(&global, "[review]\nrequired_bots = []\n").unwrap();
@@ -15701,82 +15085,7 @@ mod tests {
         )
         .unwrap();
         let inputs = resolve_review_inputs(&repo, None, None, None, Some(&global), None);
-        assert_eq!(inputs.settings.require_corroboration, Some(true));
-    }
-
-    #[test]
-    fn the_corroboration_term_blocks_exactly_the_policy_held_row() {
-        // Both read arms splice CoverageReport::corroboration_term into the
-        // `reviewed` verdict; the term blocks one shape: policy on AND the
-        // whole count self-attested.
-        assert!(!CoverageReport::corroboration_term(true, true));
-        assert!(CoverageReport::corroboration_term(true, false));
-        assert!(CoverageReport::corroboration_term(false, true));
-        assert!(CoverageReport::corroboration_term(false, false));
-    }
-
-    #[test]
-    fn corroboration_policy_holds_self_attested_only_and_passes_corroborated() {
-        // config.review.require_corroboration, default false (first pin: the
-        // policy OFF leaves a self-attested-only report covered). ON, a report
-        // whose whole count is the author's own attestation reads as uncovered
-        // (Covered(0) serializes "uncovered"), and a corroborated report - one
-        // other_session attestation - stays covered.
-        let self_only = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
-        let mut off = classify_coverage(
-            &[],
-            &[],
-            &self_only,
-            &[],
-            true,
-            Some("sess-author"),
-            &|_| Freshness::Fresh,
-            "feature/x",
-            "h",
-        );
-        assert_eq!(off.coverage, Coverage::Covered(1));
-        off.apply_corroboration_policy(false);
-        assert_eq!(off.coverage, Coverage::Covered(1));
-
-        let mut on = classify_coverage(
-            &[],
-            &[],
-            &self_only,
-            &[],
-            true,
-            Some("sess-author"),
-            &|_| Freshness::Fresh,
-            "feature/x",
-            "h",
-        );
-        assert!(on.rests_on_self_attestation_alone());
-        on.apply_corroboration_policy(true);
-        assert_eq!(on.coverage, Coverage::Covered(0));
-
-        let corroborated = format!(
-            "{}\n{}",
-            self_only,
-            serde_json::json!({
-                "type": "review_attestation",
-                "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
-                         "attester_session_id": "sess-peer", "branch": "feature/x"}
-            })
-        );
-        let mut corr = classify_coverage(
-            &[],
-            &[],
-            &corroborated,
-            &[],
-            true,
-            Some("sess-author"),
-            &|_| Freshness::Fresh,
-            "feature/x",
-            "h",
-        );
-        assert_eq!(corr.coverage, Coverage::Covered(2));
-        assert!(!corr.rests_on_self_attestation_alone());
-        corr.apply_corroboration_policy(true);
-        assert_eq!(corr.coverage, Coverage::Covered(2));
+        assert_eq!(inputs.settings.required_bots, Some(Vec::<String>::new()));
     }
 
     #[test]
@@ -16105,136 +15414,9 @@ mod tests {
         assert!(telemetry.contains("invalid transition Closed + DispatchClassified"));
     }
 
-    #[test]
-    fn decision_chokepoint_observes_block_then_terminal() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = dir.path().join("target-state.md");
-        let events = dir.path().join("events.jsonl");
-        let run_id = "20260823T060900Z-cx73523-e04109";
-        std::fs::write(&state, format!("---\nsession_id: {run_id}\n---\n")).unwrap();
-        let args = vec![
-            "loop-check".to_string(),
-            "--state".to_string(),
-            state.display().to_string(),
-            "--transcript".to_string(),
-            dir.path().join("transcript.jsonl").display().to_string(),
-            "--cwd".to_string(),
-            dir.path().display().to_string(),
-            "--events".to_string(),
-            events.display().to_string(),
-            "--global-events".to_string(),
-            events.display().to_string(),
-        ];
-
-        let blocked = allow_output("block", None, "keep working", 1, None);
-        observe_decision(&args, &blocked);
-        assert_eq!(
-            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), run_id)
-                .unwrap(),
-            crate::run_state::RunState::Working
-        );
-
-        let terminal = allow_output(
-            "allow",
-            Some(TerminationReason::DonePRGreen),
-            "done",
-            2,
-            None,
-        );
-        observe_decision(&args, &terminal);
-        assert_eq!(
-            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), run_id)
-                .unwrap(),
-            crate::run_state::RunState::Sealing
-        );
-        assert!(!events.exists());
-    }
-
-    #[test]
-    fn immediate_terminal_seeds_dispatch_before_terminal() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = dir.path().join("target-state.md");
-        let events = dir.path().join("events.jsonl");
-        let run_id = "20260823T060900Z-cx73523-e04109";
-        std::fs::write(&state, format!("---\nfno_id: {run_id}\n---\n")).unwrap();
-        let args = vec![
-            "loop-check".to_string(),
-            "--state".to_string(),
-            state.display().to_string(),
-            "--transcript".to_string(),
-            dir.path().join("transcript.jsonl").display().to_string(),
-            "--cwd".to_string(),
-            dir.path().display().to_string(),
-            "--events".to_string(),
-            events.display().to_string(),
-            "--global-events".to_string(),
-            events.display().to_string(),
-        ];
-
-        observe_decision(
-            &args,
-            &allow_output(
-                "allow",
-                Some(TerminationReason::DonePRGreen),
-                "done",
-                1,
-                None,
-            ),
-        );
-
-        let run_log = dir.path().join(".fno/run-log.jsonl");
-        assert_eq!(
-            crate::run_state::fold_run_state(&run_log, run_id).unwrap(),
-            crate::run_state::RunState::Sealing
-        );
-        let log = std::fs::read_to_string(run_log).unwrap();
-        assert!(log.contains("dispatch_classified"));
-        assert!(log.contains("terminal_decided"));
-        assert!(
-            !events.exists(),
-            "accepted shadow transitions emit no rejection"
-        );
-    }
-
-    #[test]
-    fn decision_chokepoint_prefers_canonical_fno_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = dir.path().join("target-state.md");
-        let events = dir.path().join("events.jsonl");
-        let canonical = "20260823T060900Z-cx73523-e04109";
-        std::fs::write(
-            &state,
-            format!("---\nfno_id: {canonical}\nsession_id: legacy-run\n---\n"),
-        )
-        .unwrap();
-        let args = vec![
-            "loop-check".to_string(),
-            "--state".to_string(),
-            state.display().to_string(),
-            "--transcript".to_string(),
-            dir.path().join("transcript.jsonl").display().to_string(),
-            "--cwd".to_string(),
-            dir.path().display().to_string(),
-            "--events".to_string(),
-            events.display().to_string(),
-            "--global-events".to_string(),
-            events.display().to_string(),
-        ];
-
-        observe_decision(&args, &allow_output("block", None, "keep working", 1, None));
-
-        assert_eq!(
-            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), canonical)
-                .unwrap(),
-            crate::run_state::RunState::Working
-        );
-        assert_eq!(
-            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), "legacy-run")
-                .unwrap(),
-            crate::run_state::RunState::Open
-        );
-    }
-
+    // The spaces-move chokepoint tests live in their own file: this module
+    // is shrink-only, and the tests were the code this change touched.
+    mod space_chokepoint_tests;
     #[test]
     fn shadow_observer_rejects_short_run_ids() {
         let dir = tempfile::tempdir().unwrap();
@@ -16719,177 +15901,6 @@ mod tests {
             extract_last_assistant_message(payload).as_deref(),
             Some("done <promise>MISSION COMPLETE: x</promise>")
         );
-    }
-
-    #[test]
-    fn extract_help_distress_attrs_and_shapes() {
-        // The documented shape: both attributes.
-        let d = extract_help_distress(
-            r#"stuck <help reason="missing dependency" evidence="plan 4.2">detail</help>"#,
-        )
-        .expect("documented shape must parse");
-        assert_eq!(d.reason, "missing dependency");
-        assert_eq!(d.evidence.as_deref(), Some("plan 4.2"));
-        // Reason-less and evidence-less tags still parse (schema permits).
-        let bare = extract_help_distress("<help>").expect("bare tag parses");
-        assert_eq!(bare.reason, "");
-        assert_eq!(bare.evidence, None);
-        let reason_only =
-            extract_help_distress(r#"<help reason="x">"#).expect("reason-only parses");
-        assert_eq!(reason_only.reason, "x");
-        // A longer tag name sharing the prefix must NOT match.
-        assert_eq!(extract_help_distress("use <helper> here"), None);
-        // Absence stays absence.
-        assert_eq!(extract_help_distress("no distress at all"), None);
-    }
-
-    #[test]
-    fn blocked_distress_dedup_scopes_to_run_and_reason() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("events.jsonl");
-        let mk = |run: &str, reason: &str| {
-            serde_json::to_string(&serde_json::json!({
-                "type": "blocked", "run": run,
-                "data": {"reason": reason}
-            }))
-            .unwrap()
-                + "\n"
-        };
-        std::fs::write(&path, mk("run-a", "missing dependency")).unwrap();
-        // Same run + reason -> already emitted.
-        assert!(blocked_distress_already_emitted(
-            &path,
-            "run-a",
-            "missing dependency"
-        ));
-        // Different reason on the same run -> not a duplicate.
-        assert!(!blocked_distress_already_emitted(
-            &path,
-            "run-a",
-            "other wall"
-        ));
-        // Same reason on a different run -> not a duplicate.
-        assert!(!blocked_distress_already_emitted(
-            &path,
-            "run-b",
-            "missing dependency"
-        ));
-        // A missing log is an honest no, not a corrupted yes.
-        let absent = tmp.path().join("absent.jsonl");
-        assert!(!blocked_distress_already_emitted(
-            &absent,
-            "run-a",
-            "missing dependency"
-        ));
-    }
-
-    #[test]
-    fn emit_help_distress_blocked_appends_envelope_and_dedups() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("events.jsonl");
-        let global = tmp.path().join("global.jsonl");
-        let d = HelpDistress {
-            reason: "missing dependency".to_string(),
-            evidence: Some("plan 4.2".to_string()),
-        };
-        append_blocked_event(&project, &global, "run-a", Some("x-77a0"), &d);
-        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&project)
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-        assert_eq!(rows.len(), 1, "exactly one row on first distress");
-        let row = &rows[0];
-        // x-dbaf extended envelope, same family finalize's run_summary writes.
-        assert_eq!(row["type"], "blocked");
-        assert_eq!(row["source"], "target");
-        assert_eq!(row["run"], "run-a");
-        assert_eq!(row["node"], "x-77a0");
-        assert_eq!(row["data"]["reason"], "missing dependency");
-        assert_eq!(row["data"]["evidence"], "plan 4.2");
-        assert_eq!(
-            std::fs::read_to_string(&global).unwrap().trim(),
-            serde_json::to_string(&row).unwrap(),
-            "the global mirror carries the identical row"
-        );
-        // A second fire with the same (run, reason) appends nothing anywhere.
-        assert!(!append_blocked_event(
-            &project,
-            &global,
-            "run-a",
-            Some("x-77a0"),
-            &d
-        ));
-        assert_eq!(
-            std::fs::read_to_string(&project).unwrap().lines().count(),
-            1,
-            "identical distress must not append a second row"
-        );
-        // A different reason is a new distress: it appends.
-        let d2 = HelpDistress {
-            reason: "second wall".to_string(),
-            evidence: None,
-        };
-        assert!(append_blocked_event(&project, &global, "run-a", None, &d2));
-        assert_eq!(
-            std::fs::read_to_string(&project).unwrap().lines().count(),
-            2
-        );
-    }
-
-    #[test]
-    fn emit_help_distress_blocked_caps_reason() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("events.jsonl");
-        let global = tmp.path().join("global2.jsonl");
-        let long: String = "x".repeat(BLOCKED_DATA_STR_CAP + 50);
-        let d = HelpDistress {
-            reason: long.clone(),
-            evidence: None,
-        };
-        assert!(append_blocked_event(&project, &global, "run-a", None, &d));
-        let row: serde_json::Value = serde_json::from_str(
-            std::fs::read_to_string(&project)
-                .unwrap()
-                .lines()
-                .next()
-                .unwrap(),
-        )
-        .unwrap();
-        let capped: String = "x".repeat(BLOCKED_DATA_STR_CAP);
-        assert_eq!(row["data"]["reason"], serde_json::json!(capped));
-        // Dedup joins on the CAPPED value (codex round on PR 1282): the
-        // stored row carries the capped reason, so comparing the raw one
-        // missed on every re-fire of the same oversized distress.
-        assert!(!append_blocked_event(&project, &global, "run-a", None, &d));
-        assert_eq!(
-            std::fs::read_to_string(&project).unwrap().lines().count(),
-            1
-        );
-    }
-
-    #[test]
-    fn newest_assistant_text_reads_the_newest_entry_only() {
-        // The transcript-only fallback (agy / opencode stop hooks carry no
-        // last_assistant_message payload): the distress parse must still see
-        // the newest assistant text, and only the newest.
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let older = serde_json::json!({
-            "message": {"role": "assistant", "content": "<help reason=\"old wall\">"}
-        });
-        let newer = serde_json::json!({
-            "message": {"role": "assistant", "content": "still working"}
-        });
-        let user = serde_json::json!({"message": {"role": "user", "content": "go"}});
-        std::fs::write(&path, format!("{older}\n{user}\n{newer}\n")).unwrap();
-        assert_eq!(
-            newest_assistant_text(&path).as_deref(),
-            Some("still working"),
-            "the NEWEST assistant entry wins, not the newest distress-bearing one"
-        );
-        let absent = tmp.path().join("absent.jsonl");
-        assert_eq!(newest_assistant_text(&absent), None);
     }
 
     #[test]
@@ -17407,6 +16418,7 @@ git_bounded();";
                     refusal_reason: None,
                     reviewer_context: None,
                     required: true,
+                    passed: false,
                 }],
             };
             pr
@@ -19230,8 +18242,33 @@ git_bounded();";
         );
     }
 
+    /// The review-coverage argv the quota tests share, head sha apart.
+    fn review_coverage_args(tmp: &std::path::Path, head: &str, gh: &str) -> Vec<String> {
+        [
+            "review-coverage",
+            "--cwd",
+            tmp.to_str().unwrap(),
+            "--pr",
+            "865",
+            "--head",
+            head,
+            "--events",
+            tmp.join("ev.jsonl").to_str().unwrap(),
+            "--global-events",
+            tmp.join("gev.jsonl").to_str().unwrap(),
+            "--settings",
+            tmp.join("absent.toml").to_str().unwrap(),
+            "--gh-bin",
+            gh,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
     #[test]
     fn review_coverage_pr_failure_stdout_carries_quota_diagnostic() {
+        let _root = crate::paths::DeclaredRoot::declare("review_coverage_pr_failure_s");
         // x-b56a: exit 4 with a known PR persists a schema-gated unknown row,
         // and its stdout must say WHY the read degraded. A bare unknown is
         // indistinguishable from "nobody reviewed this" and sent operators to
@@ -19239,27 +18276,8 @@ git_bounded();";
         let tmp = tempfile::tempdir().unwrap();
         let gh = write_failing_pr_view_gh(tmp.path(), 0, 14 * 60, 0);
         let events = tmp.path().join("ev.jsonl");
-        let global = tmp.path().join("gev.jsonl");
-        let args: Vec<String> = [
-            "review-coverage",
-            "--cwd",
-            tmp.path().to_str().unwrap(),
-            "--pr",
-            "865",
-            "--head",
-            "930c2e9dad5d2dc5ba2deae320070bd86ecfcfc2",
-            "--events",
-            events.to_str().unwrap(),
-            "--global-events",
-            global.to_str().unwrap(),
-            "--settings",
-            tmp.path().join("absent.toml").to_str().unwrap(),
-            "--gh-bin",
-            &gh,
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let args =
+            review_coverage_args(tmp.path(), "930c2e9dad5d2dc5ba2deae320070bd86ecfcfc2", &gh);
         let v = run_exit4_until_decisive(&args);
         assert_eq!(v["coverage"], "unknown");
         assert_eq!(v["graphql_exhausted"], true, "got: {v}");
@@ -19284,31 +18302,14 @@ git_bounded();";
 
     #[test]
     fn review_coverage_pr_failure_healthy_quota_reports_not_exhausted() {
+        let _root = crate::paths::DeclaredRoot::declare("review_coverage_pr_failure_h");
         // The diagnostic must not cry wolf: a gh failure with graphql budget
         // left is an outage, not exhaustion, and stdout saying exhausted=false
         // is what lets a reader stop guessing between the two.
         let tmp = tempfile::tempdir().unwrap();
         let gh = write_failing_pr_view_gh(tmp.path(), 4890, 0, 0);
-        let args: Vec<String> = [
-            "review-coverage",
-            "--cwd",
-            tmp.path().to_str().unwrap(),
-            "--pr",
-            "865",
-            "--head",
-            "deadbeefdeadbeefdeadbeefdeadbeef00000001",
-            "--events",
-            tmp.path().join("ev.jsonl").to_str().unwrap(),
-            "--global-events",
-            tmp.path().join("gev.jsonl").to_str().unwrap(),
-            "--settings",
-            tmp.path().join("absent.toml").to_str().unwrap(),
-            "--gh-bin",
-            &gh,
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let args =
+            review_coverage_args(tmp.path(), "deadbeefdeadbeefdeadbeefdeadbeef00000001", &gh);
         let v = run_exit4_until_decisive(&args);
         assert_eq!(v["graphql_exhausted"], false, "got: {v}");
         assert_eq!(v["graphql_remaining"], 4890);
@@ -19317,6 +18318,7 @@ git_bounded();";
 
     #[test]
     fn review_coverage_pr_failure_verbatim_403_classifies_secondary_via_the_exempt_probe() {
+        let _root = crate::paths::DeclaredRoot::declare("review_coverage_pr_failure_v");
         // The p0 shape on this verb: the failed read's stderr is the
         // MEASURED 2026-08-24 body (no "secondary" anywhere) while the exempt
         // rate_limit endpoint still answers healthy. The classifier is that
@@ -19392,6 +18394,7 @@ git_bounded();";
 
     #[test]
     fn review_coverage_no_pr_secondary_limit_classifies_the_same_way() {
+        let _root = crate::paths::DeclaredRoot::declare("review_coverage_no_pr_second");
         // The pr_num == 0 arm (no --pr passed) shares the classification: a
         // refusal with no PR number gets the same live-bucket verdict (here
         // with the OLD phrase in the stderr - the bucket, not the wording,
@@ -21784,6 +20787,7 @@ git_bounded();";
             refusal_reason: None,
             reviewer_context: None,
             required,
+            passed: false,
         };
         let mut pr = watch_pr();
         pr.coverage = CoverageReport {

@@ -305,11 +305,17 @@ def test_live_recipient_hosted_writes_audit_only_outbox_row(
             "kind": "send",
             "ts": audit.ts,
             "delivery": "hosted",
-            "claimed": True,
+            # A hosted row has no cursor, so `claimed` is `null`, never the
+            # unconditional `true` this used to assert -- that was the bug
+            # this node exists to fix. `landed` is `null` too: this test's
+            # recipient has no real transcript file for the grep to read,
+            # which is honest "cannot prove it" rather than a false "no".
+            "claimed": None,
             # A hosted row IS claimable; only a typed one is not. Asserted as
             # exact equality on purpose, so a new key has to be looked at rather
             # than absorbed.
             "claimable": True,
+            "landed": None,
         }
     ]
 

@@ -38,6 +38,7 @@ Docs: ``docs/architecture/test-hermeticity.md``.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -45,8 +46,10 @@ from fno.harness_identity import AMBIENT_IDENTITY_ENV
 
 __all__ = [
     "AMBIENT_LEAK_CANARY",
+    "UndeclaredStateRootError",
     "ambient_names",
     "classify",
+    "declared_root",
     "neutralise",
     "poison",
 ]
@@ -190,6 +193,10 @@ _ENVIRONMENT: tuple[str, ...] = (
 # ``FNO_CLAIMS_COMPAT_REQUIRED=1 uv run pytest ...``, are set inside the child
 # and never travel this path.)
 _RUNNER_PASSTHROUGH = (
+    # Native claim-door tests pin the checkout binary; without this runner
+    # channel hermetic children resolve an older PATH binary.
+    "FNO_AGENTS_BIN",
+    "FNO_AGENTS_FRONT",  # .github/actions/smoke-setup/action.yml
     "FNO_REAL_CODEX_PLUGIN_TEST",  # .github/workflows/cli-ci.yml
     "FNO_RUST_FRONT",  # .github/workflows/cli-ci.yml, via $GITHUB_ENV
     # The smoke workflow sets this on the pytest step so each matrix leg keeps
@@ -205,8 +212,6 @@ _RUNNER_PASSTHROUGH = (
     # opt-in live grok journey. The live test restores real HOME because Grok's
     # credential lives under ~/.grok, while its cwd remains an isolated fixture.
     "FNO_GROK_LIVE",
-    # opt-in live king-board duration gate (test_king_board.py): needs the real board.
-    "FNO_KING_BOARD_LIVE",
     # opt-in live kimi journey (the credential-gated onboarding waves). The
     # live test restores real HOME because kimi's credential lives under
     # ~/.kimi-code, while its cwd remains an isolated fixture.
@@ -442,6 +447,7 @@ def neutralise(
     # FNO_TEST_HERMETIC is set, so a hand-built path is stopped rather than
     # landing in a live journal. See docs/architecture/test-hermeticity.md.
     out["FNO_EVENTS_PATH"] = str(sandbox / "events.jsonl")
+    out["FNO_SPACES_DIR"] = str(sandbox / "spaces")  # spaces root, like events
 
     out.update(caches)
     out.update(_git_pins(sandbox))
@@ -527,3 +533,60 @@ def poison(env: Optional[Mapping[str, str]] = None, fixtures: Optional[Path] = N
     # The simulated missed channel. See AMBIENT_LEAK_CANARY.
     out[AMBIENT_LEAK_CANARY] = "fno-poison-canary"
     return out
+
+
+class UndeclaredStateRootError(RuntimeError):
+    """A state path resolved under a test runner with no root declared."""
+
+
+def declared_root(path: Path) -> Path:
+    """Judge one resolved state path against the process root declaration.
+
+    ``FNO_TEST_HERMETIC`` has three states and this reads all three. The rule,
+    and why ``"0"`` names no lane, are in ``docs/architecture/test-hermeticity.md``.
+    Absent under a test runner is the state that refuses: it is a lane that
+    skipped the conftest chain, which overwrote the live graph on 2026-09-06.
+    ``"pytest" in sys.modules`` is its marker, because the runner produces it.
+    """
+    pin = os.environ.get("FNO_TEST_HERMETIC")
+    if pin == "0":
+        return path
+    if pin != "1" and "pytest" not in sys.modules:
+        return path
+
+    from fno.events import HermeticEscapeError, _hermetic_allowed_roots
+
+    # Realpath only: a symlink inside the sandbox can resolve to live state.
+    resolved = Path(os.path.realpath(path))
+    roots = _hermetic_allowed_roots()
+    if any(resolved == root or root in resolved.parents for root in roots):
+        return path
+
+    if pin == "1":
+        raise HermeticEscapeError(
+            f"refused a state path outside the test sandbox: {path}. Pass an "
+            "explicit path under tmp_path, or resolve it with a fno.paths "
+            "accessor so the sandbox pins apply."
+        )
+    raise UndeclaredStateRootError(
+        f"fno resolved a state path under a test runner with no declared "
+        f"root: {path} (root class: {_root_class_of(path)}). Ambient position "
+        "never selects a root. Declare one of three ways: "
+        "FNO_TEST_HERMETIC=1 (a sandboxed process root), "
+        "FNO_TEST_HERMETIC=0 (ambient on purpose), or "
+        "fno.paths_testing.use_tmpdir(monkeypatch, tmp_path) in the test."
+    )
+
+
+def _root_class_of(path: Path) -> str:
+    """The epic's root class for ``path``, from the state-file table.
+
+    The state ROOT has no table row; the table lists files. HOME is read to
+    LABEL a refusal here, never to select a root.
+    """
+    from fno.paths import STATE_FILES
+
+    named = {f.filename: f.root_class for f in STATE_FILES}
+    home = os.environ.get("HOME")
+    under_home = bool(home) and Path(str(home)) in [path, *path.parents]
+    return named.get(path.name, "OPERATOR" if under_home else "unclassified")

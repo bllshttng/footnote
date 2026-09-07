@@ -512,10 +512,19 @@ def run_doctor() -> int:
     print(f"[doctor] settings source: {settings_path}")
     print(f"[doctor] schema_version: {s.schema_version}")
 
+    # A key that degraded to its default rather than raising. The degrade keeps
+    # one typo from making every fno command exit; this line is what keeps it
+    # from being invisible, which reads exactly like a value nobody set.
+    from fno.config._sweeps import DEGRADED
+
+    for key, raw in sorted(DEGRADED.items()):
+        print(f"[doctor] {key}: bad value {raw} ignored; using the default")
+
     try:
         print(f"[doctor] state_dir: {paths.state_dir()}")
+        print(f"[doctor] space_dir: {paths.space_dir()}  worktree: {paths.worktree_space_dir()}")
     except Exception as exc:
-        print(f"[doctor] state_dir: ERROR ({exc})")
+        print(f"[doctor] state_dir/space_dir: ERROR ({exc})")
 
     issues: list[tuple[str, str, str]] = []
     errors: list[tuple[str, str]] = []

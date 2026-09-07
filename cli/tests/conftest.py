@@ -23,6 +23,19 @@ def _sandbox_decision_index(tmp_path, monkeypatch):
     monkeypatch.setattr("fno.paths.decisions_jsonl", lambda: sandbox)
 
 
+@pytest.fixture(autouse=True)
+def _sandbox_project_spaces(tmp_path, monkeypatch):
+    """Keep project space state out of the developer's real ~/.fno/spaces.
+
+    Since the spaces move, every project-relative accessor (events, plans,
+    inbox, kings, claims, status sinks, the target manifest) resolves under
+    ``spaces_root()``. The pin rides the ``FNO_SPACES_DIR`` env var rather
+    than patching the function so multiprocessing pool children (which re
+    import fno fresh) resolve the SAME sandboxed root as the test process.
+    """
+    monkeypatch.setenv("FNO_SPACES_DIR", str(tmp_path / "spaces"))
+
+
 @pytest.fixture
 def _no_global_tick_events(monkeypatch):
     """Capture pr-watch tick emissions instead of hitting the live events log.
@@ -322,13 +335,15 @@ def _hermetic_claim_reap(monkeypatch):
     """
     import fno.claims.core as claims_core
 
-    def _noop_reap(
-        *, roots=None, apply=False, abandonment_probe=None, node_settlement=None
-    ):
+    def _noop_reap(*args, **kwargs):
+        # The verbs resolve core callables at call time, so this stub must
+        # absorb whatever signature the real reap_dead_claims grows (it
+        # already gained optout_sink after this fixture was written).
         return {
             "scanned": 0, "reaped": 0, "would_reap": 0, "kept_live": 0,
             "kept_suspect": 0, "kept_offhost": 0, "corrupted": 0, "vanished": 0,
-            "contended": 0, "reap_failed": [], "apply": apply, "roots": [],
+            "contended": 0, "reap_failed": [],
+            "apply": kwargs.get("apply", False), "roots": [],
         }
 
     monkeypatch.setattr(claims_core, "reap_dead_claims", _noop_reap)
@@ -516,25 +531,19 @@ def _real_graph_leak_tripwire():
 
 
 @pytest.fixture(autouse=True)
-def _clear_settings_cache() -> None:
-    """Clear the load_settings() lru_cache before every test.
+def _reset_config_state() -> None:
+    """Reset the config state a keyed cache cannot key on.
 
-    Prevents test pollution when one test triggers load_settings() (e.g. via
-    render_graph_html -> _load_obsidian_vault) and subsequent tests that
-    monkeypatch FNO_CONFIG would otherwise get the cached result.
-
-    Also resets config._loaded_from so paths.config_file() returns the correct
-    path for the new test's settings file (Finding 3 fix isolation).
+    The settings and repo-root caches key on their declaration, so entries
+    cannot leak between tests and there is nothing to clear. But
+    ``config._loaded_from`` is a module global holding only the most recent
+    load, and paths.config_file() reports it (Finding 3), so reset it or the
+    first config_file() read in a test reports the previous test's settings
+    file. The merged-global-config cache read_global_block serves from keeps
+    the same reset for the same reason.
     """
-    from importlib import import_module
-
-    for module_name, function_name in HERMETIC_CACHED_STATE_CLEARERS:
-        getattr(import_module(module_name), function_name).cache_clear()
-
     from fno import config as _cfg
     _cfg._loaded_from = None  # reset loaded_from tracker (Finding 3)
-    # The merged-global-config cache read_global_block serves from; same
-    # test-isolation rationale as the load_settings reset above.
     try:
         from fno.config_io import clear_global_merged_cache
 
@@ -543,12 +552,10 @@ def _clear_settings_cache() -> None:
         pass
 
 
-HERMETIC_CACHED_STATE_CLEARERS: tuple[tuple[str, str], ...] = (
-    ("fno.config", "load_settings"),
-    ("fno.paths", "_settings"),
-    ("fno.paths", "resolve_repo_root"),
-    ("fno.plan.reconcile_status", "_node_status_map"),
-)
+# The per-test clearer registry is retired: every cached state reader keys on
+# its declared root (test_cached_state_surface enforces a root parameter or a
+# recorded reason), so there is nothing left to clear per test.
+HERMETIC_CACHED_STATE_CLEARERS: tuple[tuple[str, str], ...] = ()
 
 
 MINIMAL_TARGET_STATE = """\

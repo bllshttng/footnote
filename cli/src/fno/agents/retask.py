@@ -175,7 +175,15 @@ def resolve_thread_viewport(
     thread_id = entry.fno_id
     session = (os.environ.get("FNO_SESSION") or "main").strip()
     if not isinstance(thread_id, str) or not thread_id.strip():
-        raise RetaskTransportError("thread_ref_unreadable")
+        # Name the row defect. A bare transport code here read as a broken
+        # pipe, so an absent field looked like something a retry could fix.
+        # Same reason word `detect_retask` already uses for this case.
+        raise RetaskTransportError(
+            f"worker_has_no_thread_ref: {entry.name} is "
+            f"substrate={entry.substrate or 'unknown'} and its registry row "
+            "carries no thread reference, so there is no thread to open. "
+            "A retry cannot fix it."
+        )
     if not session:
         raise RetaskTransportError("thread_view_unavailable")
     fno_bin = os.environ.get("FNO_BIN") or "fno"
@@ -197,7 +205,10 @@ def resolve_thread_viewport(
         except RetaskTransportError:
             raise
         except ValueError as exc:
-            raise RetaskTransportError("thread_ref_unreadable") from exc
+            # A different cause from the absent field above: the pane listing
+            # itself came back unparseable. One word for both is what made the
+            # row defect read as a transport failure.
+            raise RetaskTransportError("thread_pane_listing_unreadable") from exc
         matches = [
             row
             for row in rows
@@ -227,11 +238,14 @@ def resolve_target_coordinate(
     if effort is not None:
         args += ["--effort", effort]
     args.append(f"/fno:target {node}")
+    # x-7198: a probe, not a real dispatch - the builtin rung would otherwise
+    # read as an explicit override and force every retask to respawn.
     resolved = inject_spawn_defaults(
         args,
         settings=settings,
         env=env,
         stderr=io.StringIO(),
+        apply_permission_builtin=False,
     )
     harness = _flag_value(resolved, "--harness", "-H")
     if not harness:

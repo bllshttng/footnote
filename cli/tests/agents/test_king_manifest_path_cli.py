@@ -112,3 +112,88 @@ def test_deprecated_king_spelling_forwards_onto_the_agents_app(court) -> None:
     assert result.exit_code == 0, result.output
     assert str(manifest) in result.output
     assert "is now" in (result.stderr or ""), "the rename banner names the new spelling"
+
+
+def test_king_init_canonicalizes_a_set_scope_into_one_manifest(
+    court, monkeypatch
+) -> None:
+    """`king init --scope e-2,e-1,e-2` is one crown over {e-1,e-2}: the manifest
+    lands at the canonical joined name, the one every spelling of the set and
+    every scope-keyed reader resolves."""
+    import fno.king.state as king_state
+    from fno.cli import app
+
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+    monkeypatch.setattr(king_state, "king_state_root", lambda: court / ".fno")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "king", "init",
+            "--scope", "e-2,e-1,e-2",
+            "--harness-session-id", CALLER_SESSION,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    canonical = king_manifest_path("e-1,e-2", state_root=court / ".fno")
+    assert canonical.exists()
+    assert str(canonical) in result.output
+    stray = king_manifest_path("e-2,e-1,e-2", state_root=court / ".fno")
+    assert not stray.exists(), "a non-canonical spelling armed a second manifest"
+
+
+def test_king_init_resolves_a_project_alias_into_the_canonical_manifest(
+    court, monkeypatch
+) -> None:
+    """`king init --scope a` must arm kings/alpha.md. canonical_scope sorted and
+    deduped but never resolved the alias, so the manifest landed at a path no
+    row-keyed reader resolves (they build from row.crown_scope) while the
+    uncrowned-row warning stayed silent: it compares through alias
+    normalization, so 'a' and 'alpha' read as one crown."""
+    import fno.king.state as king_state
+    from fno.cli import app
+    from fno.projects import resolve as proj_resolve
+
+    cfg = court / "config.toml"
+    cfg.write_text(
+        '[work.workspaces.ws1]\nprojects = [{ name = "alpha", short_name = "a" }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
+    proj_resolve._clear_cache()
+
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+    monkeypatch.setattr(king_state, "king_state_root", lambda: court / ".fno")
+
+    result = CliRunner().invoke(
+        app,
+        ["king", "init", "--scope", "a", "--harness-session-id", CALLER_SESSION],
+    )
+
+    assert result.exit_code == 0, result.output
+    canonical = king_manifest_path("alpha", state_root=court / ".fno")
+    assert canonical.exists()
+    assert not (court / ".fno" / "kings" / "a.md").exists()
+
+
+def test_king_init_refuses_a_path_unsafe_scope_without_a_traceback(
+    court, monkeypatch
+) -> None:
+    """The path-safety refusal in king_manifest_path is an operator typo
+    ('a/b'), so it must surface as a named refusal at exit 2, not as a
+    ValueError traceback."""
+    import fno.king.state as king_state
+    from fno.cli import app
+
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+    monkeypatch.setattr(king_state, "king_state_root", lambda: court / ".fno")
+
+    result = CliRunner().invoke(
+        app,
+        ["king", "init", "--scope", "a/b", "--harness-session-id", CALLER_SESSION],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "unsafe king scope" in result.output
+    assert not isinstance(result.exception, ValueError)

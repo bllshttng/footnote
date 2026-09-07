@@ -4,7 +4,7 @@
 //! This is the ported half of the graph store: byte-compatible JSON I/O, the
 //! defaults/migration pipeline every read applies, `recompute_statuses`, the
 //! canonical key ordering, slug assignment, a bounded advisory lock, and the
-//! atomic publish with its backup + SHA256 sidecar. The Python module that
+//! atomic publish with its backup. The Python module that
 //! mirrors it becomes the RPC client in
 //! `crates/fno-agents/src/graph_keeper.rs`'s protocol; the store logic lives
 //! HERE and only here.
@@ -25,7 +25,7 @@
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1270,7 +1270,11 @@ pub fn is_terminal_entry(entry: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn is_open_phase_row(row: &Value, phase: &str) -> bool {
+/// A lifecycle row that is identified (harness + session_id), bounded
+/// (started_at) and not yet closed. Mirrors the Python authority
+/// `statuses.is_open_phase_row` shape for shape, so both legs answer one
+/// question about the same row.
+pub fn is_open_phase_row(row: &Value, phase: &str) -> bool {
     row.get("phase").and_then(Value::as_str) == Some(phase)
         && row
             .get("harness")
@@ -1293,8 +1297,87 @@ fn is_open_phase_row(row: &Value, phase: &str) -> bool {
             .unwrap_or(false)
 }
 
-fn is_open_do_row(row: &Value) -> bool {
+/// Whether a session row is a valid, unfinished `do` window.
+pub fn is_open_do_row(row: &Value) -> bool {
     is_open_phase_row(row, "do")
+}
+
+/// The WORK-done verdict for one session, read through the reverse join over
+/// `sessions[]`. This is the one WORK-done reader on the Rust side
+/// (x-c672): retirement asks it, never `row.node`, and no second predicate
+/// folds WORK, SHIP, WRITING or HOLDING into one boolean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkState {
+    /// Named on n nodes, every one `done`.
+    AllDone { nodes: Vec<String> },
+    /// At least one named node is not done; the first is reported.
+    Open { node: String, status: String },
+    /// Named on no node's `sessions[]`.
+    NoProvenance,
+}
+
+/// Normalize one session id for identity comparison, `session_identity_key`'s
+/// rule: uuid-family ids are case-insensitive, opencode's `ses_` ids are not.
+fn work_state_key(session_id: &str) -> String {
+    if session_id.starts_with("ses_") {
+        session_id.to_string()
+    } else {
+        session_id.to_ascii_lowercase()
+    }
+}
+
+/// The reverse-join index: normalised `session_id` -> `[(node_id, status)]`
+/// over every entry's `sessions[]` rows. Build once per sweep over the
+/// working graph plus the archive; `status` is the entry's stored `status`
+/// field only, never a derived overlay.
+pub fn sessions_index(entries: &[Value]) -> HashMap<String, Vec<(String, String)>> {
+    let mut index: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for entry in entries {
+        let Some(node_id) = entry_id(entry) else {
+            continue;
+        };
+        let status = entry
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let Some(rows) = entry.get("sessions").and_then(Value::as_array) else {
+            continue;
+        };
+        for row in rows {
+            let Some(sid) = row.get("session_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let sid = sid.trim();
+            if sid.is_empty() {
+                continue;
+            }
+            index
+                .entry(work_state_key(sid))
+                .or_default()
+                .push((node_id.to_string(), status.clone()));
+        }
+    }
+    index
+}
+
+/// The WORK-done question for one session against a [`sessions_index`].
+pub fn work_state(index: &HashMap<String, Vec<(String, String)>>, session_id: &str) -> WorkState {
+    let Some(named) = index.get(&work_state_key(session_id)) else {
+        return WorkState::NoProvenance;
+    };
+    if named.is_empty() {
+        return WorkState::NoProvenance;
+    }
+    if let Some((node, status)) = named.iter().find(|(_, status)| status != "done") {
+        return WorkState::Open {
+            node: node.clone(),
+            status: status.clone(),
+        };
+    }
+    WorkState::AllDone {
+        nodes: named.iter().map(|(node, _)| node.clone()).collect(),
+    }
 }
 
 /// Recompute status for all entries based on graph state
@@ -1828,15 +1911,8 @@ impl Drop for BoundedLock {
 }
 
 // ---------------------------------------------------------------------------
-// Atomic publish: backup, write, sidecar
+// Atomic publish: backup, write
 // ---------------------------------------------------------------------------
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(bytes);
-    let d = h.finalize();
-    d.iter().map(|b| format!("{b:02x}")).collect()
-}
 
 /// Copy the current file to a timestamped backup, prune to
 /// GRAPH_BACKUP_KEEP, and return the backup path (store._create_backup).
@@ -1893,26 +1969,6 @@ pub fn write_atomic(path: &Path, body: &str) -> Result<(), StoreError> {
         f.sync_all().ok();
     }
     std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-/// Write the SHA256 sidecar of `path` atomically
-/// (store._write_sha256_sidecar).
-pub fn write_sha256_sidecar(path: &Path) -> Result<(), StoreError> {
-    let bytes = std::fs::read(path)?;
-    let sidecar = PathBuf::from(format!("{}.sha256", path.display()));
-    let tmp = path.with_file_name(format!(
-        "{}.sha256.tmp-{}",
-        path.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        std::process::id()
-    ));
-    {
-        let mut f = File::create(&tmp)?;
-        writeln!(f, "{}", sha256_hex(&bytes))?;
-    }
-    std::fs::rename(&tmp, sidecar)?;
     Ok(())
 }
 
@@ -1983,7 +2039,7 @@ pub fn file_content_version(path: &Path) -> String {
 /// The store-side half of the locked read-modify-write cycle. Holds the
 /// bounded lock; re-derives the pre-image; runs slugs, recompute, the
 /// touched_at stamp, the closure-detection hook, canonicalization, and the
-/// atomic publish with backup + sidecar. The MUTATOR is the caller's: it ran
+/// atomic publish with backup. The MUTATOR is the caller's: it ran
 /// client-side against the begin snapshot, and contention is resolved by the
 /// caller retrying on [`StoreError::LockTimeout`] or a version conflict.
 pub fn locked_mutate(
@@ -2138,7 +2194,6 @@ pub fn locked_mutate(
     let backup = create_backup(path);
     let body = serialize_graph_file(&entries);
     write_atomic(path, &body)?;
-    write_sha256_sidecar(path)?;
 
     Ok(MutateOutcome {
         entries,
@@ -2348,6 +2403,72 @@ mod tests {
     }
 
     #[test]
+    fn work_state_folds_every_named_node() {
+        // AC2-HP: named on two done nodes -> AllDone carrying both.
+        let entries = vec![
+            json!({
+                "id": "N1", "status": "done",
+                "sessions": [{"session_id": "S", "phase": "do", "harness": "claude"}],
+            }),
+            json!({
+                "id": "N2", "status": "done",
+                "sessions": [{"session_id": "S", "phase": "review", "harness": "claude"}],
+            }),
+        ];
+        let index = sessions_index(&entries);
+        assert_eq!(
+            work_state(&index, "S"),
+            WorkState::AllDone {
+                nodes: vec!["N1".into(), "N2".into()]
+            }
+        );
+        // Keyed on the normalised id: an upper-case spelling resolves too.
+        assert_eq!(
+            work_state(&index, "s"),
+            WorkState::AllDone {
+                nodes: vec!["N1".into(), "N2".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn work_state_reports_the_first_open_node_and_no_provenance() {
+        // AC2-EDGE: one open node among the named -> Open naming it.
+        let entries = vec![
+            json!({
+                "id": "N2", "status": "done",
+                "sessions": [{"session_id": "S", "phase": "do", "harness": "claude"}],
+            }),
+            json!({
+                "id": "N3", "status": "in_review",
+                "sessions": [{"session_id": "S", "phase": "review", "harness": "claude"}],
+            }),
+        ];
+        let index = sessions_index(&entries);
+        assert_eq!(
+            work_state(&index, "S"),
+            WorkState::Open {
+                node: "N3".into(),
+                status: "in_review".into()
+            }
+        );
+        // Named nowhere -> NoProvenance, and a ses_ id keeps its case.
+        assert_eq!(work_state(&index, "unknown-id"), WorkState::NoProvenance);
+        let opencode = vec![json!({
+            "id": "N4", "status": "done",
+            "sessions": [{"session_id": "ses_CaseKept", "phase": "do", "harness": "opencode"}],
+        })];
+        let index = sessions_index(&opencode);
+        assert_eq!(
+            work_state(&index, "ses_CaseKept"),
+            WorkState::AllDone {
+                nodes: vec!["N4".into()]
+            }
+        );
+        assert_eq!(work_state(&index, "ses_casekept"), WorkState::NoProvenance);
+    }
+
+    #[test]
     fn commit_refuses_an_empty_presence_field_even_from_a_raw_mutator() {
         // The Python mutator runs client-side against plain dicts, so the
         // store boundary enforces what the typed update path cannot see: a
@@ -2496,10 +2617,6 @@ mod tests {
         let body = std::fs::read_to_string(&graph).unwrap();
         assert!(body.starts_with("{\n  \"entries\": [\n    {"));
         assert!(body.ends_with("\n"));
-        assert!(
-            graph.with_extension("json.sha256").exists()
-                || PathBuf::from(format!("{}.sha256", graph.display())).exists()
-        );
         assert!(out.dropped == 0);
     }
 

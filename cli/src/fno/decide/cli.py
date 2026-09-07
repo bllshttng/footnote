@@ -500,17 +500,13 @@ def retract_cmd(
     authority: Optional[str] = typer.Option(None, "--authority", help="Authority lane."),
     origin: Optional[str] = typer.Option(None, "--origin", hidden=True),
 ) -> None:
-    _retract(decision_id=decision_id, reason=reason, authority=authority, origin=origin)
-
-
-def backlog_decide_retract(
-    decision_id: str = typer.Argument(..., help="Decision id to retract."),
-    reason: Optional[str] = typer.Option(None, "--reason", "-R", help="Why it no longer counts."),
-    authority: Optional[str] = typer.Option(None, "--authority", help="Authority lane."),
-    origin: Optional[str] = typer.Option(None, "--origin", hidden=True),
-) -> None:
     """Append a durable retraction. Retractions are append-only and have no inverse."""
     _retract(decision_id=decision_id, reason=reason, authority=authority, origin=origin)
+
+
+# One body, two registered surfaces: shim `retract` and the hidden legacy
+# `decide-retract` (graph/cli.py). The alias is the second registration.
+backlog_decide_retract = retract_cmd
 
 
 @shim_app.command("list")

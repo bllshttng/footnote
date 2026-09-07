@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Collection, Literal, Optional, TypedDict, Union
+from typing import Collection, Iterator, Literal, Optional, TypedDict, Union
 
 from fno.graph._constants import (
     LEDGER_JSON, PRIORITY_ORDER, is_wellformed_node_id, mint_node_id, _rank_band,
@@ -409,10 +409,13 @@ def make_selection_sort_key(
     when its ``parent`` resolves to another node in ``entries``; such
     children always outrank loose nodes regardless of raw priority, so a
     walk stays focused on one epic before starting loose work. Among epic
-    children the order is: in-progress epics first (an epic with a done or
+    children the order is: the epic's own rank band (a ranked epic floats
+    its whole group), in-progress epics first (an epic with a done or
     claimed child), then higher-priority epics, then the epic's own
     ``created_at`` (keeps one epic's children grouped), then the child's
-    own priority and ``created_at``. Loose nodes fall back to flat
+    own rank (orders it only among its live-epic siblings - it can never
+    pull its epic group ahead of another epic or a loose node), then the
+    child's own priority and ``created_at``. Loose nodes fall back to flat
     priority then ``created_at`` (matching ``_graph_sort_key_fn``).
 
     The key is precomputed against ``entries`` once so sorting stays O(N
@@ -458,12 +461,15 @@ def make_selection_sort_key(
         return PRIORITY_ORDER[_priority_name(e)]
 
     def key(node: object) -> tuple:
-        # Curated rank leads: the SAME `_rank_band` the board uses,
-        # prepended so a `rank --top` node (band 0, ascending rank) is selected
-        # ahead of ALL unranked nodes (band 1) - including in-progress epic
-        # children, so an explicit rank overrides the epics-first heuristic
-        # (Locked Decision 1). Unranked nodes all share the `(1, 0.0)` band, so
-        # the existing epics-first key below decides their order byte-for-byte.
+        # Curated rank leads: the SAME `_rank_band` the board uses, prepended
+        # so a `rank --top` LOOSE node (band 0, ascending rank) is selected
+        # ahead of all unranked nodes (band 1), overriding the epics-first
+        # heuristic (Locked Decision 1). For a live-epic child the leading
+        # band is the EPIC's own: the group's position is decided by the
+        # epic, and the child's rank (the `band` term below) orders it only
+        # among its siblings under that epic - it can never float the group.
+        # Unranked nodes all share the `(1, 0.0)` band, so the epics-first
+        # key below decides their order byte-for-byte.
         if not isinstance(node, dict):
             node = {}
         lane = (_lane_order_key(_project_key(node)),) if swimlane else ()
@@ -477,11 +483,12 @@ def make_selection_sort_key(
         if epic is not None:
             in_progress_rank = 0 if pid in epic_in_progress else 1
             return lane + (
-                band,                    # curated rank band (ranked first)
+                _rank_band(epic),        # EPIC's rank band decides group position
                 0,                       # epic-children tier (before loose)
                 in_progress_rank,        # in-progress epics first
                 _prio(epic),             # highest-priority epic first
                 _sort_text(epic.get("created_at")),  # group one epic together
+                band,                    # child rank: orders only within its epic
                 child_prio,
                 _fanout(node_id),    # in-band: after priority, before orphan
                 child_orphan,
@@ -590,6 +597,49 @@ def _settings_candidate_paths() -> list[Path]:
     return out
 
 
+def _iter_settings_projects() -> "Iterator[tuple[object, object]]":
+    """Yield ``(name, raw_path)`` for every ``work`` project entry, in file
+    then declaration order: multi-workspace first, then legacy flat.
+
+    The single schema walk behind the work-map readers (detection, reverse
+    lookup, known-names, the maintain workspace map) so all four consume one
+    shape and cannot drift. Values are yielded untyped; each consumer applies
+    its own guards. Best-effort: a missing or unparseable file contributes
+    nothing.
+    """
+    # Function-local: keep graph-module load free of config_io's pydantic/yaml.
+    from fno.config_io import read_config_flat
+
+    for path in _settings_candidate_paths():
+        if not path.exists():
+            continue
+        # read_config_flat parses config.toml (or a legacy settings.yaml) and
+        # returns the FLAT dict; work is top-level.
+        work = read_config_flat(path).get("work")
+        if not isinstance(work, dict):
+            continue
+
+        workspaces = work.get("workspaces")
+        if isinstance(workspaces, dict):
+            for ws in workspaces.values():
+                if not isinstance(ws, dict):
+                    continue
+                projects = ws.get("projects")
+                if not isinstance(projects, list):
+                    continue
+                for proj in projects:
+                    if not isinstance(proj, dict):
+                        continue
+                    yield proj.get("name"), proj.get("path")
+
+        flat_projects = work.get("projects")
+        if isinstance(flat_projects, dict):
+            for name, cfg in flat_projects.items():
+                if not isinstance(cfg, dict):
+                    continue
+                yield name, cfg.get("path")
+
+
 def detect_project_from_settings(cwd_path: str | None = None) -> str | None:
     """Auto-detect project name from settings.yaml work config.
 
@@ -622,49 +672,12 @@ def detect_project_from_settings(cwd_path: str | None = None) -> str | None:
     # stored as ~ / absolute, so a relative target would never match.
     target = os.path.abspath(os.path.expanduser(cwd_path)) if cwd_path else os.getcwd()
 
-    # Function-local: keep graph-module load free of config_io's pydantic/yaml.
-    from fno.config_io import read_config_flat
-
-    for path in _settings_candidate_paths():
-        if not path.exists():
+    for name, raw_path in _iter_settings_projects():
+        if not name or not raw_path:
             continue
-        # read_config_flat parses config.toml (or a legacy settings.yaml) and
-        # returns the FLAT dict; work is top-level. A missing/unparseable file
-        # contributes nothing (best-effort, per the silent-failure contract).
-        work = read_config_flat(path).get("work")
-        if not isinstance(work, dict):
-            continue
-
-        workspaces = work.get("workspaces")
-        if isinstance(workspaces, dict):
-            for ws in workspaces.values():
-                if not isinstance(ws, dict):
-                    continue
-                projects = ws.get("projects")
-                if not isinstance(projects, list):
-                    continue
-                for p in projects:
-                    if not isinstance(p, dict):
-                        continue
-                    raw_path = p.get("path")
-                    name = p.get("name")
-                    if not raw_path or not name:
-                        continue
-                    proj_path = os.path.normpath(os.path.expanduser(str(raw_path)))
-                    if proj_path == target:
-                        return str(name)
-
-        flat_projects = work.get("projects")
-        if isinstance(flat_projects, dict):
-            for name, cfg in flat_projects.items():
-                if not isinstance(cfg, dict):
-                    continue
-                raw_path = cfg.get("path")
-                if not raw_path:
-                    continue
-                proj_path = os.path.normpath(os.path.expanduser(str(raw_path)))
-                if proj_path == target:
-                    return str(name)
+        proj_path = os.path.normpath(os.path.expanduser(str(raw_path)))
+        if proj_path == target:
+            return str(name)
 
     return None
 
@@ -705,47 +718,11 @@ def project_root_from_settings(project: str | None) -> str | None:
     if not project:
         return None
 
-    # Function-local: keep graph-module load free of config_io's pydantic/yaml.
-    from fno.config_io import read_config_flat
-
-    for path in _settings_candidate_paths():
-        if not path.exists():
+    for name, raw_path in _iter_settings_projects():
+        if not name or not raw_path:
             continue
-        # read_config_flat parses config.toml (or a legacy settings.yaml) and
-        # returns the FLAT dict; work is top-level. A missing/unparseable file
-        # contributes nothing (best-effort, same as the forward reader).
-        work = read_config_flat(path).get("work")
-        if not isinstance(work, dict):
-            continue
-
-        workspaces = work.get("workspaces")
-        if isinstance(workspaces, dict):
-            for ws in workspaces.values():
-                if not isinstance(ws, dict):
-                    continue
-                projects = ws.get("projects")
-                if not isinstance(projects, list):
-                    continue
-                for p in projects:
-                    if not isinstance(p, dict):
-                        continue
-                    name = p.get("name")
-                    raw_path = p.get("path")
-                    if not name or not raw_path:
-                        continue
-                    if name == project:
-                        return os.path.abspath(os.path.expanduser(str(raw_path)))
-
-        flat_projects = work.get("projects")
-        if isinstance(flat_projects, dict):
-            for name, cfg in flat_projects.items():
-                if not isinstance(cfg, dict):
-                    continue
-                raw_path = cfg.get("path")
-                if not raw_path:
-                    continue
-                if name == project:
-                    return os.path.abspath(os.path.expanduser(str(raw_path)))
+        if name == project:
+            return os.path.abspath(os.path.expanduser(str(raw_path)))
 
     return None
 
@@ -870,33 +847,9 @@ def _list_known_projects() -> set[str]:
     """
 
     known: set[str] = set()
-    # Function-local: keep graph-module load free of config_io's pydantic/yaml.
-    from fno.config_io import read_config_flat
-
-    for path in _settings_candidate_paths():
-        if not path.exists():
-            continue
-        # config.toml (or legacy settings.yaml) -> flat dict; work is top-level.
-        work = read_config_flat(path).get("work")
-        if not isinstance(work, dict):
-            continue
-
-        workspaces = work.get("workspaces")
-        if isinstance(workspaces, dict):
-            for ws in workspaces.values():
-                if not isinstance(ws, dict):
-                    continue
-                projects = ws.get("projects")
-                if isinstance(projects, list):
-                    for proj in projects:
-                        if isinstance(proj, dict) and isinstance(proj.get("name"), str):
-                            known.add(proj["name"])
-
-        flat_projects = work.get("projects")
-        if isinstance(flat_projects, dict):
-            for name in flat_projects.keys():
-                if isinstance(name, str):
-                    known.add(name)
+    for name, _raw in _iter_settings_projects():
+        if isinstance(name, str):
+            known.add(name)
 
     return known
 
@@ -1158,12 +1111,10 @@ def _warn_similar_nodes(
         pr_tok = f"  PR#{pr}" if isinstance(pr, int) and not isinstance(pr, bool) else ""
         lines.append(f'  {cid}  {status:<10}{score:.2f}{pr_tok}  "{title}"')
     top_id = candidates[0][0]
-    top_cand = by_id.get(top_id, {})
-    # The intake paths can re-file with --claims to consolidate, but only against
-    # an idea-state node (intake refuses to claim a non-idea node upstream); a
-    # missing status is malformed, not idea-state, so for any other top state the
-    # receipt informs only.
-    if intake_hint and top_cand.get("status") == "idea":
+    # The intake paths can re-file with --claims to consolidate against the
+    # top candidate, in any node state; idea/add cannot, so they get the
+    # supersede/update remedy only.
+    if intake_hint:
         lines.append(
             "consolidate: `fno backlog supersede` / `fno backlog update`, or "
             f"re-file with --claims {top_id}"
@@ -1190,17 +1141,10 @@ def _prepare_intake(
     cli_project: str | None = None,
     cli_claim: str | None = None,
 ) -> _IntakeResult:
-    # Claim resolution runs FIRST so a claim on an existing idea node beats
-    # the plan_path-equality match. _resolve_claim raises ValueError on bad
-    # input; the caller surfaces those as non-zero exits via Typer.
+    # Claim resolution runs FIRST so a claim on an existing node (any state)
+    # beats the plan_path-equality match. _resolve_claim raises ValueError on
+    # bad input; the caller surfaces those as non-zero exits via Typer.
     claim_node, claim_source = _resolve_claim(cli_claim, plan_path, entries)
-    if claim_node is not None:
-        node_status = claim_node.get("status")
-        if node_status not in ("idea", None):
-            raise ValueError(
-                f'node {claim_node.get("id")} is in state {node_status!r}; '
-                f"refuse to claim a non-idea node"
-            )
 
     existing = _match_plan_in_graph(entries, plan_path, roadmap_id)
     if existing is None:

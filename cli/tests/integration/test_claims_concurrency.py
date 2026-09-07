@@ -27,10 +27,10 @@ from fno.claims.core import (
     release_claim,
 )
 from fno.claims.io import claim_path, claims_dir, serialize_claim
-from fno.claims.staleness import now_ms
-from fno.claims.types import Claim
+from fno.claims.types import Claim, now_ms
 
 _PROCESS_START_TIMEOUT_SECONDS = 30.0
+_RACE_HOLD_SECONDS = 2.0
 
 
 def _try_acquire(root_str: str, key: str, holder: str, result_queue, hold_secs: float = 0.0) -> None:
@@ -54,12 +54,14 @@ def _try_acquire(root_str: str, key: str, holder: str, result_queue, hold_secs: 
         result_queue.put(("error", holder, repr(exc)))
 
 
-def _run_race(root: Path, key: str, n_workers: int, hold_secs: float = 0.5) -> list[tuple]:
+def _run_race(
+    root: Path, key: str, n_workers: int, hold_secs: float = _RACE_HOLD_SECONDS
+) -> list[tuple]:
     """Spawn n_workers processes racing on (key); return list of outcomes.
 
-    hold_secs keeps the winner's process alive past the join so siblings
-    can't validly stale-recover. Losers report their outcome and exit
-    immediately - their PID dying does not affect the assertion.
+    hold_secs keeps the winner's process alive through the native verdict
+    subprocess so siblings cannot validly stale-recover. Losers report their
+    outcome and exit immediately - their PID dying does not affect the assertion.
     """
     ctx = mp.get_context("spawn")
     queue = ctx.Queue()
@@ -228,16 +230,17 @@ def test_serial_acquire_release_across_processes(tmp_path):
 def test_claims_dir_resolves_to_canonical_root_from_linked_worktree(
     tmp_path, monkeypatch
 ):
-    """AC1-HP: claims_dir() with no root arg lands under the canonical repo root.
+    """AC1-HP: claims_dir() with no root arg lands in ONE shared directory.
 
     Scenario: a git repo with a linked worktree. When cwd is the LINKED
     worktree and both FNO_CLAIMS_ROOT and FNO_REPO_ROOT are unset,
-    claims_dir() must resolve to <canonical>/.fno/claims/, NOT to
-    <linked-worktree>/.fno/claims/.
+    claims_dir() must resolve to the repo's space (<spaces>/<slug>/claims/,
+    keyed on the canonical root), NOT to <linked-worktree>/.fno/claims/.
 
     This verifies Locked Decision 9: claims are cross-worktree coordination
     state and must share a single directory regardless of which worktree the
-    caller runs from.
+    caller runs from. The space replaced the canonical checkout as the shared
+    location (x-b1ee): the invariant survives, the path moved.
     """
     import subprocess
 
@@ -269,35 +272,39 @@ def test_claims_dir_resolves_to_canonical_root_from_linked_worktree(
     # -- Acquire a claim via root=None (exercises the fallback path) ---------
     from fno.claims.core import acquire_claim, release_claim
     from fno.claims.io import claims_dir
+    from fno.paths import space_dir
 
     claim = acquire_claim(key="worktree-test-claim", holder="test-holder", root=None)
     try:
         resolved = claims_dir(root=None)
+        expected = space_dir(canonical) / "claims"
 
-        # The claim file must live under the CANONICAL root, not the linked worktree.
-        assert str(resolved).startswith(str(canonical)), (
-            f"claims_dir() resolved to {resolved!r}, expected prefix {canonical!r}. "
-            "Fix: replace Path.cwd() fallback in claims_dir() with "
-            "resolve_canonical_repo_root()."
+        # The claim file must land in the CANONICAL repo's space, not the
+        # linked worktree.
+        assert resolved == expected, (
+            f"claims_dir() resolved to {resolved!r}, expected the canonical "
+            f"repo's space claims dir {expected!r}."
         )
         assert not str(resolved).startswith(str(linked)), (
             f"claims_dir() resolved to the linked worktree {linked!r} - "
             "cross-worktree coordination invariant violated."
         )
 
-        # The lock file must physically exist under canonical.
+        # The lock file must physically exist in that shared dir.
         from fno.claims.io import claim_path
         lock = claim_path("worktree-test-claim", root=None)
         assert lock.exists(), f"lock file missing at {lock}"
-        assert str(lock).startswith(str(canonical)), (
-            f"lock file at {lock!r} is not under canonical {canonical!r}"
+        assert str(lock).startswith(str(expected)), (
+            f"lock file at {lock!r} is not under the space claims dir {expected!r}"
         )
 
-        # Also verify: listing from canonical root sees the claim.
+        # Also verify: reading from the CANONICAL worktree sees the claim
+        # (root=None from a different cwd, same space).
         from fno.claims.core import claim_status
-        status = claim_status("worktree-test-claim", root=canonical)
+        monkeypatch.chdir(canonical)
+        status = claim_status("worktree-test-claim", root=None)
         assert status.get("state") in ("live", "stale"), (
-            f"claim not visible from canonical root: status={status!r}"
+            f"claim not visible from canonical worktree: status={status!r}"
         )
     finally:
         release_claim(key="worktree-test-claim", holder="test-holder", root=None)

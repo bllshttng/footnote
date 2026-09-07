@@ -25,11 +25,22 @@ set -euo pipefail
 REPO_ROOT='$tmpdir'
 STATE_DIR='$tmpdir/.fno'
 SCRIPT_DIR='$REPO_ROOT'
+export FNO_SPACES_DIR='$tmpdir/spaces'
 
 source '$WAKE_LIB'
 
 _observe_wake_signals
 " 2>/dev/null
+}
+
+# The signals dir the drop helper and the observer both resolve to.
+_signals_dir() {
+    local tmpdir="$1"
+    FNO_SPACES_DIR="$tmpdir/spaces" uv run --project "$CLI_DIR" python3 -c "
+from pathlib import Path
+from fno.wake.signal import signals_dir
+print(signals_dir(Path('$tmpdir')))
+"
 }
 
 # ---- AC2-ERR: no signals -> no wake_signal_observed lines ---------------
@@ -47,10 +58,11 @@ echo "AC2-ERR: PASS"
 
 # ---- AC1-HP: one question signal -> one log line, signal NOT deleted -----
 TMP_HP=$(mktemp -d)
-mkdir -p "$TMP_HP/.fno/wake-signals"
+SIG_DIR_HP="$(_signals_dir "$TMP_HP")"
+mkdir -p "$SIG_DIR_HP"
 
-# Drop a signal directly via the Python helper
-uv run --project "$CLI_DIR" python3 -c "
+# Drop a signal directly via the Python helper (same spaces pin as the reader)
+FNO_SPACES_DIR="$TMP_HP/spaces" uv run --project "$CLI_DIR" python3 -c "
 from datetime import datetime, timezone
 from pathlib import Path
 from fno.wake.signal import WakeSignal, drop_signal
@@ -63,7 +75,7 @@ sig = WakeSignal(
 drop_signal(Path('$TMP_HP'), sig)
 "
 
-SIGNAL_COUNT_BEFORE=$(find "$TMP_HP/.fno/wake-signals" -name 'wake-*.json' 2>/dev/null | wc -l | tr -d ' ')
+SIGNAL_COUNT_BEFORE=$(find "$SIG_DIR_HP" -name 'wake-*.json' 2>/dev/null | wc -l | tr -d ' ')
 [[ "$SIGNAL_COUNT_BEFORE" -eq 1 ]] || { echo "AC1-HP SETUP FAIL: expected 1 signal before run, got $SIGNAL_COUNT_BEFORE"; exit 1; }
 
 _run_observe_helper "$TMP_HP"
@@ -87,18 +99,19 @@ print('fields OK')
 " || { echo "AC1-HP FAIL: event JSON fields wrong"; exit 1; }
 
 # Verify signal NOT deleted
-SIGNAL_COUNT_AFTER=$(find "$TMP_HP/.fno/wake-signals" -name 'wake-*.json' 2>/dev/null | wc -l | tr -d ' ')
+SIGNAL_COUNT_AFTER=$(find "$SIG_DIR_HP" -name 'wake-*.json' 2>/dev/null | wc -l | tr -d ' ')
 [[ "$SIGNAL_COUNT_AFTER" -eq 1 ]] || { echo "AC1-HP FAIL: signal was deleted (count after=$SIGNAL_COUNT_AFTER)"; exit 1; }
 
 echo "AC1-HP: PASS"
 
 # ---- AC4-EDGE: two signals -> two log lines, both remain on disk ---------
 TMP_EDGE=$(mktemp -d)
-mkdir -p "$TMP_EDGE/.fno/wake-signals"
+SIG_DIR_EDGE="$(_signals_dir "$TMP_EDGE")"
+mkdir -p "$SIG_DIR_EDGE"
 
 # Write two signals directly as JSON (no CLI needed)
 for ID in alpha beta; do
-    cat > "$TMP_EDGE/.fno/wake-signals/wake-${ID}.json" <<SIGEOF
+    cat > "$SIG_DIR_EDGE/wake-${ID}.json" <<SIGEOF
 {
   "signal_id": "wake-${ID}",
   "kind": "question",
@@ -118,7 +131,7 @@ HOOK_EVENTS_EDGE="$TMP_EDGE/.fno/hook-events.jsonl"
 COUNT_EDGE=$(grep -c '"wake_signal_observed"' "$HOOK_EVENTS_EDGE" 2>/dev/null || echo 0)
 [[ "$COUNT_EDGE" -eq 2 ]] || { echo "AC4-EDGE FAIL: expected 2 wake_signal_observed lines, got $COUNT_EDGE"; exit 1; }
 
-SIGNAL_COUNT_EDGE=$(find "$TMP_EDGE/.fno/wake-signals" -name 'wake-*.json' 2>/dev/null | wc -l | tr -d ' ')
+SIGNAL_COUNT_EDGE=$(find "$SIG_DIR_EDGE" -name 'wake-*.json' 2>/dev/null | wc -l | tr -d ' ')
 [[ "$SIGNAL_COUNT_EDGE" -eq 2 ]] || { echo "AC4-EDGE FAIL: expected 2 signals to remain, got $SIGNAL_COUNT_EDGE"; exit 1; }
 
 echo "AC4-EDGE: PASS"

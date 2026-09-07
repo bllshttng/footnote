@@ -24,27 +24,43 @@ printf 'body\n' > "$REPO/tracked"
 git -C "$REPO" add tracked
 git -C "$REPO" commit -qm feature
 
+# The stub stands in for the CLI boundary only: it runs the real classifier
+# (build_emit_record), logs the record it built, and for an --attest call logs
+# the verdict that record measures, so run_case asserts what the writer wrote
+# instead of an argv spelling. The verdict rule mirrors classify --attest:
+# pass only on zero blocking findings.
 cat > "$BIN/fno" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FNO_TEST_LOG"
 if [[ "${1:-}" == "do" && "${2:-}" == "review" && "${3:-}" == "classify" ]]; then
-  f=""; shift 3
+  f=""; attest=""
+  shift 3
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --findings-file) f="$2"; shift 2 ;;
+      --attest) attest="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
-  PYTHONPATH="$FNO_TEST_PYTHONPATH" "$FNO_TEST_PYTHON" - "$f" <<'PY'
-import json, sys
+  FNO_TEST_ATTEST="$attest" PYTHONPATH="$FNO_TEST_PYTHONPATH" "$FNO_TEST_PYTHON" - "$f" <<'PY'
+import json, os, sys
 from fno.review.cli import build_emit_record, RecordBuildError
 with open(sys.argv[1], encoding="utf-8") as fh:
     payload = json.load(fh)
 try:
-    print(json.dumps(build_emit_record(payload)))
+    record = build_emit_record(payload)
 except RecordBuildError as exc:
     print(f"classify: {exc}", file=sys.stderr)
     raise SystemExit(2)
+out = json.dumps(record, separators=(",", ":"))
+log = os.environ.get("FNO_TEST_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write(out + "\n")
+        if os.environ.get("FNO_TEST_ATTEST"):
+            verdict = "pass" if record.get("findings_blocking", 0) == 0 else "fail"
+            fh.write('{"verdict":"%s"}\n' % verdict)
+print(out)
 PY
   exit $?
 fi

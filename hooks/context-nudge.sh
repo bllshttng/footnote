@@ -259,6 +259,10 @@ find "${STATE_DIR:-$HOME/.fno}" -maxdepth 1 -type f -name '.context-nudge-*' -de
 CTX_LATCH="${LATCH_DIR}/.context-nudge-ctx-${TBASE}-${BAND}"
 ORPHAN_LATCH="${LATCH_DIR}/.context-nudge-orphan-${TBASE}-${BAND}"
 FLUSH_LATCH="${LATCH_DIR}/.context-nudge-flush-latch-${TBASE}-${BAND}"
+# The foreign-writer refusal latches SEPARATELY from the flush latch: consuming
+# the flush latch on a refusal would silence the real nudge forever after the
+# foreign writer leaves (x-299b).
+FOREIGN_LATCH="${LATCH_DIR}/.context-nudge-flush-foreign-${TBASE}-${BAND}"
 # Static-HEAD tracking is band-independent (a turn-end is a turn-end at any
 # pressure), so it keys on the transcript alone, not the band.
 FLUSH_STATE="${LATCH_DIR}/.context-nudge-flush-${TBASE}"
@@ -398,10 +402,28 @@ fi
 
 # ── 7. Check (b): orphaned live children (CROWN-ONLY; latches INDEPENDENTLY). ─
 if [[ "$IS_KING" -eq 1 && "$ORPHAN_COUNT" -gt 0 && ! -f "$ORPHAN_LATCH" ]]; then
+    # Resolution 1: the crown holder DECLARED this reign a court. Choosing
+    # court had no machine-visible act before `fno agents king shape` existed,
+    # so this hook offered three options and could detect two - and the
+    # cheapest way to silence it (the carveout, option 3) downgrades a live
+    # teammate to advisory self-review. The shape field is the structured
+    # answer to option 1: a court with live workers is the ANSWERED case, and
+    # the nudge stays loud only for the unshaped reign walking away from them.
+    # Read failure leaves RESOLVED=0 (nag), matching the carveout posture
+    # below: a broken reader never silently clears a guard.
+    RESOLVED=0
+    if command -v fno >/dev/null 2>&1 && [[ -n "$SESSION_ID" ]]; then
+        KING_MANIFEST=$(cd "$REPO_ROOT" 2>/dev/null && with_timeout 5 fno agents king \
+            manifest-path --harness-session-id "$SESSION_ID" \
+            --state-root "$REPO_ROOT/.fno" 2>/dev/null || true)
+        if [[ -n "$KING_MANIFEST" && -f "$KING_MANIFEST" ]]; then
+            KING_SHAPE=$(sed -n 's/^shape:[[:space:]]*//p' "$KING_MANIFEST" | head -1 | tr -d '[:space:]')
+            [[ "$KING_SHAPE" == "court" ]] && RESOLVED=1
+        fi
+    fi
     # Resolution 3: a carveout carrying THIS scope (structured field, not free
     # text) means the king stated the orphaning and fell back to advisory
     # self-review. Scope match is the discriminator, or any carveout silences it.
-    RESOLVED=0
     if command -v fno >/dev/null 2>&1; then
         # --all is load-bearing: `carveout list` now scopes to the current
         # session by default, and this check must see a carveout filed by ANY
@@ -427,7 +449,7 @@ if [[ "$IS_KING" -eq 1 && "$ORPHAN_COUNT" -gt 0 && ! -f "$ORPHAN_LATCH" ]]; then
         touch "$ORPHAN_LATCH" 2>/dev/null || true
         emit_event "king_orphan_block" \
             "{\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"workers\":\"${ORPHANS}\",\"count\":${ORPHAN_COUNT},\"session_id\":\"${SESSION_ID}\"}"
-        ORPHAN_REASON="You hold the crown over ${CROWN_SCOPE} and ${ORPHAN_COUNT} worker(s) you spawned are still live (${ORPHANS}). A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave; (2) hand the crown to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno backlog carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review."
+        ORPHAN_REASON="You hold the crown over ${CROWN_SCOPE} and ${ORPHAN_COUNT} worker(s) you spawned are still live (${ORPHANS}). A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave with 'fno agents king shape court'; (2) hand the crown to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno backlog carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review. This list is built from each row's spawned_by link: a worker spawned while your identity resolved ambiguously carries no link and will NOT appear here - check 'fno agents registry-json' for spawned_by_session null before trusting the count."
         if [[ -n "$REASON" ]]; then
             REASON="${REASON}  ||  ${ORPHAN_REASON}"
         else
@@ -478,15 +500,65 @@ if [[ -n "$_head" ]]; then
     fi
 fi
 if [[ "$FIRE_FLUSH" -eq 1 ]]; then
-    touch "$FLUSH_LATCH" 2>/dev/null || true
-    emit_event "context_flush_nudge" \
-        "{\"dirty_files\":${FLUSH_DIRTY},\"static_stops\":${FLUSH_STATIC},\"session_id\":\"${SESSION_ID}\"}"
-    FLUSH_REASON="flush: ${FLUSH_DIRTY} files have uncommitted changes and the tree has not moved in ${FLUSH_STATIC} turn-ends, so this work exists only in this session's volatile state - a compact or a crashed pane loses it. Fix what you found if it is small: commit it now, in this PR, as its own atomic commit. File a carveout ONLY for what is genuinely separable: 'fno backlog carveout add -k deferred \"...\"'. A session that never reaches the end of a unit of work records nothing."
-    if [[ -n "$REASON" ]]; then
-        REASON="${REASON}  ||  ${FLUSH_REASON}"
+    # Whose dirt is this? A dirty count alone cannot tell this session's stale
+    # work from a live foreign writer rooted in the same checkout (x-299b: a
+    # codex worker edited canonical before entering its worktree and two kings
+    # were urged to commit its 351 mid-flight lines). The measurement runs only
+    # inside FIRE_FLUSH, which the thresholds make rare, so the per-turn-end
+    # cost is unchanged. Unmeasurable -> fail closed, never read as empty.
+    _FOREIGN=""
+    _FRC=0
+    if [[ -f "$PLUGIN_ROOT/scripts/lib/rooted-writers.sh" ]]; then
+        # shellcheck source=../scripts/lib/rooted-writers.sh
+        source "$PLUGIN_ROOT/scripts/lib/rooted-writers.sh" 2>/dev/null || true
+        if declare -F foreign_rooted_writers >/dev/null 2>&1; then
+            _FOREIGN=$(foreign_rooted_writers "$REPO_ROOT" "$SESSION_ID"); _FRC=$?
+        else
+            _FRC=2
+        fi
     else
-        REASON="$FLUSH_REASON"
+        _FRC=2
     fi
+    if [[ "$_FRC" -eq 2 ]]; then
+        emit_event "context_flush_refused" \
+            "{\"dirty_files\":${FLUSH_DIRTY},\"readable\":false,\"writers\":\"\",\"session_id\":\"${SESSION_ID}\"}"
+        FLUSH_REASON="flush: REFUSED. ${FLUSH_DIRTY} files are dirty in ${REPO_ROOT}, but whether a foreign live writer is rooted there could not be measured (process snapshot or agents registry unreadable), so the dirt cannot be read as yours alone. Do NOT run 'git add -A' or 'git commit -a' - stage only your own paths by name, and leave the rest."
+        if [[ -n "$REASON" ]]; then
+            REASON="${REASON}  ||  ${FLUSH_REASON}"
+        else
+            REASON="$FLUSH_REASON"
+        fi
+    elif [[ -n "$_FOREIGN" && ! -f "$FOREIGN_LATCH" ]]; then
+        touch "$FOREIGN_LATCH" 2>/dev/null || true
+        _fw_line=$(printf '%s' "$_FOREIGN" | head -1)
+        _fw_pid="$(printf '%s' "$_fw_line" | cut -f1)"
+        _fw_name="$(printf '%s' "$_fw_line" | cut -f2)"
+        _fw_sid="$(printf '%s' "$_fw_line" | cut -f3)"
+        _fw_more=$(( $(printf '%s' "$_FOREIGN" | grep -c .) - 1 ))
+        _fw_more_txt=""
+        [[ "$_fw_more" -gt 0 ]] && _fw_more_txt=" (and ${_fw_more} more rooted writer(s))"
+        emit_event "context_flush_refused" \
+            "{\"dirty_files\":${FLUSH_DIRTY},\"readable\":true,\"writers\":\"$(printf '%s' "$_FOREIGN" | tr '\t' ':' | tr '\n' ',')\",\"session_id\":\"${SESSION_ID}\"}"
+        FLUSH_REASON="flush: REFUSED. ${FLUSH_DIRTY} files are dirty in ${REPO_ROOT}, but a live writer that is not this session is rooted there: ${_fw_name} (pid ${_fw_pid}, session ${_fw_sid})${_fw_more_txt}. This diff is not yours to commit. Do NOT run 'git add -A' or 'git commit -a' here - it would put another session's mid-flight work on this branch, unreviewed, attributed to you. If some of the dirt IS yours, stage only your own paths by name. Otherwise leave it: it is reported, not orphaned."
+        if [[ -n "$REASON" ]]; then
+            REASON="${REASON}  ||  ${FLUSH_REASON}"
+        else
+            REASON="$FLUSH_REASON"
+        fi
+    elif [[ -z "$_FOREIGN" ]]; then
+        touch "$FLUSH_LATCH" 2>/dev/null || true
+        emit_event "context_flush_nudge" \
+            "{\"dirty_files\":${FLUSH_DIRTY},\"static_stops\":${FLUSH_STATIC},\"session_id\":\"${SESSION_ID}\"}"
+        FLUSH_REASON="flush: ${FLUSH_DIRTY} files have uncommitted changes and the tree has not moved in ${FLUSH_STATIC} turn-ends, so this work exists only in this session's volatile state - a compact or a crashed pane loses it. Fix what you found if it is small: commit it now, in this PR, as its own atomic commit. File a carveout ONLY for what is genuinely separable: 'fno backlog carveout add -k deferred \"...\"'. A session that never reaches the end of a unit of work records nothing."
+        if [[ -n "$REASON" ]]; then
+            REASON="${REASON}  ||  ${FLUSH_REASON}"
+        else
+            REASON="$FLUSH_REASON"
+        fi
+    fi
+    # _FOREIGN non-empty with FOREIGN_LATCH already set: refused once, so stay
+    # silent rather than nag every turn-end - and the flush latch above is the
+    # reason the real nudge still fires once the foreign writer leaves.
 fi
 
 # ── 8. Emit one block decision if either check fired; else allow (exit 0). ────

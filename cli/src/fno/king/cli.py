@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Optional, cast
+from typing import NoReturn, Optional, cast
 
 import typer
 
@@ -15,10 +15,18 @@ king_app = typer.Typer(
 )
 
 
-def _default_max_rows() -> int:
-    from fno.king.board import DEFAULT_MAX_ROWS
+#: Per-queue render cap for the human board view (was board.DEFAULT_MAX_ROWS;
+#: the count in the payload stays whole, only the rendered rows are cut).
+DEFAULT_MAX_ROWS = 25
 
+
+def _default_max_rows() -> int:
     return DEFAULT_MAX_ROWS
+
+
+def _refuse(msg: str) -> NoReturn:
+    typer.echo(msg, err=True)
+    raise typer.Exit(2)
 
 
 EVENTS_PATH = ".fno/events.jsonl"
@@ -61,10 +69,9 @@ def init_cmd(
 ) -> None:
     """Write this crown scope's manifest, which the king loop arms read.
 
-    Write-once, like the target manifest. Without it the stop hook allows exit
-    silently, which is the correct posture for a session nobody crowned. An
-    ended king's manifest is expired by `fno agents king done`, so a successor
-    init needs --force only when the predecessor died without abdicating.
+    Write-once, like the target manifest; without it the stop hook allows exit
+    silently (correct for a session nobody crowned). A successor init needs
+    --force only when the predecessor died without abdicating.
     """
     from fno.king.state import (
         KingManifestExists,
@@ -73,12 +80,9 @@ def init_cmd(
         write_manifest,
     )
 
-    # The ONE chokepoint for `config.king.enabled`. Every arm - this hook shim,
-    # `loop-check --driver king`, and `KingQueue` - arms on the manifest's
-    # existence, so gating the manifest gates all three at one place. Gating
-    # them individually is the corpus's "guard on one of N reachable paths",
-    # and the version this replaces had N of zero: the flag was read only by
-    # `fno agents autonomy status`, so a default-off king still held sessions open.
+    # The ONE chokepoint for `config.king.enabled`: every arm (hook shim,
+    # loop-check, KingQueue) arms on the manifest's existence, so gating the
+    # manifest gates all three. The version this replaces gated zero paths.
     if not king_loop_enabled():
         typer.echo(
             "king: config.king.enabled is false, so no king is crowned. "
@@ -87,9 +91,8 @@ def init_cmd(
         )
         raise typer.Exit(3)
 
-    # An id-less manifest is the same defect from the other side: the hook can
-    # match nobody against it, so it either gates every session or none. Refuse
-    # to write one rather than ship a crown that cannot be attributed.
+    # An id-less manifest matches nobody, so it gates every session or none;
+    # refuse to write a crown that cannot be attributed.
     if not harness_session_id.strip():
         typer.echo(
             "king: --harness-session-id is required. The stop hook gates the "
@@ -99,8 +102,31 @@ def init_cmd(
         )
         raise typer.Exit(2)
 
+    # Every spelling of one crown must arm the SAME file: canonicalize the set
+    # AND resolve aliases, or `--scope a` arms kings/a.md while row-keyed
+    # readers resolve kings/alpha.md from row.crown_scope - and the
+    # uncrowned-row warning stays silent, comparing through the same
+    # normalization.
+    from fno.agents.crown import _canonical_members, canonical_scope, split_scope
+
+    members = split_scope(scope)
+    if not members:
+        typer.echo(
+            "king: --scope needs a crown scope: name an epic or a project.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    scope = canonical_scope(list(_canonical_members(scope)))
+
     try:
         manifest_path = king_manifest_path(scope)
+    except ValueError as exc:
+        # A path-unsafe scope member ('..' or a '/') is a refusal, not a
+        # traceback: the safety check lives in king_manifest_path.
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+
+    try:
         fields = write_manifest(
             manifest_path,
             scope=scope,
@@ -120,30 +146,15 @@ def init_cmd(
 
 
 def _warn_uncrowned_row(scope: str) -> None:
-    """Say out loud when the manifest is armed but the row carries no crown.
+    """Warn when the manifest is armed but the row carries no crown.
 
-    Arming and authority are separate on purpose: `king init` writes the
-    manifest and never stamps the row, because a session that could stamp its
-    own crown could crown itself. `fno agents crown` owns that write and needs
-    an attended shell or a superior crown.
-
-    The split is correct and the SILENCE about it is not. Three readers -
-    `king done`, `king manifest-path`, and `hooks/king-postcompact-reinject.sh`
-    - all key on the row's crown fields, and all three fail CLOSED and QUIETLY
-    when it is absent: done refuses, manifest-path exits non-zero and prints
-    no path, and the post-compact brief never arrives. Absent covers a crown
-    over OTHER territory too - the readers key on an exact crown_scope, so a
-    containing crown is as unusable to them as none at all. A king can hold a valid manifest all
-    evening and never learn its authority is invisible to the machine.
-
-    So this warns, and never refuses: the manifest is written and the loop arms
-    on the FILE, which works. Warning-only also keeps a legitimate arm-then-
-    crown ordering usable.
-
-    Three outcomes, kept distinct because an absence has more than one cause.
-    A resolved row with no crown is the real gap. An unresolvable row is an
-    unanswered question, not a finding, and says so rather than claiming the
-    crown is missing.
+    Arming and authority are separate (only `fno agents crown` stamps the row),
+    but the three row-keyed readers - `king done`, `king manifest-path`, the
+    post-compact reinject hook - fail CLOSED and QUIETLY with no crown, and a
+    crown over OTHER territory is as absent to them as none. Warn, never
+    refuse: the loop arms on the FILE, which works, and warning keeps a
+    legitimate arm-then-crown ordering usable. An unresolvable row is an
+    unanswered question, not a finding.
     """
     from fno.agents.crown import (
         AGENT_UNREGISTERED,
@@ -171,10 +182,8 @@ def _warn_uncrowned_row(scope: str) -> None:
     if reading is not None and crown_scope_matches(reading.get("scope"), scope):
         return
 
-    # What the three row-keyed readers do when the crown does not cover the
-    # scope just armed. Identical for a missing crown and a mismatched one:
-    # each keys on crown_scope, so a crown over other territory is as absent
-    # to them as no crown at all.
+    # Identical consequence for a missing and a mismatched crown: the readers
+    # key on crown_scope, so other territory is as absent as none.
     consequence = (
         "`fno agents king done` will refuse, `fno agents king manifest-path` "
         "will exit non-zero without printing a path so the stop hook leaves "
@@ -208,10 +217,9 @@ def done_cmd(
 ) -> None:
     """Expire this crown: vacate the row and clear the scope manifest.
 
-    The abdication half of the crown lifecycle. A king ending its reign
-    calls it, so a successor's crown arms without --force. A king that dies
-    without calling it leaves an inert manifest: the registry row is
-    authority, so a leftover file captures nobody.
+    The abdication half of the lifecycle: a king ending its reign calls it so a
+    successor arms without --force. A king that dies without it leaves an inert
+    manifest (the registry row is authority).
     """
     from dataclasses import replace as _replace
 
@@ -243,12 +251,10 @@ def done_cmd(
                 err=True,
             )
             raise typer.Exit(2)
-        # A named scope may still have a LIVE king reigning over it; expiring
-        # only the manifest would disarm that king's stop-hook floor while its
-        # row still reads crowned. Resolve the holder inside the vacate
-        # closure below (under the registry lock) and vacate it too; a scope
-        # with no live holder is the orphan-cleanup case and clears the file
-        # alone.
+        # A named scope may still have a LIVE king; expiring only the manifest
+        # would disarm its stop-hook floor while the row reads crowned. The
+        # vacate closure below resolves the holder under the lock; no live
+        # holder is orphan cleanup and clears the file alone.
         holder_name = ""
     else:
         own = getattr(caller, "crown_scope", None)
@@ -272,12 +278,10 @@ def done_cmd(
             raise typer.Exit(2)
         holder_name = caller.name
 
-    # Snapshot the manifest's OWN session id BEFORE vacating: the removal
-    # below compares against it under the manifest lock, so a successor
-    # crowned in the vacate window (which writes its own id into the same
-    # scope file) survives instead of having its manifest unlinked. The id is
-    # read from the file, never the caller's row, so a resumed king whose row
-    # id has moved on still expires the manifest it was armed with.
+    # Snapshot the manifest's OWN session id BEFORE vacating: removal compares
+    # it under the manifest lock, so a successor crowned mid-vacate survives.
+    # Read from the file, never the row, so a resumed king expires the manifest
+    # it was armed with.
     try:
         expired_manifest_session = (
             parse_manifest(king_manifest_path(scope)).get("harness_session_id") or None
@@ -285,11 +289,9 @@ def done_cmd(
     except (OSError, ValueError):
         expired_manifest_session = None
 
-    # Vacate the row BEFORE touching the file, under the registry lock: the
-    # vacate closure re-reads the row's crown, so a scope that moved to a
-    # successor mid-call is refused here instead of disarming the successor's
-    # manifest below. Same order the succession path uses (stamp the heir,
-    # then clean the vacated file).
+    # Vacate the row BEFORE the file, under the registry lock: a scope that
+    # moved to a successor mid-call is refused here instead of disarming the
+    # successor's manifest below (same order as the succession path).
     vacated = holder_name is None
     if holder_name is not None:
         attended_named = holder_name == ""
@@ -298,9 +300,8 @@ def done_cmd(
             nonlocal vacated
             for index, row in enumerate(rows):
                 if attended_named:
-                    # An attended shell naming a scope: vacate whatever live
-                    # row still holds it, or clear nothing when the scope is
-                    # already orphaned (the manifest-only cleanup below).
+                    # Attended + named scope: vacate whatever live row holds
+                    # it; an orphaned scope clears the manifest alone below.
                     if (
                         row.crown_scope == scope
                         and row.status not in _TERMINAL_ROW_STATUSES
@@ -335,11 +336,9 @@ def done_cmd(
             )
             raise typer.Exit(1)
 
-    # expected_harness_session_id is the snapshot taken above, compared under
-    # the manifest lock: it is the successor-race guard, not an ownership
-    # proof (the locked vacate above already proved that). A False return
-    # here means the file on disk is no longer the manifest this expiry
-    # targeted - most likely a successor's fresh one.
+    # The session-id snapshot guards the successor race under the manifest
+    # lock (ownership was proven by the locked vacate above). False means the
+    # file is no longer the manifest this expiry targeted.
     if not remove_king_manifest(
         scope, expected_harness_session_id=expired_manifest_session
     ):
@@ -389,6 +388,77 @@ def cancel_cmd(
         raise typer.Exit(1) from exc
 
 
+@king_app.command("shape")
+def shape_cmd(
+    shape: str = typer.Argument(..., help="pass or court."),
+    scope: str = typer.Option(
+        "", "--scope", help="Crown scope to reshape. Default: this session's own crown."
+    ),
+) -> None:
+    """Declare this reign's shape: a pure pass, or a court holding workers.
+
+    The field the Stop nudge reads; declare ``court`` at the first worker. The
+    write lives in Rust; this shell keeps the caller ladder (Python self-stamp).
+    """
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+    from fno.agents.crown import (
+        AGENT_UNREGISTERED,
+        REGISTRY_UNREADABLE,
+        calling_agent_row,
+    )
+    from fno.king.state import _owner_state_root
+    from fno.rust_binary import resolve_binary
+
+    if shape not in ("pass", "court"):
+        _refuse("king: shape must be 'pass' or 'court'.")
+
+    caller = calling_agent_row()
+    if caller is REGISTRY_UNREADABLE or caller is AGENT_UNREGISTERED:
+        _refuse(
+            "king: cannot resolve the caller's crown: this session carries an "
+            "agent identity the registry does not resolve to a row. Run /fno-me "
+            "or retry."
+        )
+    if caller is None:
+        _refuse(
+            "king: an attended shell holds no crown; the crowned session "
+            "declares its own shape from inside the reign."
+        )
+    own = getattr(caller, "crown_scope", None)
+    if not own:
+        _refuse("king: this session holds no crown, so there is no reign to shape.")
+    if scope.strip() and scope != own:
+        _refuse(
+            f"king: refusing to reshape {scope!r}: this session's crown is "
+            f"{own!r}, and a holder declares only its own reign's shape."
+        )
+    session_id = (
+        getattr(caller, "harness_session_id", None)
+        or getattr(caller, "cc_session_id", None)
+        or ""
+    )
+    binary = resolve_binary()
+    if binary is None:
+        _refuse(
+            "king: the fno-agents binary was not found, and the shape write "
+            "lives there. Reinstall fno, run `fno doctor update --rust`, or "
+            "set FNO_AGENTS_BIN."
+        )
+    root = _owner_state_root(None)
+    argv = [str(binary), "reign-shape", "--scope", own, "--shape", shape,
+            "--root", str(root.parent if root.name == ".fno" else root)]
+    if session_id:
+        argv += ["--session", session_id]
+    result = subprocess.run(argv, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        typer.echo(f"king: {result.stderr.strip()}", err=True)
+        raise typer.Exit(code=propagate_returncode(result.returncode))
+    typer.echo(f"king: shape declared: {result.stdout.strip()}")
+    typer.echo(f"scope:  {own}")
+
+
 @king_app.command("manifest-path", hidden=True)
 def manifest_path_cmd(
     harness_session_id: str = typer.Option(..., "--harness-session-id"),
@@ -420,17 +490,34 @@ def board_cmd(
         help="Instead of reading the board, ask whether a king walk terminated recently.",
     ),
     since: str = typer.Option("24h", "--since", help="Window for --last-run (e.g. 24h, 90m, 7d)."),
+    budget_ms: Optional[int] = typer.Option(
+        None,
+        "--budget-ms",
+        help="Whole-board budget in milliseconds. Every per-source slice is "
+        "derived from this one total; a caller that enforces an outer timer "
+        "(the stop gate) passes that same bound in, so the board returns a "
+        "payload naming what it could not read instead of being killed.",
+    ),
     state: Optional[Path] = typer.Option(
-        None, "--state", hidden=True, help="King manifest whose scope bounds the board."
+        None,
+        "--state",
+        help="King manifest whose scope bounds the board. Defaults to this "
+        "session's own crown; pass one explicitly to read outside it.",
     ),
 ) -> None:
     """Report every queue that would keep a king working.
 
-    Exits non-zero when any queue could not be read: an unreadable queue is not
-    an empty one, and a reader who could not tell them apart would call a broken
-    verb a clean board.
+    The collector is the Rust runtime (x-25b8, d-e11b2b3e): this command is a
+    shell over `fno-agents board` - it resolves the binary, passes the whole
+    budget and the manifest through, and renders or emits the returned payload.
+    A bare call from a crowned session defaults to that crown's manifest (the
+    registry row plus the file, never presence alone, is the authority);
+    anything else reads the fleet-wide board. Exits non-zero when any queue
+    could not be read: an unreadable queue is not an empty one.
     """
-    from fno.king.board import read_board
+    import subprocess
+
+    from fno.rust_binary import resolve_binary
 
     if last_run:
         from fno.king.state import last_run_is_fresh, parse_window
@@ -444,39 +531,55 @@ def board_cmd(
         typer.echo(f"last king walk within {since}: {'yes' if fresh else 'no'}")
         raise typer.Exit(0 if fresh else 1)
 
-    scope = None
-    if state is not None:
-        from fno.king.state import parse_manifest
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno inbox board: the fno-agents binary was not found, and the board reads "
+            "through the Rust runtime. Reinstall fno, run `fno doctor update --rust`, "
+            "or set FNO_AGENTS_BIN.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
-        scope = parse_manifest(state).get("scope")
-        if not scope:
-            board = {
-                "actionable": 1,
-                "unreadable": 1,
-                "queues": [
-                    {
-                        "name": "scope",
-                        "source": str(state),
-                        "status": "unreadable",
-                        "error": "king manifest has no scope",
-                        "count": None,
-                        "rows": [],
-                        "actionable": True,
-                        "note": "",
-                    }
-                ],
-                "warnings": [],
-                "exit_code": 1,
-            }
-        else:
-            board = read_board(scope=scope)
-    else:
-        board = read_board()
+    if state is None:
+        # A king reads its own board, so the crown it already holds is the
+        # scope it means. An unreadable, terminal, or uncrowned reading
+        # resolves nothing and the board stays fleet-wide, exactly as before.
+        from fno.agents.crown import calling_agent_row
+        from fno.king.state import resolve_king_manifest_path
+
+        caller = calling_agent_row()
+        session_id = (
+            getattr(caller, "harness_session_id", None)
+            or getattr(caller, "cc_session_id", None)
+            or ""
+        )
+        if session_id:
+            resolved = resolve_king_manifest_path(
+                session_id, getattr(caller, "harness", None)
+            )
+            if resolved is not None:
+                state = resolved
+
+    cmd = [str(binary), "board", "--json"]
+    if budget_ms is not None:
+        cmd += ["--budget-ms", str(budget_ms)]
+    if state is not None:
+        cmd += ["--state", str(state)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    # The board prints a full payload even when queues are unreadable (its exit
+    # code carries that); parse the stdout regardless, as the stop gate does.
+    try:
+        board = json.loads(proc.stdout or "")
+    except ValueError as exc:
+        detail = (proc.stderr or proc.stdout or "").strip()[:300]
+        typer.echo(f"king: board unreadable (exit {proc.returncode}): {detail or exc}", err=True)
+        raise typer.Exit(code=1) from exc
     if as_json:
         typer.echo(json.dumps(board, indent=2))
     else:
         _render(board, max_rows)
-    raise typer.Exit(cast(int, board["exit_code"]))
+    raise typer.Exit(cast(int, board.get("exit_code", 1)))
 
 
 @king_app.command("escalate")
@@ -490,13 +593,13 @@ def escalate_cmd(
 ) -> None:
     """Tell the operator the king stopped with work still pending.
 
-    Called by BOTH king terminals - the stop hook's NoProgress and the walk
-    arm's per-unit park - because a guard on one of two reachable paths is
-    decorative. Idempotent per stalled id set, so a respawned king meeting the
-    same stalled board never records a second question.
+    Called by BOTH king terminals (stop-hook NoProgress and the walk arm's
+    park), because a guard on one of two reachable paths is decorative.
+    Idempotent per stalled id set.
     """
     from fno.carveout.core import resolve_carveout_root, resolve_session_id
     from fno.king.escalate import escalate
+    from fno.king.state import reign_state
     from fno.paths import resolve_repo_root
 
     ids = [part.strip() for part in stalled.split(",") if part.strip()]
@@ -504,6 +607,13 @@ def escalate_cmd(
         session_id = resolve_session_id(resolve_repo_root())
     except Exception:  # noqa: BLE001 - an unresolvable session never blocks the ask
         session_id = None
+    # The caller's own liveness, read not asserted: unknown reads as dead
+    # inside question_text, with the reason named.
+    try:
+        state = reign_state(session_id=session_id)
+        live, unknown_reason = state.live, state.unknown_reason
+    except Exception as exc:  # noqa: BLE001 - escalation must still fire
+        live, unknown_reason = None, f"reign_state unreadable: {exc}"
     try:
         outcome, qid = escalate(
             ids,
@@ -511,12 +621,44 @@ def escalate_cmd(
             root=resolve_carveout_root(),
             session_id=session_id,
             cwd=Path.cwd(),
+            live=live,
+            unknown_reason=unknown_reason,
         )
     except Exception as exc:  # noqa: BLE001 - named, never swallowed
         typer.echo(f"king: escalation failed: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(f"king: {outcome} {qid}", err=True)
     typer.echo(qid)
+
+
+@king_app.command("drain")
+def drain_cmd(
+    scope: str = typer.Argument(..., help="The crown scope to count."),
+) -> None:
+    """Is the crown drained: how many scope nodes are not done or superseded.
+
+    The walk's termination reads this, never a queue: a row with a driver
+    leaves the actionable board while its work is unshipped, so the board
+    answers assignment and this answers delivery. An unreadable graph exits
+    nonzero on purpose - a walk that cannot see the scope must not read the
+    failure as drained.
+    """
+    from fno.graph.store import GraphUnreadableError, StoreUnavailable
+    from fno.king.scope import scope_undelivered
+    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
+
+    try:
+        entries = read_entries("king drain", strict=True)
+        undelivered = scope_undelivered(scope, entries)
+    except (
+        ExternalMetadataUnavailable,
+        GraphUnreadableError,
+        StoreUnavailable,
+        ValueError,
+    ) as exc:
+        typer.echo(f"king: drain for {scope!r} unreadable: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps({"scope": scope, "undelivered": undelivered}))
 
 
 def _render(board: dict, max_rows: int) -> None:
@@ -548,13 +690,11 @@ agents_king_app.command("init")(init_cmd)
 agents_king_app.command("done")(done_cmd)
 agents_king_app.command("cancel")(cancel_cmd)
 agents_king_app.command("escalate")(escalate_cmd)
-# The stop hooks resolve the crown manifest here. They once reached it
-# through the deprecated `fno king` spelling that verb_moves forwards onto
-# THIS app; the verb missed the fold, so the resolver exited 2 and every
-# stop on an active kings dir burned its unavailable-retries before
-# allowing exit. The hooks now name `agents king` directly, so the
-# deprecation clock cannot re-open that hole. Hidden: a hook surface, not
-# menu UI.
+agents_king_app.command("drain")(drain_cmd)
+agents_king_app.command("shape")(shape_cmd)
+# The stop hooks resolve the crown manifest through this hidden verb: the
+# deprecated `fno king` spelling once missed the verb_moves fold and burned
+# every stop's unavailable-retries. The hooks now name `agents king` directly.
 agents_king_app.command("manifest-path", hidden=True)(manifest_path_cmd)
 
 

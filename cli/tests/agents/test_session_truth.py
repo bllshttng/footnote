@@ -150,6 +150,52 @@ def _resolver(session):
     return r
 
 
+def test_observed_title_rides_the_truth_payload(tmp_path):
+    """A Ctrl+R rename appends an agent-name record and fires no hook, so the
+    tail reader is the only detector; the title is SERVED beside the label
+    (``harness_title``) and never written into it."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    sid = "11aa78de-2222-3333-4444-555566667777"
+    p = tmp_path / f"{sid}.jsonl"
+    p.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "user", "message": {
+                    "role": "user", "content": [{"type": "text", "text": "go"}]}}),
+                json.dumps({"type": "agent-name", "agentName": "renamed-in-view"}),
+                json.dumps({"type": "assistant", "message": {
+                    "role": "assistant", "model": "glm",
+                    "content": [{"type": "text", "text": "on it"}]}}),
+            ]
+        )
+        + "\n"
+    )
+    session = SimpleNamespace(
+        agent="claude", session_id=sid, cwd="/w", short_id=sid[:8], transcript_path=str(p)
+    )
+    result = resolve_session_truth("w1", resolve=_resolver(session), projects_root=tmp_path)
+    assert result["harness_title"] == "renamed-in-view"
+
+
+def test_resolve_without_a_title_reports_absence(tmp_path):
+    """No agent-name record -> ``harness_title`` is None: absence renders as
+    absence, never as the fno label or a fabricated default."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    sid = "99fe1ba0-1111-2222-3333-444455556666"
+    p = tmp_path / f"{sid}.jsonl"
+    p.write_text(
+        json.dumps({"type": "user", "message": {
+            "role": "user", "content": [{"type": "text", "text": "go"}]}}) + "\n"
+    )
+    session = SimpleNamespace(
+        agent="claude", session_id=sid, cwd="/w", short_id=sid[:8], transcript_path=str(p)
+    )
+    result = resolve_session_truth("w1", resolve=_resolver(session), projects_root=tmp_path)
+    assert result["harness_title"] is None
+
+
 def test_resolve_reads_worktree_transcript_your_move(tmp_path):
     """AC2-HP + integrates the resolver fix: session dispatched with canonical
     cwd, live transcript in the worktree dir, last turn ends in a question."""

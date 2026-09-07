@@ -24,6 +24,7 @@ Phase 5 (MCP channel + streaming) additions are grouped at the bottom.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from dataclasses import asdict
@@ -255,6 +256,7 @@ def emit_spawned(
     spawned_by_session: Optional[str] = None,
     spawned_by_harness: Optional[str] = None,
     spawned_by_cwd: Optional[str] = None,
+    lineage_reason: Optional[str] = None,
     harness_session_id: Optional[str] = None,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
@@ -279,6 +281,8 @@ def emit_spawned(
         "spawned_by_session": spawned_by_session,
         "spawned_by_harness": spawned_by_harness,
         "spawned_by_cwd": spawned_by_cwd,
+        # x-5283: a birth names its parent or why it could not.
+        "lineage_reason": lineage_reason,
     }
     if pid is not None:
         data["pid"] = pid
@@ -356,6 +360,90 @@ def emit_session_transition(
     if source:
         data["source"] = source
     _emit_daemon_envelope(kind, data)
+
+
+# Merge-triggered cleanup: the merge mints the reap order itself; the
+# ritual reuses the same helper, one request-id formula for both.
+KIND_MERGE_CLEANUP_REQUESTED = "merge_cleanup_requested"
+
+
+def merge_cleanup_request_id(
+    project: Any, pr: int, branch: str, worktree: Optional[str], node_ids
+) -> str:
+    """The daemon's fold key for one exact merge (the ritual's old formula)."""
+    ordered = sorted(str(node) for node in node_ids)
+    identity = "|".join([str(project), str(pr), branch, worktree or "", *ordered])
+    return "merge-cleanup-" + hashlib.sha256(identity.encode()).hexdigest()[:20]
+
+
+def rows_for_cleanup(worktree: str, node_ids, *, runner=None) -> list[str]:
+    """Row names whose cwd IS the merged worktree or whose name targets one
+    of the closed nodes (``target-<node>-*``). Best-effort: any failure
+    reads as no candidates (the daemon's registry scan is the second net).
+    """
+    try:
+        if runner is not None:
+            r = runner(["agents", "list", "--json"])
+        else:
+            from fno._subprocess_util import fno_py_cmd
+            from fno.pr._proc import run
+
+            r = run([*fno_py_cmd(), "agents", "list", "--json"])
+    except Exception:  # noqa: BLE001 - a failed candidate read proposes nothing
+        return []
+    if not r.ok:
+        return []
+    try:
+        payload = json.loads(r.stdout or "{}")
+    except json.JSONDecodeError:
+        return []
+    rows = payload if isinstance(payload, list) else payload.get("agents") or []
+    ids = [str(node) for node in node_ids]
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "")
+        if row.get("cwd") == worktree or any(
+            name.startswith(f"target-{node}-") for node in ids
+        ):
+            out.append(name)
+    return out
+
+
+def emit_merge_cleanup_requested(
+    *,
+    repo: str,
+    project: str,
+    pr: int,
+    branch: str,
+    worktree: Optional[str],
+    node_ids,
+    session_id: Optional[str],
+    harness: Optional[str],
+    merged_at: Optional[str] = None,
+    candidate_row_names,
+) -> str:
+    """Mint the durable reap order in the daemon lifecycle log; ``merged_at``
+    anchors the grace clock (``None`` stamps now). Returns the request id."""
+    request_id = merge_cleanup_request_id(project, pr, branch, worktree, node_ids)
+    _emit_daemon_envelope(
+        KIND_MERGE_CLEANUP_REQUESTED,
+        {
+            "request_id": request_id,
+            "repo": repo,
+            "project": str(project),
+            "pr": int(pr),
+            "branch": branch,
+            "worktree": worktree,
+            "node_ids": sorted(str(node) for node in node_ids),
+            "candidate_row_names": list(candidate_row_names),
+            "merged_at": merged_at or _utc_now_iso(),
+            "session_id": session_id,
+            "harness": harness,
+        },
+    )
+    return request_id
 
 
 # ---------------------------------------------------------------------

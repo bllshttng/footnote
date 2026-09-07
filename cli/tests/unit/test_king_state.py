@@ -142,8 +142,11 @@ def test_disabled_king_loop_arms_no_manifest(monkeypatch, tmp_path):
 def test_disabled_coronation_neutralizes_stale_scope_state(monkeypatch, tmp_path):
     import fno.king.state as state
 
-    root = tmp_path / "repo" / ".fno"
-    stale = state.king_manifest_path("x-f3d0", state_root=root)
+    from fno.paths import space_dir
+
+    # Seed the manifest where THIS owner resolves it: the space keyed on the
+    # owner cwd's canonical root, the same derivation arm_king_manifest uses.
+    stale = state.king_manifest_path("x-f3d0", state_root=space_dir(tmp_path / "repo"))
     write_manifest(stale, scope="x-f3d0", harness_session_id="old-session")
     monkeypatch.setattr(state, "king_loop_enabled", lambda: False)
 
@@ -164,7 +167,9 @@ def test_coronation_defaults_to_the_owner_repositories_state_root(monkeypatch, t
         "x-f3d0", "33333333-3333-4333-8333-333333333333", owner_cwd=str(owner)
     )
 
-    assert path == owner / ".fno" / "kings" / "x-f3d0.md"
+    from fno.paths import space_dir
+
+    assert path == space_dir(owner) / "kings" / "x-f3d0.md"
 
 
 def test_cleanup_does_not_delete_a_successors_refreshed_manifest(tmp_path):
@@ -445,6 +450,8 @@ def test_an_enabled_named_king_is_crowned(monkeypatch, tmp_path):
     code, _ = _init(monkeypatch, tmp_path)
 
     assert code == 0
-    manifest = tmp_path / ".fno" / "kings" / "drain.md"
+    import fno.king.state as state
+
+    manifest = state.king_manifest_path("drain")
     assert manifest.exists()
     assert "harness_session_id: sess-1" in manifest.read_text()

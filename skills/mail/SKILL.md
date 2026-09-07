@@ -4,9 +4,9 @@ description: "Message background agent workers and projects from a runner-less s
 argument-hint: "<verb> [args]  |  send <name> \"<body>\"  |  reply <msg-id> \"<body>\"  |  hold [minutes|off|status]  |  unread|list|status [name]"
 metadata:
   internal: false
-requires:
-  binaries:
-    - "fno >= 0.1"
+  requires:
+    binaries:
+      - "fno >= 0.1"
 ---
 
 # Mail

@@ -63,6 +63,18 @@ def is_terminal_entry(entry: object) -> bool:
     return bool(completed) and not str(completed).startswith(_LEGACY_DEFER_PREFIX)
 
 
+def node_is_done(entry: object) -> bool:
+    """The one WORK-done read: the node's stored ruling, nothing else.
+
+    Every Python reader that asks "is this node's work done" calls this
+    (x-c672); ``completed_at`` spellings are retired from that question
+    (measured 0 divergence in graph and archive). Superseded is deliberately
+    absent - a superseded node's WORK is not done, it was replaced, and only
+    rebindability reads it that way.
+    """
+    return isinstance(entry, dict) and entry.get("status") == "done"
+
+
 def derived_status(entry: object, missing: str = "unknown") -> str:
     """The one status string every reader of a row must agree on.
 
@@ -188,6 +200,26 @@ def is_open_phase_row(row: object, phase: str) -> bool:
 def is_open_do_row(row: object) -> bool:
     """Return whether a session row is a valid, unfinished ``do`` window."""
     return is_open_phase_row(row, "do")
+
+
+def completed_at_status_divergence(entries: list[dict]) -> list[str]:
+    """Ids where ``completed_at`` is set but the stored ``status`` is not terminal.
+
+    ``_cascade_close_parents`` (graph/cli.py) decides an ancestor is already
+    closed by reading ``completed_at`` alone, never ``status``. That is safe
+    only because, measured across the live graph on 2026-09-05 (2428
+    entries), the two fields agreed on every row. This is the regression pin
+    for that measurement: it names any row where they diverge instead of
+    letting the guard silently trust the wrong field forever.
+    """
+    return [
+        e["id"]
+        for e in entries
+        if isinstance(e, dict)
+        and isinstance(e.get("id"), str)
+        and e.get("completed_at")
+        and e.get("status") not in TERMINAL_RUNGS
+    ]
 
 
 def recompute_statuses(entries: list[dict]) -> list[dict]:

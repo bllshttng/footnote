@@ -10,6 +10,9 @@
 /// All tests assert exactly which JSON fields the output carries and that
 /// `target-state.md` bytes are unmodified after any fire (read-only invariant).
 use fno_agents::loopcheck::run_loop_check;
+#[path = "space_paths.rs"]
+mod space_paths;
+use space_paths::{project_events, project_ledger};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -604,7 +607,7 @@ fn ac1_hp_promise_green_pr_done() {
     );
 
     // Verify: termination event appended to project events
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     assert!(events_path.exists(), "project events.jsonl must exist");
     let events_content = fs::read_to_string(&events_path).unwrap();
     assert!(
@@ -656,7 +659,7 @@ fn ac3_ui_unparseable_settings_emits_event() {
         &format!("--git-bin={}", mock.git.display()),
     ]);
 
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(
         events.contains("loop_check_settings_unparseable"),
         "unparseable settings must emit loop_check_settings_unparseable; events: {events}"
@@ -766,7 +769,7 @@ fn batched_unit_promise_done_batched() {
         d.termination_reason
     );
 
-    let events_content = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    let events_content = fs::read_to_string(project_events(&cwd)).unwrap();
     assert!(
         events_content.contains("DoneBatched"),
         "DoneBatched in termination event"
@@ -898,7 +901,7 @@ fn ac1_err_gh_outage_blocks_promise() {
     assert!(d.termination_reason.is_none(), "no termination on block");
 
     // loop_check_gh_error event must exist
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     let events = fs::read_to_string(&events_path).unwrap_or_default();
     assert!(
         events.contains("loop_check_gh_error"),
@@ -997,7 +1000,7 @@ fn ac1_edge_no_pr_block_with_fingerprint() {
     assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
 
     // Fingerprint event with pr_state=none
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(
         events.contains("loop_check"),
         "loop_check event expected; got: {events}"
@@ -1121,7 +1124,7 @@ fn ac4_edge_legacy_complete_allows_exit() {
     assert_eq!(code, 0);
     assert_eq!(d.decision, "allow");
 
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(
         events.contains("loop_check_legacy_manifest"),
         "legacy event expected; got: {events}"
@@ -1152,7 +1155,7 @@ fn ac3_hp_budget_flat_key_trips_cost() {
     fs::write(&settings_path, "budget_cap = 0.01\n").unwrap();
 
     // Ledger with cost > 0.01 for this session
-    let ledger_path = cwd.join(".fno/ledger.json");
+    let ledger_path = project_ledger(&cwd);
     let ledger = serde_json::json!([
         {"session_id": "sess-budget", "cost_usd": 0.05, "tokens": 1000}
     ]);
@@ -1183,7 +1186,7 @@ fn ac3_hp_budget_flat_key_trips_cost() {
     assert_eq!(d.termination_reason.as_deref(), Some("Budget"));
 
     // Verify axis=cost in the termination event
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(
         events.contains("cost"),
         "axis=cost expected in Budget termination event; got: {events}"
@@ -1228,7 +1231,7 @@ fn wall_clock_budget_trips() {
     assert_eq!(d.decision, "allow");
     assert_eq!(d.termination_reason.as_deref(), Some("Budget"));
 
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(events.contains("wall_clock"), "axis=wall_clock expected");
 }
 
@@ -1317,7 +1320,7 @@ fn streak_window_secs_is_emitted_on_every_loop_check_event() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
 
     fs::write(
         &manifest_path,
@@ -1381,7 +1384,7 @@ fn loop_check_config_emitted_once_at_first_fire() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
 
     fs::write(
         &manifest_path,
@@ -1455,7 +1458,7 @@ fn ac2_hp_fingerprint_backstop_no_progress() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
 
     // Unattended session (N=3)
     fs::write(
@@ -1506,7 +1509,7 @@ fn ac2_edge_review_ts_change_resets_counter() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
 
     // Unattended (N=3)
     fs::write(
@@ -1644,7 +1647,7 @@ fn ac2_fr_done_but_mute_resolves_done_pr_green() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
 
     // Unattended (N=3), green PR, no promise
     fs::write(
@@ -1978,7 +1981,7 @@ fn ac5_err_no_gh_attended_advisory_block() {
     // Attended + no gh -> advisory mode -> block (keep working)
     assert_eq!(d.decision, "block");
 
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(
         events.contains("loop_advisory_mode"),
         "loop_advisory_mode event expected; got: {events}"
@@ -2062,12 +2065,12 @@ fn events_appended_to_both_project_and_global() {
     ]);
 
     assert!(
-        cwd.join(".fno/events.jsonl").exists(),
+        project_events(&cwd).exists(),
         "project events.jsonl must exist"
     );
     assert!(global_events.exists(), "global events.jsonl must exist");
 
-    let proj_events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    let proj_events = fs::read_to_string(project_events(&cwd)).unwrap();
     let glob_events = fs::read_to_string(&global_events).unwrap();
     assert!(
         !proj_events.is_empty() && !glob_events.is_empty(),
@@ -2175,7 +2178,7 @@ fn gh_unspawnable_stays_out_of_advisory_mode() {
     ]);
 
     assert_eq!(code, 0);
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap();
     assert!(
         events.contains("\"gh_probe\""),
         "probe outcome row expected: {events}"
@@ -2234,7 +2237,7 @@ fn gh_absent_attended_blocks_advisory() {
         "advisory mode without intent must block"
     );
     assert!(d.termination_reason.is_none());
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap();
     assert!(
         events.contains("\"loop_advisory_mode\""),
         "loop_advisory_mode event expected: {events}"
@@ -2277,7 +2280,7 @@ fn gh_absent_attended_promise_done_advisory() {
     assert_eq!(code, 0);
     assert_eq!(d.decision, "allow");
     assert_eq!(d.termination_reason.as_deref(), Some("DoneAdvisory"));
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap();
     assert!(events.contains("\"loop_advisory_mode\""));
     assert!(events.contains("DoneAdvisory"));
 }
@@ -2318,7 +2321,7 @@ fn gh_absent_unattended_interrupted() {
     assert_eq!(code, 0);
     assert_eq!(d.decision, "allow");
     assert_eq!(d.termination_reason.as_deref(), Some("Interrupted"));
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap();
     assert!(
         events.contains("\"termination\"") && events.contains("Interrupted"),
         "termination(Interrupted) event expected: {events}"
@@ -2549,7 +2552,7 @@ fn ac1_fr_late_review_then_done() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     fs::write(
         &manifest_path,
         new_manifest("sess-latefr", "2026-06-05T00:00:00Z", true),
@@ -2753,7 +2756,7 @@ fn operator_review_finding_blocks_until_resolved() {
     fs::write(cwd.join("transcript.jsonl"), transcript_with_promise()).unwrap();
 
     // Seed one OPEN finding for x-gate.
-    let events = cwd.join(".fno/events.jsonl");
+    let events = project_events(&cwd);
     fs::write(
         &events,
         "{\"ts\":\"t\",\"type\":\"review_finding\",\"source\":\"observer\",\"data\":{\"finding_id\":\"f9\",\"node\":\"x-gate\",\"text\":\"operator says fix the retry\"}}\n",
@@ -2984,7 +2987,7 @@ fn ac3_hp_empty_required_bots_skips_review_reads() {
     assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
 
     // AC3-UI: the skip is recorded in the loop_check event.
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(
         events.contains("\"review_skipped\":true"),
         "loop_check event must record review_skipped; got: {events}"
@@ -3055,7 +3058,7 @@ fn not_required_terminal_never_says_reviewed() {
     );
 
     // The durable lie lived in the event row, not the stdout.
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(
         !events.contains("green and reviewed"),
         "the termination event must not say green and reviewed: {events}"
@@ -3165,7 +3168,7 @@ fn code_pr_floors_even_where_the_cwd_diff_is_empty() {
     let (code, d) = fire_pr_payload(cwd, "[review]\nrequired_bots = []\n", &mock);
 
     assert_eq!(code, 0);
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(
         events.contains("\"review_skipped\":false"),
         "the floor must engage from the PR payload; review_skipped is the proof: {events}"
@@ -3205,7 +3208,7 @@ fn docs_pr_keeps_the_floor_off_and_names_the_opt_out() {
         "the docs-PR message must not carry the word reviewed: {}",
         d.message
     );
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(
         events.contains("\"review_skipped\":true"),
         "a docs-only PR must not floor: {events}"
@@ -3362,7 +3365,7 @@ fn no_external_on_active_gate_serializes_unknown_coverage_not_uncovered() {
         "no_external must not block: {}",
         d.message
     );
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(
         events.contains("\"coverage\":\"unknown\""),
         "no_external on an active gate must read unknown, not a fabricated zero: {events}"
@@ -3493,7 +3496,7 @@ fn x2219_no_external_lane_counts_github_review_rounds_past_the_cap() {
     // discharge): the session terminates green instead of demanding a round
     // the budget will not fund. The emitted review_coverage row carries the
     // exact numbers.
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(
         events.contains("\"rounds_used\":3"),
         "three GitHub-only rounds must count as 3 on the no-external arm: {events}"
@@ -3545,7 +3548,7 @@ fn x2219_max_rounds_three_fires_at_four_rounds_and_five_does_not() {
             &format!("--gh-bin={}", gh.display()),
             &format!("--git-bin={}", git.display()),
         ]);
-        let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+        let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
         assert!(
             events.contains("\"rounds_used\":4"),
             "max_rounds={max_rounds}: the counter read all four rounds: {events}"
@@ -3666,11 +3669,7 @@ fn x2219_covered_pr_skips_the_reviews_read_uncovered_pays_for_it() {
         "ts": "2026-06-05T00:10:00Z",
         "data": {"reviewer": "code-review", "head_sha": X2219_HEAD, "verdict": "pass"}
     });
-    fs::write(
-        cwd.join(".fno/events.jsonl"),
-        attestation.to_string() + "\n",
-    )
-    .unwrap();
+    fs::write(project_events(&cwd), attestation.to_string() + "\n").unwrap();
     let record = cwd.join("reviews-reads.log");
     let bins = TempDir::new().unwrap();
     let (gh, git) = x2219_reviews_gh(bins.path(), Some(&record), &x2219_oids(1));
@@ -3831,7 +3830,7 @@ fn no_external_on_inactive_gate_serializes_the_known_zero() {
         "an ungated repo must not block: {}",
         d.message
     );
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(
         events.contains("\"coverage\":\"uncovered\""),
         "nothing configured to read is a known zero, never an unknown: {events}"
@@ -3934,7 +3933,7 @@ fn reviewers_gate_clears_with_head_pinned_attestation() {
     fs::write(&settings_path, "[review]\nreviewers = [\"sigma\"]\n").unwrap();
     // The attestation lands in the project events log loop-check reads.
     fs::write(
-        cwd.join(".fno/events.jsonl"),
+        project_events(&cwd),
         format!(
             "{{\"ts\":\"2026-06-05T00:10:00Z\",\"type\":\"review_attestation\",\"source\":\"target\",\"data\":{{\"reviewer\":\"sigma\",\"head_sha\":\"{GREEN_HEAD}\",\"verdict\":\"pass\"}}}}\n"
         ),
@@ -4041,7 +4040,7 @@ fn ac3_fr_restoring_required_bots_reenforces() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     fs::write(
         &manifest_path,
         new_manifest("sess-restore", "2026-06-05T00:00:00Z", true),
@@ -4125,7 +4124,7 @@ fn ac4_hp_fr_outage_freezes_streak_then_resumes() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
 
     // Unattended: N = 3
     fs::write(
@@ -4219,7 +4218,7 @@ fn ac4_err_done_read_failure_never_no_progress() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
 
     fs::write(
         &manifest_path,
@@ -4443,7 +4442,7 @@ fn prefail_done_success_keeps_carried_fingerprint() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     fs::write(
         &manifest_path,
         new_manifest("sess-prefail", "2026-06-05T00:00:00Z", false),
@@ -4566,7 +4565,7 @@ fn late_finding_after_clean_fires_reblocks_not_noprogress() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     // Unattended: N = 3.
     fs::write(
         &manifest_path,
@@ -5217,7 +5216,7 @@ fn done_probes_ac1_hp_passing_probe_grants_done() {
         d.message
     );
 
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap();
     assert!(
         events.contains("\"done_probes\""),
         "probe evidence must be recorded in the loop_check event"
@@ -5241,7 +5240,7 @@ fn done_probes_ac2_hp_absent_field_leaves_gate_unchanged() {
     assert_eq!(d.decision, "allow");
     assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
 
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap();
     assert!(
         events.contains("\"done_probes\":null"),
         "no declaration must record a null, never a fabricated 0/0: {events}"
@@ -5337,7 +5336,7 @@ fn done_probes_a_prior_fires_pass_never_satisfies_this_fire() {
 
     // Seed a prior fire in which the very same probe passed.
     fs::write(
-        cwd.join(".fno/events.jsonl"),
+        project_events(&cwd),
         format!(
             "{}\n",
             serde_json::json!({
@@ -5373,7 +5372,7 @@ fn done_probes_block_path_records_evidence_in_the_event() {
     let d = fire_probe_gate(cwd, &manifest, &transcript, &mock);
     assert_eq!(d.decision, "block");
 
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap();
     assert!(
         events.contains("\"exit 3\":\"fail:3\""),
         "a failing probe's result must be recorded, not just its reason: {events}"
@@ -5602,7 +5601,7 @@ fn reviewers_gate_is_name_agnostic_for_a_registered_reviewer() {
 
     // Attested at HEAD: the gate clears, with no Rust-side allowlist involved.
     fs::write(
-        cwd.join(".fno/events.jsonl"),
+        project_events(&cwd),
         format!(
             "{{\"ts\":\"2026-06-05T00:10:00Z\",\"type\":\"review_attestation\",\"source\":\"target\",\"data\":{{\"reviewer\":\"my-security-skill\",\"head_sha\":\"{GREEN_HEAD}\",\"verdict\":\"pass\"}}}}\n"
         ),
@@ -5730,7 +5729,7 @@ fn nudge_failed_post_keeps_needs_nudge_and_emits_event() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     fs::write(
         &manifest_path,
         new_manifest("sess-nudge-fail", "2026-06-05T00:00:00Z", true),
@@ -5786,7 +5785,7 @@ fn nudge_unresponsive_bot_gives_up_on_backstop() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     // Unattended -> backstop N=3.
     fs::write(
         &manifest_path,
@@ -5905,7 +5904,7 @@ fn nudge_awaiting_defers_the_backstop() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     // Unattended -> backstop N=3.
     fs::write(
         &manifest_path,
@@ -5969,7 +5968,7 @@ fn ci_pending_wait_defers_the_backstop() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     // Unattended -> backstop N=3. A promise transcript (not watching), so the
     // idle-allow branch never engages: this is the fall-through path that
     // produced the measured wrong terminal on x-b57a.
@@ -6035,7 +6034,7 @@ fn settled_stuck_pr_still_burns_no_progress() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     fs::write(
         &manifest_path,
         new_manifest("sess-stuck-red", "2026-06-05T00:00:00Z", false),
@@ -6090,7 +6089,7 @@ fn not_nudgeable_review_wait_defers_the_backstop() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     fs::write(
         &manifest_path,
         new_manifest("sess-review-wait", "2026-06-05T00:00:00Z", false),
@@ -6154,7 +6153,7 @@ fn same_model_sentinel_wait_still_burns_no_progress() {
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     fs::write(
         &manifest_path,
         new_manifest("sess-sentinel", "2026-06-05T00:00:00Z", false),
@@ -6553,7 +6552,7 @@ fn attestation_scope_both_scans_agree_on_foreign_line() {
 /// need review coverage to reach DonePRGreen under the x-0eaf coverage gate.
 fn seed_code_review_attestation(cwd: &Path, head_sha: &str) {
     fs::create_dir_all(cwd.join(".fno")).unwrap();
-    let events = cwd.join(".fno/events.jsonl");
+    let events = project_events(&cwd);
     let mut existing = fs::read_to_string(&events).unwrap_or_default();
     existing.push_str(&attestation_line("code-review", head_sha, "pass"));
     existing.push('\n');
@@ -7515,12 +7514,10 @@ fn coverage_origin_unknown_when_attester_empty_count_unchanged() {
     assert_eq!(rep.coverage_count(), Some(1));
 }
 
-/// No authoring session known (no manifest / unparseable) -> every local
-/// verdict Unknown, failing open so the verdict set is byte-identical to the
-/// pre-change behavior on unknown authorship. A present attester with an absent
-/// author is Unknown, not Other: the comparison is never guessed.
+/// No author session known: a concrete attester is Unmeasured (the comparison
+/// failed, never guessed) and still counts - origin is recorded, never gating.
 #[test]
-fn coverage_origin_author_unknown_is_unknown_fail_open() {
+fn coverage_origin_author_unmeasured_still_counts() {
     let events = format!(
         "{}\n",
         attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR)
@@ -7531,7 +7528,7 @@ fn coverage_origin_author_unknown_is_unknown_fail_open() {
         .iter()
         .find(|v| v.producer == CoverageProducer::LocalAttestation)
         .unwrap();
-    assert_eq!(local.attestation_origin, AttestationOrigin::Unknown);
+    assert_eq!(local.attestation_origin, AttestationOrigin::Unmeasured);
     assert_eq!(rep.coverage_count(), Some(1));
 }
 
@@ -7890,7 +7887,7 @@ fn floor_stand_down_spends_no_graphql() {
     // string, which never matches current_fp and truncates the reverse-scan
     // the instant it hits this row - one stand-down silently breaks the
     // consecutive-unchanged streak for every earlier fire in the session.
-    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
     assert!(
         events.contains("\"type\":\"loop_check_graphql_standdown\"")
             || events.contains("\"type\": \"loop_check_graphql_standdown\""),
@@ -7919,7 +7916,7 @@ fn floor_stands_down_on_a_recent_secondary_refusal_even_with_healthy_quota() {
     isolate_settings(cwd);
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     let global_events_path = global_dir.join("events.jsonl");
     fs::write(
         &manifest_path,
@@ -8000,7 +7997,7 @@ fn floor_stands_down_on_another_sessions_secondary_refusal() {
     isolate_settings(cwd);
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = cwd.join(".fno/events.jsonl");
+    let events_path = project_events(&cwd);
     let global_events_path = global_dir.join("events.jsonl");
     fs::write(
         &manifest_path,
@@ -8471,7 +8468,7 @@ fn coverage_status_publish_fires_from_both_emitters_to_the_pr_head() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("proj");
     pub_fixture(&cwd, BOT_LANE);
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = tmp.path().join("global.jsonl");
     let manifest = cwd.join("target-state.md");
     fs::write(
@@ -8559,7 +8556,7 @@ fn coverage_status_publish_posts_failure_when_unreviewed() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("proj");
     pub_fixture(&cwd, BOT_LANE);
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = tmp.path().join("global.jsonl");
     let record = tmp.path().join("gh-api-record");
     let bins = TempDir::new().unwrap();
@@ -8591,7 +8588,7 @@ fn coverage_status_publish_requires_local_code_review_pass_when_configured() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("proj");
     pub_fixture(&cwd, "[review]\nreviewers = [\"code-review\"]\n");
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = tmp.path().join("global.jsonl");
     let record = tmp.path().join("gh-api-record");
     let bins = TempDir::new().unwrap();
@@ -8625,7 +8622,7 @@ fn coverage_status_protects_an_override_after_three_refused_label_reads() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("proj");
     pub_fixture(&cwd, BOT_LANE);
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = tmp.path().join("global.jsonl");
     let record = tmp.path().join("gh-api-record");
     let bins = TempDir::new().unwrap();
@@ -8652,7 +8649,7 @@ fn coverage_status_posts_covered_after_refused_label_reads_find_no_override() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("proj");
     pub_fixture(&cwd, BOT_LANE);
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = tmp.path().join("global.jsonl");
     let record = tmp.path().join("gh-api-record");
     let bins = TempDir::new().unwrap();
@@ -8692,7 +8689,7 @@ fn coverage_status_posts_failure_after_refused_label_reads_find_no_status() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("proj");
     pub_fixture(&cwd, BOT_LANE);
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = tmp.path().join("global.jsonl");
     let record = tmp.path().join("gh-api-record");
     let bins = TempDir::new().unwrap();
@@ -8720,7 +8717,7 @@ fn coverage_status_retries_a_label_read_then_honors_the_override() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("proj");
     pub_fixture(&cwd, BOT_LANE);
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = tmp.path().join("global.jsonl");
     let record = tmp.path().join("gh-api-record");
     let bins = TempDir::new().unwrap();
@@ -8749,778 +8746,6 @@ fn coverage_status_retries_a_label_read_then_honors_the_override() {
                 && post.contains("state=success")
         ),
         "{posts:?}"
-    );
-}
-
-// ── the king driver arm ───────────────────────────────────────────────────────
-//
-// A king has no PR, so none of the target conjuncts above apply. These drive
-// the same verb with `--driver king` over a king manifest and a mocked board.
-
-fn king_manifest(dir: &Path, fno_id: &str) -> PathBuf {
-    let path = dir.join("king-state.md");
-    fs::write(
-        &path,
-        format!(
-            "---\nfno_id: {fno_id}\ncreated_at: 2026-08-18T00:00:00Z\nscope: board drain\n\
-             harness: claude\nbudget_max_iterations: 40\n---\n"
-        ),
-    )
-    .unwrap();
-    path
-}
-
-/// A mock `fno` whose `inbox board --json` prints `payload`.
-fn king_board_bin(dir: &Path, payload: &str, exit: i32) -> PathBuf {
-    make_script(
-        dir,
-        "fno-king-mock",
-        &format!("cat <<'JSON'\n{payload}\nJSON\nexit {exit}"),
-    )
-}
-
-#[test]
-fn king_board_invocation_carries_the_selected_manifest_path() {
-    let tmp = TempDir::new().unwrap();
-    let state = king_manifest(tmp.path(), "king-state-path");
-    let record = tmp.path().join("board-args");
-    let script = make_script(
-        tmp.path(),
-        "fno-board-state-record",
-        &format!(
-            "printf '%s' \"$*\" > '{}'\ncat <<'JSON'\n{}\nJSON\n",
-            record.display(),
-            BOARD_CLEAN
-        ),
-    );
-
-    let events = tmp.path().join("events.jsonl");
-    let (code, decision) = king_fire(&state, tmp.path(), &events, &script);
-
-    assert_eq!(code, 0, "{decision}");
-    assert_eq!(decision["actionable"], 0);
-    let args = fs::read_to_string(record).unwrap();
-    assert!(args.contains("inbox board --json --state"), "{args}");
-    assert!(args.contains(state.to_str().unwrap()), "{args}");
-}
-
-fn king_fire(state: &Path, cwd: &Path, events: &Path, fno_bin: &Path) -> (i32, serde_json::Value) {
-    let (code, json) = fno_agents::loopcheck::run_loop_check_capture(&[
-        "loop-check".to_string(),
-        "--driver".to_string(),
-        "king".to_string(),
-        "--state".to_string(),
-        state.to_str().unwrap().to_string(),
-        "--transcript".to_string(),
-        cwd.join("transcript.jsonl").to_str().unwrap().to_string(),
-        "--cwd".to_string(),
-        cwd.to_str().unwrap().to_string(),
-        "--events".to_string(),
-        events.to_str().unwrap().to_string(),
-        "--global-events".to_string(),
-        events.to_str().unwrap().to_string(),
-        "--fno-bin".to_string(),
-        fno_bin.to_str().unwrap().to_string(),
-    ]);
-    (code, serde_json::from_str(&json).unwrap())
-}
-
-const BOARD_TWO_ACTIONABLE: &str = r#"{
-  "actionable": 2, "unreadable": 0,
-  "queues": [
-    {"name":"undispatched","status":"ok","actionable":true,"count":2,
-     "rows":[{"id":"x-1234"},{"id":"x-5678"}],"error":"","truncated":0,"note":"","source":"s"}
-  ]
-}"#;
-
-/// The same board with one row cleared, which is the progress signal.
-const BOARD_ONE_CLEARED: &str = r#"{
-  "actionable": 1, "unreadable": 0,
-  "queues": [
-    {"name":"undispatched","status":"ok","actionable":true,"count":1,
-     "rows":[{"id":"x-5678"}],"error":"","truncated":0,"note":"","source":"s"}
-  ]
-}"#;
-
-/// A row cleared while the board GREW. Progress, because progress is a row
-/// leaving, never board size.
-const BOARD_REFILLED: &str = r#"{
-  "actionable": 3, "unreadable": 0,
-  "queues": [
-    {"name":"undispatched","status":"ok","actionable":true,"count":3,
-     "rows":[{"id":"x-5678"},{"id":"x-9999"},{"id":"x-aaaa"}],
-     "error":"","truncated":0,"note":"","source":"s"}
-  ]
-}"#;
-
-const BOARD_CLEAN: &str = r#"{
-  "actionable": 0, "unreadable": 0,
-  "queues": [
-    {"name":"undispatched","status":"ok","actionable":true,"count":0,
-     "rows":[],"error":"","truncated":0,"note":"","source":"s"}
-  ]
-}"#;
-
-#[test]
-fn king_arm_blocks_while_the_board_is_not_empty() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-block");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
-
-    let (code, d) = king_fire(&state, cwd, &events, &fno);
-
-    assert_eq!(code, 0, "a non-empty board must block: {d}");
-    assert_eq!(d["decision"], "block");
-    assert_eq!(d["actionable"], 2);
-    let reason = d["reason"].as_str().unwrap();
-    assert!(
-        reason.contains("undispatched") && reason.contains("x-1234"),
-        "the block reason must name the top actionable row: {reason}"
-    );
-}
-
-#[test]
-fn king_nowork_is_the_clean_terminal_for_an_empty_board() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-clean");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-    let fno = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
-
-    let (code, d) = king_fire(&state, cwd, &events, &fno);
-
-    assert_eq!(code, 0);
-    assert_eq!(d["decision"], "allow");
-    assert_eq!(d["termination_reason"], "NoWork");
-
-    let journal = fs::read_to_string(&events).unwrap();
-    let row: serde_json::Value = journal
-        .lines()
-        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
-        .find(|v| v["type"] == "termination")
-        .expect("a termination event must be appended");
-    assert_eq!(row["data"]["reason"], "NoWork");
-    assert_eq!(
-        row["data"]["session_id"], "k-clean",
-        "the event must carry the king session id so the journal reader matches it"
-    );
-    assert_eq!(row["data"]["driver"], "king");
-}
-
-#[test]
-fn king_arm_allows_silently_when_no_king_manifest_exists() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
-
-    let (code, d) = king_fire(&cwd.join("absent.md"), cwd, &events, &fno);
-
-    assert_eq!(code, 0);
-    assert_eq!(d["decision"], "allow");
-    assert!(
-        !events.exists(),
-        "a non-king session must write no king events"
-    );
-}
-
-#[test]
-fn king_arm_never_reads_the_target_manifest() {
-    // The kill criterion this arm ships under says a diff reaching into the
-    // target arm means the second-driver framing was wrong. This asserts the
-    // runtime half of that: a target manifest sitting in the same checkout
-    // changes nothing about a king fire.
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    fs::create_dir_all(cwd.join(".fno")).unwrap();
-    fs::write(
-        cwd.join(".fno/target-state.md"),
-        "---\nsession_id: t-1\n---\n",
-    )
-    .unwrap();
-    let state = king_manifest(cwd, "k-iso");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-    let fno = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
-
-    let (code, d) = king_fire(&state, cwd, &events, &fno);
-    assert_eq!(code, 0);
-    assert_eq!(d["termination_reason"], "NoWork");
-}
-
-#[test]
-fn king_arm_honors_the_cancel_sentinel() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    fs::create_dir_all(cwd.join(".fno")).unwrap();
-    let state = king_manifest(cwd, "k-cancel");
-    fs::write(state.with_extension("cancelled"), "").unwrap();
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
-
-    let (code, d) = king_fire(&state, cwd, &events, &fno);
-    assert_eq!(code, 0);
-    assert_eq!(d["termination_reason"], "Interrupted");
-}
-
-#[test]
-fn king_arm_blocks_rather_than_certifying_a_board_it_cannot_read() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-blind");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-    let fno = king_board_bin(bin_dir.path(), "not json at all", 1);
-
-    let (code, d) = king_fire(&state, cwd, &events, &fno);
-
-    assert_eq!(code, 2, "blind is not clean: {d}");
-    assert_eq!(
-        d["decision"], "block",
-        "the unavailable path stays exit 2 (fail-closed): {d}"
-    );
-    assert!(d["reason"].as_str().unwrap().contains("unreadable"));
-}
-
-/// Append one event row to a king journal.
-fn king_event(events: &Path, event_type: &str, data: serde_json::Value) {
-    use std::io::Write;
-    let row = serde_json::json!({
-        "ts": "2026-08-18T00:00:00Z",
-        "type": event_type,
-        "source": "hook",
-        "data": data,
-    });
-    let mut f = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(events)
-        .unwrap();
-    writeln!(f, "{row}").unwrap();
-}
-
-#[test]
-fn a_cleared_row_is_progress_and_needs_no_event_producer() {
-    // The defect this replaces: progress keyed ONLY on a king_action event, and
-    // nothing in the repo emitted one, so every king hit NoProgress on fire 3.
-    // A row leaving the board is external truth and needs no producer at all.
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-cleared");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-
-    // Two dry fires that recorded both rows...
-    let ids = serde_json::json!(["undispatched:x-1234", "undispatched:x-5678"]);
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-cleared", "actionable_ids": ids}),
-    );
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-cleared", "actionable_ids": ids}),
-    );
-
-    // ...then a board with x-1234 gone. That is work the king did.
-    let fno = king_board_bin(bin_dir.path(), BOARD_ONE_CLEARED, 0);
-    let (code, d) = king_fire(&state, cwd, &events, &fno);
-
-    assert_eq!(code, 0, "clearing a row must keep the loop running: {d}");
-    assert_eq!(
-        d["decision"], "block",
-        "a block at exit 0 must still say so in the JSON: {d}"
-    );
-    assert_eq!(d["fires"], 1, "the dry-fire counter must have reset");
-}
-
-#[test]
-fn the_cleared_row_reset_survives_into_the_next_fire() {
-    // The defect: `king_decide` reset a LOCAL `dry` and the journal kept the
-    // rows, so the next fire recounted them. The 3-fire tolerance shrank by one
-    // per fire and a king that was demonstrably working still died NoProgress.
-    //
-    // The sibling test above passes either way, because it asserts only the
-    // fire that clears. This one asserts the fire AFTER it, which is where the
-    // forgetting showed up.
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-durable");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-
-    let ids = serde_json::json!(["undispatched:x-1234", "undispatched:x-5678"]);
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-durable", "actionable_ids": ids}),
-    );
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-durable", "actionable_ids": ids}),
-    );
-
-    // Fire that clears x-1234.
-    let cleared_bin = king_board_bin(bin_dir.path(), BOARD_ONE_CLEARED, 0);
-    let (code, d) = king_fire(&state, cwd, &events, &cleared_bin);
-    assert_eq!(code, 0, "the clearing fire must keep running: {d}");
-    assert_eq!(d["decision"], "block");
-
-    // The very next fire clears nothing. Pre-fix this read three dry fires and
-    // terminated; the king had just done real work one fire earlier.
-    let (code, d) = king_fire(&state, cwd, &events, &cleared_bin);
-    assert_eq!(
-        code, 0,
-        "a single dry fire after real progress must not end the king: {d}"
-    );
-    assert_eq!(d["decision"], "block");
-    assert_eq!(
-        d["termination_reason"],
-        serde_json::Value::Null,
-        "no terminal one fire after a cleared row: {d}"
-    );
-    assert_eq!(
-        d["fires"], 1,
-        "the counter restarts from the clear, not from 0 fires ago"
-    );
-}
-
-#[test]
-fn a_row_cleared_while_the_board_grew_is_still_progress() {
-    // Progress is a row LEAVING, never board size. The board refills while the
-    // king works, so a count that went up can still carry real progress.
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-refill");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-
-    let ids = serde_json::json!(["undispatched:x-1234", "undispatched:x-5678"]);
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-refill", "actionable_ids": ids}),
-    );
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-refill", "actionable_ids": ids}),
-    );
-
-    let fno = king_board_bin(bin_dir.path(), BOARD_REFILLED, 0);
-    let (code, d) = king_fire(&state, cwd, &events, &fno);
-
-    assert_eq!(code, 0, "a grown board that cleared a row is progress: {d}");
-    assert_eq!(d["decision"], "block");
-    assert_eq!(d["actionable"], 3);
-    assert_eq!(d["fires"], 1);
-}
-
-#[test]
-fn an_unchanged_board_clears_nothing_and_still_reaches_noprogress() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-same");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-
-    let ids = serde_json::json!(["undispatched:x-1234", "undispatched:x-5678"]);
-    for _ in 0..2 {
-        king_event(
-            &events,
-            "king_loop_check",
-            serde_json::json!({"session_id": "k-same", "actionable_ids": ids}),
-        );
-    }
-
-    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
-    let (code, d) = king_fire(&state, cwd, &events, &fno);
-
-    assert_eq!(code, 0);
-    assert_eq!(d["termination_reason"], "NoProgress");
-}
-
-#[test]
-fn a_fire_records_the_actionable_ids_the_next_fire_compares_against() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-record");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
-
-    king_fire(&state, cwd, &events, &fno);
-
-    let journal = fs::read_to_string(&events).unwrap();
-    let row: serde_json::Value = journal
-        .lines()
-        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
-        .find(|v| v["type"] == "king_loop_check")
-        .expect("a blocking fire must record its board");
-    let ids = row["data"]["actionable_ids"].as_array().unwrap();
-    assert_eq!(
-        ids.len(),
-        2,
-        "without these the next fire cannot see a clear"
-    );
-    assert_eq!(ids[0], "undispatched:x-1234");
-}
-
-#[test]
-fn king_progress_is_an_action_against_a_target_id_not_seen_before() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-progress");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
-
-    // Two dry fires, then a real action: the counter goes back to zero, so the
-    // next fire blocks rather than giving up.
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-progress"}),
-    );
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-progress"}),
-    );
-    king_event(
-        &events,
-        "king_action",
-        serde_json::json!({"session_id": "k-progress", "kind": "dispatch", "target_id": "x-1234"}),
-    );
-
-    let (code, d) = king_fire(&state, cwd, &events, &fno);
-    assert_eq!(code, 0, "progress must keep the loop running: {d}");
-    assert_eq!(d["decision"], "block");
-    assert_eq!(d["fires"], 1, "the dry-fire counter must have reset");
-}
-
-#[test]
-fn king_noprogress_ends_a_board_that_refuses_to_shrink() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-stuck");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
-
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-stuck"}),
-    );
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-stuck"}),
-    );
-
-    let (code, d) = king_fire(&state, cwd, &events, &fno);
-
-    assert_eq!(code, 0);
-    assert_eq!(d["termination_reason"], "NoProgress");
-    let reason = d["reason"].as_str().unwrap();
-    assert!(
-        reason.contains('2') && reason.contains("actionable"),
-        "the terminal must name what stayed unshrunk: {reason}"
-    );
-}
-
-#[test]
-fn a_repeated_king_action_is_not_progress() {
-    // The specific way this loop would fail to converge, and it passes every
-    // naive test: `stalled_holder` rows survive the one action a king has for
-    // them, so re-waking the same node forever would reset the counter forever.
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-repeat");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
-
-    let wake = serde_json::json!({"session_id": "k-repeat", "kind": "wake", "target_id": "x-1234"});
-    king_event(&events, "king_action", wake.clone());
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-repeat"}),
-    );
-    king_event(&events, "king_action", wake.clone());
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-repeat"}),
-    );
-
-    let (code, d) = king_fire(&state, cwd, &events, &fno);
-
-    assert_eq!(
-        code, 0,
-        "a repeated action must not hold the loop open: {d}"
-    );
-    assert_eq!(d["termination_reason"], "NoProgress");
-}
-
-#[test]
-fn another_kings_events_do_not_move_this_kings_counter() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-mine");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
-
-    for _ in 0..5 {
-        king_event(
-            &events,
-            "king_loop_check",
-            serde_json::json!({"session_id": "k-other"}),
-        );
-    }
-
-    let (code, d) = king_fire(&state, cwd, &events, &fno);
-    assert_eq!(code, 0, "a sibling king's fires are not mine: {d}");
-    assert_eq!(d["decision"], "block");
-    assert_eq!(d["fires"], 1);
-}
-
-#[test]
-fn an_empty_board_wins_over_a_dry_fire_streak() {
-    // NoWork is the clean terminal and must not be pre-empted by NoProgress:
-    // a king that drained its board on the third fire finished, it did not stall.
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-drained");
-    let events = cwd.join("events.jsonl");
-    let bin_dir = TempDir::new().unwrap();
-    let fno = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
-
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-drained"}),
-    );
-    king_event(
-        &events,
-        "king_loop_check",
-        serde_json::json!({"session_id": "k-drained"}),
-    );
-
-    let (code, d) = king_fire(&state, cwd, &events, &fno);
-    assert_eq!(code, 0);
-    assert_eq!(d["termination_reason"], "NoWork");
-}
-
-#[test]
-fn an_unknown_driver_is_refused_rather_than_run_against_the_wrong_gate() {
-    let (code, json) = fno_agents::loopcheck::run_loop_check_capture(&[
-        "loop-check".to_string(),
-        "--driver".to_string(),
-        "emperor".to_string(),
-        "--state".to_string(),
-        "/nonexistent".to_string(),
-        "--transcript".to_string(),
-        "/nonexistent".to_string(),
-        "--cwd".to_string(),
-        "/tmp".to_string(),
-    ]);
-    assert_eq!(code, 2);
-    let d: serde_json::Value = serde_json::from_str(&json).unwrap();
-    let err = d["error"].as_str().unwrap();
-    assert!(
-        err.contains("emperor") && err.contains("king"),
-        "got: {err}"
-    );
-}
-
-/// A mock `fno` that answers `inbox board --json` and LOGS every
-/// `agents king escalate`
-/// argv, so a test can read back which paths escalated and over what.
-fn king_escalate_bin(dir: &Path, payload: &str, log: &Path) -> PathBuf {
-    make_script(
-        dir,
-        "fno-king-escalate-mock",
-        &format!(
-            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"escalate\" ]; then\n\
-             \x20 echo \"$*\" >> {log}\n\
-             \x20 echo q-mock\n\
-             \x20 exit 0\n\
-             fi\n\
-             cat <<'JSON'\n{payload}\nJSON",
-            log = log.display()
-        ),
-    )
-}
-
-/// Plan verification 7, first half: EVERY NoProgress terminal escalates.
-///
-/// `king_decide` reaches NoProgress two ways: a board it could not read for
-/// the whole dry-fire run, and a board whose rows nothing cleared. Both route
-/// through the shared `terminate` closure, so both escalate and a terminal
-/// added later is covered without anyone remembering to wire it. This drives
-/// both rather than asserting the helper they share, which would pin the
-/// function and not the destination.
-///
-/// The second half, that repeated calls over one stalled set yield exactly ONE
-/// operator question, is `test_king_escalate.py`: the dedupe lives in the verb,
-/// and a mock `fno` here records no questions to count. Neither test alone is
-/// the verification; the seam between them is the `--stalled` argument.
-#[test]
-fn every_king_noprogress_terminal_escalates() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let bin_dir = TempDir::new().unwrap();
-    let log = cwd.join("escalations.log");
-    let state = king_manifest(cwd, "k-escalate");
-    let events = cwd.join("events.jsonl");
-    let fno = king_escalate_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, &log);
-
-    // Terminal 1: a readable board whose rows nothing clears.
-    let mut last = (0, serde_json::Value::Null);
-    for _ in 0..3 {
-        last = king_fire(&state, cwd, &events, &fno);
-    }
-    assert_eq!(
-        last.1["termination_reason"], "NoProgress",
-        "three dry fires must reach the NoProgress terminal: {:?}",
-        last.1
-    );
-
-    let logged = fs::read_to_string(&log).unwrap_or_default();
-    let calls: Vec<&str> = logged.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(
-        calls.len(),
-        1,
-        "the unshrunk-board terminal escalates: {logged}"
-    );
-    assert!(
-        calls[0].contains("--stalled undispatched:x-1234,undispatched:x-5678"),
-        "it escalates over the board's actionable rows, QUEUE-QUALIFIED \
-         (the same node in two queues is two rows), got: {}",
-        calls[0]
-    );
-
-    // Terminal 2: a board that never answers. There are no ids to name, so the
-    // escalation carries an EMPTY set rather than being skipped. An operator
-    // told nothing is the failure this verb exists to prevent, and a king that
-    // cannot see its board is the case most worth telling them about.
-    let blind_tmp = TempDir::new().unwrap();
-    let blind_cwd = blind_tmp.path();
-    let blind_log = blind_cwd.join("escalations.log");
-    let blind_state = king_manifest(blind_cwd, "k-blind");
-    let blind_events = blind_cwd.join("events.jsonl");
-    let blind_bin = king_escalate_bin(bin_dir.path(), "not json at all", &blind_log);
-
-    let mut blind = (0, serde_json::Value::Null);
-    for _ in 0..3 {
-        blind = king_fire(&blind_state, blind_cwd, &blind_events, &blind_bin);
-    }
-    assert_eq!(
-        blind.1["termination_reason"], "NoProgress",
-        "an unreadable board must terminate rather than block forever: {:?}",
-        blind.1
-    );
-    let blind_logged = fs::read_to_string(&blind_log).unwrap_or_default();
-    let blind_calls: Vec<&str> = blind_logged
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
-    assert_eq!(
-        blind_calls.len(),
-        1,
-        "the unreadable-board terminal escalates too: {blind_logged}"
-    );
-    assert!(
-        blind_calls[0].contains("--stalled  --reason NoProgress")
-            || blind_calls[0].contains("--stalled --reason"),
-        "with no rows to name it still escalates, got: {}",
-        blind_calls[0]
-    );
-}
-
-/// The ceiling `--max-iterations` advertises must actually bind.
-///
-/// It was parsed into the manifest and read by nothing, so the help string
-/// promised a bound that did not exist. A help string that lies is worse than
-/// a missing flag: someone sets it, believes the king is bounded, and walks
-/// away.
-///
-/// Progress is deliberately irrelevant here. A king clearing a row every fire
-/// never trips the dry-fire counter, so without this it runs forever. That is
-/// the case the flag exists for.
-#[test]
-fn the_manifest_iteration_ceiling_stops_a_king_that_is_still_working() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let bin_dir = TempDir::new().unwrap();
-    let events = cwd.join("events.jsonl");
-
-    // A manifest with a ceiling of 3 rather than the default 40.
-    let state = cwd.join("king-state.md");
-    fs::write(
-        &state,
-        "---\nfno_id: k-budget\ncreated_at: 2026-08-18T00:00:00Z\nscope: drain\n\
-         harness: claude\nbudget_max_iterations: 3\n---\n",
-    )
-    .unwrap();
-
-    // Every fire clears a row, so the dry-fire counter never trips.
-    let boards = [BOARD_TWO_ACTIONABLE, BOARD_ONE_CLEARED, BOARD_REFILLED];
-    let mut last = (0, serde_json::Value::Null);
-    for (i, payload) in boards.iter().enumerate() {
-        let fno = king_board_bin(bin_dir.path(), payload, 0);
-        last = king_fire(&state, cwd, &events, &fno);
-        if i < boards.len() - 1 {
-            assert_eq!(
-                last.0, 0,
-                "fire {i} must keep the king running: {:?}",
-                last.1
-            );
-        }
-    }
-
-    assert_eq!(
-        last.1["termination_reason"], "Budget",
-        "the third fire reaches the manifest ceiling: {:?}",
-        last.1
-    );
-    assert_ne!(
-        last.1["termination_reason"], "NoProgress",
-        "a king that cleared a row every fire did not stall"
-    );
-}
-
-/// A terminal that is NOT NoProgress never escalates. NoWork is the king's
-/// clean exit; asking the operator about a board it just emptied would train
-/// them to ignore the queue this feature depends on.
-#[test]
-fn a_clean_king_terminal_does_not_ask_the_operator_anything() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let bin_dir = TempDir::new().unwrap();
-    let log = cwd.join("escalations.log");
-    let state = king_manifest(cwd, "k-clean");
-    let events = cwd.join("events.jsonl");
-    let fno = king_escalate_bin(bin_dir.path(), BOARD_CLEAN, &log);
-
-    let (_, json) = king_fire(&state, cwd, &events, &fno);
-    assert_eq!(json["termination_reason"], "NoWork");
-    assert!(
-        !log.exists(),
-        "a NoWork terminal must not escalate: {}",
-        fs::read_to_string(&log).unwrap_or_default()
     );
 }
 
@@ -9693,7 +8918,7 @@ fn assert_timeout_block(
 #[test]
 fn external_read_timeout_pr_view_names_the_read_not_a_sibling() {
     let ws = wedged_setup("pr_view");
-    let events = ws._tmp.path().join(".fno/events.jsonl");
+    let events = project_events(ws._tmp.path());
     let git = MockBins::green().git;
     let (code, d, elapsed) =
         wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
@@ -9705,7 +8930,7 @@ fn external_read_timeout_pr_view_names_the_read_not_a_sibling() {
 #[test]
 fn external_read_timeout_pr_checks_names_the_read() {
     let ws = wedged_setup("pr_checks");
-    let events = ws._tmp.path().join(".fno/events.jsonl");
+    let events = project_events(ws._tmp.path());
     let git = MockBins::green().git;
     let (code, d, elapsed) =
         wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
@@ -9715,7 +8940,7 @@ fn external_read_timeout_pr_checks_names_the_read() {
 #[test]
 fn external_read_timeout_pr_reviews_names_the_read() {
     let ws = wedged_setup("pr_reviews");
-    let events = ws._tmp.path().join(".fno/events.jsonl");
+    let events = project_events(ws._tmp.path());
     let git = MockBins::green().git;
     let (code, d, elapsed) =
         wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
@@ -9725,7 +8950,7 @@ fn external_read_timeout_pr_reviews_names_the_read() {
 #[test]
 fn external_read_timeout_fingerprint_read_names_the_read() {
     let ws = wedged_setup("fingerprint_pr_view");
-    let events = ws._tmp.path().join(".fno/events.jsonl");
+    let events = project_events(ws._tmp.path());
     let git = MockBins::green().git;
     let (code, d, elapsed) =
         wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
@@ -9795,65 +9020,10 @@ exit 0"#,
     );
 }
 
-/// The king driver's one external read (the board) is bounded too, and a
-/// wedged board blocks with the killed-timeout wording rather than hanging
-/// the king's fire.
-#[test]
-fn external_read_timeout_king_board_blocks_named() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    let state = king_manifest(cwd, "k-wedge");
-    let events = cwd.join("events.jsonl");
-    let bins = TempDir::new().unwrap();
-    // The mock must answer the harness's `--version` probe instantly: an
-    // unconditional sleep costs the setup 30s before the fire even starts
-    // (make_script probe-runs every generated script once).
-    let fno = make_script(
-        bins.path(),
-        "fno-king-mock",
-        "[ \"$1\" = \"--version\" ] && exit 0\nsleep 30",
-    );
-
-    let started = std::time::Instant::now();
-    let (code, json) = fno_agents::loopcheck::run_loop_check_capture(&[
-        "loop-check".to_string(),
-        "--driver".to_string(),
-        "king".to_string(),
-        "--state".to_string(),
-        state.to_str().unwrap().to_string(),
-        "--transcript".to_string(),
-        cwd.join("transcript.jsonl").to_str().unwrap().to_string(),
-        "--cwd".to_string(),
-        cwd.to_str().unwrap().to_string(),
-        "--events".to_string(),
-        events.to_str().unwrap().to_string(),
-        "--global-events".to_string(),
-        events.to_str().unwrap().to_string(),
-        "--fno-bin".to_string(),
-        fno.to_str().unwrap().to_string(),
-        "--read-timeout-ms".to_string(),
-        "1000".to_string(),
-    ]);
-    let elapsed = started.elapsed();
-    let d: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(d["decision"], "block", "{d}");
-    let reason = d["reason"].as_str().unwrap();
-    assert!(
-        reason.contains("external read 'king_board' timed out after"),
-        "the king block reason must name the wedged board read: {reason}"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_secs(10),
-        "king fire must return within the bound plus slack, took {elapsed:?}"
-    );
-    assert_eq!(
-        code, 2,
-        "a king block exits 2 like the non-empty board: {code}"
-    );
-}
-
+/// The board's reads are bounded by the collector's own budget now (the
+/// transport timeout died with the subprocess board read): a wedged source
+/// dies at its slice, the fire still decides, and the payload names the
 // ── operator-law waiver (review coverage) ───────────────────────────────────
-
 use fno_agents::loopcheck::operator_waiver;
 
 const HEAD40: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
@@ -10104,7 +9274,7 @@ fn review_posture_defaults_to_self_review_and_reports_gaps() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("proj");
     pub_fixture(&cwd, "");
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = tmp.path().join("global.jsonl");
     let bins = TempDir::new().unwrap();
     let gh = recording_green_gh(bins.path(), &tmp.path().join("rec"), false);
@@ -10133,7 +9303,7 @@ fn review_posture_explicit_github_rung_is_satisfied_by_app_review() {
         &cwd,
         "[review]\nposture = \"github_review\"\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
     );
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = tmp.path().join("global.jsonl");
     let bins = TempDir::new().unwrap();
     let gh = recording_green_gh(bins.path(), &tmp.path().join("rec"), true);
@@ -10164,7 +9334,7 @@ fn review_posture_legacy_inference_names_self_and_github() {
         &cwd,
         "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
     );
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = tmp.path().join("global.jsonl");
     let bins = TempDir::new().unwrap();
     let gh = recording_green_gh(bins.path(), &tmp.path().join("rec"), true);
@@ -10197,7 +9367,7 @@ fn review_posture_independent_rung_requires_fresh_context_marker() {
         &cwd,
         "[review]\nposture = \"independent_review\"\nreviewers = [\"code-review\"]\n",
     );
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = tmp.path().join("global.jsonl");
     let bins = TempDir::new().unwrap();
     let gh = recording_green_gh(bins.path(), &tmp.path().join("rec"), false);
@@ -10247,7 +9417,7 @@ fn review_posture_declare_and_sigma_never_satisfy_the_self_component() {
         &cwd,
         "[review]\nposture = \"self_review\"\nreviewers = [\"declare\", \"sigma\"]\n",
     );
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = tmp.path().join("global.jsonl");
     let bins = TempDir::new().unwrap();
     let gh = recording_green_gh(bins.path(), &tmp.path().join("rec"), false);

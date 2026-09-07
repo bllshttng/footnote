@@ -19,6 +19,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+
+from fno.paths import project_log
 from typer.testing import CliRunner
 
 from fno.harness_identity import OwnedHarnessIdentity
@@ -74,7 +76,6 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # would pass on the real session id rather than the one they set.
     import fno.paths as paths_mod
 
-    paths_mod.resolve_repo_root.cache_clear()
     # The clear path projects decisions onto the subject node's graph entry,
     # resolving GRAPH_JSON through the module attribute. Pin it to a
     # nonexistent path so these tests never read or write the real machine
@@ -217,7 +218,7 @@ def test_ask_records_the_answer_text_on_clear(root: Path):
     runner.invoke(outstanding_app, ["clear", qid, "--answer", "the codex lane"])
     lines = [
         json.loads(line)
-        for line in (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in project_log("events.jsonl", project_root=root).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     closed = [e for e in lines if e["type"] == "operator_question_closed"]
@@ -258,7 +259,7 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
     )
 
     assert asked.exit_code == 0, asked.output
-    event = json.loads((root / ".fno" / "events.jsonl").read_text().splitlines()[-1])
+    event = json.loads(project_log("events.jsonl", project_root=root).read_text().splitlines()[-1])
     assert event["data"]["asker"] == "01234567"
     assert event["data"]["ask"] == "pick one"
     assert event["data"]["options"] == ["index", "journal"]
@@ -664,7 +665,7 @@ def test_clear_with_answer_emits_operator_decision(root: Path):
 
     lines = [
         json.loads(line)
-        for line in (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in project_log("events.jsonl", project_root=root).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     decisions = [e for e in lines if e["type"] == "operator_decision"]
@@ -689,7 +690,7 @@ def test_clear_with_answer_emits_operator_decision(root: Path):
     runner.invoke(outstanding_app, ["clear", qid2])
     lines = [
         json.loads(line)
-        for line in (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in project_log("events.jsonl", project_root=root).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     assert len([e for e in lines if e["type"] == "operator_decision"]) == 1
@@ -718,7 +719,7 @@ def test_clear_with_answer_records_operator_authority_when_stated_at_a_terminal(
 
     lines = [
         json.loads(line)
-        for line in (root / ".fno" / "events.jsonl")
+        for line in project_log("events.jsonl", project_root=root)
         .read_text(encoding="utf-8")
         .splitlines()
         if line.strip()
@@ -844,7 +845,7 @@ def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):
     found among 20k unrelated rows) plus a wall-clock ceiling.
     """
     qid = runner.invoke(outstanding_app, ["ask", "buried under noise?"]).stdout.strip().splitlines()[-1]
-    events = root / ".fno" / "events.jsonl"
+    events = project_log("events.jsonl", project_root=root)
     noise = json.dumps(
         {"ts": "2026-08-01T00:00:00Z", "type": "phase_transition", "source": "target",
          "data": {"phase": "do", "nonce": "x" * 32, "session_id": "s", "gate_bearing": False}}
@@ -864,7 +865,7 @@ def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):
 
 def test_a_malformed_events_line_is_skipped_never_raised(root: Path):
     qid = runner.invoke(outstanding_app, ["ask", "still readable?"]).stdout.strip().splitlines()[-1]
-    events = root / ".fno" / "events.jsonl"
+    events = project_log("events.jsonl", project_root=root)
     with events.open("a", encoding="utf-8") as fh:
         fh.write("{not json at all\n")
 
@@ -881,7 +882,7 @@ def test_question_index_dual_writes_ask_and_close(root: Path):
     assert asked.exit_code == 0, asked.output
     qid = asked.stdout.strip().splitlines()[-1]
 
-    project_path = root / ".fno" / "events.jsonl"
+    project_path = project_log("events.jsonl", project_root=root)
     index_path = root / "questions.jsonl"
     project_ask = json.loads(project_path.read_text(encoding="utf-8").splitlines()[-1])
     index_ask = json.loads(index_path.read_text(encoding="utf-8").splitlines()[-1])
@@ -916,7 +917,7 @@ def test_question_index_failure_names_id_and_reindex(root: Path, monkeypatch: py
     assert "q-feedface" in result.output
     assert "fno inbox outstanding reindex" in result.output
     durable = json.loads(
-        (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+        project_log("events.jsonl", project_root=root).read_text(encoding="utf-8").splitlines()[-1]
     )
     assert durable["data"]["question_id"] == "q-feedface"
 
@@ -944,7 +945,7 @@ def test_question_close_index_failure_names_id_and_reindex(
     assert qid in result.output
     assert "fno inbox outstanding reindex" in result.output
     project_close = json.loads(
-        (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+        project_log("events.jsonl", project_root=root).read_text(encoding="utf-8").splitlines()[-1]
     )
     assert project_close["type"] == "operator_question_closed"
     index_last = json.loads(index_path.read_text(encoding="utf-8").splitlines()[-1])
@@ -1275,7 +1276,6 @@ def capture_roots(
     monkeypatch.setenv("FNO_REPO_ROOT", str(this))
     import fno.paths as paths_mod
 
-    paths_mod.resolve_repo_root.cache_clear()
     (this / ".fno").mkdir(exist_ok=True)
     graph = tmp_path / "graph.json"
     graph.write_text(

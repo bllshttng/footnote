@@ -90,10 +90,7 @@ python3 scripts/metrics/backfill-cost-recompute.py --apply    # write
   transcripts -> cost/3 (`pricing_only` - exact for the pricing component,
   the dedup factor is unknowable without data); anything else ->
   `no_transcript`, cost untouched, never guess.
-- Graph `cost_sessions` rows are corrected via session-id cross-reference
-  through `fno.graph.store.locked_mutate_graph` (flock + backup +
-  SHA256 sidecar). `session_id` fields are never rewritten - the budget
-  enforcement path greps by session-id prefix.
+- Graph `cost_sessions` rows are corrected via session-id cross-reference through `fno.graph.store.locked_mutate_graph` (flock + backup). `session_id` fields are never rewritten - the budget enforcement path greps by session-id prefix.
 - Concurrency: holds the register path's ledger flock
   (`/tmp/fno-ledger.lock`); `--apply` refuses while live
   target-session claims exist in `~/.fno/claims` (both TTL and

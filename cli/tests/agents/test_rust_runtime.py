@@ -424,7 +424,16 @@ def test_python_agent_verbs_match_registered_commands() -> None:
         # a Rust client port.
         "spawn",
     }
-    lazy_python_owned = set(rr.FOLDED_AGENT_SUBCOMMANDS) & set(rr.RUST_CLIENT_VERBS)
+    # Folded single-command leaves whose verb has NO Rust client port: they
+    # left ``registered_commands`` when they moved out of cli.py, so the
+    # RUST_CLIENT_VERBS intersection below cannot see them. Naming them here
+    # keeps the guard's teeth: a new folded leaf must be added to
+    # PYTHON_AGENT_VERBS and named here, or the assert fires. (`reseat` left
+    # when the whole verb moved to the native `fno mux thread reseat`.)
+    folded_python_leaves: set[str] = set()
+    lazy_python_owned = (
+        set(rr.FOLDED_AGENT_SUBCOMMANDS) & set(rr.RUST_CLIENT_VERBS)
+    ) | folded_python_leaves
     python_owned = (registered - rust_parity_verbs) | lazy_python_owned
     assert python_owned == set(rr.PYTHON_AGENT_VERBS), (
         "PYTHON_AGENT_VERBS is out of sync with the agents_app commands.\n"
@@ -476,7 +485,13 @@ def test_rust_client_verbs_match_client_rs() -> None:
     # Verbs dispatched before build_request via `verb == "…"` (drive, status; the
     # `--emit-schema` flag starts with `-` so it is excluded by the same anchor).
     specials = set(re.findall(r'verb == "([a-z][a-z0-9-]*)"', src))
-    routable = arms | specials
+    # Hidden direct-dispatch arms: the binary serves them before build_request,
+    # but Python never routes them. `board` is reached only through
+    # `fno inbox board` shelling to the binary via resolve_binary (d-e11b2b3e);
+    # adding it to RUST_CLIENT_VERBS would mint a second surface for it.
+    # `notify-watch` is the same shape: the pr-watch tick phase and the arms
+    # readout are its only callers, both through resolve_binary.
+    routable = arms | (specials - {"board", "notify-watch"})
 
     assert routable == set(rr.RUST_CLIENT_VERBS), (
         "RUST_CLIENT_VERBS is out of sync with client.rs routable verbs.\n"
@@ -1041,6 +1056,25 @@ def test_the_account_picker_leaves_a_cutover_spawn_alone(monkeypatch) -> None:
     )
     args = ["spawn", "w", "--harness", "claude", "--dispatch-account", "ccr"]
     assert rr._pick_account_at_seam(args) == args
+
+
+def test_the_seam_pick_fires_for_spawn_itself(monkeypatch) -> None:
+    """The pick, scrub and remap refusal live in the seam's shared arm, so a
+    spawn takes them like every worker verb. Wiring them only into the elif
+    made the whole provenance carrier decorative on the spawn path: a
+    bg spawn exec'd the Rust client and minted its row off whatever stale
+    parent env it inherited. The patch's exit code only surfaces if the seam
+    actually called it."""
+    from fno.cli import app
+
+    monkeypatch.setattr(rr, "_pick_account_at_seam", lambda args: exit(99))
+    result = CliRunner().invoke(app, ["agents", "spawn", "--name", "w-seam", "hi"])
+    assert result.exit_code == 99, result.output
+
+    # rm owns its own elif arm: the account seam must not leak into it.
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
+    result = CliRunner().invoke(app, ["agents", "rm", "--name", "w-seam"])
+    assert result.exit_code != 99, result.output
 
 
 def test_exec_lane_scrubs_ambient_identity_before_rust_spawn(monkeypatch, tmp_path) -> None:

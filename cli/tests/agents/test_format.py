@@ -457,6 +457,13 @@ def test_serialize_entry_emits_the_persisted_node() -> None:
     assert row["node"] == "x-cafe"
 
 
+def test_serialize_entry_keeps_unobserved_node_unknown() -> None:
+    """A row with no measured provenance stays null; names are not a fallback."""
+    row = serialize_entry(_claude_entry(node=None), live_status=None)
+
+    assert row["node"] is None
+
+
 def test_serialize_entry_carries_the_observed_model() -> None:
     """The derived reading reaches the row, and defaults to the same
     `no-transcript` the resolver reports when it finds no file -- never to a

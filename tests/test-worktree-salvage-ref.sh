@@ -40,7 +40,7 @@ extract_install_snippet() {
   # file and the create/prepend logic it mirrors had already drifted once).
   # Bounded by two markers that each occur exactly once in the file; the
   # end marker line is excluded from the extracted range.
-  sed -n '/^_salvage_marker="worktree-salvage-ref\.sh"$/,/^if (( events_journal_shared == 0 )); then$/p' \
+  sed -n '/^_salvage_marker="worktree-salvage-ref\.sh"$/,/^echo "setup-worktree: linked shared state/p' \
     "$SETUP_WORKTREE_SH" | sed '$d'
 }
 

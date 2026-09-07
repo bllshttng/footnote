@@ -21,6 +21,7 @@ import typer
 
 from fno.approvals.cli import approvals_app
 from fno.decide.cli import backlog_decide, backlog_decisions
+from fno.inbox.operator_turns import operator_app
 from fno.king.cli import board_cmd
 from fno.law import law_app
 from fno.notify.cli import notify_app
@@ -29,7 +30,8 @@ from fno.outstanding.cli import outstanding_app
 inbox_app = typer.Typer(
     name="inbox",
     help="What is waiting on a human: approvals, notifications, outstanding "
-    "carve-outs and questions, the king board, decisions, and law.",
+    "carve-outs and questions, the king board, decisions, law, and the "
+    "operator conversation queue.",
     no_args_is_help=True,
 )
 
@@ -37,6 +39,7 @@ inbox_app.add_typer(approvals_app, name="approvals")
 inbox_app.add_typer(notify_app, name="notify")
 inbox_app.add_typer(outstanding_app, name="outstanding")
 inbox_app.add_typer(law_app, name="law")
+inbox_app.add_typer(operator_app, name="operator")
 inbox_app.command("board")(board_cmd)
 inbox_app.command("decide")(backlog_decide)
 inbox_app.command("decisions")(backlog_decisions)

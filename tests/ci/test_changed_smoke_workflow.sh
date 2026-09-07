@@ -70,9 +70,12 @@ check(changed.get("if") == "github.event_name == 'pull_request'",
       "changed-smoke is PR-only",
       f"changed-smoke event guard is {changed.get('if')!r}, not pull_request")
 
-# --- AC8: started together, no dependency edge either way -------------------
-check("needs" not in changed, "changed-smoke has no needs (starts immediately)",
-      f"changed-smoke waits on {changed.get('needs')!r} - that delays first feedback")
+# --- AC8: the packet never gates the merge gate, and its one edge is the ---
+# --- sizer, which runs no tests ---------------------------------------------
+# The needs edge used to be forbidden outright, when the cap was fixed and no
+# job had anything a dependency could give the packet. The cap is sized from
+# the packet now, so changed-smoke needs the sizer - and only the sizer: any
+# other edge means some other job's work sits in front of first feedback.
 def _needs(job):
     n = job.get("needs")
     return [n] if isinstance(n, str) else list(n or [])
@@ -94,8 +97,48 @@ check(not _reaches("smoke", "changed-smoke"),
       "changed packet never gates the merge gate",
       "smoke depends on changed-smoke - partial feedback now delays the merge gate")
 
+SIZER = "changed-packet-size"
+check(_needs(changed) == [SIZER],
+      f"changed-smoke's only dependency is the {SIZER} sizer",
+      f"changed-smoke needs {_needs(changed)} - only {SIZER} may sit in front of it")
+if fails:
+    sys.exit(1)
+sizer = jobs[SIZER]
+sizer_run = "\n".join(s.get("run", "") for s in sizer["steps"])
 changed_run = "\n".join(s.get("run", "") for s in changed["steps"])
 smoke_run = "\n".join(s.get("run", "") for s in smoke["steps"])
+
+# The sizer is a measurement, never a runner: selection only, so no suite can
+# hide behind it and its cost stays seconds.
+check("--list" in sizer_run, "the sizer runs selection only (--list)",
+      "the sizer runs more than the --list selection")
+check(sizer.get("if") == "github.event_name == 'pull_request'",
+      "the sizer is PR-only like the job it sizes",
+      f"the sizer event guard is {sizer.get('if')!r}, not pull_request")
+check(sizer.get("steps", [{}])[0].get("with", {}).get("fetch-depth") == 0,
+      "the sizer fetches full history (its diff must resolve)",
+      "the sizer uses a shallow checkout - its estimate would be UNEVALUATED")
+
+# The ceiling must come from the sizer, spelled the same way in both places it
+# is consumed: the job's own timeout and the env the steps read. Two spellings
+# of one number drift independently.
+check(changed.get("timeout-minutes")
+      == "${{ fromJSON(needs.changed-packet-size.outputs.timeout_minutes) }}",
+      "the changed-smoke timeout is the sizer's ceiling",
+      f"changed-smoke timeout-minutes is {changed.get('timeout-minutes')!r} - it must be "
+      "the sizer's timeout_minutes")
+env = changed.get("env") or {}
+check(env.get("CAP_MINUTES") == "${{ needs.changed-packet-size.outputs.timeout_minutes }}",
+      "CAP_MINUTES is the same sizer output the timeout consumes",
+      f"CAP_MINUTES is {env.get('CAP_MINUTES')!r} - the cap now lives in two spellings")
+
+# The fit assertion: a packet that cannot fit its ceiling must fail a named
+# assertion instead of running until the cap kills it into a bare `cancelled`.
+fit = [ln for ln in changed_run.splitlines() if "ASSERTION" in ln]
+check(any("ESTIMATE_MINUTES" in ln and "CAP_MINUTES" in ln for ln in fit),
+      "an oversized packet fails a named assertion citing estimate and cap",
+      "no fit assertion compares ESTIMATE_MINUTES against CAP_MINUTES - "
+      "an oversized packet would die at the cap, reported as cancelled")
 
 # --- the changed job runs the packet, with explicit revisions ---------------
 check("--changed" in changed_run, "changed-smoke invokes the --changed packet",

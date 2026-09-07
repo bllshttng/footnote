@@ -52,7 +52,6 @@ def _isolate(
     # checkout's own target-state.md instead of tmp_path's.
     from fno.paths import resolve_repo_root
 
-    resolve_repo_root.cache_clear()
     # Stub the real install so tests never execute uv/pip.
     # We patch _discover_source to return a sentinel Path, and os.execvp + subprocess.run
     # to be no-ops. Monkeypatch BEFORE invoking the command (memory: feedback_default_arg_breaks_monkeypatch_isolation).
@@ -78,7 +77,6 @@ def _isolate(
         lambda *a, **kw: fake_result,
     )
     yield
-    resolve_repo_root.cache_clear()
 
 
 def _write_state(tmp_path: Path, content: str) -> None:

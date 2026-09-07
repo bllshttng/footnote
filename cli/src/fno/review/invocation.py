@@ -2,7 +2,7 @@
 
 The sender and reviewer run in different processes, so the invocation id is
 kept in a best-effort per-session sidecar while the canonical event remains in
-the worktree's ``.fno/events.jsonl`` journal.
+the project event journal.
 """
 from __future__ import annotations
 
@@ -20,7 +20,9 @@ REVIEW_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 # The review flags whose spelling this module is the authority for: the router
 # prose cites this vocabulary rather than restating it, so a spelling accepted
 # in one place is accepted in the other and the two cannot drift.
-KNOWN_REVIEW_FLAGS = frozenset({"comment", "fix"})
+# `verify-fixes`: a scoped fix-verification, NOT a round; the cap gate derives its spelling from VERIFY_FIXES.
+VERIFY_FIXES = "verify-fixes"
+KNOWN_REVIEW_FLAGS = frozenset({"comment", "fix", VERIFY_FIXES})
 _EM_DASH = "\u2014"
 
 

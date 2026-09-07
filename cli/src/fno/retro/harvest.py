@@ -21,7 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from fno.carveout.core import BACKFILL_KIND
+from fno.carveout.core import BACKFILL_KIND, CARVEOUTS_NAME
+from fno.paths import project_log
 from fno.retro.types import (
     KIND_CARVEOUT,
     KIND_DEFERRED,
@@ -89,7 +90,9 @@ def harvest_carveouts(
     A malformed line is skipped with a warning (never aborts the harvest).
     """
     warnings = warnings if warnings is not None else []
-    ledger = repo_root / ".fno" / "carveouts.jsonl"
+    # The ledger every accessor routes through; the raw checkout path split
+    # reader from writer once the space move landed.
+    ledger = project_log(CARVEOUTS_NAME, project_root=repo_root)
     if not ledger.exists():
         return []
 

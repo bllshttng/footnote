@@ -44,7 +44,11 @@ sha2 = "0.10"
 # DefaultHasher.
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: the `mux thread reseat` verb round-trips registry.json as
+# raw JSON to clear one row's mux ref; without it serde_json would reorder
+# every key in the file on each flip. fno-agents enables it for the same
+# registry-interop reason.
+serde_json = { version = "1", features = ["preserve_order"] }
 # Read the flat `config.toml` (x-8526 stage 3): the interactive server reads
 # `config.mux.*` directly (digest_overlay Pattern B) instead of shelling `fno`.
 toml = "0.8"

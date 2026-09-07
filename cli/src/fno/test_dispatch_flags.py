@@ -83,11 +83,20 @@ def test_multiple_markers_are_ambiguous():
 
 
 def test_codex_thread_and_legacy_codex_marker_infer_same_harness():
-    env = {"CODEX_THREAD_ID": "thread", "CODEX_SESSION_ID": "session"}
+    """The same id under both codex names is one session and infers codex;
+    two DIFFERENT ids of one family are a disagreement and infer nothing
+    (x-0992), falling through to the builtin default."""
+    env = {"CODEX_THREAD_ID": "thread", "CODEX_SESSION_ID": "thread"}
     assert infer_invoking_harness(env) == "codex"
     assert resolve_dispatch_harness(None, env=env) == (
         "codex",
         "harness-inferred",
+    )
+    disagree = {"CODEX_THREAD_ID": "thread", "CODEX_SESSION_ID": "session"}
+    assert infer_invoking_harness(disagree) is None
+    assert resolve_dispatch_harness(None, env=disagree) == (
+        "claude",
+        "builtin-default",
     )
 
 

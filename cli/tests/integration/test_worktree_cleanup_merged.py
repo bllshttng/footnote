@@ -19,6 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 LIFECYCLE_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-lifecycle.sh"
 LIFECYCLE_COMPAT_SRC = REPO_ROOT / "scripts" / "worktree-lifecycle.sh"
 UNPUSHED_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-unpushed.sh"
+REAPABLE_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-reapable.sh"
+FNO_PYTHON_SRC = REPO_ROOT / "scripts" / "lib" / "fno-python.sh"
 ARCHIVE_SRC = REPO_ROOT / "scripts" / "setup" / "archive-worktree.sh"
 TARGET_GUARD_SRC = REPO_ROOT / "scripts" / "lib" / "target-guard.sh"
 REMOVAL_EVENT_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-removal-event.sh"
@@ -427,7 +429,11 @@ def test_apply_removal_emits_event_row(repo: Path, tmp_path: Path, monkeypatch):
             if line.strip()
         ]
 
-    project_rows = _rows(repo / ".fno" / "events.jsonl")
+    # The emit resolves the repo's space journal (the accessor the writers
+    # use); the checkout copy is retired.
+    from fno.paths import project_log
+
+    project_rows = _rows(project_log("events.jsonl", project_root=repo))
     hits = [row for row in project_rows if row.get("type") == "worktree_removed"]
     assert hits, f"removal emitted no row; project log types: {[r.get('type') for r in project_rows]}"
     data = hits[-1]["data"]
@@ -1174,3 +1180,62 @@ def test_deleted_upstream_archives_without_origin_head(repo: Path):
     assert "1 archived" in r.stdout, diag
     assert "no upstream and no resolvable remote HEAD" not in r.stderr, diag
     assert not wt.exists(), "worktree dir should be gone" + diag
+
+
+# ── x-11d8: setup's own symlinks must not stop the sweep ────────────────────
+#
+# `wt_reapable` discounts them, but `git worktree remove` still refuses on
+# untracked content. Without --force the sweep spends salvage and the process
+# sweep and THEN fails, so this drives the whole path end to end.
+
+
+def _wire_real_reapable(canon: Path) -> None:
+    """Give the fixture the real classifier, not the lifecycle stub.
+
+    The stub answers `dirty` for any non-empty porcelain, which is the answer
+    under test. `wt_reapable` anchors on its own file, so the two libs and a
+    `cli/` carrying src plus the venv have to sit under the fixture root.
+    """
+    venv = REPO_ROOT / "cli" / ".venv" / "bin" / "python3"
+    # Named, because without it wt_reapable falls through to whatever `fno` is
+    # installed, which may predate this change and answers `reapable=no`. The
+    # test would then fail as "kept (dirty)" and read as a code defect.
+    assert venv.exists(), f"this test needs the checkout venv at {venv}"
+    shutil.copy2(REAPABLE_SRC, canon / "scripts" / "lib" / "worktree-reapable.sh")
+    shutil.copy2(FNO_PYTHON_SRC, canon / "scripts" / "lib" / "fno-python.sh")
+    (canon / "cli").symlink_to(REPO_ROOT / "cli")
+
+
+def test_apply_reaps_a_tree_whose_only_dirt_is_setup_symlinks(repo: Path):
+    _wire_real_reapable(repo)
+    wt = _add_merged(repo, "setuplinks")
+    (repo / ".agents").mkdir(exist_ok=True)
+    (repo / ".claude").mkdir(exist_ok=True)
+    (repo / ".claude" / "skills").mkdir(exist_ok=True)
+    (wt / "cli" / ".claude").mkdir(parents=True)
+    (wt / "cli" / ".agents").symlink_to(repo / ".agents")
+    (wt / "cli" / ".claude" / "skills").symlink_to(repo / ".claude" / "skills")
+    assert _git(wt, "status", "--porcelain").stdout.strip(), "the tree must read dirty"
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "1 archived" in r.stdout, diag
+    assert not wt.exists(), "worktree dir should be gone" + diag
+    assert (repo / ".claude" / "skills").is_dir(), "the link target must survive"
+
+
+def test_a_real_untracked_file_beside_setup_symlinks_keeps_the_tree(repo: Path):
+    _wire_real_reapable(repo)
+    wt = _add_merged(repo, "mixed")
+    (repo / ".agents").mkdir(exist_ok=True)
+    (wt / "cli").mkdir()
+    (wt / "cli" / ".agents").symlink_to(repo / ".agents")
+    (wt / "cli" / "scratch.py").write_text("real work\n")
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert wt.exists(), "a tree holding real untracked work must be kept" + diag
+    assert (wt / "cli" / "scratch.py").exists(), diag

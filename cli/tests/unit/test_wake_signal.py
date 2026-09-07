@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from fno.wake.signal import WakeSignal, drop_signal, drain_signals
+from fno.wake.signal import WakeSignal, drop_signal, drain_signals, signals_dir
 
 
 def _drop_one(args):
@@ -30,7 +30,7 @@ def test_drop_signal_writes_json(tmp_path):
         ts=datetime(2026, 5, 5, 17, 14, tzinfo=timezone.utc),
     )
     drop_signal(tmp_path, sig)
-    files = list((tmp_path / ".fno" / "wake-signals").glob("wake-*.json"))
+    files = list(signals_dir(tmp_path).glob("wake-*.json"))
     assert len(files) == 1
     payload = json.loads(files[0].read_text())
     assert payload["source"] == "inbox-drain"
@@ -42,15 +42,15 @@ def test_drop_signal_creates_parent_dir(tmp_path):
     sig = WakeSignal(source="x", kind="question", msg_id="m", from_project="f",
                      summary="s", ts=datetime.now(tz=timezone.utc))
     drop_signal(tmp_path, sig)
-    assert (tmp_path / ".fno" / "wake-signals").is_dir()
+    assert signals_dir(tmp_path).is_dir()
 
 
 def test_concurrent_drops_no_collision(tmp_path):
     with multiprocessing.Pool(3) as pool:
         pool.map(_drop_one, [(tmp_path, i) for i in range(3)])
-    files = list((tmp_path / ".fno" / "wake-signals").glob("wake-*.json"))
+    files = list(signals_dir(tmp_path).glob("wake-*.json"))
     assert len(files) == 3
-    tmps = list((tmp_path / ".fno" / "wake-signals").glob(".tmp.*"))
+    tmps = list(signals_dir(tmp_path).glob(".tmp.*"))
     assert tmps == []
 
 
@@ -73,7 +73,7 @@ def test_drain_signals_logs_unlink_failure_to_stderr(tmp_path, capsys):
     drop_signal(tmp_path, sig)
 
     # Verify the file exists before we inject the failure
-    files = list((tmp_path / ".fno" / "wake-signals").glob("wake-*.json"))
+    files = list(signals_dir(tmp_path).glob("wake-*.json"))
     assert len(files) == 1
 
     # Inject an unlink failure

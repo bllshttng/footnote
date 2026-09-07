@@ -4,7 +4,7 @@ Lightweight executor for focused plans. Read the plan, make the changes, verify,
 
 ## 0. Structural Context (if available)
 
-If `.fno/codemap.md` exists, read it. Do NOT generate it. Flat mode is lightweight and must not add 3 seconds to every invocation. If the user previously ran `fno doctor codemap`, `/blueprint`, or `/target`, the file will be there. Use it to identify high-importance files before making changes. The top of the codemap has the highest PageRank.
+If the codemap in the repo's space exists (`fno-agents state path codemap`), read it. Do NOT generate it. Flat mode is lightweight and must not add 3 seconds to every invocation. If the user previously ran `fno doctor codemap`, `/blueprint`, or `/target`, the file will be there. Use it to identify high-importance files before making changes. The top of the codemap has the highest PageRank.
 
 ## 1. Read Plan
 

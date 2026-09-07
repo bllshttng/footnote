@@ -27,7 +27,24 @@ heal fixes three classes on its own. `rustfmt-drift` runs the pinned `cargo fmt`
 | 4 | A read failed |
 | 127 | The `fno-agents` binary was not found |
 
-The default is a dry run. `--apply` fixes, commits and pushes. `--all` reports every red open PR and refuses `--apply`, because a remedy needs the PR's own worktree and this process has one cwd.
+The default is a dry run. `--apply` fixes, commits and pushes. `--all` reports every red open PR. `--all --apply` is the drive loop, described next.
+
+## The drive loop
+
+`--all --apply` iterates every open PR with something red of its own and heals each one. The loop lives in Rust beside the classifier. Each PR is healed from its own worktree. The worktree is located by matching the PR's head ref against `git worktree list`. A PR with no worktree is named and skipped. The loop never clones a repo on its own.
+
+Four refusals gate it:
+
+1. **Claim free.** A PR whose branch names a node with a live or suspect claim is skipped as `claim_held`. A healer pushing under a live worker is the two-writers failure. The claim lockfile is the read, never a stored pid.
+2. **Known signature.** Only a failing check the signature table recognizes is healed. An unknown signature becomes one operator question through `fno inbox outstanding ask`, deduplicated on a marker so a 600s tick cannot re-ask it.
+3. **One push per PR per cycle.** Each PR is visited once per invocation. The single-PR rules above hold inside it. A run in flight keeps the commit local.
+4. **Inherited failures are named and skipped.** A check red on `origin/main` too is main's problem. It is never fixed on the branch.
+
+One invocation emits one `pr_heal_tick` row into the global `~/.fno/events.jsonl`. The row carries the counts: PRs seen, healed, skipped by reason, unknown signatures. `fno doctor event find --field type=pr_heal_tick --since 24h` reads it. `--all --apply --dry-run` rehearses every refusal and prints the plan without touching a worktree or the inbox.
+
+## The tick's heal phase
+
+When `auto_heal.enabled` is set, the pr-watch tick runs the drive loop on its 600s launchd cadence. The key defaults to false and lives with the other tick gates in `config.toml`. The phase sits between `king_wake` and `stranded`, so a PR the healer fixes this tick is not reported stranded in the same breath. The tick starts in `/`, so the phase passes each project root explicitly with `--cwd`.
 
 ## How to add a signature
 

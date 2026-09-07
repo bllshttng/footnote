@@ -112,7 +112,6 @@ def _invoke_init(args: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     from fno.config import load_settings
     from fno.cli import app
 
-    load_settings.cache_clear()
     return CliRunner().invoke(app, ["do", "target", "init", "--input", "some-feature", *args])
 
 
@@ -154,7 +153,6 @@ def test_deliverables_flag_reaches_the_manifest_writer_env(
     from fno.config import load_settings
     from fno.cli import app
 
-    load_settings.cache_clear()
     r = CliRunner().invoke(
         app, ["do", "target", "init", "--input", "some-feature", "--deliverables", "4"]
     )
@@ -190,7 +188,6 @@ def test_omitting_deliverables_does_not_set_the_env_carrier(
     from fno.config import load_settings
     from fno.cli import app
 
-    load_settings.cache_clear()
     r = CliRunner().invoke(app, ["do", "target", "init", "--input", "some-feature"])
     assert r.exit_code == 0, r.output
     assert "TARGET_DELIVERABLES" not in captured["env"]
@@ -295,7 +292,6 @@ def _invoke_init_node(monkeypatch: pytest.MonkeyPatch, node: dict, deliverables:
     from fno.config import load_settings
     from fno.cli import app
 
-    load_settings.cache_clear()
     args = ["do", "target", "init", "--input", "x-test"]
     if deliverables:
         args += ["--deliverables", "1"]
@@ -350,7 +346,6 @@ def test_init_never_refuses_a_node_with_a_bound_plan(
     from fno.config import load_settings
     from fno.cli import app
 
-    load_settings.cache_clear()
     plan = tmp_path / "plan.md"
     plan.write_text("# Plan\n", encoding="utf-8")
     r = CliRunner().invoke(app, ["do", "target", "init", "--plan-path", str(plan)])

@@ -1,6 +1,6 @@
 # House style for agent-authored text
 
-Agent text is re-read by every recipient on every turn. It must read once. A machine checks seven rules at the tool boundary. Rules 1 to 6 run on mail, PR bodies, comments, and changed markdown. Rule 7 runs on mail and on the evidence of a backlog encounter, and its number is config-driven per surface.
+Agent text is re-read by every recipient on every turn. It must read once. A machine checks seven rules at the tool boundary. Rules 1 to 6 run on PR bodies, comments, and changed markdown. Mail enforces the relay compression contract only: rule 7, the 80-word cap. The same cap runs on the evidence of a backlog encounter, its number config-driven per surface.
 
 ## The house style
 

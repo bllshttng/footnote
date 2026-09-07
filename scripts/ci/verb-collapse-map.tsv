@@ -13,6 +13,7 @@ agents claim session-pid	T1	agents claim session-pid	2
 agents claim status	T1	agents claim status	32
 agents codex-session-for-pid	T1	agents codex-session-for-pid	3
 agents court	T1	agents court	3
+agents court-orphans	T1	agents court-orphans	0
 agents crown	T1	agents crown	17
 agents digest	T1	agents digest	7
 agents discovered-json	T1	agents discovered-json	9
@@ -29,6 +30,7 @@ agents history	T1	agents history	3
 agents kill-check	T1	agents kill-check	4
 agents king cancel	T1	agents king cancel	0
 agents king done	T1	agents king done	5
+agents king drain	T1	agents king drain	1
 agents king escalate	T1	agents king escalate	1
 agents king init	T1	agents king init	7
 agents king manifest-path	T1	agents king manifest-path	3
@@ -62,6 +64,7 @@ agents needs	KEEP	agents needs	11	ruled KEEP: fno-agents needs is coupled to nee
 agents nudge-peek	T1	agents nudge-peek	6
 agents orphans	T1	agents orphans	10
 agents pane-identity	T1	agents pane-identity	0
+agents newest-assistant-text	T1	agents newest-assistant-text	6
 agents peek	T1	agents peek	29
 agents ping	T1	agents ping	3
 agents probe-run	T1	agents probe-run	3
@@ -120,6 +123,7 @@ approvals decide	T1	approvals decide	2
 approvals ls	T1	approvals ls	2
 approvals show	T1	approvals show	3
 backlog add	T1	backlog add	3
+backlog contain	T1	backlog contain	3
 backlog advance	KEEP	backlog advance	43	deliberate readability slack for a high-traffic distinct operation
 backlog album	T1	backlog album	0
 backlog annotate add	T1	backlog annotate add	7	
@@ -188,7 +192,6 @@ backlog rank	T1	backlog rank	20
 backlog ready	T1	backlog ready	21
 backlog reconcile	KEEP	backlog reconcile	44	deliberate readability slack for a high-traffic distinct operation
 backlog reconcile-findings	T1	backlog reconcile-findings	0
-backlog rehash	T1	backlog rehash	4
 backlog relatedness build	T1	backlog relatedness build	0
 backlog relatedness get	T1	backlog relatedness get	0
 backlog remove	T1	backlog remove	7
@@ -218,6 +221,7 @@ backlog triage trend	T1	backlog triage trend	2
 backlog triage validate	T1	backlog triage validate	1
 backlog unarchive	T1	backlog unarchive	2
 backlog unclaim	T1	backlog unclaim	8
+backlog requeue	T1	backlog requeue	3
 backlog undefer	T1	backlog undefer	14
 backlog undispatched	T1	backlog undispatched	0
 backlog unqueue	T1	backlog unqueue	0
@@ -564,6 +568,9 @@ worktree reapable	T1	worktree reapable	4
 worktree status	T1	worktree status	1
 worktree stranded	T1	worktree stranded	1
 agents stale-escalate	T1	agents stale-escalate	6
-agents harness probe	T1	agents harness probe	0	
+agents friction-escalate	T1	agents friction-escalate	5
+agents feed	T1	agents feed	13
+agents harness probe	T1	agents harness probe	0
+agents king shape	T1	agents king shape	5	
 do review invocations	T1	do review invocations	3	
 do review post-dispositions	T1	do review post-dispositions	1	

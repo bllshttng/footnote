@@ -275,19 +275,23 @@ def test_list_agents_filter_by_status(
         session_truth,
         "resolve_session_truth",
         lambda handle, **_kwargs: {
-            "state": "done" if handle == "dead" else "working"
+            "state": "done" if handle == "dead" else "working",
+            "last_activity_age_s": None if handle == "dead" else 30,
         },
     )
 
     # `done` means the worker declared its MISSION complete, which says nothing
-    # about whether it is still up (x-16d8). It is UNKNOWN, not orphaned; only
-    # an affirmative falsifier condemns a row.
-    result = list_agents(status="unknown", json_out=True, tty=True)
+    # about whether it is still up (x-16d8). It renders parked, not orphaned;
+    # only an affirmative falsifier condemns a row.
+    result = list_agents(status="parked", json_out=True, tty=True)
     parsed = json.loads(result.output)
 
     assert parsed["count"] == 1
     assert parsed["agents"][0]["name"] == "dead"
 
+    assert json.loads(
+        list_agents(status="writing", json_out=True, tty=True).output
+    )["count"] == 1
     assert json.loads(
         list_agents(status="orphaned", json_out=True, tty=True).output
     )["count"] == 0
@@ -298,10 +302,11 @@ def test_list_agents_filter_by_progress_is_independent_of_status(
 ):
     """AC15-HP: the two axes filter independently.
 
-    The exact motivating specimen: both rows are ``working`` and reachable
-    (``status == "live"`` on both), and one is answering as a foreign model.
-    ``--progress refused`` narrows to that row alone, while ``--status live``
-    still returns both -- a refused worker is fully reachable.
+    The exact motivating specimen: both rows are ``working`` with a moving
+    transcript (rendered ``writing`` on both), and one is answering as a
+    foreign model. ``--progress refused`` narrows to that row alone, while
+    ``--status writing`` still returns both -- a refused worker is fully
+    reachable.
     """
     use_tmpdir(monkeypatch, tmp_path)
     write_registry(
@@ -321,7 +326,7 @@ def test_list_agents_filter_by_progress_is_independent_of_status(
             if handle == "refused"
             else {"kind": "observed", "model": "claude-opus-4-1"}
         )
-        return {"state": "working", "observed_model": model}
+        return {"state": "working", "observed_model": model, "last_activity_age_s": 30}
 
     monkeypatch.setattr(session_truth, "resolve_session_truth", _fake_truth)
 
@@ -332,10 +337,10 @@ def test_list_agents_filter_by_progress_is_independent_of_status(
     assert refused_only["agents"][0]["name"] == "refused"
     assert refused_only["filters_applied"]["progress"] == "refused"
 
-    still_live = json.loads(
-        list_agents(status="live", json_out=True, tty=True).output
+    still_writing = json.loads(
+        list_agents(status="writing", json_out=True, tty=True).output
     )
-    assert still_live["count"] == 2, "the status axis must not shrink when progress is filtered separately"
+    assert still_writing["count"] == 2, "the status axis must not shrink when progress is filtered separately"
 
 
 def test_list_agents_filter_by_cwd_resolves_relative(
@@ -490,7 +495,7 @@ def test_list_agents_family1_truth_overrides_stale_orphaned_render(
     )
 
     row = json.loads(list_agents(json_out=True, tty=True).output)["agents"][0]
-    assert row["status"] == "live"
+    assert row["status"] == "writing"
 
 
 def test_a_dead_pid_outvotes_a_stale_working_supervisor_status(
@@ -593,7 +598,7 @@ def test_a_live_pid_keeps_the_harness_working_verdict(
     assert row["live_status_basis"] is None
 
 
-def test_list_agents_live_worker_with_null_activity_age_has_unknown_progress(
+def test_list_agents_unmeasured_age_reads_unknown_on_both_axes(
     tmp_path, monkeypatch, _patch_claude_agents_json
 ):
     use_tmpdir(monkeypatch, tmp_path)
@@ -622,7 +627,7 @@ def test_list_agents_live_worker_with_null_activity_age_has_unknown_progress(
     )
 
     row = json.loads(list_agents(json_out=True, tty=True).output)["agents"][0]
-    assert row["status"] == "live"
+    assert row["status"] == "unknown"
     assert row["last_activity_age_s"] is None
     assert row["progress"] == "unknown"
     assert row["progress_basis"] == "no-evidence"

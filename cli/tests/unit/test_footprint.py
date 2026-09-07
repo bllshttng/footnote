@@ -256,3 +256,108 @@ def test_the_test_count_is_whole_machine_not_fleet_attributed() -> None:
 
     assert reading.process_count == 0
     assert reading.test_process_count == 1
+
+
+def test_ac8_hp_top_consumers_name_the_process_and_the_worktree() -> None:
+    """x-aeab AC8: 23 fno-py rows and 18 fno-agents-worker rows from one
+    worktree aggregate to two consumers, the top named with its process
+    count, the worktree named with how many of its rows run from it."""
+    from fno.footprint import top_consumers
+
+    fno_py = [
+        (200.0 - float(i), f"/usr/local/bin/python3 fno-py doctor test {i}")
+        for i in range(23)
+    ]
+    workers = [
+        (90.0 - i, f"fno-agents-worker debug .fno/worktrees/x-b1ee/target/{i}")
+        for i in range(18)
+    ]
+    sustained = fno_py + workers
+
+    top = top_consumers(sustained)
+
+    assert top[0]["name"] == "python3"
+    assert top[0]["procs"] == 23
+    assert top[1]["name"] == "fno-agents-worker"
+    assert top[1]["procs"] == 18
+    assert top[1]["worktree"] == ".fno/worktrees/x-b1ee"
+    assert top[1]["worktree_procs"] == 18
+    # Bounded to five consumers.
+    assert len(top) <= 5
+
+
+def test_ac9_edge_top_consumers_carry_no_worktree_when_argv_names_none() -> None:
+    from fno.footprint import top_consumers
+
+    top = top_consumers([(10.0, "/usr/sbin/cfprefsd agent")])
+
+    assert top[0]["name"] == "cfprefsd"
+    assert top[0]["worktree"] is None
+    assert top[0]["worktree_procs"] == 0
+
+
+#: Measured 2026-09-07: the Claude Code background daemon's pre-warm pool
+#: under both spellings it uses. Neither is an fno process, so neither is
+#: fleet-attributable; they are counted only so a load refusal can name them.
+_BG_SPARE = "claude bg-spare --bg-spare /tmp/cc-daemon-501/608d3bdb/spare/235506db.claim.sock"
+_BG_PTY_HOST = (
+    "claude bg-pty-host --bg-pty-host /tmp/cc-daemon-501/608d3bdb/spare/235506db.pty.sock 200 50"
+)
+_BG_PTY_HOST_APP_PATH = (
+    "/Users/bb16/.local/share/claude/versions/2.1.263 --bg-spare "
+    "/tmp/cc-daemon-501/608d3bdb/spare/235506db.claim.sock"
+)
+
+
+def test_is_claude_spare_pool_matches_both_spellings() -> None:
+    from fno.footprint import is_claude_spare_pool
+
+    assert is_claude_spare_pool(_BG_SPARE)
+    assert is_claude_spare_pool(_BG_PTY_HOST)
+
+
+def test_is_claude_spare_pool_edge_a_prompt_naming_it_is_not_the_pool() -> None:
+    """The trap this predicate closes: a real claude session whose PROMPT or
+    argument happens to contain the word is not a pre-warm process. Matched on
+    argv[0]/argv[1], never a substring scan of the whole command line."""
+    from fno.footprint import is_claude_spare_pool
+
+    assert not is_claude_spare_pool("claude chat please explain bg-spare to me")
+    assert not is_claude_spare_pool(_BG_PTY_HOST_APP_PATH)  # argv[0] is not "claude"
+    assert not is_claude_spare_pool("")
+    assert not is_claude_spare_pool("cargo build --release")
+
+
+def test_ac_hp_spare_pool_rows_are_counted_but_never_fleet_attributed() -> None:
+    """A snapshot with pool rows yields a nonzero pool count, and those rows
+    are not counted as fno-attributable fleet CPU (they are not fno processes
+    at all, so `parse_footprint` never attributed them either)."""
+    reading = parse_footprint(
+        """\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        100 1 01:00:00 20.0 1024 fno-agents-worker --run
+        300 1 00:05:00 15.0 118784 {bg_spare}
+        301 1 00:05:00 12.0 118784 {bg_pty_host}
+        """.format(bg_spare=_BG_SPARE, bg_pty_host=_BG_PTY_HOST),
+    )
+
+    assert reading.spare_pool_process_count == 2
+    assert reading.spare_pool_cpu_cores == 0.27
+    assert reading.spare_pool_rss_gb > 0
+    # The fleet number is fno-attributable CPU only; the pool never enters it.
+    assert reading.fleet_cpu_cores == 0.2
+    assert reading.process_count == 1
+
+
+def test_ac_edge_no_pool_rows_yields_zero_and_unchanged_fleet_numbers() -> None:
+    reading = parse_footprint(
+        """\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        100 1 01:00:00 20.0 1024 fno-agents-worker --run
+        """,
+    )
+
+    assert reading.spare_pool_process_count == 0
+    assert reading.spare_pool_cpu_cores == 0.0
+    assert reading.spare_pool_rss_gb == 0.0
+    assert reading.fleet_cpu_cores == 0.2

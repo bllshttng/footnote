@@ -46,7 +46,19 @@ def court(tmp_path, monkeypatch):
     install_fake_claude(bin_dir)
     monkeypatch.setenv("PATH", str(bin_dir))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", CALLER_SESSION)
-    return tmp_path
+    # The store gate checks that a level-0 stamp names members that RESOLVE as
+    # projects, so the fixture declares the two the refusal tests spawn over.
+    from fno.projects import resolve as proj_resolve
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[work.workspaces.ws1]\nprojects = [{ name = "alpha" }, { name = "beta" }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
+    proj_resolve._clear_cache()
+    yield tmp_path
+    proj_resolve._clear_cache()
 
 
 def _seat(

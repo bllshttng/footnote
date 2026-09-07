@@ -18,8 +18,19 @@ if [[ -z "${EVENTS_FILE:-}" ]]; then
     if [[ -n "${FNO_EVENTS_PATH:-}" ]]; then
         EVENTS_FILE="$FNO_EVENTS_PATH"
     else
+        # Resolver first: the project journal lives in the space, and a raw
+        # checkout path is retired once a repo migrates. The Rust CLI answers
+        # the same path every Rust reader uses; the checkout file remains the
+        # degrade for contexts with no fno-agents on PATH (its setup symlink,
+        # when one was linked, still follows to the canonical journal).
         _events_repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || _events_repo_root="$PWD"
-        EVENTS_FILE="$_events_repo_root/.fno/events.jsonl"
+        EVENTS_FILE=""
+        if command -v fno-agents >/dev/null 2>&1; then
+            EVENTS_FILE=$(cd "$_events_repo_root" 2>/dev/null && fno-agents state path events 2>/dev/null)
+        fi
+        if [[ -z "$EVENTS_FILE" ]]; then
+            EVENTS_FILE="$_events_repo_root/.fno/events.jsonl"
+        fi
         unset _events_repo_root
     fi
 fi

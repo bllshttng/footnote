@@ -3,7 +3,7 @@
 The store itself is ported: `crates/fno-agents/src/graph_store.rs` owns the
 byte-compatible JSON I/O, the defaults/migration pipeline,
 ``recompute_statuses``, canonicalization, slugs, the bounded lock, and the
-atomic publish with its backup + SHA256 sidecar. This module is the RPC
+atomic publish with its backup. This module is the RPC
 client the 32k lines of Python surface call; the public signatures are the
 ones the file-reading store exposed, so no caller changed shape.
 
@@ -28,8 +28,7 @@ after the lock dropped.
 Read-failure taxonomy (unchanged): :class:`GraphCorruptError` (the soft
 read's parse failure, swallowed to [] by read_graph, exit 1 by the mutate
 path), :class:`GraphUnreadableError` / :class:`GraphMalformedRootError`
-(the strict read). load.py's GraphCorruptionError is the SHA256 sidecar
-axis, checked only by load_graph.
+(the strict read).
 """
 from __future__ import annotations
 
@@ -692,10 +691,8 @@ def canonical_field_order() -> "list[str]":
 def read_file_bytes(path: Path) -> bytes:
     """The file's raw bytes through the keeper's gated read.
 
-    load.py's hash validation consumes this: the gate held across the read
-    means the bytes and the sidecar the keeper last wrote answer one
-    consistent instant, so a mismatch is real corruption, never the
-    two-write window."""
+    load_graph parses these bytes directly: the gate held across the read
+    means the bytes answer one consistent instant of the publish cycle."""
     result = _client_for(Path(path)).read_file(Path(path))
     return _base64.b64decode(result["bytes_b64"])
 
@@ -1014,7 +1011,7 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     The mutator runs client-side against the begin snapshot; the keeper
     re-derives the write pipeline (slugs, statuses, touched_at, closure
     detection, canonicalization) and publishes under the bounded lock with
-    backup + sidecar. Renders, claim releases, and the nudge run after the
+    a backup. Renders, claim releases, and the nudge run after the
     publish lands -- the same post-lock position the file leg used.
 
     The plan-rung map is computed over the MUTATED rows (the rows the
@@ -1156,7 +1153,9 @@ def _validate_session_identity(phase: str, harness: str, session_id: str) -> "tu
     """Validate a session row's identity triple, returning the stripped pair.
 
     The keeper re-validates under the lock; this pass keeps the ValueError
-    contract at the call boundary.
+    contract at the call boundary. An id whose shape names one of the
+    shape-known harnesses refuses a stamp naming another: the wrong-harness
+    stamp is how phantom twin rows get minted.
     """
     if phase not in _SESSION_PHASES:
         raise ValueError(
@@ -1169,6 +1168,17 @@ def _validate_session_identity(phase: str, harness: str, session_id: str) -> "tu
             raise ValueError(f"{label} must be a non-empty string")
         if len(value) > _SESSION_STR_MAX:
             raise ValueError(f"{label} exceeds {_SESSION_STR_MAX} chars")
+    from fno.harness_identity import SHAPE_KNOWN_HARNESSES, harness_of_session_id
+
+    shape_harness = harness_of_session_id(session_id)
+    if (
+        shape_harness is not None
+        and harness != shape_harness
+        and harness in SHAPE_KNOWN_HARNESSES
+    ):
+        raise ValueError(
+            f"session_id {session_id} is a {shape_harness} id; refusing harness {harness}"
+        )
     return harness, session_id
 
 
@@ -1356,15 +1366,9 @@ def reap_open_session_record(
             return report
         rows = node.get("sessions") or []
         report["status_after"] = node.get("status")
-        report["remaining_open_do"] = sum(
-            1
-            for row in rows
-            if isinstance(row, dict)
-            and row.get("phase") == "do"
-            and isinstance(row.get("started_at"), str)
-            and row["started_at"].strip()
-            and "ended_at" not in row
-        )
+        from fno.graph.statuses import is_open_do_row
+
+        report["remaining_open_do"] = sum(1 for row in rows if is_open_do_row(row))
         report["settled"] = True
     except Exception:  # noqa: BLE001 - the settlement read is advisory
         report["settled"] = report.get("found", False)

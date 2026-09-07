@@ -1456,11 +1456,11 @@ def test_resolver_only_provisional_registry_id_cannot_hide_canonical_owner(
 
 @pytest.mark.parametrize(
     "truth_state,expected",
-    # `done` is UNKNOWN, not orphaned: a worker that declared its mission complete
-    # says nothing about whether it is still up, and this row carries no falsifier
-    # (pid 0 is the "not recorded" placeholder). Only an affirmative falsifier
-    # condemns a row, in this lane exactly as in the registry lane.
-    [("working", "live"), ("done", "unknown"), ("unknown", "unknown")],
+    # Served activity (x-c672, AC7): `done` renders PARKED - the tail closed a
+    # promise - and a state with no measured age renders unknown, exactly as
+    # the registry lane does. This row carries no falsifier (pid 0 is the
+    # "not recorded" placeholder), so nothing reads orphaned.
+    [("working", "unknown"), ("done", "parked"), ("unknown", "unknown")],
 )
 def test_discovered_row_status_projects_family1_truth(truth_state, expected):
     session = discover.DiscoveredSession(
@@ -3108,7 +3108,7 @@ def test_resolve_reachable_keeps_case_distinct_opencode_sessions(tmp_path, monke
         discover,
         "_reachable_from_transcripts",
         lambda *_a: (
-            [(upper, "opencode", "/upper", True), (lower, "opencode", "/lower", True)],
+            [(upper, "opencode", "/upper", True, None), (lower, "opencode", "/lower", True, None)],
             True,
         ),
     )
@@ -3139,8 +3139,8 @@ def test_resolve_reachable_keeps_same_id_under_different_harnesses_distinct(tmp_
         "_reachable_from_transcripts",
         lambda *_a: (
             [
-                (_SHARED_SID, "claude", "/claude-cwd", True),
-                (_SHARED_SID, "codex", "/codex-cwd", True),
+                (_SHARED_SID, "claude", "/claude-cwd", True, None),
+                (_SHARED_SID, "codex", "/codex-cwd", True, None),
             ],
             True,
         ),
@@ -3185,7 +3185,7 @@ def test_reachable_from_registry_keeps_cross_harness_rows_distinct(tmp_path):
     hits, read_ok = discover._reachable_from_registry(_SHARED_SID, reg)
 
     assert read_ok
-    assert sorted(harness for _sid, harness, _cwd, _v in hits) == ["claude", "codex"]
+    assert sorted(harness for _sid, harness, _cwd, _v, _tp in hits) == ["claude", "codex"]
 
 
 def test_discover_live_sessions_keeps_cross_harness_rows_distinct(tmp_path, monkeypatch):
@@ -3282,7 +3282,7 @@ def test_resolve_reachable_includes_complete_harness_store_hits(tmp_path, monkey
     monkeypatch.setattr(
         discover,
         "_reachable_from_harness_stores",
-        lambda _token: ([(sid, "codex", "/repo", True)], True),
+        lambda _token: ([(sid, "codex", "/repo", True, None)], True),
     )
 
     found, ambiguous = discover.resolve_reachable("deadbeef", projects_dir=tmp_path / "projects")

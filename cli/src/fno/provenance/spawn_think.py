@@ -821,12 +821,17 @@ def _spawn_think_worker(
     # on the claude/bg arm). Empty/None = provider default, unchanged.
     if resolved_model:
         cmd += ["--model", resolved_model]
-    # x-dfa4: an explicit permission_mode wins; else the autonomous-dispatcher
-    # config default (config.agents.spawn_permission_mode). Both empty = unchanged.
+    # x-dfa4: an explicit permission_mode wins; else the operator's spawn
+    # default (config.agents.defaults.permission_mode); else the built-in
+    # unattended answer (x-7198).
     mode = (permission_mode or "").strip()
     if not mode:
         try:
-            mode = (settings_obj.agents.spawn_permission_mode or "").strip()
+            from fno.agents.spawn_defaults import SPAWN_PERMISSION_BUILTIN
+
+            mode = (
+                settings_obj.agents.defaults.permission_mode or ""
+            ).strip() or SPAWN_PERMISSION_BUILTIN
         except Exception:  # noqa: BLE001 - fail-safe to unset (unchanged)
             mode = ""
     if mode and (resolved_harness == "claude" or substrate == "pane"):
