@@ -737,6 +737,8 @@ fn states_leg(payload: &Value) -> Value {
                     )));
                     return json!({
                         "status": "states", "lane_states": [], "chain": chain,
+                        "on_exhausted": on_exhausted, "on_low": on_low,
+                        "on_unknown": on_unknown,
                         "would_take": would_take, "routing": routing,
                     });
                 }
@@ -750,6 +752,8 @@ fn states_leg(payload: &Value) -> Value {
                         )));
                         return json!({
                             "status": "states", "lane_states": [], "chain": chain,
+                            "on_exhausted": on_exhausted, "on_low": on_low,
+                            "on_unknown": on_unknown,
                             "would_take": would_take, "routing": routing,
                         });
                     }
@@ -795,6 +799,8 @@ fn states_leg(payload: &Value) -> Value {
             chain.push(json!(line));
             return json!({
                 "status": "states", "lane_states": [], "chain": chain,
+                "on_exhausted": on_exhausted, "on_low": on_low,
+                "on_unknown": on_unknown,
                 "would_take": would_take, "routing": routing,
             });
         }
@@ -1660,6 +1666,34 @@ mod tests {
         assert_eq!(out["on_exhausted"], "Bogus (invalid)");
         // The walk refuses the same config, so the verdict names the fault.
         assert!(out["would_take"].as_str().unwrap().contains("not one of"));
+        assert_eq!(out["routing"], "unarmed");
+    }
+
+    #[test]
+    fn states_fault_paths_still_display_the_policy_lines() {
+        // A malformed overlay lanes list refuses, and the readout keeps the
+        // policy display it always showed for a peeked-non-empty slot.
+        let out = resolve_slot_payload(&json!({
+            "mode": "states",
+            "rung_base": "agents.profiles.target",
+            "lanes_raw": [],
+            "profile": {"on_exhausted": "queue", "by_difficulty":
+                        {"high": {"lanes": "garbage"}}},
+        }));
+        assert_eq!(out["on_exhausted"], "queue");
+        assert_eq!(out["on_low"], "prefer_healthy");
+        assert_eq!(out["on_unknown"], "allow");
+        assert!(out["would_take"]
+            .as_str().unwrap().contains("must be a non-empty list"));
+        // A fold fault (lane names nothing declared) keeps them too.
+        let out = resolve_slot_payload(&json!({
+            "mode": "states",
+            "rung_base": "agents.profiles.target",
+            "lanes_raw": ["ghost-x"],
+            "declared_rows": {},
+            "profile": {"on_exhausted": "degrade"},
+        }));
+        assert_eq!(out["on_exhausted"], "degrade");
         assert_eq!(out["routing"], "unarmed");
     }
 
