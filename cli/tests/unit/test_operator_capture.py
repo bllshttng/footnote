@@ -61,6 +61,61 @@ def _user_row(text, uuid: str, ts: str = "2026-09-06T21:00:00.000Z") -> dict:
     }
 
 
+def test_naive_timestamp_reads_as_utc_not_local(tmp_path, tmp_ledger, monkeypatch):
+    """A naive transcript timestamp must not skew the age by the local offset."""
+    from datetime import datetime, timezone
+
+    from fno.inbox import operator_turns as ot
+
+    _pin(monkeypatch, tmp_path, [_user_row("ask", "u-naive", ts="2026-09-06T21:00:00.000000")])
+    result = runner.invoke(app, ["inbox", "operator", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.stdout)
+    expected = datetime(2026, 9, 6, 21, 0, tzinfo=timezone.utc).timestamp()
+    assert rows[0]["ts_epoch"] == expected
+
+
+def test_duplicate_rows_derive_distinct_ids(tmp_path, tmp_ledger, monkeypatch):
+    """Two id-less identical rows get distinct derived ids, so one ack disposes one turn."""
+    tp = _transcript(
+        tmp_path,
+        [
+            {"type": "user", "timestamp": "2026-09-06T21:00:00.000Z",
+             "message": {"role": "user", "content": "same text"}},
+            {"type": "user", "timestamp": "2026-09-06T21:00:00.000Z",
+             "message": {"role": "user", "content": "same text"}},
+        ],
+    )
+    monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "s-test")
+    monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(tp))
+    result = runner.invoke(app, ["inbox", "operator", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.stdout)
+    assert len(rows) == 2
+    assert rows[0]["turn_id"] != rows[1]["turn_id"]
+
+
+def test_tail_window_drops_no_prose_turn(tmp_path, tmp_ledger, monkeypatch):
+    """A transcript larger than the tail window still reads its newest turns cleanly."""
+    from fno.inbox import operator_turns as ot
+
+    tp = tmp_path / "transcript.jsonl"
+    pad = b'{"type":"user","uuid":"pad"}\n' * (ot._TAIL_BYTES // 28 + 1)
+    tp.write_bytes(
+        _transcript(tmp_path, [_user_row("old turn beyond the window", "u-old",
+                                         ts="2026-09-01T00:00:00.000Z")]).read_bytes()
+        + pad
+        + _transcript(tmp_path, [_user_row("fresh turn inside the window", "u-new",
+                                          ts="2026-09-06T21:00:00.000Z")]).read_bytes()
+    )
+    monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "s-test")
+    monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(tp))
+    result = runner.invoke(app, ["inbox", "operator", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.stdout)
+    assert [r["turn_id"] for r in rows] == ["u-new"]
+
+
 # -- the classifier and the queue --
 
 

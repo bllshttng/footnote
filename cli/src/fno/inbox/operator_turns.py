@@ -144,14 +144,18 @@ def _turn_text(obj: dict) -> str:
     )
 
 
-def _turn_id(obj: dict, text: str) -> str:
-    """A stable ledger id: the transcript's own uuid/id, else a digest."""
+def _turn_id(obj: dict, text: str, line_no: int) -> str:
+    """A stable ledger id: the transcript's own uuid/id, else a digest.
+
+    The digest folds the row's line number in, so byte-identical duplicate
+    rows still get distinct ids and one ack can never dispose two turns.
+    """
     for key in ("uuid", "id"):
         val = obj.get(key)
         if isinstance(val, str) and val.strip():
             return val.strip()
-    digest = hashlib.sha1(f"{obj.get('timestamp')}:{text}".encode()).hexdigest()[:12]
-    return f"derived-{digest}"
+    seed = f"{line_no}:{obj.get('timestamp')}:{text}"
+    return f"derived-{hashlib.sha1(seed.encode()).hexdigest()[:12]}"
 
 
 def _turn_ts_epoch(obj: dict) -> Optional[float]:
@@ -159,9 +163,14 @@ def _turn_ts_epoch(obj: dict) -> Optional[float]:
     if not isinstance(ts, str) or not ts.strip():
         return None
     try:
-        return datetime.fromisoformat(ts.strip().replace("Z", "+00:00")).timestamp()
+        parsed = datetime.fromisoformat(ts.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        # Transcripts are UTC by convention; a naive stamp must not read as
+        # local time or the age skews by the machine's offset.
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _is_bare_command(text: str) -> bool:
@@ -198,14 +207,28 @@ def classify(text: str) -> Optional[str]:
     return cleaned
 
 
+#: The retroactivity window. The read is tail-bounded so a multi-MB
+#: transcript costs fixed bytes per hook fire; past the window a turn can
+#: only be surfaced by acking nothing and re-reading, which no caller does.
+_TAIL_BYTES = 2_000_000
+
+
 def read_operator_turns(transcript_path: Path) -> list[dict]:
     """Operator turns, oldest first, as ``{turn_id, ts_epoch, text}``."""
     try:
-        raw = transcript_path.read_text(encoding="utf-8", errors="replace")
+        with transcript_path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - _TAIL_BYTES))
+            raw = fh.read().decode("utf-8", errors="replace")
     except OSError as exc:
         raise OperatorCaptureError(f"transcript {transcript_path} unreadable: {exc}") from exc
+    if size > _TAIL_BYTES:
+        # Drop the torn line the seek landed inside.
+        newline = raw.find("\n")
+        raw = raw[newline + 1 :] if newline >= 0 else ""
     turns: list[dict] = []
-    for line in raw.splitlines():
+    for line_no, line in enumerate(raw.splitlines()):
         try:
             obj = json.loads(line)
         except ValueError:
@@ -215,7 +238,11 @@ def read_operator_turns(transcript_path: Path) -> list[dict]:
         text = classify(_turn_text(obj))
         if text is not None:
             turns.append(
-                {"turn_id": _turn_id(obj, text), "ts_epoch": _turn_ts_epoch(obj), "text": text}
+                {
+                    "turn_id": _turn_id(obj, text, line_no),
+                    "ts_epoch": _turn_ts_epoch(obj),
+                    "text": text,
+                }
             )
     return turns
 
