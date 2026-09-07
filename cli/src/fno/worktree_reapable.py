@@ -21,13 +21,24 @@ N implementations of one operation is a defect class this repo already
 documents, so they now call `fno agents workspace worktree reapable` and an equivalence test
 pins that they agree. When the verb cannot be reached, every caller keeps its
 own fail-closed default, which is today's behaviour exactly.
+
+The same argument reaches one class of untracked content. `setup-worktree.sh`
+symlinks the canonical checkout's shared state into every worktree it makes,
+and those names are gitignored at the repo root only, so a nested copy reads
+untracked. Measured 2026-09-06 on `.claude/worktrees/x-ba96`: the tree's ENTIRE
+difference was four such links. footnote dirtied the tree at creation and the
+rule then protected that dirt forever. A link whose target is one of the paths
+setup writes carries no human work, so it is discounted and named in the
+receipt. Everything else untracked still blocks.
 """
 from __future__ import annotations
 
+import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 # Unmerged (conflict) codes, per `git status` docs. These matter because two of
 # them carry only `D` and `A` letters: reading `DD` ("both deleted") as two
@@ -35,6 +46,30 @@ from typing import Optional, Union
 # letters alone are not enough to classify a line; the conflict set is checked
 # first.
 _UNMERGED = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
+
+# The canonical-relative paths `scripts/setup/setup-worktree.sh` symlinks into
+# every worktree it prepares. They are gitignored at the repo ROOT only, so a
+# nested copy (`cli/.agents`, seen on 2026-09-06) reads untracked and the tree
+# is dirty from the moment setup finishes. That is footnote's own dirt and it
+# holds no human work: the file it names lives in the canonical checkout.
+_SETUP_LINK_TARGETS = frozenset(
+    {
+        "internal",
+        ".agents",
+        ".codex",
+        ".codex-plugin",
+        ".gemini",
+        ".claude/agents",
+        ".claude/commands",
+        ".claude/skills",
+        ".claude/plans",
+        ".claude/settings.local.json",
+        ".claude/scheduled_tasks.json",
+        ".claude/scheduled_tasks.lock",
+        ".claude/.skill-scoping-state.json",
+        ".claude/audit-progress.txt",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -45,6 +80,7 @@ class Verdict:
     reason: str
     detail: str = ""
     recoverable_deletions: int = 0
+    discounted: tuple[str, ...] = field(default_factory=tuple)
 
     def line(self) -> str:
         """The one-line receipt the bash and Rust callers parse.
@@ -56,7 +92,8 @@ class Verdict:
         head = (
             f"reapable={'yes' if self.reapable else 'no'} "
             f"reason={self.reason} "
-            f"recoverable_deletions={self.recoverable_deletions}"
+            f"recoverable_deletions={self.recoverable_deletions} "
+            f"discounted={len(self.discounted)}"
         )
         if self.detail:
             head += f" detail={self.detail}"
@@ -66,6 +103,67 @@ class Verdict:
 def _path_of(entry: str) -> str:
     """The path from a porcelain line, minus the two status chars and a space."""
     return entry[3:].strip() if len(entry) > 3 else entry.strip()
+
+
+def _canonical_root(worktree: Path) -> Optional[Path]:
+    """The main checkout this worktree links back to, or None if unresolvable."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    common = Path(r.stdout.strip())
+    if not common.is_absolute():
+        common = worktree / common
+    return common.parent
+
+
+def _is_setup_link(link: Path, canonical: Path) -> bool:
+    """Did setup-worktree.sh write this symlink?
+
+    Read the link ONE hop instead of resolving it. Setup writes an absolute
+    ``$CANONICAL/$rel``, so the raw target IS the attribution. Resolving would
+    follow the canonical entry's own symlink (``internal`` is one) out of the
+    checkout and lose it.
+    """
+    try:
+        target = os.readlink(link)
+    except OSError:
+        return False
+    if not os.path.isabs(target):
+        return False
+    for base in (str(canonical), os.path.realpath(canonical)):
+        rel = os.path.relpath(target, base)
+        if rel.startswith(".."):
+            continue
+        return rel in _SETUP_LINK_TARGETS or fnmatch(rel, ".claude/*.local.md")
+    return False
+
+
+def _is_setup_dirt(path: Path, canonical: Path) -> bool:
+    """A setup symlink, or a directory holding nothing but setup dirt.
+
+    ``mkdir -p "$WORKTREE/.claude"`` makes a REAL directory and fills it with
+    links, so git reports the directory and never its contents. An empty
+    directory reads False: git does not report one, and saying yes would
+    discount something this function never looked at.
+    """
+    if path.is_symlink():
+        return _is_setup_link(path, canonical)
+    if path.is_dir():
+        try:
+            children = list(path.iterdir())
+        except OSError:
+            return False
+        return bool(children) and all(_is_setup_dirt(c, canonical) for c in children)
+    return False
 
 
 def is_linked_worktree(path: Union[str, Path]) -> bool:
@@ -142,14 +240,21 @@ def branch_merged(path: Union[str, Path]) -> Optional[bool]:
     return None
 
 
-def classify(porcelain: str) -> Verdict:
+def classify(porcelain: str, discount: Optional[Callable[[str], bool]] = None) -> Verdict:
     """Classify `git status --porcelain` output. Pure: no clock, no disk.
 
     Blocking, in precedence order: an unmerged conflict, untracked content,
     then any staged or unstaged modification of tracked content. Everything
     else is a deletion of a tracked file, which is recoverable from HEAD.
+
+    `discount` names untracked paths that carry no human work - today, the
+    symlinks setup-worktree.sh writes into the worktree it prepares. It is
+    consulted for `??` lines only, so a modified tracked file and an unmerged
+    conflict block exactly as before. Omit it and this function answers what
+    it always answered.
     """
     deletions = 0
+    discounted: list[str] = []
     for raw in porcelain.splitlines():
         if not raw.strip():
             continue
@@ -157,12 +262,24 @@ def classify(porcelain: str) -> Verdict:
         if code in _UNMERGED:
             return Verdict(False, "unmerged", _path_of(raw))
         if code == "??":
-            return Verdict(False, "untracked", _path_of(raw))
+            path = _path_of(raw)
+            if discount is not None and discount(path):
+                discounted.append(path)
+                continue
+            return Verdict(False, "untracked", path)
         letters = set(code) - {" "}
         if letters == {"D"}:
             deletions += 1
             continue
         return Verdict(False, "modified-tracked", _path_of(raw))
+    if discounted:
+        return Verdict(
+            True,
+            "setup-links",
+            ", ".join(discounted),
+            deletions,
+            tuple(discounted),
+        )
     return Verdict(True, "clean", "", deletions)
 
 
@@ -187,4 +304,15 @@ def reapable(path: Union[str, Path]) -> Verdict:
         return Verdict(False, "probe-failed", f"git-error: {exc}")
     if r.returncode != 0:
         return Verdict(False, "probe-failed", "git status exited non-zero")
-    return classify(r.stdout)
+
+    # Resolved on the first untracked line and not before, so a clean tree
+    # still costs one `git status` and nothing else.
+    canonical: list[Optional[Path]] = []
+
+    def _discount(rel: str) -> bool:
+        if not canonical:
+            canonical.append(_canonical_root(target))
+        root = canonical[0]
+        return root is not None and _is_setup_dirt(target / rel, root)
+
+    return classify(r.stdout, _discount)

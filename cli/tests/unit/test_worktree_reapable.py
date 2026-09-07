@@ -253,3 +253,134 @@ def test_detached_head_answers_unknown(repo: Path, tmp_path: Path) -> None:
     _git(wt, "checkout", "-q", "--detach")
 
     assert branch_merged(wt) is None
+
+
+# -- x-11d8: footnote's own setup symlinks are not dirt ----------------------
+#
+# scripts/setup/setup-worktree.sh links the canonical checkout's shared state
+# into every worktree it prepares. Those names are gitignored at the repo ROOT
+# only, so a nested copy (cli/.agents, specimen 2026-09-06) reads untracked and
+# the tree was kept forever. The reap half is one test; the guard half is five,
+# because that is the direction that loses work.
+
+
+@pytest.fixture()
+def canonical(repo: Path) -> Path:
+    """`repo` plus the shared state setup links, and a tracked `cli/`.
+
+    The tracked file matters: with `cli/` wholly untracked git reports one
+    `cli/` line and the per-path attribution is never exercised.
+    """
+    (repo / "cli").mkdir()
+    (repo / "cli" / "keep.py").write_text("x = 1\n")
+    _git(repo, "add", "cli/keep.py")
+    _git(repo, "commit", "-qm", "cli")
+    for rel in (".agents", ".codex", ".codex-plugin", ".claude", ".claude/skills"):
+        (repo / rel).mkdir()
+    (repo / ".claude" / "settings.local.json").write_text("{}\n")
+    return repo
+
+
+def _setup_links(wt: Path, canonical: Path) -> None:
+    """What setup-worktree.sh leaves behind, one directory deeper."""
+    (wt / "cli" / ".claude").mkdir(parents=True)
+    (wt / "cli" / ".agents").symlink_to(canonical / ".agents")
+    (wt / "cli" / ".codex").symlink_to(canonical / ".codex")
+    (wt / "cli" / ".codex-plugin").symlink_to(canonical / ".codex-plugin")
+    (wt / "cli" / ".claude" / "skills").symlink_to(canonical / ".claude" / "skills")
+    (wt / "cli" / ".claude" / "settings.local.json").symlink_to(
+        canonical / ".claude" / "settings.local.json"
+    )
+
+
+def test_setup_links_only_is_reapable_and_names_what_it_discounted(
+    canonical: Path, tmp_path: Path
+) -> None:
+    wt = _linked_wt(tmp_path, canonical, "setup", "feature/setup")
+    _setup_links(wt, canonical)
+
+    v = reapable(wt)
+
+    assert v.reapable is True
+    assert v.reason == "setup-links"
+    assert len(v.discounted) == 4
+    for named in ("cli/.agents", "cli/.claude", "cli/.codex", "cli/.codex-plugin"):
+        assert named in v.detail
+    assert "discounted=4" in v.line()
+
+
+def test_one_modified_tracked_file_beside_setup_links_still_blocks(
+    canonical: Path, tmp_path: Path
+) -> None:
+    wt = _linked_wt(tmp_path, canonical, "modified", "feature/modified")
+    _setup_links(wt, canonical)
+    (wt / "cli" / "keep.py").write_text("x = 999\n")
+
+    v = reapable(wt)
+
+    assert v.reapable is False
+    assert v.reason == "modified-tracked"
+
+
+def test_one_plain_untracked_file_beside_setup_links_still_blocks(
+    canonical: Path, tmp_path: Path
+) -> None:
+    wt = _linked_wt(tmp_path, canonical, "scratch", "feature/scratch")
+    _setup_links(wt, canonical)
+    (wt / "cli" / "scratch.py").write_text("real work\n")
+
+    v = reapable(wt)
+
+    assert v.reapable is False
+    assert v.reason == "untracked"
+    assert "scratch.py" in v.detail
+
+
+def test_a_symlink_out_of_the_canonical_checkout_still_blocks(
+    canonical: Path, tmp_path: Path
+) -> None:
+    wt = _linked_wt(tmp_path, canonical, "outward", "feature/outward")
+    _setup_links(wt, canonical)
+    (wt / "cli" / "elsewhere").symlink_to(tmp_path / "somewhere-else")
+
+    v = reapable(wt)
+
+    assert v.reapable is False
+    assert v.reason == "untracked"
+    assert "elsewhere" in v.detail
+
+
+def test_a_canonical_symlink_setup_never_writes_still_blocks(
+    canonical: Path, tmp_path: Path
+) -> None:
+    wt = _linked_wt(tmp_path, canonical, "unknown", "feature/unknown")
+    _setup_links(wt, canonical)
+    (wt / "cli" / "borrowed.py").symlink_to(canonical / "keep.py")
+
+    v = reapable(wt)
+
+    assert v.reapable is False
+    assert v.reason == "untracked"
+    assert "borrowed.py" in v.detail
+
+
+def test_a_directory_mixing_a_setup_link_with_real_content_blocks(
+    canonical: Path, tmp_path: Path
+) -> None:
+    wt = _linked_wt(tmp_path, canonical, "mixed", "feature/mixed")
+    _setup_links(wt, canonical)
+    (wt / "cli" / ".claude" / "notes.md").write_text("mine\n")
+
+    v = reapable(wt)
+
+    assert v.reapable is False
+    assert v.reason == "untracked"
+    assert "cli/.claude" in v.detail
+
+
+def test_classify_without_a_discount_answers_exactly_as_before() -> None:
+    v = classify("?? cli/.agents\n")
+
+    assert v.reapable is False
+    assert v.reason == "untracked"
+    assert v.discounted == ()

@@ -541,13 +541,15 @@ def reapable(
 ) -> None:
     """Say whether removing <path> can destroy anything. Read-only.
 
-    Prints one line, e.g. `reapable=yes reason=clean recoverable_deletions=76`.
-    Exit 0 when reapable, 1 when something blocks. The three removal call sites
-    (the --merged sweep, archive-worktree.sh, the Rust row-GC probe) read this
-    instead of each deciding for itself.
+    Prints one line, e.g. `reapable=yes reason=clean recoverable_deletions=76
+    discounted=0`. Exit 0 when reapable, 1 when something blocks. The three
+    removal call sites (the --merged sweep, archive-worktree.sh, the Rust
+    row-GC probe) read this instead of each deciding for itself.
 
     A missing tracked file never blocks: HEAD holds its content, so removal
-    loses nothing. Modified tracked content, untracked files, and unmerged
+    loses nothing. Nor do the symlinks setup-worktree.sh writes into a
+    worktree; `reason=setup-links` and `detail` name every path discounted
+    that way. Modified tracked content, other untracked files, and unmerged
     conflicts do block, and a probe that cannot answer blocks too.
     """
     from fno.worktree_reapable import reapable as _classify
