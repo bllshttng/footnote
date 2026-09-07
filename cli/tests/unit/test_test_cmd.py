@@ -602,6 +602,11 @@ def test_smoke_shard_partitions_steps_and_scopes_pytest_env(
 
     def run(command, *, cwd, env):
         del cwd
+        # The state-canary bracket rides the same subprocess.run. It is not
+        # what this test measures, and folding it into the expected list would
+        # couple shard partitioning to the canary's presence.
+        if any("check-state-canary.sh" in str(part) for part in command):
+            return _Completed()
         calls.append((command[-1], env.get("FNO_PYTEST_SHARD")))
         return _Completed()
 
