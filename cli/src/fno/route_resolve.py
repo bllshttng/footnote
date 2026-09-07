@@ -529,8 +529,7 @@ def _slot_fold(
 
     A string lane names a declared ``[[routing.models]]`` row; an inline
     table folds as its own row named by its config path. A config fault
-    appends one ``slot=config`` terminal to ``chain`` and answers
-    ``(None, None, {})``.
+    appends one ``slot=config`` terminal and answers ``(None, None, {})``.
     """
     plan: list[tuple[str, str]] = []
     fold: list[dict[str, Any]] = []
@@ -590,26 +589,15 @@ def resolve_slot(
 ) -> tuple[Optional[dict[str, Any]], list[str]]:
     """Which lane does this dispatch ride right now: the ONE slot resolver.
 
-    ``agents.profiles.<verb>.lanes`` is the rank. Each lane is a
-    ``[[routing.models]]`` row name or an inline table; the first lane whose
-    posture, vendor cap and per-account capacity pass is the candidate
-    (``harness``/``model``/``effort`` plus ``lane``/``lane_rung`` and the
-    passthrough ``lane_fields``). ``on_exhausted`` names the all-skipped
-    terminal; a command-line lane or ``FNO_SPAWN_GATE=0`` degrades whatever
-    it says. No ``lanes``: fall through to :func:`resolve_grid` unchanged
-    (a node-less spawn answers nothing). A config fault is a ``slot=config``
-    terminal, never a raise. Returns ``(candidate, chain)`` like
-    :func:`resolve_grid`.
+    ``agents.profiles.<verb>.lanes`` is the rank: each lane is a
+    ``[[routing.models]]`` row name or an inline table, and the first lane
+    whose posture, vendor cap and per-account capacity pass is the candidate.
+    ``on_exhausted`` names the all-skipped terminal; a command-line lane or
+    ``FNO_SPAWN_GATE=0`` degrades whatever it says. No ``lanes``: fall through
+    to :func:`resolve_grid` unchanged (a node-less spawn answers nothing).
+    A config fault is a ``slot=config`` terminal, never a raise.
     """
-    if settings is None:
-        try:
-            from fno.config import load_settings
-
-            settings = load_settings()
-        except Exception:  # noqa: BLE001 - a config read never breaks a spawn
-            settings = None
-    profile = _verb_profile(settings, verb)
-    lanes = getattr(profile, "lanes", None) if profile is not None else None
+    settings, profile, lanes = _slot_entry(settings, verb)
     rung_base = f"agents.profiles.{verb}" if verb else "agents.profiles"
     if not lanes:
         if node is None:
@@ -665,16 +653,14 @@ def resolve_slot(
         if row is None:
             declared = ", ".join(sorted(lane_inv.rows)) or "(none)"
             chain.append(
-                f"slot=config {rung} names no [[routing.models]] row "
-                f"{row_name!r}; declared rows: {declared}; "
-                "see fno config route inventory"
+                f"slot=config {rung} names no [[routing.models]] row {row_name!r};"
+                f" declared rows: {declared}; see fno config route inventory"
             )
             return None, chain
         if not _candidate_supported(row.harness, substrate, permission_mode):
             chain.append(
-                f"slot skip {rung} {row_name} harness {row.harness!r} cannot "
-                f"carry substrate({substrate or '-'}) "
-                f"permission({permission_mode or '-'})"
+                f"slot skip {rung} {row_name} harness {row.harness!r} cannot carry"
+                f" substrate({substrate or '-'}) permission({permission_mode or '-'})"
             )
             continue
         vendor: Optional[str] = None
@@ -686,20 +672,16 @@ def resolve_slot(
                 current = provider_live_count(vendor)
             except ProviderCountUnavailable as exc:
                 if not gate_bypassed:
-                    chain.append(
-                        f"slot=provider-count-unavailable {rung} {vendor}: {exc}"
-                    )
+                    chain.append(f"slot=provider-count-unavailable {rung} {vendor}: {exc}")
                     return None, chain
                 chain.append(
-                    f"slot note {rung} {row_name} provider count unavailable "
-                    f"for {vendor}: {exc}; FNO_SPAWN_GATE=0, so the lane is "
-                    "taken uncapped"
+                    f"slot note {rung} {row_name} {vendor} count unavailable ({exc});"
+                    " FNO_SPAWN_GATE=0, so the lane is taken uncapped"
                 )
             else:
                 if current >= cap:
                     chain.append(
-                        f"slot skip {rung} {row_name} provider {vendor} "
-                        f"at {current} of {cap}"
+                        f"slot skip {rung} {row_name} provider {vendor} at {current} of {cap}"
                     )
                     continue
         state, window = row_capacity(row, capacity)
@@ -724,24 +706,20 @@ def resolve_slot(
             )
             if value
         }
-        pick: dict[str, Any] = {
-            "harness": row.harness,
-            "model": row.model,
-            "lane": row_name,
-            "lane_rung": rung,
-            "lane_index": index,
-            "lane_fields": lane_fields,
-        }
+        pick: dict[str, Any] = dict(
+            harness=row.harness,
+            model=row.model,
+            lane=row_name,
+            lane_rung=rung,
+            lane_index=index,
+            lane_fields=lane_fields,
+        )
         if row.effort:
             pick["effort"] = row.effort
         return pick, chain
 
     if explicit_lane or gate_bypassed:
-        why = (
-            "the command line already names the lane"
-            if explicit_lane
-            else "FNO_SPAWN_GATE=0"
-        )
+        why = "the command line already names the lane" if explicit_lane else "FNO_SPAWN_GATE=0"
         chain.append(f"slot=exhausted degrade ({why})")
         return None, chain
     chain.append(f"slot=exhausted {on_exhausted}")
@@ -763,6 +741,22 @@ def _verb_profile(settings: object, verb: Optional[str]) -> Optional[object]:
         return None
 
 
+def _slot_entry(
+    settings: object, verb: Optional[str]
+) -> tuple[object, Optional[object], object]:
+    """Settings (a config read never raises), the verb's profile, its lanes."""
+    if settings is None:
+        try:
+            from fno.config import load_settings
+
+            settings = load_settings()
+        except Exception:  # noqa: BLE001 - an unreadable config reads as absent
+            settings = None
+    profile = _verb_profile(settings, verb)
+    lanes = getattr(profile, "lanes", None) if profile is not None else None
+    return settings, profile, lanes
+
+
 def slot_states(
     verb: str,
     capacity: Optional[Mapping[str, object]],
@@ -775,17 +769,9 @@ def slot_states(
     resolved by :func:`resolve_slot` ITSELF, never re-derived here - the lane
     a spawn would take right now. Display, never selection.
     """
-    if settings is None:
-        try:
-            from fno.config import load_settings
-
-            settings = load_settings()
-        except Exception:  # noqa: BLE001 - an unreadable config reads as absent
-            settings = None
+    settings, _profile, lanes = _slot_entry(settings, verb)
     if inventory is None:
         inventory = resolve_inventory(settings=settings)
-    profile = _verb_profile(settings, verb)
-    lanes = getattr(profile, "lanes", None) if profile is not None else None
     out: dict[str, Any] = {"verb": verb, "lanes": [], "on_exhausted": "", "would_take": ""}
     if not lanes:
         if inventory.declared and inventory.rows:
@@ -793,7 +779,7 @@ def slot_states(
         else:
             out["would_take"] = "no lanes; no inventory; harness default"
         return out
-    raw_exhausted = str(getattr(profile, "on_exhausted", "") or "refuse")
+    raw_exhausted = str(getattr(_profile, "on_exhausted", "") or "refuse")
     on_exhausted = raw_exhausted.strip().lower()
     out["on_exhausted"] = (
         on_exhausted if on_exhausted in _ON_EXHAUSTED else f"{raw_exhausted} (invalid)"
