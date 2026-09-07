@@ -112,12 +112,12 @@ def test_map_covers_current_surface_once():
     # transcript read the loopcheck distress leg shells) and this branch adds
     # `agents friction-escalate` (the watchdog friction lane): 571 -> 573.
     # This branch also allocates `backlog requeue` its row: 573 -> 574.
-    # The cargo-offload branch allocates both spellings of the new verb their
-    # rows: `agents workspace worktree cargo-offload` and the legacy
-    # `worktree cargo-offload`: 574 -> 576.
-    # The two-lane discovery branch allocates `backlog discover`, the hidden
-    # discovery worklist read: counted from the merged file, 576 -> 577.
-    assert len(mapped) == 577, (
+    # Upstream's cargo-offload rows (`agents workspace worktree cargo-offload`
+    # and the legacy `worktree cargo-offload`) took 574 -> 576 and the
+    # two-lane discovery branch allocated `backlog discover`: 576 -> 577. The
+    # routing branch allocates `agents route-slot`, the delivery-slot resolver
+    # the spawn seam's client invokes directly (hidden verb): 577 -> 578.
+    assert len(mapped) == 578, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
