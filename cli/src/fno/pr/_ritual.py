@@ -532,8 +532,8 @@ class Ritual:
         self._leg("sync-canonical", ["do", "pr", "sync-canonical", "--pr-number", str(self.ctx.pr)],
                   timeout=900.0)
 
-    def _merged_state(self) -> tuple[Optional[str], Optional[str]]:
-        """(state, headRefName) from ONE gh call, or (None, None) if unreadable.
+    def _merged_state(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """(state, headRefName, mergedAt) from ONE gh call, or Nones if unreadable.
 
         Memoized: two legs ask, and one PR view per ritual is enough. The state
         can only travel toward MERGED during a run, so a cached OPEN refuses
@@ -549,24 +549,30 @@ class Ritual:
         `_resolve_pr`, which returns a caller-supplied number unchecked. On that
         path the merge is an ARGUMENT, so the guard belongs here at the leg,
         where a removal actually happens, not at resolve.
+
+        mergedAt travels to the cleanup mint: both mint sites key one request
+        id, the journal keeps the LAST event per id, and the reaper's grace
+        window anchors on merged_at - so a later mint that stamped now would
+        push the reap a full grace window past the real merge.
         """
         if self._merge_state is None:
             self._merge_state = self._merged_state_read()
         return self._merge_state
 
-    def _merged_state_read(self) -> tuple[Optional[str], Optional[str]]:
+    def _merged_state_read(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
         try:
             meta = self._gh(["pr", "view", str(self.ctx.pr),
-                             "--json", "state,headRefName"])
+                             "--json", "state,headRefName,mergedAt"])
         except (ToolMissing, subprocess.SubprocessError):
-            return (None, None)
+            return (None, None, None)
         if not meta.ok:
-            return (None, None)
+            return (None, None, None)
         try:
             obj = json.loads(meta.stdout or "{}")
         except json.JSONDecodeError:
-            return (None, None)
-        return (obj.get("state") or None, obj.get("headRefName") or None)
+            return (None, None, None)
+        return (obj.get("state") or None, obj.get("headRefName") or None,
+                obj.get("mergedAt") or None)
 
     def _refuse_unless_merged(self, step: str) -> bool:
         """True when gh confirms MERGED. Emits the refusal itself otherwise.
@@ -574,7 +580,7 @@ class Ritual:
         Fails CLOSED: an unreadable state refuses too. "I could not check"
         must never spend the same as "I checked and it is merged".
         """
-        state, _ = self._merged_state()
+        state, _, _ = self._merged_state()
         if state == "MERGED":
             return True
         detail = f"not-merged (state={state})" if state else "merge-state unreadable"
@@ -587,6 +593,12 @@ class Ritual:
         """Persist one merge-triggered cleanup request before deferring: the
         shared helper `fno do pr merge` also mints, one fold key for both.
         """
+        if not self.ctx.node_ids:
+            # Dominant path: the ship gate already closed the node, so
+            # reconcile's .closed[] was empty. Recover it HERE, before the
+            # envelope and its request id key on it - leg_reap_rows runs the
+            # same recovery several legs later, too late for this mint.
+            self.ctx.node_ids = self._recover_node_for_pr()
         request_id = emit_merge_cleanup_requested(
             repo=str(self.canon) if self.canon else "",
             project=self.ctx.project,
@@ -596,6 +608,7 @@ class Ritual:
             node_ids=[str(node) for node in self.ctx.node_ids],
             session_id=None,
             harness=None,
+            merged_at=self._merged_state()[2],
             candidate_row_names=(
                 rows_for_cleanup(worktree, self.ctx.node_ids, runner=self._sh)
                 if worktree
@@ -634,7 +647,7 @@ class Ritual:
 
     def leg_archive(self) -> None:
         """Step 4: best-effort worktree archive; defer when run from inside it."""
-        state, branch = self._merged_state()
+        state, branch, _merged_at = self._merged_state()
         if state is None:
             self._emit("archive", _SKIPPED, "gh-unavailable")
             return

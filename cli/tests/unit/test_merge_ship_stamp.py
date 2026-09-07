@@ -558,6 +558,9 @@ def test_ritual_mint_shares_request_id_with_merge_mint(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "agents_home_dir", lambda: tmp_path / "agents-home")
     ritual = R.Ritual.__new__(R.Ritual)
     ritual.cwd = tmp_path
+    # The mint reads the memoized gh read for the grace anchor; a bare
+    # __new__ ritual has no runner, so seed the cache the legs would have.
+    ritual._merge_state = ("MERGED", "feature/x-07dc", "2026-09-07T15:00:00Z")
     ritual.ctx = R._Ctx(
         pr=9,
         autonomous=False,
