@@ -123,6 +123,10 @@ def test_codex_plugin_manifest_points_to_session_start_hook() -> None:
                     "type": "command",
                     "command": "${PLUGIN_ROOT}/hooks/codex-app-server-nudge-session-start.sh",
                 },
+                {
+                    "type": "command",
+                    "command": "${PLUGIN_ROOT}/hooks/operator-capture-nudge.sh",
+                },
             ],
         },
         # The whoami/crown block gets its OWN entry on startup: the combined
