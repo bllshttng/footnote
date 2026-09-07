@@ -363,15 +363,12 @@ fn reaching_an_occupied_portal_repoints_only_that_index() {
 }
 
 #[test]
-fn stored_tab_trees_prunes_every_portal_seat_tiled_in_one_tab() {
-    // AC9-HP, and the reason Change 3 is its own change rather than a
-    // rename. `node_without_leaf` removes ONE leaf per call and the
-    // capture loop calls it once per tab, so a mechanical port of the
-    // single-slot prune captures the SECOND portal and restore rebuilds
-    // a pane for a thread - the exact re-bind the declaration forbids.
-    //
-    // A ONE-portal restart passes either way, so it cannot be this test.
-    // Two seats in one tab is the discriminating fixture.
+fn stored_tab_trees_captures_every_portal_seat_tiled_in_one_tab() {
+    // AC1-HP: a tab with two tiled portals plus one ordinary pane captures
+    // THREE slots. This is the discriminating fixture the old prune test
+    // used in reverse: two portals in one tab is the shape the single-slot
+    // prune hid, and the shape the operator's report named (two tiled in
+    // tab 1, one alone in tab 2).
     set_attach_program(&["/bin/cat"]);
     let (mut core, client_id, _p1, _rx) = thread_core();
     core.agents = vec![
@@ -383,11 +380,7 @@ fn stored_tab_trees_prunes_every_portal_seat_tiled_in_one_tab() {
     let seats: Vec<u64> = core.portals.values().map(|e| e.seat).collect();
     assert_eq!(seats.len(), 2, "fixture: two portals are open");
 
-    // Tile them: BOTH seats plus one ordinary pane in ONE named tab, the
-    // shape Join produces. The ordinary pane is load-bearing - it keeps
-    // the tab from being hollowed away entirely, so the assertion counts
-    // survivors rather than reading an absent tab. A single-call prune
-    // leaves 2 slots here; the fold leaves 1.
+    // Tile them: BOTH seats plus one ordinary pane in ONE named tab.
     let (sid, ti) = core.session.find_pane(seats[0]).expect("seat 0 placed");
     let plain = core.spawn_pane(24, 40, "/tmp/seen").expect("plain pane");
     let tab = &mut core.session.squad_mut(sid).expect("live squad").tabs[ti];
@@ -406,16 +399,37 @@ fn stored_tab_trees_prunes_every_portal_seat_tiled_in_one_tab() {
     let tiled = trees
         .iter()
         .find(|t| t.tab_name.as_deref() == Some("tiled"))
-        .expect("the tiled tab survives capture: one ordinary pane remains");
+        .expect("the tiled tab is captured");
     assert_eq!(
         tiled.slots.len(),
-        1,
-        "only the ordinary pane is captured - BOTH portal seats were pruned. \
-             A prune that removes one leaf per tab leaves 2 here; slots = {:?}",
+        3,
+        "all three leaves are captured: slots = {:?}",
         tiled.slots
     );
+    // The split is preserved: three leaves under one branch.
+    assert!(
+        matches!(&tiled.tree, LayoutTreeSpec::Split { children, .. } if children.len() == 3),
+        "the tile survives as a split: {:?}",
+        tiled.tree
+    );
+    let portal_slots: Vec<(u8, &str)> = tiled
+        .slots
+        .iter()
+        .filter_map(|s| s.portal.as_ref().map(|p| (p.index, p.row.as_str())))
+        .collect();
+    assert_eq!(
+        portal_slots,
+        vec![(0, "deadbee1"), (1, "deadbee2")],
+        "two slots carry the open indices and row keys"
+    );
+    assert!(
+        tiled.slots.iter().any(|s| s.portal.is_none()
+            && matches!(&s.binding, LayoutBinding::Shell)
+            && s.name.starts_with('p')),
+        "the ordinary pane stays an ordinal shell slot"
+    );
 
-    // Positive control: the prune touched the CAPTURE, not the live tree.
+    // Positive control: capture touched the STORED shape, not the live tree.
     assert_eq!(core.portals.len(), 2, "both portals still open");
     assert!(core.session.find_pane(seats[1]).is_some());
 }
@@ -1004,43 +1018,53 @@ fn thread_pane_ctl_answers_a_pane_hosted_row_with_its_location() {
 }
 
 #[test]
-fn stored_tab_trees_prunes_the_thread_pane_and_remaps_active_tab() {
-    // (x-07c2) The dedicated thread pane is never persisted: capture
-    // prunes its leaf, a tab it hollowed out is not captured at all, and
-    // a skipped tab - the active one included - never leaves a dangling
-    // `active_tab` (position IS the durable tab identity in tab_trees).
-    // The thread pane carries an `attached` binding, so an un-pruned
-    // capture WOULD name its slot Fno(deadbee1): the absent binding is
-    // the red/green pair, not a vacuous one.
+fn stored_tab_trees_captures_a_portal_only_tab_whole() {
+    // (x-a9b4) AC1-EDGE: a tab holding ONLY a portal is captured with its
+    // name, and if it was the active tab it stays the active one. This is
+    // the operator's tab 2: the prune used to skip it whole and lose the
+    // name with it.
     set_attach_program(&["/bin/cat"]);
     let (mut core, client_id, _p1, _rx) = thread_core();
     core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
     core.command(client_id, thread_reach_cmd("deadbee1"));
     let thread_pid = core.portals.get(&0).expect("portal 0 open").seat;
-    let (sid, _ti) = core
+    let (sid, thread_tab_idx) = core
         .session
         .find_pane(thread_pid)
         .expect("the thread pane is in the live tree");
+    let squad = core.session.squad_mut(sid).unwrap();
+    squad.tabs[thread_tab_idx].name = Some("watch".into());
+    squad.active_tab = thread_tab_idx;
 
     let (trees, active) = core.stored_tab_trees(sid).unwrap();
+    assert_eq!(
+        trees.len(),
+        2,
+        "both tabs are captured: the shell tab and the portal-only tab"
+    );
+    let watch = trees
+        .iter()
+        .find(|t| t.tab_name.as_deref() == Some("watch"))
+        .expect("the portal tab is in the capture");
+    assert_eq!(watch.slots.len(), 1, "one slot: the portal seat");
+    let slot = &watch.slots[0];
+    let portal = slot.portal.as_ref().expect("the seat carries its portal");
+    assert_eq!(portal.index, 0, "the open index is kept");
+    assert_eq!(portal.row, "deadbee1", "the row key is kept");
     assert!(
+        matches!(&slot.binding, LayoutBinding::Shell),
+        "the binding stays Shell: at restore the seat is a shell until filled"
+    );
+    assert_eq!(
+        active,
         trees
             .iter()
-            .flat_map(|t| &t.slots)
-            .all(|s| !matches!(&s.binding, LayoutBinding::Fno(id) if id == "deadbee1")),
-        "no captured slot names the thread pane's attach id"
+            .position(|t| t.tab_name.as_deref() == Some("watch"))
+            .expect("the portal tab is in the capture"),
+        "the portal-only tab is the active one"
     );
-    assert!(
-        active < trees.len(),
-        "active_tab remapped into the captured range (active={active}, {} trees)",
-        trees.len()
-    );
-    assert!(
-        trees.iter().all(|t| !t.slots.is_empty()),
-        "no hollowed tab was captured"
-    );
-    // Positive control: the prune touched the CAPTURE, not the live
-    // session - the pane is still there and still the dedicated slot.
+
+    // Positive control: capture touched the STORED shape, not the live tree.
     assert!(core.session.find_pane(thread_pid).is_some());
     assert_eq!(
         core.portals.get(&0).map(|entry| entry.seat),
@@ -1049,12 +1073,11 @@ fn stored_tab_trees_prunes_the_thread_pane_and_remaps_active_tab() {
 }
 
 #[test]
-fn stored_tab_trees_remaps_active_tab_when_the_active_tab_is_pruned_away() {
-    // (x-07c2) When the ACTIVE tab is the one entirely hollowed out by
-    // the thread-pane prune, the remap in the loop above never fires
-    // (its guard never sees a tab that `continue`d past it) - active_tab
-    // must not silently default to 0, which would land restore on a
-    // tab unrelated to the one that vanished.
+fn stored_tab_trees_keeps_the_active_tab_when_it_holds_only_portals() {
+    // (x-a9b4) The remap the old prune needed is gone with the prune: a
+    // portal-only ACTIVE tab sandwiched between ordinary siblings is
+    // captured in its position and active_tab points at it, not at some
+    // other tab.
     set_attach_program(&["/bin/cat"]);
     let (mut core, client_id, _p1, _rx) = thread_core();
     core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
@@ -1065,8 +1088,8 @@ fn stored_tab_trees_remaps_active_tab_when_the_active_tab_is_pruned_away() {
         .find_pane(thread_pid)
         .expect("the thread pane is in the live tree");
 
-    // Sandwich the thread tab between two ordinary sibling tabs, and
-    // make the thread tab (pure thread pane, no other content) active.
+    // Sandwich the portal tab between two ordinary sibling tabs, and
+    // make the portal tab (pure portal seat, no other content) active.
     let squad = core.session.squad_mut(sid).unwrap();
     let thread_tab = squad.tabs.remove(thread_tab_idx);
     squad.tabs = vec![leaf_tab(9001, 9101), thread_tab, leaf_tab(9002, 9102)];
@@ -1075,12 +1098,16 @@ fn stored_tab_trees_remaps_active_tab_when_the_active_tab_is_pruned_away() {
     let (trees, active) = core.stored_tab_trees(sid).unwrap();
     assert_eq!(
         trees.len(),
-        2,
-        "only the two sibling tabs survive the prune"
+        3,
+        "every tab is captured, portal-only tab included"
     );
-    assert_eq!(
-        active, 1,
-        "active_tab lands on the surviving tab that followed the pruned one, not index 0"
+    assert_eq!(active, 1, "the portal-only tab is still the active one");
+    assert!(
+        trees[1]
+            .slots
+            .iter()
+            .any(|s| s.portal.as_ref().is_some_and(|p| p.row == "deadbee1")),
+        "the middle tree carries the portal slot"
     );
 }
 
@@ -1700,4 +1727,487 @@ fn close_pane_stand_in_shell_still_removes_its_tab() {
         }),
         "the slot stays stale-named, exactly as closing a dedicated pane always did"
     );
+}
+
+// ---- (x-a9b4) portals survive the restart: capture, hold, fill ----------
+
+/// A store row whose named tab is a two-child split of a portal slot
+/// (index 1, row `deadbee1`) and an ordinary shell slot. The AC3-HP
+/// fixture, shared by the hold and fill tests. The scratch is returned
+/// alive: dropping it would repoint the store path and delete the row.
+fn hold_fixture(store_name: &str) -> StoreScratch {
+    let s = StoreScratch::new(store_name);
+    let origin = s.dir.join("repo");
+    std::fs::create_dir_all(&origin).unwrap();
+    let origin_str = origin.to_string_lossy().into_owned();
+    let key = crate::squad_store::origin_key(&[origin_str.clone()]);
+    crate::squad_store::upsert("p-hold", &key, &[origin_str.clone()], &[]).unwrap();
+    let tree = crate::proto::LayoutTreeSpec::Split {
+        axis: crate::tree::Axis::Horizontal,
+        children: vec![
+            crate::proto::LayoutTreeChild {
+                weight: 0.5,
+                tree: crate::proto::LayoutTreeSpec::Slot("portal1".into()),
+            },
+            crate::proto::LayoutTreeChild {
+                weight: 0.5,
+                tree: crate::proto::LayoutTreeSpec::Slot("p2".into()),
+            },
+        ],
+    };
+    let slots = vec![
+        crate::proto::LayoutSlot {
+            name: "portal1".into(),
+            binding: LayoutBinding::Shell,
+            cwd: None,
+            portal: Some(PortalSlot {
+                index: 1,
+                row: "deadbee1".into(),
+            }),
+        },
+        crate::proto::LayoutSlot {
+            name: "p2".into(),
+            binding: LayoutBinding::Shell,
+            cwd: None,
+            portal: None,
+        },
+    ];
+    crate::squad_store::set_tab_trees(
+        "p-hold",
+        &key,
+        &[],
+        &[crate::squad_store::StoredTabTree {
+            tab_name: Some("watch".into()),
+            tree,
+            slots,
+            focus: None,
+        }],
+        Some(0),
+    )
+    .unwrap();
+    s
+}
+
+#[test]
+fn restore_holds_a_portal_slot_idle_in_its_seat() {
+    // AC3-HP: the named tab comes back with its split, the portal entry
+    // names the first child of the split with the stored row key, that
+    // pane runs no command, and the pane says what it waits for.
+    let _s = hold_fixture("portal-hold-hp");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+
+    let squad = core
+        .session
+        .squads
+        .iter()
+        .find(|s| !s.tabs.is_empty())
+        .expect("a squad was restored");
+    let tab = squad
+        .tabs
+        .iter()
+        .find(|t| t.name.as_deref() == Some("watch"))
+        .expect("the named tab came back");
+    let leaves = tree::leaves(&tab.root);
+    assert_eq!(leaves.len(), 2, "the split has two leaves");
+    let portal = core.portals.get(&1).expect("portal 1 is held again");
+    assert_eq!(portal.row_key, "deadbee1", "the stored row key came back");
+    assert_eq!(portal.tab, tab.id, "the seat lives in the restored tab");
+    assert!(
+        leaves.contains(&portal.seat),
+        "the seat is a leaf of the restored split"
+    );
+    let entry = core.panes.get(&portal.seat).expect("seat pane exists");
+    assert!(entry.cmd.is_none(), "the seat is a shell until filled");
+    assert_eq!(entry.name.as_deref(), Some("portal1"), "the seat is named");
+    assert!(
+        entry.vt.text().contains("held across restart"),
+        "the pane says what it waits for"
+    );
+    let notices = drain_notices(&mut rx).join("\n");
+    assert!(
+        notices.contains("held 0 worker pane(s) and 1 portal(s)"),
+        "the restore receipt names the held portal: {notices}"
+    );
+}
+
+#[test]
+fn restore_sends_a_clashed_portal_index_to_the_next_free_one() {
+    // AC3-EDGE: two stored squads both carry a portal slot at index 0.
+    // The second lands at the next free index and the notice says so; no
+    // insert overwrites a held entry.
+    let _s = hold_fixture("portal-hold-clash");
+    // Second squad: same store, different name and origin dir.
+    let origin = _s.dir.join("repo2");
+    std::fs::create_dir_all(&origin).unwrap();
+    let origin_str = origin.to_string_lossy().into_owned();
+    let key = crate::squad_store::origin_key(&[origin_str.clone()]);
+    crate::squad_store::upsert("p-hold-2", &key, &[origin_str.clone()], &[]).unwrap();
+    crate::squad_store::set_tab_trees(
+        "p-hold-2",
+        &key,
+        &[],
+        &[crate::squad_store::StoredTabTree {
+            tab_name: Some("other".into()),
+            tree: crate::proto::LayoutTreeSpec::Slot("portal1".into()),
+            slots: vec![crate::proto::LayoutSlot {
+                name: "portal1".into(),
+                binding: LayoutBinding::Shell,
+                cwd: None,
+                portal: Some(PortalSlot {
+                    index: 1,
+                    row: "deadbee9".into(),
+                }),
+            }],
+            focus: None,
+        }],
+        Some(0),
+    )
+    .unwrap();
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+
+    assert_eq!(
+        core.portals.get(&1).map(|p| p.row_key.as_str()),
+        Some("deadbee1"),
+        "the first squad keeps its index"
+    );
+    assert_eq!(
+        core.portals.get(&0).map(|p| p.row_key.as_str()),
+        Some("deadbee9"),
+        "the second squad lands at the next free index"
+    );
+    let notices = drain_notices(&mut rx).join("\n");
+    assert!(
+        notices.contains("at portal 0 instead"),
+        "the re-seat is named: {notices}"
+    );
+}
+
+#[test]
+fn the_restore_notice_names_both_held_kinds() {
+    // AC4-HP: one worker pane and two portal seats held; the startup
+    // notice reads both counts.
+    let s = hold_fixture("portal-hold-notice");
+    // A second tab on the same squad carrying one more portal slot, and
+    // a worker member that holds a pane across the restore.
+    let origin = s.dir.join("repo");
+    let origin_str = origin.to_string_lossy().into_owned();
+    let key = crate::squad_store::origin_key(&[origin_str.clone()]);
+    let mut loaded = crate::squad_store::load();
+    let mut trees = std::mem::take(&mut loaded.squads[0].tab_trees);
+    trees.push(crate::squad_store::StoredTabTree {
+        tab_name: Some("second".into()),
+        tree: crate::proto::LayoutTreeSpec::Slot("portal2".into()),
+        slots: vec![crate::proto::LayoutSlot {
+            name: "portal2".into(),
+            binding: LayoutBinding::Shell,
+            cwd: None,
+            portal: Some(PortalSlot {
+                index: 2,
+                row: "deadbee2".into(),
+            }),
+        }],
+        focus: None,
+    });
+    crate::squad_store::set_tab_trees("p-hold", &key, &loaded.squads[0].origins, &trees, Some(0))
+        .unwrap();
+    // A worker member that holds a pane across the restore.
+    crate::squad_store::upsert(
+        "p-hold",
+        &key,
+        &loaded.squads[0].origins,
+        &[crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("t-live-one".into()),
+            harness: Some("codex".into()),
+            harness_session_id: Some("live-session".into()),
+        }],
+    )
+    .unwrap();
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let mut one = exited_claude_row("t-live-one", None);
+    one.harness = Some("codex".into());
+    one.harness_session_id = Some("live-session".into());
+    core.agents = vec![one];
+    let _known = KnownWorkersGuard;
+    set_known_workers(&["t-live-one"]);
+    set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Hold);
+    let _pol = RestorePolicyGuard;
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+
+    let notices = drain_notices(&mut rx).join("\n");
+    assert!(
+        notices.contains("held 1 worker pane(s) and 2 portal(s)"),
+        "the receipt names both held kinds: {notices}"
+    );
+}
+
+#[test]
+fn focusing_a_held_portal_seat_fills_it_in_place() {
+    // AC6-HP: the held seat at portal 1 shows a shell; focusing it swaps
+    // the row's viewer into THAT seat; portals[1] names the new pane.
+    set_attach_program(&["/bin/cat"]);
+    let _s = hold_fixture("portal-fill-focus");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, _rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
+    let (sid, ti) = core.session.find_pane(seat).expect("seat in tree");
+    let tab_id = core.session.squad(sid).unwrap().tabs[ti].id;
+    let before = core.next_pane_id;
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+
+    core.command(1, Command::FocusPane(seat));
+
+    let filled = core.portals.get(&1).expect("portal 1 still open").seat;
+    assert_ne!(filled, seat, "the shell seat was replaced");
+    assert_eq!(filled, before, "exactly one pane was spawned");
+    assert_eq!(
+        core.panes[&filled].cmd.as_deref(),
+        Some("cat"),
+        "the seat now runs the row's tier argv"
+    );
+    assert_eq!(
+        core.portals.get(&1).map(|p| p.tab),
+        Some(tab_id),
+        "the viewer landed in the same tab the seat held"
+    );
+}
+
+#[test]
+fn a_default_reach_fills_the_held_seat_naming_the_row() {
+    // AC7-HP: Enter on the row carries no explicit index. A held portal
+    // at index 1 names the row; the reach fills THAT seat instead of
+    // stranding it while a fresh viewer mints at 0.
+    set_attach_program(&["/bin/cat"]);
+    let _s = hold_fixture("portal-fill-default");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let held_seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+
+    core.command(
+        1,
+        Command::AttachAgent {
+            id: "deadbee1".into(),
+            placement: PanePlacement {
+                thread_pane: true,
+                ..Default::default()
+            },
+        },
+    );
+
+    assert_eq!(
+        core.portals
+            .get(&1)
+            .map(|p| core.panes[&p.seat].cmd.as_deref()),
+        Some(Some("cat")),
+        "the held seat now runs the viewer"
+    );
+    assert!(
+        core.panes.get(&held_seat).is_none(),
+        "the shell stand-in was reaped"
+    );
+    assert!(!core.portals.contains_key(&0), "no portal 0 was minted");
+    let notices = drain_notices(&mut rx).join("\n");
+    assert!(
+        notices.contains("portal 1: resuming"),
+        "the resume is named: {notices}"
+    );
+}
+
+#[test]
+fn an_explicit_reach_never_hijacks_a_held_seat() {
+    // AC7-EDGE: `--portal 0` means portal 0. The held seat at 1 stays
+    // held; a fresh viewer opens at 0.
+    set_attach_program(&["/bin/cat"]);
+    let _s = hold_fixture("portal-fill-explicit");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, _rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let held_seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+
+    core.command(1, portal_reach_cmd("deadbee1", 0));
+
+    assert_eq!(
+        core.portals
+            .get(&0)
+            .map(|p| core.panes[&p.seat].cmd.as_deref()),
+        Some(Some("cat")),
+        "a fresh viewer opened at the named index"
+    );
+    assert_eq!(
+        core.portals.get(&1).map(|p| p.seat),
+        Some(held_seat),
+        "the held seat at 1 is untouched"
+    );
+    assert!(core.panes.get(&held_seat).is_some());
+}
+
+#[test]
+fn a_held_seat_whose_row_is_gone_stays_a_readable_shell() {
+    // AC8-EDGE: the held row never appears in the registry. Focus falls
+    // through to a plain focus: the pane stays a readable shell naming
+    // the row and nothing is spawned.
+    let _s = hold_fixture("portal-fill-gone");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let (c, _rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+    let seat = core.portals.get(&1).expect("fixture: portal 1 held").seat;
+    // The placeholder names its row in its pane text (asserted at spawn
+    // size; a later split's geometry pass may rewrap the visible grid).
+    assert!(
+        core.panes[&seat].vt.text().contains("deadbee1"),
+        "the placeholder names its row"
+    );
+    let panes_before = core.panes.len();
+    core.agents = vec![]; // no row answers deadbee1
+
+    core.command(1, Command::FocusPane(seat));
+
+    assert_eq!(core.panes.len(), panes_before, "nothing was spawned");
+    assert!(
+        !core.panes[&seat].vt.is_pristine_idle_shell(),
+        "the placeholder is still readable"
+    );
+    assert_eq!(
+        core.portals.get(&1).map(|p| p.seat),
+        Some(seat),
+        "the seat is still the held portal"
+    );
+}
+
+#[test]
+fn a_portal_onto_a_done_row_prunes_with_the_done_set() {
+    // AC5-HP: the only slot is a portal onto attach id deadbee1 and the
+    // done set carries that id (the forgotten-tombstone arm fills it).
+    // No pane is minted and the skipped-tab count includes the tab.
+    let s = StoreScratch::new("portal-done");
+    let origin = s.dir.join("repo");
+    std::fs::create_dir_all(&origin).unwrap();
+    let origin_str = origin.to_string_lossy().into_owned();
+    let key = crate::squad_store::origin_key(&[origin_str.clone()]);
+    crate::squad_store::upsert("", &key, &[origin_str.clone()], &[]).unwrap();
+    // The member died and the registry forgot its attach id: the same
+    // arm that prunes the member puts the id in done_bindings.
+    crate::squad_store::upsert(
+        "",
+        &key,
+        &[origin_str.clone()],
+        &[crate::squad_store::StoredMember {
+            attach_id: "deadbee1".into(),
+            tombstone: true,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: None,
+            harness: None,
+            harness_session_id: None,
+        }],
+    )
+    .unwrap();
+    crate::squad_store::set_tab_trees(
+        "",
+        &key,
+        &[],
+        &[crate::squad_store::StoredTabTree {
+            tab_name: None,
+            tree: crate::proto::LayoutTreeSpec::Slot("portal1".into()),
+            slots: vec![crate::proto::LayoutSlot {
+                name: "portal1".into(),
+                binding: LayoutBinding::Shell,
+                cwd: None,
+                portal: Some(PortalSlot {
+                    index: 1,
+                    row: "deadbee1".into(),
+                }),
+            }],
+            focus: None,
+        }],
+        None,
+    )
+    .unwrap();
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    core.agents = vec![bg_row("other", "/tmp/seen", Some("cafebabe"))];
+    // The forgotten-tombstone arm reads the registry, not core.agents; pin
+    // the seam to rows naming OTHER ids so deadbee1 reads as forgotten even
+    // on a machine with no registry file (CI).
+    let _registry = RestoreRegistryRowsGuard;
+    set_restore_registry_rows(vec![bg_row("other", "/tmp/seen", Some("cafebabe"))]);
+    let (c, mut rx) = client_with_rx(1);
+    core.clients.push(c);
+    core.restore_squads(24, 80, 999);
+
+    assert!(
+        core.portals.is_empty(),
+        "no portal came back for a done row"
+    );
+    assert_eq!(
+        core.panes.len(),
+        1,
+        "only the empty-squad fallback shell exists; the done portal slot minted nothing"
+    );
+    let notices = drain_notices(&mut rx).join("\n");
+    assert!(
+        notices.contains("1 done tab(s)"),
+        "the skipped tab is counted: {notices}"
+    );
+}
+
+#[test]
+fn the_notice_latch_holds_through_the_restart_path() {
+    // AC9-HP: restore held portals with no client attached - the ordinary
+    // startup ordering - then attach a client and feed a live paneless
+    // row. The discoverability notice never fires (portals is non-empty)
+    // and the latch stays unset; the restore receipt was the delivered
+    // portal notice, and it is asserted present, not inferred from an
+    // absence.
+    set_attach_program(&["/bin/cat"]);
+    let _s = hold_fixture("portal-latch");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    core.restore_squads(24, 80, 999);
+    assert!(!core.portal_noticed, "no client: the latch stays unset");
+
+    let (c, mut rx) = client_with_rx(9);
+    core.clients.push(c);
+    while rx.try_recv().is_ok() {}
+    core.agents = vec![bg_row("bg-worker", "/tmp/seen", None)];
+    core.handle_msg(CoreMsg::AgentRows {
+        rows: core.agents.clone(),
+        branches: HashMap::new(),
+        tails: HashMap::new(),
+    });
+
+    let notices = drain_notices(&mut rx);
+    assert!(
+        !notices.iter().any(|t| t.contains("thread row present")),
+        "a held portal disarms the discoverability notice: {notices:?}"
+    );
+    assert!(!core.portal_noticed, "nothing latched");
 }

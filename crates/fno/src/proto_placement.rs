@@ -112,9 +112,10 @@ pub struct PanePlacement {
     /// (v64, x-8f9d) Which portal this placement targets. `Some(n)` reaches
     /// portal n; `None` is no portal. A portal is the dedicated pane a
     /// thread is shown through, indexed from 0 and addressable at launch.
-    /// No portal at n opens one (never persisted as a squad member), a
-    /// portal at n on another row repoints it in place, a portal at n on
-    /// this row focuses it. Mutually exclusive with `here`, `at`, `split`
+    /// No portal at n opens one (a portal is never persisted as a squad
+    /// member; an open portal is persisted as a slot of its tab and
+    /// restored held), a portal at n on another row repoints it in place,
+    /// a portal at n on this row focuses it. Mutually exclusive with `here`, `at`, `split`
     /// and a non-default `target` (a portal owns its geometry); the server
     /// refuses a conflicting combination. Additive and `#[serde(default)]`,
     /// so every existing placement stays wire-identical and the

@@ -31,6 +31,7 @@ pub mod pane_cwd;
 pub mod popup;
 pub mod process_admission;
 pub mod proto;
+pub mod proto_slot;
 pub mod pty;
 pub mod registry_label;
 pub mod server;

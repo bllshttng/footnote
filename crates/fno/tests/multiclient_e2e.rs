@@ -698,11 +698,13 @@ fn concurrent_graft_one_commits_one_refuses() {
                     name: "anchor".into(),
                     binding: LayoutBinding::Anchor,
                     cwd: None,
+                    portal: None,
                 },
                 LayoutSlot {
                     name: "fresh".into(),
                     binding: LayoutBinding::Shell,
                     cwd: None,
+                    portal: None,
                 },
             ],
         }
