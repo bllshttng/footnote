@@ -72,7 +72,9 @@ def main(argv: list[str]) -> int:
         print(f"ERROR: {err}", file=sys.stderr)
         return 2
 
-    reqs = (fm.get("requires") or {}).get("binaries") or []
+    # `metadata` is the documented custom-data field in the skill frontmatter
+    # contract; a top-level `requires` is not on the supported list.
+    reqs = ((fm.get("metadata") or {}).get("requires") or {}).get("binaries") or []
     if not isinstance(reqs, list):
         # `binaries` declared but not a list — author error. Treat as
         # missing-binary (rc=1) since the structural shape is wrong.

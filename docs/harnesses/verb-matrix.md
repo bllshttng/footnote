@@ -4,7 +4,7 @@
      and skills/*/SKILL.md frontmatter. -->
 # Verb x harness matrix
 
-Which fno verb runs on which harness, rendered from the capability table (`map_version 18`) and each skill's `requires.harness` frontmatter. One row per `skills/*/SKILL.md`, one column per supported harness. The states are the features vocabulary in [capability-matrix.md](capability-matrix.md).
+Which fno verb runs on which harness, rendered from the capability table (`map_version 18`) and each skill's `metadata.requires.harness` frontmatter. One row per `skills/*/SKILL.md`, one column per supported harness. The states are the features vocabulary in [capability-matrix.md](capability-matrix.md).
 
 A cell is a projection, never a fresh measurement. The rule, in order:
 

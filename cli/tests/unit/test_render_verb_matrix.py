@@ -1,7 +1,7 @@
 """The verb x harness matrix is a projection of the capability table and each
-skill's `requires.harness` frontmatter. These tests pin the cell rule on a
-synthetic table and on committed cells, so a table or frontmatter edit that
-changes a verdict shows up here before the freshness gate does."""
+skill's `metadata.requires.harness` frontmatter. These tests pin the cell rule
+on a synthetic table and on committed cells, so a table or frontmatter edit
+that changes a verdict shows up here before the freshness gate does."""
 
 from __future__ import annotations
 
@@ -86,23 +86,33 @@ def _skill(tmp_path: Path, frontmatter: str) -> Path:
 
 
 def test_out_of_vocabulary_need_refuses_naming_the_skill(renderer, tmp_path: Path) -> None:
-    root = _skill(tmp_path, "requires:\n  harness:\n    - telepathy\n")
+    root = _skill(tmp_path, "metadata:\n  requires:\n    harness:\n      - telepathy\n")
     with pytest.raises(SystemExit) as raised:
         renderer.skill_needs(root, VOCAB)
     assert "bogus" in str(raised.value) and "telepathy" in str(raised.value)
 
 
 def test_scalar_need_refuses_naming_the_value(renderer, tmp_path: Path) -> None:
-    root = _skill(tmp_path, "requires:\n  harness: loop\n")
+    root = _skill(tmp_path, "metadata:\n  requires:\n    harness: loop\n")
     with pytest.raises(SystemExit) as raised:
         renderer.skill_needs(root, VOCAB)
     assert "must be a list" in str(raised.value) and "'loop'" in str(raised.value)
 
 
+def test_a_top_level_requires_block_is_not_read(renderer, tmp_path: Path) -> None:
+    """`requires` is not a field the skill frontmatter contract supports, so a
+    declaration left at the top level reads as no needs rather than as data."""
+    root = _skill(tmp_path, "requires:\n  harness:\n    - telepathy\n")
+    assert renderer.skill_needs(root, VOCAB) == {"bogus": []}
+
+
 def test_crlf_frontmatter_still_reads_needs(renderer, tmp_path: Path) -> None:
     skill = tmp_path / "bogus" / "SKILL.md"
     skill.parent.mkdir()
-    skill.write_bytes(b"---\r\nname: bogus\r\nrequires:\r\n  harness:\r\n    - loop\r\n---\r\n# bogus\r\n")
+    skill.write_bytes(
+        b"---\r\nname: bogus\r\nmetadata:\r\n  requires:\r\n    harness:\r\n"
+        b"      - loop\r\n---\r\n# bogus\r\n"
+    )
     assert renderer.skill_needs(tmp_path, VOCAB) == {"bogus": ["loop"]}
 
 

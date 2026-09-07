@@ -56,7 +56,7 @@ _VERB_HEADER = """\
      and skills/*/SKILL.md frontmatter. -->
 # Verb x harness matrix
 
-Which fno verb runs on which harness, rendered from the capability table (`map_version {version}`) and each skill's `requires.harness` frontmatter. One row per `skills/*/SKILL.md`, one column per supported harness. The states are the features vocabulary in [capability-matrix.md](capability-matrix.md).
+Which fno verb runs on which harness, rendered from the capability table (`map_version {version}`) and each skill's `metadata.requires.harness` frontmatter. One row per `skills/*/SKILL.md`, one column per supported harness. The states are the features vocabulary in [capability-matrix.md](capability-matrix.md).
 
 A cell is a projection, never a fresh measurement. The rule, in order:
 
@@ -125,20 +125,28 @@ def verb_cell(harness: str, row: dict | None, needs: list[str]) -> str:
 
 
 def skill_needs(skills_dir: Path, vocabulary: list[str]) -> dict[str, list[str]]:
-    """Every skill's declared `requires.harness`, keyed by skill name. A
-    value outside the vocabulary refuses by naming the skill and the value:
+    """Every skill's declared `metadata.requires.harness`, keyed by skill name.
+
+    `metadata` is the documented custom-data field in the Claude Code skill
+    frontmatter contract, so the declaration rides a supported key rather than
+    a top-level one the loader never promised to keep ignoring.
+
+    A value outside the vocabulary refuses by naming the skill and the value:
     a typo that silently read as "no needs" would render native by default."""
     needs: dict[str, list[str]] = {}
     for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
         frontmatter, _body = read_frontmatter(skill_md)
         name = str(frontmatter.get("name") or skill_md.parent.name)
-        declared = (frontmatter.get("requires") or {}).get("harness") or []
+        requires = (frontmatter.get("metadata") or {}).get("requires") or {}
+        declared = requires.get("harness") or []
         if not isinstance(declared, list):
-            raise SystemExit(f"{skill_md}: requires.harness must be a list, got {declared!r}")
+            raise SystemExit(
+                f"{skill_md}: metadata.requires.harness must be a list, got {declared!r}"
+            )
         for value in declared:
             if value not in vocabulary:
                 raise SystemExit(
-                    f"{skill_md}: requires.harness value {value!r} is outside "
+                    f"{skill_md}: metadata.requires.harness value {value!r} is outside "
                     f"the vocabulary {vocabulary}"
                 )
         needs[name] = [str(value) for value in declared]

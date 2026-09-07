@@ -4,13 +4,13 @@ description: "Use when: build this feature, get it done end-to-end, or execute a
 argument-hint: "[S|small|M|medium|L|large] [agent|fork] [beastmode|beast] [clean] [adversarial] [combo <name>] [resume|cancel] [expertise] <ab-xxxxxxxx | feature-description | plan-path> [--max-iterations N] [--budget N] [--no-ship] [--no-external] [--no-docs] [--no-browser]"
 metadata:
   internal: true
-requires:
-  binaries:
-    - "fno >= 0.1"
-    - "gh >= 2.0"
-    - "git >= 2.30"
-  harness:
-    - loop
+  requires:
+    binaries:
+      - "fno >= 0.1"
+      - "gh >= 2.0"
+      - "git >= 2.30"
+    harness:
+      - loop
 ---
 
 <!-- style-exception: this file's established "- **only if** <condition>: <action>" bullet heading, used by dozens of pre-existing bullets below, puts "if" after "only" rather than leading the sentence (rule 5). Rewriting that file-wide convention is out of scope for x-42c5, which only touches one such bullet's body. -->

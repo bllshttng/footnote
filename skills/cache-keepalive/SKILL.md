@@ -1,9 +1,10 @@
 ---
 name: cache-keepalive
 description: "Keep prompt cache alive during idle. Prevents 10x cost spike when cache expires. Use when: 'keep cache warm', 'cache keepalive', or auto-activated at session start when project opts in."
-requires:
-  harness:
-    - claude
+metadata:
+  requires:
+    harness:
+      - claude
 ---
 
 # Cache Keepalive
