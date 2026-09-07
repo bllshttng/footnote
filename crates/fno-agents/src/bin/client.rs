@@ -16,6 +16,7 @@ use fno_agents::drift::drift_warning;
 use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
 use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
+use fno_agents::spawn_gate::machine_status_line;
 use fno_agents::usage::{verb_usage, CLIENT_VERB_USAGE};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
@@ -2014,6 +2015,11 @@ fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "{}".into())
         );
+    }
+    // Best-effort: a machine whose footprint cannot be read prints no line
+    // rather than a stale or fabricated one.
+    if let Some(line) = machine_status_line() {
+        println!("machine: {line}");
     }
 }
 
