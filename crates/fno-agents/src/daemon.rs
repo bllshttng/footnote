@@ -611,240 +611,6 @@ fn registry_repo_roots(home: &AgentsHome) -> Vec<String> {
     seen.into_iter().collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MergeCleanupRequest {
-    request_id: String,
-    repo: String,
-    pr: i64,
-    worktree: Option<String>,
-    node_ids: Vec<String>,
-    candidate_row_names: Vec<String>,
-}
-
-fn pending_merge_cleanup_requests(home: &AgentsHome, repo: &str) -> Vec<MergeCleanupRequest> {
-    let Ok(contents) = std::fs::read_to_string(home.events_jsonl()) else {
-        return Vec::new();
-    };
-    let mut requested = std::collections::BTreeMap::<String, MergeCleanupRequest>::new();
-    let mut finished = std::collections::HashSet::<String>::new();
-    for line in contents.lines() {
-        let Ok(event) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(kind) = event.get("type").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(data) = event.get("data") else {
-            continue;
-        };
-        let Some(request_id) = data.get("request_id").and_then(Value::as_str) else {
-            continue;
-        };
-        match kind {
-            "merge_cleanup_requested" => {
-                let Some(request_repo) = data.get("repo").and_then(Value::as_str) else {
-                    continue;
-                };
-                if request_repo != repo {
-                    continue;
-                }
-                let Some(pr) = data.get("pr").and_then(Value::as_i64) else {
-                    continue;
-                };
-                let node_ids = data
-                    .get("node_ids")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect();
-                let candidate_row_names = data
-                    .get("candidate_row_names")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect();
-                requested.insert(
-                    request_id.to_owned(),
-                    MergeCleanupRequest {
-                        request_id: request_id.to_owned(),
-                        repo: request_repo.to_owned(),
-                        pr,
-                        worktree: data
-                            .get("worktree")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        node_ids,
-                        candidate_row_names,
-                    },
-                );
-            }
-            "merge_cleanup_completed" | "merge_cleanup_refused" => {
-                finished.insert(request_id.to_owned());
-            }
-            _ => {}
-        }
-    }
-    requested
-        .into_values()
-        .filter(|request| !finished.contains(&request.request_id))
-        .collect()
-}
-
-fn merge_cleanup_requested(home: &AgentsHome, repo: &str) -> bool {
-    !pending_merge_cleanup_requests(home, repo).is_empty()
-}
-
-fn merge_cleanup_reclaimed_bytes(home: &AgentsHome, worktree: &str) -> u64 {
-    let Ok(contents) = std::fs::read_to_string(home.events_jsonl()) else {
-        return 0;
-    };
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| event.get("type").and_then(Value::as_str) == Some("worktree_removed"))
-        .filter_map(|event| event.get("data").cloned())
-        .filter(|data| data.get("path").and_then(Value::as_str) == Some(worktree))
-        .filter_map(|data| data.get("reclaimed_bytes").and_then(Value::as_u64))
-        .last()
-        .unwrap_or(0)
-}
-
-fn merge_cleanup_guard_reason(repo: &str, worktree: &str) -> Option<String> {
-    let status = std::process::Command::new("git")
-        .current_dir(worktree)
-        .args(["status", "--porcelain"])
-        .output()
-        .ok()?;
-    if !status.status.success() {
-        return Some("git-status-unreadable".into());
-    }
-    if !status.stdout.is_empty() {
-        return Some("dirty".into());
-    }
-    let origin = std::process::Command::new("git")
-        .current_dir(repo)
-        .args(["rev-parse", "--verify", "--quiet", "origin/main"])
-        .output()
-        .ok()?;
-    if !origin.status.success() {
-        return Some("origin-main-unreadable".into());
-    }
-    let merged = std::process::Command::new("git")
-        .current_dir(worktree)
-        .args(["merge-base", "--is-ancestor", "HEAD", "origin/main"])
-        .status()
-        .ok()?;
-    if !merged.success() {
-        return Some("unreachable-from-origin-main".into());
-    }
-    None
-}
-
-fn merge_cleanup_row_names(home: &AgentsHome, request: &MergeCleanupRequest) -> Vec<String> {
-    let Ok(registry) = state::load_registry(&home.registry_json()) else {
-        return Vec::new();
-    };
-    let mut names = request.candidate_row_names.clone();
-    names.extend(
-        registry
-            .entries
-            .into_iter()
-            .filter(|entry| {
-                request
-                    .worktree
-                    .as_deref()
-                    .is_some_and(|worktree| entry.cwd == worktree)
-                    || request
-                        .node_ids
-                        .iter()
-                        .any(|node| entry.name.starts_with(&format!("target-{node}-")))
-            })
-            .map(|entry| entry.name)
-            .collect::<Vec<_>>(),
-    );
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn consume_merge_cleanup_requests(home: &AgentsHome, roots: &[String], emitter: &EventEmitter) {
-    for root in roots {
-        for request in pending_merge_cleanup_requests(home, root) {
-            if let Some(worktree) = request.worktree.as_deref() {
-                if std::path::Path::new(worktree).exists() {
-                    if let Some(reason) = merge_cleanup_guard_reason(root, worktree) {
-                        let _ = emitter.emit(
-                            "merge_cleanup_refused",
-                            &json!({
-                                "request_id": request.request_id,
-                                "repo": request.repo,
-                                "pr": request.pr,
-                                "reason": reason,
-                            }),
-                        );
-                    }
-                    continue;
-                }
-            }
-            let reclaimed_bytes = request
-                .worktree
-                .as_deref()
-                .map(|worktree| merge_cleanup_reclaimed_bytes(home, worktree))
-                .unwrap_or(0);
-            let names = merge_cleanup_row_names(home, &request);
-            let mut failed = None;
-            for name in names {
-                let output = std::process::Command::new("fno")
-                    .current_dir(root)
-                    .args([
-                        "agents",
-                        "rm",
-                        &name,
-                        "--audit-actor",
-                        "post-merge",
-                        "--audit-reason",
-                        "pr-merged",
-                        "--audit-request-id",
-                        &request.request_id,
-                        "--audit-worktree-touched",
-                        "--audit-reclaimed-bytes",
-                        &reclaimed_bytes.to_string(),
-                    ])
-                    .output();
-                if !output.as_ref().is_ok_and(|output| output.status.success()) {
-                    failed = Some(name);
-                    break;
-                }
-            }
-            if let Some(name) = failed {
-                let _ = emitter.emit(
-                    "merge_cleanup_refused",
-                    &json!({
-                        "request_id": request.request_id,
-                        "repo": request.repo,
-                        "pr": request.pr,
-                        "reason": format!("row-removal-failed:{name}"),
-                    }),
-                );
-                continue;
-            }
-            let _ = emitter.emit(
-                "merge_cleanup_completed",
-                &json!({
-                    "request_id": request.request_id,
-                    "repo": request.repo,
-                    "pr": request.pr,
-                    "reclaimed_bytes": reclaimed_bytes,
-                }),
-            );
-        }
-    }
-}
-
 /// How long between worktree report sweeps. A 24-hour reap order spans at
 /// least three complete windows even when its mint cannot clear the stamp.
 const WORKTREE_SWEEP_INTERVAL_SECS: u64 = 21_600;
@@ -996,17 +762,19 @@ pub fn parse_worktree_sweep(stdout: &str) -> Option<WorktreeSweepReport> {
 }
 
 /// Worktree sweep, one line per repo, on a 6h floor: report-only until a
-/// merge-minted reap order stands, then applying.
+/// merge-minted cleanup request stands, then applying.
 ///
 /// A timer tick proves nothing on its own, so an unearned tick still only
-/// REPORTS. Removal stays on the merge-triggered path: the post-merge ritual
-/// mints a `reap:pr-<n>` claim (TTL-bounded) before archive lookup, and while
-/// any such order stands in a repository (`orders` injects that scoped read)
-/// that repository's pass runs with `--apply`. The sweep's own guards -
-/// reapable, live claim, rooted processes - decide tree by tree. A tree that
-/// stays protected expires its order rather than being forced. There is no
-/// config knob, because two off-switches for one decision strand whoever
-/// flips the wrong one.
+/// REPORTS. Removal is merge-triggered: `fno do pr merge` (and the post-merge
+/// ritual, as its second mint site) writes the `merge_cleanup_requested`
+/// envelope, and while a pending request stands for a repository (`orders`
+/// injects that scoped read) that repository's pass runs with `--apply`. The
+/// primary consumer is the merge reaper (merge_reap.rs), which stops the
+/// harness, drops the rows, and takes the tree; this sweep only catches what
+/// that pass leaves behind. The sweep's own guards - reapable, live claim,
+/// rooted processes - still decide tree by tree. There is no config knob,
+/// because two off-switches for one decision strand whoever flips the wrong
+/// one.
 ///
 /// `orders` and `run` are injected so the policy is testable without shelling
 /// out.
@@ -1782,7 +1550,7 @@ impl RemovalAuditContext {
     }
 }
 
-fn directory_bytes(path: &std::path::Path) -> Option<u64> {
+pub(crate) fn directory_bytes(path: &std::path::Path) -> Option<u64> {
     fn walk(path: &std::path::Path, total: &mut u64) -> std::io::Result<()> {
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
@@ -1833,7 +1601,7 @@ pub(crate) fn dispatch_node_id(name: &str) -> Option<String> {
     Some(format!("{prefix}-{hex}"))
 }
 
-fn global_events_path(home: &AgentsHome) -> PathBuf {
+pub(crate) fn global_events_path(home: &AgentsHome) -> PathBuf {
     home.root()
         .parent()
         .unwrap_or_else(|| home.root())
@@ -2120,7 +1888,7 @@ pub(crate) fn live_liveness_prober(
 /// keep running past the deadline this call gave up at (self-review finding:
 /// this was hand-duplicated at the RPC call site below; one shared helper
 /// now backs both).
-async fn bounded_claude_stop(
+pub(crate) async fn bounded_claude_stop(
     short: &str,
     timeout: Duration,
 ) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
@@ -2852,38 +2620,24 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         crate::gc::unowned_sweeps(&home, &emitter, &grace_cwd);
                     });
                 }
-                // Worktree sweep: the backstop for what the merge ritual
-                // missed. Its own 24h stamp makes it a near-no-op on this tick,
-                // but the verb shells git across every worktree when it does
-                // fire, so it runs off-loop behind a one-in-flight gate like the
-                // scrape sweep. Report-only unless a merge-minted reap order
-                // (reap:pr-* claim) stands, in which case the pass applies.
+                // Worktree sweep + merge reaper (x-07dc). The sweep is the
+                // backstop for what the reaper cannot reach; the reaper is the
+                // merge-triggered consumer of `merge_cleanup_requested`, with
+                // its own 60s floor. Both run off-loop behind the one-in-flight
+                // gate; the reaper's grace and stop order live in merge_reap.rs.
                 if !worktree_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
                     let flag = Arc::clone(&worktree_sweep_in_flight);
                     let home = ctx.home.clone();
                     let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
+                    let grace_cwd = ctx.opts.agents_config_cwd.clone();
                     tokio::task::spawn_blocking(move || {
                         let _gate = SweepGate(flag);
                         let roots = registry_repo_roots(&home);
                         let now = now_epoch_secs();
                         worktree_sweep(&home, &emitter, now, &roots, &|root| {
-                            if merge_cleanup_requested(&home, root) {
-                                return WorktreeSweepOrderRead::from(true);
-                            }
-                            // Compatibility with requests minted by older
-                            // rituals: a standing claim still authorizes the
-                            // guarded report/apply sweep during the deploy window.
-                            // Live reap orders anywhere (both claim roots are
-                            // read by `list`): each is minted only by a ritual
-                            // that gh-confirmed MERGED, so its standing is the
-                            // merge-trigger for this tick's apply pass.
-                            (!crate::claims::list(
-                                Some("reap:"),
-                                Some(std::path::Path::new(root)),
-                                false,
-                            )
-                            .is_empty())
-                                .into()
+                            // A pending merge-cleanup request is the standing
+                            // order: the pass applies while one waits.
+                            crate::merge_reap::merge_cleanup_requested(&home, root).into()
                         }, &|root, apply| {
                             let mut cmd = std::process::Command::new("fno");
                             cmd.current_dir(root)
@@ -2907,7 +2661,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                 },
                             }
                         });
-                        consume_merge_cleanup_requests(&home, &roots, &emitter);
+                        let grace_secs =
+                            crate::agents_config::retire_grace_secs(&grace_cwd) as i64;
+                        crate::merge_reap::consume_merge_cleanup_requests(
+                            &home, &roots, &emitter, grace_secs,
+                        );
                     });
                 }
                 // Orphaned-test-binary reap: the waitpid sweep above only ever
@@ -10196,52 +9954,6 @@ mod tests {
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .collect()
-    }
-
-    #[test]
-    fn merge_cleanup_fold_keeps_requests_until_completed_or_refused() {
-        let home = tmp_home("merge-cleanup-fold");
-        let request = json!({
-            "ts": "2026-09-02T00:00:00Z",
-            "type": "merge_cleanup_requested",
-            "source": "python",
-            "data": {
-                "request_id": "merge-cleanup-1",
-                "repo": "/repo",
-                "pr": 42,
-                "branch": "feature/session",
-                "worktree": "/repo/worktree",
-                "node_ids": ["x-90ee"]
-            }
-        });
-        std::fs::write(
-            home.events_jsonl(),
-            format!("{}\n", serde_json::to_string(&request).unwrap()),
-        )
-        .unwrap();
-        assert_eq!(pending_merge_cleanup_requests(&home, "/repo").len(), 1);
-        assert!(merge_cleanup_requested(&home, "/repo"));
-
-        let completed = json!({
-            "ts": "2026-09-02T00:01:00Z",
-            "type": "merge_cleanup_completed",
-            "source": "daemon",
-            "data": {
-                "request_id": "merge-cleanup-1",
-                "repo": "/repo",
-                "pr": 42,
-                "reclaimed_bytes": 12
-            }
-        });
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(home.events_jsonl())
-            .unwrap()
-            .write_all(format!("{}\n", serde_json::to_string(&completed).unwrap()).as_bytes())
-            .unwrap();
-        assert!(pending_merge_cleanup_requests(&home, "/repo").is_empty());
-        assert!(!merge_cleanup_requested(&home, "/repo"));
-        std::fs::remove_dir_all(home.root()).ok();
     }
 
     // Generic one-shot ask row builder (empty short_id + no pid, owns no

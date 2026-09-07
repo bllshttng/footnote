@@ -37,6 +37,7 @@ import shutil
 import sys
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Iterator, List, Literal, Optional, Sequence, Tuple
 
 from fno.pr._proc import ToolMissing, run
@@ -875,7 +876,7 @@ def _repo_scoped_number_matches(
     return list(dict.fromkeys(matches))
 
 
-def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
+def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
     """Close every node the just-merged PR closes, synchronously (x-59a6).
 
     ``_run_post_merge_followups`` only drops a ``.triage-pending`` sentinel for a
@@ -893,6 +894,10 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
     that forward scan exactly as before - this call site no longer resolves
     or stamps a node itself, so a PR naming several nodes closes all of them,
     not just the one this process happens to find first.
+
+    Returns the node ids the merge can name as closed (receipt ids, with the
+    ``_find_pr_node_id`` url match as fallback); the cleanup request carries
+    them as ``node_ids``, and an empty list is held by the daemon.
 
     Repo scoping is mandatory: without SOME resolvable repo the call is
     refused rather than risking a same-numbered PR in a different repository.
@@ -920,7 +925,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
         # `not path.exists(): return` here would silently no-op every
         # external-backend close on a project that never used graph mode.
         if not external and not path.exists():
-            return
+            return []
         pr_url = ""
         view = _gh(
             ["pr", "view", str(pr_number), "--json", "url", "-q", ".url"],
@@ -944,7 +949,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
             ]
             nid = _find_pr_node_id(rows, pr_number, pr_url)
             if not nid:
-                return  # no node linked to this PR - nothing to close
+                return []  # no node linked to this PR - nothing to close
 
             from fno.graph.cli import _done_via_seam
 
@@ -955,8 +960,9 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
                     sc.pr_url = pr_url
                 sidecar_store.save(sc)
             _done_via_seam(nid, skip_stamp=False, force=False, reason=None)
-            return
+            return [nid]
 
+        matched_id = None
         if pr_url:
             from fno.graph.store import locked_mutate_graph, read_graph
 
@@ -984,7 +990,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
                 "close skipped; a later full sweep still catches it)",
                 file=sys.stderr,
             )
-            return
+            return []
 
         from fno import _subprocess_util
 
@@ -1002,23 +1008,33 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
                 f"{(res.stderr or res.stdout or '').strip()[:200]}",
                 file=sys.stderr,
             )
-        else:
-            # reconcile exits 0 even when the trailer-claimed nodes never got
-            # bound (only an unresolvable PR query exits non-zero) - the same
-            # closure_refused field leg_stamp checks via this identical --json
-            # call. Without this, a refused bind read as a clean, silent
-            # success (round-11 review fix, x-59a6).
-            try:
-                obj = json.loads(res.stdout or "{}")
-            except json.JSONDecodeError:
-                obj = {}
-            closure_refused = obj.get("closure_refused")
-            if closure_refused:
-                print(
-                    f"fno do pr merge: reconcile for PR #{pr_number} bound nothing: "
-                    f"{closure_refused}",
-                    file=sys.stderr,
-                )
+            return []
+        # reconcile exits 0 even when the trailer-claimed nodes never got
+        # bound (only an unresolvable PR query exits non-zero) - the same
+        # closure_refused field leg_stamp checks via this identical --json
+        # call. Without this, a refused bind read as a clean, silent
+        # success (round-11 review fix, x-59a6).
+        try:
+            obj = json.loads(res.stdout or "{}")
+        except json.JSONDecodeError:
+            obj = {}
+        closure_refused = obj.get("closure_refused")
+        if closure_refused:
+            print(
+                f"fno do pr merge: reconcile for PR #{pr_number} bound nothing: "
+                f"{closure_refused}",
+                file=sys.stderr,
+            )
+        # `closed` = what the scan closed this run; `closure_bound`/`claims`
+        # = the trailer's bindings. The url match backfills a PR whose nodes
+        # the trailer never named.
+        named = {
+            *(row.get("node_id") for row in obj.get("closed") or [] if isinstance(row, dict)),
+            *(obj.get("closure_bound") or []),
+            *(obj.get("closure_claims") or []),
+        }
+        named = {str(nid) for nid in named if nid} or ({matched_id} if matched_id else set())
+        return sorted(named)
     except (Exception, SystemExit):
         # Never block the merge outcome on the node-close (mirrors
         # _sync_graph_merge_status: SystemExit covers a corrupt-graph exit).
@@ -1027,18 +1043,20 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
             "skipped (non-fatal)",
             file=sys.stderr,
         )
+        return []
 
 
-def _on_confirmed_merge(pr_number: int, cwd: str = "") -> None:
+def _on_confirmed_merge(pr_number: int, cwd: str = "") -> List[str]:
     """Every graph side-effect of a CONFIRMED (immediate) merge, in one place.
 
     Sync merge_status + stamp ship provenance (``_sync_graph_merge_status``), then
     close the node (``_reconcile_merged_pr_node``). The three merged code paths
     call this ONE function so the node-close can never be forgotten on one of
     them; the failure paths keep calling ``_sync_graph_merge_status`` alone.
+    Returns the node ids the merge closed (the cleanup request's ``node_ids``).
     """
     _sync_graph_merge_status("merged", pr_number, cwd)
-    _reconcile_merged_pr_node(pr_number, cwd)
+    return _reconcile_merged_pr_node(pr_number, cwd)
 
 
 def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
@@ -1210,9 +1228,75 @@ def _emit_human_touch_merge(pr_number: int, state_dir: str) -> None:
         )
 
 
-def _run_post_merge_followups(pr_number: int, strategy: str, cwd: str) -> None:
+def _merge_request_repo_and_project(cwd: str) -> tuple[str, str]:
+    """``(repo, project)`` resolved the ritual's way, so both mints share one fold key."""
+    repo = ""
+    gcd = _git(["rev-parse", "--git-common-dir"], cwd)
+    raw = gcd.stdout.strip() if gcd.ok else ""
+    if raw:
+        p = Path(raw)
+        p = p if p.is_absolute() else Path(cwd) / p
+        if p.exists():
+            repo = str(p.parent)
+    if not repo:
+        top = _git(["rev-parse", "--show-toplevel"], cwd)
+        repo = top.stdout.strip() if top.ok and top.stdout.strip() else cwd
+    try:
+        from fno.config import load_settings_for_repo
+
+        settings = load_settings_for_repo(Path(repo))
+        project = getattr(getattr(settings, "project", None), "id", "") or ""
+    except Exception:  # noqa: BLE001 - an unreadable config degrades to empty
+        project = ""
+    return repo, project
+
+
+def _emit_merge_cleanup_request(
+    pr_number: int, cwd: str, state_file: str, bound_node_ids: List[str]
+) -> None:
+    """Mint the machine's reap order - for EVERY confirmed merge, no agent
+    in the path (the ritual needed an agent and ran for none of the six PRs
+    merged 2026-09-06). Only against a gh-confirmed MERGED state, as the
+    ritual holds."""
+    from fno.agents.events import emit_merge_cleanup_requested, rows_for_cleanup
+    from fno.worktree_reapable import is_linked_worktree
+
+    res = _gh(["pr", "view", str(pr_number), "--json", "state,headRefName"], cwd)
+    meta = {}
+    if res.ok:
+        try:
+            meta = json.loads(res.stdout or "{}")
+        except json.JSONDecodeError:
+            pass
+    if meta.get("state") != "MERGED" or not meta.get("headRefName"):
+        return
+    branch = meta["headRefName"]
+    repo, project = _merge_request_repo_and_project(cwd)
+    worktree = cwd if is_linked_worktree(cwd) else None
+    emit_merge_cleanup_requested(
+        repo=repo,
+        project=project,
+        pr=pr_number,
+        branch=branch,
+        worktree=worktree,
+        node_ids=bound_node_ids,
+        session_id=_read_state_field(state_file, "session_id") or None,
+        harness=_read_state_field(state_file, "harness") or None,
+        candidate_row_names=rows_for_cleanup(worktree, bound_node_ids) if worktree else [],
+    )
+
+
+def _run_post_merge_followups(
+    pr_number: int, strategy: str, cwd: str, bound_node_ids: Optional[List[str]] = None
+) -> None:
     state_dir = _repo_state_dir(cwd)
     state_file = os.path.join(state_dir, "target-state.md")
+
+    # Merge-minted cleanup request, FIRST: the grace clock starts at the merge.
+    try:
+        _emit_merge_cleanup_request(pr_number, cwd, state_file, bound_node_ids or [])
+    except Exception as exc:  # noqa: BLE001 - best-effort, merge outcome unaffected
+        sys.stderr.write(f"pr-merge: merge-cleanup emit failed ({exc}); unaffected\n")
 
     # Memory-pass sentinel.
     try:
@@ -1326,8 +1410,8 @@ def _finish_confirmed_merge(
         )
         rc = 0
 
-    _on_confirmed_merge(pr_number, repo)
-    _run_post_merge_followups(pr_number, strategy, repo)
+    bound_node_ids = _on_confirmed_merge(pr_number, repo)
+    _run_post_merge_followups(pr_number, strategy, repo, bound_node_ids=bound_node_ids)
     return rc
 
 
