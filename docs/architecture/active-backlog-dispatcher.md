@@ -65,19 +65,7 @@ config.active_backlog (master switch) + epics with mission_active=true
 
 ## Components
 
-- **Config schema** (`cli/src/fno/config/__init__.py`, `ActiveBacklogConfig`).
-  `config.active_backlog`: `enabled` (bool or per-project map), `interval`
-  (duration string, default `5m`), `failure_limit` (default 3), `max_concurrent`
-  (default 1; v1 asserts 1, defined now so v2 parallelism needs no migration).
-  `mission` is IGNORED (x-7f1f): missions are per-epic graph state
-  (`mission_active`), never a config value; the key stays parseable for one
-  release and `fno config doctor` warns when it is set. Mirrors the
-  `config.auto_continue` / `config.target.blast`
-  fail-safe posture: a malformed block degrades to disabled, a bad scalar is
-  dropped to its default, and an invalid `interval` fails *closed* (the feature
-  disables) rather than spinning a 0-sleep hot loop. Accessors `is_enabled_for`,
-  `any_enabled`, `enabled_projects`, and `interval_seconds` centralize the
-  fail-closed rule.
+- **Config schema** (`cli/src/fno/config/__init__.py`, `ActiveBacklogConfig`). `config.active_backlog`: `enabled` (bool or per-project map), `interval` (duration string, default `5m`), `failure_limit` (default 3), `max_concurrent` (default 1, v1 asserts 1, defined now so v2 parallelism needs no migration). `mission` is IGNORED (x-7f1f): missions are per-epic graph state (`mission_active`), never a config value. The key stays parseable for one release. When it is set, `fno config doctor` warns. Mirrors the `config.auto_continue` / `config.target.blast` fail-safe posture: a malformed block degrades to disabled, a bad scalar is dropped to its default, and an invalid `interval` fails *closed* (the feature disables) rather than spinning a 0-sleep hot loop. Accessors `is_enabled_for`, `any_enabled`, `enabled_projects`, and `interval_seconds` centralize the fail-closed rule.
 
 - **Target resolver** (`cli/src/fno/active_backlog.py`, surfaced as
   `fno config active-backlog --json`). The daemon is a per-user global process
@@ -91,18 +79,7 @@ config.active_backlog (master switch) + epics with mission_active=true
   `is_enabled_for(epic project)`, so an explicitly-disabled project's mission
   does not drain.
 
-- **Mission drain tick** (`crates/fno-agents/src/active_backlog.rs`,
-  `mission_drain_tick` / `dispatch_mission`). Reconciles prior fire-and-forget
-  dispatches from events (feeding the breaker) and then dispatches by shelling
-  `fno backlog advance --epic <id> --continuation --json`. The converge core owns
-  all dispatch policy (cross-project fan-out, per-root `walker:` respect,
-  spawn-gate headroom width, claim dedup), so it is never forked; the walker
-  probe is per child against that child's own root - one live walker in the
-  epic repo refuses only its own repo's children, never the whole pass
-  (x-7f1f). `--continuation` means the
-  daemon never (re)activates a mission and retires an already-inactive one, so an
-  operator `--stop` between ticks sticks. A `deactivated`/`all_done` receipt
-  retires the loop (`active_backlog_mission_retired`).
+- **Mission drain tick** (`crates/fno-agents/src/active_backlog.rs`, `mission_drain_tick` / `dispatch_mission`). Reconciles prior fire-and-forget dispatches from events (feeding the breaker) and then dispatches by shelling `fno backlog advance --epic <id> --continuation --json`. The converge core owns all dispatch policy (cross-project fan-out, per-root `walker:` respect, spawn-gate headroom width, claim dedup), so it is never forked. The walker probe runs per child against that child's own root, so one live walker in the epic repo refuses only its own repo's children, never the whole pass (x-7f1f). `--continuation` means the daemon never (re)activates a mission and retires an already-inactive one, so an operator `--stop` between ticks sticks. A `deactivated`/`all_done` receipt retires the loop (`active_backlog_mission_retired`).
 
 - **Circuit breaker** (`CircuitBreaker`). A pure, cross-tick per-node
   consecutive-failure counter with Hermes semantics: increment on a failed
