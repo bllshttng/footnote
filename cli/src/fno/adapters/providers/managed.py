@@ -275,41 +275,49 @@ def _read_claude_keychain_item(service: str) -> Optional[str]:
     return blob if _token_present(blob) else None
 
 
-def canonical_slot_blobs(cli: str) -> list[str]:
-    """Every distinct credential the SHARED slot can present, ignoring overrides.
+def slot_blobs(cli: str, root: Path | None = None) -> list[str]:
+    """Every distinct credential a reader of ``root`` can be served.
 
-    darwin keeps TWO Keychain items for the canonical dir, scoped and unscoped,
-    and they can hold different accounts - a stale scoped item beside a live
-    unscoped one is the observed reality, and the reason the usage probe tries
-    several bearers. The on-disk ``.credentials.json`` is a third source, read
-    first by that probe. All of them are candidates: proving one and stamping it
-    would trust one account while a reader gets another.
+    ``root=None`` is the SHARED slot and ignores any ambient override. darwin
+    keeps two Keychain items for it, scoped and unscoped, which can hold
+    different accounts; the on-disk ``.credentials.json`` is a third source,
+    and the usage probe reads it first. All are candidates, because proving one
+    and stamping it would trust one account while a reader gets another.
+
+    A dir of its own reads only its scoped item and its own file. Borrowing the
+    unscoped item, which belongs to whoever occupies the shared slot, is how a
+    per-account probe ends up reporting the active account's numbers. Its
+    transcript folders may symlink anywhere; neither source here is a
+    transcript, so sharing transcripts never merges credential identity.
     """
     if cli != "claude":
-        blob = _read_slot_blob(cli)
-        return [blob] if blob and blob.strip() else []
-    canonical = Path.home() / ".claude"
-    if sys.platform != "darwin":
-        blob = _read_claude_blob(canonical, shared=True)
-        return [blob] if blob and blob.strip() else []
+        return [b for b in [_read_slot_blob(cli)] if b and b.strip()]
+    cfg = root or Path.home() / ".claude"
     out: list[str] = []
-    for service in (_claude_scoped_service(canonical), _CLAUDE_KEYCHAIN_SERVICE):
-        blob = _read_claude_keychain_item(service)
-        if blob and blob not in out:
+    if sys.platform == "darwin":
+        services = [_claude_scoped_service(cfg)]
+        if root is None:
+            services.append(_CLAUDE_KEYCHAIN_SERVICE)
+        for service in services:
+            blob = _read_claude_keychain_item(service)
+            if blob and blob not in out:
+                out.append(blob)
+    elif root is None:
+        blob = _read_claude_blob(cfg, shared=True)
+        if blob and blob.strip():
             out.append(blob)
-    # The on-disk credential file counts too, even on darwin where claude reads
-    # the Keychain: the usage probe reads it FIRST, so a stale file bearer could
-    # prove out and have its quota reported while the Keychain account is the
-    # one actually occupying the slot. The candidate set has to be every source
-    # anything reads, or "is this slot unambiguous" answers a narrower question
-    # than the one that matters.
     try:
-        blob = (canonical / ".credentials.json").read_text(encoding="utf-8")
+        blob = (cfg / ".credentials.json").read_text(encoding="utf-8")
     except OSError:
         blob = ""
     if blob.strip() and _token_present(blob) and blob not in out:
         out.append(blob)
     return out
+
+
+def canonical_slot_blobs(cli: str) -> list[str]:
+    """Every distinct credential the SHARED slot can present, ignoring overrides."""
+    return slot_blobs(cli)
 
 
 def canonical_slot_identity(

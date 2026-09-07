@@ -8,7 +8,6 @@ will read. See docs/provider-rotation.md, the effective-account binding.
 """
 from __future__ import annotations
 
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,29 +96,14 @@ def credential_root(record: ProviderRecord) -> Path | None:
 def credential_blobs(harness: str, root: Path | None) -> list[str]:
     """Every distinct credential a reader of ``root`` can be served.
 
-    A dir of its own reads the Keychain item SCOPED to it plus its own
-    ``.credentials.json``, never the unscoped item, which belongs to whoever
-    occupies the shared slot. Its transcript folders may symlink anywhere;
-    neither source read here is a transcript. A source that could not be READ
-    raises: shrinking the candidate set on a denied read is how an
-    unambiguous-looking slot ends up holding two accounts.
+    One reader for the probe, both launch paths and doctor: a second copy is how
+    they stopped agreeing about which credential serves a record. Raises on a
+    source that could not be READ, because shrinking the candidate set on a
+    denied read is how an unambiguous-looking slot ends up holding two accounts.
     """
-    if harness != "claude":
-        return []
     if root is None:
         return managed.canonical_slot_blobs(harness)
-    out: list[str] = []
-    if sys.platform == "darwin":
-        blob = managed._read_claude_keychain_item(managed._claude_scoped_service(root))
-        if blob:
-            out.append(blob)
-    try:
-        blob = (root / ".credentials.json").read_text(encoding="utf-8")
-    except OSError:
-        blob = ""
-    if blob.strip() and managed._token_present(blob) and blob not in out:
-        out.append(blob)
-    return out
+    return managed.slot_blobs(harness, root)
 
 
 def resolve_account_binding(

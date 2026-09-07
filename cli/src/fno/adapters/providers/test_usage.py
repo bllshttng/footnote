@@ -297,7 +297,7 @@ class TestProbeFailOpen:
             seen.append(args[args.index("-s") + 1])
             return _Out()
 
-        monkeypatch.setattr(binding.sys, "platform", "darwin")
+        monkeypatch.setattr(managed.sys, "platform", "darwin")
         monkeypatch.setattr(managed, "_run_security", _fake_security)
         binding.credential_blobs("claude", tmp_path)
         assert len(seen) == 1
