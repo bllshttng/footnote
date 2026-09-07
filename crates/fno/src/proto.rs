@@ -4044,7 +4044,7 @@ mod tests {
         // reload pair (`ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`)
         // bumps it 69 -> 71. The ThreadReseat control verb (x-867b) takes 72,
         // so the version never moves backwards whichever branch lands first.
-        assert_eq!(PROTO_VERSION, 72);
+        assert_eq!(PROTO_VERSION, 73);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
