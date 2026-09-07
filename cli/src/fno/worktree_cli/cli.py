@@ -547,10 +547,9 @@ def reapable(
     row-GC probe) read this instead of each deciding for itself.
 
     A missing tracked file never blocks: HEAD holds its content, so removal
-    loses nothing. Nor do the symlinks setup-worktree.sh writes into a
-    worktree; `reason=setup-links` and `detail` name every path discounted
-    that way. Modified tracked content, other untracked files, and unmerged
-    conflicts do block, and a probe that cannot answer blocks too.
+    loses nothing. Nor do the symlinks setup-worktree.sh writes, which
+    `reason=setup-links` and `detail` name. Modified tracked content, other
+    untracked files, unmerged conflicts and an unanswerable probe do block.
     """
     from fno.worktree_reapable import reapable as _classify
 

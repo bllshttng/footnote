@@ -22,21 +22,17 @@ documents, so they now call `fno agents workspace worktree reapable` and an equi
 pins that they agree. When the verb cannot be reached, every caller keeps its
 own fail-closed default, which is today's behaviour exactly.
 
-The same argument reaches one class of untracked content. `setup-worktree.sh`
-symlinks the canonical checkout's shared state into every worktree it makes,
-and those names are gitignored at the repo root only, so a nested copy reads
-untracked. Measured 2026-09-06 on `.claude/worktrees/x-ba96`: the tree's ENTIRE
-difference was four such links. footnote dirtied the tree at creation and the
-rule then protected that dirt forever. A link whose target is one of the paths
-setup writes carries no human work, so it is discounted and named in the
-receipt. Everything else untracked still blocks.
+The same argument reaches one class of untracked content: the symlinks
+`setup-worktree.sh` writes. Measured 2026-09-06 on `.claude/worktrees/x-ba96`,
+they were the tree's ENTIRE difference, so footnote dirtied the tree at creation
+and the DIRTY rule then protected that dirt forever. Such a link holds no human
+work, so it is discounted and named. Everything else untracked still blocks.
 """
 from __future__ import annotations
 
 import os
 import subprocess
 from dataclasses import dataclass, field
-from fnmatch import fnmatch
 from pathlib import Path
 from typing import Callable, Optional, Union
 
@@ -47,29 +43,10 @@ from typing import Callable, Optional, Union
 # first.
 _UNMERGED = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
 
-# The canonical-relative paths `scripts/setup/setup-worktree.sh` symlinks into
-# every worktree it prepares. They are gitignored at the repo ROOT only, so a
-# nested copy (`cli/.agents`, seen on 2026-09-06) reads untracked and the tree
-# is dirty from the moment setup finishes. That is footnote's own dirt and it
-# holds no human work: the file it names lives in the canonical checkout.
-_SETUP_LINK_TARGETS = frozenset(
-    {
-        "internal",
-        ".agents",
-        ".codex",
-        ".codex-plugin",
-        ".gemini",
-        ".claude/agents",
-        ".claude/commands",
-        ".claude/skills",
-        ".claude/plans",
-        ".claude/settings.local.json",
-        ".claude/scheduled_tasks.json",
-        ".claude/scheduled_tasks.lock",
-        ".claude/.skill-scoping-state.json",
-        ".claude/audit-progress.txt",
-    }
-)
+# What `scripts/setup/setup-worktree.sh` links, canonical-relative: these five
+# roots, and anything one level under `.claude/`. The second half is a shape,
+# not a list of names: the script's own list grows, and a copy here would drift.
+_SETUP_LINK_ROOTS = frozenset({"internal", ".agents", ".codex", ".codex-plugin", ".gemini"})
 
 
 @dataclass(frozen=True)
@@ -107,14 +84,9 @@ def _path_of(entry: str) -> str:
 
 def _canonical_root(worktree: Path) -> Optional[Path]:
     """The main checkout this worktree links back to, or None if unresolvable."""
+    args = ["git", "rev-parse", "--git-common-dir"]
     try:
-        r = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            cwd=str(worktree),
-            capture_output=True,
-            text=True,
-            timeout=30.0,
-        )
+        r = subprocess.run(args, cwd=str(worktree), capture_output=True, text=True, timeout=30.0)
     except (OSError, subprocess.SubprocessError):
         return None
     if r.returncode != 0 or not r.stdout.strip():
@@ -128,10 +100,9 @@ def _canonical_root(worktree: Path) -> Optional[Path]:
 def _is_setup_link(link: Path, canonical: Path) -> bool:
     """Did setup-worktree.sh write this symlink?
 
-    Read the link ONE hop instead of resolving it. Setup writes an absolute
-    ``$CANONICAL/$rel``, so the raw target IS the attribution. Resolving would
-    follow the canonical entry's own symlink (``internal`` is one) out of the
-    checkout and lose it.
+    Read the link ONE hop rather than resolving it: setup writes an absolute
+    ``$CANONICAL/$rel``, so the raw target IS the attribution, and resolving
+    would follow ``internal`` (itself a symlink) out of the checkout.
     """
     try:
         target = os.readlink(link)
@@ -143,17 +114,17 @@ def _is_setup_link(link: Path, canonical: Path) -> bool:
         rel = os.path.relpath(target, base)
         if rel.startswith(".."):
             continue
-        return rel in _SETUP_LINK_TARGETS or fnmatch(rel, ".claude/*.local.md")
+        parent, _, name = rel.rpartition("/")
+        return bool(name) and (rel in _SETUP_LINK_ROOTS or parent == ".claude")
     return False
 
 
 def _is_setup_dirt(path: Path, canonical: Path) -> bool:
     """A setup symlink, or a directory holding nothing but setup dirt.
 
-    ``mkdir -p "$WORKTREE/.claude"`` makes a REAL directory and fills it with
-    links, so git reports the directory and never its contents. An empty
-    directory reads False: git does not report one, and saying yes would
-    discount something this function never looked at.
+    Setup makes a REAL ``.claude`` directory and fills it with links, so git
+    reports the directory and never its contents. An empty one reads False:
+    git never reports one, and yes would discount what was never looked at.
     """
     if path.is_symlink():
         return _is_setup_link(path, canonical)
@@ -247,11 +218,9 @@ def classify(porcelain: str, discount: Optional[Callable[[str], bool]] = None) -
     then any staged or unstaged modification of tracked content. Everything
     else is a deletion of a tracked file, which is recoverable from HEAD.
 
-    `discount` names untracked paths that carry no human work - today, the
-    symlinks setup-worktree.sh writes into the worktree it prepares. It is
-    consulted for `??` lines only, so a modified tracked file and an unmerged
-    conflict block exactly as before. Omit it and this function answers what
-    it always answered.
+    `discount` names untracked paths that carry no human work. It is asked
+    about `??` lines only, so tracked and unmerged dirt block as before, and
+    omitting it answers exactly what this function always answered.
     """
     deletions = 0
     discounted: list[str] = []
