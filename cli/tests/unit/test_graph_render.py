@@ -682,3 +682,118 @@ def test_selection_fanout_counts_only_open_dependents():
     ordered = [e["id"] for e in sorted([X, Y, done_dep], key=_lane_key([X, Y, done_dep]))]
     # Y is older, and X's only dependent is closed: Y first.
     assert ordered[0] == "ab-22220012"
+
+
+# -- Branch Provenance section --
+
+
+def _cache_rows():
+    return [
+        {
+            "branch": "feature/x-04ce-review-fixes",
+            "node": "x-04ce",
+            "node_title": "review fixes",
+            "klass": "STRANDED",
+            "unpushed": 23,
+            "has_remote": False,
+            "age": "33 hours ago",
+            "pr_number": None,
+            "live": False,
+            "path": "/wt/a",
+        },
+        {
+            "branch": "fix/x-129b-payload-cache-head",
+            "node": None,
+            "node_title": None,
+            "klass": "UNKNOWN",
+            "unpushed": 0,
+            "has_remote": True,
+            "age": "12 hours ago",
+            "pr_number": None,
+            "live": True,
+            "path": "/wt/b",
+        },
+    ]
+
+
+def test_branch_provenance_renders_cached_rows_incl_unmapped(tmp_path, monkeypatch):
+    """The board must answer 'do we pick this back up' per branch - and an
+    unmapped branch is exactly the interesting case, rendered, never dropped."""
+    import json
+
+    from fno.branch_provenance_cache import cache_path
+
+    repo = tmp_path / "repo"
+    cache_path(repo).parent.mkdir(parents=True)
+    cache_path(repo).write_text(json.dumps(_cache_rows()))
+    monkeypatch.setattr("fno.graph.render._provenance_roots", lambda: [repo])
+
+    output = tmp_path / "graph.md"
+    render_graph_md([_entry("ab-99990001")], output)
+    content = output.read_text()
+
+    assert "## Branch Provenance" in content
+    assert (
+        "- **x-04ce** (feature/x-04ce-review-fixes): "
+        "no remote, 23 unpushed, no PR, newest commit 33 hours ago" in content
+    )
+    assert (
+        "- *(unmapped)* (fix/x-129b-payload-cache-head): "
+        "has remote, 0 unpushed, no PR, LIVE, newest commit 12 hours ago" in content
+    )
+
+
+def test_branch_provenance_omitted_when_cache_empty(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr("fno.graph.render._provenance_roots", lambda: [repo])
+
+    output = tmp_path / "graph.md"
+    render_graph_md([_entry("ab-99990002")], output)
+    content = output.read_text()
+
+    assert "Branch Provenance" not in content
+    assert content.rstrip().endswith("%%")  # Obsidian footer untouched
+
+
+def test_branch_provenance_stays_above_the_kanban_footer(tmp_path, monkeypatch):
+    """The %% kanban:settings %% block must remain the LAST thing in the file
+    or the Obsidian Kanban plugin stops parsing the board."""
+    from fno.branch_provenance_cache import write_cache
+    from fno.worktree_stranded import STRANDED, Row
+
+    repo = tmp_path / "repo"
+    row = Row(
+        STRANDED,
+        "x-9ed9",
+        3,
+        "5 hours ago",
+        {"path": "/wt/c", "branch": "feature/x-9ed9", "has_remote": False,
+         "pr_number": None, "live": False},
+    )
+    write_cache(repo, [row], entries_by_id={})
+    monkeypatch.setattr("fno.graph.render._provenance_roots", lambda: [repo])
+
+    output = tmp_path / "graph.md"
+    render_graph_md([_entry("ab-99990003")], output)
+    lines = output.read_text().rstrip("\n").splitlines()
+
+    assert lines[-1] == "%%"
+    provenance_idx = lines.index("## Branch Provenance")
+    footer_idx = lines.index("%% kanban:settings")
+    assert provenance_idx < footer_idx
+
+
+def test_branch_provenance_fails_open_on_bad_cache(tmp_path, monkeypatch):
+    from fno.graph.render import _branch_provenance_lines
+
+    repo = tmp_path / "repo"
+    (repo / ".fno").mkdir(parents=True)
+    (repo / ".fno" / "branch-provenance.json").write_text("{not json")
+    monkeypatch.setattr("fno.graph.render._provenance_roots", lambda: [repo])
+
+    assert _branch_provenance_lines() == []
+
+    output = tmp_path / "graph.md"
+    render_graph_md([_entry("ab-99990004")], output)
+    assert "Branch Provenance" not in output.read_text()

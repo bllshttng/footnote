@@ -9,6 +9,7 @@ import os
 import tempfile
 from collections.abc import Collection
 from pathlib import Path
+from typing import Optional
 
 from fno.graph._constants import GRAPH_MD, PRIORITY_ORDER, _rank_band as _rank_band
 from fno.graph._intake import (
@@ -241,6 +242,66 @@ def _kanban_card(
     return header
 
 
+def _provenance_roots() -> list[Path]:
+    """Repo roots that may carry a branch-provenance cache.
+
+    Same shape as the pr-watch stranded leg's own root walk: every sidecar
+    cwd, deduped, existing on disk. Fails open to [] - no sidecar store
+    means no section, never a broken render.
+    """
+    try:
+        from fno.tracker import sidecar as sidecar_store
+
+        sidecars = sidecar_store.load_all()
+    except Exception:  # noqa: BLE001 - display signal; never break a mutation
+        return []
+    roots: dict[str, Path] = {}
+    for sc in sidecars.values():
+        cwd = getattr(sc, "cwd", None)
+        if cwd and str(cwd) not in roots:
+            roots[str(cwd)] = Path(cwd)
+    return [p for p in roots.values() if p.is_dir()]
+
+
+def _provenance_line(row: dict) -> str:
+    """One board line: node (or the unmapped marker), branch, then the raw
+    signals a king needs to answer 'do we pick this back up'."""
+    node = row.get("node")
+    label = f"**{node}**" if node else "*(unmapped)*"
+    branch = row.get("branch") or "(no branch)"
+    parts = [
+        "no remote" if not row.get("has_remote") else "has remote",
+        f"{row.get('unpushed') or 0} unpushed",
+        f"PR #{row['pr_number']}" if row.get("pr_number") else "no PR",
+    ]
+    if row.get("live"):
+        parts.append("LIVE")
+    parts.append(f"newest commit {row.get('age') or 'unknown'}")
+    return f"- {label} ({branch}): {', '.join(parts)}"
+
+
+def _branch_provenance_lines(roots: Optional[list[Path]] = None) -> list[str]:
+    """The Branch Provenance section, or [] when there is nothing to report.
+
+    Reads the per-repo cache written by the pr-watch stranded leg - no git
+    at render time. An empty or unreadable cache omits the heading entirely;
+    a bad read must degrade to "section omitted" because board rendering
+    runs inside locked_mutate_graph (same contract as _orphan_ids above).
+    """
+    try:
+        from fno.branch_provenance_cache import read_cache
+
+        rows = [row for root in (roots if roots is not None else _provenance_roots()) for row in read_cache(root)]
+    except Exception:  # noqa: BLE001 - display signal; never break a mutation
+        return []
+    if not rows:
+        return []
+    lines = ["## Branch Provenance", ""]
+    lines.extend(_provenance_line(row) for row in rows)
+    lines.append("")
+    return lines
+
+
 def render_graph_md(
     entries: list[dict], path: Path = GRAPH_MD, *, obsidian: bool = True
 ) -> None:
@@ -295,6 +356,11 @@ def render_graph_md(
         for entry in columns[col]:
             lines.append(_kanban_card(entry, id_to_entry, orphans))
             lines.append("")
+
+    # Branch provenance rides after the columns but BEFORE the Obsidian
+    # footer: the %% kanban:settings %% block must stay the last thing in
+    # the file or the Kanban plugin stops parsing the board.
+    lines.extend(_branch_provenance_lines())
 
     if obsidian:
         lines.append("***")
