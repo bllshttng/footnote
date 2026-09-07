@@ -330,7 +330,7 @@ def test_node_status_map_reads_through_the_archive(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "graph_archive_json", lambda: graph.parent / "graph-archive.json")
     rs._node_status_map.cache_clear()
 
-    status_map = rs._node_status_map()
+    status_map = rs._node_status_map(graph)
 
     assert status_map["x-gone"] == "done"  # archived, still projectable
     assert status_map["x-live"] == "ready"
@@ -354,25 +354,7 @@ def test_node_status_map_survives_a_missing_archive(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "graph_archive_json", lambda: home / "graph-archive.json")
     rs._node_status_map.cache_clear()
 
-    assert rs._node_status_map() == {"x-live": "done"}
-
-
-@pytest.fixture(autouse=True)
-def _clear_node_status_cache():
-    """`_node_status_map` is lru_cached, so a test that points it at a tmp graph
-    leaks that map into every later test in the worker - including on a failing
-    assert, which skips any cleanup written at the end of the test body.
-    """
-    from fno.plan import reconcile_status as rs
-
-    # getattr: a test may have monkeypatched the function with a plain lambda,
-    # and teardown can run before monkeypatch restores it.
-    def clear():
-        getattr(rs._node_status_map, "cache_clear", lambda: None)()
-
-    clear()
-    yield
-    clear()
+    assert rs._node_status_map(home / "graph.json") == {"x-live": "done"}
 
 
 def test_sweep_projects_from_an_archived_node_end_to_end(tmp_path, monkeypatch):
@@ -415,7 +397,7 @@ def test_sweep_projects_from_an_archived_node_end_to_end(tmp_path, monkeypatch):
 def test_tier2_stands_down_when_no_node_status_is_available(tmp_path, monkeypatch):
     from fno.plan import reconcile_status as rs
 
-    monkeypatch.setattr(rs, "_node_status_map", lambda: {})
+    monkeypatch.setattr(rs, "_node_status_map", lambda _p: {})
     p = tmp_path / "a.md"
     p.write_text(_linked_plan("implemented"))
     before = p.read_text()
@@ -435,7 +417,7 @@ def test_tier1_synonyms_still_rewrite_without_a_graph(tmp_path, monkeypatch):
     """
     from fno.plan import reconcile_status as rs
 
-    monkeypatch.setattr(rs, "_node_status_map", lambda: {})
+    monkeypatch.setattr(rs, "_node_status_map", lambda _p: {})
     p = tmp_path / "a.md"
     p.write_text(_linked_plan("draft"))
 
@@ -451,7 +433,7 @@ def test_an_explicit_signal_is_not_gated_by_an_empty_map(tmp_path, monkeypatch):
     """
     from fno.plan import reconcile_status as rs
 
-    monkeypatch.setattr(rs, "_node_status_map", lambda: {})
+    monkeypatch.setattr(rs, "_node_status_map", lambda _p: {})
     p = tmp_path / "a.md"
     p.write_text(_linked_plan("implemented"))
 
@@ -482,7 +464,7 @@ def test_a_corrupt_working_graph_does_not_hide_behind_a_readable_archive(tmp_pat
     monkeypatch.setattr(paths, "graph_json", lambda: home / "graph.json")
     monkeypatch.setattr(paths, "graph_archive_json", lambda: home / "graph-archive.json")
 
-    assert rs._node_status_map() == {}  # corruption is absent evidence, not archive-only truth
+    assert rs._node_status_map(paths.graph_json()) == {}  # corruption is absent evidence, not archive-only truth
 
     plans = tmp_path / "plans"
     plans.mkdir()
