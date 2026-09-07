@@ -308,25 +308,11 @@ def gates_for(node: Optional[dict], grid_harness: Optional[str] = None) -> list[
         except Exception as exc:  # noqa: BLE001
             out.append(_unreadable("node-claim", exc))
 
-    # Per-project occupancy is now context, not a cap: the epic advance's
-    # width derives from spawn-gate headroom (the fleet and provider rows
-    # above), and a configured parallel.max_lanes is deprecated and ignored.
-    try:
-        by_project = adv._live_workers_by_project()
-        proj = (node or {}).get("project") or "-"
-        occupied = by_project.get(proj, 0)
-        out.append(
-            Gate(
-                "project-lane",
-                f"{occupied} ({proj})",
-                "ignored",
-                "pass",
-                key="parallel.max_lanes",
-                note="deprecated and ignored (the deletion ruling); width is spawn-gate headroom",
-            )
-        )
-    except Exception as exc:  # noqa: BLE001
-        out.append(_unreadable("project-lane", exc, key="parallel.max_lanes"))
+    # Per-project occupancy row DELETED with the dead lane counter (x-7f1f):
+    # the epic advance's width derives from spawn-gate headroom (the fleet and
+    # provider rows above), and a configured parallel.max_lanes is deprecated
+    # and ignored - a counter for a cap nobody reads is a row that reports a
+    # selector the drain does not run.
 
     # Provider lanes: the cap that was actually binding on 2026-09-01.
     provider = _resolved_vendor(node, grid_harness)

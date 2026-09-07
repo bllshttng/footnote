@@ -3960,48 +3960,6 @@ def _ready_leaf_children(epic_id: str) -> list[dict]:
     return [n for n in nodes if isinstance(n, dict) and n.get("id")]
 
 
-def _live_workers_by_project() -> dict[str, int]:
-    """Count occupied per-project lanes to seed max_lanes.
-
-    max_lanes is a per-project concurrency cap, so a project that already has a
-    worker occupies a lane and the epic advance must count it before deciding how many
-    MORE to dispatch. Counts BOTH live/suspect ``node:<id>`` claims (a running
-    worker) AND live/suspect ``dispatch:<id>`` reservations (the boot-window
-    bridge a just-dispatched worker holds before it owns node:<id>) - else an
-    immediate rerun during that boot window would under-count the lane and
-    over-dispatch a second same-project child past the cap (codex P2). Deduped by
-    node id so a child holding both claims counts once. Best-effort: any read
-    fault degrades to an empty map (no seed), never blocks the pass.
-    """
-    counts: dict[str, int] = {}
-    try:
-        from fno.claims.core import list_claims
-        from fno.claims.io import global_claims_root
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json
-
-        root = global_claims_root()
-        occupied: set[str] = set()
-        for prefix in ("node:", "dispatch:"):
-            for claim in list_claims(prefix=prefix, include_stale=False, root=root):
-                key = claim.get("key")
-                if isinstance(key, str):
-                    occupied.add(key.removeprefix(prefix))
-        if not occupied:
-            return counts
-        by_id = {
-            e["id"]: e for e in read_graph(graph_json())
-            if isinstance(e, dict) and isinstance(e.get("id"), str)
-        }
-        for nid in occupied:
-            proj = (by_id.get(nid) or {}).get("project")
-            if proj:
-                counts[proj] = counts.get(proj, 0) + 1
-    except Exception:  # noqa: BLE001 - a live-count read must never block the epic advance
-        return counts
-    return counts
-
-
 def _binding_provider() -> Optional[str]:
     """The configured provider with the least lane headroom, or None.
 

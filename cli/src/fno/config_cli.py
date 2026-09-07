@@ -594,6 +594,7 @@ def doctor_cmd(
         _report_state_roots,
         _report_deprecated_auto_merge,
         _report_deprecated_dispatch_harness,
+        _report_deprecated_active_backlog_mission,
         _report_band_routing,
     ):
         try:
@@ -745,6 +746,45 @@ def _report_deprecated_auto_merge() -> None:
             f"      It reads as `auto_merge.grant = \"{reads_as}\"` for one release.\n"
             f"      Migrate: fno config set auto_merge.grant {reads_as}{scope_flag} && "
             f"fno config unset dispatch.auto_merge{scope_flag}"
+        )
+
+
+def _report_deprecated_active_backlog_mission() -> None:
+    """Name every config file still setting the ignored ``active_backlog.mission``.
+
+    x-7f1f retirement: the mission-scoped drain resolves one target per ACTIVE
+    mission (an epic with ``mission_active=true`` in the graph), so this key
+    selects nothing. Parseable for one release; this line names the live axis.
+    """
+    from fno.config import _candidate_paths, _global_settings_path, _load_raw
+
+    global_dir = _global_settings_path().parent
+    for candidate in _candidate_paths():
+        if not candidate.is_file():
+            continue
+        parsed, ok = _load_raw(candidate)
+        if not ok:
+            continue
+        scope = None
+        if isinstance(parsed.get("active_backlog"), dict):
+            scope = parsed
+        else:
+            wrapped = parsed.get("config")
+            if isinstance(wrapped, dict) and isinstance(wrapped.get("active_backlog"), dict):
+                scope = wrapped
+        if scope is None:
+            continue
+        mission = (scope["active_backlog"].get("mission") or "").strip()
+        if not mission:
+            continue
+        scope_flag = "" if candidate.parent == global_dir else " --local"
+        typer.echo(
+            f"warn: {candidate} sets `active_backlog.mission`, which the "
+            "mission-scoped drain IGNORES (missions are per-epic graph state, "
+            "not config).\n"
+            "      Live axis: `fno backlog advance --epic <id>` activates a "
+            "mission; `--stop` retires it.\n"
+            f"      Remove the ignored key: fno config unset active_backlog.mission{scope_flag}"
         )
 
 

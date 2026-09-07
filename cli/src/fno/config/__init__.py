@@ -3649,8 +3649,12 @@ class ActiveBacklogConfig(BaseModel):
         In-flight nodes per project per tick. Default 1 (serial, v1). Defined
         now so v2 parallelism needs no config migration; v1 asserts == 1.
     mission:
-        Optional mission id; when set, the daemon drains only that mission's
-        nodes and never drifts into the general backlog.
+        IGNORED (x-7f1f retirement). The mission-scoped drain resolves one
+        target per ACTIVE mission (an epic with ``mission_active=true`` in the
+        graph) and never reads this key. Kept parseable for one release;
+        ``fno config doctor`` warns when it is set. The live axis is
+        ``fno backlog advance --epic <id>`` to activate a mission and
+        ``--stop`` to retire it.
     """
 
     model_config = ConfigDict(extra="ignore")
