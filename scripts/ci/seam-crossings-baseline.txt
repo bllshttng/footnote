@@ -80,3 +80,4 @@ resolver	crates/fno-agents/src/scrape.rs	174	fn fno_bin() -> std::ffi::OsString 
 resolver	crates/fno/src/bootstrap.rs	1005	fn diagnose_locate_failure() -> Option<String> {
 resolver	crates/fno/src/mux_cli.rs	5903	fn prepare_pane_bytes(
 resolver	crates/fno/src/server.rs	2952	pub(crate) fn fno_bin() -> PathBuf {
+crossing	crates/fno-agents/src/loopcheck.rs	8388	&loopcheck_fno_bin(),
