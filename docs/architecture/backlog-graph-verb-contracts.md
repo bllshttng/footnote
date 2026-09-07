@@ -371,12 +371,11 @@ Decide whether a node's plan promised work that has not all shipped.
          harvest files and consumes it) or be force-overridden. ``oos-bug`` and
          ``backfill`` carve-outs do NOT block (genuine discovery, filed by the
          later harvest); both land in the same ledger and look identical, which
-         is why a deferred item can merge away unnoticed (cv-99ebc0f3 on
-         x-44cb). Checked first and independent of the plan so a close is held
+         is why a deferred item can merge away unnoticed. Checked first and independent of the plan so a close is held
          even when the plan is absent or unreadable. Scoped to the closing
          node's OWN rows via the ``node`` field stamped at capture time
          (``find_held_node`` proven ownership): a row filed by another node's
-         session must not hold this close open (x-40be - one unrelated
+         session must not hold this close open (one unrelated
          carve-out was blocking every close in the repo). Unattributed rows
          (legacy, ambient shell, harness without a session id) block nothing
          at close time; they stay visible via ``fno backlog carveout list`` and the
@@ -397,7 +396,7 @@ Decide whether a node's plan promised work that has not all shipped.
 ## emit_session_satisfied_for_record
 
 Emit a ``session_satisfied{source:"pr_merge"}`` event for the target
-    session that owns a merged-and-now-closed node (Group 1 / ab-f7f8bc53).
+    session that owns a merged-and-now-closed node (Group 1).
 
     Today only an in-gate merge through ``scripts/lib/pr-merge.sh`` emits this
     signal, so an out-of-band merge (web button, bare ``gh pr merge``) leaves the
@@ -417,7 +416,7 @@ Emit a ``session_satisfied{source:"pr_merge"}`` event for the target
 
 ## emit_gate_escape_for_record
 
-Tier-1 auto-emit (x-f894): a ``gate_escape{reason:dead-bot}`` when
+Tier-1 auto-emit: a ``gate_escape{reason:dead-bot}`` when
     reconcile closes an out-of-band-merged node whose required review bot never
     reviewed.
 
@@ -446,7 +445,7 @@ Find open nodes whose PR has merged outside the ship gate.
     record - they are not drift. ``node_id`` restricts the scan to a single
     node (a str) or a set of nodes (an iterable of str) - e.g. every node one
     specific PR's exact trailer names, so a ``--pr-number`` call scans only
-    what that PR could possibly touch instead of the whole graph (x-59a6).
+    what that PR could possibly touch instead of the whole graph.
     Tests inject a ``query`` stub to avoid shelling out to gh.
 
     A second pass (``reverse_map_unstamped``) covers open nodes with NO PR ref
@@ -476,7 +475,7 @@ Unharvested ``deferred`` carve-outs on the node's project ledger.
     ``deferred`` blocks a close (declared scope did not ship); ``oos-bug`` and
     ``backfill`` do not (genuine discovery, filed by the later harvest). Both
     land in the same ``.fno/carveouts.jsonl``, which is why a deferred item can
-    merge away unnoticed (cv-99ebc0f3 on x-44cb). The ledger is resolved from
+    merge away unnoticed. The ledger is resolved from
     the NODE's project (``cwd``), not the ambient command repo: a cross-project
     close names a foreign node from this session, and reading the ambient
     ledger would both miss the foreign carve-out and let an unrelated local one
@@ -562,7 +561,7 @@ Successor id -> successor node, for pending predecessors already owed proof.
 
 Select up to ``max_lanes`` ready nodes, each collision-clean to dispatch.
 
-    The parallel-mode (epic x-42d5, group 2) lane-fill selector. With
+    The parallel-mode (group 2) lane-fill selector. With
     ``claim=True`` each pick atomically acquires a dispatch-time lane slot (the
     group-1 primitive ``acquire_lane_slot``), so the concurrency cap is enforced
     by claim atomicity, never a counted snapshot (Locked Decision #7). Each
@@ -572,7 +571,7 @@ Select up to ``max_lanes`` ready nodes, each collision-clean to dispatch.
 
     Collision-cleanliness is recomputed AFTER each claim from a FRESH ready-list,
     never a pre-claim snapshot: between two picks a peer may claim a node or a
-    lane may finish, and re-querying reflects that. This is the x-7441 "stops at
+    lane may finish, and re-querying reflects that. This is the "stops at
     a claimed head" hazard - selection must skip claimed heads across every
     domain. A node a live peer lane already holds is skipped so a
     not-yet-node-claimed lane is never double-dispatched. (Two dispatchers
@@ -587,7 +586,7 @@ Select up to ``max_lanes`` ready nodes, each collision-clean to dispatch.
 
     ``max_lanes == 1`` selects a single ready node: this is the retargeted
     active_backlog daemon's sequential
-    fire-and-forget dispatch (x-0ad6). ``max_lanes < 1`` returns ``[]`` with no
+    fire-and-forget dispatch. ``max_lanes < 1`` returns ``[]`` with no
     side effects.
 
     ``claim=False`` previews the selection (which nodes WOULD dispatch) without
@@ -616,7 +615,7 @@ Return a skip-reason for a would-be-selected node, or None to select it.
         which names where the work actually went (``dead-ancestor`` would only
         say the subtree is dead). First, because containment is a fact about
         THIS node while every guard below reads its ancestors or its plan.
-        Belt-and-braces: the write-site refusal (x-d9a4) already stops new
+        Belt-and-braces: the write-site refusal already stops new
         double-bindings, so this is a read of a state that should not exist.
         It is also only HALF the coverage - selection_guards is autonomous-only
         (see the design-stage note below), so `fno do target init` carries the
@@ -647,7 +646,7 @@ Return a skip-reason for a would-be-selected node, or None to select it.
 
 ## _join_node
 
-Spawn width-bounded joiners into a held node's worktree (x-8d1d).
+Spawn width-bounded joiners into a held node's worktree.
 
     Resolves the holder's worktree from the LIVE ``node:<id>`` claim (never a
     manifest snapshot), computes the bound plan's ready-graph width, and
@@ -753,15 +752,15 @@ Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
 
     Routes the substrate + the per-harness-normalized command through the shared
     resolver (``fno.agents.harness_map.resolve_dispatch``) instead of hardcoding
-    ``--substrate bg`` + a ``/target`` f-string (x-0676). ``harness`` (the selected
+    ``--substrate bg`` + a ``/target`` f-string. ``harness`` (the selected
     provider record's ``cli``; ``None`` = config/``claude``) picks the substrate:
     ``bg`` for claude (the detached ``claude --bg`` thread that self-isolates into a
-    worktree, never the pane default that would STALL a fire-and-forget dispatch,
-    x-2c27), ``headless`` for codex/others. A node's ``dispatch_verb``/
+    worktree, never the pane default that would STALL a fire-and-forget dispatch),
+    ``headless`` for codex/others. A node's ``dispatch_verb``/
     ``dispatch_brief`` (``verb``/``brief``) route the verb path (``/think {id}``,
     brief on ``TARGET_BRIEF`` env); with no verb the builtin ``/target`` is used.
 
-    Merge posture (x-4391) stays a launcher decision, never baked into a node verb:
+    Merge posture stays a launcher decision, never baked into a node verb:
     the default builtin bakes ``no-merge``; ``config.auto_merge.grant`` routes the
     ``/target`` verb path (which omits ``no-merge``); reconcile stays an explicit
     ``/target [--no-merge] --reconcile <manifest> {id}`` template. The agent is named
@@ -773,8 +772,7 @@ Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
     record and applies its overlay where the harness is exec'd. That matters
     because a non-claude record's overlay is a HOME override and footnote reads
     HOME to find its own state root, so an overlay merged into THIS wrapper's env
-    would file the worker's registry row and claim under the account's home
-    (x-c33e). ``extra_env`` is refused outright for any such key.
+    would file the worker's registry row and claim under the account's home. ``extra_env`` is refused outright for any such key.
 
     Returns the spawn receipt's LAUNCH IDENTITY: the claude short_id, or for a
     codex thread the FULL harness_session_id (codex has no short id; a head-8

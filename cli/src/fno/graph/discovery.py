@@ -273,7 +273,7 @@ def assess(
 
 
 def expired_worklist(
-    limit: int, *, graph_path: Path | None = None
+    limit: int, *, graph_path: Path
 ) -> tuple[dict[str, Any], str]:
     """Assess every expired deferred node and build the ranked worklist.
 
@@ -288,9 +288,8 @@ def expired_worklist(
     from fno.graph import relatedness
     from fno.graph.store import read_graph
 
-    path = graph_path or _graph_path()
-    before = path.read_bytes()
-    entries = read_graph(path)
+    before = graph_path.read_bytes()
+    entries = read_graph(graph_path)
     expired = [
         entry
         for entry in entries
@@ -328,7 +327,7 @@ def expired_worklist(
             str(entry.get("title") or ""),
             str(entry.get("details") or ""),
             entries=entries,
-            graph_path=path,
+            graph_path=graph_path,
             exclude_id=entry.get("id") if isinstance(entry.get("id"), str) else None,
             limit=limit,
             token_cache=token_cache,
@@ -364,7 +363,9 @@ def expired_worklist(
     positive: dict[str, Any] | None = None
     if worklist and all(not row["candidates"] for row in worklist):
         control_query = str(expired[0].get("title") or expired[0].get("id") or "")
-        positive = positive_control(control_query, graph_path=path, entries=entries)
+        positive = positive_control(
+            control_query, graph_path=graph_path, entries=entries
+        )
         if not positive["matches"]:
             return (
                 {},
@@ -372,7 +373,7 @@ def expired_worklist(
                 "the all-empty worklist is not trusted",
             )
 
-    after = path.read_bytes()
+    after = graph_path.read_bytes()
     if after != before:
         return (
             {},
