@@ -73,13 +73,9 @@ def classify(
     has_remote: bool = False,
 ) -> Row:
     """First match wins. See module docstring for the shape of the join."""
-    facts = {
-        "path": path,
-        "branch": branch,
-        "has_remote": has_remote,
-        "pr_number": node_entry.get("pr_number") if node_entry else None,
-        "live": registry_status in _ALIVE_STATUSES,
-    }
+    facts = {"path": path, "branch": branch, "has_remote": has_remote,
+             "pr_number": node_entry.get("pr_number") if node_entry else None,
+             "live": registry_status in _ALIVE_STATUSES}
 
     if unpushed == 0:
         return Row(CLEAN, node, unpushed, age, facts)
@@ -181,11 +177,9 @@ def _unpushed_batch(
     worktrees: list[tuple[Optional[str], str]],
 ) -> dict[str, tuple[int, bool, str, bool]]:
     """(branch, path) -> (unpushed_count, ok, age, has_remote), via the packaged port of
-    ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh; the bash
-    original remains for its shell callers). The port exists so this module
-    never shells out to a clone-only script: an installed wheel carries no
-    ``scripts/`` tree, and rooting that call at the package parent either
-    crashed or silently disabled this leg. The remote-refs refresh is
+    ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh). The port
+    exists so this module never shells out to a clone-only script: an
+    installed wheel carries no ``scripts/`` tree. The remote-refs refresh is
     verified once per process (module flags below), the same one-fetch-per-
     sweep contract the exported bash cache gave."""
     if not worktrees:
@@ -208,10 +202,8 @@ def _unpushed_batch(
 
 
 def _has_remote(path: str, branch: Optional[str]) -> bool:
-    """Whether refs/remotes/origin/<branch> resolves. Reads the remote-tracking
-    refs the batch's own verified fetch just refreshed, so no second network
-    call. A branch with no remote is the strongest provenance signal the
-    board can show; a missing ref must never demote a row unpushed flagged."""
+    """Whether refs/remotes/origin/<branch> resolves, off the refs the batch's
+    own fetch just refreshed; a missing ref must never demote a flagged row."""
     if not branch:
         return False
     r = subprocess.run(

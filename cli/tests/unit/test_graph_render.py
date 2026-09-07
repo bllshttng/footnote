@@ -726,7 +726,7 @@ def test_branch_provenance_renders_cached_rows_incl_unmapped(tmp_path, monkeypat
     repo = tmp_path / "repo"
     cache_path(repo).parent.mkdir(parents=True)
     cache_path(repo).write_text(json.dumps(_cache_rows()))
-    monkeypatch.setattr("fno.graph.render._provenance_roots", lambda: [repo])
+    monkeypatch.setattr("fno.branch_provenance_cache._provenance_roots", lambda: [repo])
 
     output = tmp_path / "graph.md"
     render_graph_md([_entry("ab-99990001")], output)
@@ -746,7 +746,7 @@ def test_branch_provenance_renders_cached_rows_incl_unmapped(tmp_path, monkeypat
 def test_branch_provenance_omitted_when_cache_empty(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
-    monkeypatch.setattr("fno.graph.render._provenance_roots", lambda: [repo])
+    monkeypatch.setattr("fno.branch_provenance_cache._provenance_roots", lambda: [repo])
 
     output = tmp_path / "graph.md"
     render_graph_md([_entry("ab-99990002")], output)
@@ -771,8 +771,8 @@ def test_branch_provenance_stays_above_the_kanban_footer(tmp_path, monkeypatch):
         {"path": "/wt/c", "branch": "feature/x-9ed9", "has_remote": False,
          "pr_number": None, "live": False},
     )
-    write_cache(repo, [row], entries_by_id={})
-    monkeypatch.setattr("fno.graph.render._provenance_roots", lambda: [repo])
+    write_cache(repo, [row])
+    monkeypatch.setattr("fno.branch_provenance_cache._provenance_roots", lambda: [repo])
 
     output = tmp_path / "graph.md"
     render_graph_md([_entry("ab-99990003")], output)
@@ -785,14 +785,14 @@ def test_branch_provenance_stays_above_the_kanban_footer(tmp_path, monkeypatch):
 
 
 def test_branch_provenance_fails_open_on_bad_cache(tmp_path, monkeypatch):
-    from fno.graph.render import _branch_provenance_lines
+    from fno.branch_provenance_cache import provenance_lines
 
     repo = tmp_path / "repo"
     (repo / ".fno").mkdir(parents=True)
     (repo / ".fno" / "branch-provenance.json").write_text("{not json")
-    monkeypatch.setattr("fno.graph.render._provenance_roots", lambda: [repo])
+    monkeypatch.setattr("fno.branch_provenance_cache._provenance_roots", lambda: [repo])
 
-    assert _branch_provenance_lines() == []
+    assert provenance_lines() == []
 
     output = tmp_path / "graph.md"
     render_graph_md([_entry("ab-99990004")], output)

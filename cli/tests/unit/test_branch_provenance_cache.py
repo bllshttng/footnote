@@ -2,14 +2,14 @@
 
 The cache is the join between the pr-watch tick's stranded sweep (writer)
 and the Kanban board (reader), so the contract here is the render
-contract: only non-CLEAN rows are stored, titles come from the graph at
-write time, and every read failure degrades to "no section".
+contract: only non-CLEAN rows are stored, and every read failure degrades
+to "no section".
 """
 import json
 
 import pytest
 
-from fno.branch_provenance_cache import CACHE_RELPATH, cache_path, read_cache, write_cache
+from fno.branch_provenance_cache import CACHE_RELPATH, cache_path, provenance_lines, read_cache, write_cache
 from fno.worktree_stranded import CLEAN, STRANDED, Row
 
 
@@ -41,7 +41,6 @@ def test_write_skips_clean_rows_and_carries_the_full_shape(tmp_path):
     assert rows[0] == {
         "branch": "feature/x-abcd",
         "node": "x-abcd",
-        "node_title": None,
         "klass": "STRANDED",
         "unpushed": 23,
         "has_remote": False,
@@ -50,12 +49,6 @@ def test_write_skips_clean_rows_and_carries_the_full_shape(tmp_path):
         "live": False,
         "path": "/wt/x-abcd",
     }
-
-
-def test_write_resolves_node_titles_from_entries_by_id(tmp_path):
-    entries = {"x-abcd": {"title": "Branch provenance on the board"}}
-    write_cache(tmp_path, [_stranded()], entries_by_id=entries)
-    assert read_cache(tmp_path)[0]["node_title"] == "Branch provenance on the board"
 
 
 def test_unmapped_node_is_cached_not_dropped(tmp_path):
@@ -67,7 +60,6 @@ def test_unmapped_node_is_cached_not_dropped(tmp_path):
         {
             "branch": "feature/unmapped",
             "node": None,
-            "node_title": None,
             "klass": "STRANDED",
             "unpushed": 7,
             "has_remote": False,
@@ -100,28 +92,16 @@ def test_write_overwrites_never_appends(tmp_path):
     write_cache(tmp_path, [_stranded()])
     write_cache(tmp_path, [])
     assert read_cache(tmp_path) == []
-    leftovers = [p for p in tmp_path.glob("*.tmp")]
-    assert leftovers == []
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
-def test_write_failure_never_raises(tmp_path, monkeypatch):
+def test_write_failure_never_raises(tmp_path):
     # A repo path that cannot hold the file (a regular file where the
     # directory belongs) must log, answer False, and leave the tick leg up.
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("occupied")
     assert write_cache(blocker, [_stranded()]) is False
     assert read_cache(blocker) == []
-
-
-def test_bad_graph_read_still_writes_rows(tmp_path, monkeypatch):
-    import fno.graph.store as store
-
-    def _boom():
-        raise RuntimeError("graph unavailable")
-
-    monkeypatch.setattr(store, "read_graph_strict", _boom)
-    assert write_cache(tmp_path, [_stranded()]) is True
-    assert read_cache(tmp_path)[0]["node"] == "x-abcd"
 
 
 def test_cache_path_shape(tmp_path):
@@ -133,3 +113,62 @@ def test_every_reported_class_is_cached(tmp_path, klass):
     row = _row(klass, "x-1", 2, "3 hours ago", has_remote=True, pr_number=9, live=klass == "LIVE")
     write_cache(tmp_path, [row])
     assert [r["klass"] for r in read_cache(tmp_path)] == [klass]
+
+
+# -- the board section the cache feeds --
+
+
+def _cache_rows():
+    return [
+        {
+            "branch": "feature/x-04ce-review-fixes",
+            "node": "x-04ce",
+            "klass": "STRANDED",
+            "unpushed": 23,
+            "has_remote": False,
+            "age": "33 hours ago",
+            "pr_number": None,
+            "live": False,
+            "path": "/wt/a",
+        },
+        {
+            "branch": "fix/x-129b-payload-cache-head",
+            "node": None,
+            "klass": "UNKNOWN",
+            "unpushed": 0,
+            "has_remote": True,
+            "age": "12 hours ago",
+            "pr_number": None,
+            "live": True,
+            "path": "/wt/b",
+        },
+    ]
+
+
+def test_provenance_lines_render_mapped_and_unmapped_rows(tmp_path):
+    """An unmapped branch is exactly the interesting case: rendered by name,
+    never dropped."""
+    cache_path(tmp_path).parent.mkdir(parents=True)
+    cache_path(tmp_path).write_text(json.dumps(_cache_rows()))
+
+    lines = provenance_lines([tmp_path])
+
+    assert lines[0] == "## Branch Provenance"
+    assert (
+        "- **x-04ce** (feature/x-04ce-review-fixes): "
+        "no remote, 23 unpushed, no PR, newest commit 33 hours ago" in lines
+    )
+    assert (
+        "- *(unmapped)* (fix/x-129b-payload-cache-head): "
+        "has remote, 0 unpushed, no PR, LIVE, newest commit 12 hours ago" in lines
+    )
+
+
+def test_provenance_lines_omitted_when_cache_empty(tmp_path):
+    assert provenance_lines([tmp_path]) == []
+
+
+def test_provenance_lines_fail_open_on_bad_cache(tmp_path):
+    cache_path(tmp_path).parent.mkdir(parents=True)
+    cache_path(tmp_path).write_text("{not json")
+    assert provenance_lines([tmp_path]) == []

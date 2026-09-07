@@ -1,17 +1,4 @@
-"""Per-repo cache of the stranded sweep, for board rendering.
-
-The pr-watch tick already classifies every worktree (``sweep()``) and then
-throws the rows away after one log line. This module persists the
-non-CLEAN rows to ``<repo>/.fno/branch-provenance.json`` so the Kanban
-board can render branch provenance - which branches have no remote, how
-many commits exist only on this disk, which have no PR - without any
-render-time git. A branch that resolves to no backlog node is exactly the
-interesting case and is cached with ``node: null``, never dropped.
-
-Written every tick, never appended; safe to delete (the next tick
-rewrites it). Reads fail open to ``[]`` so a missing or malformed file
-only omits the board section.
-"""
+"""Per-repo branch-provenance cache: the pr-watch stranded leg writes it, the Kanban board reads it. File contract: docs/state-root-inventory.md."""
 
 from __future__ import annotations
 
@@ -20,10 +7,6 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
-
-if TYPE_CHECKING:
-    from fno.worktree_stranded import Row
 
 from fno.worktree_stranded import CLEAN
 
@@ -34,67 +17,33 @@ def cache_path(repo: Path) -> Path:
     return Path(repo) / CACHE_RELPATH
 
 
-def write_cache(
-    repo: Path,
-    rows: "list[Row]",
-    entries_by_id: Optional[dict] = None,
-) -> bool:
-    """Persist the non-CLEAN rows atomically; True when the file was written.
-
-    ``entries_by_id`` supplies node titles when the caller has the graph
-    loaded; without it, one local graph read is spent here. Any failure is
-    logged and answered False - the cache is a display input and must never
-    break the tick leg that writes it.
-    """
-    if entries_by_id is None:
-        try:
-            from fno.graph.store import read_graph_strict
-
-            entries_by_id = {
-                e.get("id"): e for e in read_graph_strict() if isinstance(e, dict) and e.get("id")
-            }
-        except Exception:  # noqa: BLE001 - titles are decoration; rows are the payload
-            entries_by_id = {}
-
-    out: list[dict] = []
-    for row in rows:
-        if row.klass == CLEAN:
-            continue
-        node_entry = entries_by_id.get(row.node) if row.node else None
-        out.append(
-            {
-                "branch": row.facts.get("branch"),
-                "node": row.node,
-                "node_title": (node_entry or {}).get("title"),
-                "klass": row.klass,
-                "unpushed": row.unpushed,
-                "has_remote": row.facts.get("has_remote"),
-                "age": row.age,
-                "pr_number": row.facts.get("pr_number"),
-                "live": row.facts.get("live"),
-                "path": row.facts.get("path"),
-            }
-        )
-
+def write_cache(repo: Path, rows: list) -> bool:
+    """Persist the non-CLEAN rows atomically; log-and-False on any failure."""
+    out = [
+        {
+            "branch": row.facts.get("branch"),
+            "node": row.node,
+            "klass": row.klass,
+            "unpushed": row.unpushed,
+            "has_remote": row.facts.get("has_remote"),
+            "age": row.age,
+            "pr_number": row.facts.get("pr_number"),
+            "live": row.facts.get("live"),
+            "path": row.facts.get("path"),
+        }
+        for row in rows
+        if row.klass != CLEAN
+    ]
     target = cache_path(repo)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=target.parent, suffix=".tmp")
-        try:
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                json.dump(out, f)
-            os.replace(tmp_path, str(target))
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        fd, tmp = tempfile.mkstemp(dir=target.parent, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(out, f)
+        os.replace(tmp, str(target))
         return True
     except Exception as exc:  # noqa: BLE001 - display cache, never break the tick
-        logging.getLogger(__name__).warning(
-            "branch_provenance_cache: write failed for %s: %s", repo, exc
-        )
+        logging.getLogger(__name__).warning("branch_provenance_cache: write failed for %s: %s", repo, exc)
         return False
 
 
@@ -109,3 +58,49 @@ def read_cache(repo: Path) -> list[dict]:
     # A valid-JSON list of non-objects must not reach the renderer: the
     # board's own try/except sits around the READ, not around row formatting.
     return [row for row in data if isinstance(row, dict)]
+
+
+def _provenance_roots() -> list[Path]:
+    """Repo roots that may carry a cache: the sidecar cwds, deduped, on disk."""
+    try:
+        from fno.tracker import sidecar as sidecar_store
+
+        sidecars = sidecar_store.load_all()
+    except Exception:  # noqa: BLE001 - display signal; never break a mutation
+        return []
+    roots: dict[str, Path] = {}
+    for sc in sidecars.values():
+        cwd = getattr(sc, "cwd", None)
+        if cwd:
+            roots.setdefault(str(cwd), Path(cwd))
+    return [p for p in roots.values() if p.is_dir()]
+
+
+def _provenance_line(row: dict) -> str:
+    """One board line: node (or the unmapped marker), branch, raw signals."""
+    parts = [
+        "no remote" if not row.get("has_remote") else "has remote",
+        f"{row.get('unpushed') or 0} unpushed",
+        f"PR #{row['pr_number']}" if row.get("pr_number") else "no PR",
+    ]
+    if row.get("live"):
+        parts.append("LIVE")
+    parts.append(f"newest commit {row.get('age') or 'unknown'}")
+    node = row.get("node")
+    label = f"**{node}**" if node else "*(unmapped)*"
+    return f"- {label} ({row.get('branch') or 'no branch'}): {', '.join(parts)}"
+
+
+def provenance_lines(roots: list[Path] | None = None) -> list[str]:
+    """The Branch Provenance section, [] when there is nothing to report.
+
+    Board rendering runs inside locked_mutate_graph, so a bad read degrades
+    to "section omitted" - the same fail-open contract as the rollup.
+    """
+    try:
+        rows = [r for root in (roots if roots is not None else _provenance_roots()) for r in read_cache(root)]
+    except Exception:  # noqa: BLE001 - display signal; never break a mutation
+        return []
+    if not rows:
+        return []
+    return ["## Branch Provenance", "", *(_provenance_line(r) for r in rows), ""]
