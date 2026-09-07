@@ -3222,6 +3222,7 @@ fn build_claude_stream_entry(
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
+        git_grant: None,
         ..RegistryEntry::new(
             Some(uuid.into()),
             Lineage::captured((parent_session, parent_harness, parent_cwd)),
@@ -9775,6 +9776,7 @@ mod tests {
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            git_grant: None,
             ..Default::default()
         }
     }
@@ -11657,6 +11659,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            git_grant: None,
             ..Default::default()
         }
     }
@@ -11869,6 +11872,121 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             Some(AgentStatus::Orphaned),
             "resumable thread reads Orphaned, never Live-forever"
         );
+    }
+
+    /// AC15: a row whose startup resume FAILED reads Orphaned after the
+    /// recovery pass, never Live-forever. The resume is made to fail
+    /// deterministically via a nonexistent cwd (app-server spawn cannot even
+    /// start there).
+    /// AC11: a yolo spawn stamps the posture on the row; the resume lane's
+    /// helper reads it back.
+    ///
+    /// It drives a fake SHARED daemon. It used to install a stdio `codex` on
+    /// PATH and let the driver fork it. After the transport moved to the
+    /// shared daemon that fake was never reached: on a developer machine the
+    /// driver connected to the operator's REAL daemon and the test passed by
+    /// starting a real thread, and in CI, where no daemon runs, it panicked.
+    /// A test that reaches a live daemon is not a unit test, so it takes the
+    /// same fake every other one here does.
+    #[test]
+    fn build_codex_thread_entry_stamps_the_launch_posture() {
+        let worktree = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(worktree.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let git_common_dir = std::process::Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(worktree.path())
+            .output()
+            .unwrap();
+        assert!(git_common_dir.status.success());
+        let git_common_dir = String::from_utf8(git_common_dir.stdout).unwrap();
+        let git_common_dir = git_common_dir.trim();
+        let _guard = crate::path_test_guard();
+        let start = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                // The fake must outlive the start: it owns CODEX_HOME.
+                let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+                    crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-p"),
+                );
+                crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
+                    .await
+                    .expect("yolo thread starts")
+            });
+        let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true, None);
+        assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
+        assert_eq!(yolo.git_grant.as_deref(), Some(git_common_dir));
+        assert!(
+            entry_posture_is_full_access(&yolo)
+                && yolo.fno_id.as_deref() == Some("thread-p")
+                && yolo.mux.is_none()
+        );
+        let bounded =
+            build_codex_thread_entry("t", worktree.path(), &start, None, None, false, None);
+        assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
+        assert_eq!(bounded.git_grant.as_deref(), Some(git_common_dir));
+        let outside_repo = tempfile::tempdir().unwrap();
+        let outside =
+            build_codex_thread_entry("t", outside_repo.path(), &start, None, None, false, None);
+        assert_eq!(outside.git_grant, None);
+        assert!(!entry_posture_is_full_access(&bounded));
+        // A requested model stamps its basis on the row; an absent one
+        // leaves the basis absent with it.
+        let modeled = build_codex_thread_entry(
+            "t",
+            worktree.path(),
+            &start,
+            Some("gpt-5.6-sol"),
+            None,
+            false,
+            None,
+        );
+        assert_eq!(modeled.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(modeled.model_basis.as_deref(), Some("requested"));
+        assert_eq!(bounded.model_basis, None);
+        // v25 positive marker: the route identity the spawn actually used,
+        // read back non-empty from the minted row - the provider-outage
+        // collector refuses evidence on a row whose axes are absent, so an
+        // all-None stamp here would keep every daemon codex thread blind.
+        assert_eq!(modeled.route_provider_id.as_deref(), Some("openai"));
+        assert_eq!(modeled.model_name.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(modeled.account_record_id.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn build_codex_thread_entry_stamps_the_request_node() {
+        let worktree = tempfile::tempdir().unwrap();
+        let _guard = crate::path_test_guard();
+        let start = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+                    crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-node"),
+                );
+                crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
+                    .await
+                    .expect("yolo thread starts")
+            });
+        let entry = build_codex_thread_entry(
+            "t",
+            worktree.path(),
+            &start,
+            None,
+            None,
+            true,
+            Some("x-535c"),
+        );
+        assert_eq!(entry.node.as_deref(), Some("x-535c"));
     }
 
     /// AC12: a PRE-v19 row (no posture key) still parses and reads the safe
@@ -14533,6 +14651,7 @@ done
                 fno_id: None,
                 delivery_policy: None,
                 sandbox_posture: None,
+                git_grant: None,
                 ..Default::default()
             });
         })
@@ -14603,6 +14722,7 @@ done
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            git_grant: None,
             ..Default::default()
         }
     }

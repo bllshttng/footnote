@@ -855,6 +855,7 @@ fn dispatch_opencode_serve_inner(
         fno_id: Some(session_id.clone()),
         delivery_policy: None,
         sandbox_posture: None,
+        git_grant: None,
         ..RegistryEntry::new(
             Some(session_id.clone()),
             Lineage {

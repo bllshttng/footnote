@@ -61,6 +61,7 @@ fn entry(name: &str, harness: &str, sid: Option<&str>) -> RegistryEntry {
         sandbox_posture: None,
         resolved_sandbox: None,
         granted_writable_roots: Vec::new(),
+        git_grant: None,
         origin: None,
         spawn_trigger: None,
         liveness: None,

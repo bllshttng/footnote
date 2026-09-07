@@ -109,6 +109,9 @@ pub(crate) fn build_codex_thread_entry(
         // what this record ends.
         resolved_sandbox: Some(driver.resolved_sandbox_posture().to_string()),
         granted_writable_roots: driver.granted_writable_roots().to_vec(),
+        // v30: the effective positive Git grant carried by the bounded thread
+        // policy. Outside a repository there is no grant to record.
+        git_grant: crate::provider::git_common_dir(cwd),
         ..RegistryEntry::new(
             Some(session_id),
             Lineage::captured((parent_session, parent_harness, parent_cwd)),
