@@ -4060,7 +4060,7 @@ def cmd_update(
     # on its own, so a lock clear that did not transition the node refuses
     # the Updated receipt and names the verb that settles the row.
     if locked_by == "null" and stored_node.get("status") == "in_progress":
-        from fno.graph.requeue import _wedge_refusal
+        from fno.backlog.requeue import _wedge_refusal
         from fno.graph.statuses import is_open_do_row
 
         _wedge_refusal(
@@ -4118,7 +4118,7 @@ def cmd_update(
 
 
 # -- unclaim / release / requeue: the queue-return subject lives in
-# fno.graph.requeue; registration stays here on the backlog app. --
+# fno.backlog.requeue; registration stays here on the backlog app. --
 
 
 @cli.command("unclaim", hidden=True)
@@ -4128,7 +4128,7 @@ def cmd_unclaim(
     ),
 ) -> None:
     """Free a claimed node in one call (graph claim + safe lockfile release)."""
-    from fno.graph.requeue import _unclaim_node
+    from fno.backlog.requeue import _unclaim_node
 
     _unclaim_node(task_id)
 
@@ -4139,7 +4139,7 @@ def cmd_requeue(
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
     """Return a node wedged in_progress by a dead worker to the queue."""
-    from fno.graph.requeue import cmd_requeue as _impl
+    from fno.backlog.requeue import cmd_requeue as _impl
 
     _impl(node, json_out=json_out)
 

@@ -54,7 +54,7 @@ ALLOWLIST = {
     # point at force-release). Single authority at an explicit operator
     # lifecycle boundary (x-a747). Lives in graph/requeue.py since the
     # queue-return subject moved there out of the over-budget graph/cli.py.
-    "cli/src/fno/graph/requeue.py",
+    "cli/src/fno/backlog/requeue.py",
     # init-target-state.sh: the acquire-then-validate refusal (x-e957). Releases
     # the claim THIS SAME BLOCK acquired one line earlier, with the holder it
     # just minted, when the post-acquire containment read says the node was
