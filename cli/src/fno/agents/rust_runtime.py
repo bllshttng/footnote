@@ -287,6 +287,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # `--watch` worker-binary surface noted in client.rs is a separate lane), so
     # it must never auto-route to the daemon.
     "watch",
+    # The newest-assistant transcript read the loopcheck distress leg shells.
+    # Pure Python (fno.agents.peek reads the JSONL directly); no Rust port, so
+    # it must never auto-route to the daemon.
+    "newest-assistant-text",
     # ab-098967b4 P1: internal helper the Rust `list` render path shells out to
     # for the discovered-live-sessions lane. Pure Python (reads
     # ~/.claude/sessions via fno.agents.discover); no Rust port, so it
