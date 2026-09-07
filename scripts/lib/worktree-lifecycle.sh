@@ -187,16 +187,19 @@ _wt_pids() {
             print pid
         }
     ' <(printf '%s\n' "$ps_snap") <(printf '%s\n' "$candidates"))"
-    # A candidate that is an ANCESTOR of this sweep is the sweep's own
-    # invoker, never a squatter: under pytest-xdist the worker and controller
-    # argv carry the test's tmp paths and read as phantom processes in a tree
-    # nobody is in (CI smoke, 2026-09-07). Walk UP from $$ through the
-    # snapshot's ppid map and drop any candidate on that chain; walking up
-    # from the CANDIDATE finds only its own ancestors and can never reach $$,
-    # a descendant. A DESCENDANT with its own cwd inside the tree is a real
-    # occupant (the battery pins this), so it stays. A pid missing from the
-    # snapshot ends the walk.
-    local mine="" walk_pid hop pid_keep
+    # Two drops, both read from the ONE ps snapshot in memory:
+    # 1. A candidate that is an ANCESTOR of this sweep is the sweep's own
+    #    invoker (the xdist worker whose argv carries the test's tmp paths,
+    #    CI smoke 2026-09-07). Walk UP from $$ through the ppid map; walking
+    #    from the CANDIDATE can never reach $$, a descendant.
+    # 2. A candidate with a row in NEITHER snapshot (this ps snapshot, or the
+    #    lsof cwd snapshot) was an enumeration transient: a fork of the
+    #    sweep's own pipeline visible to pgrep mid-exec with the sweep's
+    #    argv, dead before either snapshot (CI, pids=@no-cwd-row with an
+    #    empty command). It held nothing long enough to own build artifacts.
+    #    A descendant with its own cwd in the tree stays: a real occupant
+    #    (the battery pins this).
+    local mine="" walk_pid hop pid_keep ps_rows
     walk_pid="$$"
     for hop in 1 2 3 4 5 6 7 8 9 10 11 12; do
         [[ -z "$walk_pid" || "$walk_pid" == "0" || "$walk_pid" == "1" ]] && break
@@ -205,11 +208,28 @@ _wt_pids() {
             $1 == want { print $2; exit }
         ' <<< "$ps_snap")"
     done
-    local filtered2=""
-    while IFS= read -r pid_keep; do
-        [[ -z "$pid_keep" ]] && continue
-        printf '%s\n' "$mine" | grep -qx "$pid_keep" || filtered2="${filtered2}${pid_keep}"$'\n'
-    done <<< "$filtered"
+    # The transient drop only fires on a positively-populated ps snapshot: an
+    # empty one (sandbox denies ps, or a stub prints nothing) proves nothing,
+    # so every candidate is kept (the battery's empty-ps pin).
+    ps_rows="$(awk -v m="__FNO_PS_SNAPSHOT_COMPLETE__" '$0 == m { exit } NF { c++ } END { print c + 0 }' <<< "$ps_snap")"
+    local filtered2="" in_ps in_cwd
+    if [[ "$ps_rows" -gt 0 ]]; then
+        while IFS= read -r pid_keep; do
+            [[ -z "$pid_keep" ]] && continue
+            printf '%s\n' "$mine" | grep -qx "$pid_keep" && continue
+            in_ps=0
+            awk -v want="$pid_keep" '$1 == want { found=1 } END { exit !found }' <<< "$ps_snap" && in_ps=1
+            in_cwd=0
+            printf '%s\n' "${_WT_CWD_SNAPSHOT:-}" \
+                | awk -F '\t' -v want="$pid_keep" '$1 == want { found=1 } END { exit !found }' && in_cwd=1
+            if [[ "$in_ps" -ne 1 && "$in_cwd" -ne 1 ]]; then
+                continue
+            fi
+            filtered2="${filtered2}${pid_keep}"$'\n'
+        done <<< "$filtered"
+    else
+        filtered2="$filtered"
+    fi
     printf '%s\n' "$filtered2"
     return "$snapshot_rc"
 }
