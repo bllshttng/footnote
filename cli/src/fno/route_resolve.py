@@ -298,10 +298,10 @@ def resolve_slot(
         return None, []
 
     gate_bypassed = os.environ.get("FNO_SPAWN_GATE") == "0"
-    from fno.route_slot_client import RouteSlotUnavailable, route_slot
+    from fno.route_slot_client import RouteSlotUnavailable, route_slot_call
 
     try:
-        return route_slot(_slot_payload(
+        return _answer(route_slot_call(_slot_payload(
             rung_base=rung_base, profile=profile, lanes=lanes, node=node,
             capacity=capacity, inventory=inventory, settings=settings,
             substrate=substrate, permission_mode=permission_mode,
@@ -309,12 +309,17 @@ def resolve_slot(
             explicit_model=explicit_model, gate_bypassed=gate_bypassed,
             role=role, protected_role=protected_role,
             model_occupied=model_occupied,
-        ))
+        )), "candidate")
     except RouteSlotUnavailable as exc:
         return None, [f"slot=route-slot-unavailable ({exc})"]
 
 
 
+
+
+def _answer(out: dict[str, Any], key: str) -> tuple[Any, list[str]]:
+    """The verb's named field plus its chain, lines coerced verbatim."""
+    return out.get(key), [str(line) for line in (out.get("chain") or [])]
 
 
 def _profile_fields(profile: Optional[object]) -> dict[str, Any]:
@@ -566,9 +571,9 @@ def slot_states(
     payload["mode"] = "states"
     states: dict[str, Any] = {}
     try:
-        from fno.route_slot_client import route_states
+        from fno.route_slot_client import route_slot_call
 
-        states = route_states(payload)
+        states = route_slot_call(payload)
     except Exception as exc:  # noqa: BLE001 - a missing verb degrades the readout
         states = {"would_take": f"slot=route-slot-unavailable ({exc})"}
     for key in ("on_exhausted", "on_low", "on_unknown", "would_take", "routing"):
@@ -701,14 +706,15 @@ def resolve_tier(
 ) -> tuple[Optional[str], list[str]]:
     """Resolve a tier to a concrete declared model, scoped to one harness when
     asked. The band math lives on ``fno-agents route-slot``; never raises."""
-    from fno.route_slot_client import RouteSlotUnavailable, route_tier
+    from fno.route_slot_client import RouteSlotUnavailable, route_slot_call
 
     inv = inventory if inventory is not None else resolve_inventory(
         settings=settings, snapshot=snapshot
     )
     try:
-        return route_tier({"mode": "tier", "tier": tier, "provider": provider,
-                           "inventory": _inventory_payload(inv)})
+        return _answer(route_slot_call(
+            {"mode": "tier", "tier": tier, "provider": provider,
+             "inventory": _inventory_payload(inv)}), "model")
     except RouteSlotUnavailable:
         return None, ["tier=route-slot-unavailable"]
 

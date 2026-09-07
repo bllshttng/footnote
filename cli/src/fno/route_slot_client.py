@@ -56,19 +56,7 @@ def _route_slot_call(payload: dict[str, Any]) -> dict[str, Any]:
             print(json.dumps({"payload": payload}), flush=True)
 
 
-def route_slot(payload: dict[str, Any]) -> tuple[Optional[dict], list[str]]:
-    """The slot/grid legs: returns ``(candidate, chain)``."""
-    out = _route_slot_call(payload)
-    return out.get("candidate"), [str(line) for line in (out.get("chain") or [])]
-
-
-def route_tier(payload: dict[str, Any]) -> tuple[Optional[str], list[str]]:
-    """The tier leg: returns ``(model, chain)``."""
-    out = _route_slot_call(payload)
-    return out.get("model"), [str(line) for line in (out.get("chain") or [])]
-
-
-def route_states(payload: dict[str, Any]) -> dict[str, Any]:
-    """The readout leg: the verb's whole states answer (lane_states, chain,
-    the policy lines, and would_take)."""
+def route_slot_call(payload: dict[str, Any]) -> dict[str, Any]:
+    """The whole verb answer ({status, candidate|model|lane_states, chain});
+    the caller unpacks the leg it asked for."""
     return _route_slot_call(payload)
