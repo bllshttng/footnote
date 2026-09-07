@@ -4167,11 +4167,17 @@ async fn spawn_codex_thread_lane(
         );
     }
     let model = req.params.get("model").and_then(Value::as_str);
-    let yolo = req
-        .params
-        .get("yolo")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    // Both spellings, resolved by one reader. Reading `yolo` alone dropped
+    // `permission_mode` silently and started bounded, which downgrades the very
+    // posture the caller was naming; an unrecognized value is refused here
+    // rather than degraded, for the same reason.
+    let yolo = match crate::codex_thread::resolve_thread_posture(
+        req.params.get("yolo").and_then(Value::as_bool),
+        req.params.get("permission_mode").and_then(Value::as_str),
+    ) {
+        Ok(yolo) => yolo,
+        Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
+    };
     let effort = req.params.get("effort").and_then(Value::as_str);
     let node = req.params.get("node").and_then(Value::as_str);
     // Hop 2 of the state-root grant (x-f22f). Read the roots from the REQUEST,
@@ -16928,6 +16934,38 @@ done
                 );
             }
             _ => panic!("expected refusal for a keeper-lane harness"),
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// A permission axis the lane cannot resolve is refused at the RPC
+    /// boundary, before any thread starts. The alternative is a spawn that
+    /// succeeds at a posture nobody asked for, which reads as a working worker
+    /// until it cannot write.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_spawn_thread_refuses_an_unmappable_permission_mode() {
+        let home = tmp_home("spawn-thread-permission-mode");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "test-agent",
+                "provider": "codex",
+                "substrate": "thread",
+                "permission_mode": "acceptEdits",
+            }),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        match &resp.payload {
+            crate::protocol::ResponsePayload::Err(e) => {
+                assert!(
+                    e.message.contains("acceptEdits"),
+                    "refusal must name the value it could not map; got: {}",
+                    e.message
+                );
+            }
+            _ => panic!("expected refusal for an unmappable permission_mode"),
         }
         std::fs::remove_dir_all(home.root()).ok();
     }

@@ -318,6 +318,65 @@ pub fn parse_resolved_sandbox(raw: &str) -> Option<Value> {
         .cloned()
 }
 
+/// Resolve the thread lane's launch posture from BOTH spellings a spawn can
+/// use, or refuse.
+///
+/// `spawn_codex_thread_lane` read the `yolo` bool alone and dropped
+/// `permission_mode` on the floor. Dropping an axis is not neutral here: the
+/// lane then starts bounded, which is a SILENT downgrade of the exact posture
+/// the caller was trying to name. Both CLI front doors happen to refuse
+/// `--permission-mode` for codex today, so nothing reaches this with the key
+/// set - but the daemon RPC is the trust boundary, and a boundary that ignores
+/// a permission axis it does not understand is one caller away from the defect.
+///
+/// The vocabulary is codex's own, and it is the one `permission_pane_tokens`
+/// maps for the pane lane (`fno.agents.mux_spawn`): the `full-auto` and `yolo`
+/// shortcuts, or the explicit `<sandbox>:<approval>` pair. Keep the two in
+/// step; a third spelling invented here would be a second vocabulary for one
+/// axis.
+///
+/// Fail closed on anything else, and on both keys at once - "one knob at a
+/// time" is the rule the CLIs already enforce, and guessing which of two
+/// disagreeing postures a caller meant is how a bypass gets granted by
+/// accident.
+pub fn resolve_thread_posture(
+    yolo: Option<bool>,
+    permission_mode: Option<&str>,
+) -> Result<bool, String> {
+    let mode = permission_mode.map(str::trim).filter(|m| !m.is_empty());
+    let Some(mode) = mode else {
+        return Ok(yolo.unwrap_or(false));
+    };
+    if yolo == Some(true) {
+        return Err(format!(
+            "spawn carries both yolo=true and permission_mode {mode:?}; pass one \
+             (they are mutually exclusive, as on `fno agents spawn`)"
+        ));
+    }
+    match mode {
+        "yolo" => Ok(true),
+        "full-auto" => Ok(false),
+        _ => match mode.split_once(':') {
+            Some((sandbox, approval)) if !sandbox.is_empty() && !approval.is_empty() => {
+                match sandbox {
+                    "danger-full-access" => Ok(true),
+                    "workspace-write" | "read-only" => Ok(false),
+                    _ => Err(format!(
+                        "codex permission_mode {mode:?} names sandbox {sandbox:?}, which the \
+                         thread lane cannot resolve; use read-only, workspace-write, or \
+                         danger-full-access"
+                    )),
+                }
+            }
+            _ => Err(format!(
+                "codex permission_mode {mode:?} unmappable on the thread lane; use a shortcut \
+                 (full-auto, yolo) or the <sandbox>:<approval> form \
+                 (e.g. workspace-write:on-request)"
+            )),
+        },
+    }
+}
+
 /// The posture name the server reported, read WITHOUT the workspaceWrite
 /// filter [`parse_resolved_sandbox`] applies.
 ///
@@ -1693,6 +1752,85 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(value["params"]["expectedTurnId"], "turn-1");
+    }
+
+    /// A spawn that spells its posture as `permission_mode` reaches the same
+    /// frame a `yolo` bool reaches. Asserted THROUGH the frame rather than on
+    /// the resolver's bool alone: the bool is an implementation detail and the
+    /// wire field is what the app-server reads.
+    #[test]
+    fn permission_mode_yolo_reaches_a_full_access_frame() {
+        let yolo = resolve_thread_posture(None, Some("yolo")).expect("yolo maps");
+        let frame: Value = serde_json::from_str(&thread_start_request_with_options(
+            1,
+            std::path::Path::new("/tmp/w"),
+            None,
+            yolo,
+            "never",
+            None,
+        ))
+        .unwrap();
+        assert_eq!(frame["params"]["sandbox"], "danger-full-access");
+
+        // The explicit pair form resolves off its sandbox half, not its name.
+        let paired =
+            resolve_thread_posture(None, Some("danger-full-access:never")).expect("pair maps");
+        let frame: Value = serde_json::from_str(&thread_start_request_with_options(
+            1,
+            std::path::Path::new("/tmp/w"),
+            None,
+            paired,
+            "never",
+            None,
+        ))
+        .unwrap();
+        assert_eq!(frame["params"]["sandbox"], "danger-full-access");
+    }
+
+    /// The bounded spellings stay bounded, and an absent axis is byte-identical
+    /// to reading the bare bool - the shape every spawn takes today.
+    #[test]
+    fn resolve_thread_posture_keeps_the_bounded_spellings_bounded() {
+        assert_eq!(resolve_thread_posture(None, None), Ok(false));
+        assert_eq!(resolve_thread_posture(Some(true), None), Ok(true));
+        assert_eq!(resolve_thread_posture(Some(false), None), Ok(false));
+        // An empty value is UNSET, not a mode: the bool still decides.
+        assert_eq!(resolve_thread_posture(Some(true), Some("")), Ok(true));
+        assert_eq!(resolve_thread_posture(None, Some("full-auto")), Ok(false));
+        assert_eq!(
+            resolve_thread_posture(None, Some("workspace-write:on-request")),
+            Ok(false)
+        );
+        assert_eq!(
+            resolve_thread_posture(None, Some("read-only:untrusted")),
+            Ok(false)
+        );
+    }
+
+    /// Fail closed, and say which value: a permission axis the lane cannot
+    /// resolve must never fall through to bounded. Bounded is a plausible
+    /// answer, which is what makes the silent version of this so hard to see.
+    #[test]
+    fn resolve_thread_posture_refuses_rather_than_degrading() {
+        for mode in ["accept-edits", "bypassPermissions", "danger-full-access", ":never"] {
+            let err = resolve_thread_posture(None, Some(mode))
+                .expect_err("an unmappable mode must refuse");
+            assert!(
+                err.contains(mode),
+                "refusal must name the value it could not map; got: {err}"
+            );
+        }
+        // An unknown sandbox half is refused even though the pair form parses.
+        let err = resolve_thread_posture(None, Some("full-access:never"))
+            .expect_err("an unknown sandbox must refuse");
+        assert!(err.contains("full-access"), "got: {err}");
+        // One knob at a time, the rule the CLIs already enforce.
+        let err = resolve_thread_posture(Some(true), Some("full-auto"))
+            .expect_err("two postures at once must refuse");
+        assert!(
+            err.contains("mutually exclusive"),
+            "refusal must name the conflict; got: {err}"
+        );
     }
 
     /// AC11: the resume request carries the recorded posture, so a daemon
