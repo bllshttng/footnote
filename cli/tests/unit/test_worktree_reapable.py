@@ -12,12 +12,13 @@ one class of dirt that cannot cause data loss.
 The tests drive real temp git repos, not mocked porcelain strings, because the
 classifier's job is to be right about what git actually prints.
 """
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from fno.worktree_reapable import branch_merged, classify, reapable
+from fno.worktree_reapable import _is_setup_link, branch_merged, classify, reapable
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -384,3 +385,29 @@ def test_classify_without_a_discount_answers_exactly_as_before() -> None:
     assert v.reapable is False
     assert v.reason == "untracked"
     assert v.discounted == ()
+
+
+# -- Parity: the discount must track what setup-worktree.sh actually links ---
+
+
+def test_every_path_setup_links_is_discounted(tmp_path: Path) -> None:
+    """Read the script's own link calls; each must pass the predicate.
+
+    Without this, adding `link_dir ".cursor"` to setup-worktree.sh silently
+    puts every fresh worktree back in the kept-forever bucket, and no test
+    fails. The script is the authority; this asserts the classifier follows.
+    """
+    script = Path(__file__).resolve().parents[3] / "scripts" / "setup" / "setup-worktree.sh"
+    calls = re.findall(r'^\s*link_(?:dir|file|artifact)\s+"([^"$]+)"', script.read_text(), re.M)
+    assert len(calls) >= 10, f"parser found only {len(calls)} link calls; the script changed shape"
+
+    canonical = tmp_path / "canonical"
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    for rel in calls:
+        target = canonical / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x")
+        link = worktree / rel.replace("/", "_")
+        link.symlink_to(target)
+        assert _is_setup_link(link, canonical), f"setup links {rel}, the classifier does not know it"
