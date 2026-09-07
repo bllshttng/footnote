@@ -283,7 +283,7 @@ One read-only verb reporting the store's real condition, exiting non-zero when a
 - a tainted slot
 - a shared-slot account with no proven identity bound (why its usage reads `unknown`)
 - a stamp the live slot credential contradicts (an out-of-band `/login`)
-- `account_identity_unknown`: who the live slot serves could not be proven, so the slot is neither healthy nor a successful switch
+- `account_identity_unknown`: the live slot's account is unproven, so the slot is neither healthy nor a successful switch
 
 `register` refuses a duplicate credential up front, but that guard is register-time only.
 `doctor` is the surface that reports stores predating it, and the verb that confirms a `--config-dir` conversion took.
@@ -367,36 +367,21 @@ And the active shared-slot occupant correctly keeps `config_dir = None`, because
 
 ### The effective-account binding
 
-One question has four readers: which account will this claude launch actually bill?
-`resolve_account_overlay` used to read the active stamp, `dispatch_env` used to return a config directory, the usage probe ranked credential sources, and `doctor` compared a stamp against a live principal.
-A path says where a credential is meant to be. A stamp says who put it there. Neither says who the credential presents as.
-So the four could disagree, and each one still printed a receipt naming an account.
+One question had four readers: which account will this claude launch bill? `resolve_account_overlay` read the active stamp. `dispatch_env` returned a config directory. The usage probe ranked credential sources. `doctor` compared a stamp against a live principal. A path says where a credential is meant to be. A stamp says who put it there. Neither says who the credential presents as. So the four disagreed, and each one still printed a receipt naming an account.
 
-`fno.adapters.providers.binding.resolve_account_binding` is now the single answer, and the four consume it.
-It joins evidence that already existed: the OAuth profile principal, the credential-digest cache, and the per-record principal bound at `register`.
-It proves nothing new. It attaches that proof to the credential root the launch will read.
+`fno.adapters.providers.binding.resolve_account_binding` is the single answer now, and the four consume it. It joins evidence that already existed: the OAuth profile principal, the credential-digest cache, and the per-record principal bound at `register`. It proves nothing new. It attaches that proof to the credential root the launch will read.
 
-The verdict is `matched`, `mismatch`, `ambiguous`, or `unknown`, and only one of them refuses.
-A `mismatch` is a positive observation, so both launch env paths refuse with `account_identity_mismatch` before spawning anything.
-An `unknown` never refuses. An unreachable profile endpoint must not ground the fleet, and an unpinned manual login keeps its permissive posture.
-What `unknown` forbids is a receipt naming an account as served: `doctor` and `fno config accounts usage` print `account_identity_unknown` with its cause instead.
+The verdict is `matched`, `mismatch`, `ambiguous` or `unknown`. Only one of them refuses. A `mismatch` is a positive observation, so both launch env paths refuse with `account_identity_mismatch` before they spawn anything. An `unknown` never refuses. An unreachable profile endpoint must not ground the fleet, and an unpinned manual login keeps its permissive posture. What `unknown` forbids is a receipt naming an account as served. `doctor` and `fno config accounts usage` print `account_identity_unknown` with its cause instead.
 
-A reading is bound to the credential generation that produced it.
-Identity is proven before the usage request, which stops another account's numbers being fetched at all.
-A sign-in landing after the request is a separate window, and a reading from it is discarded with `identity_changed`.
-The marker matters as much as the discard: a missing snapshot alone reads exactly like a probe that never ran.
+A reading is bound to the credential generation that produced it. Identity is proven before the usage request, which stops another account's numbers being fetched at all. A sign-in that lands after the request is a separate window, and a reading from it is discarded with `identity_changed`. The marker matters as much as the discard: a missing snapshot alone reads exactly like a probe that never ran.
 
 ### Switching claude accounts is manual, by design
 
-Two claude accounts on one machine are two separate session stores, and that separation is the point.
-The operator signs out of canonical `claude` and signs back in as the other account. It takes about a minute, and live sessions need remote control re-enabled afterwards.
-A second account may instead keep its own credential directory (`--config-dir ~/.claude-alt`), including one whose transcript folders are symlinks back into canonical.
-Sharing transcripts never merges credential identity: the binding reads the Keychain item scoped to that directory and that directory's own `.credentials.json`, and neither is a transcript.
+Two claude accounts on one machine are two separate session stores, and that separation is the point. The operator signs out of canonical `claude` and signs back in as the other account. It takes about a minute, and live sessions need remote control re-enabled afterwards.
 
-footnote never automates this switch.
-It does not log in, log out, restore a token, rewrite an account record, or touch remote control.
-What it does is read the account that is signed in right now, name it, and say `manual switch` when that account runs low.
-Automatic rotation stays where accounts are genuinely independent access paths: api_key records, codex, and combos.
+A second account can instead keep its own credential directory (`--config-dir ~/.claude-alt`). Its transcript folders are often symlinks back into canonical. Sharing transcripts never merges credential identity. The binding reads the Keychain item scoped to that directory, plus that directory's own `.credentials.json`. Neither source is a transcript.
+
+footnote never automates this switch. It does not log in, log out, restore a token, rewrite an account record, or touch remote control. It reads the account that is signed in right now and names it. When that account runs low, it prints `manual switch` and the operator decides. Automatic rotation stays where accounts are genuinely independent access paths: api_key records, codex, and combos.
 
 The commands that read it:
 
@@ -709,9 +694,7 @@ This is Spec 1 of 4. Specs 2-4 extend the substrate with automation:
   active provider.
 - **Error detection:** the substrate does not monitor for 429s, auth failures, or
   quota exhaustion. Detection lives in Spec 2.
-- **Automatic claude account switching:** never, in any spec. Two claude accounts
-  are two session stores and the swap is a deliberate manual act. footnote reads
-  the signed-in identity and names the manual switch when the account runs low.
+- **Automatic claude account switching:** never, in any spec. Two claude accounts are two session stores, and the swap is a deliberate manual act. footnote reads the signed-in identity. When the account runs low, it names the manual switch.
 - **Mid-session swap:** `dispatch_env()` reads from disk at call time; swapping the
   active provider mid-session (between phases) has no effect on already-dispatched
   processes.
