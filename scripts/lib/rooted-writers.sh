@@ -16,10 +16,12 @@
 # The predicate is: rooted HERE (cwd under the checkout, or argv carrying it,
 # via worktree-lifecycle.sh's _wt_pids), not MINE (ancestry walk drops the
 # caller's ancestors - the harness that spawned the hook - and its
-# descendants), and claimed by a live registry row that owns a pid
-# (cli/src/fno/agents/registry.py writes pid only when the writer owns the
-# process, which is the subprocess-dispatch lane that edits canonical before
-# moving into a worktree).
+# descendants), and claimed by a registry row in an ACTIVE status (anything
+# but exited/orphaned/failed/permanent_dead - a worker mid-turn projects
+# "busy", not always "live") that owns a pid (cli/src/fno/agents/registry.py
+# writes pid only when the writer owns the process, which is the
+# subprocess-dispatch lane that edits canonical before moving into a
+# worktree).
 #
 # ponytail: a foreign writer with NO pid-bearing registry row is invisible
 # here - today that is the operator's shell and every pane/thread worker
@@ -75,7 +77,7 @@ foreign_rooted_writers() {
             if (desc) next
             print
         }' <(printf '%s\n' "$ps_snap"; printf '%s\n' '__FNO_PS_DONE__') <(printf '%s\n' "$rooted"))"
-    [[ "$survivors" == "__PS_SNAPSHOT_INCOMPLETE__" ]] && return 2
+    [[ "$survivors" == *__PS_SNAPSHOT_INCOMPLETE__* ]] && return 2
     [[ -n "$survivors" ]] || return 0
 
     # Registry join. A MISSING registry is an empty one: no agent has ever
@@ -87,7 +89,8 @@ foreign_rooted_writers() {
     [[ -f "$reg" ]] || return 0
     jq -r --arg sid "$my_sid" --arg pids "$survivors" '
         .agents[]?
-        | select((.status // "") == "live")
+        | select((.status // "live") != "exited" and (.status // "live") != "orphaned"
+                 and (.status // "live") != "failed" and (.status // "live") != "permanent_dead")
         | select(.pid != null)
         | select(.harness_session_id != $sid)
         | (.pid | tostring) as $p

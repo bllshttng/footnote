@@ -383,9 +383,11 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo "f$i" > "$FLUSH_REPO/foreign-dirty$
 cd "$FLUSH_REPO"
 sleep 300 &                                            # foreign writer: cwd = FLUSH_REPO
 FPID=$!
+# status "busy" is deliberate: a dispatched worker mid-turn projects an active
+# status, not always "live", and the guard must see it anyway (review round 1).
 jq -n --argjson pid "$FPID" '{schema_version: 13, agents: [{
   name:"t-foreign-probe", harness:"codex", cwd:"/tmp", log_path:"/tmp/fp",
-  status:"live", short_id:"fp", harness_session_id:"foreign-probe-sid",
+  status:"busy", short_id:"fp", harness_session_id:"foreign-probe-sid",
   pid:$pid, crown_level:null, crown_scope:null, crown_grantor:null }]}' > "$SBX/.fno/agents/registry.json"
 write_transcript "$SBX/low.jsonl" 300000
 run_hook "$(payload "$SBX/low.jsonl")"                 # stop 1: static=1
