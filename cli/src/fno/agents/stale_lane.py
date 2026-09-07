@@ -91,10 +91,8 @@ def reconcile_channel(
     if existing:
         for q in _open_questions(root, marker):
             if q.id != existing:
-                _close_question(
-                    q.id, f"{subject} set changed; superseded by {existing}",
-                    root, lane=subject,
-                )
+                _close_question(q.id, f"{subject} set changed; superseded by {existing}",
+                                root, lane=subject)
         return ("duplicate", existing)
 
     import secrets
@@ -117,10 +115,8 @@ def reconcile_channel(
     )
     for q in _open_questions(root, marker):
         if q.id != qid:
-            _close_question(
-                q.id, f"{subject} set changed; superseded by {qid}", root,
-                lane=subject,
-            )
+            _close_question(q.id, f"{subject} set changed; superseded by {qid}",
+                            root, lane=subject)
     return ("asked", qid)
 
 

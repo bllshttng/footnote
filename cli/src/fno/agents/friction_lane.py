@@ -29,13 +29,12 @@ def reconcile_friction(pairs, *, root: Path, session_id: "str | None",
         question=lambda key: (
             f"[{FRICTION_MARKER}:{key}] The fleet watchdog holds "
             f"{len(pairs)} contention/polling row(s) no lane will act on. "
-            "Each needs a human to separate the sessions or stop the "
-            "polling. Rows: " + "; ".join(shown)
+            "Each needs a human to separate the sessions or stop it. "
+            "Rows: " + "; ".join(shown)
         ),
         ask=lambda _key: (
-            f"triage {len(pairs)} friction row(s): "
-            "fno agents watchdog --only contended; fno agents watchdog "
-            "--only polling_settled"
+            f"triage {len(pairs)} friction row(s): fno agents watchdog "
+            "--only contended; fno agents watchdog --only polling_settled"
         ),
     )
 
