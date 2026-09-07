@@ -1720,15 +1720,16 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         ("codex", "bg") => None,
 
         // The three arms above stay NAMED rather than lane-routed, because
-        // they are three different ownership models and only two of them are
-        // what the contract says they are: claude's thread is hosted by the
-        // detached client itself, codex's by its own app-server, and
-        // opencode's by a serve-hosted HTTP session. opencode is the
-        // deliberate exception - its capability row declares
-        // `interactive_attach` unsupported, so the derived lane reads
-        // `keeper`, while its serve lane is built and working. Routing this
-        // match on the derived lane would send a working path to a refusal;
-        // the mismatch belongs to the capability row, not here.
+        // they are three different ownership models: claude's thread is
+        // hosted by the detached client itself, codex's by its own
+        // app-server, and opencode's by a serve-hosted HTTP session -
+        // `thread_lane` classifies all three `attach` (each answers "the
+        // harness owns the live session; a client re-attaches"), but that one
+        // label can't tell a client-side re-attach apart from a daemon-owned
+        // serve process, and each needs its own dispatch call. (Before x-df08,
+        // opencode's row read `keeper` here - a stale answer this match arm
+        // had to route around by name; the row now agrees with the dispatch
+        // below.)
         //
         // The REFUSAL is derived, because a provider name list goes stale the
         // moment a lane is built and then misdirects the reader it was meant
@@ -1767,9 +1768,23 @@ fn bg_substrate_refusal(harness: &str) -> String {
         py_repr(harness)
     );
     let tail = "use --substrate headless for a one-shot";
-    let lane = fno_agents::harness_capabilities::HarnessContract::packaged()
-        .ok()
-        .and_then(|contract| contract.thread_lane(harness).ok());
+    let contract = fno_agents::harness_capabilities::HarnessContract::packaged().ok();
+    // A refused command_surface (a deprecated harness, e.g. gemini) has no
+    // dispatch lane at all - check this BEFORE thread_lane, which would
+    // otherwise describe a retired harness as future lane work (PR 1355
+    // review, P2). Mirrors harness_map._refused_reason's wording so both
+    // runtimes name the same gap the same way.
+    if let Some(caps) = contract.as_ref().and_then(|c| c.capabilities(harness).ok()) {
+        if caps.command_surface == "refused" {
+            return format!(
+                "harness {} has no maintained footnote dispatch lane and is deprecated; \
+                 route this work to its successor 'agy' (or a claude/codex/opencode harness) \
+                 - no prose build brief is generated",
+                py_repr(harness)
+            );
+        }
+    }
+    let lane = contract.and_then(|contract| contract.thread_lane(harness).ok());
     match lane {
         // No resume form at all, so there is no lane for fno to build.
         Some("none") => {
