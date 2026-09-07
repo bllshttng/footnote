@@ -162,14 +162,12 @@ def evals_health_summary(
 ) -> Optional[dict[str, Any]]:
     """One-line evals health for `fno backlog triage health` and `fno doctor`, or None.
 
-    Returns None when no history exists or it holds no rows, so the triage-health
-    consumer shows an evals line ONLY when there is data (the consumption armor:
-    the report has a real consumer from day one). Never raises.
+    Returns None when no history exists or it holds no rows (the consumption
+    armor: the report has a real consumer from day one). Never raises.
 
     The age fields are the demand side (x-ab72): the harness went 40 days
-    unridden while a stale 100% rendered as healthy, because both consumers
-    displayed history and never demanded it. ``stale`` is True when the newest
-    regression-tier run is older than *stale_days* (resolved from
+    unridden while a stale 100% rendered as healthy. ``stale`` is True when
+    the newest regression-tier run is older than *stale_days* (resolved from
     ``config.evals.stale_days``, default 7). A history with rows but no
     regression run reads ``never_ran``: due, not aged. A regression row
     without a readable ts degrades to ``age_days=None`` and never asserts
@@ -191,20 +189,20 @@ def evals_health_summary(
             stale_days = 7
     if now is None:
         now = datetime.now(timezone.utc)
-    newest_dt: Optional[datetime] = None
-    newest_ts: Optional[str] = None
-    for r in rows:
-        if r.get("tier") != "regression":
-            continue
-        dt = _parse_ts(r.get("ts"))
-        if dt is not None and (newest_dt is None or dt > newest_dt):
-            newest_dt = dt
-            ts = r.get("ts")
-            newest_ts = ts if isinstance(ts, str) else None
+    reg_ages = [
+        (dt, str(r["ts"]))
+        for r in rows
+        if r.get("tier") == "regression"
+        for dt in [_parse_ts(r.get("ts"))]
+        if dt is not None
+    ]
+    newest_dt, newest_ts = max(reg_ages, default=(None, None), key=lambda p: p[0])
     never_ran = reg is None
-    age_days: Optional[float] = None
-    if newest_dt is not None:
-        age_days = round((now - newest_dt).total_seconds() / 86400, 3)
+    age_days = (
+        round((now - newest_dt).total_seconds() / 86400, 3)
+        if newest_dt is not None
+        else None
+    )
     stale = bool(never_ran is False and age_days is not None and age_days > stale_days)
     return {
         "regression_pass_rate": reg["pass_rate"] if reg else None,

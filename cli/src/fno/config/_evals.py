@@ -1,7 +1,7 @@
 """Eval-suite worker + demand settings (the ``config.evals`` block).
 
-Lives beside :mod:`fno.config._watchdog`: the block is small but the module
-that used to host it is over the file budget and may only shrink.
+Its own module because ``config/__init__.py`` is over the shrink-only file
+budget, the same reason the watchdog block lives in ``_watchdog.py``.
 """
 
 from __future__ import annotations
@@ -14,17 +14,13 @@ _LOG = logging.getLogger(__name__)
 
 
 class EvalsBlock(BaseModel):
-    """Eval-suite worker settings (nested under 'config.evals').
+    """Eval-suite settings: the grading-worker gate plus the demand keys.
 
-    x-aaaf wave 2: `evals/runner.py`'s `run_task` spawns a headless grading
-    worker with no enable key at all. Default ``True`` matches its CURRENT
-    effective behavior (it always ran when invoked) - shipping this gate
-    changes nothing until an operator explicitly disables it.
-
-    x-ab72 adds the demand side: ``stale_days`` is the age at which the newest
-    regression-tier run reads STALE in `fno doctor` and `fno backlog triage
-    health`; ``schedule_days`` is how often the pr-watch tick runs the
-    regression tier (0 disables the scheduled run).
+    ``enabled`` gates the headless grading-worker spawn (x-aaaf wave 2) and
+    defaults True: the spawner ran unconditionally before the gate existed.
+    ``schedule_days`` is how often the regression tier runs on a schedule (0
+    disables); ``stale_days`` is the age at which the newest regression-tier
+    run reads STALE in `fno doctor` and `fno backlog triage health`.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -46,29 +42,21 @@ class EvalsBlock(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _sanitize_days(cls, v: object) -> object:
-        """Drop a non-integer or negative day value so the field default applies.
-
-        A malformed value must never break load_settings(); it degrades to the
-        modeled default for that key (with a WARNING), the block's existing
-        fail-safe posture.
-        """
+        """Drop a bad day value so the default applies; never break load."""
         if not isinstance(v, dict):
             return v
         out = dict(v)
         for key in ("schedule_days", "stale_days"):
+            raw = out.get(key)
             if key not in out:
                 continue
-            raw_val = out[key]
-            if isinstance(raw_val, bool):
-                ok = False
-            else:
+            ok = not isinstance(raw, bool)
+            if ok:
                 try:
-                    ok = int(raw_val) >= 0
+                    ok = int(raw) >= 0
                 except (TypeError, ValueError):
                     ok = False
             if not ok:
-                _LOG.warning(
-                    "config.evals.%s=%r invalid; using default", key, raw_val
-                )
+                _LOG.warning("config.evals.%s=%r invalid; using default", key, raw)
                 out.pop(key)
         return out
