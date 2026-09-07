@@ -69,7 +69,15 @@ class AccountBinding:
     @property
     def receipt(self) -> str:
         """A one-line receipt safe to print. Never names an unproven account."""
-        who = self.observed_label or self.observed_principal or "an unproven account"
+        # The label rides a fresh proof; a cached one carries the identity key
+        # only. The record name is what an operator recognizes, so it comes
+        # first among what is left - never a bare uuid pair when a name exists.
+        who = (
+            self.observed_label
+            or self.matched_record
+            or self.observed_principal
+            or "an unproven account"
+        )
         where = (
             str(self.credential_root)
             if self.credential_root
@@ -196,6 +204,11 @@ def resolve_account_binding(
         # is not what it bills, so its principal is not the question asked here.
         return _at(UNKNOWN, reason="api-key-route")
 
+    if bearer is not None:
+        # The bearer lane owns its own unbound case, in `managed`, so the
+        # short-circuit below must not run ahead of it.
+        return _bearer_binding(_at, harness, requested, cred_root, root, bearer, now, ttl)
+
     # An unbound record has no reference identity, so nothing can be compared to
     # it. Answering here keeps the launch path offline and free in the common
     # case, and `doctor` already reports the unbound record with its repair.
@@ -204,9 +217,6 @@ def resolve_account_binding(
         want = managed.identity_key(managed.record_principal(requested, root))
         if want is None:
             return _at(UNKNOWN, reason="unbound-principal")
-
-    if bearer is not None:
-        return _bearer_binding(_at, harness, requested, cred_root, root, bearer, now, ttl)
 
     try:
         blobs = credential_blobs(harness, cred_root)
