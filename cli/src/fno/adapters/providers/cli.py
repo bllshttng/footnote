@@ -241,9 +241,6 @@ def _fmt_resets_in(resets_at: float | None, now: float) -> str:
     return f"in {hours}h{rem:02d}m"
 
 
-#: What an operator does when a claude account runs low. Claude account
-#: switching is a deliberate manual act - the separate session stores are the
-#: point - so footnote names the action and never performs it.
 _MANUAL_SWITCH = (
     "manual switch: sign out of claude and sign back in as the other account "
     "(about a minute; live sessions need remote control re-enabled)"
@@ -253,10 +250,8 @@ _MANUAL_SWITCH = (
 def _identity_for(record, by_id: dict, now: float):
     """The effective-account verdict for one claude record, or None.
 
-    From the same binding the launch paths use, so the usage surface cannot name
-    an account a spawn would refuse. Called only for a record that HAS an
-    observation to attribute: resolving it for every configured record turned a
-    local display into one profile call per record.
+    Called only for a record that HAS an observation to attribute: resolving it
+    for every configured record costs one profile call per record.
     """
     from fno.adapters.providers.binding import resolve_account_binding
 
@@ -270,21 +265,10 @@ def _identity_for(record, by_id: dict, now: float):
         return None
 
 
-def _add_identity(entry: dict, got) -> None:
-    """Attach the identity verdict to a JSON usage row, when there is one."""
-    if got is not None:
-        entry["identity"] = {
-            "status": got.status,
-            "account": got.matched_record,
-            "reason": got.reason,
-            "observed_at": got.observed_at,
-        }
-
-
 def _identity_lines(record, got, worst_pct: float, threshold: float, now: float) -> list[str]:
     """The identity and manual-switch lines for one record's usage row.
 
-    An unproven identity is named rather than passed over: silence there reads
+    An unproven identity is named rather than passed over. Silence there reads
     as a proven account.
     """
     from fno.adapters.providers.binding import MATCHED
@@ -293,8 +277,7 @@ def _identity_lines(record, got, worst_pct: float, threshold: float, now: float)
         return []
     prefix = f"{record.id}  [{record.harness}]  "
     if got.status == MATCHED:
-        # matched_record is None when two records share the identity, which is
-        # still a match for the pinned one - naming it beats printing None.
+        # None when two records share the identity, still a match for the pin.
         served = got.matched_record or got.requested_record
         age = max(0, int((now - got.observed_at) // 60))
         lines = [f"{prefix}identity: {served} (observed {age}m ago)"]
@@ -355,8 +338,7 @@ def usage_providers(
                 else UsageRefresh(cached, None if cached.windows else "no-windows")
             )
         if not obs.known:
-            # No identity rides an unknown row: identity attributes an
-            # observation, and this row is the absence of one.
+            # No identity on an unknown row: identity attributes an observation.
             out[record.id] = {"state": "unknown", "reason": obs.reason or "unknown"}
             continue
         snap = obs.snapshot
@@ -378,8 +360,14 @@ def usage_providers(
         if obs.persisted is False:
             # Additive: the reading is good, only its cache write lost the race.
             entry["persisted"] = False
-        identities[record.id] = _identity_for(record, config.by_id, now)
-        _add_identity(entry, identities[record.id])
+        got = identities[record.id] = _identity_for(record, config.by_id, now)
+        if got is not None:
+            entry["identity"] = {
+                "status": got.status,
+                "account": got.matched_record,
+                "reason": got.reason,
+                "observed_at": got.observed_at,
+            }
         out[record.id] = entry
 
     if json_output:
@@ -1380,10 +1368,8 @@ def _doctor_findings() -> list[dict]:
 def _slot_identity_findings(harness_kind: str, by_id: dict) -> list[dict]:
     """Identity findings for one CLI's shared slot, from the shared binding.
 
-    The same read the launch paths and the usage probe make, so doctor cannot
-    report a healthy account that a spawn then refuses. Free until it can
-    answer: with no stamp, or no principal bound to the stamped record, there is
-    nothing to compare, and ``unbound-principal`` above already names that.
+    Free until it can answer. With no stamp, or no principal bound to the
+    stamped record, there is nothing to compare.
     """
     from fno.adapters.providers.binding import (
         AMBIGUOUS,
@@ -1416,9 +1402,7 @@ def _slot_identity_findings(harness_kind: str, by_id: dict) -> list[dict]:
             f"stamped, some reader gets the other; sign out and back in, then {repair}"
         ))
     if got.observed_principal is None:
-        # AC3-EDGE. This used to read as healthy: an unreadable slot cannot
-        # demonstrate drift, so the check that would have caught a wrong stamp
-        # returned nothing and doctor stayed quiet about it.
+        # An unreadable slot cannot demonstrate drift, so this used to be quiet.
         return _finding(UNKNOWN_RECEIPT, (
             f"who the live slot serves could not be proven ({got.reason}), so usage "
             f"and launch receipts stay unknown rather than naming '{stamped}'; this "

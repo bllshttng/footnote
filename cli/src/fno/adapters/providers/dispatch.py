@@ -145,11 +145,7 @@ def _env_for_api_key(
 def _refuse_identity_mismatch(
     record: ProviderRecord, root: Path, by_id: dict[str, ProviderRecord]
 ) -> None:
-    """The same refusal ``resolve_account_overlay`` makes, from the same binding.
-
-    Two launch env paths that disagree about who is billed are two receipts,
-    one of which is wrong.
-    """
+    """The same refusal ``resolve_account_overlay`` makes, from the same binding."""
     from fno.adapters.providers.binding import MISMATCH, resolve_account_binding
 
     got = resolve_account_binding(record, root=root, by_id=by_id)
@@ -166,8 +162,8 @@ def dispatch_env(
 
     Reads settings.yaml via load_providers(), looks up the record, and computes
     the env. For a claude record with a bound principal it also asks the binding
-    who the credential root serves, which can cost one profile call and writes
-    that proof to the digest-keyed cache. No account record is mutated.
+    who the credential root serves, which costs one profile call and a cache
+    write. No account record is mutated.
 
     Raises:
         ProviderNotFoundError: if provider_id not in config.records
@@ -207,8 +203,7 @@ def dispatch_env(
         # A managed account materializes into the shared default slot
         # (~/.claude for claude, ~/.codex for codex), so dispatch adds no
         # CLAUDE_CONFIG_DIR/HOME override - the CLI reads the slot directly.
-        # Which is exactly why the slot has to be asked who it serves: this arm
-        # has no path to be wrong about, and a wrong one bills silently.
+        # So the slot itself has to be asked who it serves.
         _refuse_identity_mismatch(record, root, by_id)
         return {}
 
