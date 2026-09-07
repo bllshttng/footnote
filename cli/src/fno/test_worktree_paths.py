@@ -7,9 +7,11 @@ from pathlib import Path
 import pytest
 
 from fno.worktree_paths import (
+    WorktreePolicyError,
     _validate_component,
     legacy_worktree_path,
     resolve_project_id,
+    resolve_worktree_policy,
     worktree_base,
     worktree_path,
 )
@@ -252,3 +254,117 @@ def test_legacy_worktree_path_returns_old_shape(tmp_path):
 def test_legacy_worktree_path_validates_name(tmp_path):
     with pytest.raises(ValueError):
         legacy_worktree_path("../escape", repo_root=tmp_path)
+
+
+# ----------------------------------------------------------------------
+# resolve_worktree_policy: one location answer (x-f96e task 1.2)
+# ----------------------------------------------------------------------
+#
+# The autouse fixture pins FNO_CONFIG to an empty file, so each test's
+# repo-local .fno/config.toml is the only config that can move the answer.
+
+
+def _policy_repo(path: Path, config_text: str = "") -> Path:
+    """A repo for policy resolution; config_text goes to FNO_CONFIG, the
+    sole candidate under the autouse fixture (a pinned FNO_CONFIG makes the
+    loader ignore repo-local config by design)."""
+    import os
+
+    repo = _make_repo(path)
+    (repo / ".fno").mkdir()
+    if config_text:
+        Path(os.environ["FNO_CONFIG"]).write_text(config_text, encoding="utf-8")
+    return repo
+
+
+def test_explicit_worktrees_base_alone_relocates(tmp_path):
+    """AC4-HP: the key degrades harness-native to external, no second key."""
+    base_dir = tmp_path / "wtbase"
+    repo = _policy_repo(
+        tmp_path / "relocated",
+        f'[paths]\nworktrees_base = "{base_dir}"\n',
+    )
+    pol = resolve_worktree_policy(repo, "claude")
+    assert pol.policy == "external"
+    assert pol.base == base_dir
+    assert pol.degraded is True
+    assert pol.requested_policy == "harness-native"
+
+
+def test_both_keys_unset_keeps_harness_native_claude_default(tmp_path):
+    """AC5-HP: today's default is unchanged."""
+    repo = _policy_repo(tmp_path / "defaulted")
+    pol = resolve_worktree_policy(repo, "claude")
+    assert pol.policy == "harness-native"
+    assert pol.degraded is False
+
+
+def test_never_policy_unchanged_by_an_explicit_base(tmp_path):
+    """AC6-EDGE: `never` is not a location and an explicit base cannot flip it."""
+    base_dir = tmp_path / "wtbase"
+    repo = _policy_repo(
+        tmp_path / "neverrepo",
+        f'[worktree]\npolicy = "never"\n[paths]\nworktrees_base = "{base_dir}"\n',
+    )
+    pol = resolve_worktree_policy(repo, "claude")
+    assert pol.policy == "never"
+
+
+def test_explicit_external_policy_uses_the_configured_base(tmp_path):
+    base_dir = tmp_path / "wtbase"
+    repo = _policy_repo(
+        tmp_path / "explicitext",
+        f'[worktree]\npolicy = "external"\n[paths]\nworktrees_base = "{base_dir}"\n',
+    )
+    pol = resolve_worktree_policy(repo, "claude")
+    assert pol.policy == "external"
+    assert pol.base == base_dir
+    assert pol.degraded is False
+
+
+def test_repo_config_base_relocates_too(tmp_path):
+    """Same key via the sole config file, exercising the merged-config read."""
+    base_dir = tmp_path / "repo-base"
+    repo = _policy_repo(
+        tmp_path / "repobase",
+        f'[paths]\nworktrees_base = "{base_dir}"\n',
+    )
+    pol = resolve_worktree_policy(repo, "claude")
+    assert pol.policy == "external"
+    assert pol.base == base_dir
+
+
+def test_deprecated_conductor_key_relocates_with_note(tmp_path):
+    repo = _policy_repo(
+        tmp_path / "conductor",
+        '[worktree]\nuse_conductor_canonical = true\n',
+    )
+    pol = resolve_worktree_policy(repo, "claude")
+    assert pol.policy == "external"
+    assert pol.base == (Path.home() / "conductor" / "workspaces").resolve()
+    assert "DEPRECATED" in pol.note
+
+
+def test_non_native_harness_degradation_keeps_fallback_base(tmp_path, monkeypatch):
+    """A codex harness still degrades to the state-dir fallback, NOT to an
+    explicitly configured base: that base is an external allocator choice
+    and must not make an unsupported session look allocator-owned."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    base_dir = tmp_path / "wtbase"
+    repo = _policy_repo(
+        tmp_path / "codexrepo",
+        f'[paths]\nworktrees_base = "{base_dir}"\n',
+    )
+    pol = resolve_worktree_policy(repo, "codex")
+    assert pol.policy == "external"
+    assert pol.base != base_dir
+    assert pol.base == (tmp_path / ".fno" / "worktrees").resolve()
+
+
+def test_out_of_enum_policy_still_refuses(tmp_path):
+    repo = _policy_repo(
+        tmp_path / "badpolicy",
+        '[worktree]\npolicy = "sideways"\n',
+    )
+    with pytest.raises(WorktreePolicyError):
+        resolve_worktree_policy(repo, "claude")

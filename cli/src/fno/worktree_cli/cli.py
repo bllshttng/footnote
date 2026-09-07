@@ -389,6 +389,8 @@ def _worktree_ensure(
         policy_receipt += (
             f" requested={pol.requested_policy} degraded=true"
         )
+    if pol.note:
+        policy_receipt += f"; {pol.note}"
     if pol.policy == "never":
         # A caller that explicitly demanded a distinct branch (e.g. the batch
         # lane's `--branch feature/batch-...`) cannot get one in place: launching
@@ -600,6 +602,8 @@ def policy(
     except Exception as exc:  # noqa: BLE001 - report any resolve error, incl. OSError
         typer.echo(f"worktree policy: {exc}", err=True)
         raise typer.Exit(1)
+    if pol.note:
+        typer.echo(pol.note, err=True)
     typer.echo(pol.policy)
     if pol.policy != "never":
         typer.echo(f"base={pol.base}")

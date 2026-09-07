@@ -46,10 +46,10 @@ Every code-payload dispatch routes through `fno agents workspace worktree ensure
 Precedence: per-project `work.workspaces.<slug>.projects[].worktree` > global `config.worktree.policy` > built-in `harness-native`.
 
 - **`never`** - launch in place on the canonical checkout (for projects whose tree IS the product, e.g. an Obsidian vault). ensure prints the repo root, exit 0; callers skip `setup-worktree.sh`; the location gate treats the protected branch as `ok`.
-- **`harness-native`** (default) - the harness's own location: claude lands at `<repo>/.claude/worktrees/<name>`, **always**, ignoring `worktrees_base`. Codex Desktop uses `/worktree` or **Hand off -> Worktree**. A harness with no native transition degrades to `~/.fno/worktrees` (no `worktrees_base` inheritance); ensure needs `--harness` and never guesses.
+- **`harness-native`** (default when neither key is set) - the harness's own location: claude lands at `<repo>/.claude/worktrees/<name>`. Codex Desktop uses `/worktree` or **Hand off -> Worktree**. A harness with no native transition degrades to `~/.fno/worktrees` (no `worktrees_base` inheritance); ensure needs `--harness` and never guesses. An explicitly set `paths.worktrees_base` degrades `harness-native` to `external` (x-f96e): the key alone relocates every creation path, so "set the base but forgot the policy" is no longer a silent no-op.
 - **`external`** - fno-managed at `<worktrees_base>/<repo>/<name>`.
 
-The per-project policy outranks `worktrees_base` (relocating the claude default also needs `policy = "external"`; "conductor" is a base value, not a policy value). A parse error or out-of-enum value REFUSES creation (fail closed): ensure exits non-zero with empty stdout, so the caller holds.
+The per-project policy outranks the global `worktree.policy` key ("conductor" is a base value, not a policy value). An explicitly set `worktrees_base` degrades a resolved `harness-native` to `external`, so the key alone relocates. A parse error or out-of-enum value REFUSES creation (fail closed): ensure exits non-zero with empty stdout, so the caller holds.
 
 Both creation paths honor `never`, the hook resolving it through `fno agents workspace worktree policy` (one resolver, no second precedence impl).
 
