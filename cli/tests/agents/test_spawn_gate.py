@@ -1016,9 +1016,9 @@ class TestRunGate:
     def test_every_registry_mint_site_stamps_spawned_by(self):
         """The parent-edge sibling of the provider stamp test: each mint site
         calls the ambient capture helper and wires the triple onto the row.
-        The shell gate (check-spawn-lineage-parity.sh) runs the same sweep in
-        CI; this pytest copy fails in the local suite a developer actually
-        runs."""
+        The Rust mint constructor (RegistryEntry::new) now makes the omission a
+        compile error; this sweep stays as the local-suite check that each
+        site routes through it and still captures the ambient edge."""
         root = Path(__file__).resolve().parents[3]
         rust_sites = {
             "claude create": (
@@ -1050,7 +1050,10 @@ class TestRunGate:
             assert start in text and end in text.split(start, 1)[1], label
             body = text.split(start, 1)[1].split(end, 1)[0]
             assert "crate::claims::ambient_parent_edge()" in body, label
-            assert "spawned_by_session: parent_session" in body, label
+            # The identity and the parent edge ride the required mint
+            # constructor; a site naming neither fails to compile.
+            assert "RegistryEntry::new(" in body, label
+            assert "Lineage {" in body or "Lineage::captured(" in body, label
 
         state_rust = (root / "crates/fno-agents/src/state.rs").read_text()
         for field in ("spawned_by_session", "spawned_by_harness", "spawned_by_cwd"):

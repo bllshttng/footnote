@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use crate::claude_ask::emit_event;
 use crate::paths::AgentsHome;
 use crate::provider::normalize_codex_command;
-use crate::state::{find_keyed_mut, load_registry, update_registry};
+use crate::state::{find_keyed_mut, load_registry, update_registry, Lineage, RegistryEntry};
 use crate::AgentStatus;
 
 // ===========================================================================
@@ -1251,7 +1251,6 @@ fn dispatch_create(
             .map(str::to_string),
         effort: reasoning_effort.map(str::to_string),
         harness: Some("codex".to_string()),
-        harness_session_id: Some(session_id.clone()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         // v25: the route axes this lane actually used. Codex's ambient auth
@@ -1267,9 +1266,6 @@ fn dispatch_create(
         // later reader has to guess at.
         origin: Some("spawn".to_string()),
         spawn_trigger: None,
-        spawned_by_session: parent_session,
-        spawned_by_harness: parent_harness,
-        spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
         claude_session_uuid: None,
         messaging_socket_path: None,
@@ -1309,7 +1305,14 @@ fn dispatch_create(
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
-        ..Default::default()
+        ..RegistryEntry::new(
+            Some(session_id.clone()),
+            Lineage {
+                session: parent_session,
+                harness: parent_harness,
+                cwd: parent_cwd,
+            },
+        )
     };
 
     match update_registry(registry_path, |reg| {
