@@ -2459,3 +2459,38 @@ fn pty_state_collapses_inconsistent_legacy_shape() {
 // shrink-only line, and test motion is the sanctioned shrink.
 #[path = "x4c87_row_counts.rs"]
 mod row_count_tests;
+
+#[test]
+fn backfill_fno_id_adopts_the_session_id() {
+    // AC4-HP: a thread row that learned its session id also has a thread ref.
+    let row = r#"{"name":"bp-b7c1-stuck","harness":"claude","cwd":"/p","log_path":null,
+            "harness_session_id":"5bab90bc-1391-4b94-8e5a-bfb663268506",
+            "substrate":"thread","created_at":"2026-09-06T00:00:00Z","status":"live"}"#;
+    let mut e: RegistryEntry = serde_json::from_str(row).unwrap();
+    e.backfill_fno_id();
+    assert_eq!(
+        e.fno_id.as_deref(),
+        Some("5bab90bc-1391-4b94-8e5a-bfb663268506")
+    );
+}
+
+#[test]
+fn backfill_fno_id_never_overwrites_a_thread_ref() {
+    // AC5-EDGE: a branch keeps its own ref and a succession keeps its stable one.
+    let row = r#"{"name":"branch-row","harness":"claude","cwd":"/p","log_path":null,
+            "harness_session_id":"sess-b","fno_id":"thread-a",
+            "substrate":"thread","created_at":"2026-09-06T00:00:00Z","status":"live"}"#;
+    let mut e: RegistryEntry = serde_json::from_str(row).unwrap();
+    e.backfill_fno_id();
+    assert_eq!(e.fno_id.as_deref(), Some("thread-a"));
+}
+
+#[test]
+fn backfill_fno_id_needs_a_session_id() {
+    // AC5-EDGE: no session id to adopt leaves the thread ref absent.
+    let row = r#"{"name":"spawning-row","harness":"claude","cwd":"/p","log_path":null,
+            "substrate":"thread","created_at":"2026-09-06T00:00:00Z","status":"live"}"#;
+    let mut e: RegistryEntry = serde_json::from_str(row).unwrap();
+    e.backfill_fno_id();
+    assert_eq!(e.fno_id, None);
+}

@@ -84,6 +84,12 @@ pub struct ReentryPlan {
     pub mechanism: String,
     pub name: String,
     pub fno_id: Option<String>,
+    /// The backlog node this row works, straight off the registry entry's own
+    /// `node` field -- a different axis from `fno_id` (the thread/session
+    /// identity). `mesh_identity_assignments` folds this into `FNO_NODE` on
+    /// relaunch, so a caller that reaches for `fno_id` there stamps a session
+    /// id where a graph node id belongs.
+    pub node: Option<String>,
     /// The selected harness session id (primary, or the related id when the
     /// caller selected it).
     pub session_id: String,
@@ -453,6 +459,7 @@ pub fn resolve_reentry_with(
         mechanism,
         name: entry.name.clone(),
         fno_id: entry.fno_id.clone(),
+        node: entry.node.clone(),
         session_id,
         short_id,
         launch_account: launch_account.unwrap_or_else(|| "unknown".to_string()),
@@ -1196,5 +1203,31 @@ mod tests {
         .unwrap();
         assert_eq!(plan.short_id, "aaaaaaaa");
         assert_eq!(plan.session_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    }
+
+    #[test]
+    fn reentry_plan_carries_the_backlog_node_not_the_thread_ref() {
+        // The row a resume relaunch stamps FNO_NODE from must be the backlog
+        // node id (entry.node), never fno_id (the thread/session identity) --
+        // the two are unrelated axes and mesh_identity_assignments folds
+        // whatever this plan carries into FNO_NODE.
+        let mut e = row("thread-worker");
+        e.node = Some("x-6910".into());
+        e.fno_id = Some("5bab90bc-1391-4b94-8e5a-bfb663268506".into());
+        e.harness_session_id = Some("5bab90bc-1391-4b94-8e5a-bfb663268506".into());
+        e.short_id = "5bab90bc".into();
+
+        let (_tmp, home) = staged_home(&["5bab90bc"]);
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "thread-worker",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.node.as_deref(), Some("x-6910"));
     }
 }
