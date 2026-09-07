@@ -16,7 +16,8 @@ from fno.agents.spawn_defaults import inject_spawn_defaults, resolve_lane_vendor
 
 class _Defaults:
     def __init__(self, provider="", model="", effort="", substrate="", permission_mode="",
-                 route="", account="", pane_group="", lanes=None, on_exhausted=""):
+                 route="", account="", pane_group="", lanes=None, on_exhausted="",
+                 by_difficulty=None, on_low="prefer_healthy", on_unknown="allow"):
         self.provider = provider
         self.model = model
         self.effort = effort
@@ -30,6 +31,9 @@ class _Defaults:
             for lane in (lanes or [])
         ]
         self.on_exhausted = on_exhausted
+        self.by_difficulty = by_difficulty or {}
+        self.on_low = on_low
+        self.on_unknown = on_unknown
 
 
 class _Settings:
@@ -2262,3 +2266,199 @@ def test_a_selected_lane_does_not_inherit_a_route_it_never_named(monkeypatch):
     )
     assert out[out.index("--harness") + 1] == "codex"
     assert "--route" not in out
+_LOW_NODE = {"id": "x-1", "difficulty": "low", "priority": "p2"}
+
+
+def test_missing_difficulty_takes_the_high_overlay(monkeypatch):
+    """AC6-DIFFICULTY: no node, no difficulty: the high overlay answers and
+    the receipt says the difficulty rounded up."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS,
+            {"target": {"lanes": ["flash-x"],
+                        "by_difficulty": {"high": {"lanes": ["sonnet-x"]}}}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "claude-sonnet-5"
+    assert "difficulty missing; rounds up to high" in err.getvalue()
+
+
+def test_low_difficulty_overlay_replaces_lanes(monkeypatch):
+    """AC6-DIFFICULTY: a low node rides the low overlay's lanes."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node", lambda toks, env=None: dict(_LOW_NODE)
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "--node", "x-1", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS,
+            {"target": {"lanes": ["sonnet-x"],
+                        "by_difficulty": {"low": {"lanes": ["flash-x"]}}}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "glm-5.3-flash"
+
+
+def test_invalid_difficulty_rounds_up_to_high(monkeypatch):
+    """AC6-DIFFICULTY: an out-of-vocabulary difficulty is missing, not low."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda toks, env=None: {"id": "x-1", "difficulty": "urgent"},
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "--node", "x-1", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS,
+            {"target": {"lanes": ["flash-x"],
+                        "by_difficulty": {"high": {"lanes": ["sonnet-x"]}}}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "claude-sonnet-5"
+    assert "difficulty 'urgent' is not low|medium|high" in err.getvalue()
+
+
+def test_overlay_omitted_fields_inherit_the_base_slot(monkeypatch):
+    """AC6-DIFFICULTY: an overlay that only names a policy keeps the base
+    lanes; the policy is live on them."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": {"state": "ok", "accounts": {"zai-main": "low"}}},
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node", lambda toks, env=None: dict(_LOW_NODE)
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "--node", "x-1", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS,
+            {"target": {"lanes": ["flash-x", "sonnet-x"],
+                        "by_difficulty": {"low": {"on_low": "skip"}}}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "claude-sonnet-5"
+    assert "capacity=low (on_low=skip)" in err.getvalue()
+
+
+_LOW_FLASH_HEALTHY_CODEX = [
+    *_SLOT_ROWS[:1],
+    {"name": "codex-y", "harness": "codex", "model": "gpt-5.6-luna"},
+]
+
+
+def test_on_low_prefer_healthy_demotes_low_behind_healthy(monkeypatch):
+    """AC6-LOW: the default policy demotes a low lane behind a healthy one."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {
+            "claude": {"state": "low", "accounts": {"zai-main": "low"}},
+            "codex": {"state": "ok"},
+        },
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _LOW_FLASH_HEALTHY_CODEX,
+            {"target": {"lanes": ["flash-x", "codex-y"]}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert "slot demote agents.profiles.target.lanes[0] flash-x capacity=low" in err.getvalue()
+
+
+def test_on_low_prefer_healthy_takes_the_demoted_lane_when_all_low(monkeypatch):
+    """AC6-LOW: no healthy lane anywhere: the first low lane still serves."""
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {
+            "claude": {"state": "low", "accounts": {"zai-main": "low"}},
+            "codex": {"state": "low"},
+        },
+    )
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _LOW_FLASH_HEALTHY_CODEX,
+            {"target": {"lanes": ["flash-x", "codex-y"]}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--harness") + 1] == "claude"
+    assert "slot demote agents.profiles.target.lanes[0] flash-x capacity=low" in err.getvalue()
+    assert "applied slot=agents.profiles.target.lanes[0] flash-x (routing)" in err.getvalue()
+
+
+def test_on_unknown_skip_excludes_unknown_lanes_and_refuses(monkeypatch):
+    """AC6-UNKNOWN: with skip, an unproven observation never serves."""
+    monkeypatch.setenv("FNO_SPAWN_GATE", "1")
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            settings=_slot_settings(
+                _SLOT_ROWS,
+                {"target": {"lanes": ["flash-x", "sonnet-x"], "on_unknown": "skip"}},
+            ),
+            stderr=err,
+            env={},
+        )
+    assert exc.value.code == 2
+    assert "capacity=unknown (on_unknown=skip)" in err.getvalue()
+
+
+def test_overlay_with_explicit_empty_lanes_refuses_as_malformed(monkeypatch):
+    """AC6-DIFFICULTY: an explicitly empty overlay lane list is malformed, not
+    an invitation to open the global inventory."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            settings=_slot_settings(
+                _SLOT_ROWS,
+                {"target": {"lanes": ["flash-x"],
+                            "by_difficulty": {"high": {"lanes": []}}}},
+            ),
+            stderr=err,
+            env={},
+        )
+    assert exc.value.code == 2
+    assert "by_difficulty.high.lanes must be a non-empty list" in err.getvalue()
+
+
+def test_overlay_only_profile_still_resolves(monkeypatch):
+    """AC6-DIFFICULTY: a profile with no base lanes but a by_difficulty map is
+    a configured slot, not a grid fallthrough."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        settings=_slot_settings(
+            _SLOT_ROWS,
+            {"target": {"by_difficulty": {"high": {"lanes": ["sonnet-x"]}}}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--model") + 1] == "claude-sonnet-5"

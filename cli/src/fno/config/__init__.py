@@ -2039,6 +2039,16 @@ class SpawnProfileBlock(SpawnDefaultsBlock):
     # typed exit-78 capacity refusal. An out-of-enum value refuses at the
     # spawn seam by name rather than coercing to a terminal nobody named.
     on_exhausted: str = "refuse"
+    # Difficulty overlays keyed low|medium|high (operator amendment): each may
+    # replace lanes and the policy fields; omitted fields inherit this block.
+    # Raw like lanes: the slot resolver validates and refuses by name.
+    by_difficulty: Any = Field(default_factory=dict)
+    # on_low governs a low-capacity observation (prefer_healthy demotes the
+    # low lane behind healthy ones); on_unknown governs stale, absent or
+    # unproven observations. Defaults keep a single-lane install behaving as
+    # before: low still serves, unknown permits.
+    on_low: str = "prefer_healthy"
+    on_unknown: str = "allow"
 
 
 class RoutingModelBlock(BaseModel):

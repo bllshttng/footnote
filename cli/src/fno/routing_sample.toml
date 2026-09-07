@@ -33,6 +33,13 @@ lanes = ["flash-zai", "luna-codex", "sonnet-thread"]
 # | degrade (the profile scalars and agents.defaults answer) | queue (a
 # typed capacity refusal, exit 78, which a dispatcher reads as capacity).
 on_exhausted = "queue"
+# Difficulty overlays are optional. Each key (low|medium|high) may replace
+# lanes and any policy field; omitted fields inherit this block. The
+# effective difficulty comes from the dispatched node and rounds up to high.
+# [agents.profiles.target.by_difficulty.high]
+# lanes = ["astra-codex", "opus-canonical"]
+# on_low = "skip"        # allow | prefer_healthy (default) | skip
+# on_unknown = "skip"    # allow (default) | skip
 
 [[routing.models]]
 # Lane 1: the cheap subscription lane. route names the vendor the quota is

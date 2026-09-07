@@ -507,8 +507,24 @@ _SLOT_LANE_FIELDS = (
 )
 _LANE_PASSTHROUGH_FIELDS = ("substrate", "permission_mode", "pane_group")
 _ON_EXHAUSTED = ("queue", "degrade", "refuse")
+_ON_LOW = ("allow", "prefer_healthy", "skip")
+_ON_UNKNOWN = ("allow", "skip")
+_MISSING = object()
 #: The verbs fno dispatches, and therefore the slots an operator fills.
 SLOT_VERBS = ("think", "blueprint", "target", "review", "crown")
+
+
+def _effective_difficulty(node: Optional[Mapping]) -> tuple[str, str]:
+    """The overlay key for this dispatch's difficulty; missing or odd rounds
+    up to high with the reason, and ``max`` rides the high overlay too
+    (``xhigh`` is an effort value, never a node band)."""
+    raw = node.get("difficulty") if isinstance(node, Mapping) else None
+    if isinstance(raw, str):
+        key = raw.strip().lower()
+        if key in ("low", "medium", "high"):
+            return key, ""
+        return "high", f"difficulty {raw!r} is not low|medium|high; rounds up to high"
+    return "high", "difficulty missing; rounds up to high"
 
 
 def _lane_field(lane: object, name: str) -> str:
@@ -596,13 +612,33 @@ def resolve_slot(
     """
     settings, profile, lanes = _slot_entry(settings, verb)
     rung_base = f"agents.profiles.{verb}" if verb else "agents.profiles"
+    prefix: list[str] = []
+    overlay: Optional[Mapping] = None
+    by_diff = getattr(profile, "by_difficulty", None) or {}
+    if isinstance(by_diff, Mapping) and by_diff:
+        diff_key, diff_reason = _effective_difficulty(node)
+        candidate_overlay = by_diff.get(diff_key)
+        if isinstance(candidate_overlay, Mapping):
+            overlay = candidate_overlay
+            ovl_lanes = overlay.get("lanes", _MISSING)
+            if ovl_lanes is not _MISSING:
+                if isinstance(ovl_lanes, (list, tuple)) and ovl_lanes:
+                    lanes = ovl_lanes
+                else:
+                    prefix.append(
+                        f"slot=config {rung_base}.by_difficulty.{diff_key}.lanes"
+                        " must be a non-empty list when declared"
+                    )
+                    return None, prefix
+        if diff_reason:
+            prefix.append(f"slot note {rung_base} {diff_reason}")
     if not lanes:
         if node is None:
             return None, []
-        chain = [f"slot {rung_base} has no lanes; grid over inventory"]
+        prefix.append(f"slot {rung_base} has no lanes; grid over inventory")
         if model_occupied:
-            chain.append("grid=model-axis-occupied")
-            return None, chain
+            prefix.append("grid=model-axis-occupied")
+            return None, prefix
         candidate, grid_chain = resolve_grid(
             node.get("difficulty"),
             node.get("priority"),
@@ -614,16 +650,29 @@ def resolve_slot(
             protected_role=protected_role,
             inventory=inventory,
         )
-        return candidate, chain + grid_chain
+        return candidate, prefix + grid_chain
 
-    chain = [f"slot {rung_base} lanes walked in declared order"]
-    raw_exhausted = str(getattr(profile, "on_exhausted", "") or "refuse")
-    on_exhausted = raw_exhausted.strip().lower()
-    if on_exhausted not in _ON_EXHAUSTED:
-        chain.append(
-            f"slot=config {rung_base}.on_exhausted {raw_exhausted!r} is not "
-            f"one of {'|'.join(_ON_EXHAUSTED)}"
+    chain = prefix + [f"slot {rung_base} lanes walked in declared order"]
+
+    def _policy(name: str, default: str, allowed: tuple[str, ...]) -> str:
+        raw = (
+            overlay.get(name, None)
+            if isinstance(overlay, Mapping) and overlay.get(name) is not None
+            else getattr(profile, name, None)
         )
+        raw = str(raw or default)
+        value = raw.strip().lower()
+        if value not in allowed:
+            chain.append(
+                f"slot=config {rung_base}.{name} {raw!r} is not one of {'|'.join(allowed)}"
+            )
+            return ""
+        return value
+
+    on_exhausted = _policy("on_exhausted", "refuse", _ON_EXHAUSTED)
+    on_low = _policy("on_low", "prefer_healthy", _ON_LOW) if on_exhausted else ""
+    on_unknown = _policy("on_unknown", "allow", _ON_UNKNOWN) if on_exhausted else ""
+    if not on_exhausted:
         return None, chain
 
     plan, lane_inv, fields_by_rung = _slot_fold(lanes, rung_base, settings, chain)
@@ -644,6 +693,41 @@ def resolve_slot(
         caps: dict = dict(provider_limits_table(getattr(settings, "agents", None)))
     except Exception:  # noqa: BLE001 - an unreadable cap table skips no lane
         caps = {}
+
+    demoted: list[tuple[int, str, str, str]] = []
+
+    def _take(
+        index: int, rung: str, row_name: str, state: str, window: str, note: str = ""
+    ) -> dict[str, Any]:
+        chain.append(
+            f"slot {rung} {row_name} capacity={state}"
+            + (f" window={window}" if window else "")
+            + (f" ({note})" if note else "")
+        )
+        row = lane_inv.rows[row_name]
+        inline = fields_by_rung.get(rung)
+        lane_fields = dict(inline) if inline else {
+            key: value
+            for key, value in (
+                ("provider", row.harness),
+                ("model", row.model),
+                ("effort", row.effort),
+                ("route", row.route),
+                ("account", row.account),
+            )
+            if value
+        }
+        pick: dict[str, Any] = dict(
+            harness=row.harness,
+            model=row.model,
+            lane=row_name,
+            lane_rung=rung,
+            lane_index=index,
+            lane_fields=lane_fields,
+        )
+        if row.effort:
+            pick["effort"] = row.effort
+        return pick
 
     for index, (rung, row_name) in enumerate(plan):
         row = lane_inv.rows.get(row_name)
@@ -685,35 +769,27 @@ def resolve_slot(
         if state in ("exhausted", "blocked"):
             chain.append(f"slot skip {rung} {row_name} capacity={state}")
             continue
+        if state == "low" and on_low == "skip":
+            chain.append(f"slot skip {rung} {row_name} capacity=low (on_low=skip)")
+            continue
         if state not in ("ok", "low", "available"):
+            if on_unknown == "skip":
+                chain.append(
+                    f"slot skip {rung} {row_name} capacity={state} (on_unknown=skip)"
+                )
+                continue
             state = "unknown-permitted"
-        chain.append(
-            f"slot {rung} {row_name} capacity={state}"
-            + (f" window={window}" if window else "")
-        )
-        inline = fields_by_rung.get(rung)
-        lane_fields = dict(inline) if inline else {
-            key: value
-            for key, value in (
-                ("provider", row.harness),
-                ("model", row.model),
-                ("effort", row.effort),
-                ("route", row.route),
-                ("account", row.account),
+        if state == "low" and on_low == "prefer_healthy":
+            demoted.append((index, rung, row_name, window))
+            chain.append(
+                f"slot demote {rung} {row_name} capacity=low (on_low=prefer_healthy)"
             )
-            if value
-        }
-        pick: dict[str, Any] = dict(
-            harness=row.harness,
-            model=row.model,
-            lane=row_name,
-            lane_rung=rung,
-            lane_index=index,
-            lane_fields=lane_fields,
-        )
-        if row.effort:
-            pick["effort"] = row.effort
-        return pick, chain
+            continue
+        return _take(index, rung, row_name, state, window), chain
+
+    if demoted:
+        index, rung, row_name, window = demoted[0]
+        return (_take(index, rung, row_name, "low", window, "no healthy lane; on_low=prefer_healthy"), chain)
 
     if explicit_lane or gate_bypassed:
         why = "the command line already names the lane" if explicit_lane else "FNO_SPAWN_GATE=0"
@@ -780,6 +856,8 @@ def slot_states(
     out["on_exhausted"] = (
         on_exhausted if on_exhausted in _ON_EXHAUSTED else f"{raw_exhausted} (invalid)"
     )
+    out["on_low"] = str(getattr(_profile, "on_low", "") or "prefer_healthy")
+    out["on_unknown"] = str(getattr(_profile, "on_unknown", "") or "allow")
     chain: list[str] = []
     plan, lane_inv, _fields = _slot_fold(lanes, f"agents.profiles.{verb}", settings, chain)
     if plan is None or lane_inv is None:

@@ -1093,7 +1093,10 @@ def inject_spawn_defaults(
             return "agents.defaults"
         return None
 
-    lanes_present = bool(profile is not None and getattr(profile, "lanes", None))
+    lanes_present = bool(
+        profile is not None
+        and (getattr(profile, "lanes", None) or getattr(profile, "by_difficulty", None))
+    )
     # A profile LANE is atomic (occupies harness/model/effort); a bare FIELD
     # occupies only its axis. `model_occupied` is the NO-LANE view gating the
     # grid rung, which resolve_slot runs only when the verb declares no lanes.
@@ -1167,7 +1170,7 @@ def inject_spawn_defaults(
                 slot_chain = []
         # Receipt + refusal seam: the chain's last element is the terminal.
         for _line in slot_chain:
-            if _line.startswith(("slot skip", "slot note")):
+            if _line.startswith(("slot skip", "slot note", "slot demote")):
                 print(f"fno agents spawn: {_line}", file=err)
         if slot_chain:
             _terminal = slot_chain[-1]
