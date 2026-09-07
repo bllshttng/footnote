@@ -1143,6 +1143,84 @@ def test_spawn_worker_codex_receipt_with_only_session_id_key(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# x-7f1f task 1.1: the spawn receipt carries the substrate to the caller.
+# A headless dispatch is SYNCHRONOUS - subprocess.run returns only after the
+# one-shot worker finished - so the drain must know the substrate or it
+# fabricates a crash for a child that already succeeded.
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_worker_fills_receipt_out_param(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, _RECEIPT)
+    )
+    ev = tmp_path / "events.jsonl"
+    receipt: dict = {}
+    sid = adv._spawn_worker("ab-2222aaaa", None, events_path=ev, receipt=receipt)
+    row = json.loads(ev.read_text().splitlines()[-1])
+    assert row["type"] == adv.EVENT_SPAWNED
+    payload = row["data"]
+    assert receipt["short_id"] == payload["short_id"] == sid
+    assert receipt["substrate"] == payload["substrate"]
+    assert receipt["harness"] == payload["harness"]
+
+
+def test_spawn_worker_receipt_stays_empty_on_spawn_error(monkeypatch):
+    receipt: dict = {}
+    monkeypatch.setattr(
+        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(1, "", "daemon unreachable"),
+    )
+    with pytest.raises(adv.SpawnError):
+        adv._spawn_worker("ab-2222aaaa", None, receipt=receipt)
+    assert receipt == {}
+
+
+def _converge_env(monkeypatch, tmp_path):
+    """Silence the pre-spawn gates so _converge_one reaches the spawn seam."""
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    monkeypatch.setattr(adv, "_walker_live_at", lambda root: False)
+    monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda nid, root: None)
+    monkeypatch.setattr(
+        adv._autobrief, "resolve_dispatch_brief", lambda node_meta: ("", "")
+    )
+    monkeypatch.setattr(adv._route_resolve, "node_model", lambda *a, **k: None)
+
+
+def test_converge_one_dispatched_result_carries_substrate(monkeypatch, tmp_path):
+    _converge_env(monkeypatch, tmp_path)
+
+    def fake_spawn(node_id, root, slug, **kwargs):
+        kwargs["receipt"].update(
+            {"short_id": "headless", "substrate": "headless", "harness": "codex"}
+        )
+        return "headless"
+
+    monkeypatch.setattr(adv, "_spawn_worker", fake_spawn)
+    result = adv._converge_one(
+        {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
+    )
+    assert result.decision == "dispatched"
+    assert result.substrate == "headless"
+
+
+def test_converge_one_spawn_failure_leaves_receipt_empty(monkeypatch, tmp_path):
+    _converge_env(monkeypatch, tmp_path)
+    seen: dict = {}
+
+    def fake_spawn(node_id, root, slug, **kwargs):
+        seen["receipt"] = kwargs["receipt"]
+        raise adv.SpawnError("boom")
+
+    monkeypatch.setattr(adv, "_spawn_worker", fake_spawn)
+    result = adv._converge_one(
+        {"id": "ab-1111aaaa", "slug": "s"}, str(tmp_path), tmp_path / "ev.jsonl", False
+    )
+    assert result.decision == "failed"
+    assert seen["receipt"] == {}
+    assert result.substrate is None
+
+
+# ---------------------------------------------------------------------------
 # cmd_advance: the `fno backlog advance` CLI verb
 # ---------------------------------------------------------------------------
 

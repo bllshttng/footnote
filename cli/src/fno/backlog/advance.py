@@ -169,6 +169,10 @@ class AdvanceResult:
     node_id: Optional[str] = None
     short_id: Optional[str] = None
     detail: Optional[str] = None
+    # Resolved substrate of the launch ("bg" | "thread" | "headless"); set on
+    # dispatched results only. "headless" is synchronous: the worker already
+    # ran and released its claim before this result exists.
+    substrate: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Make an invalid (decision, event) combination a loud construction
@@ -1318,6 +1322,7 @@ def _spawn_worker(
     caller: str = "unknown",
     events_path: Optional[Path] = None,
     grid_reason: Optional[str] = None,
+    receipt: Optional[dict] = None,
 ) -> str:
     """Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
 
@@ -1586,6 +1591,13 @@ def _spawn_worker(
         },
         events_path,
     )
+    if receipt is not None:
+        # Filled from the same values the EVENT_SPAWNED row carries, so the
+        # row and the receipt cannot disagree (the row has no harness-
+        # independent form; prov is what it records).
+        receipt.update(
+            {"short_id": launch_identity, "substrate": substrate, "harness": prov}
+        )
     return launch_identity
 
 
@@ -3691,6 +3703,7 @@ def _converge_one(
     try:
         eff_provider = provider if provider is not None else node_meta.get("provider")
         _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node_meta)
+        spawn_receipt: dict = {}
         short_id = _spawn_worker(
             node_id,
             root,
@@ -3704,6 +3717,7 @@ def _converge_one(
             node=node_meta,
             caller="_converge_one",
             events_path=ev_path,
+            receipt=spawn_receipt,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -3733,7 +3747,13 @@ def _converge_one(
             f"target worker {short_id} (--cwd {root}) (brief={_brief_tag})",
             file=sys.stderr,
         )
-    return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
+    return AdvanceResult(
+        "dispatched",
+        EVENT_DISPATCHED,
+        node_id=node_id,
+        short_id=short_id,
+        substrate=spawn_receipt.get("substrate"),
+    )
 
 
 def _dispatch_one_dependent(
