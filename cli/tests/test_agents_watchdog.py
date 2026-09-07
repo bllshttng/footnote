@@ -3479,6 +3479,10 @@ def test_codex_response_item_is_normalized_for_distress_reads():
         'evidence=".git/refs/heads/feature/x.lock: Operation not permitted',
         '<help evidence=".git/refs/heads/feature/x.lock"> '
         'Operation not permitted',
+        '<help reason="data-evidence=.git/refs/heads/feature/x.lock: '
+        'Operation not permitted">',
+        '<help reason="evidence=.git/refs/heads/feature/x.lock: '
+        'Operation not permitted">',
     ],
 )
 def test_incomplete_or_mismatched_help_evidence_is_not_reaped(text, monkeypatch):
@@ -3574,6 +3578,37 @@ def test_sandbox_reap_rechecks_guards_before_removal(
 
     assert outcome == "held"
     assert guard_text in detail
+    assert calls == []
+
+
+def test_sandbox_reap_requires_current_distress_before_removal(monkeypatch):
+    monkeypatch.setattr(watchdog, "_claim_view", lambda node: {"state": "free"})
+    monkeypatch.setattr(watchdog, "_branch_commit_count", lambda cwd: 0)
+    monkeypatch.setattr(
+        watchdog,
+        "tail_facts",
+        lambda *args, **kwargs: _facts("ordinary assistant completion"),
+    )
+    calls = []
+    v = Verdict(
+        "cccc3333-0017",
+        "t-sandbox",
+        "working",
+        SANDBOX_BLOCKED,
+        "Codex sandbox blocked Git writes",
+        "reap",
+    )
+
+    outcome, detail = apply_verdict(
+        v,
+        lanes="all",
+        cwd="/tmp/w",
+        node="x-sandbox",
+        runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    assert outcome == "refused"
+    assert "current transcript" in detail
     assert calls == []
 
 

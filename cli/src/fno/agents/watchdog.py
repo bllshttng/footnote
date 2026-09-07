@@ -776,14 +776,21 @@ def _sandbox_denial_text(facts: Optional[TailFacts]) -> Optional[str]:
     tag = re.search(r"<help(?:\s(?P<attributes>[^>]*))?>", text, re.IGNORECASE)
     if tag is None:
         return None
-    evidence_match = re.search(
-        r"\bevidence\s*=\s*(['\"])(?P<value>.*?)\1",
-        tag.group("attributes") or "",
-        re.IGNORECASE,
-    )
-    if evidence_match is None:
+    import shlex
+
+    try:
+        attributes = shlex.split(tag.group("attributes") or "")
+    except ValueError:
         return None
-    evidence = evidence_match.group("value")
+    evidence = next(
+        (
+            value.split("=", 1)[1]
+            for value in attributes
+            if value.split("=", 1)[0].lower() == "evidence"
+            and "=" in value
+        ),
+        "",
+    )
     if not evidence:
         return None
     if "Operation not permitted" not in evidence:
@@ -2961,6 +2968,8 @@ def _apply_sandbox_blocked(
         return "refused", "reap refused: branch commit count unreadable"
     if commit_count:
         return "held", f"reap held: branch carries {commit_count} commit(s)"
+    if _sandbox_denial_text(tail_facts(v.row_id, cwd, agent="codex")) is None:
+        return "refused", "reap refused: current transcript no longer carries the distress"
     proc = runner(
         [
             *_fno(),
