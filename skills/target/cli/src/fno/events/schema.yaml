@@ -3851,6 +3851,13 @@ event_types:
         command:
           type: string
           description: "The dispatched message exactly as sent, with {id} substituted and spelled for the resolved harness (`/target ...` on claude/opencode, `$fno:target ...` on codex)."
+        verb:
+          type: string
+          description: "The verb this dispatch resolved: the node's declared dispatch_verb (canonicalized the way the allowlist rung does, so /fno:blueprint records /blueprint), or the literal 'builtin' when the node declared nothing. `builtin` beside a node that DID declare is only visible as a command mismatch, which is why this field exists (x-0961)."
+        verb_source:
+          type: string
+          enum: [declared, none-declared, field-absent]
+          description: "declared = the node dict carried a non-empty dispatch_verb. none-declared = the key was present and empty/null, a legitimate default. field-absent = the key was NOT in the dict at all, which can only mean the selection projection feeding this dispatcher dropped it; the spawn also warns on stderr, so a future lossy projection self-reports (x-0961)."
         cwd:
           type: string
           description: "The --cwd the worker was launched into; empty means --fresh."
@@ -3881,6 +3888,13 @@ event_types:
         agent_name:
           type: string
           description: "Spawned agent name (target-<full-node-id>-<slug>)."
+        verb:
+          type: string
+          description: "The verb this dispatch resolved: the node's declared dispatch_verb (canonicalized), or 'builtin'. See dispatch_spawned.verb (x-0961)."
+        verb_source:
+          type: string
+          enum: [declared, none-declared, field-absent]
+          description: "Whether the dispatched verb was declared, defaulted from an explicit empty, or unknowable because the feed dropped the key. See dispatch_spawned.verb_source (x-0961)."
         closed_node_id:
           type: string
           description: "The just-merged node whose close triggered this advance (keying for AC1-RACE)."

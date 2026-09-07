@@ -4355,14 +4355,11 @@ EXTERNAL_SELECTION_TTL = "15m"
 def _dispatch_node_summary(e) -> dict:
     """The ONE projection a dispatcher sees when it picks work.
 
-    `next` and `ready` both feed autonomous dispatch (`_next_node` /
-    `_ready_nodes` shell `fno backlog ready`; epic advance shells it with
-    `--parent`), so the two summaries are one thing spelled twice: every
-    field either surface carried, unioned, no filtering and no ordering.
-    A key dropped here is dropped from every dispatch decision - the
-    silent `dispatch_verb` loss this exists to prevent (x-0961).
-    Consumers read by key, so additions are safe; `_dispatch_node_summary`
-    is the only hand-listed copy.
+    `next` and `ready` both feed autonomous dispatch, so the two summaries
+    are one thing spelled twice: the union of every field either surface
+    carried, no filtering, no ordering. A key dropped here is dropped from
+    every dispatch decision - the silent `dispatch_verb` loss this exists
+    to prevent (x-0961). Consumers read by key, so additions are safe.
     """
     return {
         # slug leads () so a list / clipboard is readable; `id` stays the
@@ -4380,12 +4377,12 @@ def _dispatch_node_summary(e) -> dict:
         # select_lane_fill's dispatch-time collision gate compares plan file
         # surfaces; without this it has nothing to read.
         "plan_path": e.get("plan_path"),
-        # The per-node model pin rides in the projection so the
-        # active-backlog drain can prefer it over cfg.model.
+        # The per-node model pin rides so the active-backlog drain can
+        # prefer it over cfg.model.
         "model": e.get("model"),
-        # The per-node dispatch overrides must ride in the projection so the
-        # resolver's verb/brief routing actually fires for real graph nodes,
-        # not only for tests that inject them.
+        # The per-node dispatch overrides must ride so the resolver's
+        # verb/brief routing fires for real graph nodes, not only for
+        # tests that inject them.
         "dispatch_verb": e.get("dispatch_verb"),
         "dispatch_brief": e.get("dispatch_brief"),
         "mission_id": e.get("mission_id"),
@@ -4393,7 +4390,7 @@ def _dispatch_node_summary(e) -> dict:
         "mission_slug": e.get("mission_slug"),
         "mission_from_msg_id": e.get("mission_from_msg_id"),
         # x-fe2c: age and rank ride too, so a dispatcher can order and
-        # staleness-check without a second full `backlog get` per node.
+        # staleness-check without a second `backlog get` per node.
         "created_at": e.get("created_at"),
         "touched_at": e.get("touched_at"),
         "rank": e.get("rank"),
