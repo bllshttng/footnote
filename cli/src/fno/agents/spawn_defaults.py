@@ -1064,10 +1064,8 @@ def inject_spawn_defaults(
     grid_node_entry: Optional[dict] = None
     # Axis occupancy scanned ONCE, before the slot resolver: a lane named on
     # the command line changes the all-exhausted terminal (degrade, not
-    # refuse), and an occupied model axis stands the no-lanes grid down.
-    # -P/--provider counts as a named lane: it names the VENDOR, which is the
-    # axis a cap is about, so a caller who typed it is not spending a capped
-    # lane's budget either.
+    # refuse), an occupied model axis stands the no-lanes grid down, and
+    # -P/--provider counts as a named lane (it names the capped VENDOR).
     has_harness, explicit_harness, has_model, has_effort = _scan(out[1:])
     explicit_vendor = _flag_value(out[1:], "--provider", "-P")
     explicit_vendor_present = explicit_vendor is not None
@@ -1077,10 +1075,8 @@ def inject_spawn_defaults(
     explicit_substrate = _has_explicit_substrate(out[1:])
     explicit_permission_value = _flag_value(out[1:], "--permission-mode")
     if not explicit_permission_value and _has_permission_mode(out[1:]):
-        # --yolo/-Y are the same knob as --permission-mode (see
-        # _has_permission_mode), so the slot's permission filter must see
-        # them too or it can hand a yolo spawn a harness the spawn gate
-        # refuses.
+        # --yolo/-Y are the same knob as --permission-mode; the filter must
+        # see them or it can hand a yolo spawn a harness the gate refuses.
         explicit_permission_value = "yolo"
     node_id_present = (
         _flag_value(out[1:], "--node") is not None or bool((env or {}).get("FNO_NODE"))
@@ -1098,12 +1094,9 @@ def inject_spawn_defaults(
         return None
 
     lanes_present = bool(profile is not None and getattr(profile, "lanes", None))
-    # A profile LANE is atomic and occupies the harness/model/effort axes when
-    # it answers; a bare profile FIELD occupies only the axis it names.
-    # `model_occupied` here is the NO-LANE view: it gates the grid rung, which
-    # resolve_slot runs only when the verb declares no lanes. The grid is
-    # evaluated from a node-bearing spawn only; a lane-bearing profile is the
-    # exception - its lanes answer regardless, and need capacity to do it.
+    # A profile LANE is atomic (occupies harness/model/effort); a bare FIELD
+    # occupies only its axis. `model_occupied` is the NO-LANE view gating the
+    # grid rung, which resolve_slot runs only when the verb declares no lanes.
     model_occupied = bool(
         has_model
         or explicit_vendor_present
@@ -1126,10 +1119,8 @@ def inject_spawn_defaults(
             except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
                 capacity = {}
         if capacity is not None:
-            # The planning/execution role comes from plan-presence, never
-            # plan quality: a /target on an unplanned node does planning work
-            # and bills at the planning tier (grill-3). `verb` is the profile
-            # key already resolved above - the same rule.
+            # Role comes from plan-presence, not plan quality: a /target on
+            # an unplanned node bills at the planning tier.
             grid_role: Optional[str] = None
             if grid_node_entry and verb == "target":
                 grid_role = (
@@ -1181,10 +1172,7 @@ def inject_spawn_defaults(
         if slot_chain:
             _terminal = slot_chain[-1]
             if _terminal.startswith("slot=config "):
-                print(
-                    f"fno agents spawn: {_terminal[len('slot=config '):]}",
-                    file=err,
-                )
+                print(f"fno agents spawn: {_terminal[len('slot=config '):]}", file=err)
                 print("fno agents spawn: refusing; no worker launched", file=err)
                 raise SystemExit(2)
             if _terminal.startswith("slot=provider-count-unavailable "):
@@ -1192,8 +1180,8 @@ def inject_spawn_defaults(
                     len("slot=provider-count-unavailable "):
                 ].split(" ", 1)
                 print(
-                    f"fno agents spawn: config.{_rung} provider count unavailable "
-                    f"for {_detail}; refusing; no worker launched",
+                    f"fno agents spawn: config.{_rung} provider count unavailable"
+                    f" for {_detail}; refusing; no worker launched",
                     file=err,
                 )
                 raise SystemExit(2)
@@ -1237,12 +1225,9 @@ def inject_spawn_defaults(
         # stands down loudly rather than in silence.
         slot_receipt.append(("grid", "grid=model-axis-occupied", "routing"))
 
-    # A lane is a COMPLETE routing coordinate, so route and model do not fall
-    # through to a lower rung when a lane was chosen: per-field fallback let a
-    # codex-harness lane inherit a profile-level zai route, putting `--harness
-    # codex` and `--route zai/...` in one argv, which cli.py refuses outright.
-    # The other fields still fall through: substrate/permission/account are
-    # postures a lane can legitimately leave to the profile.
+    # A lane is a COMPLETE coordinate: route/model stop at the lane (a codex
+    # lane inheriting a profile-level zai route builds an argv cli.py refuses).
+    # Postures (substrate/permission/account) still fall through.
     _LANE_EXCLUSIVE = ("route", "model")
 
     def field(name: str) -> Tuple[str, Optional[str]]:

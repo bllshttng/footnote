@@ -457,14 +457,11 @@ def resolve_grid(
             chain.append(f"grid refuses {r.name}: harness {r.harness!r} not installed")
     rows = installed
 
-    # Tier wins: a row is a candidate when its band meets or exceeds the
-    # requested floor. A row with NO band is a candidate at every band and
-    # ranks after the banded rows that clear, in declared order: the operator
-    # who declares no band declines to rank by strength, so fno does not rank
-    # for them. No degrade below the floor here, unlike resolve_tier: the
-    # grid's round-up ruling would be undone by quietly handing strong work to
-    # a weak row, so an empty tier falls through to the operator's own
-    # defaults instead.
+    # A row is a candidate when its band meets the floor. A row with NO band
+    # is a candidate at every band and ranks after the banded rows that clear,
+    # in declared order: declaring no band declines strength ranking. No
+    # degrade below the floor, unlike resolve_tier: an empty tier falls
+    # through to the operator's own defaults.
     floor_rank = _BAND_RANK[candidate_band]
     clearing = [r for r in rows if r.rank >= floor_rank and r.harness and r.model]
     unbanded = [r for r in rows if r.band == "" and r.harness and r.model]
@@ -667,23 +664,19 @@ def resolve_slot(
         if row.route:
             vendor = row.route.replace(",", "/").partition("/")[0].strip() or None
         cap = provider_lanes_cap(caps.get(vendor)) if vendor else None
-        if vendor is not None and cap is not None:
+        if vendor is not None and cap is not None and gate_bypassed:
+            chain.append(f"slot note {rung} {row_name} {vendor} cap bypassed (FNO_SPAWN_GATE=0)")
+        elif vendor is not None and cap is not None:
             try:
                 current = provider_live_count(vendor)
             except ProviderCountUnavailable as exc:
-                if not gate_bypassed:
-                    chain.append(f"slot=provider-count-unavailable {rung} {vendor}: {exc}")
-                    return None, chain
+                chain.append(f"slot=provider-count-unavailable {rung} {vendor}: {exc}")
+                return None, chain
+            if current >= cap:
                 chain.append(
-                    f"slot note {rung} {row_name} {vendor} count unavailable ({exc});"
-                    " FNO_SPAWN_GATE=0, so the lane is taken uncapped"
+                    f"slot skip {rung} {row_name} provider {vendor} at {current} of {cap}"
                 )
-            else:
-                if current >= cap:
-                    chain.append(
-                        f"slot skip {rung} {row_name} provider {vendor} at {current} of {cap}"
-                    )
-                    continue
+                continue
         state, window = row_capacity(row, capacity)
         if state in ("exhausted", "blocked"):
             chain.append(f"slot skip {rung} {row_name} capacity={state}")
@@ -764,10 +757,9 @@ def slot_states(
     inventory: Optional[Inventory] = None,
     settings: object = None,
 ) -> dict[str, Any]:
-    """The readout projection of one verb's slot: declared lanes in order with
-    live :func:`row_capacity` states, the ``on_exhausted`` terminal, and -
-    resolved by :func:`resolve_slot` ITSELF, never re-derived here - the lane
-    a spawn would take right now. Display, never selection.
+    """Readout of one verb's slot: lanes in order with live capacity states,
+    the ``on_exhausted`` terminal, and the lane a spawn would take right now
+    (resolved by :func:`resolve_slot` itself). Display, never selection.
     """
     settings, _profile, lanes = _slot_entry(settings, verb)
     if inventory is None:
