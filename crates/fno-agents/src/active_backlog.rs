@@ -1039,6 +1039,12 @@ impl ConvergeGate {
     /// restart. Growing adds permits at once. Shrinking can only forget permits
     /// that are FREE, so the total records what actually went and the next
     /// resync retries the remainder as in-flight converges hand theirs back.
+    /// ponytail: a shrink while every permit stays continuously busy can lag
+    /// the declared cap until a mission goes idle; each mission's own poll
+    /// floor (minutes, not this 60s resync) makes that idle gap routine in
+    /// practice. Upgrade path if it ever bites: a permit wrapper that forgets
+    /// itself on return while a shrink is still pending, instead of this
+    /// snapshot-based forget.
     pub fn resize(&self, cap: u32) {
         let cap = cap.max(1);
         let old = self.total.load(Ordering::SeqCst);
