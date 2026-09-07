@@ -18,7 +18,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 pub const ORPHAN_MIN_ZOMBIES: usize = 20;
-pub const DEFAULT_MIN_ELAPSED_SECS: u64 = 900;
 pub const ENV_MIN_ELAPSED: &str = "FNO_TEST_ORPHAN_MIN_ELAPSED_SECONDS";
 
 #[derive(Debug, PartialEq, Serialize)]
