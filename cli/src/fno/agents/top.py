@@ -612,10 +612,10 @@ def _retirable_lines(rows: list[dict], lanes: list[dict]) -> list[str]:
     holder no lane names still gets its line - the verdict is the graph's,
     not the lane counter's.
     """
-    holder_lane: dict[str, str] = {}
-    for lane in lanes:
-        for h in lane.get("holders") or []:
-            holder_lane[h] = lane.get("provider")
+    holder_lane: dict[str, Optional[str]] = {}
+    for lane_row in lanes:
+        for h in lane_row.get("holders") or []:
+            holder_lane[h] = lane_row.get("provider")
     out = []
     for r in rows:
         if not r.get("retire"):
@@ -623,8 +623,8 @@ def _retirable_lines(rows: list[dict], lanes: list[dict]) -> list[str]:
         # The lane counter tallies REGISTRY handles, and this row may be
         # labelled by the first 8 hex, so the join goes through the same
         # handle the row already carries.
-        lane = holder_lane.get(r.get("handle") or r["name"])
-        holds = f" holds a {lane} lane" if lane else " holds a lane"
+        provider = holder_lane.get(r.get("handle") or r["name"])
+        holds = f" holds a {provider} lane" if provider else " holds a lane"
         pr = (r["retire_reason"] or "").rsplit(" ", 1)[-1]
         out.append(f"retirable: {r['name']}{holds}; {r['node']} is done, merged at PR {pr}")
     return out
