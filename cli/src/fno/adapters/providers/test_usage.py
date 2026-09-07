@@ -1457,6 +1457,39 @@ class TestUntaintedStampDrift:
         # The mismatching bearer was never spent on a usage request.
         assert used == ["unscoped"]
 
+    def test_a_login_during_the_reading_discards_it_with_a_positive_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2-RACE: identity is proven before the request, which stops another
+        account's numbers being FETCHED. The window after the request is a
+        different one: a sign-in there would file the old generation's reading
+        under the new principal. Discarding it is only half the answer -
+        `identity_changed` is the marker that says a reading existed and why it
+        was dropped, which an absent snapshot cannot say."""
+        import fno.adapters.providers.usage as usage_mod
+
+        rec = self._record()
+        self._slot(tmp_path, monkeypatch)
+        reads = {"n": 0}
+
+        def _keychain(_cfg):
+            reads["n"] += 1
+            token = "unscoped" if reads["n"] == 1 else "rotated"
+            return [json.dumps({"claudeAiOauth": {"accessToken": token}})]
+
+        monkeypatch.setattr(usage_mod, "_read_claude_keychain_blobs", _keychain)
+        used: list[str] = []
+        self._arm(
+            monkeypatch, rec,
+            verdicts={"slot-token": "mismatch", "unscoped": "match"},
+            used=used, root=tmp_path,
+        )
+
+        snap, reason = usage_mod._probe_claude(rec, now=1000.0)
+
+        assert used == ["unscoped"]  # the reading really happened
+        assert snap is None and reason == "identity_changed"
+
     def test_every_candidate_unattributable_reports_unknown_and_repairs_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

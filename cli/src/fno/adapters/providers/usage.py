@@ -188,15 +188,14 @@ def _canonical_claude_slot_dir() -> Path:
 def _record_credential_dir(record: ProviderRecord) -> Path | None:
     """The record's OWN credential dir, or None when it has no per-record source.
 
-    ``config_dir`` (the x-d012 per-account login) outranks ``credentials_source``
-    (the oauth_dir staging lane) for the same reason ``resolve_account_overlay``
-    ranks them that way: a converged account always rides its own dir.
+    One line, because the ranking belongs to ``binding.credential_root``: this
+    reader, both launch env paths and doctor all have to agree about which dir
+    serves a record, and three copies of the ranking is how they stopped
+    agreeing.
     """
-    if record.config_dir is not None:
-        return Path(record.config_dir)
-    if record.credentials_source is not None:
-        return Path(record.credentials_source)
-    return None
+    from fno.adapters.providers.binding import credential_root
+
+    return credential_root(record)
 
 
 def _is_active_slot_occupant(record: ProviderRecord) -> bool:
@@ -340,21 +339,17 @@ def _bearer_verdict(record: ProviderRecord, bearer: str, now: float) -> str:
     if not _shares_the_slot(record):
         return "unsupported"
     try:
+        from fno.adapters.providers import binding as _binding
         from fno.adapters.providers import managed
 
-        # A slot presenting more than one distinct credential is not
-        # attributable at all, however well this particular bearer proves out:
-        # claude reads the scoped Keychain item first while this probe reads the
-        # unscoped one, so a matching bearer here can still be a different
-        # account from the one actually being billed. Checked offline - the
-        # candidate count alone settles it, no profile call needed.
-        if len(managed.canonical_slot_blobs(record.harness)) > 1:
-            return "unprovable"
-        return managed.bearer_principal_verdict(
-            record.harness, record.id, managed.store_root(), bearer, now=now
+        got = _binding.resolve_account_binding(
+            record, bearer=bearer, root=managed.store_root(), now=now
         )
     except Exception:  # noqa: BLE001 - an unreadable store cannot vouch for a bearer
         return "unprovable"
+    return {_binding.MATCHED: "match", _binding.MISMATCH: "mismatch"}.get(
+        got.status, "unprovable"
+    )
 
 
 def _claude_bearer_candidates(record: ProviderRecord) -> list[str]:
@@ -502,6 +497,23 @@ def _parse_claude_windows(payload: Any) -> tuple[UsageWindow, ...]:
     return tuple(out)
 
 
+def _credential_still_current(record: ProviderRecord, bearer: str) -> bool:
+    """Is ``bearer`` still a credential ``record``'s root serves?
+
+    Identity is proven before the usage request, which closes the window on
+    fetching another account's numbers. It does not close the one AFTER the
+    request: a sign-in landing between the proof and the reading would file the
+    old generation's numbers under the new principal. Re-reading the candidate
+    set is what catches that, and ``identity_changed`` is the positive marker
+    that explains the discard - a missing snapshot alone reads identically to a
+    probe that never ran.
+    """
+    try:
+        return bearer in _claude_bearer_candidates(record)
+    except Exception:  # noqa: BLE001 - a set we cannot re-read cannot vouch for it
+        return False
+
+
 def _probe_claude(
     record: ProviderRecord, now: float
 ) -> tuple[UsageSnapshot | None, str | None]:
@@ -527,6 +539,10 @@ def _probe_claude(
     dir resolved, whose single 108-character bearer proved out, and whose usage
     request returned a clean 401. The repair is a re-login for that config dir,
     and no amount of network debugging finds it.
+
+    Reports ``identity_changed`` when the credential moved between the identity
+    proof and the reading. The reading is real; the account it belongs to is no
+    longer the one this record names, so it is discarded rather than filed.
     """
     unattributable = False
     rejected = False
@@ -559,6 +575,8 @@ def _probe_claude(
             payload = json.loads(body)
         except (json.JSONDecodeError, ValueError):
             return None, "probe-failed"
+        if not _credential_still_current(record, bearer):
+            return None, "identity_changed"
         return UsageSnapshot(
             provider_id=record.id,
             windows=_parse_claude_windows(payload),

@@ -335,6 +335,21 @@ def _login_present(config_dir: Path) -> bool:
     return out.returncode == 0 and bool(out.stdout.strip())
 
 
+def _refuse_identity_mismatch(record, providers_root: Path, by_id: dict) -> None:
+    """Refuse a pin whose credential root provably serves a different account.
+
+    Only a POSITIVE mismatch refuses. An unreachable profile endpoint must not
+    ground the fleet, so every other verdict leaves this lane's documented
+    posture alone - what an unproven identity forbids is a receipt naming the
+    account as served, not the launch.
+    """
+    from fno.adapters.providers.binding import MISMATCH, resolve_account_binding
+
+    got = resolve_account_binding(record, root=providers_root, by_id=by_id)
+    if got.status == MISMATCH:
+        raise AccountResolutionError(got.receipt)
+
+
 def resolve_account_overlay(
     account_id: str,
     *,
@@ -380,6 +395,10 @@ def resolve_account_overlay(
                 f"account {account_id!r} config_dir {cfg} holds no claude login "
                 f"(run: CLAUDE_CONFIG_DIR={cfg} claude /login)"
             )
+        # A login being PRESENT in the dir says nothing about whose login it is.
+        # An operator who signed the wrong account into this dir gets a worker
+        # that authenticates and bills someone else, silently.
+        _refuse_identity_mismatch(record, providers_root, by_id)
         return AccountOverlay(
             account_id, {"CLAUDE_CONFIG_DIR": str(cfg)}, "config-dir"
         )
@@ -418,6 +437,11 @@ def resolve_account_overlay(
             # CLAUDE_CONFIG_DIR (e.g. exported from a prior alt-account session)
             # leak through and silently bill the wrong account. Managed claude
             # accounts materialize into ~/.claude by definition.
+            #
+            # The stamp is the thing an out-of-band `claude /login` leaves wrong
+            # AND untainted, so agreeing with it is not proof of anything. The
+            # binding is what asks the slot who it actually serves.
+            _refuse_identity_mismatch(record, providers_root, by_id)
             slot = str(Path.home() / ".claude")
             return AccountOverlay(
                 account_id, {"CLAUDE_CONFIG_DIR": slot}, "managed-active"

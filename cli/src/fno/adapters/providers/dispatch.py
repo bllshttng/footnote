@@ -142,6 +142,23 @@ def _env_for_api_key(
     return resolved
 
 
+def _refuse_identity_mismatch(
+    record: ProviderRecord, root: Path, by_id: dict[str, ProviderRecord]
+) -> None:
+    """Refuse a record whose credential root provably serves another account.
+
+    The same rule ``resolve_account_overlay`` applies, from the same binding:
+    two launch env paths that disagree about who is being billed are two
+    receipts, one of which is wrong. Only a POSITIVE mismatch refuses; an
+    unreachable profile endpoint leaves this path exactly as it was.
+    """
+    from fno.adapters.providers.binding import MISMATCH, resolve_account_binding
+
+    got = resolve_account_binding(record, root=root, by_id=by_id)
+    if got.status == MISMATCH:
+        raise ProviderUnavailableError(got.receipt)
+
+
 def dispatch_env(
     provider_id: str,
     repo_root: Path | None = None,
@@ -175,6 +192,7 @@ def dispatch_env(
     # would fall through to the `managed -> {}` arm below and dispatch on the
     # ambient default account (silent mis-bill).
     if record.config_dir is not None:
+        _refuse_identity_mismatch(record, root, by_id)
         return {"CLAUDE_CONFIG_DIR": str(record.config_dir)}
 
     if record.auth == "oauth_dir":
@@ -189,6 +207,9 @@ def dispatch_env(
         # A managed account materializes into the shared default slot
         # (~/.claude for claude, ~/.codex for codex), so dispatch adds no
         # CLAUDE_CONFIG_DIR/HOME override - the CLI reads the slot directly.
+        # Which is exactly why the slot has to be asked who it serves: this arm
+        # has no path to be wrong about, and a wrong one bills silently.
+        _refuse_identity_mismatch(record, root, by_id)
         return {}
 
     # api_key path

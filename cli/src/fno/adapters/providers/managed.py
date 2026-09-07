@@ -1258,45 +1258,6 @@ def capture_record_principal(
     return principal
 
 
-def slot_identity_drift(cli: str, root: Path | None = None) -> Optional[dict]:
-    """``{stamped, live}`` when the stamp and the live slot disagree, else None.
-
-    The taint marker only watches the door footnote controls. An out-of-band
-    `claude /login` walks through the other one, leaving a stamp that is wrong
-    and UNTAINTED - so attribution proceeds confidently and files the new
-    account's usage under the old account's name. This is the read that makes
-    that loud.
-
-    Read-only, and free until it can answer: with no bound principal there is
-    nothing to compare, so an unbound store never pays for a profile call.
-    """
-    if cli != "claude":
-        return None
-    try:
-        stamped = active_slot_id(cli, root)
-    except OSError:
-        return None
-    if not stamped:
-        return None
-    bound = record_principal(stamped, root)
-    if bound is None:
-        return None
-    try:
-        principal, failure = canonical_slot_principal(cli)
-    except ManagedStoreError:
-        return None  # an unreadable slot cannot demonstrate drift
-    if failure == "ambiguous-slot":
-        # Reporting healthy here would hide two accounts sharing one slot.
-        return {"stamped": stamped, "live": None, "ambiguous": True}
-    if principal is None or identity_key(principal) == identity_key(bound):
-        return None
-    return {
-        "stamped": stamped,
-        "live": principal.get("email") or principal.get("account_uuid"),
-        "ambiguous": False,
-    }
-
-
 def _clear_record_principal(record_id: str, root: Path | None = None) -> None:
     """Drop a record's principal binding, leaving the rest of its metadata."""
     meta = read_meta(record_id, root) or {}

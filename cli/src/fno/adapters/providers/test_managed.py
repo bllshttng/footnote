@@ -2383,7 +2383,13 @@ class TestUnreadableSlotIsARefusal:
 
         assert result.outcome == "slot-unreadable" and "timed out" in result.detail
 
-    def test_drift_reports_nothing_rather_than_raising(self, tmp_path, monkeypatch):
+    def test_an_unreadable_slot_is_typed_for_the_binding_too(
+        self, tmp_path, monkeypatch
+    ):
+        """The drift read moved to `binding`; a denied Keychain still refuses
+        rather than raising, and reads as unknown rather than as healthy."""
+        from fno.adapters.providers import binding
+
         managed.stamp_active_slot("claude", "work-a", tmp_path)
         managed.write_record_principal(
             "work-a", {"account_uuid": "a", "organization_uuid": "o"}, tmp_path
@@ -2393,7 +2399,10 @@ class TestUnreadableSlotIsARefusal:
             raise managed.KeychainError("denied")
 
         monkeypatch.setattr(managed, "canonical_slot_blobs", _boom)
-        assert managed.slot_identity_drift("claude", tmp_path) is None
+        got = binding.resolve_account_binding(None, harness="claude", root=tmp_path)
+
+        assert got.status == binding.UNKNOWN
+        assert got.reason == "credential-unreadable"
 
 
 class TestRegisterPostWriteSlotMove:
