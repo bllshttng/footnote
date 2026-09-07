@@ -176,12 +176,11 @@ def resolve_node_id(
 def _unpushed_batch(
     worktrees: list[tuple[Optional[str], str]],
 ) -> dict[str, tuple[int, bool, str, bool]]:
-    """(branch, path) -> (unpushed_count, ok, age, has_remote), via the packaged port of
-    ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh). The port
-    exists so this module never shells out to a clone-only script: an
-    installed wheel carries no ``scripts/`` tree. The remote-refs refresh is
-    verified once per process (module flags below), the same one-fetch-per-
-    sweep contract the exported bash cache gave."""
+    """(branch, path) -> (unpushed_count, ok, age, has_remote), via the packaged
+    port of ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh). The
+    port exists so this module never shells out to a clone-only script: an
+    installed wheel carries no ``scripts/`` tree. Remote refs refresh is
+    verified once per process (flags below)."""
     if not worktrees:
         return {}
     results: dict[str, tuple[int, bool, str, bool]] = {}
@@ -192,12 +191,10 @@ def _unpushed_batch(
             capture_output=True,
             text=True,
         )
-        remote = False
-        if branch:
-            remote = subprocess.run(
-                ["git", "-C", p, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
-                capture_output=True,
-            ).returncode == 0
+        remote = bool(branch) and subprocess.run(
+            ["git", "-C", p, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
+            capture_output=True,
+        ).returncode == 0
         results[p] = (count, ok, age_p.stdout.strip() or "unknown", remote)
     return results
 
