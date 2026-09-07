@@ -80,6 +80,31 @@ def test_classify_seven_classes(overrides, expected):
     assert row.klass == expected
 
 
+def test_classify_exposes_provenance_facts():
+    """The board needs the raw signals, not just the folded klass: has_remote,
+    pr_number and live are all computed inputs, so classify() exposes them on
+    facts for the cache writer instead of making a second caller re-derive
+    them. Exposing them changes no decision - klass still folds the same."""
+    row = classify(
+        **_base_kwargs(
+            node_entry={"status": "ready", "pr_number": 42},
+            registry_status="busy",
+            has_remote=True,
+        )
+    )
+    assert row.klass == LIVE  # unchanged precedence; exposure is informational
+    assert row.facts["has_remote"] is True
+    assert row.facts["pr_number"] == 42
+    assert row.facts["live"] is True
+
+
+def test_classify_provenance_facts_default_false_and_none():
+    row = classify(**_base_kwargs())
+    assert row.facts["has_remote"] is False
+    assert row.facts["pr_number"] is None
+    assert row.facts["live"] is False
+
+
 def test_live_outranks_pr_open():
     """The epic king's correction: a live-fleet row must win even when the
     same node also carries an open PR, or a minutes-old branch could get
@@ -365,7 +390,7 @@ def test_remote_branch_at_older_sha_still_reads_unpushed(tmp_path):
 
     work = tmp_path / "work"
     work.mkdir()
-    _git(work, "init", "-q")
+    _git(work, "init", "-q", "-b", "feature/x-ab12")
     _git(work, "config", "user.email", "t@t.co")
     _git(work, "config", "user.name", "t")
     _git(work, "remote", "add", "origin", str(remote))
@@ -379,11 +404,32 @@ def test_remote_branch_at_older_sha_still_reads_unpushed(tmp_path):
     _git(work, "add", "f.txt")
     _git(work, "commit", "-q", "-m", "second, never pushed")
 
-    counts = _unpushed_batch([str(work)])
-    count, ok, age = counts[str(work)]
+    counts = _unpushed_batch([("feature/x-ab12", str(work))])
+    count, ok, age, has_remote = counts[str(work)]
     assert ok is True
     assert count > 0
     assert age != ""
+    assert has_remote is True
+
+
+def test_unpushed_batch_no_remote_reads_false(tmp_path):
+    """The strongest provenance signal: a branch with no origin/<branch> at
+    all. The unpushed count cannot distinguish 'caught up' from 'nowhere to
+    push'; has_remote can, so it must read False here without disturbing the
+    count the classifier consumes."""
+    work = tmp_path / "never-pushed"
+    work.mkdir()
+    _git(work, "init", "-q", "-b", "feature/x-norem")
+    _git(work, "config", "user.email", "t@t.co")
+    _git(work, "config", "user.name", "t")
+    (work / "f.txt").write_text("one\n")
+    _git(work, "add", "f.txt")
+    _git(work, "commit", "-q", "-m", "unpushed, no remote")
+
+    count, ok, _age, has_remote = _unpushed_batch([("feature/x-norem", str(work))])[str(work)]
+    assert ok is True
+    assert count == 1
+    assert has_remote is False
 
 
 def test_worktree_stranded_never_imports_resolve_repo_root():
@@ -418,10 +464,11 @@ def test_unpushed_batch_ignores_cwd(tmp_path, monkeypatch):
     decoy.mkdir()
     monkeypatch.chdir(decoy)
 
-    counts = _unpushed_batch([str(work)])
-    count, ok, _age = counts[str(work)]
+    counts = _unpushed_batch([("feature/x-abcd", str(work))])
+    count, ok, _age, has_remote = counts[str(work)]
     assert ok is True
     assert count > 0
+    assert has_remote is False
 
 
 def test_unpushed_batch_missing_path_reads_unverifiable(tmp_path):
@@ -435,8 +482,8 @@ def test_unpushed_batch_missing_path_reads_unverifiable(tmp_path):
     classify()'s fail-open gate."""
     ghost = tmp_path / "does-not-exist"
 
-    counts = _unpushed_batch([str(ghost)])
-    count, ok, _age = counts[str(ghost)]
+    counts = _unpushed_batch([(None, str(ghost))])
+    count, ok, _age, _has_remote = counts[str(ghost)]
     assert ok is False
     assert count == 1
 

@@ -49,10 +49,10 @@ if ( cd "$EMPTY_CWD"
      env -u FNO_REPO_ROOT -u CLAUDE_PLUGIN_ROOT \
        "$TMPDIR_INSTALL/venv/bin/python" -I -c \
        "from fno.worktree_stranded import _unpushed_batch
-r = _unpushed_batch(['/nonexistent-ghost-path'])
+r = _unpushed_batch([(None, '/nonexistent-ghost-path')])
 assert isinstance(r, dict)
 if '/nonexistent-ghost-path' in r:
-    count, ok, _age = r['/nonexistent-ghost-path']
+    count, ok, _age, _has_remote = r['/nonexistent-ghost-path']
     assert ok is False and count == 1" ); then
   rm -rf "$EMPTY_CWD"
   echo "PASS: installed wheel unpushed leg degrades without raising"
