@@ -5427,7 +5427,7 @@ def _aliased_layers(
     (``_warn_legacy_once``), so the only thing a cache would buy is one
     redundant file walk per consumer - and caching by path would serve a stale
     parse to a test (or tool) that rewrites a config file mid-process, exactly
-    the freshness load_settings' own cache_clear contract promises."""
+    the staleness load_settings' keyed cache shows a same-key rewrite."""
     layers: list[tuple[Path, dict[str, object]]] = []
     for candidate in candidates:
         if candidate.is_file():

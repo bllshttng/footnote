@@ -235,7 +235,8 @@ def read_global_block(
     reader shares ONE parse per mutation. Caveat: on a filesystem with
     coarse mtime granularity, a same-size rewrite inside one tick can serve
     the previous parse until the next size-changing write - bounded
-    staleness, strictly fresher than load_settings' process-lifetime cache.
+    staleness, strictly fresher than load_settings' declaration-keyed cache,
+    which a same-key rewrite never sees without an explicit clear.
     Returns ``None`` when no global file defines the block or the block is
     not a table (the caller's absent-block path). A caller that must warn on
     degradation (the render targets) passes ``unreadable`` and receives every

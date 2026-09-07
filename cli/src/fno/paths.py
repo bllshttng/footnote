@@ -221,10 +221,10 @@ def resolve_canonical_repo_root() -> Path:
     fallback (also covers bare / separate-git-dir layouts the helper returns
     ``None`` for).
 
-    Uncached on purpose: it is called once per process from inside the
-    ``lru_cache``-d :func:`fno.config.load_settings`, so caching buys
-    nothing, and staying uncached keeps test isolation simple (no extra
-    ``cache_clear`` plumbing) and honors mid-process ``FNO_REPO_ROOT`` changes.
+    Uncached on purpose: :func:`fno.config.load_settings` is an uncached
+    wrapper over a declaration-keyed cache, so caching here buys nothing,
+    and staying uncached keeps test isolation simple and honors
+    mid-process ``FNO_REPO_ROOT`` changes.
     """
     env_root = os.environ.get("FNO_REPO_ROOT")
     if env_root:
