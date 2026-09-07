@@ -116,8 +116,7 @@ _WT_PIDS_DIAG=""
 # Row counts the last _wt_pids decision read from each snapshot, plus the
 # diagnostic-format version the protected line stamps. A verdict that
 # contradicts these counters means an older script ran.
-_WT_PIDS_PS_ROWS=""
-_WT_PIDS_DIAG_VERSION=5
+_WT_PIDS_DIAG_VERSION=6
 
 _wt_refresh_cwd_snapshot() {
     local raw=""
@@ -159,7 +158,6 @@ _wt_pids() {
     # would surface as the function's status even though the pids printed fine.
     candidates="$(printf '%s\n%s\n' "$pids" "$pids_f" | grep -v "^$$\$" | grep -v '^$' | sort -u || true)"
     if [[ -z "$candidates" ]]; then
-        _WT_PIDS_PS_ROWS=""
         _WT_PIDS_DIAG=""
         return "$snapshot_rc"
     fi
@@ -206,7 +204,6 @@ _wt_pids() {
     # every candidate is kept fail-closed and the diagnostic records the ps
     # exit status plus any cwd sighting, readable from the protection line.
     ps_rows="$(awk -v m="__FNO_PS_SNAPSHOT_COMPLETE__" '$0 == m { exit } NF { c++ } END { print c + 0 }' <<< "$ps_snap")"
-    _WT_PIDS_PS_ROWS="$ps_rows"
     local filtered2="" pid_keep cwd_row kept_info kp kcmd kcwd
     _WT_PIDS_DIAG=""
     if [[ "$ps_rows" -eq 0 ]]; then
@@ -217,7 +214,7 @@ _wt_pids() {
                 | awk -F '\t' -v want="$pid_keep" '$1 == want { print $2; exit }')"
             _WT_PIDS_DIAG="${_WT_PIDS_DIAG}${pid_keep}:no-ps@${cwd_row:-no-cwd-row},"
         done <<< "$filtered"
-        _WT_PIDS_DIAG="ps-rc=${ps_rc} ${_WT_PIDS_DIAG%,}"
+        _WT_PIDS_DIAG="ps-rc=${ps_rc} rows=0 ${_WT_PIDS_DIAG%,}"
         printf '%s\n' "$filtered2"
         return "$snapshot_rc"
     fi
@@ -291,6 +288,9 @@ _wt_pids() {
         filtered2="${filtered2}${kp}"$'\n'
         _WT_PIDS_DIAG="${_WT_PIDS_DIAG}${kp}:${kcmd:0:60}@${kcwd:0:60},"
     done <<< "$kept_info"
+    # The row count rides inside the diagnostic: _wt_pids normally runs in a
+    # command substitution, and globals it sets die with that subshell.
+    _WT_PIDS_DIAG="ps-rows=${ps_rows} ${_WT_PIDS_DIAG%,}"
     printf '%s\n' "$filtered2"
     return "$snapshot_rc"
 }
@@ -671,13 +671,15 @@ _cargo_target_cleanup() {
 _cargo_target_offload() {
     local apply="${1:-}"
     local base repo main_wt wt target crate tree dest bytes resolved
-    local protection pids pids_rc
+    local protection pids pids_rc diag_file
     local moved=0 moved_bytes=0 kept=0 already=0 mode
     base="$(_cargo_offload_base)"
     main_wt="$(git worktree list --porcelain 2>/dev/null | awk 'NR==1{sub(/^worktree /, ""); print}')"
     repo="$(basename "${main_wt:-$(pwd)}")"
     mode="dry-run"
     [[ -n "$apply" ]] && mode="apply"
+    diag_file="${TMPDIR:-/tmp}/fno-wt-pids-diag.$$"
+    : > "$diag_file" || diag_file="/dev/null"
     _wt_refresh_cwd_snapshot || true
     while IFS= read -r wt; do
         [[ -d "$wt" ]] || continue
@@ -689,8 +691,15 @@ _cargo_target_offload() {
         if _wt_live "$wt"; then
             protection="live-session"
         else
-            pids="$(_wt_pids "$wt")"
+            # _wt_pids runs inside a command substitution: globals it sets
+            # die with the subshell (CI 2026-09-07: the protection line kept
+            # printing an empty pid list). Its diagnostic rides stderr to a
+            # file the parent reads back with the `read` builtin.
+            : > "$diag_file"
+            pids="$(_wt_pids "$wt" 2>"$diag_file")"
             pids_rc=$?
+            _WT_PIDS_DIAG=""
+            IFS= read -r _WT_PIDS_DIAG < "$diag_file" || true
             if [[ "$pids_rc" -ne 0 ]]; then
                 protection="process-snapshot-unreadable"
             elif [[ -n "$pids" ]]; then
@@ -726,9 +735,9 @@ _cargo_target_offload() {
                 # `ps -p` re-read reports the empty command of a process
                 # that died in between and names nothing.
                 pid_diag="${_WT_PIDS_DIAG%,}"
-                printf 'cargo-offload protected bytes=%s reason=%s path=%s v=%s ps_rows=%s cwd_rows=%s pids=%s\n' \
+                printf 'cargo-offload protected bytes=%s reason=%s path=%s v=%s cwd_rows=%s pids=%s\n' \
                     "$bytes" "$protection" "$target" "$_WT_PIDS_DIAG_VERSION" \
-                    "${_WT_PIDS_PS_ROWS:-?}" "${_WT_CWD_ROWS:-?}" "${pid_diag%,}"
+                    "${_WT_CWD_ROWS:-?}" "${pid_diag%,}"
                 kept=$((kept + 1))
                 continue
             fi
@@ -769,6 +778,7 @@ _cargo_target_offload() {
     done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
     printf 'cargo-offload status=ok mode=%s base=%s moved=%s moved_bytes=%s already-offloaded=%s kept=%s\n' \
         "$mode" "$base" "$moved" "$moved_bytes" "$already" "$kept"
+    [[ "$diag_file" == "/dev/null" ]] || rm -f "$diag_file"
 }
 
 # One sweep at a time, shared by cleanup and cargo-offload. Caller sets
