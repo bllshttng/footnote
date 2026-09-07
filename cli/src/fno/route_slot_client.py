@@ -44,8 +44,7 @@ def _route_slot_call(payload: dict[str, Any]) -> dict[str, Any]:
         raise RouteSlotUnavailable(f"fno-agents route-slot failed: {exc}") from exc
     if proc.returncode != 0:
         raise RouteSlotUnavailable(
-            f"fno-agents route-slot exited {proc.returncode}: {proc.stderr.strip()[:200]}"
-        )
+            f"fno-agents route-slot exited {proc.returncode}: {proc.stderr.strip()[:200]}")
     try:
         return json.loads(proc.stdout)
     except ValueError as exc:

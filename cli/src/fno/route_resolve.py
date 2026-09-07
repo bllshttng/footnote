@@ -281,10 +281,8 @@ def resolve_slot(
     explicit_lane: bool = False,
 ) -> tuple[Optional[dict[str, Any]], list[str]]:
     """Which lane does this dispatch ride right now: the ONE slot resolver.
-
-    Selection is Rust (``fno-agents route-slot``): lanes walked in declared
-    order, or the grid when no lanes. Chain strings come back verbatim; a
-    missing or failing binary is a named refusal, never a silent spawn."""
+    Selection is Rust (``fno-agents route-slot``); chain strings come back
+    verbatim, and a missing or failing binary is a named refusal."""
     import os
 
     settings, profile, lanes = _slot_entry(settings, verb)
@@ -507,17 +505,6 @@ def _slot_payload(
     return payload
 
 
-def _verb_profile(settings: object, verb: Optional[str]) -> Optional[object]:
-    """The verb's profile block, or None; never raises."""
-    if not verb or settings is None:
-        return None
-    try:
-        profiles = getattr(getattr(settings, "agents", None), "profiles", None) or {}
-        return profiles.get(verb)
-    except Exception:  # noqa: BLE001
-        return None
-
-
 def _slot_entry(
     settings: object, verb: Optional[str]
 ) -> tuple[object, Optional[object], Any]:
@@ -529,7 +516,13 @@ def _slot_entry(
             settings = load_settings()
         except Exception:  # noqa: BLE001 - an unreadable config reads as absent
             settings = None
-    profile = _verb_profile(settings, verb)
+    profile = None
+    if verb and settings is not None:
+        try:
+            profiles = getattr(getattr(settings, "agents", None), "profiles", None) or {}
+            profile = profiles.get(verb)
+        except Exception:  # noqa: BLE001
+            profile = None
     lanes = getattr(profile, "lanes", None) if profile is not None else None
     return settings, profile, lanes
 
@@ -541,9 +534,9 @@ def slot_states(
     inventory: Optional[Inventory] = None,
     settings: object = None,
 ) -> dict[str, Any]:
-    """Readout of one verb's slot: lanes with live capacity, identity and
-    source per lane, the terminal policy, and the lane a spawn would take
-    right now. Display, never selection; callers label it a preview."""
+    """Readout of one verb's slot: lanes with live capacity and identity,
+    the policy lines, and the lane a spawn would take right now - the verb's
+    own answer. Display, never selection."""
     settings, _profile, lanes = _slot_entry(settings, verb)
     if inventory is None:
         inventory = resolve_inventory(settings=settings)
