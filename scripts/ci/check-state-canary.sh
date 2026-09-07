@@ -62,10 +62,12 @@ require_python() {
   exit 2
 }
 
-# Walk both roots and print "<sha256>  <path>", sorted. followlinks is on: a
-# worktree's .fno entries are symlinks into canonical state, which is where a
-# worktree session's writes actually land. Without it those files are invisible
-# and the checkout root reads as empty.
+# Walk both roots and print "<sha256>  <path>", sorted. Symlinks are NOT
+# followed. setup-worktree.sh retired the fno state links, so a worktree's .fno
+# holds plain files and following finds nothing new. It also costs. On one dev
+# box following raised the population from 74,515 files to 180,362. The links
+# under ~/.fno/worktrees reach the vault and the canonical checkout, and every
+# file found is hashed, twice per run.
 snapshot_now() {
   require_python
   python3 - "$HOME/.fno" "$ROOT/.fno" "$SNAPSHOT" <<'PY'
@@ -86,7 +88,7 @@ rows, seen, excluded = [], set(), 0
 for root in roots:
     if not os.path.isdir(root):
         continue
-    for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
+    for dirpath, _dirnames, filenames in os.walk(root):
         for name in filenames:
             path = os.path.join(dirpath, name)
             real = os.path.realpath(path)
@@ -146,18 +148,35 @@ cmd_plant() {
     report "could not create the watched roots"
     return 2
   fi
+  # Only when the file is ABSENT, which is the CI runner. An existing
+  # graph.json is the operator's file even with an empty entries list. It
+  # carries their real schema_version, and plant does not restore what it
+  # overwrites. The guard above only skips a graph that HAS entries. Write
+  # nothing and the walk still watches the file for a change.
   # entries is empty on purpose: a re-plant must not read its own marker as a
   # live operator root.
-  printf '%s\n' '{"schema_version": 1, "entries": [], "canary": "fno-state-canary"}' \
-    >"$home_fno/graph.json"
+  if [[ ! -e "$home_fno/graph.json" ]]; then
+    printf '%s\n' '{"schema_version": 1, "entries": [], "canary": "fno-state-canary"}' \
+      >"$home_fno/graph.json"
+  fi
   printf 'fno-state-canary\n' >"$home_fno/.canary"
   printf 'fno-state-canary\n' >"$ROOT/.fno/.canary"
+  local snap_rc n
   {
     printf 'PLANTED\n'
     snapshot_now
   } >"$SNAPSHOT"
-  local n
+  snap_rc=$?
   n=$(($(wc -l <"$SNAPSHOT") - 2))
+  # plant just wrote a .canary under each root, so under two rows means the
+  # walk died. Drop the snapshot rather than keep a short one. verify refuses
+  # on a missing snapshot. A short one would report every real file as ADDED,
+  # blaming the test run for the instrument's own failure.
+  if ((snap_rc != 0 || n < 2)); then
+    report "plant could not snapshot the watched roots (exit $snap_rc, $n row(s))"
+    rm -f "$SNAPSHOT"
+    return 2
+  fi
   echo "state-canary: planted, $n file(s) snapshotted"
 }
 
