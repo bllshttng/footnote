@@ -765,17 +765,14 @@ def _report_deprecated_active_backlog_mission() -> None:
         parsed, ok = _load_raw(candidate)
         if not ok:
             continue
-        scope = None
-        if isinstance(parsed.get("active_backlog"), dict):
-            scope = parsed
-        else:
+        block = parsed.get("active_backlog")
+        if not isinstance(block, dict):
             wrapped = parsed.get("config")
-            if isinstance(wrapped, dict) and isinstance(wrapped.get("active_backlog"), dict):
-                scope = wrapped
-        if scope is None:
+            block = wrapped.get("active_backlog") if isinstance(wrapped, dict) else None
+        if not isinstance(block, dict):
             continue
-        mission = (scope["active_backlog"].get("mission") or "").strip()
-        if not mission:
+        mission = block.get("mission")
+        if not isinstance(mission, str) or not mission.strip():
             continue
         scope_flag = "" if candidate.parent == global_dir else " --local"
         typer.echo(
