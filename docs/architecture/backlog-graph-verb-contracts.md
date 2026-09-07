@@ -815,3 +815,25 @@ Classify one ready node for lane-fill. ``None`` = selectable, else a typed
         a stated verdict rather than a swallowed error precisely so it cannot
         reach the frontier looking like a clean comparison. Carries the same
         ``+same-domain:<domain>`` annotation when the domain is held.
+
+## _strandable_epic_ids
+
+Open epics (parents) whose children are ALL done - closeable right now.
+
+Read-only. The cascade (_cascade_close_parents) only fires on a child-CLOSE
+event, so an epic whose children were all completed BEFORE this code shipped
+(or whose last child closed via a path that did not cascade) is stranded:
+open, all children done, and - now that containers are hidden from
+next/ready - unreachable for closure. This identifies them so reconcile can
+self-heal.
+
+## _sweep_close_done_epics
+
+Close every open epic whose children are all done (self-heal/migration).
+
+Idempotent, mutating, run inside a close mutator. Repeats to a fixpoint so a
+freshly-closed epic heals ITS parent too (grandparent chains). Returns the
+ids it closed so the caller can auto-continue their dependents. Reconcile
+runs this so pre-existing stranded all-done epics heal on the next reconcile
+pass - going forward the cascade prevents new ones, so this is a no-op once
+migrated.
