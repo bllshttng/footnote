@@ -770,6 +770,7 @@ def build_lane_fill_report(
     excluded: list[dict] = []
     selected: list[dict] = []
     for child in ready:
+        reason: Optional[str]
         proj = child.get("project")
         if not proj:
             reason = "no-project"
