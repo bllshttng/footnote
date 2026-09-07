@@ -322,13 +322,15 @@ CONVERSATION_ID=$(printf '%s' "$HOOK_INPUT" | jq -r '.conversationId // empty' 2
 TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | jq -r '.transcriptPath // empty' 2>/dev/null || true)
 
 # ── 4. Synthesize a claude-shaped transcript loop-check can read ───────────────
-# loop-check's scan filters lines on role=="assistant" (from /message/role OR
-# top-level role) and reads text from /message/content (string | text-block array)
-# OR top-level content. agy's transcript.jsonl uses Gemini-family conventions
-# (likely role:"model" + parts:[{text}]), which that scan would skip. Normalize the
-# realistic shapes to the line loop-check reads: {"message":{"role":"assistant",
-# "content":"<text>"}}. fromjson? skips a malformed line individually (the scan is
-# newest-first, so losing an early bad line is harmless).
+# loop-check reads transcripts through the shared Python reader (fno agents
+# newest-assistant-text), whose claude arm filters lines on type in
+# (user, assistant) and reads text from /message/content (string | block
+# array). agy's transcript.jsonl uses Gemini-family conventions (likely
+# role:"model" + parts:[{text}]), which that arm would skip. Normalize the
+# realistic shapes to the line the reader accepts: {"type":"assistant",
+# "message":{"role":"assistant","content":"<text>"}}. fromjson? skips a
+# malformed line individually (the scan is newest-first, so losing an early
+# bad line is harmless).
 #
 # ponytail: agy's exact transcript.jsonl line schema is unconfirmed at build time
 # (deferred capture, dated 2026-07-11) -- this filter handles the documented-
@@ -349,7 +351,7 @@ synthesize_transcript() {
             end
           ) as $t
         | select(($t | type) == "string" and ($t | length) > 0)
-        | {message: {role: "assistant", content: $t}}
+        | {type: "assistant", message: {role: "assistant", content: $t}}
     ' "$1" 2>/dev/null
 }
 
