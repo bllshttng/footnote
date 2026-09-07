@@ -517,6 +517,24 @@ def test_newest_assistant_text_reads_the_newest_entry_only(tmp_path):
     assert newest_assistant_text(path) == "still working"
 
 
+def test_newest_assistant_text_reads_the_agy_shim_synthesis(tmp_path):
+    """The agy stop hook normalizes Gemini-family lines to exactly this shape
+    before loop-check reads them (hooks/agy-target-stop-hook.sh); the reader
+    must accept the shim's dialect, not only a real claude transcript's."""
+    synth = tmp_path / "synth.jsonl"
+    synth.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": '<help reason="agy-blocked">no source edits occurred</help>'},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert 'reason="agy-blocked"' in newest_assistant_text(synth)
+
+
 def test_newest_assistant_text_none_without_an_assistant_turn(tmp_path):
     """User-only, empty, and absent files all read as no answer (None), which
     the caller treats as fail-quiet."""
