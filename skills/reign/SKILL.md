@@ -85,7 +85,7 @@ Read `fno inbox board --json`, `fno agents court --json`, `fno agents status --j
 - the oldest worker last-seen stamp
 - crown liveness including `split`
 
-Then the levers, in this order, stopping at the first that applies per row: mail the stalled worker; `fno backlog rank <node> --top` so the drain dispatches it next tick; `fno backlog undefer` or `supersede` when the row is the problem; `fno inbox outstanding ask` when a lever needs the operator.
+Then the levers, in this order, stopping at the first that applies per row: mail the stalled worker; `fno backlog rank <node> --top` so the drain takes the node first, then put the node inside an active mission scope, because rank alone never dispatches and a crown is not a mission; `fno backlog undefer` or `supersede` when the row is the problem; `fno inbox outstanding ask` when a lever needs the operator.
 
 Journal `reign_checkin`. If nothing changed since the last check-in, print `no change` and stop.
 

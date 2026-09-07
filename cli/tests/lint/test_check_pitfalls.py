@@ -12,6 +12,7 @@ graph fails loud, and an absent graph is the legitimate skip. Fixture runs pin
 a test.
 """
 import os
+import shutil
 import subprocess
 from datetime import date, timedelta
 from pathlib import Path
@@ -360,3 +361,99 @@ def test_git_first_appearance_decides_staleness(tmp_path: Path) -> None:
     assert "note: entry 'Old trap'" in r.stderr
     assert "the git date decides staleness" in r.stderr
     assert "over the 60-day limit" not in r.stderr
+
+
+def test_a_shallow_clone_keeps_the_prose_date(tmp_path: Path) -> None:
+    # CI checks out one commit, so every title reads as first appearing in it
+    # and the git date is always today. Trusting it there makes the 60-day
+    # test inert: a stale entry passes. A shallow clone is no history, which
+    # the gate already answers by keeping the prose date.
+    origin = tmp_path / "origin"
+    lint = _transplant(origin, None)
+    path = origin / "agents.md"
+    path.write_text(
+        f"# AGENTS\n\n{SECTION}\n\nrationale.\n\n### Old trap\n\ntrap.\n\n"
+        f"- graduates-to: a lint\n- added: {STALE}\n\n{NEXT_HEADING}\n",
+        encoding="utf-8",
+    )
+    for args in (
+        ["git", "init", str(origin)],
+        ["git", "-C", str(origin), "add", "-A"],
+        [
+            "git",
+            "-C",
+            str(origin),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "corpus",
+        ],
+        ["git", "clone", "--depth", "1", f"file://{origin}", str(tmp_path / "clone")],
+    ):
+        step = subprocess.run(args, capture_output=True, text=True)
+        assert step.returncode == 0, step.stderr
+
+    clone = tmp_path / "clone"
+    assert _run(path, lint=lint).returncode == 0, "the deep original still passes"
+    r = _run(clone / "agents.md", lint=clone / "scripts" / "ci" / LINT.name)
+    assert r.returncode == 1
+    assert "over the 60-day limit" in r.stderr
+    assert "the git date decides staleness" not in r.stderr
+
+
+def test_an_unanswerable_shallow_probe_keeps_the_prose_date(tmp_path: Path) -> None:
+    # git older than 2.15 has no --is-shallow-repository, and the probe can
+    # fail for other reasons. An empty answer is not "deep": trusting it there
+    # restores the collapsed-date bug the guard exists to close.
+    origin = tmp_path / "origin"
+    lint = _transplant(origin, None)
+    path = origin / "agents.md"
+    path.write_text(
+        f"# AGENTS\n\n{SECTION}\n\nrationale.\n\n### Old trap\n\ntrap.\n\n"
+        f"- graduates-to: a lint\n- added: {STALE}\n\n{NEXT_HEADING}\n",
+        encoding="utf-8",
+    )
+    for args in (
+        ["git", "init", str(origin)],
+        ["git", "-C", str(origin), "add", "-A"],
+        [
+            "git",
+            "-C",
+            str(origin),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "corpus",
+        ],
+    ):
+        step = subprocess.run(args, capture_output=True, text=True)
+        assert step.returncode == 0, step.stderr
+
+    # A deep clone whose depth probe fails: every other git call still works.
+    real_git = shutil.which("git")
+    assert real_git
+    stub_dir = tmp_path / "stub"
+    stub_dir.mkdir()
+    stub = stub_dir / "git"
+    stub.write_text(
+        '#!/bin/sh\nfor a in "$@"; do\n'
+        '  [ "$a" = "--is-shallow-repository" ] && exit 128\n'
+        f'done\nexec {real_git} "$@"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+    r = _run(
+        path,
+        lint=lint,
+        env_extra={"PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}"},
+    )
+    assert r.returncode == 1
+    assert "over the 60-day limit" in r.stderr
+    assert "the git date decides staleness" not in r.stderr
