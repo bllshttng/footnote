@@ -1426,6 +1426,27 @@ def _spawn_worker(
     # reach the resolver too, or the command follows the stage table instead.
     launch_axis = _launch_harness_axis(launch, node_cwd)
     node_verb = (verb or "").strip() or None
+    # x-0961: "declared nothing" and "declaration eaten by a lossy feed" used
+    # to produce a byte-identical dispatch. The `verb` param collapses both to
+    # None; only the node dict carries the difference, so the receipt names it.
+    # A dict without the key at all can only come from a projection that
+    # dropped it - the exact silent loss this names out loud. Canonicalized
+    # the same way the resolver's allowlist rung does, so receipt and command
+    # agree on the spelling.
+    if isinstance(node, dict) and "dispatch_verb" in node:
+        verb_source = "declared" if node_verb else "none-declared"
+    else:
+        verb_source = "field-absent"
+        print(
+            f"advance: WARNING: dispatching {node_id} without knowing whether it "
+            f"declared a verb: the node dict {caller} passed carries no "
+            "dispatch_verb key. The selection projection feeding this dispatcher "
+            "is lossy (x-0961); fix the projection, not the node.",
+            file=sys.stderr,
+        )
+    receipt_verb = node_verb or "builtin"
+    if receipt_verb.startswith("/fno:"):
+        receipt_verb = "/" + receipt_verb[len("/fno:"):]
     resolve_kwargs: dict = {
         "harness": ((harness or "").strip() or launch_axis or None),
         "node_id": node_id,
@@ -1584,6 +1605,8 @@ def _spawn_worker(
             "account": dispatch_account or "",
             "substrate": substrate,
             "command": target_cmd,
+            "verb": receipt_verb,
+            "verb_source": verb_source,
             "cwd": node_cwd or "",
             "caller": caller,
             "grid": grid_why or "",
@@ -1596,7 +1619,13 @@ def _spawn_worker(
         # row and the receipt cannot disagree (the row has no harness-
         # independent form; prov is what it records).
         receipt.update(
-            {"short_id": launch_identity, "substrate": substrate, "harness": prov}
+            {
+                "short_id": launch_identity,
+                "substrate": substrate,
+                "harness": prov,
+                "verb": receipt_verb,
+                "verb_source": verb_source,
+            }
         )
     return launch_identity
 
@@ -2056,6 +2085,7 @@ def dispatch_lanes(
                     worktree, node_id, _base_project_id(root)
                 )
             _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
+            lane_receipt: dict = {}
             short_id = _spawn_worker(
                 node_id,
                 str(worktree),
@@ -2072,6 +2102,7 @@ def dispatch_lanes(
                 node=node,
                 caller="dispatch_lanes",
                 events_path=ev_path,
+                receipt=lane_receipt,
                 # The door resolved the grid, so the seam's own consult never
                 # runs and the reason field would be blank on the busiest door.
                 grid_reason=lane_grid_why,
@@ -2094,6 +2125,8 @@ def dispatch_lanes(
                 "agent_name": _worker_agent_name(node_id, slug),
                 "lane": True,
                 "worktree": str(worktree),
+                "verb": lane_receipt.get("verb", "builtin"),
+                "verb_source": lane_receipt.get("verb_source", "field-absent"),
                 "brief": _brief_tag,
             },
             ev_path,
@@ -3392,6 +3425,7 @@ def advance(
         else:
             eff_provider = provider if provider is not None else node.get("provider")
         _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
+        next_receipt: dict = {}
         short_id = _spawn_worker(
             node_id,
             node_cwd,
@@ -3407,6 +3441,7 @@ def advance(
             brief=_brief,
             caller="advance",
             events_path=ev_path,
+            receipt=next_receipt,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -3441,6 +3476,8 @@ def advance(
             "node_id": node_id,
             "short_id": short_id,
             "agent_name": _worker_agent_name(node_id, node.get("slug") or node.get("title")),
+            "verb": next_receipt.get("verb", "builtin"),
+            "verb_source": next_receipt.get("verb_source", "field-absent"),
             "brief": _brief_tag,
             "rank": rank,
             **({"closed_node_id": closed_node_id} if closed_node_id else {}),
@@ -3449,7 +3486,10 @@ def advance(
     )
     if verbose:
         print(
-            f"advance: dispatched {node_id} -> target worker {short_id} (brief={_brief_tag})",
+            f"advance: dispatched {node_id} -> target worker {short_id} "
+            f"(verb={next_receipt.get('verb', 'builtin')} "
+            f"source={next_receipt.get('verb_source', 'field-absent')} "
+            f"brief={_brief_tag})",
             file=sys.stderr,
         )
     _tick(1, None, f"node={node_id} worker={short_id}")
@@ -3746,6 +3786,8 @@ def _converge_one(
                 "short_id": short_id,
                 "agent_name": _worker_agent_name(node_id, slug),
                 "cross_project": cross_project,
+                "verb": spawn_receipt.get("verb", "builtin"),
+                "verb_source": spawn_receipt.get("verb_source", "field-absent"),
                 "brief": _brief_tag,
             }
         ),
@@ -3756,7 +3798,10 @@ def _converge_one(
         _kind = "cross-project" if cross_project else "same-project"
         print(
             f"advance: dispatched {_scope}{_kind} {node_id} -> "
-            f"target worker {short_id} (--cwd {root}) (brief={_brief_tag})",
+            f"target worker {short_id} (--cwd {root}) "
+            f"(verb={spawn_receipt.get('verb', 'builtin')} "
+            f"source={spawn_receipt.get('verb_source', 'field-absent')} "
+            f"brief={_brief_tag})",
             file=sys.stderr,
         )
     return AdvanceResult(

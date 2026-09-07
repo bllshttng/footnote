@@ -119,6 +119,15 @@ def _write_graph(graph: Path, *, verb: str | None, brief: str | None, cwd: str) 
     )
 
 
+def _events(p: Path) -> list[dict]:
+    """Envelope rows only: the journal also carries claim-stamp rows (no
+    `type` key) from the graph lock stamp."""
+    if not p.exists():
+        return []
+    rows = [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    return [r for r in rows if isinstance(r, dict) and "type" in r]
+
+
 def _record_spawns(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     """Patch subprocess.run in fno.backlog.advance ONLY.
 
@@ -173,6 +182,10 @@ def test_epic_advance_declared_verb_reaches_spawn_argv(iso, monkeypatch):
     # claude command surface renders it verbatim, {id} substituted.
     assert calls[0]["argv"][-1] == "/blueprint x-BP01", calls[0]["argv"]
     assert calls[0]["env"].get("TARGET_BRIEF") == BRIEF_SENTINEL
+    # AC7-HP: the receipt names the resolved verb and its source.
+    disp = [e for e in _events(iso.events) if e["type"] == "advance_dispatched"]
+    assert disp and disp[0]["data"]["verb"] == "/blueprint"
+    assert disp[0]["data"]["verb_source"] == "declared"
 
 
 def test_epic_advance_undeclared_node_keeps_the_builtin(iso, monkeypatch):
@@ -193,6 +206,39 @@ def test_epic_advance_undeclared_node_keeps_the_builtin(iso, monkeypatch):
     assert res.dispatched == ("x-BP01",)
     assert calls[0]["argv"][-1] == "/target --no-merge x-BP01", calls[0]["argv"]
     assert "TARGET_BRIEF" not in calls[0]["env"]
+    # AC8-HP: a legitimate default is named as one, not left to guesswork.
+    disp = [e for e in _events(iso.events) if e["type"] == "advance_dispatched"]
+    assert disp and disp[0]["data"]["verb"] == "builtin"
+    assert disp[0]["data"]["verb_source"] == "none-declared"
+
+
+def test_field_absent_node_dict_warns_and_names_the_source(iso, monkeypatch, capsys):
+    """AC9-EDGE: a node dict built without a dispatch_verb key at all (the
+    pre-fix projection) dispatches with verb_source=field-absent and a
+    warning on stderr - the tripwire that makes the next lossy projection
+    self-report instead of silently substituting the builtin."""
+    repo = iso.repo()
+    calls = _record_spawns(monkeypatch)
+    # The pre-fix projection's shape, constructed directly: eleven keys, no
+    # dispatch_verb. _converge_one is called directly because every shipped
+    # selection surface now carries the key.
+    node_meta = {
+        "id": "x-BP01",
+        "slug": "bp-declared",
+        "title": "t",
+        "project": "web",
+        "cwd": str(repo),
+    }
+
+    res = adv._converge_one(node_meta, str(repo), iso.events, verbose=False)
+
+    assert calls, "positive control: the spawn instrument ran and recorded"
+    assert res.decision == "dispatched"
+    disp = [e for e in _events(iso.events) if e["type"] == "advance_dispatched"]
+    assert disp and disp[0]["data"]["verb"] == "builtin"
+    assert disp[0]["data"]["verb_source"] == "field-absent"
+    err = capsys.readouterr().err
+    assert "x-BP01" in err and "dispatch_verb" in err, err
 
 
 def test_lane_fill_declared_verb_reaches_spawn_argv(iso, monkeypatch):
