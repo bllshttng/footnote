@@ -67,11 +67,79 @@ def test_band_from_snapshot_percentile_when_row_leaves_it_unset():
     assert inv.rows["weakling"].band == ""  # below every floor: unbanded
 
 
-def test_unbanded_row_is_never_a_grid_candidate():
+def test_unbanded_row_is_a_candidate_at_every_band():
+    """AC1-HP: one unbanded row is the whole inventory and still answers: band
+    is optional, so a single-model fleet is routable with one declared row."""
     inv = _inv([{"name": "mystery", "harness": "claude", "model": "m-1"}])
+    for difficulty in ("low", "high", None):
+        candidate, chain = rr.resolve_grid(difficulty, "p2", {"claude": "ok"}, inventory=inv)
+        assert candidate == {"harness": "claude", "model": "m-1"}, difficulty
+        assert any("band=unbanded" in step for step in chain), difficulty
+
+
+def test_banded_row_that_clears_outranks_an_unbanded_one():
+    """AC1-EDGE: unbanded rows rank AFTER the banded rows that clear, in
+    declared order - they are admitted everywhere, never preferred."""
+    inv = _inv([
+        {"name": "banded", "harness": "claude", "model": "b-1", "band": "low"},
+        {"name": "unbanded", "harness": "claude", "model": "u-1"},
+    ])
     candidate, chain = rr.resolve_grid("low", "p2", {"claude": "ok"}, inventory=inv)
-    assert candidate is None
-    assert chain[-1] == "grid=no-band-candidate"
+    assert candidate["model"] == "b-1"
+    assert not any("band=unbanded" in step for step in chain)
+    # the unbanded row is still the next candidate once the banded one is out
+    # of range: a high floor the low band cannot clear leaves the unbanded row
+    candidate, chain = rr.resolve_grid("high", "p2", {"claude": "ok"}, inventory=inv)
+    assert candidate["model"] == "u-1"
+    assert any("band=unbanded" in step for step in chain)
+
+
+def test_row_naming_no_account_reads_the_harness_aggregate():
+    """AC2-EDGE: an account-less row reads the MAX aggregate exactly as before
+    per-account resolution existed."""
+    inv = _inv([{"name": "any-lane", "harness": "claude", "model": "a-1", "band": "low"}])
+    candidate, chain = rr.resolve_grid(
+        "low", "p2",
+        {"claude": {"state": "ok", "accounts": {"a": "exhausted", "b": "exhausted"}}},
+        inventory=inv,
+    )
+    # the accounts are dead but the aggregate the row reads is ok
+    assert candidate is not None
+    assert any("capacity=ok" in step for step in chain)
+
+
+def test_lane_on_an_exhausted_account_is_skipped_when_a_sibling_account_is_healthy():
+    """AC2-HP: quota locks out at the ACCOUNT, so the row pinned to the dead
+    account skips and the sibling on the healthy account wins."""
+    inv = _inv([
+        {"name": "row-a", "harness": "claude", "model": "a-1", "band": "low",
+         "account": "a"},
+        {"name": "row-b", "harness": "claude", "model": "b-1", "band": "low",
+         "account": "b"},
+    ])
+    candidate, chain = rr.resolve_grid(
+        "low", "p2",
+        {"claude": {"state": "ok", "accounts": {"a": "exhausted", "b": "ok"}}},
+        inventory=inv,
+    )
+    assert candidate["model"] == "b-1"
+    assert any(
+        "grid skip claude/row-a capacity=exhausted" in step for step in chain
+    )
+
+
+def test_row_account_absent_from_the_snapshot_reads_unknown_and_permits():
+    """An account the capacity snapshot does not name reads unknown, which
+    permits - the same posture the harness-wide unknown already has."""
+    inv = _inv([{"name": "pinned", "harness": "claude", "model": "p-1", "band": "low",
+                 "account": "unlisted"}])
+    candidate, chain = rr.resolve_grid(
+        "low", "p2",
+        {"claude": {"state": "ok", "accounts": {"a": "exhausted"}}},
+        inventory=inv,
+    )
+    assert candidate is not None
+    assert any("capacity=unknown-permitted" in step for step in chain)
 
 
 def test_empty_inventory_records_no_inventory_declared():

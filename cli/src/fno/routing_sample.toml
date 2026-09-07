@@ -29,7 +29,8 @@ harness = "claude"
 # The literal --model value passed to that harness.
 model = "glm-5.3"
 # low | medium | high. Omit to let the optional benchmarks snapshot supply a
-# percentile-derived band; a row with neither is UNBANDED and never a candidate.
+# percentile-derived band; a row with neither is UNBANDED: a candidate at
+# every band, ranking after the banded rows that clear.
 band = "medium"
 # Effort is harness-shaped: declare it beside the harness it belongs to.
 # A harness with no effort surface (agy) omits it and the grid injects nothing.

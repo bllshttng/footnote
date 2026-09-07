@@ -61,13 +61,17 @@ _PLANNING_BAND = "high"
 # Aggregation order for a harness's accounts: MAX over headroom. ok > low >
 # unknown > exhausted. Unknown outranks exhausted because exhaustion is only
 # true when EVERY account says so (M2/t2.1): one silent account never walls a
-# harness another account can still serve.
+# harness another account can still serve. The MAX aggregate is the
+# HARNESS-WIDE answer and is correct for a row that names no account; a row
+# that names an account gets that account's own answer (:func:`row_capacity`).
 _CAPACITY_RANK = {"ok": 3, "available": 3, "low": 2, "unknown": 1, "exhausted": 0, "blocked": 0}
 
 
 @dataclasses.dataclass(frozen=True)
 class InventoryRow:
-    """One resolved inventory row. ``band`` is "" when unbanded."""
+    """One resolved inventory row. ``band`` is "" when unbanded, and an
+    unbanded row is a grid candidate at every band: it ranks after the banded
+    rows that clear, in declared order."""
 
     name: str
     harness: str
@@ -147,8 +151,9 @@ def inventory_from_rows(
     field and the fields it did not name keep the earlier row's value (the
     merge precedent from ``model_routing._DEFAULT_PROVIDERS``). Band
     resolution per row: the row's own ``band``, else a snapshot percentile
-    against ``_BAND_FLOOR``, else unbanded. An unbanded row is never a grid
-    candidate and is named by ``fno doctor route`` when asked for.
+    against ``_BAND_FLOOR``, else unbanded. A row with no band is a candidate
+    at every band; it ranks after the banded rows that clear, and
+    ``fno config route inventory`` labels it ``unbanded``.
     """
     folded: dict[str, dict[str, Any]] = {}
     order: list[str] = []
@@ -364,6 +369,32 @@ def _capacity_state(value: object) -> tuple[str, str]:
     return str(value or "unknown").lower(), ""
 
 
+def row_capacity(
+    row: InventoryRow, capacity: Optional[Mapping[str, object]]
+) -> tuple[str, str]:
+    """(state, window-note) THIS row reads from a runtime capacity snapshot.
+
+    Quota locks out at the ACCOUNT, so a row that names one reads that
+    account's own answer from the detail mapping ``runtime_capacity``
+    produces (``{state, window, accounts: {id: state}}``); an account the
+    snapshot does not name reads ``unknown`` (permitted). A row naming no
+    account reads the harness-wide MAX aggregate, which stays the correct
+    answer for it: the aggregate says whether ANY account on the harness can
+    serve, and an unnamed row spends whichever does.
+    """
+    value = (capacity or {}).get(row.harness, "unknown")
+    if not row.account:
+        return _capacity_state(value)
+    if isinstance(value, Mapping):
+        accounts = value.get("accounts")
+        if isinstance(accounts, Mapping):
+            state = str(accounts.get(row.account) or "unknown").lower()
+            return state, str(value.get("window", "") or "")
+    # No per-account detail behind the row's named account: the honest answer
+    # for THAT account is unknown, never the harness-wide best.
+    return "unknown", ""
+
+
 def resolve_grid(
     difficulty: Optional[str],
     priority: Optional[str],
@@ -453,19 +484,22 @@ def resolve_grid(
     rows = installed
 
     # Tier wins: a row is a candidate when its band meets or exceeds the
-    # requested floor. UNBANDED rows never qualify (no declared band, no
-    # snapshot percentile) and are named when asked for via doctor route. No
-    # degrade below the floor here, unlike resolve_tier: the grid's round-up
-    # ruling would be undone by quietly handing strong work to a weak row, so
-    # an empty tier falls through to the operator's own defaults instead.
+    # requested floor. A row with NO band is a candidate at every band and
+    # ranks after the banded rows that clear, in declared order: the operator
+    # who declares no band declines to rank by strength, so fno does not rank
+    # for them. No degrade below the floor here, unlike resolve_tier: the
+    # grid's round-up ruling would be undone by quietly handing strong work to
+    # a weak row, so an empty tier falls through to the operator's own
+    # defaults instead.
     floor_rank = _BAND_RANK[candidate_band]
     clearing = [r for r in rows if r.rank >= floor_rank and r.harness and r.model]
-    if not clearing:
+    unbanded = [r for r in rows if r.band == "" and r.harness and r.model]
+    if not clearing and not unbanded:
         chain.append("grid=no-band-candidate")
         return None, chain
 
-    for row in _order_candidates(clearing, inv):
-        state, window = _capacity_state((capacity or {}).get(row.harness, "unknown"))
+    for row in _order_candidates(clearing, inv) + unbanded:
+        state, window = row_capacity(row, capacity)
         if state in ("exhausted", "blocked"):
             chain.append(f"grid skip {row.harness}/{row.name} capacity={state}")
             continue
@@ -474,6 +508,7 @@ def resolve_grid(
         chain.append(
             f"grid candidate {row.harness}/{row.name} capacity={state}"
             + (f" window={window}" if window else "")
+            + ("" if row.band else " band=unbanded")
         )
         out = {"harness": row.harness, "model": row.model}
         effort = row.effort

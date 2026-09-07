@@ -315,9 +315,10 @@ def inventory_cmd(
     snapshot-derived percentile, else unbanded) and a reachability verdict:
     ``ok`` (a known harness can invoke it), ``not-installed`` (the named
     harness is not one fno can drive; the row refuses BY NAME on stderr rather
-    than silently vanishing from routing), ``unbanded`` (never a grid
-    candidate), or ``incomplete`` (no --model value). An empty inventory says
-    so: a virgin install routes nothing from the grid.
+    than silently vanishing from routing), ``unbanded`` (a candidate at every
+    band; it ranks after the banded rows that clear), or ``incomplete`` (no
+    --model value). An empty inventory says so: a virgin install routes
+    nothing from the grid.
     """
     from fno.agents.harnesses import READABLE_PROVIDERS
     from fno.route_resolve import resolve_inventory
