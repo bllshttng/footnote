@@ -317,13 +317,9 @@ def inventory_cmd(
     harness is not one fno can drive; the row refuses BY NAME on stderr rather
     than silently vanishing from routing), ``unbanded`` (a candidate at every
     band; it ranks after the banded rows that clear), or ``incomplete`` (no
-    --model value). An empty inventory says so: a virgin install routes
-    nothing from the grid.
-
-    After the rows, a ``slots`` section answers the question an operator
-    actually opens this verb with - what will a dispatch ride right now: each
-    dispatched verb's declared lanes in order with live capacity, its
-    ``on_exhausted`` terminal, and the lane a spawn would take.
+    --model value). An empty inventory says so. After the rows, a ``slots``
+    section names each dispatched verb's lanes with live capacity and the lane
+    a spawn would take right now.
     """
     from fno.agents.harnesses import READABLE_PROVIDERS
     from fno.route_resolve import SLOT_VERBS, resolve_inventory, runtime_capacity, slot_states

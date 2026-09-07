@@ -1,26 +1,15 @@
 """Config-sourced spawn defaults, injected argv-level at the dispatch seam.
 
-Every `fno agents spawn` / `/agent spawn` passes the Python dispatch seam
-(`rust_runtime.make_context`) before the Rust/Python routing fork. Injecting
-`config.agents.defaults` field-by-field on argv HERE covers pane, bg, headless,
-and the Rust route with zero Rust changes (Locked Decision 9).
-
-Precedence per field: explicit CLI flag > `agents.profiles.<verb>` > `agents.
-defaults` > built-in. The profile layer (x-3d5b) is the same block keyed by the
-seed's leading slash-verb, merged over defaults field-wise before injection.
-Fields resolve independently, with ONE exception: the `model` default is provider-
-scoped. A bare scalar `model` with no `provider` is scoped to the harness it was
-written for - the config `provider`, else the builtin default (claude), NOT the
-ambient harness (whose shape the model may not match). A spawn that resolves to a
-DIFFERENT harness (an explicit `-H codex`, OR a codex-ambient session, over a
-claude-shaped `model`) leaves the model to that harness rather than forcing an
-incompatible one. An explicit `-m/--model` always wins. The profile layer
-applies to every spawn carrying a slash-verb seed, including autonomous dispatch
-(`/target`, `/blueprint`): a stage that has not pinned a field inherits it from
-`profiles.<verb>` then `agents.defaults`, so a coordinate set in the stage table
-reaches an autonomous worker. An explicit flag always wins, and a `--role` whose
-lane resolves owns the model, so autonomous dispatch is never rerouted on a field
-it pinned (harness, substrate).
+Every `fno agents spawn` passes this seam before the Rust/Python routing
+fork, so config injection covers pane, bg, headless and the Rust route with
+zero Rust changes (Locked Decision 9). Per field: explicit CLI flag >
+`agents.profiles.<verb>` > `agents.defaults` > built-in; the profile layer
+(x-3d5b) keys on the seed's leading slash-verb and reaches autonomous
+dispatch the same way. The one field-wise exception: a bare scalar `model` is
+scoped to the harness it was written for (the config `provider`, else
+claude), never the ambient harness, and an explicit `-m/--model` always wins.
+A `--role` whose lane resolves owns the model, so a stage table never
+reroutes a field the dispatch pinned.
 """
 from __future__ import annotations
 
@@ -1011,17 +1000,15 @@ def inject_spawn_defaults(
 ) -> List[str]:
     """Return ``args`` with config spawn-defaults injected where absent.
 
-    Fields resolve field-wise from the merged view `agents.profiles.<verb>` (the
-    seed's leading slash-verb, x-3d5b) over `agents.defaults`, so an explicit CLI
-    flag > profile > defaults > built-in. Only acts on a `spawn` verb
-    (``args[0] == "spawn"``). Returns the input unchanged for any other verb, or
-    when the config load fails (a bad config must never brick spawning). Raises
-    ``SystemExit(2)`` on an unknown config provider (AC5-ERR). Config-sourced
-    effort/substrate/permission_mode degrade open on an incompatible resolved
-    provider (warn, skip); an explicit flag stays fail-closed downstream.
-
-    ``apply_permission_builtin`` (default True) gates the ``SPAWN_PERMISSION_BUILTIN``
-    rung (x-7198); off for a probe that never launches (see ``retask.py``).
+    Only acts on a `spawn` verb; returns the input unchanged for any other
+    verb, or when the config load fails (a bad config must never brick
+    spawning). Raises ``SystemExit(2)`` on an unknown config provider
+    (AC5-ERR) and on a malformed slot; exits 78 on an on_exhausted=queue
+    terminal. Config-sourced effort/substrate/permission_mode degrade open on
+    an incompatible resolved provider (warn, skip); an explicit flag stays
+    fail-closed downstream. ``apply_permission_builtin`` (default True) gates
+    the ``SPAWN_PERMISSION_BUILTIN`` rung (x-7198); off for a probe that
+    never launches (see ``retask.py``).
     """
     out = list(args)
     if not out or out[0] != "spawn":

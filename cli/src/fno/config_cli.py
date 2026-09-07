@@ -826,11 +826,9 @@ def _report_deprecated_dispatch_harness() -> None:
 def _report_band_routing() -> None:
     """Say when difficulty bands and verb slots are routing nothing, and why.
 
-    An unarmed slot and an absent one read the same at every dispatch, which
-    is how the grid stayed inert for weeks. The line names BOTH halves: how
-    many rows the inventory declares, and which dispatched verbs have no lane
-    that resolves. Silent only when at least one verb's slot would take a
-    lane. ``model_routing.roles`` is a DIFFERENT axis; having it set reads as
+    The line names BOTH halves - declared row count, verbs with no resolving
+    lane - and is silent only once at least one verb's slot would take a lane.
+    ``model_routing.roles`` is a DIFFERENT axis; having it set reads as
     already on.
     """
     from fno import route_resolve

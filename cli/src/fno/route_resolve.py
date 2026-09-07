@@ -624,13 +624,7 @@ def resolve_slot(
             settings = load_settings()
         except Exception:  # noqa: BLE001 - a config read never breaks a spawn
             settings = None
-    profile = None
-    if verb:
-        try:
-            profiles = getattr(getattr(settings, "agents", None), "profiles", None) or {}
-            profile = profiles.get(verb)
-        except Exception:  # noqa: BLE001
-            profile = None
+    profile = _verb_profile(settings, verb)
     lanes = getattr(profile, "lanes", None) if profile is not None else None
     rung_base = f"agents.profiles.{verb}" if verb else "agents.profiles"
     if not lanes:
@@ -774,6 +768,17 @@ def _max_band(a: str, b: str) -> str:
     return a if _BAND_RANK.get(a, -1) >= _BAND_RANK.get(b, -1) else b
 
 
+def _verb_profile(settings: object, verb: Optional[str]) -> Optional[object]:
+    """The verb's profile block, or None; never raises."""
+    if not verb or settings is None:
+        return None
+    try:
+        profiles = getattr(getattr(settings, "agents", None), "profiles", None) or {}
+        return profiles.get(verb)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def slot_states(
     verb: str,
     capacity: Optional[Mapping[str, object]],
@@ -781,11 +786,10 @@ def slot_states(
     inventory: Optional[Inventory] = None,
     settings: object = None,
 ) -> dict[str, Any]:
-    """The readout projection of one verb's slot for the inventory and doctor
-    verbs: declared lanes in order with live :func:`row_capacity` states, the
-    ``on_exhausted`` terminal, and - resolved by :func:`resolve_slot` ITSELF,
-    never re-derived here - the lane a spawn would take right now. Display,
-    never selection.
+    """The readout projection of one verb's slot: declared lanes in order with
+    live :func:`row_capacity` states, the ``on_exhausted`` terminal, and -
+    resolved by :func:`resolve_slot` ITSELF, never re-derived here - the lane
+    a spawn would take right now. Display, never selection.
     """
     if settings is None:
         try:
@@ -796,13 +800,8 @@ def slot_states(
             settings = None
     if inventory is None:
         inventory = resolve_inventory(settings=settings)
-    profile = None
-    try:
-        profile = (getattr(getattr(settings, "agents", None), "profiles", None) or {}).get(verb)
-    except Exception:  # noqa: BLE001
-        profile = None
+    profile = _verb_profile(settings, verb)
     lanes = getattr(profile, "lanes", None) if profile is not None else None
-    rung_base = f"agents.profiles.{verb}"
     out: dict[str, Any] = {"verb": verb, "lanes": [], "on_exhausted": "", "would_take": ""}
     if not lanes:
         if inventory.declared and inventory.rows:
@@ -816,19 +815,13 @@ def slot_states(
         on_exhausted if on_exhausted in _ON_EXHAUSTED else f"{raw_exhausted} (invalid)"
     )
     chain: list[str] = []
-    folded = _slot_fold(lanes, rung_base, settings, chain)
-    plan, lane_inv, _fields = folded
+    plan, lane_inv, _fields = _slot_fold(lanes, f"agents.profiles.{verb}", settings, chain)
     if plan is None or lane_inv is None:
         out["would_take"] = chain[-1]
         return out
     for rung, row_name in plan:
         row = lane_inv.rows.get(row_name)
-        if row is None:
-            out["lanes"].append({
-                "rung": rung, "name": row_name, "state": "no-such-row",
-            })
-            continue
-        state, _window = row_capacity(row, capacity)
+        state = "no-such-row" if row is None else row_capacity(row, capacity)[0]
         out["lanes"].append({"rung": rung, "name": row_name, "state": state})
     candidate, slot_chain = resolve_slot(
         verb, None, capacity, inventory=inventory, settings=settings
