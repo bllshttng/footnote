@@ -546,12 +546,10 @@ def declared_root(path: Path) -> Path:
     declares a PROCESS root and the path must sit under an allowed root.
     ``"0"`` is ambient on purpose, the dirty lane's declaration. Absent means
     nothing was declared: outside a test process that is production, and
-    inside one it is an escaped reader, a lane that skipped the conftest chain
-    resolving the operator's root in silence. That is what overwrote the live
-    graph on 2026-09-06, so it refuses.
-
-    ``"pytest" in sys.modules`` is the positive marker. The runner produces it
-    and it is true at import time, which ``PYTEST_CURRENT_TEST`` is not.
+    inside one it is a lane that skipped the conftest chain and is resolving
+    the operator's root in silence. That is what overwrote the live graph on
+    2026-09-06, so it refuses. ``"pytest" in sys.modules`` is the marker: the
+    runner produces it, and it is true at import time.
     """
     pin = os.environ.get("FNO_TEST_HERMETIC")
     if pin == "0":

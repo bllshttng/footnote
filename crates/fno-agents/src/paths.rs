@@ -26,8 +26,14 @@ pub const HOME_ENV: &str = "FNO_AGENTS_HOME";
 
 /// Whether this process declared a root. `FNO_TEST_HERMETIC` has the same
 /// three states the Python fence reads: `"1"` declares a sandboxed process
-/// root (the runner pins `HOME` inside it, so the fallback is declared), `"0"`
-/// is ambient on purpose, and absent under test is an escaped reader.
+/// root, `"0"` is ambient on purpose, and absent under test is an escaped
+/// reader.
+///
+/// `"1"` is a CLAIM, not a proof. `fno doctor test rust` makes it true by
+/// pinning `HOME` inside a `mktemp` sandbox; a bare `FNO_TEST_HERMETIC=1
+/// cargo test` does not, and there [`fence_declared_root`] refuses the
+/// resolved root instead. That refusal is the point: a process claiming a
+/// sandbox it does not have should hear so, loudly.
 fn test_root_declared() -> bool {
     matches!(
         std::env::var("FNO_TEST_HERMETIC").ok().as_deref(),
@@ -116,6 +122,10 @@ impl AgentsHome {
     /// and inventing one out of ambient `$HOME` is the read this epic bars. A
     /// caller that actually resolves state still refuses through
     /// [`AgentsHome::from_env`].
+    ///
+    /// `None` covers the UNDECLARED case only. A process that declared a
+    /// sandbox it does not have still panics through [`fence_declared_root`];
+    /// that refusal is the point, not a hole in this degrade.
     pub fn from_env_opt() -> Option<Self> {
         if cfg!(test) && std::env::var_os(HOME_ENV).is_none() && !test_root_declared() {
             return None;
@@ -1041,6 +1051,21 @@ mod tests {
         std::env::remove_var(HOME_ENV);
         std::env::remove_var("FNO_TEST_HERMETIC");
         let _ = space_dir(&std::env::temp_dir());
+    }
+
+    /// A claimed sandbox that is not one is refused, not trusted. Nothing in
+    /// tree reaches this today, so without the test the guard's green would be
+    /// an absence rather than a receipt.
+    #[test]
+    #[should_panic(expected = "outside the test sandbox")]
+    fn a_claimed_sandbox_that_is_not_one_is_refused() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _restore = EnvGuard::capture();
+        std::env::set_var("FNO_TEST_HERMETIC", "1");
+        std::env::set_var(HOME_ENV, "/nonexistent-outside-any-tmpdir/.fno/agents");
+        let _ = AgentsHome::from_env();
     }
 
     /// `"0"` is a declaration, not a missing one, and it is what the dirty

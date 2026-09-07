@@ -17,10 +17,9 @@ def use_tmpdir(monkeypatch: object, tmp_path: Path) -> Path:
     """Point state_dir and settings file at tmp_path.
 
     Writes a minimal settings.yaml so paths.X() resolves cleanly, then sets
-    ``FNO_CONFIG`` at the tmp file. The settings cache keys on its
-    declaration (``fno.config._settings_key``), so every reader - including
-    modules that bound ``load_settings`` at import time - resolves the tmp
-    root with no function swap and no cache clearing.
+    ``FNO_CONFIG`` at the tmp file. The settings cache keys on its declaration
+    (``fno.config._settings_key``), so every reader resolves the tmp root with
+    no function swap, including one that bound ``load_settings`` at import.
 
     Returns the path to the tmp settings file for further customization
     (caller can overwrite it before calling paths.X()).
@@ -66,6 +65,12 @@ def _assert_state_landed(tmp_state: Path) -> None:
         return resolved == tmp_state or tmp_state in resolved.parents, str(resolved)
 
     checked = {name: landed(name) for name in ("state_dir", "graph_json")}
+    # The probe WARMS the cache, whose key is the declaration and not the file
+    # content, so a caller that overwrites the settings file (the docstring
+    # invites it) would read the warm minimal copy instead.
+    from fno.config import _load_settings_at
+
+    _load_settings_at.cache_clear()
     if all(ok for ok, _ in checked.values()):
         return
     resolved = {name: shown for name, (_, shown) in checked.items()}

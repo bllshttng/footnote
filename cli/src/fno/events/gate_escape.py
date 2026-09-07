@@ -126,13 +126,11 @@ def record_emit_failure(
     # present. Refuse here on the same terms; a dropped failure log in a test is
     # not a loss, because the refusal already printed above.
     try:
-        from fno.events import HermeticEscapeError, _refuse_hermetic_escape
+        from fno.hermetic import declared_root
 
-        _refuse_hermetic_escape(Path(log_path))
-    except HermeticEscapeError:
+        declared_root(Path(log_path))
+    except Exception:  # noqa: BLE001 - any refusal, and a broken probe, hold
         return
-    except Exception:  # noqa: BLE001 - never raise from the telemetry path
-        pass
     try:
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(
