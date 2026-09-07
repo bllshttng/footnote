@@ -554,8 +554,8 @@ def verdicts(
     worktree_check: Optional[Callable[[str], bool]] = None,
     pr_state_for: Optional[Callable[[str, int], Optional[str]]] = None,
 ) -> list[Verdict]:
-    """One verdict per row, in table precedence (ghost > contended > reroute
-    > wake > leave). Each basis string names the measurement that decided it,
+    """One verdict per row, in table precedence (ghost > contended > stale
+    > reroute > wake > leave). Each basis string names the measurement that decided it,
     so a reader can falsify the call. ``claim_for(node)`` returns the
     ``node:<id>`` claim view (``{"state", "holder"}``); ``node_state_for``
     returns the graph entry (``{"status", ...}``) or None.
@@ -609,8 +609,7 @@ def verdicts(
             in_quorum_breaker=row.row_id in quorum_row_ids,
             peers=peers,
         )
-        # polling_settled upgrades a LEAVE like unclaimed below: liveness
-        # lanes outrank the waste reading.
+        # polling_settled upgrades a LEAVE like unclaimed: liveness outranks waste.
         if verdict.verdict == LEAVE:
             facts = facts_by_row.get(row.row_id)
             if facts is not None:
@@ -1015,8 +1014,7 @@ def _record_text(e: dict) -> str:
 
 
 #: A command that reads one PR's status. The sanctioned CI-wait
-#: (``fno do pr wait``) is ONE command whose internal polling never reaches
-#: the transcript, so a transcript-level repeat is the agent re-asking.
+#: (``fno do pr wait``) never reaches the transcript: a repeat is re-asking.
 _PR_READ_RE = re.compile(
     r"\b(?:fno\s+do\s+pr|gh\s+pr)\s+(?:status|info|view|checks|wait)\s+#?(\d+)"
 )

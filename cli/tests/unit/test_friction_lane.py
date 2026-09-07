@@ -131,3 +131,24 @@ def test_emptied_set_resolves_the_open_question(tmp_path: Path) -> None:
     outcome, _closed_id = _friction_run(tmp_path, rows, quiet)
     assert outcome == "closed"
     assert read_open_questions(tmp_path) == []
+
+
+def test_a_friction_close_records_friction_provenance(tmp_path: Path) -> None:
+    wt = _linked_worktree(tmp_path, "w1")
+    rows = [_row("aaaa1111-0000", "w1", wt), _row("bbbb2222-0000", "w2", wt)]
+    transcripts = {
+        "aaaa1111-0000": _facts("still on it", 60),
+        "bbbb2222-0000": _facts("still on it", 60),
+    }
+    _friction_run(tmp_path, rows, transcripts)
+    quiet = dict(transcripts)
+    quiet["bbbb2222-0000"] = _facts(
+        "<promise>PR is green and reviewed</promise>", 1800
+    )
+    _friction_run(tmp_path, rows, quiet)
+    raw = (tmp_path / "questions.jsonl").read_text()
+    # The close and its decision row must name the friction lane, not the
+    # stale lane whose close helper the channel shares.
+    assert '"closed_by":"friction-escalate"' in raw.replace(" ", "")
+    assert "watchdog-friction:" in raw
+    assert "watchdog-stale:" not in raw
