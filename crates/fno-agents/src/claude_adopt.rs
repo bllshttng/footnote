@@ -20,7 +20,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use crate::claude_roster::RosterWorker;
-use crate::state::{update_registry, RegistryEntry, StateError, HOST_MODE_ATTACHED};
+use crate::state::{update_registry, Lineage, RegistryEntry, StateError, HOST_MODE_ATTACHED};
 use crate::AgentStatus;
 
 /// The single-writer claim holder for an adopted session: `pty:<short_id>`. The
@@ -262,7 +262,6 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         requested_provider: None,
         requested_effort: None,
         harness: Some("claude".into()),
-        harness_session_id: Some(w.session_id.clone()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         route_provider_id: None,
@@ -298,11 +297,15 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         delivery_policy: None,
         sandbox_posture: None,
         spawn_trigger: None,
-        spawned_by_session: parent_session,
-        spawned_by_harness: parent_harness,
-        spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
-        ..Default::default()
+        ..RegistryEntry::new(
+            Some(w.session_id.clone()),
+            Lineage {
+                session: parent_session,
+                harness: parent_harness,
+                cwd: parent_cwd,
+            },
+        )
     }
 }
 

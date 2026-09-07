@@ -394,13 +394,25 @@ if [[ "$FORCE" -eq 0 ]]; then
       echo "    --force to override, or commit/stash first." >&2
       exit 2
     fi
-    # Cleared, but git will still object to the missing tracked files. Record
-    # that so the removal can tell git we already checked (see REMOVE_FLAGS).
+    # Cleared, but git will still object. It objects to TWO classes we cleared
+    # on their own terms: tracked files missing from disk, and the untracked
+    # symlinks setup-worktree.sh wrote (`discounted=`). Record either so the
+    # removal can tell git we already checked (see REMOVE_FLAGS). Missing the
+    # second class is not a no-op: the tree passes wt_reapable, this script
+    # spends its salvage push and its process sweep, and then git refuses.
+    _WT_CLEARED_DIRT=0
     case "$WT_REAPABLE_LINE" in
       *recoverable_deletions=0*) : ;;
-      *recoverable_deletions=*) _WT_RECOVERABLE_ONLY=1
-        echo "archive-worktree: $WT_REAPABLE_LINE" >&2 ;;
+      *recoverable_deletions=*) _WT_CLEARED_DIRT=1 ;;
     esac
+    case "$WT_REAPABLE_LINE" in
+      *discounted=0*) : ;;
+      *discounted=*) _WT_CLEARED_DIRT=1 ;;
+    esac
+    if [[ "$_WT_CLEARED_DIRT" -eq 1 ]]; then
+      _WT_RECOVERABLE_ONLY=1
+      echo "archive-worktree: $WT_REAPABLE_LINE" >&2
+    fi
   elif [[ -n "$FORCE_DIRTY_STATUS" ]]; then
     echo "archive-worktree: dirty working tree at $TARGET" >&2
     printf '%s\n' "$FORCE_DIRTY_STATUS" >&2
@@ -633,9 +645,10 @@ REMOVE_FLAGS=""
 # check alone was not enough. Our `--force` overrides disclosed positive checks
 # (dirty, unpushed, live session). `git worktree remove --force` skips GIT's own check, which
 # counts a tracked file missing from disk as "modified" and refuses with exit
-# 4. So a worktree we affirmatively cleared as recoverable-only still failed to
-# remove, and the whole predicate change was inert on exactly the 17 worktrees
-# it targets. Pass git's force only after OUR check said yes on its own terms:
+# 4. It refuses on untracked content the same way, which is the second class:
+# setup's own symlinks. So a worktree we affirmatively cleared still failed to
+# remove, and the whole predicate change was inert on exactly the worktrees it
+# targets. Pass git's force only after OUR check said yes on its own terms:
 # the unpushed-commit and live-session guards above have already run.
 # RE-READ AT REMOVAL TIME. The verdict above was taken before the process sweep
 # SIGTERM/SIGKILLed anything rooted here and before salvage ran; an editor or

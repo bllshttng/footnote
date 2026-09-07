@@ -362,6 +362,11 @@ async fn granted_thread_puts_the_roots_on_every_turn_start() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let daemon = FakeDaemon::start(Behavior::quick().with_thread_id("thread-grant"));
     let worktree = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(worktree.path())
+        .output()
+        .expect("git init runs");
     let mut thread =
         CodexThread::start_with_state_dirs(worktree.path(), None, false, None, &grant_roots())
             .await
@@ -387,6 +392,15 @@ async fn granted_thread_puts_the_roots_on_every_turn_start() {
         let policy = &turn["params"]["sandboxPolicy"];
         assert_eq!(policy["type"], "workspaceWrite");
         assert_eq!(policy["writableRoots"][0], "/Users/x/.fno");
+        assert!(
+            policy["writableRoots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|root| root.as_str())
+                .any(|root| root.ends_with("/.git")),
+            "the git common dir rides every turn: {policy}"
+        );
     }
 }
 
@@ -411,15 +425,22 @@ async fn ungranted_thread_emits_todays_frames_unchanged() {
     );
 }
 
-/// A yolo thread is already `danger-full-access`. A workspaceWrite policy
-/// would NARROW it, so the roots are dropped rather than sent.
+/// A yolo thread is not unsandboxed on this lane. The scalar asks for
+/// `danger-full-access`, but the server keeps its workspaceWrite default, so
+/// withholding the policy left `.git` read-only - sandboxed, with every grant
+/// suppressed. The grant rides every posture; only the scalar differs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn yolo_thread_is_never_narrowed_by_the_grant() {
+async fn yolo_thread_still_sends_the_git_grant() {
     let _guard = ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let daemon = FakeDaemon::start(Behavior::quick().with_thread_id("thread-yolo"));
     let worktree = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(worktree.path())
+        .output()
+        .expect("git init runs");
     let mut thread =
         CodexThread::start_with_state_dirs(worktree.path(), None, true, None, &grant_roots())
             .await
@@ -429,8 +450,20 @@ async fn yolo_thread_is_never_narrowed_by_the_grant() {
     let start = daemon.first_params("thread/start").expect("a thread/start");
     assert_eq!(start["sandbox"], "danger-full-access");
     let turn = daemon.first_params("turn/start").expect("a turn/start");
+    let policy = &turn["sandboxPolicy"];
+    assert_eq!(policy["type"], "workspaceWrite");
+    let roots: Vec<&str> = policy["writableRoots"]
+        .as_array()
+        .expect("roots array")
+        .iter()
+        .filter_map(|root| root.as_str())
+        .collect();
     assert!(
-        turn.get("sandboxPolicy").is_none(),
-        "a full-access thread must not be handed a narrower policy: {turn}"
+        roots.iter().any(|root| root.ends_with("/.git")),
+        "the git common dir must be granted on a yolo thread: {turn}"
+    );
+    assert!(
+        roots.iter().any(|root| *root == "/Users/x/.fno"),
+        "the caller's state dirs must survive: {turn}"
     );
 }

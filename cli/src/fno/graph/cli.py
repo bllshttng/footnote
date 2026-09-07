@@ -10290,12 +10290,9 @@ def _run_advance_epic(
                     "all_done": result.all_done,
                     "dispatched": list(result.dispatched),
                     "children": [
-                        {
-                            "node_id": r.node_id,
-                            "decision": r.decision,
-                            "reason": r.reason,
-                            "short_id": r.short_id,
-                        }
+                        {"node_id": r.node_id, "decision": r.decision,
+                         "reason": r.reason, "short_id": r.short_id,
+                         "substrate": r.substrate}
                         for r in result.child_results
                     ],
                 },
@@ -10761,9 +10758,8 @@ def cmd_advance(
     if explain:
         from fno.backlog.explain import build_report, render_report
 
-        # --explain --epic models the DAEMON's cascade (select_lane_fill), never
-        # the next cascade: two selectors, and an answer about the wrong one is
-        # the lie the dry run exists to prevent.
+        # --explain --epic models the DAEMON's drain (the --epic fan-out through the
+        # converge gates), never the next cascade whose answer is the second-selector lie.
         if epic is not None:
             from fno.backlog.explain import build_lane_fill_report, render_lane_fill_report
 

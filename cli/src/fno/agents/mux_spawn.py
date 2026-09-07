@@ -65,6 +65,7 @@ from fno.agents.registry import (
     TERMINAL_STATUSES,
     _has_resolvable_handle,
     load_registry,
+    mint_agent_entry,
     update_registry,
 )
 from fno.agents.crown import (
@@ -4816,7 +4817,11 @@ def dispatch_spawn_pane(
             ):
                 touched_log_path = _touch_log_path(name)
                 final_log_path = str(touched_log_path) if touched_log_path is not None else ""
-            entry = AgentEntry(
+            entry = mint_agent_entry(
+                    harness_session_id=stored_session_uuid,
+                    spawned_by_session=spawned_by_session,
+                    spawned_by_harness=spawned_by_harness,
+                    spawned_by_cwd=spawned_by_cwd,
                     name=name,
                     harness=provider,
                     provider=resolved_lane_provider,
@@ -4826,10 +4831,9 @@ def dispatch_spawn_pane(
                     model=actual_model or route_model,
                     model_basis="requested" if (actual_model or route_model) else None,
                     effort=effort,
-                    # v23 (x-2019): the REQUEST verbatim beside the effect.
-                    # Note the deliberate asymmetry with `model` above: the
-                    # observed half may land on actual_model, the request
-                    # never does - it is what the flags spelled.
+                    # v23 (x-2019): the request verbatim beside the effect; the
+                    # observed half may land on actual_model, the request never
+                    # does - it is what the flags spelled.
                     requested_model=model or route_model,
                     requested_provider=resolved_lane_provider,
                     requested_effort=effort,
@@ -4838,14 +4842,10 @@ def dispatch_spawn_pane(
                     # a concurrent reconcile cannot land one without the other
                     # and lose the only evidence the death left.
                     log_path=final_log_path,
-                    harness_session_id=stored_session_uuid,
                     status=row_status,
                     pid=child_pid,
                     pid_start_time=pid_start_time,
                     mux={"session": session, "pane_id": pane_id},
-                    spawned_by_session=spawned_by_session,
-                    spawned_by_harness=spawned_by_harness,
-                    spawned_by_cwd=spawned_by_cwd,
                     spawn_trigger=spawn_trigger,
                     # footnote created this worker, so the reap lane's "did a
                     # human start this session by hand" reads no. The operator

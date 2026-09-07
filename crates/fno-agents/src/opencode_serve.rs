@@ -56,7 +56,7 @@ use std::time::Duration;
 use crate::claude_ask::{emit_event, validate_spawn_inputs};
 use crate::opencode_ask::{apply_opencode_variant, AskOutcome, OPENCODE_DEFAULT_MODEL};
 use crate::paths::AgentsHome;
-use crate::state::{load_registry, update_registry, RegistryEntry};
+use crate::state::{load_registry, update_registry, Lineage, RegistryEntry};
 use crate::AgentStatus;
 
 /// Everything the spawn needs from a live serve: the loopback base URL, the
@@ -821,7 +821,6 @@ fn dispatch_opencode_serve_inner(
         requested_provider: None,
         requested_effort: effort.filter(|v| !v.is_empty()).map(str::to_string),
         harness: Some("opencode".to_string()),
-        harness_session_id: Some(session_id.clone()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
         cwd: cwd.to_string_lossy().to_string(),
@@ -829,9 +828,6 @@ fn dispatch_opencode_serve_inner(
         session_id: Some(session_id.clone()),
         origin: Some("spawn".to_string()),
         spawn_trigger: None,
-        spawned_by_session: parent_session,
-        spawned_by_harness: parent_harness,
-        spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
         claude_session_uuid: None,
         messaging_socket_path: None,
@@ -859,7 +855,14 @@ fn dispatch_opencode_serve_inner(
         fno_id: Some(session_id.clone()),
         delivery_policy: None,
         sandbox_posture: None,
-        ..Default::default()
+        ..RegistryEntry::new(
+            Some(session_id.clone()),
+            Lineage {
+                session: parent_session,
+                harness: parent_harness,
+                cwd: parent_cwd,
+            },
+        )
     };
     let registry_path = home.registry_json();
     match update_registry(&registry_path, |reg| {

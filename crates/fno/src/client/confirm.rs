@@ -4,7 +4,7 @@
 //! The gesture sites, the commit mapping and the row stamp all read
 //! these types through the re-export in the parent.
 
-use super::{SectionKey, TabId};
+use super::{agent_lattice_state, LatticeState, SectionKey, TabId};
 use crate::proto::Command;
 
 /// The command that clears ONE dead row, by what kind of row it is. Three
@@ -27,6 +27,11 @@ pub(crate) fn remove_dead(a: &super::AgentRow) -> Command {
             // nothing to answer, so resolution stays registry-only here.
             // The live-row gesture path carries pane_id itself.
             pane_id: None,
+            // (x-b5d1) Every door that removes an Unmeasured row measures:
+            // the dead-row sweep and the row menu ride the same flag the x
+            // gesture sets, so no path pays a stop leg a `?` row cannot
+            // answer. The server's gate still refuses a row that reads Alive.
+            measure: agent_lattice_state(a) == LatticeState::Unmeasured,
         },
     }
 }
@@ -71,11 +76,14 @@ pub(crate) enum ConfirmKind {
         pane_id: Option<u64>,
     },
     /// Remove an agent row in one gesture (x-76ea, x-e763). Same captured
-    /// name + session id + pane id.
+    /// name + session id + pane id. (x-b5d1) `measure` arms the
+    /// measure-and-remove prompt and wire flag for an Unmeasured row: rm's
+    /// daemon-side gate does the measuring the stop leg cannot.
     RemoveAgent {
         name: String,
         sid: Option<String>,
         pane_id: Option<u64>,
+        measure: bool,
     },
     /// Bulk-reap every exited fno-agent registry row (x-7561, uppercase `X`).
     /// No payload - the server's reap verb owns the candidate set.
@@ -121,10 +129,16 @@ impl ConfirmKind {
                 harness_session_id: sid,
                 pane_id,
             }),
-            ConfirmKind::RemoveAgent { name, sid, pane_id } => Some(Command::RemoveAgent {
+            ConfirmKind::RemoveAgent {
+                name,
+                sid,
+                pane_id,
+                measure,
+            } => Some(Command::RemoveAgent {
                 name,
                 harness_session_id: sid,
                 pane_id,
+                measure,
             }),
             ConfirmKind::ReapAgents => Some(Command::ReapAgents),
             ConfirmKind::StopExternal { attach_id, name } => {

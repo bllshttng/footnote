@@ -116,26 +116,51 @@ pub(super) async fn run_stop_or_remove(name: &str) -> String {
     compose_stop_remove(&stop_note, name, &rm)
 }
 
+/// The daemon's own last non-empty stdout line, for notices that quote the
+/// verdict verbatim - "claude row already absent" is the fact that unstuck
+/// the operator when the CLI did this by hand. One extraction shared by
+/// every rm-quoting notice builder, so they cannot drift.
+fn daemon_verdict(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
 /// The combined stop+rm notice: the stop outcome first, then what the rm leg
 /// decided. Pure; the testable half of [`run_stop_or_remove`].
 fn compose_stop_remove(stop_note: &str, name: &str, rm: &AgentVerbResult) -> String {
     if rm.ok {
-        // Quote the daemon's own verdict - "claude row already absent" is
-        // the fact that unstuck the operator when the CLI did this by hand.
-        let verdict = rm
-            .stdout
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .trim();
-        if verdict.is_empty() {
-            format!("{stop_note}; removed it")
-        } else {
-            format!("{stop_note}; removed it ({verdict})")
+        match daemon_verdict(&rm.stdout) {
+            Some(v) => format!("{stop_note}; removed it ({v})"),
+            None => format!("{stop_note}; removed it"),
         }
     } else {
         format!("{stop_note}; {}", render_agent_verb("rm", name, rm))
+    }
+}
+
+/// (x-b5d1) The measure-and-remove leg: rm only, no stop leg. An
+/// Unmeasured row's stop leg is the leg that times out - nothing answers
+/// it - and rm's daemon-side live gate IS the measurement: it probes the
+/// live roster, removes a provably-absent row, and refuses a live one
+/// with its reason. The verdict is quoted like the composed path does.
+pub(super) async fn run_measure_remove(name: &str) -> String {
+    let rm = run_agent_verb("rm", name).await;
+    measure_remove_notice(name, &rm)
+}
+
+/// Pure; the testable half of [`run_measure_remove`]. Both notice shapes
+/// name the row, so the client's row stamp resolves against the notice.
+fn measure_remove_notice(name: &str, rm: &AgentVerbResult) -> String {
+    if !rm.ok {
+        return render_agent_verb("rm", name, rm);
+    }
+    match daemon_verdict(&rm.stdout) {
+        Some(v) => format!("removed {name} ({v})"),
+        None => render_agent_verb("rm", name, rm),
     }
 }
 
@@ -363,6 +388,65 @@ pub(super) async fn run_mail_send(name: &str, text: &str) -> String {
     }
 }
 
+impl super::Core {
+    /// Shell `fno-agents <verb> <name>` OFF the core loop (x-76ea), mirroring
+    /// `dispatch_next`: the one-line outcome routes back as a `DispatchResult`
+    /// notice, but the AUTHORITATIVE row change is the registry poll's exited
+    /// flip / row vanish, not this notice. `verb` is a fixed literal
+    /// (`"stop"`/`"rm"`), never operator text; `name` was catalog-validated by
+    /// the caller.
+    pub(super) fn agent_action(&self, id: u64, verb: &'static str, name: String) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let notice = run_agent_action(verb, &name).await;
+            let _ = core_tx
+                .send(super::CoreMsg::DispatchResult { id, notice })
+                .await;
+        });
+    }
+
+    /// Rename a row's label off-loop: the `agent_action` mirror with the new
+    /// label as a second argv token. The notice is the verb's own report.
+    pub(super) fn agent_rename_action(&self, id: u64, token: String, new_name: String) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let notice = run_agent_rename(&token, &new_name)
+                .await
+                .unwrap_or_else(|e| e);
+            let _ = core_tx
+                .send(super::CoreMsg::DispatchResult { id, notice })
+                .await;
+        });
+    }
+
+    /// (x-b5d1) The measuring remove: rm only (the gate in the RemoveAgent
+    /// arm already refused a live row), off-loop like the sibling actions.
+    pub(super) fn remove_agent_action(&self, id: u64, name: String, measure: bool) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let notice = if measure {
+                run_measure_remove(&name).await
+            } else {
+                run_stop_or_remove(&name).await
+            };
+            let _ = core_tx
+                .send(super::CoreMsg::DispatchResult { id, notice })
+                .await;
+        });
+    }
+
+    /// (x-b5d1) The registry row's liveness, for the measuring-remove gate.
+    /// Resolution is by the resolved label; the resolver refused ambiguity,
+    /// so at most one non-external row answers.
+    pub(super) fn registry_liveness(&self, label: &str) -> Option<crate::agents_view::Liveness> {
+        self.agents
+            .iter()
+            .filter(|a| !a.external && a.name == label)
+            .map(|a| a.liveness)
+            .next()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,6 +534,36 @@ mod tests {
         let notice = compose_stop_remove("stopped corpse", "corpse", &clean);
 
         assert_eq!(notice, "stopped corpse; removed it");
+    }
+
+    #[test]
+    fn measure_remove_notice_quotes_the_daemon_verdict() {
+        // (x-b5d1) rm ok with a daemon verdict: the notice quotes it
+        // verbatim and names the row, so the client's row stamp resolves.
+        let rm = verb_result(
+            true,
+            "removed: corpse (fno; claude row already absent)\n",
+            "",
+        );
+        let notice = measure_remove_notice("corpse", &rm);
+        assert!(notice.starts_with("removed corpse"), "{notice}");
+        assert!(
+            notice.contains("claude row already absent"),
+            "quotes the verdict: {notice}"
+        );
+    }
+
+    #[test]
+    fn measure_remove_notice_names_the_refusal() {
+        // (x-b5d1) rm refused (the roster still lists the session): the
+        // notice names the row and the reason, failure-marked, so the row
+        // stays stamped with why.
+        let rm = verb_result(false, "", "agent corpse is still live - stop it first");
+        let notice = measure_remove_notice("corpse", &rm);
+        assert_eq!(
+            notice,
+            "rm corpse: failed: agent corpse is still live - stop it first"
+        );
     }
 
     #[test]

@@ -196,8 +196,16 @@ pub(super) fn no_pane_notice(a: &AgentRow) -> String {
             a.name
         ),
         Some(AgentNoPaneReason::LivenessUnmeasured) => format!(
-            "worker {} has no pane here: liveness reading is absent (neither confirmed dead nor confirmed live); run fno agents peek {} to see before resuming",
-            a.name, a.name
+            "worker {} has no pane here: liveness reading is absent (neither confirmed dead nor confirmed live{}); run fno agents peek {} to see before resuming",
+            a.name,
+            // (x-b5d1) The reading is absent, but a measurement may still
+            // exist and be old - say how old, so "unmeasured" cannot be
+            // read as "just checked, nothing there".
+            match a.liveness_age_s {
+                Some(age) => format!("; last probe {age}s ago"),
+                None => String::new(),
+            },
+            a.name
         ),
         Some(AgentNoPaneReason::MissingHarness) => {
             format!("worker {} has no pane here: no harness recorded", a.name)
@@ -347,6 +355,7 @@ mod tests {
             sid: None,
             name: "corpse".into(),
             pane_id: None,
+            measure: false,
         });
         view.resolve_row_stamp("removed corpse");
         let row = corpse_row();

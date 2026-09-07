@@ -34,12 +34,26 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
         }
         if task_id in reachable:
             return None
+        # The remedy, not just the diagnosis (x-7f1f): the note names the one
+        # command that makes a dispatcher take the node - activating its epic.
+        # With no epic parent it says so, so the note never prints a command
+        # that cannot work.
+        me = next((e for e in entries if e.get("id") == task_id), None)
+        parent = (me or {}).get("parent")
+        if parent:
+            remedy = f"; Activate its epic: fno backlog advance --epic {parent}"
+        else:
+            remedy = (
+                "; no epic to activate (missions are activated per epic with "
+                "fno backlog advance --epic <epic-id>)"
+            )
         if missions:
             return (
                 "no live dispatcher will take it "
                 f"(outside active mission scopes: {', '.join(missions)})"
+                + remedy
             )
-        return "no live dispatcher will take it (no resolved active missions)"
+        return "no live dispatcher will take it (no resolved active missions)" + remedy
     except Exception as exc:  # noqa: BLE001 - rank already committed; qualify unknowns
         return f"dispatcher scope unavailable ({exc})"
 

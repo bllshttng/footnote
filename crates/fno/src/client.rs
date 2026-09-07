@@ -1715,6 +1715,14 @@ fn build_keys_modal() -> KeysModal {
         )),
         None,
     );
+    // (x-b5d1) The glyph legend rides the modal tail, after the notes: the
+    // x7683 pin holds the notes above the 64-row fold, and the legend is
+    // reference material the same scroll reaches. Generated from the same
+    // lattice table the rows and the header band render - one source, so
+    // the modal cannot drift from what the screen draws. Inert rows.
+    for row in glyph_legend::legend_rows() {
+        add(row, None);
+    }
     KeysModal {
         popup: Popup::new(rows, Anchor::Center),
         row_events: events,
@@ -7158,7 +7166,7 @@ impl View {
                 c += 1;
             }
         }
-        let help = "? for keys ";
+        let help = "? keys · glyphs ";
         let start = cols.saturating_sub(help.chars().count());
         if start > c {
             for (i, ch) in help.chars().enumerate() {
@@ -7231,6 +7239,9 @@ impl View {
                 format!("close workspace {label} ({panes} panes)?")
             }
             ConfirmKind::StopAgent { .. } => format!("stop {label}?"),
+            ConfirmKind::RemoveAgent { measure: true, .. } => {
+                format!("measure and remove {label}?")
+            }
             ConfirmKind::RemoveAgent { .. } => format!("remove {label}?"),
             ConfirmKind::ReapAgents => "reap all exited fno agents?".to_string(),
             ConfirmKind::StopExternal { .. } => format!("stop {label}?"),
@@ -9996,43 +10007,16 @@ fn agent_lane_fg(a: &AgentRow, st: LatticeState, fallback: Color) -> Color {
 }
 
 fn lattice_style(s: LatticeState, accent: Color) -> LatticeStyle {
-    match s {
-        LatticeState::Working => LatticeStyle {
-            glyph: '●',
-            flags: cell_flags::BOLD,
-            fg: Color::Default,
-        },
-        LatticeState::Idle => LatticeStyle {
-            glyph: '○',
-            flags: 0,
-            fg: Color::Default,
-        },
-        LatticeState::Blocked => LatticeStyle {
-            glyph: '▲',
-            flags: cell_flags::BOLD,
-            fg: accent,
-        },
-        LatticeState::DoneUnseen => LatticeStyle {
-            glyph: '✓',
-            flags: cell_flags::BOLD,
-            fg: Color::Default,
-        },
-        LatticeState::Exited => LatticeStyle {
-            glyph: '✗',
-            flags: cell_flags::DIM,
-            fg: Color::Default,
-        },
-        LatticeState::Unmeasured => LatticeStyle {
-            glyph: '?',
-            flags: cell_flags::DIM,
-            fg: Color::Default,
-        },
-        LatticeState::Empty => LatticeStyle {
-            glyph: '∅',
-            flags: cell_flags::DIM,
-            fg: Color::Default,
-        },
-    }
+    let (glyph, flags, fg) = match s {
+        LatticeState::Working => ('●', cell_flags::BOLD, Color::Default),
+        LatticeState::Idle => ('○', 0, Color::Default),
+        LatticeState::Blocked => ('▲', cell_flags::BOLD, accent),
+        LatticeState::DoneUnseen => ('✓', cell_flags::BOLD, Color::Default),
+        LatticeState::Exited => ('✗', cell_flags::DIM, Color::Default),
+        LatticeState::Unmeasured => ('?', cell_flags::DIM, Color::Default),
+        LatticeState::Empty => ('∅', cell_flags::DIM, Color::Default),
+    };
+    LatticeStyle { glyph, flags, fg }
 }
 
 /// The glyph + flags for a state, with no color. For every caller that does not
@@ -13961,6 +13945,7 @@ async fn execute_row_menu_action(
                         name: a.name.clone(),
                         sid: a.harness_session_id.clone(),
                         pane_id: a.pane_id,
+                        measure: agent_lattice_state(&a) == LatticeState::Unmeasured,
                     },
                 },
             };
@@ -15553,10 +15538,17 @@ async fn selector_keys(
                         a.external,
                         a.attach_id.clone(),
                         a.harness_session_id.clone(),
+                        // (x-b5d1) The row's lattice state decides whether the
+                        // remove carries the measure flag: a `?` row measures
+                        // (rm's daemon gate) instead of paying a stop leg
+                        // that times out against a session nothing answers.
+                        agent_lattice_state(a) == LatticeState::Unmeasured,
                     )),
                     _ => None,
                 };
-                if let Some((name, exited, external, attach_id, harness_session_id)) = agent {
+                if let Some((name, exited, external, attach_id, harness_session_id, unmeasured)) =
+                    agent
+                {
                     if view.term.0 < MIN_ROWS_FOR_STATUS {
                         view.set_notice("terminal too short for the confirm prompt".into());
                         continue;
@@ -15579,6 +15571,7 @@ async fn selector_keys(
                             name: name.clone(),
                             sid: harness_session_id,
                             pane_id: None,
+                            measure: unmeasured,
                         },
                     };
                     // (x-f191 scope a+c) The slot feeds the post-commit
@@ -16955,3 +16948,6 @@ mod feed_view_tests;
 
 #[path = "client/court_block.rs"]
 mod court_block;
+
+#[path = "client/glyph_legend.rs"]
+mod glyph_legend;

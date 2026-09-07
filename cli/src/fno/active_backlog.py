@@ -125,7 +125,9 @@ def resolve_drain_targets(*, strict: bool = False) -> list[DrainTarget]:
     ever comes back.
 
     ``config.active_backlog`` stays the daemon's master switch: an unenabled
-    config or invalid interval yields no targets. A mission whose epic project has
+    config or invalid interval yields no targets. ``config.active_backlog.mission``
+    is IGNORED (x-7f1f): missions are per-epic graph state (``mission_active``),
+    never a config value. A mission whose epic project has
     no workspace path is skipped (cannot root the loop). Fail-safe throughout.
     """
     try:

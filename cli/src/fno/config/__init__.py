@@ -60,6 +60,7 @@ from pydantic import (
 # idiom mypy's --no-implicit-reexport requires (these names used to be defined here).
 from fno.config import _watchdog
 from fno.config._auto_heal import AutoHealBlock
+from fno.config._evals import EvalsBlock
 from fno.config._sweeps import ReapReceiptsBlock, SweepKeys
 from fno.config._test import TestBlock
 from fno.config._watchdog import WatchdogBlock
@@ -3225,25 +3226,6 @@ class RestartBlock(BaseModel):
         return _coerce_bool_default_true(v)
 
 
-class EvalsBlock(BaseModel):
-    """Eval-suite worker settings (nested under 'config.evals').
-
-    x-aaaf wave 2: `evals/runner.py`'s `run_task` spawns a headless grading
-    worker with no enable key at all. Default ``True`` matches its CURRENT
-    effective behavior (it always ran when invoked) - shipping this gate
-    changes nothing until an operator explicitly disables it.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    enabled: bool = True
-
-    @field_validator("enabled", mode="before")
-    @classmethod
-    def _coerce_enabled(cls, v: object) -> bool:
-        return _coerce_bool_default_true(v)
-
-
 class RecoveryBlock(BaseModel):
     """Bg-session recovery sweep settings (nested under 'config.recovery').
 
@@ -3651,9 +3633,7 @@ class ActiveBacklogConfig(BaseModel):
     max_concurrent:
         In-flight nodes per project per tick. Default 1 (serial, v1). Defined
         now so v2 parallelism needs no config migration; v1 asserts == 1.
-    mission:
-        Optional mission id; when set, the daemon drains only that mission's
-        nodes and never drifts into the general backlog.
+    mission: IGNORED (missions are per-epic graph state, never config; ``fno config doctor`` warns when it is set; the live axis is ``fno backlog advance --epic <id>`` / ``--stop``).
     """
 
     model_config = ConfigDict(extra="ignore")
