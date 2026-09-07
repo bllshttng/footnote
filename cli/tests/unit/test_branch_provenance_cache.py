@@ -52,7 +52,6 @@ def test_write_skips_clean_rows_and_carries_the_full_shape(tmp_path):
         "age": "33 hours ago",
         "pr_number": None,
         "live": False,
-        "path": "/wt/x-abcd",
     }
 
 
@@ -71,9 +70,16 @@ def test_unmapped_node_is_cached_not_dropped(tmp_path):
             "age": "2 hours ago",
             "pr_number": None,
             "live": False,
-            "path": "/wt/unmapped",
         }
     ]
+
+
+def test_write_returns_changed_not_written(tmp_path):
+    """True flags a CONTENT change, so the tick can re-render the board only
+    when the cache moved; an identical rewrite writes nothing."""
+    assert write_cache(tmp_path, [_stranded()]) is True
+    assert write_cache(tmp_path, [_stranded()]) is False
+    assert not list(tmp_path.glob("*.tmp"))  # unchanged: no write at all
 
 
 def test_read_cache_fails_open(tmp_path):
@@ -163,6 +169,17 @@ def test_provenance_lines_render_mapped_and_unmapped_rows(tmp_path):
         "- *(unmapped)* (fix/x-129b-payload-cache-head): "
         "has remote, 0 unpushed, no PR, LIVE, newest commit 12 hours ago" in lines
     )
+
+
+def test_failed_remote_probe_reads_unknown_not_absent(tmp_path):
+    """A failed rev-parse must never print 'no remote': that asserts an
+    absence the probe never proved (AGENTS.md, positive-marker rule)."""
+    row = dict(_cache_rows()[0], has_remote=None)
+    cache_path(tmp_path).parent.mkdir(parents=True)
+    cache_path(tmp_path).write_text(json.dumps([row]))
+
+    lines = provenance_lines([tmp_path])
+    assert "remote unknown" in lines[2]
 
 
 def test_provenance_lines_omitted_when_cache_empty(tmp_path):

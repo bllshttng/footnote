@@ -2787,6 +2787,11 @@ class TestTickRecordsAndDeadline:
         ]
         monkeypatch.setattr("fno.worktree_stranded.sweep", lambda **kw: rows)
         monkeypatch.setattr("fno.worktree_stranded.apply_sweep", lambda *a, **kw: [])
+        renders = []
+        monkeypatch.setattr(
+            "fno.graph.render.render_graph_md",
+            lambda *a, **kw: renders.append(a),
+        )
 
         app = typer.Typer()
         app.command()(prcli.tick)
@@ -2797,6 +2802,59 @@ class TestTickRecordsAndDeadline:
         assert [r["node"] for r in cached] == ["x-abcd"], f"cache said: {cached}"
         assert cached[0]["klass"] == STRANDED
         assert cached[0]["has_remote"] is False
+        # A changed cache re-renders the board in the same tick; the section
+        # must never wait for an unrelated backlog write.
+        assert len(renders) == 1, f"board re-render said: {renders}; out={result.output}"
+
+    def test_stranded_leg_report_mode_still_freshens_the_cache(
+        self, monkeypatch, tmp_path
+    ):
+        """P1 review finding: the cache is display state, not recovery state.
+        With the recovery lane unarmed (the documented default) the sweep must
+        still classify and persist - report posture, never acting."""
+        import typer
+        from typer.testing import CliRunner
+
+        from fno.agents import watchdog
+        from fno.branch_provenance_cache import read_cache
+        from fno.pr_watch import cli as prcli
+        from fno.worktree_stranded import STRANDED, Row
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        scanned, lines = self._arm_watchdog_tick(monkeypatch, tmp_path, [repo])
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "600")
+        monkeypatch.setattr(prcli, "_catchup_roots", lambda: [repo])
+        monkeypatch.setattr(watchdog, "lane_armed", lambda s: False)
+        applied = []
+        monkeypatch.setattr(
+            "fno.worktree_stranded.apply_sweep",
+            lambda rows, *, wake: applied.append(wake) or [],
+        )
+        monkeypatch.setattr("fno.graph.render.render_graph_md", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            "fno.worktree_stranded.sweep",
+            lambda **kw: [
+                Row(
+                    STRANDED,
+                    "x-beef",
+                    4,
+                    "2 hours ago",
+                    {"path": "/wt/d", "branch": "feature/x-beef",
+                     "has_remote": False, "pr_number": None, "live": False},
+                )
+            ],
+        )
+
+        app = typer.Typer()
+        app.command()(prcli.tick)
+        result = CliRunner().invoke(app, [])
+
+        assert result.exit_code == 0, (result.output, lines)
+        cached = read_cache(repo)
+        assert [r["node"] for r in cached] == ["x-beef"], f"cache said: {cached}"
+        assert applied == [False], "report posture must never act"
+        assert "report" in result.output
 
     def test_watchdog_tick_publishes_a_refused_recovery_once(self, monkeypatch, tmp_path):
         """An unusable recoverable is refound every tick until it ages out.

@@ -70,7 +70,7 @@ def classify(
     registry_status: Optional[str],
     registry_ok: bool,
     age: str = "unknown",
-    has_remote: bool = False,
+    has_remote: Optional[bool] = False,
 ) -> Row:
     """First match wins. See module docstring for the shape of the join."""
     facts = {"path": path, "branch": branch, "has_remote": has_remote,
@@ -176,14 +176,13 @@ def resolve_node_id(
 def _unpushed_batch(
     worktrees: list[tuple[Optional[str], str]],
 ) -> dict[str, tuple[int, bool, str, bool]]:
-    """(branch, path) -> (unpushed_count, ok, age, has_remote), via the packaged
-    port of ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh). The
-    port exists so this module never shells out to a clone-only script: an
-    installed wheel carries no ``scripts/`` tree. Remote refs refresh is
-    verified once per process (flags below)."""
+    """(branch, path) -> (unpushed_count, ok, age, has_remote) via the packaged
+    port of ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh), which
+    exists because an installed wheel carries no ``scripts/`` tree. has_remote
+    is True/False on a resolving/absent ref, None when the probe itself fails."""
     if not worktrees:
         return {}
-    results: dict[str, tuple[int, bool, str, bool]] = {}
+    results: dict[str, tuple[int, bool, str, Optional[bool]]] = {}
     for branch, p in worktrees:
         count, ok = _wt_unpushed_count(p)
         age_p = subprocess.run(
@@ -191,10 +190,13 @@ def _unpushed_batch(
             capture_output=True,
             text=True,
         )
-        remote = bool(branch) and subprocess.run(
-            ["git", "-C", p, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
-            capture_output=True,
-        ).returncode == 0
+        remote: Optional[bool] = None
+        if branch:
+            rc = subprocess.run(
+                ["git", "-C", p, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
+                capture_output=True,
+            ).returncode
+            remote = {0: True, 1: False}.get(rc)  # 1 = ref absent; else the probe failed
         results[p] = (count, ok, age_p.stdout.strip() or "unknown", remote)
     return results
 
@@ -283,9 +285,7 @@ def sweep(repo: Path) -> list[Row]:
 
     rows: list[Row] = []
     for branch, path in worktrees:
-        unpushed, unpushed_ok, age, has_remote = unpushed_by_path.get(
-            path, (1, False, "unknown", False)
-        )
+        unpushed, unpushed_ok, age, has_remote = unpushed_by_path.get(path, (1, False, "unknown", None))
         node, node_entry = resolve_node_id(path, branch, entries_by_id)
         registry_status = registry.get(str(Path(path)))
         rows.append(

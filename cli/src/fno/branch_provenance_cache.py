@@ -14,7 +14,7 @@ CACHE_RELPATH = ".fno/branch-provenance.json"
 
 
 def write_cache(repo: Path, rows: list) -> bool:
-    """Persist the non-CLEAN rows to <repo>/.fno/branch-provenance.json; log-and-False on any failure."""
+    """Write the non-CLEAN rows when they differ from the cache; True then."""
     out = [
         {
             "branch": row.facts.get("branch"),
@@ -25,11 +25,12 @@ def write_cache(repo: Path, rows: list) -> bool:
             "age": row.age,
             "pr_number": row.facts.get("pr_number"),
             "live": row.facts.get("live"),
-            "path": row.facts.get("path"),
         }
         for row in rows
         if row.klass != CLEAN
     ]
+    if out == read_cache(repo):
+        return False
     target = Path(repo) / CACHE_RELPATH
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -53,7 +54,6 @@ def read_cache(repo: Path) -> list[dict]:
 
 
 def _provenance_roots() -> list[Path]:
-    """Repo roots that may carry a cache: the sidecar cwds, on disk."""
     try:
         from fno.tracker import sidecar as sidecar_store
 
@@ -64,9 +64,8 @@ def _provenance_roots() -> list[Path]:
 
 
 def _provenance_line(row: dict) -> str:
-    """One board line: node (or the unmapped marker), branch, raw signals."""
     parts = [
-        "no remote" if not row.get("has_remote") else "has remote",
+        {True: "has remote", False: "no remote"}.get(row.get("has_remote"), "remote unknown"),
         f"{row.get('unpushed') or 0} unpushed",
         f"PR #{row['pr_number']}" if row.get("pr_number") else "no PR",
         *(["LIVE"] if row.get("live") else []),

@@ -432,6 +432,20 @@ def test_unpushed_batch_no_remote_reads_false(tmp_path):
     assert has_remote is False
 
 
+def test_failed_remote_probe_reads_unknown(tmp_path):
+    """A rev-parse that fails for any reason other than an absent ref
+    (exit 1) is a failed probe, not a proven absence: has_remote answers
+    None so the board says 'remote unknown' instead of 'no remote'."""
+    not_a_repo = tmp_path / "plain-dir"
+    not_a_repo.mkdir()
+
+    count, ok, _age, has_remote = _unpushed_batch([("feature/x", str(not_a_repo))])[
+        str(not_a_repo)
+    ]
+    assert ok is False  # the unpushed count fails toward keep, as always
+    assert has_remote is None
+
+
 def test_worktree_stranded_never_imports_resolve_repo_root():
     """A code-review finding, confirmed by three independent finder angles:
     the script's own path must never come from resolve_repo_root(), a
