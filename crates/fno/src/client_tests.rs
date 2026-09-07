@@ -4594,14 +4594,15 @@ fn client_compose_draws_scroll_indicator_when_pane_scrolled() {
 #[test]
 fn client_compose_status_row_shows_session_cwd_and_help() {
     // US4 AC4-UI: bottom row carries session name, active squad cwd, and
-    // the `? for keys` affordance; the focused pane's scroll offset joins
-    // it when non-zero (the canonical `[+N]` home).
+    // the `? keys · glyphs` affordance (x-b5d1 named the legend); the
+    // focused pane's scroll offset joins it when non-zero (the canonical
+    // `[+N]` home).
     let mut view = two_pane_view();
     let text = frame_text(&view.compose());
     let bottom = text.lines().last().unwrap().to_string();
     assert!(bottom.contains("main"), "{bottom:?}");
     assert!(bottom.contains("/code/footnote"), "{bottom:?}");
-    assert!(bottom.contains("? for keys"), "{bottom:?}");
+    assert!(bottom.contains("? keys"), "{bottom:?}");
     assert!(!bottom.contains("[+"), "no stale indicator: {bottom:?}");
     // The row is blanked first, so no divider glyphs bleed through the
     // gaps between segments.
@@ -5390,97 +5391,6 @@ fn name_entry_prompt_renders_centered_naming_its_target() {
 }
 
 #[test]
-fn every_confirm_variant_renders_shared_chrome_and_controls() {
-    let variants = vec![
-        (ConfirmKind::Dispatch { node: "x-1".into() }, "dispatch"),
-        (
-            ConfirmKind::RemoveSquad {
-                squad: 1,
-                panes: 2,
-                last: false,
-            },
-            "remove squad",
-        ),
-        (
-            ConfirmKind::StopAgent {
-                sid: None,
-                name: "agent".into(),
-                pane_id: None,
-            },
-            "stop agent",
-        ),
-        (
-            ConfirmKind::RemoveAgent {
-                sid: None,
-                name: "agent".into(),
-                pane_id: None,
-            },
-            "remove agent",
-        ),
-        (ConfirmKind::ReapAgents, "reap"),
-        (
-            ConfirmKind::StopExternal {
-                attach_id: "a-1".into(),
-                name: "external".into(),
-            },
-            "stop external",
-        ),
-        (
-            ConfirmKind::RemoveExternal {
-                attach_id: "a-1".into(),
-                name: "external".into(),
-            },
-            "remove external",
-        ),
-        (
-            ConfirmKind::DismissMember {
-                squad: 1,
-                attach_id: "a-1".into(),
-            },
-            "dismiss member",
-        ),
-        (
-            ConfirmKind::ClearDead {
-                key: crate::view_store::SectionKey::Missions,
-                squad: None,
-                dead: 3,
-            },
-            "clear dead",
-        ),
-        (ConfirmKind::CloseTab { tab: 1 }, "close tab"),
-    ];
-
-    for (action, label) in variants {
-        let mut view = two_pane_view();
-        view.confirm = Some(ConfirmAction {
-            action,
-            label: label.into(),
-        });
-        let (rows, cols) = (view.term.0 as usize, view.term.1 as usize);
-        let mut cells = vec![Cell::default(); rows * cols];
-        view.draw_bottom_row(&mut cells, rows, cols);
-        let screen: String = (0..rows)
-            .map(|r| {
-                cells[r * cols..(r + 1) * cols]
-                    .iter()
-                    .map(|cell| cell.c)
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(
-            screen.contains('┌'),
-            "{label} has no shared top border: {screen}"
-        );
-        assert!(
-            screen.contains("enter confirm · esc cancel"),
-            "{label} has no actual controls footer: {screen}"
-        );
-    }
-}
-
-#[test]
 fn modal_esc_chips_cancel_name_and_confirm_states_without_outside_dismissal() {
     let close_cell = |view: &View| {
         let layout = view
@@ -5837,7 +5747,8 @@ async fn clear_dead_refolds_the_set_at_commit_not_at_open() {
         vec![Command::RemoveAgent {
             harness_session_id: None,
             name: "dead-b".into(),
-            pane_id: None
+            pane_id: None,
+            measure: false
         }],
         "the vanished row is not re-removed"
     );
@@ -5861,6 +5772,7 @@ async fn clear_dead_routes_external_rows_by_attach_id() {
                 harness_session_id: None,
                 name: "plain-dead".into(),
                 pane_id: None,
+                measure: false,
             },
             Command::RemoveExternal {
                 attach_id: "deadbeef".into(),
@@ -5937,6 +5849,7 @@ async fn clear_dead_dismisses_member_tombstones() {
                 harness_session_id: None,
                 name: "plain-dead".into(),
                 pane_id: None,
+                measure: false,
             },
         ]
     );
@@ -6052,7 +5965,8 @@ async fn clear_dead_is_scoped_to_its_own_section() {
         vec![Command::RemoveAgent {
             harness_session_id: None,
             name: "dead-in-1".into(),
-            pane_id: None
+            pane_id: None,
+            measure: false,
         }],
         "the sibling squad's dead row is untouched"
     );
@@ -6086,7 +6000,8 @@ async fn clear_dead_works_on_the_elsewhere_band_too() {
         vec![Command::RemoveAgent {
             harness_session_id: None,
             name: "stray-dead".into(),
-            pane_id: None
+            pane_id: None,
+            measure: false,
         }]
     );
 }
@@ -6496,7 +6411,11 @@ async fn a_bound_byte_no_entry_offers_dismisses_without_action() {
         vec![Command::RemoveAgent {
             harness_session_id: None,
             name: "w1".into(),
-            pane_id: None
+            pane_id: None,
+            // The paneless bg row is Unmeasured (no badge, no activity
+            // reading), so the remove measures (x-b5d1): every door that
+            // removes a `?` row skips the stop leg it cannot answer.
+            measure: true,
         }],
         "the remove byte removed the live row in one gesture"
     );
@@ -6687,7 +6606,8 @@ async fn menu_accelerator_remove_arms_the_dead_row_confirm() {
         vec![Command::RemoveAgent {
             harness_session_id: None,
             name: "dead".into(),
-            pane_id: None
+            pane_id: None,
+            measure: false,
         }],
         "the confirm the key armed removes exactly this row"
     );
@@ -12041,11 +11961,13 @@ async fn confirm_keys_enter_sends_stop_then_remove_agent() {
                 name: "w".into(),
                 sid: None,
                 pane_id: None,
+                measure: false,
             },
             Command::RemoveAgent {
                 name: "w".into(),
                 harness_session_id: None,
                 pane_id: None,
+                measure: false,
             },
         ),
     ] {
@@ -18612,3 +18534,6 @@ use section_menu_tests::arm_clear_dead;
 // (x-e763) The default-dispatch lifecycle gestures, same file-budget rule.
 #[path = "client/tests/lifecycle_dispatch_tests.rs"]
 mod lifecycle_dispatch_tests;
+
+#[path = "client/tests/confirm_tests.rs"]
+mod confirm_tests;

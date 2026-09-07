@@ -148,12 +148,8 @@ fn default_true() -> bool {
 /// the second-to-merge rule the v17/v18/v20 churn established.)
 ///
 /// v26 (x-76ea): `Command::StopAgent { name }` / `Command::RemoveAgent { name }`
-/// give the sideline a per-row lifecycle verb (`x` on a live row stops it, on an
-/// exited row removes it), server-shelled to `fno-agents stop|rm <name>`. Both
-/// validate the name against the current agents catalog server-side and refuse
-/// an `external: true` roster row (owned by the claude daemon, not the fno
-/// registry) with a notice.
-///
+/// give the sideline a per-row lifecycle verb, server-shelled to `fno-agents
+/// stop|rm <name>` and refused on an `external: true` roster row.
 /// v27 (x-0333): `Command::ReorderTab { squad, tab, delta }` moves a tab within
 /// its client-captured squad while preserving the active tab by stable id.
 /// v28 (x-3e38): pane-run and watch-only attach carry an explicit squad target
@@ -312,7 +308,9 @@ fn default_true() -> bool {
 /// v72 (x-867b): `ControlVerb::ThreadReseat` - the re-seat move (a live
 /// pane-hosted worker becomes a portal seat, keeping its PTY); floor stays 58.
 /// v73: `LayoutSlot.portal` serde(default), the persisted portal seat; floor stays 58.
-pub const PROTO_VERSION: u32 = 73;
+/// v74 (x-b5d1): `Command::RemoveAgent.measure` - measure-and-remove skips
+/// the stop leg on an Unmeasured row; floor stays 58.
+pub const PROTO_VERSION: u32 = 74;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1636,12 +1634,11 @@ pub enum Command {
         squad: u64,
         attach_id: String,
     },
-    /// (v26, x-76ea) Stop a live agent row from the sideline. Resolution is
-    /// fail-closed: identity first, then label, then the pane the row was
-    /// drawn from (`pane_id`, x-e763 - see `server/lifecycle_target.rs` for
-    /// the full rules, which also cover the refusal texts). An external row
-    /// refuses; a pane target signals the pane's child and leaves the pane.
-    /// The resolution-rules prose that lived here moved to that module.
+    /// (v26, x-76ea) Stop a live sideline row. Fail-closed resolution -
+    /// identity first, then label, then the drawn-from pane (`pane_id`,
+    /// x-e763; full rules + refusal texts in `server/lifecycle_target.rs`).
+    /// An external row refuses; a pane target signals the child, leaves
+    /// the pane.
     StopAgent {
         name: String,
         #[serde(default)]
@@ -1652,14 +1649,18 @@ pub enum Command {
     /// (v26, x-76ea) Remove an agent row in one gesture. Registry targets
     /// stop-then-rm through the fno-agents verbs; a pane target (x-e763)
     /// kills the child, releases the claim, and drops the pane. Same
-    /// fail-closed resolution as `StopAgent`; the prose lives in
-    /// `server/lifecycle_target.rs`.
+    /// fail-closed resolution as `StopAgent`.
+    /// (v74, x-b5d1) `measure` skips the stop leg: an Unmeasured row is
+    /// measured by rm's daemon-side live gate instead of paying a stop
+    /// that times out. Additive, default false; floor stays 58.
     RemoveAgent {
         name: String,
         #[serde(default)]
         harness_session_id: Option<String>,
         #[serde(default)]
         pane_id: Option<u64>,
+        #[serde(default)]
+        measure: bool,
     },
     /// Rename a sideline row's LABEL. Grammar-checked server-side before any
     /// subprocess; unknown/external/ambiguous rows refuse. Live rows too.
@@ -4036,15 +4037,10 @@ mod tests {
         // This is the ONE canonical pin, as this test's name says. Two sibling
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
-        // edit; they now assert only their own wire shapes.
-        // The registry-keyed identity pair (StopAgent/RemoveAgent carry
-        // `harness_session_id`; AgentRow carries `liveness_age_s`) bumps it
-        // 66 -> 67. `LayoutSlot.cwd` (x-5baf) bumps it 67 -> 68.
-        // `Command::RedrawPane` (x-a600) bumps it 68 -> 69. The prune
-        // reload pair (`ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`)
-        // bumps it 69 -> 71. The ThreadReseat control verb (x-867b) takes 72,
-        // so the version never moves backwards whichever branch lands first.
-        assert_eq!(PROTO_VERSION, 73);
+        // edit; they now assert only their own wire shapes. Per-bump history
+        // lives on the PROTO_VERSION const; v74 (x-b5d1) took 74 so the
+        // version never moves backwards whichever branch lands first.
+        assert_eq!(PROTO_VERSION, 74);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

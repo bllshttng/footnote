@@ -67,10 +67,7 @@ mod pane_reseat;
 mod portal_reach;
 mod squad_sync;
 
-use self::agent_actions::{
-    run_agent_action, run_agent_rename, run_mail_send, run_reap, run_reentry_plan,
-    run_stop_or_remove,
-};
+use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
 
 /// A control connection's reply channel: exactly one [`ServerMsg`], then close.
 type ControlReply = oneshot::Sender<ServerMsg>;
@@ -9132,44 +9129,6 @@ impl Core {
         });
     }
 
-    /// Shell `fno-agents <verb> <name>` OFF the core loop (x-76ea), mirroring
-    /// `dispatch_next`: the one-line outcome routes back as a `DispatchResult`
-    /// notice, but the AUTHORITATIVE row change is the registry poll's exited
-    /// flip / row vanish, not this notice. `verb` is a fixed literal
-    /// (`"stop"`/`"rm"`), never operator text; `name` was catalog-validated by
-    /// the caller.
-    fn agent_action(&self, id: u64, verb: &'static str, name: String) {
-        let core_tx = self.self_tx.clone();
-        tokio::spawn(async move {
-            let notice = run_agent_action(verb, &name).await;
-            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
-        });
-    }
-
-    /// Rename a row's label off-loop: the `agent_action` mirror with the new
-    /// label as a second argv token. The notice is the verb's own report.
-    fn agent_rename_action(&self, id: u64, token: String, new_name: String) {
-        let core_tx = self.self_tx.clone();
-        tokio::spawn(async move {
-            let notice = run_agent_rename(&token, &new_name)
-                .await
-                .unwrap_or_else(|e| e);
-            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
-        });
-    }
-
-    /// (x-f191) The one-gesture remove: off-loop like
-    /// [`Self::agent_action`], but the verb pair (stop, then rm) so the
-    /// operator states removal intent once. A live row stops first; a corpse
-    /// whose stop no-ops still clears through rm's already-absent gate.
-    fn stop_agent_action(&self, id: u64, name: String) {
-        let core_tx = self.self_tx.clone();
-        tokio::spawn(async move {
-            let notice = run_stop_or_remove(&name).await;
-            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
-        });
-    }
-
     /// (x-d285) Resolve a gesture's re-entry plan OFF the core loop and
     /// re-dispatch the gesture when the verdict lands. `request` names the
     /// gesture to re-enter (the attach id + its placement, or the resume
@@ -13347,6 +13306,7 @@ impl Core {
                 name,
                 harness_session_id,
                 pane_id,
+                measure,
             } => {
                 // (x-f191 scope b) The operator states the intent ONCE: remove.
                 // The server orchestrates stop-then-rm off-loop - a live row is
@@ -13355,12 +13315,27 @@ impl Core {
                 // no-ops reaches the CLI's already-absent branch through rm's
                 // daemon-side live gate. Same resolution as StopAgent: the
                 // subprocess gets the resolved row's current label.
+                // (x-b5d1) `measure` widens the door to the Unmeasured row:
+                // rm runs without the stop leg, and rm's daemon-side live
+                // gate is the measurement. The gate re-checks against THIS
+                // registry now - a row that came alive between the client's
+                // arm and Enter is refused, never rm'd live.
                 let resolved =
                     self.resolve_lifecycle_full(&name, harness_session_id.as_deref(), pane_id);
                 match resolved {
                     Err(msg) => self.notice(client_id, msg),
                     Ok(lifecycle_target::LifecycleTarget::Registry(owned)) => {
-                        self.stop_agent_action(client_id, owned)
+                        if measure
+                            && self.registry_liveness(&owned)
+                                == Some(crate::agents_view::Liveness::Alive)
+                        {
+                            self.notice(
+                                client_id,
+                                format!("{owned} is still live - stop it first"),
+                            );
+                        } else {
+                            self.remove_agent_action(client_id, owned, measure);
+                        }
                     }
                     Ok(lifecycle_target::LifecycleTarget::Pane(pid)) => {
                         return self.remove_pane_row(client_id, pid, &name)
@@ -22453,6 +22428,7 @@ mod tests {
                     harness_session_id: None,
                     name: "ext-b".into(),
                     pane_id: None,
+                    measure: false,
                 },
             ),
         ] {
@@ -22663,6 +22639,7 @@ mod tests {
                 name: "dup".into(),
                 harness_session_id: None,
                 pane_id: None,
+                measure: false,
             },
         );
         assert!(drain_notice(&mut rx).unwrap().contains("ambiguous"));
@@ -23976,6 +23953,28 @@ mod tests {
             "\u{3093}-54fa"
         ));
         assert!(!name_has_node_token("a\u{3093}-54fa", "\u{3093}-54fa"));
+    }
+
+    #[test]
+    fn measure_remove_on_an_alive_row_is_refused_before_any_spawn() {
+        // (x-b5d1) measure: true is a door for the Unmeasured row only. A
+        // row the registry reads Alive refuses on this server before any
+        // subprocess: a plain #[test] has no runtime, so reaching the
+        // spawn would panic - the clean refusal proves it never does.
+        let mut core = empty_core();
+        core.agents = vec![bg_row("corpse", "/tmp", None)];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(
+            1,
+            Command::RemoveAgent {
+                name: "corpse".into(),
+                harness_session_id: None,
+                pane_id: None,
+                measure: true,
+            },
+        );
+        assert!(drain_notice(&mut rx).unwrap().contains("is still live"));
     }
 
     /// A paneless registry row for the routing tests: `name`/`cwd`/`attach_id`
