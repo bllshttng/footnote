@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fno.evals import history as _history
+from fno.config import load_settings
 
 
 @dataclass(frozen=True)
@@ -174,8 +175,6 @@ def evals_health_summary(
     reg = report["tiers"].get("regression")
     if stale_days is None:
         try:
-            from fno.config import load_settings
-
             stale_days = int(load_settings().evals.stale_days)
         except Exception:  # noqa: BLE001 - the summary never raises
             stale_days = 7
