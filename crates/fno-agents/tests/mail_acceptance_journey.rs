@@ -29,6 +29,11 @@ struct Script {
     accept_session: Option<String>,
     /// How long after the CR the acceptance lands.
     accept_delay_ms: u64,
+    /// Total `Output` bytes a background flooder streams from connect time.
+    /// The completion signal lands on this channel when the last byte is
+    /// written; a budget-long flood only completes if the injector drains.
+    flood_bytes: usize,
+    flood_done: Option<std::sync::mpsc::Sender<()>>,
 }
 
 struct Rig {
@@ -108,6 +113,38 @@ fn spawn_keeper(rig: &Rig, text: &str, script: Script) -> std::thread::JoinHandl
             let Ok((mut stream, _)) = listener.accept() else {
                 return Vec::new();
             };
+            // The flood thread writes `flood_bytes` of Output with BLOCKING
+            // writes, exactly like the real keeper's pty-reader relay: if the
+            // injector stops draining, the writes stall mid-buffer and the
+            // completion signal never fires.
+            if script.flood_bytes > 0 {
+                let mut writer = stream.try_clone().unwrap();
+                let done = script.flood_done.clone();
+                let total = script.flood_bytes;
+                std::thread::spawn(move || {
+                    use std::io::Write;
+                    let frame_body = [0x20u8; 8192];
+                    let mut written = 0usize;
+                    while written < total {
+                        let n = total - written;
+                        let body = &frame_body[..n.min(frame_body.len())];
+                        if writer
+                            .write_all(&fno_agents::pane_keeper::encode(&Frame::Output(
+                                body.to_vec(),
+                            )))
+                            .is_err()
+                        {
+                            break;
+                        }
+                        written += body.len();
+                    }
+                    if written >= total {
+                        if let Some(done) = done {
+                            let _ = done.send(());
+                        }
+                    }
+                });
+            }
             let mut frames: Vec<Frame> = Vec::new();
             let mut buf: Vec<u8> = Vec::new();
             let mut chunk = [0u8; 8192];
@@ -192,6 +229,7 @@ fn accepted_turn_after_painted_draft_confirms_exactly_once() {
         paint: vec![ENVELOPE.as_bytes().to_vec()],
         accept_session: Some("sess-acc".into()),
         accept_delay_ms: 30,
+        ..Default::default()
     };
     let handle = spawn_keeper(&rig, ENVELOPE, script);
     let outcome =
@@ -339,5 +377,32 @@ fn unavailable_reader_refuses_before_typing() {
         deliver_via_keeper_socket_in(&rig.home, &rig.pi_root, "sess-dup", ENVELOPE, 4, 20, 0);
     assert_eq!(outcome, Err("duplicate-session-store"));
     assert_eq!(submit_count(&handle.join().unwrap()), 0);
+    std::fs::remove_dir_all(&rig.dir).ok();
+}
+
+#[test]
+fn unconfirmable_lane_keeps_draining_keeper_output() {
+    // The retired PTY matcher was the only reader of this subscriber socket,
+    // and the real keeper relays Output with a BLOCKING write under the
+    // client lock, so an unread buffer backpressures the keeper into the
+    // hosted TUI and freezes it. An unconfirmable budget must still drain.
+    // The flood completes only if the injector keeps reading, and half a
+    // megabyte of painted noise still never confirms.
+    let rig = rig("drain");
+    row_for(&rig, "cursor-agent", "sess-drain");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let script = Script {
+        flood_bytes: 512 * 1024,
+        flood_done: Some(tx),
+        ..Default::default()
+    };
+    let handle = spawn_keeper(&rig, ENVELOPE, script);
+    let outcome =
+        deliver_via_keeper_socket_in(&rig.home, &rig.pi_root, "sess-drain", ENVELOPE, 30, 25, 0);
+    assert_eq!(outcome, Err("not-confirmed"));
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("the injector must drain keeper Output while unconfirmable");
+    // paste + CR, plus one resubmit CR per full CR_RESUBMIT_EVERY window.
+    assert_eq!(submit_count(&handle.join().unwrap()), 2 + 30 / 8);
     std::fs::remove_dir_all(&rig.dir).ok();
 }

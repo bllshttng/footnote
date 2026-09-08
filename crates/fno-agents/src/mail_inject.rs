@@ -775,11 +775,27 @@ pub fn deliver_via_keeper_socket_in(
             _ => "io-error",
         },
     )?;
-    // A PendingStore re-looks-up per poll: pi writes the session file at the
-    // first turn attempt, and THIS inject is that attempt, so the file (and
-    // then the marker) appears within the budget; every line a fresh file has
-    // is new signal, hence the zero baseline.
+    // The subscriber seat must keep draining: the keeper's pty-reader thread
+    // relays every Output chunk to this connection with a BLOCKING write
+    // under the client lock, so an unread socket backpressures the keeper
+    // into the hosted TUI and freezes it for the rest of the budget. Every
+    // poll drains and DISCARDS - paint is never read as evidence (x-175a);
+    // the only reader here is the buffer's, not the matcher's.
+    let confirm_stream = transport.stream.try_clone().ok();
+    if let Some(cs) = confirm_stream.as_ref() {
+        let _ = cs.set_read_timeout(Some(Duration::from_millis(50)));
+    }
     let confirmed = move || -> bool {
+        if let Some(stream) = confirm_stream.as_ref() {
+            let mut sink = [0u8; 8192];
+            let mut reader = stream;
+            loop {
+                match std::io::Read::read(&mut reader, &mut sink) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
         match &confirm {
             KeeperConfirm::Transcript { path, baseline } => {
                 confirm_content_after(path, marker, *baseline).unwrap_or(false)
