@@ -16,10 +16,11 @@
 //! rather than observing it. A row the settle cannot fill on a node still in
 //! flight keeps under `open do row on done node`.
 //!
-//! Retirement never removes the session from its harness's
-//! store, and never deletes a branch. The node's `sessions[]` row and the
-//! transcript survive the retirement, so `fno agents resume` still opens the
-//! session afterwards.
+//! Retirement removes the session from its harness's ACTIVE surface only
+//! (the agent list, the session index); the native history is never deleted,
+//! and neither is a branch. The node's `sessions[]` row and the transcript
+//! survive the retirement, so `fno agents resume` still opens the session
+//! afterwards.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -32,10 +33,12 @@ use crate::gc::{
 };
 use crate::graph_store::{self, WorkState};
 use crate::paths::AgentsHome;
-use crate::receipt::{build_reap_receipt, write_reap_receipt, ReapReceipt};
+use crate::receipt::{
+    build_reap_receipt, expire_receipt_details, write_reap_receipt, EffectRecord, ReapReceipt,
+};
 use crate::state;
 
-pub(crate) use crate::daemon::HarnessStoreIndex;
+pub(crate) use crate::gc_inventory::HarnessStoreIndex;
 
 /// Outcome of one retirement pass, for the `fno agents reap` report and
 /// tests. Every row the pass judged lands in exactly one bucket, zero
@@ -100,6 +103,10 @@ pub struct GcSummary {
 pub(crate) struct GraphRead {
     pub index: HashMap<String, Vec<(String, String)>>,
     pub open_do: HashMap<String, Vec<String>>,
+    /// Normalized session id -> the phases its sessions[] rows carry. The
+    /// planning lane reads this to recognize a planner row (blueprint/think)
+    /// that a node's reverse join alone cannot.
+    pub phases: HashMap<String, Vec<String>>,
 }
 
 /// One row the pass decided to retire, with everything the write tail needs.
@@ -150,6 +157,7 @@ pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let entries = read_graph_entries_raw(home)?;
     let index = graph_store::sessions_index(&entries);
     let mut open_do: HashMap<String, Vec<String>> = HashMap::new();
+    let mut phases: HashMap<String, Vec<String>> = HashMap::new();
     for entry in &entries {
         let Some(node_id) = graph_store::entry_id(entry) else {
             continue;
@@ -168,9 +176,24 @@ pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                     .or_default()
                     .push(node_id.to_string());
             }
+            let phase = row
+                .get("phase")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if !phase.is_empty() {
+                phases
+                    .entry(sid.to_ascii_lowercase())
+                    .or_default()
+                    .push(phase);
+            }
         }
     }
-    Some(GraphRead { index, open_do })
+    Some(GraphRead {
+        index,
+        open_do,
+        phases,
+    })
 }
 
 /// One open do row the sweep may settle: its node is done, GitHub-confirmed
@@ -513,6 +536,7 @@ pub(crate) fn run(
     read_graph: &dyn Fn(&AgentsHome) -> Option<GraphRead>,
     store_matches: &dyn Fn(&state::RegistryEntry) -> Option<Vec<PathBuf>>,
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
+    surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     tree_probe: &dyn Fn(&state::RegistryEntry) -> (Option<bool>, Option<bool>),
     prune_tree: &dyn Fn(&state::RegistryEntry),
 ) -> GcSummary {
@@ -579,6 +603,32 @@ pub(crate) fn run(
         }
         let age = transcript_age_s(store_matches(e).as_deref(), now);
         let owns_worktree = !e.is_one_shot_ask() && crate::daemon::is_linked_worktree(&e.cwd);
+        // The planning lane (x-70e1 task 2): a blueprint/think row's OWN job
+        // ends at plan-written-and-node-ready. A row whose sessions[] phases
+        // name it a planner (or whose dispatch label is the bp- shape) gets
+        // its every named node's status checked as a set; any node still at
+        // `idea` (the plan never landed) or similar holds the row.
+        let is_planning = graph
+            .phases
+            .get(&sid.to_ascii_lowercase())
+            .is_some_and(|phases| phases.iter().any(|p| p == "blueprint" || p == "think"))
+            || e.name.starts_with("bp-");
+        let planning = if is_planning {
+            Some(
+                graph
+                    .index
+                    .get(&sid.to_ascii_lowercase())
+                    .map(|named| {
+                        named
+                            .iter()
+                            .map(|(_, status)| status.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+            )
+        } else {
+            None
+        };
         let row = GcRow {
             origin: e.origin.clone(),
             crowned: e.crown_level.is_some(),
@@ -587,6 +637,7 @@ pub(crate) fn run(
             owns_worktree,
             worktree_clean: None,
             branch_merged: None,
+            planning,
         };
         let (action, reason) = gc_decide(&row, grace_secs);
         if action == GcAction::Keep {
@@ -612,12 +663,46 @@ pub(crate) fn run(
         // keeps the row this tick and names the refusal. DRY-RUN never stops
         // anything - a rehearsal that killed the worker it rehearsed
         // retiring would be the destructive run wearing a dry flag.
+        // Per-candidate freshness re-check (the fold of the reap-guard
+        // finding): between classifying and applying, re-read THIS row's
+        // transcript activity. Activity arrived in the window -> keep, and a
+        // re-read that cannot resolve (a moved or deleted transcript) keeps
+        // too: absence on re-read is not quiet. One stat, on rows already
+        // classified would-retire, so the hot path pays nothing.
+        if !dry_run {
+            let fresh_age = transcript_age_s(store_matches(e).as_deref(), now);
+            let still_quiet = matches!(fresh_age, Some(a) if a > grace_secs);
+            if !still_quiet {
+                let age_now = fresh_age.unwrap_or(0);
+                summary.kept_active.push((id, age_now));
+                continue;
+            }
+        }
         let stopped = if dry_run { true } else { stop_confirmed(e) };
         if !stopped {
             summary
                 .stop_refused
                 .push((id, "the stop did not confirm; row kept for retry".into()));
             continue;
+        }
+        // The ACTIVE-SURFACE removal (x-70e1 task 3): claude's agent list,
+        // codex's session index, cursor-agent's worker servers - through the
+        // same cascade `rm` walks, typed outcome recorded. A `failed` or
+        // `kept` (unverified) outcome HOLDS the row for retry: a retirement
+        // is applied only when every applicable native effect positively
+        // confirmed (or measured not-applicable). DRY-RUN applies nothing.
+        let mut effects: Vec<crate::receipt::EffectRecord> = Vec::new();
+        if !dry_run {
+            let outcome = surface_removal(e);
+            let applied = outcome.satisfies_applied();
+            effects.push(outcome.effect_record("active-surface"));
+            if !applied {
+                summary.stop_refused.push((
+                    id,
+                    "the native active-surface removal did not confirm".into(),
+                ));
+                continue;
+            }
         }
         if !stage_reap_receipt(
             e,
@@ -627,6 +712,9 @@ pub(crate) fn run(
             &mut summary.kept_no_receipt,
         ) {
             continue;
+        }
+        if let Some(receipt) = receipts.get_mut(&e.name) {
+            receipt.effects = effects.clone();
         }
         // The tree probes run only now, on a row already retiring: steady
         // state has no such rows, so no subprocess runs on the hot path.
@@ -857,30 +945,59 @@ fn expire_reap_receipts(home: &AgentsHome, retain_days: u64, summary: &mut GcSum
         let read = std::fs::read(&path)
             .map_err(|e| format!("receipt unreadable: {e}"))
             .and_then(|raw| {
-                serde_json::from_slice::<Value>(&raw).map_err(|e| format!("receipt malformed: {e}"))
+                serde_json::from_slice::<ReapReceipt>(&raw)
+                    .map_err(|e| format!("receipt malformed: {e}"))
             });
-        let reaped = match read {
-            Ok(value) => row_timestamp(value.get("reaped_at")),
+        let mut receipt = match read {
+            Ok(receipt) => receipt,
             Err(reason) => {
                 summary.kept_receipts.push((name, reason));
                 continue;
             }
         };
-        let Some(reaped) = reaped else {
-            summary.kept_receipts.push((
-                name,
-                "reaped_at missing or unparseable; a failed read is not evidence of age"
-                    .to_string(),
-            ));
-            continue;
+        let reaped = match row_timestamp(Some(&Value::String(receipt.reaped_at.clone()))) {
+            Some(ts) => ts,
+            None => {
+                summary.kept_receipts.push((
+                    name,
+                    "reaped_at missing or unparseable; a failed read is not evidence of age"
+                        .to_string(),
+                ));
+                continue;
+            }
         };
         let age_secs = (now - reaped).num_seconds().max(0) as u64;
         if age_secs > window_secs {
-            match std::fs::remove_file(&path) {
-                Ok(()) => summary.expired_receipts.push(name),
-                Err(err) => summary
+            // Past the window: strip the expendable detail, keep the identity
+            // core. The mapping this store exists to preserve outlives the
+            // operation log (AC2-HP); deleting the file would destroy the
+            // only recovery record for a session that may still be resumable.
+            if expire_receipt_details(&mut receipt) {
+                // Rewrite IN PLACE: the expiry's job is to age THIS file's
+                // expendable detail, not to mint a second receipt at the
+                // canonical key while the original keeps its stale copy.
+                let body = match serde_json::to_vec_pretty(&receipt) {
+                    Ok(body) => body,
+                    Err(err) => {
+                        summary
+                            .kept_receipts
+                            .push((name, format!("expiry rewrite failed: {err}")));
+                        continue;
+                    }
+                };
+                match std::fs::write(&path, body) {
+                    Ok(()) => summary.expired_receipts.push(name),
+                    Err(err) => summary
+                        .kept_receipts
+                        .push((name, format!("expiry rewrite failed: {err}"))),
+                }
+            }
+            // Nothing expendable left: the receipt is already the identity
+            // core only; leave it byte-identical and name it as kept.
+            else {
+                summary
                     .kept_receipts
-                    .push((name, format!("expiry failed: {err}"))),
+                    .push((name, "past retention window; identity core kept".into()));
             }
         }
     }

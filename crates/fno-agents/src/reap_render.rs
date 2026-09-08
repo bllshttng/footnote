@@ -175,6 +175,39 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     out
 }
 
+/// Render a sweep outcome plus, for the dry-run JSON read, the census the
+/// projection exists to expose (x-70e1 task 4): the complete per-session
+/// identity, its observed surfaces, and the source coverage that says how
+/// complete the enumeration is. `None` renders exactly like
+/// [`render_reap`].
+pub fn render_reap_with_inventory(
+    summary: &GcSummary,
+    inventory: Option<&crate::gc_inventory::Inventory>,
+    json_out: bool,
+    dry_run: bool,
+) -> String {
+    let base = render_reap(summary, json_out, dry_run);
+    let Some(inv) = inventory else {
+        return base;
+    };
+    if !json_out {
+        return base;
+    }
+    // Splice the census into the summary object: one JSON read carries both
+    // the would-retire verdicts and the world they were judged against.
+    let mut value: Value = match serde_json::from_str(base.trim()) {
+        Ok(v) => v,
+        Err(_) => return base,
+    };
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "inventory".into(),
+            serde_json::to_value(inv).unwrap_or(Value::Null),
+        );
+    }
+    format!("{}\n", value)
+}
+
 #[cfg(test)]
 mod tests {
     //! `reap` outcome rendering: every bucket, at every pass, including zero.

@@ -69,6 +69,7 @@ pub mod codex_ask;
 #[doc(hidden)]
 pub mod codex_fake_daemon;
 pub mod codex_inject;
+pub mod codex_store;
 pub mod codex_thread;
 mod codex_thread_entry;
 mod completion_output;
@@ -86,7 +87,10 @@ pub mod fallback_chain;
 pub mod feed;
 pub mod finalize;
 pub mod gc;
+pub mod gc_inventory;
+pub mod gc_native;
 pub mod gc_sweep;
+pub mod gc_verify;
 pub mod gemini_ask;
 #[cfg(test)]
 mod git_test_helpers;
@@ -137,6 +141,7 @@ pub mod receipt;
 pub mod reentry;
 pub mod rename;
 pub mod resume_args;
+pub mod resume_receipt;
 pub mod review_freshness;
 pub mod review_summary;
 pub mod roster_progress;

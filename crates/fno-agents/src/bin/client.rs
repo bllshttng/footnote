@@ -2065,8 +2065,97 @@ fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus
 /// `--dry-run` runs the identical classification with no registry write and no
 /// `agent_row_reaped` event - a reaper an operator cannot rehearse is one they
 /// will not run.
+/// Parse a `<number><s|m|h|d>` duration into seconds (`24h`, `90m`, `30s`,
+/// `7d`). `None` on anything else - an unparsable window is a usage error,
+/// never "everything".
+fn parse_duration_secs(raw: &str) -> Option<u64> {
+    let (digits, unit) = raw.split_at(raw.len().saturating_sub(1));
+    let multiplier = match unit {
+        "s" => 1u64,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        _ => return None,
+    };
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(multiplier))
+}
+
 fn run_reap(rest: &[String]) -> i32 {
     let json_out = rest.iter().any(|a| a == "--json" || a == "-J");
+
+    // The verify probe (x-70e1 task 5): read-only audit of the receipts
+    // store over `--since`, pinned to THIS build. Nonzero exit on any
+    // unmet condition - empty window, stale build, partial effects - so the
+    // plan's done probe cannot pass on CI-green alone.
+    if let Some(verify_pos) = rest.iter().position(|a| a == "--verify") {
+        let since = match rest.iter().position(|a| a == "--since") {
+            Some(i) => match rest.get(i + 1).and_then(|v| parse_duration_secs(v)) {
+                Some(secs) => secs,
+                None => {
+                    eprintln!(
+                        "fno-agents: --since needs a duration like 24h (got: {:?})",
+                        rest.get(i + 1).map(String::as_str).unwrap_or("")
+                    );
+                    return 2;
+                }
+            },
+            None => 24 * 3600,
+        };
+        // Exactly --verify, --since <dur>, --json/-J: anything else is a
+        // usage error, checked with a plain skip-list walk.
+        let mut extras: Vec<&str> = Vec::new();
+        let mut i = 0;
+        while i < rest.len() {
+            match rest[i].as_str() {
+                "--verify" | "--json" | "-J" => {}
+                "--since" => {
+                    i += 1; // the duration value rides with --since
+                }
+                other => extras.push(other),
+            }
+            i += 1;
+        }
+        if !extras.is_empty() {
+            eprintln!(
+                "fno-agents: reap --verify takes only --since/--json (got: {})",
+                extras.join(" ")
+            );
+            return 2;
+        }
+        let home = AgentsHome::from_env();
+        let report = fno_agents::gc_verify::verify(&home, since);
+        if json_out {
+            println!("{}", report.to_json());
+        } else {
+            println!(
+                "verified {} of {} receipt(s) in the last {}s (build {})",
+                report.verified.len(),
+                report.checked,
+                since,
+                fno_agents::gc_verify::current_build()
+            );
+            for v in &report.verified {
+                println!(
+                    "  ok {} {} ({}) at {}",
+                    v.harness, v.session_id, v.row_name, v.reaped_at
+                );
+                for effect in &v.effects {
+                    println!("    {effect}");
+                }
+            }
+            for p in &report.problems {
+                println!("  REFUSED {}: {}", p.receipt, p.reason);
+            }
+            for s in &report.skipped {
+                println!("  SKIP {}: {}", s.receipt, s.reason);
+            }
+        }
+        return if report.passes() { 0 } else { 1 };
+    }
+
     let dry_run = rest.iter().any(|a| a == "--dry-run");
     let extras: Vec<&str> = rest
         .iter()
@@ -2097,9 +2186,22 @@ fn run_reap(rest: &[String]) -> i32 {
         )
     };
 
+    // The dry-run JSON read also carries the census (x-70e1 task 4): the
+    // complete per-session identity, observed surfaces and source coverage,
+    // so one read answers both "who would retire" and "what was seen".
+    let inventory = if dry_run && json_out {
+        Some(fno_agents::gc_inventory::census(&home))
+    } else {
+        None
+    };
     print!(
         "{}",
-        fno_agents::reap_render::render_reap(&summary, json_out, dry_run)
+        fno_agents::reap_render::render_reap_with_inventory(
+            &summary,
+            inventory.as_ref(),
+            json_out,
+            dry_run
+        )
     );
     0
 }

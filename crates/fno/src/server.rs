@@ -1674,21 +1674,6 @@ fn clear_known_workers() {
 }
 
 #[cfg(test)]
-fn set_restore_registry_rows(rows: Vec<RegistryAgent>) {
-    RESTORE_REGISTRY_ROWS.with(|p| *p.borrow_mut() = Some(Some(rows)));
-}
-
-#[cfg(test)]
-struct RestoreRegistryRowsGuard;
-
-#[cfg(test)]
-impl Drop for RestoreRegistryRowsGuard {
-    fn drop(&mut self) {
-        RESTORE_REGISTRY_ROWS.with(|p| *p.borrow_mut() = None);
-    }
-}
-
-#[cfg(test)]
 struct KnownWorkersGuard;
 
 #[cfg(test)]
@@ -2736,25 +2721,9 @@ pub(crate) fn restore_member_cwd(
     }
 }
 
-// The registry rows the restore verb classifies against, read fresh from
-// the registry file at verb time. In tests, `RESTORE_REGISTRY_ROWS`
-// overrides the file (a unit test cannot populate the real registry, and
-// reading it would clobber the fake rows the test installed).
-#[cfg(test)]
-thread_local! {
-    static RESTORE_REGISTRY_ROWS: std::cell::RefCell<Option<Option<Vec<RegistryAgent>>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn restore_registry_rows() -> Option<Vec<RegistryAgent>> {
-    #[cfg(test)]
-    if let Some(rows) = RESTORE_REGISTRY_ROWS.with(|p| p.borrow().clone()) {
-        return rows;
-    }
-    std::fs::read_to_string(agents_view::registry_path())
-        .ok()
-        .and_then(|raw| agents_view::derive_rows(&raw, 0))
-}
+// The registry rows the restore verb classifies against: the reader and its
+// test override live in `restore_gate`, next to the restore refusals.
+use crate::restore_gate::restore_registry_rows;
 
 /// (x-9052) The restore gate's done set, overridable in tests (a unit test
 /// cannot populate the real graph). `None` falls through to the live
@@ -6851,8 +6820,27 @@ impl Core {
             *name_counts.entry(name.clone()).or_default() += 1;
         }
         let dims = (crate::vt::DEFAULT_ROWS, crate::vt::DEFAULT_COLS);
+        // A reap receipt is the session's death record: a member it preserves
+        // must not read as a live restore candidate, or restore resurrects a
+        // session the fleet deliberately retired.
+        let retired = crate::restore_gate::retired_receipt_session_ids().unwrap_or_default();
         let mut rows = Vec::with_capacity(candidates.len());
         for (name, member) in candidates {
+            if let Some(reason) =
+                crate::restore_gate::retired_refusal(member.harness_session_id.as_deref(), &retired)
+            {
+                rows.push(RestoreRow {
+                    member: name,
+                    harness: member.harness.clone(),
+                    squad: 0,
+                    outcome: "refused".into(),
+                    pane: None,
+                    tab: None,
+                    reason: Some(reason),
+                    notice: None,
+                });
+                continue;
+            }
             if name_counts.get(name.as_str()).copied().unwrap_or(0) > 1 {
                 rows.push(RestoreRow {
                     member: name,
@@ -16467,6 +16455,7 @@ async fn client_writer(
 mod tests {
     use super::*;
     use crate::pty::ChildGuard;
+    use crate::restore_gate::{set_restore_registry_rows, RestoreRegistryRowsGuard};
 
     #[path = "../server_thread_viewer_tests.rs"]
     mod thread_viewer_tests;

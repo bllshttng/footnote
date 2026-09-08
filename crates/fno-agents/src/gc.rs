@@ -61,7 +61,21 @@ pub struct GcRow {
     /// `Some(false)`, `None` (nothing names the work or the main line).
     /// Asked only after cleanliness answered `true`.
     pub branch_merged: Option<bool>,
+    /// The statuses of EVERY node this session is named on, when the row is
+    /// a PLANNING assignment (blueprint/think phase, or a `bp-` dispatch
+    /// label): a planner's job ends at plan-written-and-node-ready, never at
+    /// feature-shipped. `None` for every other row - their open-work gate is
+    /// unchanged.
+    pub planning: Option<Vec<String>>,
 }
+
+/// The statuses that complete a PLANNING assignment: the plan was written
+/// and the node moved on (dispatched, in flight, or shipped). `idea` is the
+/// loud exception - an idea node never received the plan, so the planning
+/// assignment it was meant for is not finished (AC3-EDGE: an uncompleted
+/// revision assignment stays outstanding).
+pub const PLANNING_COMPLETE_STATUSES: [&str; 5] =
+    ["done", "ready", "in_progress", "in_review", "shipped"];
 
 /// WHICH gate is holding a [`GcAction::Keep`] row. Every keep is named - a
 /// row that is stuck and invisible is the failure mode this enum exists to
@@ -148,20 +162,44 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
     }
     match &row.work {
         WorkState::NoProvenance => (GcAction::Keep, Some(KeepReason::NoProvenance)),
-        WorkState::Open { node, status } => (
-            GcAction::Keep,
-            Some(KeepReason::OpenWork {
-                node: node.clone(),
-                status: status.clone(),
-            }),
-        ),
-        WorkState::AllDone { .. } => match row.transcript_age_s {
-            None => (GcAction::Keep, Some(KeepReason::TranscriptUnresolved)),
-            Some(age) if age <= grace_secs => {
-                (GcAction::Keep, Some(KeepReason::Active { age_s: age }))
+        WorkState::Open { node, status } => {
+            // The planning lane: the ROW's own job (write the plan) ends at
+            // node-ready, so a planner whose every named node has moved past
+            // planning is done with its work even though the feature is not
+            // shipped (AC3-HP). One open node still parked at `idea` (or any
+            // non-complete status) holds the row: the plan it was dispatched
+            // to write never landed there.
+            if let Some(statuses) = &row.planning {
+                // An EMPTY status set fails closed: a lane that fires on a
+                // vacuous all() would retire a row the graph could not
+                // describe.
+                if !statuses.is_empty()
+                    && statuses
+                        .iter()
+                        .all(|s| PLANNING_COMPLETE_STATUSES.contains(&s.as_str()))
+                {
+                    return grace_gate(row, grace_secs);
+                }
             }
-            Some(_) => (GcAction::Retire, None),
-        },
+            (
+                GcAction::Keep,
+                Some(KeepReason::OpenWork {
+                    node: node.clone(),
+                    status: status.clone(),
+                }),
+            )
+        }
+        WorkState::AllDone { .. } => grace_gate(row, grace_secs),
+    }
+}
+
+/// The transcript gates shared by every retire-eligible arm: an unresolved
+/// transcript and a transcript inside the grace window both keep the row.
+fn grace_gate(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>) {
+    match row.transcript_age_s {
+        None => (GcAction::Keep, Some(KeepReason::TranscriptUnresolved)),
+        Some(age) if age <= grace_secs => (GcAction::Keep, Some(KeepReason::Active { age_s: age })),
+        Some(_) => (GcAction::Retire, None),
     }
 }
 
@@ -250,6 +288,7 @@ pub fn gc_sweep(
         &gc_sweep::read_graph_entries,
         &|e| store.borrow_mut().matches(e),
         &|e| gc_sweep::stop_row_process(home, e),
+        &crate::gc_native::apply_active_surface_removal,
         &gc_sweep::production_tree_probe,
         &|e| {
             crate::daemon::rm_take_worktree(e);
@@ -286,6 +325,7 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
         &read,
         &|e| store.borrow_mut().matches(e),
         &|e| gc_sweep::stop_row_process(home, e),
+        &crate::gc_native::apply_active_surface_removal,
         &gc_sweep::production_tree_probe,
         &|e| {
             crate::daemon::rm_take_worktree(e);
@@ -729,7 +769,81 @@ mod tests {
             owns_worktree: true,
             worktree_clean: Some(true),
             branch_merged: Some(true),
+            planning: None,
         }
+    }
+
+    /// The planning lane (AC3-HP): a blueprinter named on a node that reached
+    /// ready has FINISHED its assignment - the plan was written and the node
+    /// moved on. Quiet past grace retires it without closing the feature or
+    /// inventing a node.
+    #[test]
+    fn ac3_hp_planner_on_ready_node_completes_at_plan_written() {
+        let planner = GcRow {
+            work: WorkState::Open {
+                node: "x-70e1".into(),
+                status: "ready".into(),
+            },
+            planning: Some(vec!["ready".to_string()]),
+            ..retiring()
+        };
+        assert_eq!(gc_decide(&planner, GRACE), (GcAction::Retire, None));
+        // ...and stays eligible when its node is in flight: the planner is
+        // not the implementer.
+        let dispatched = GcRow {
+            work: WorkState::Open {
+                node: "x-70e1".into(),
+                status: "in_progress".into(),
+            },
+            planning: Some(vec!["in_progress".to_string()]),
+            ..retiring()
+        };
+        assert_eq!(gc_decide(&dispatched, GRACE), (GcAction::Retire, None));
+    }
+
+    /// The planning lane's edge (AC3-EDGE): one named node still at `idea`
+    /// holds the planner - the plan it was dispatched to write never landed
+    /// there. A planning row with NO planning statuses (graph lost the join)
+    /// also keeps: an unjudgeable row is never retired on the planning lane.
+    #[test]
+    fn ac3_edge_planner_on_idea_node_stays_outstanding() {
+        let planner = GcRow {
+            work: WorkState::Open {
+                node: "x-70e1".into(),
+                status: "idea".into(),
+            },
+            planning: Some(vec!["idea".to_string()]),
+            ..retiring()
+        };
+        assert_eq!(
+            gc_decide(&planner, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::OpenWork {
+                    node: "x-70e1".into(),
+                    status: "idea".into(),
+                })
+            )
+        );
+
+        let unplannable = GcRow {
+            work: WorkState::Open {
+                node: "x-70e1".into(),
+                status: "ready".into(),
+            },
+            planning: Some(Vec::new()),
+            ..retiring()
+        };
+        assert_eq!(
+            gc_decide(&unplannable, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::OpenWork {
+                    node: "x-70e1".into(),
+                    status: "ready".into(),
+                })
+            )
+        );
     }
 
     #[test]
@@ -841,6 +955,7 @@ mod tests {
         let graph = std::cell::RefCell::new(Some(gc_sweep::GraphRead {
             index,
             open_do: HashMap::new(),
+            phases: HashMap::new(),
         }));
         let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
         let stopped = Arc::new(AtomicBool::new(false));
@@ -857,6 +972,7 @@ mod tests {
                 flag.store(true, Ordering::SeqCst);
                 true
             },
+            &|_e| crate::daemon::CascadeOutcome::NotApplicable,
             &|_e| (None, None),
             &|_e| {},
         );
@@ -878,6 +994,119 @@ mod tests {
             "dry-run mutated the registry"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The per-candidate freshness re-check: activity arriving between
+    /// classification and the stop effect keeps the row. The re-check re-stats
+    /// THIS row's transcript through the same store seam; a fresh read, or a
+    /// read that can no longer resolve, holds the retirement for the next
+    /// tick.
+    #[test]
+    fn activity_arriving_in_the_apply_window_keeps_the_row() {
+        use std::cell::Cell;
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!(
+            "fno-gc-fresh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let home = AgentsHome::at(dir);
+        home.ensure_root().unwrap();
+        let transcript = home.root().join("rollout.jsonl");
+        std::fs::write(&transcript, b"{}\n").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2000);
+        std::fs::File::options()
+            .write(true)
+            .open(&transcript)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        crate::state::update_registry(&home.registry_json(), |r| {
+            let mut e = crate::state::RegistryEntry::default();
+            e.name = "freshw".into();
+            e.short_id = "freshw".into();
+            e.origin = Some("spawn".into());
+            e.harness = Some("codex".into());
+            e.harness_session_id = Some("S-fresh".into());
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        let mut index = HashMap::new();
+        index.insert(
+            "s-fresh".to_string(),
+            vec![("N1".to_string(), "done".to_string())],
+        );
+        let graph = std::cell::RefCell::new(Some(gc_sweep::GraphRead {
+            index,
+            open_do: HashMap::new(),
+            phases: HashMap::new(),
+        }));
+        let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
+        let stopped = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stopped);
+        let calls = Cell::new(0u32);
+        let calls_ref = &calls;
+        let transcript_path = transcript.clone();
+        let summary = gc_sweep::run(
+            &home,
+            &emitter,
+            900, // grace
+            false,
+            7,
+            &|_h| graph.borrow_mut().take(),
+            // Call 1 (classification): the transcript is 2000s old, past
+            // grace. Call 2 (the apply-window re-check): the SAME file reads
+            // fresh, as if the session just wrote a turn.
+            &move |_e| {
+                let n = calls_ref.get();
+                calls_ref.set(n + 1);
+                if n == 0 {
+                    Some(vec![transcript_path.clone()])
+                } else {
+                    let fresh_file = transcript_path.clone();
+                    std::fs::File::options()
+                        .write(true)
+                        .open(&fresh_file)
+                        .unwrap()
+                        .set_times(
+                            std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()),
+                        )
+                        .unwrap();
+                    Some(vec![fresh_file])
+                }
+            },
+            &move |_e| {
+                flag.store(true, Ordering::SeqCst);
+                true
+            },
+            &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+            &|_e| (None, None),
+            &|_e| {},
+        );
+        assert!(
+            !stopped.load(Ordering::SeqCst),
+            "the stop fired despite fresh activity in the window"
+        );
+        assert!(
+            summary.retired.is_empty(),
+            "no retirement recorded: {:?}",
+            summary.retired
+        );
+        assert_eq!(
+            summary.kept_active.len(),
+            1,
+            "the row lands in kept_active: {:?}",
+            summary.kept_active
+        );
+        let _ = std::fs::remove_dir_all(home.root());
     }
 
     #[test]
@@ -918,6 +1147,7 @@ mod tests {
             &|_| None,
             &|_| None,
             &|_| true,
+            &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|_| (None, None),
             &|_| {},
         );
