@@ -62,7 +62,13 @@ use crate::view_store::{
 use crate::vt::ShellActivity;
 
 mod row_stamp;
+// (v75) The sideline's density width rules, moved out under the file-budget
+// ratchet while the SessionRetired arms landed.
+mod density_width;
 use self::row_stamp::{no_pane_notice, paint_notice_overlay, paint_row_stamp, RowArm, RowStamp};
+use density_width::{
+    canonical_width, density_glyph, min_admit_width, min_render_width, sideline_max_width,
+};
 
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -187,69 +193,6 @@ const MIN_EXTENDED_PANEL_W: u16 = COL_STATUS + COL_MIN_NAME + COL_PR + COL_TIME 
 /// first row: the state glyph plus a trailing pad (x-2e86) so it does not sit
 /// flush against the divider.
 const DENSITY_BTN_W: usize = 2;
-
-/// (x-2e86) The width a density jumps to when picked as a preset (the density
-/// key or button): each mode's canonical size. Free-standing so the preset
-/// path can price a mode without being in it.
-fn canonical_width(d: Density) -> u16 {
-    match d {
-        Density::Slim => SLIM_PANEL_W,
-        Density::Regular => PANEL_W,
-        Density::Extended => EXTENDED_PANEL_W,
-    }
-}
-
-/// (x-2e86) The narrowest width at which a density still renders its structure.
-/// A drag below this demotes the density (Locked 5). Only `Extended` has a
-/// floor above [`MIN_SLIM_PANEL_W`]: the tree and the rail truncate gracefully
-/// down to the slim floor, but the table needs room for status + agent + PR + age.
-fn min_render_width(d: Density) -> u16 {
-    match d {
-        Density::Slim | Density::Regular => MIN_SLIM_PANEL_W,
-        Density::Extended => MIN_EXTENDED_PANEL_W,
-    }
-}
-
-/// (x-2e86) The smallest terminal room ([`sideline_max_width`]) at which a
-/// density is shown at all; below it the rail AUTO-HIDES so the panes keep the
-/// screen, rather than rendering a rail too cramped to be worth its columns.
-///
-/// This is the pre-x-2e86 per-density floor, and it is deliberately NOT
-/// [`min_render_width`]: a `Slim` rail stays useful squished to
-/// [`MIN_SLIM_PANEL_W`], but a `Regular` tree below [`PANEL_W`] or an `Extended`
-/// table below [`MIN_EXTENDED_PANEL_W`] is too tight to read, so on a narrow
-/// terminal those hide (giving content the room) exactly as they did before free
-/// width. It gates on terminal CAPACITY, not on the stored width, so a rail the
-/// terminal CAN admit still renders at a small DRAGGED width (a drag-to-8 Regular
-/// shows, because the terminal that fits 28 also fits 8).
-fn min_admit_width(d: Density) -> u16 {
-    match d {
-        Density::Slim => MIN_SLIM_PANEL_W,
-        Density::Regular => PANEL_W,
-        Density::Extended => MIN_EXTENDED_PANEL_W,
-    }
-}
-
-/// (x-2e86) The largest sideline width this terminal allows: 60% of the columns,
-/// but never so wide that content drops below [`MIN_CONTENT_COLS`] - the tighter
-/// bound wins. Saturating throughout (a u32 intermediate for the 60%) so a
-/// degenerate terminal underflows to 0 rather than panicking; `panel_w` reads
-/// that 0 as "too narrow, hide the rail".
-fn sideline_max_width(term_cols: u16) -> u16 {
-    let sixty = ((term_cols as u32) * 3 / 5) as u16;
-    sixty.min(term_cols.saturating_sub(MIN_CONTENT_COLS))
-}
-
-fn density_glyph(d: Density) -> char {
-    // (x-2e86) A fill ramp - rail, tree, table - reading as increasing density.
-    // All three are East-Asian-width 1 (U+2581/2584/2588), which the button's
-    // column math and the header-band composition require.
-    match d {
-        Density::Slim => '▁',
-        Density::Regular => '▄',
-        Density::Extended => '█',
-    }
-}
 /// The tab bar row.
 const TAB_BAR_ROWS: u16 = 1;
 /// The status row (US4): one always-on bottom line of client-local chrome.
