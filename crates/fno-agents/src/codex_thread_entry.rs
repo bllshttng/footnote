@@ -9,7 +9,6 @@ use crate::AgentStatus;
 pub(crate) fn git_grant_for_cwd(cwd: &Path) -> Option<String> {
     crate::provider::git_common_dir(cwd)
 }
-
 /// Build the registry row for a Codex app-server thread. Codex has no fno
 /// short id: the full harness session id is both the resume handle and the
 /// canonical registry identity.
@@ -142,5 +141,4 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         assert_eq!(git_grant_for_cwd(outside.path()), None);
     }
-
 }
