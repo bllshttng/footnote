@@ -4,6 +4,16 @@ Questions a king or an orchestrating agent hits while running workers, and the a
 
 This is a FAQ, not a command reference. The full verb surface is `fno agents --help` and [../skills/king-for-a-day/references/cli-commands.md](../skills/king-for-a-day/references/cli-commands.md).
 
+## What this list is for
+
+Every entry is a workaround, and a workaround is a gap in the machinery. So this doubles as a standing gap list: the things a human or an agent has to know because the tool does not yet say it, refuse it, or do it.
+
+That makes each entry a candidate fix, not a permanent teaching. An entry earns its place until the gap closes, and then it leaves.
+
+**Adding an entry.** Write the question a reader would actually type, the answer that survived contact, and the specimen that proves it (a file and line, a command and its real output, a measured number). Add a `Graduates to:` line naming the change that retires it. Prose with no specimen is a guess, and an entry with no exit is a permanent workaround dressed as documentation.
+
+This convention matches the pitfalls corpus in AGENTS.md, which removes an entry in the PR where its guard lands. Do the same here.
+
 ## A worker looks dead. Is it?
 
 Probably not, and four readers will disagree with each other. Know what each one actually proves before you act on it.
@@ -26,6 +36,8 @@ A stale file can sit at the canonical path. One session read that copy and saw a
 
 `fno agents resume <name> --print-command` prints the resolved cwd on its first line. Treat that line as the authority on where to look.
 
+*Graduates to:* one liveness verb with a decisive answer, so four readers stop disagreeing, and a transcript path resolver every caller shares.
+
 ## How do I get a worker back?
 
 Three verbs, and they are not interchangeable.
@@ -38,6 +50,8 @@ When the old worker holds context you must otherwise pay to rebuild, prefer resu
 
 **A caution on `resume -m`.** Resume takes `-m/--message` to hand the revived session an instruction. Once observed, `resume -m` against a session already in a terminal state printed `Done -> Done` and the message never reached the transcript. If you need an instruction to land, send it with `fno agents mail send` and verify it arrived rather than assuming the resume carried it.
 
+*Graduates to:* `resume -m` either delivering to a terminal session or refusing loudly, instead of reporting `Done -> Done` and dropping the payload.
+
 ## My worker did real work and never reported it
 
 Read its transcript. A finished worker can print its report into its own transcript and stop without mailing anyone. Its roster row then reads `quiet` with `last_message_at` null, which looks identical to a worker that did nothing.
@@ -45,6 +59,8 @@ Read its transcript. A finished worker can print its report into its own transcr
 One session found a completed, validated plan this way twelve minutes after the worker had finished and gone silent.
 
 The general rule: `last_message_at` measures mail, not work.
+
+*Graduates to:* a finished worker mailing its own report, or a roster field that separates "worked and did not mail" from "did nothing".
 
 ## I need to change a worker's instructions
 
@@ -56,6 +72,8 @@ Two channels, and they answer different questions.
 
 A brief that still says "hold for the operator ruling" will park a fresh worker on arrival, and the grant you just received will look like it never landed. Two separate sessions hit this in one day: the graph keeps issuing the old order until you change the graph.
 
+*Graduates to:* a dispatch brief carrying a written-at stamp, so a worker can see its order predates the grant that sent it.
+
 ## Spawn, reuse, or resume?
 
 In this order:
@@ -65,6 +83,8 @@ In this order:
 3. When neither exists, **spawn**.
 
 Before any spawn, check for a duplicate. A node with a live claim or a sibling worker already on it turns a helpful spawn into two workers fighting over one worktree. `fno agents list --json` filtered on the node id is enough. Name every worker after the node it serves, because that name is the only worker-to-node join you get.
+
+*Graduates to:* spawn refusing by default when a live claim or a sibling worker already holds the node.
 
 ## A gate refused me
 
@@ -78,6 +98,8 @@ Refusals seen in practice, all correct:
 
 A refusal message can name the wrong cause while still being right to refuse. Fix the message in the project, obey the refusal now.
 
+*Graduates to:* every refusal naming a cause it actually verified. `fno agents rm` currently blames an unreadable roster that reads fine.
+
 ## I got zero results. Is that real?
 
 Not until a positive control says so. An absence has three explanations: the real outcome, the instrument never ran, or the pipeline ate the output.
@@ -89,6 +111,8 @@ Two specimens from one day:
 
 So: run the same reader for something you *expect* to find, and never truncate a zero you intend to trust. `head` on an existence read is how a false absence gets published.
 
+*Graduates to:* the assert helper the AGENTS.md pitfalls corpus already names, rejecting absence-only success and zero-hit probes with no positive control.
+
 ## My check-in keeps saying nothing changed
 
 Check what your check-in is not reading. A reign check-in that reads the board, the court, agent status, capacity and the PR, but never reads the decision record, cannot notice being unblocked.
@@ -96,6 +120,8 @@ Check what your check-in is not reading. A reign check-in that reads the board, 
 One session reported "waiting on an operator ruling" every thirty minutes for eleven hours. The ruling had landed three minutes after the question was filed, recorded against a different subject. `fno backlog decisions` with no argument lists recent rulings across every subject and catches this on the next beat.
 
 The decision record is keyed by subject and has no reverse index. A ruling on `pr-1562` silently decides every other row blocked the same way and tells none of them.
+
+*Graduates to:* a decisions read inside the check-in body, and a reverse index from a blocked row to the ruling that frees it.
 
 ## A worker is gaming a numeric gate
 
@@ -110,6 +136,8 @@ The discriminator is not the motive. Both a good and a bad edit will say "to fit
 
 Also worth knowing, because it changes what you tell a worker: the same gate **excludes test paths** (`check-file-budget.sh`). Test coverage is free. Say so, or a worker will delete tests it must keep.
 
+*Graduates to:* the budget gate discounting comment and docstring lines, so the cheapest legal move for a worker is a real port.
+
 ## Two live laws contradict each other
 
 Surface and hold. Do not pick.
@@ -117,6 +145,8 @@ Surface and hold. Do not pick.
 When two rulings point opposite ways at the same action and neither is marked as winning, choosing one is synthesizing a resolution the operator withheld. When a law's own rationale says the tension was "flagged to the operator rather than resolved here", that sentence is a standing instruction, not a gap.
 
 Holding is cheap and reversible. A worker killed to satisfy the wrong side of an unresolved conflict is not.
+
+*Graduates to:* `fno backlog decisions` flagging two live rulings that contradict each other on one subject.
 
 ## Related
 
