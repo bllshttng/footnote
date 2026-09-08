@@ -54,7 +54,7 @@ from typing import Any, Literal, NamedTuple, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
-from fno.agents.naming import agent_name
+from fno.agents.naming import agent_name, slug_component
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.provenance import autobrief as _autobrief
 
@@ -1090,8 +1090,28 @@ def schedule_shadow(
     }
 
 
+def _verb_qualifier(verb: Optional[str]) -> Optional[str]:
+    """Lifecycle-reason qualifier for the worker name: the bare declared verb.
+
+    ``/fno:blueprint`` becomes ``blueprint`` (the codex ``$fno:`` spelling
+    slugifies to ``fno-blueprint``), so the row name states which verb ran
+    while every ``target-<node>-`` consumer match keeps holding. A node
+    declaring no verb yields ``None``: the builtin target path keeps its
+    exact current name.
+    """
+    v = (verb or "").strip()
+    if not v:
+        return None
+    if v.startswith("/fno:"):
+        v = v[len("/fno:"):]
+    return slug_component(v.lstrip("/")) or None
+
+
 def _worker_agent_name(
-    node_id: str, node_slug: Optional[str], prefix: str = "target"
+    node_id: str,
+    node_slug: Optional[str],
+    prefix: str = "target",
+    qualifier: Optional[str] = None,
 ) -> str:
     """Provenance-carrying bg worker name: ``<prefix>-<full-node-id>-<slug>``.
 
@@ -1100,13 +1120,15 @@ def _worker_agent_name(
     configured node id assembled a name ``fno agents spawn`` rejected, losing
     the dispatch with no session and no event (x-3218). ``prefix`` is
     ``reconcile`` for the G4 de-stub pass so its worker name never collides
-    with the (ended) first pass's ``target-<id>-<slug>``.
+    with the (ended) first pass's ``target-<id>-<slug>``. ``qualifier`` names
+    the declared dispatch verb when the node declares one (see
+    :func:`_verb_qualifier`).
 
     Raises :class:`~fno.agents.naming.AgentNameError` when the required
     identity cannot be represented; the dispatch path projects that as a
     node-identifying failure event rather than a launched lane.
     """
-    return agent_name(prefix, node_id, slug=node_slug)
+    return agent_name(prefix, node_id, slug=node_slug, qualifier=qualifier)
 
 
 def _refuse_repeated_dead_dispatch(
@@ -1253,8 +1275,12 @@ def _spawn_worker(
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     is_reconcile = bool(reconcile_manifest)
+    node_verb = (verb or "").strip() or None
     agent_name = _worker_agent_name(
-        node_id, node_slug, prefix="reconcile" if is_reconcile else "target"
+        node_id,
+        node_slug,
+        prefix="reconcile" if is_reconcile else "target",
+        qualifier=_verb_qualifier(node_verb),
     )
     # --provider selects the account/record (or a bare kind like "claude"); a
     # per-node or dispatch-time pin overrides the claude default. Layer-separate
@@ -1319,7 +1345,6 @@ def _spawn_worker(
     # One axis: `provider` is the harness under an older spelling, so it must
     # reach the resolver too, or the command follows the stage table instead.
     launch_axis = _launch_harness_axis(launch, node_cwd)
-    node_verb = (verb or "").strip() or None
     # x-0961: "declared nothing" and "declaration eaten by a lossy feed" used
     # to produce a byte-identical dispatch. The `verb` param collapses both to
     # None; only the node dict carries the difference, so the receipt names it
@@ -3164,7 +3189,10 @@ def advance(
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
-        _tick(0, reason, f"node={node_id or '-'} reason={reason}")
+        tick_detail = f"node={node_id or '-'} reason={reason}"
+        if detail:
+            tick_detail += f" detail={detail[:120]}"
+        _tick(0, reason, tick_detail)
         return AdvanceResult(
             "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail
         )
