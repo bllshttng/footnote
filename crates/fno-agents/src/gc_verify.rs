@@ -84,28 +84,33 @@ impl VerifyReport {
     }
 }
 
-/// The identity of the RUNNING binary: the pin every receipt in the window
-/// must carry. Two deployments of the same package version must not share a
-/// stamp - a rebuild behind the same version would otherwise accept receipts
-/// the deployed binary never wrote - so the pin carries the running
-/// executable's own mtime beside the version. An unreadable exe path falls
-/// back to the version alone (named in the stamp) rather than failing the
-/// writer.
+/// The identity of the BUILD, not of the running executable: the pin every
+/// receipt in the window must carry.
+///
+/// The writer and the verifier are never the same file. `fno-agents-daemon`
+/// writes the receipt; `fno-agents` runs `reap --verify`. One `cargo install`
+/// lays down three separate executables, so any pin read off the running
+/// exe (its path, its mtime, its own hash) differs between writer and reader
+/// and the audit can never pass. It did not: a 523-receipt window read 0
+/// verified, every current-daemon receipt named stale over a 5-second mtime
+/// gap between the two binaries of one install.
+///
+/// So the pin is what the whole triad bakes at compile time: the crates/
+/// subtree rev from build.rs, the same quantity `fno doctor update` already
+/// uses to prove the three bins are ONE build. Two deployments of the same
+/// package version still differ whenever the source moved. A rebuild of
+/// identical source shares a stamp, which is correct - it is the same build.
+/// The `-dirty` suffix names an uncommitted tree so a dev build never passes
+/// itself off as the committed rev.
 pub fn current_build() -> String {
     let version = env!("CARGO_PKG_VERSION");
-    match std::env::current_exe()
-        .and_then(|exe| exe.metadata())
-        .and_then(|meta| meta.modified())
-    {
-        Ok(modified) => {
-            let secs = modified
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            format!("fno-agents {version} exe-mtime {secs}")
-        }
-        Err(_) => format!("fno-agents {version} exe-mtime unknown"),
-    }
+    let rev = env!("FNO_AGENTS_CRATES_REV");
+    let dirty = if env!("FNO_AGENTS_GIT_DIRTY") == "1" {
+        "-dirty"
+    } else {
+        ""
+    };
+    format!("fno-agents {version} rev {rev}{dirty}")
 }
 
 /// Audit the receipts store over the window. Read-only: nothing here writes.
@@ -212,6 +217,21 @@ pub fn verify(home: &AgentsHome, since_secs: u64) -> VerifyReport {
                 .collect(),
         });
     }
+    // A window that refused nothing and verified nothing reads as a silent
+    // red: `problems` empty, `passes` false, and no reason on the page. Name
+    // the shape. On the live fleet this exact output (523 checked, 0
+    // verified, 0 problems) hid a build pin that could never match, and
+    // reading it took a source dive instead of a receipt.
+    if report.verified.is_empty() && report.problems.is_empty() && !report.skipped.is_empty() {
+        report.problems.push(VerifyProblem {
+            receipt: format!("window of {}s", since_secs),
+            reason: format!(
+                "{} receipt(s) in the window, every one from another build, none from {build:?}: \
+                 no retirement by the current build to verify yet",
+                report.skipped.len()
+            ),
+        });
+    }
     report
 }
 
@@ -222,13 +242,19 @@ mod tests {
     use crate::state;
 
     fn temp_home() -> AgentsHome {
+        // A per-call counter, not the clock alone: cargo runs these tests as
+        // threads of one process, and two of them reading the same coarse
+        // nanosecond shared a home - one test's receipts then landed in
+        // another's window and reddened it at random.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "gc-verify-{}-{}",
+            "gc-verify-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let home = AgentsHome::at(dir);
@@ -274,9 +300,10 @@ mod tests {
 
     #[test]
     fn a_stale_build_never_passes_the_audit() {
-        // A receipt stamped by another binary can never verify. It skips
-        // (not a refusal: any rollout holds both builds' receipts), and the
-        // audit still fails on empty evidence.
+        // A receipt stamped by another binary can never verify. It skips -
+        // no PER-RECEIPT refusal, because any rollout holds both builds'
+        // receipts - and the audit fails on empty evidence, with the window
+        // itself naming why.
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("old"), None).unwrap();
         stamp(&mut receipt, Some("fno-agents 0.0.1"));
@@ -286,7 +313,14 @@ mod tests {
         let report = verify(&home, 24 * 3600);
         assert!(!report.passes());
         assert!(report.verified.is_empty());
-        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        assert!(
+            report.problems[0]
+                .reason
+                .contains("no retirement by the current build"),
+            "{:?}",
+            report.problems
+        );
         assert!(
             report
                 .skipped
@@ -300,7 +334,9 @@ mod tests {
     #[test]
     fn an_unstamped_v1_receipt_reads_stale() {
         // Pre-stamp receipts (writer_build absent) are the deployed fleet's
-        // own history: skip, never verify, never refuse.
+        // own history: skip, never verify, never refuse PER RECEIPT. The
+        // window itself still says why it is red - a report with nothing in
+        // `problems` and nothing in `verified` names no reason at all.
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("v1"), None).unwrap();
         stamp(&mut receipt, None);
@@ -309,8 +345,15 @@ mod tests {
 
         let report = verify(&home, 24 * 3600);
         assert!(!report.passes());
-        assert!(report.problems.is_empty(), "{:?}", report.problems);
         assert!(report.skipped.len() == 1, "{:?}", report.skipped);
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        assert!(
+            report.problems[0]
+                .reason
+                .contains("every one from another build"),
+            "{:?}",
+            report.problems
+        );
     }
 
     #[test]

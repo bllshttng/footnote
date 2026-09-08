@@ -162,4 +162,6 @@ Only confirmed native effects let a retirement apply. Every applicable effect mu
 
 The receipts store (`<agents home>/reap-receipts/`) keeps the recovery mapping: identity, native locator, resume argv, and the per-effect outcome records. Retention strips the expendable detail and keeps the identity core. `fno agents reap --verify --since 24h --json` audits the store against the CURRENT build. It refuses an empty window, a stale build, or a partial effect set, because a green CI is not applied evidence.
 
+The build pin is the crates/ subtree rev that build.rs bakes into all three bins, and every bin prints it as `build` in `version --json`. It cannot be read off the running executable. The daemon writes the receipt and the client reads it, so a pin taken from the running file differs between the two and the audit can never pass. It did not: one 523-receipt window read 0 verified, because a single `cargo install` wrote the two bins 5 seconds apart. A window that verifies nothing and refuses nothing now names that shape instead of reading as a silent red.
+
 The watchdog retirement lane is gone. A classifier that only reported and never executed was the measured zero this document once described. Do not restore it.
