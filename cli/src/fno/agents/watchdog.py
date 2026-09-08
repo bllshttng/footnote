@@ -2273,6 +2273,47 @@ def run_sweep(
     return payload, rows
 
 
+def session_verdict(
+    session_id: str,
+    *,
+    now_s: Optional[float] = None,
+    rows_provider: Optional[Callable[[], tuple[list[Row], list[str]]]] = None,
+    transcript_fn: Optional[Callable[[str], Optional[TailFacts]]] = None,
+    claim_fn: Optional[Callable[[str], dict | _Unreadable]] = None,
+    graph_fn: Optional[Callable[[], dict[str, dict] | _Unreadable]] = None,
+    provider_outage_fn: Optional[Callable[[], dict[str, Any]]] = None,
+    roster_timeout: Optional[float] = None,
+    pr_state_fn: Optional[Callable[[str, int], Optional[str]]] = None,
+) -> Optional[str]:
+    """This module's own verdict word (wake/reroute/ghost/stale/leave/...)
+    for one session, or ``None`` when the row is absent from the sweep or
+    the sweep itself failed to read.
+
+    A thin filter over :func:`run_sweep` - the DI seams pass straight
+    through, so a caller can inject the same synthetic rows a unit test
+    would. Exported so a caller outside this module (the king board's
+    blocked_child queue, x-3ecf) asks the ONE classifier this file owns for
+    "is this session stuck" instead of restating it against raw
+    transcripts."""
+    try:
+        payload, _rows = run_sweep(
+            now_s=now_s,
+            rows_provider=rows_provider,
+            transcript_fn=transcript_fn,
+            claim_fn=claim_fn,
+            graph_fn=graph_fn,
+            provider_outage_fn=provider_outage_fn,
+            roster_timeout=roster_timeout,
+            pr_state_fn=pr_state_fn,
+        )
+    except Exception:  # noqa: BLE001 - a failed sweep is never a verdict
+        return None
+    for v in payload.get("verdicts", []):
+        if v.get("row_id") == session_id:
+            return v.get("verdict")
+    return None
+
+
 def emit_event(kind: str, data: dict) -> None:
     """Best-effort schema-validated event on the global events.jsonl. The
     source is ``daemon`` for both cadences (the envelope enum's only allowed
