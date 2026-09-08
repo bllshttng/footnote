@@ -12,6 +12,7 @@
 //! attribution owners); this module never reads state files or the network.
 
 use serde_json::{json, Map, Value};
+use std::path::Path;
 
 const SLOT_LANE_FIELDS: [&str; 9] = [
     "provider",
@@ -1850,47 +1851,13 @@ pub fn run_route_slot_audit(args: &[String]) -> (i32, String, String) {
             }
         },
         None => {
-            // No snapshot handed in: load it through the Python front door's
-            // established readers. A missing front door is an incomplete
-            // terminal, never a pass.
-            match std::process::Command::new("fno")
-                .args([
-                    "config",
-                    "route",
-                    "audit-snapshot",
-                    "--project",
-                    &project,
-                    "--node",
-                    &node,
-                    "--since",
-                    &since,
-                ])
-                .output()
-            {
-                Ok(out) if out.status.success() => {
-                    String::from_utf8_lossy(&out.stdout).into_owned()
-                }
-                Ok(out) => {
-                    let detail = String::from_utf8_lossy(&out.stderr);
-                    return (
-                        1,
-                        String::new(),
-                        format!(
-                            "route-slot audit: snapshot loader failed: {}",
-                            detail.trim()
-                        ),
-                    );
-                }
-                Err(e) => {
-                    return (
-                        1,
-                        String::new(),
-                        format!(
-                            "route-slot audit: no fno front door for the snapshot \
-                             loader: {e}"
-                        ),
-                    )
-                }
+            // No snapshot handed in: load it natively. Config facts ride the
+            // public inventory surface (the fingerprint algorithm belongs to
+            // the Python config reader); sessions come from the machine
+            // stores this binary already owns.
+            match load_audit_snapshot(&project, &node, &since) {
+                Ok(v) => serde_json::to_string(&v).unwrap_or_default(),
+                Err(e) => return (1, String::new(), format!("route-slot audit: {e}\n")),
             }
         }
     };
@@ -2119,6 +2086,231 @@ fn view_evidence(session: &Value, sid: &str, fingerprint: &str) -> Result<(), Va
         }));
     }
     Ok(())
+}
+
+/// Config facts (fingerprint, policy) come from the public inventory surface;
+/// everything else loads from the machine stores. A missing front door is an
+/// incomplete terminal, never a pass.
+fn load_audit_snapshot(project: &str, node: &str, since: &str) -> Result<Value, String> {
+    let inv = std::process::Command::new("fno")
+        .args(["config", "route", "inventory", "--json"])
+        .output()
+        .map_err(|e| format!("no fno front door for config facts: {e}"))?;
+    if !inv.status.success() {
+        return Err("inventory read failed for config facts".to_string());
+    }
+    let facts: Value =
+        serde_json::from_slice(&inv.stdout).map_err(|e| format!("bad inventory json: {e}"))?;
+    let since_seconds = parse_since_seconds(since)?;
+    let home = crate::paths::AgentsHome::from_env();
+    let state_root = home
+        .root()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| home.root().to_path_buf());
+    audit_load_snapshot(
+        &facts,
+        &state_root,
+        &home.registry_json(),
+        project,
+        node,
+        since_seconds,
+    )
+}
+
+/// The evidence window: `30m`, `2h`, `7d`, or bare seconds.
+fn parse_since_seconds(text: &str) -> Result<i64, String> {
+    let text = text.trim();
+    let units: [(&str, i64); 4] = [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)];
+    for (suffix, seconds) in units {
+        if let Some(value) = text
+            .strip_suffix(suffix)
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            if text.len() > suffix.len() {
+                return Ok(value * seconds);
+            }
+        }
+    }
+    text.parse::<i64>()
+        .map_err(|_| format!("--since must look like 30m, 2h or 7d: {text:?}"))
+}
+
+/// The native snapshot loader. Config facts arrive in `config_facts` (the
+/// caller execs the public inventory surface for them: the fingerprint's
+/// algorithm belongs to the Python config reader, and duplicating it here
+/// would fork the one answer the receipts carry). Sessions, receipts and
+/// view records load from the machine stores this binary already reads.
+///
+/// Pure over its inputs: the same files and facts in, the same snapshot out.
+pub(crate) fn audit_load_snapshot(
+    config_facts: &Value,
+    state_root: &Path,
+    registry_path: &Path,
+    project: &str,
+    node: &str,
+    since_seconds: i64,
+) -> Result<Value, String> {
+    use std::collections::BTreeMap;
+
+    let fingerprint = config_facts
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let policy = config_facts.get("policy").cloned().unwrap_or(json!({}));
+    let cutoff = chrono::Utc::now() - chrono::Duration::seconds(since_seconds);
+    let within = |ts: &str| -> bool {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .map(|t| t.with_timezone(&chrono::Utc) >= cutoff)
+            .unwrap_or(false)
+    };
+
+    // Spawn decision receipts: the newest fingerprint per spawn name inside
+    // the window.
+    let mut receipts: BTreeMap<String, String> = BTreeMap::new();
+    match std::fs::read_to_string(state_root.join("events.jsonl")) {
+        Ok(text) => {
+            for line in text.lines() {
+                let Ok(row) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                if row.get("kind").and_then(Value::as_str) != Some("spawn_defaults_applied") {
+                    continue;
+                }
+                if !within(row.get("ts").and_then(Value::as_str).unwrap_or("")) {
+                    continue;
+                }
+                let name = row.get("name").and_then(Value::as_str).unwrap_or("");
+                let fp = row.get("fingerprint").and_then(Value::as_str).unwrap_or("");
+                if !name.is_empty() && !fp.is_empty() {
+                    receipts.insert(name.to_string(), fp.to_string());
+                }
+            }
+        }
+        Err(_) => {} // no journal: no receipts, the verifier names the boundary
+    }
+
+    // View records: one row per subject prefix routing-view:, with retractions
+    // and supersedes applied by row order (a consumer-side consistency read;
+    // the Python decisions reader stays the format owner).
+    let mut view_rows: BTreeMap<String, (String, String, String)> = BTreeMap::new(); // subject -> (decision, ts, decision_id)
+    let mut retired: BTreeMap<String, ()> = BTreeMap::new();
+    match std::fs::read_to_string(state_root.join("decisions.jsonl")) {
+        Ok(text) => {
+            for line in text.lines() {
+                let Ok(row) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
+                let data = row.get("data").cloned().unwrap_or(json!({}));
+                let subject = data.get("subject").and_then(Value::as_str).unwrap_or("");
+                let is_view = subject.starts_with("routing-view:");
+                if kind == "decision_retracted" {
+                    let target = data
+                        .get("target_decision_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if !target.is_empty() {
+                        retired.insert(target.to_string(), ());
+                    }
+                    continue;
+                }
+                if !is_view {
+                    continue;
+                }
+                let did = data
+                    .get("decision_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                view_rows.insert(
+                    subject.to_string(),
+                    (
+                        data.get("decision")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        row.get("ts")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        did.to_string(),
+                    ),
+                );
+            }
+        }
+        Err(_) => {} // no index: no view records, the verifier names the boundary
+    }
+
+    // Sessions: registry rows naming the node inside the window.
+    let mut sessions: Vec<Value> = Vec::new();
+    if node.is_empty() {
+        return Ok(json!({}));
+    }
+    match crate::state::load_registry(registry_path) {
+        Ok(registry) => {
+            for entry in &registry.entries {
+                if entry.node.as_deref() != Some(node) {
+                    continue;
+                }
+                let root = if entry.project_root.is_empty() {
+                    entry.cwd.as_str()
+                } else {
+                    entry.project_root.as_str()
+                };
+                if !project.is_empty() && !root.starts_with(project) {
+                    continue;
+                }
+                if !within(&entry.created_at) {
+                    continue;
+                }
+                let sid = entry
+                    .harness_session_id
+                    .clone()
+                    .or_else(|| entry.fno_id.clone())
+                    .unwrap_or_default();
+                let name = entry.name.clone();
+                let view_records: Vec<Value> = view_rows
+                    .iter()
+                    .filter(|(subject, _)| subject.as_str() == &format!("routing-view:{sid}"))
+                    .filter(|(_, (decision, _, did))| {
+                        // A retracted or superseded confirmation verifies
+                        // nothing; the Python reader owns the full lifecycle.
+                        !retired.contains_key(did.as_str()) && !decision.is_empty()
+                    })
+                    .map(|(subject, (decision, ts, did))| {
+                        json!({
+                            "subject": subject,
+                            "decision": decision,
+                            "ts": ts,
+                            "decision_id": did.to_string(),
+                            "lifecycle": "live",
+                        })
+                    })
+                    .collect();
+                sessions.push(json!({
+                    "session_id": sid,
+                    "name": name,
+                    "harness": entry.harness.clone(),
+                    "model": entry.model.clone().unwrap_or_default(),
+                    "model_basis": entry.model_basis.clone().unwrap_or_default(),
+                    "requested_model": entry.requested_model.clone().unwrap_or_default(),
+                    "account": entry.account_record_id.clone().unwrap_or_default(),
+                    "created_at": entry.created_at,
+                    "receipt_fingerprint": receipts.get(&name).cloned().unwrap_or_default(),
+                    "view_records": view_records,
+                }));
+            }
+        }
+        Err(e) => return Err(format!("registry unreadable: {e}")),
+    }
+    Ok(json!({
+        "project": project,
+        "node": node,
+        "fingerprint": fingerprint,
+        "policy": policy,
+        "sessions": sessions,
+    }))
 }
 
 #[cfg(test)]
@@ -2920,5 +3112,90 @@ mod tests {
         let report: Value = serde_json::from_str(&stdout).unwrap();
         assert_eq!(report["verdict"], "ROUTING_POLICY_VERIFIED");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn since_parser_reads_units_and_bare_seconds() {
+        assert_eq!(parse_since_seconds("30m").unwrap(), 1800);
+        assert_eq!(parse_since_seconds("2h").unwrap(), 7200);
+        assert_eq!(parse_since_seconds("7d").unwrap(), 604800);
+        assert_eq!(parse_since_seconds("90").unwrap(), 90);
+        assert!(parse_since_seconds("abc").is_err());
+    }
+
+    #[test]
+    fn loader_builds_sessions_from_the_machine_stores() {
+        use crate::state::{Lineage, RegistryEntry};
+
+        let dir = std::env::temp_dir().join(format!("fno-auditld-{}", std::process::id()));
+        let agents_root = dir.join("agents");
+        std::fs::create_dir_all(&agents_root).unwrap();
+        let state_root = dir.clone();
+
+        let fresh = chrono::Utc::now().to_rfc3339();
+        let stale = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        let entry = |sid: &str, created: String, node_v: &str| RegistryEntry {
+            node: Some(node_v.to_string()),
+            name: "worker-1".into(),
+            harness: Some("claude".into()),
+            cwd: "/tmp/proj".into(),
+            project_root: "/tmp/proj".into(),
+            created_at: created,
+            model: Some("glm".into()),
+            model_basis: Some("verified".into()),
+            requested_model: Some("glm".into()),
+            account_record_id: Some("zai-main".into()),
+            harness_session_id: Some(sid.to_string()),
+            fno_id: Some(sid.to_string()),
+            ..RegistryEntry::new(Some(sid.to_string()), Lineage::captured((None, None, None)))
+        };
+        let registry = crate::state::Registry {
+            entries: vec![
+                entry("sid-1", fresh.clone(), "x-90a9"),
+                entry("sid-old", stale, "x-90a9"),
+            ],
+            ..crate::state::Registry::default()
+        };
+        std::fs::write(
+            &agents_root.join("registry.json"),
+            serde_json::to_vec(&registry).unwrap(),
+        )
+        .unwrap();
+
+        std::fs::write(
+            state_root.join("events.jsonl"),
+            format!(
+                "{{\"kind\":\"spawn_defaults_applied\",\"name\":\"worker-1\",\"fingerprint\":\"fp1\",\"ts\":\"{fresh}\"}}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            state_root.join("decisions.jsonl"),
+            format!(
+                "{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view1\",\"subject\":\"routing-view:sid-1\",\"decision\":\"{{\\\"view\\\": \\\"claude-native\\\", \\\"fingerprint\\\": \\\"fp1\\\", \\\"session_id\\\": \\\"sid-1\\\"}}\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view2\",\"subject\":\"routing-view:sid-other\",\"decision\":\"x\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"decision_retracted\",\"data\":{{\"target_decision_id\":\"d-view2\"}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let facts = json!({
+            "fingerprint": "fp1",
+            "policy": {"enforce_inventory": true, "operator_access": "local"},
+        });
+        let snap = audit_load_snapshot(
+            &facts,
+            &state_root,
+            &agents_root.join("registry.json"),
+            "/tmp/proj",
+            "x-90a9",
+            1800,
+        )
+        .unwrap();
+        assert_eq!(snap["fingerprint"], "fp1");
+        let sessions = snap["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 1, "{sessions:?}");
+        assert_eq!(sessions[0]["session_id"], "sid-1");
+        assert_eq!(sessions[0]["account"], "zai-main");
+        assert_eq!(sessions[0]["receipt_fingerprint"], "fp1");
+        assert_eq!(sessions[0]["view_records"].as_array().unwrap().len(), 1);
     }
 }
