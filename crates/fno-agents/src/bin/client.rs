@@ -2058,12 +2058,14 @@ fn parse_duration_secs(raw: &str) -> Option<u64> {
         "d" => 86_400,
         _ => return None,
     };
-    digits.parse::<u64>().ok().map(|n| n * multiplier)
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(multiplier))
 }
 
 fn run_reap(rest: &[String]) -> i32 {
     let json_out = rest.iter().any(|a| a == "--json" || a == "-J");
-    let dry_run = rest.iter().any(|a| a == "--dry-run");
 
     // The verify probe (x-70e1 task 5): read-only audit of the receipts
     // store over `--since`, pinned to THIS build. Nonzero exit on any

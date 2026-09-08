@@ -17,14 +17,14 @@ REVIEW_VERB_PREFIXES = ("/code-review", "/review", "/fno:review")
 
 def infer_phase(message: str | None) -> str:
     """``do`` | ``review`` | ``blueprint`` | ``think`` | ``""`` when
-    unlabelable. Harness-qualified spellings (``/fno:``, ``$fno:``) are
-    normalized before matching; a leading token without a slash never reads
-    as a review."""
+    unlabelable. Harness-qualified spellings (``/fno:`` and ``$fno:``) are
+    normalized via ``lstrip("/$")`` before matching; a leading token without
+    a slash or dollar never reads as a review."""
     verb = (message or "").lstrip().split(maxsplit=1)[0] if message else ""
     bare = verb.lstrip("/$")
     if is_target_family(message):
         return "do"
-    if verb.startswith(REVIEW_VERB_PREFIXES):
+    if verb.startswith(REVIEW_VERB_PREFIXES) or bare.startswith("fno:review"):
         return "review"
     if bare.startswith("fno:blueprint"):
         return "blueprint"
