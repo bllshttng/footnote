@@ -99,7 +99,7 @@ Journal `reign_checkin`. If nothing changed since the last check-in, print `no c
 
 A crowned king is not an operator, and `fno backlog decide` refuses every agent session, crowned included: operator authority is never inherited by an agent. Do not spend three calls discovering the door is shut. The king's channels:
 
-- `fno backlog note <node> <text>` for a finding or a ruling against a row.
+- `fno backlog note <node> <text>` for a finding or a ruling against a row. It mails the row's live holder and the epic's king, so a ruling reaches the worker without a second call. `--quiet` writes the note and mails nobody.
 - `fno inbox law set <subject> <decision> --rationale "<why>"` for a durable rule the OPERATOR asked for. It records a chat-attested row and can never supersede the operator's own law.
 
 ## The one dispatch exception

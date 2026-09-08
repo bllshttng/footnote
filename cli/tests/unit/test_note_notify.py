@@ -304,3 +304,39 @@ def test_an_unconfirmed_receipt_lands_on_stderr(monkeypatch) -> None:
     assert result.exit_code == 0
     assert "noted x-0d08: the finding" in result.stdout
     assert "notify UNCONFIRMED sess-worker" in result.stderr
+
+
+def test_the_crown_scope_is_the_epic_not_the_grandparent() -> None:
+    """An ordinary child's epic is its own parent, whatever sits above that."""
+    scopes: list[str] = []
+
+    def record(scope: str) -> list[str]:
+        scopes.append(scope)
+        return ["king-of-the-epic"]
+
+    got = note_recipients(
+        {"id": "x-0d08", "parent": "x-16b7"},
+        index={"x-16b7": {"id": "x-16b7", "parent": "x-mission"}},
+        claim_reader=_claims(),
+        king_resolver=record,
+    )
+    assert scopes == ["x-16b7"]
+    assert got == [("king-of-the-epic", "king of x-16b7")]
+
+
+def test_a_contained_node_looks_one_level_further_out_for_the_crown() -> None:
+    """Its parent is the node carrying its PR, so the epic is that node's parent."""
+    scopes: list[str] = []
+
+    def record(scope: str) -> list[str]:
+        scopes.append(scope)
+        return ["king-of-the-epic"]
+
+    got = note_recipients(
+        {"id": "x-0d08", "contained_in": "x-5a62", "parent": "x-5a62"},
+        index={"x-5a62": {"id": "x-5a62", "parent": "x-16b7"}},
+        claim_reader=_claims(),
+        king_resolver=record,
+    )
+    assert scopes == ["x-16b7"]
+    assert got == [("king-of-the-epic", "king of x-16b7")]

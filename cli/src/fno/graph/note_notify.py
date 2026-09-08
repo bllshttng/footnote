@@ -98,13 +98,16 @@ def note_recipients(
 
     add(_holder(node_id, claim_reader), f"holder of {node_id}")
 
+    contained_in = entry.get("contained_in")
     owner_id = _owner_id(entry)
-    owner = index.get(owner_id) if owner_id else None
     if owner_id:
         add(_holder(owner_id, claim_reader), f"holder of owner {owner_id}")
 
-    # The crown sits on the EPIC. A contained node's epic is its owner's parent;
-    # an ordinary child's epic is its own parent.
+    # The crown sits on the EPIC, which is this node's own parent. Only a
+    # CONTAINED node looks one level further out, because its parent is the node
+    # whose PR carries it. Reading the owner's parent unconditionally would walk
+    # past the epic to the grandparent for every ordinary child.
+    owner = index.get(contained_in) if isinstance(contained_in, str) else None
     scope = (owner.get("parent") if owner else None) or entry.get("parent")
     if isinstance(scope, str) and scope:
         try:
