@@ -1,11 +1,12 @@
 """Does the config read back the way an operator reads it?
 
-The checks `fno config doctor` prints, plus the unknown-key walker and the
-one provenance renderer they share. Rationale, specimens and measurements:
-docs/architecture/config-readback.md.
+The checks `fno config doctor` prints, plus the unknown-key walker and the one
+provenance renderer they share. Rationale, specimens and the measurements
+behind both caps: docs/architecture/config-readback.md.
 """
 from __future__ import annotations
 
+import logging
 import os
 import types
 import typing
@@ -14,44 +15,33 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-#: An unknown table with more leaves than this reports as the table. A foreign
-#: tool's block in the shared config file is one finding, not one per key.
+#: An unknown table with more leaves than this reports as the table.
 _UNKNOWN_LEAF_CAP = 3
-
-#: A leaf name shared by more sections than this is a common word, not a near
-#: miss. `enabled` lives under 25 of them.
+#: A leaf name in more sections than this is a common word, not a near miss.
 _NEAR_MISS_CAP = 4
 
-_LOG = __import__("logging").getLogger("fno.config")
+_LOG = logging.getLogger("fno.config")
 
 
-def _nested_model(annotation: object) -> "type[BaseModel] | None":
-    """The BaseModel a field annotation resolves to, unwrapping Optional."""
-    for arg in getattr(annotation, "__args__", ()):
-        if arg is not type(None) and isinstance(arg, type) and issubclass(arg, BaseModel):
-            return arg
-    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-        return annotation
-    return None
+def _field_models(annotation: object) -> tuple[Optional[type[BaseModel]], Optional[type[BaseModel]]]:
+    """``(dict[str, Model] value model, nested model)`` for one field.
 
-
-def _mapping_value_model(annotation: object) -> "type[BaseModel] | None":
-    """The VALUE model of a ``dict[str, Model]`` field, else None.
-
-    Both union spellings resolve, so a model that switches from
+    Both union spellings resolve, so a model switching from
     ``Optional[dict[...]]`` to ``dict[...] | None`` cannot silently regress to
     walking the map's keys as field names.
     """
-    candidates = [annotation]
-    if typing.get_origin(annotation) in (typing.Union, types.UnionType):
-        candidates = list(typing.get_args(annotation))
+    candidates = list(typing.get_args(annotation)) or [annotation]
+    if typing.get_origin(annotation) not in (typing.Union, types.UnionType):
+        candidates = [annotation, *candidates]
+    nested: Optional[type[BaseModel]] = None
     for candidate in candidates:
-        if typing.get_origin(candidate) is not dict:
-            continue
-        args = typing.get_args(candidate)
-        if len(args) == 2 and isinstance(args[1], type) and issubclass(args[1], BaseModel):
-            return args[1]
-    return None
+        if typing.get_origin(candidate) is dict:
+            args = typing.get_args(candidate)
+            if len(args) == 2 and isinstance(args[1], type) and issubclass(args[1], BaseModel):
+                return args[1], None
+        elif nested is None and isinstance(candidate, type) and issubclass(candidate, BaseModel):
+            nested = candidate
+    return None, nested
 
 
 def warn_unknown_keys(
@@ -59,9 +49,8 @@ def warn_unknown_keys(
 ) -> list[str]:
     """Dotted keys not in the model's field set. Logs them under FNO_DEBUG.
 
-    A `dict[str, Model]` field's keys are operator-chosen names, so each VALUE
-    is walked with the map key in the prefix rather than the map itself being
-    checked against the value model's fields.
+    A ``dict[str, Model]`` field's keys are operator-chosen names, so each
+    VALUE is walked with the map key in the prefix.
     """
     from fno.config import _flatten_leaf_paths
 
@@ -80,16 +69,13 @@ def warn_unknown_keys(
             continue
         if not isinstance(value, dict):
             continue
-        annotation = model.model_fields[key].annotation
-        mapped = _mapping_value_model(annotation)
+        mapped, nested = _field_models(model.model_fields[key].annotation)
         if mapped is not None:
             for name, entry in value.items():
                 if isinstance(entry, dict):
                     unknown.extend(warn_unknown_keys(entry, mapped, prefix=f"{qualified}.{name}"))
-            continue
-        inner = _nested_model(annotation)
-        if inner is not None:
-            unknown.extend(warn_unknown_keys(value, inner, prefix=qualified))
+        elif nested is not None:
+            unknown.extend(warn_unknown_keys(value, nested, prefix=qualified))
     if os.environ.get("FNO_DEBUG"):
         for qualified in unknown:
             _LOG.warning("settings: unknown key %r (ignored for forward compatibility)", qualified)
@@ -97,11 +83,7 @@ def warn_unknown_keys(
 
 
 def source_note(key: str, root: Optional[Path] = None) -> Optional[str]:
-    """``"set in <file>"`` when a config file decides ``key``, else None.
-
-    The one renderer for provenance on a printed value: it reads the loader's
-    own answer rather than re-deriving one.
-    """
+    """``"set in <file>"`` when a config file decides ``key``, else None."""
     from fno.config import resolve_source
 
     try:
@@ -111,51 +93,35 @@ def source_note(key: str, root: Optional[Path] = None) -> Optional[str]:
     return f"set in {decided[0]}" if decided is not None else None
 
 
-def _readable_layers() -> list[tuple[Path, dict[str, object]]]:
-    """Each existing candidate that parses, deduped, highest precedence first."""
+def _read_candidates() -> tuple[list[tuple[Path, dict[str, object]]], list[str]]:
+    """One walk: the layers that parsed, and the errors from those that did not.
+
+    A file parsing to an EMPTY table is legal and reports no error.
+    """
     from fno.config import _candidate_paths
     from fno.config_io import _parse_settings
 
-    out: list[tuple[Path, dict[str, object]]] = []
+    layers: list[tuple[Path, dict[str, object]]] = []
+    errors: list[str] = []
     seen: set[Path] = set()
     for path in _candidate_paths():
-        if not path.is_file():
+        if not path.is_file() or path.resolve() in seen:
             continue
-        resolved = path.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
+        seen.add(path.resolve())
         parsed, error = _parse_settings(path)
         if error is None:
-            out.append((path, parsed))
-    return out
+            layers.append((path, parsed))
+        else:
+            errors.append(error)
+    return layers, errors
 
 
 def check_config_files_read() -> list[str]:
-    """Settings files the loader could not read back.
-
-    A file that parses to an EMPTY table reports nothing: an empty file and a
-    comments-only file are both legal.
-    """
+    """Settings files the loader could not read back."""
     try:
-        from fno.config import _candidate_paths
-        from fno.config_io import _parse_settings
-    except Exception:
+        return _read_candidates()[1]
+    except Exception:  # noqa: BLE001 - a report, not the loader
         return []
-
-    problems: list[str] = []
-    seen: set[Path] = set()
-    for path in _candidate_paths():
-        if not path.is_file():
-            continue
-        resolved = path.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        _, error = _parse_settings(path)
-        if error is not None:
-            problems.append(error)
-    return problems
 
 
 def _near_miss_keys(unknown: str) -> list[str]:
@@ -178,14 +144,16 @@ def check_unknown_keys() -> list[str]:
     try:
         from fno.config import SettingsModel
         from fno.config_io import _unwrap_config_dict
-    except Exception:
+
+        layers = _read_candidates()[0]
+    except Exception:  # noqa: BLE001 - a report, not the loader
         return []
 
     problems: list[str] = []
-    for path, parsed in _readable_layers():
+    for path, parsed in layers:
         try:
             unknown = warn_unknown_keys(_unwrap_config_dict(parsed), SettingsModel)
-        except Exception:  # noqa: BLE001 - a report, not the loader
+        except Exception:  # noqa: BLE001
             continue
         for key in unknown:
             hints = _near_miss_keys(key)
@@ -203,10 +171,7 @@ def check_enabled_with_empty_population() -> list[str]:
     try:
         from fno.config import load_settings
         from fno.review.provider_resolution import available_provider_kinds
-    except Exception:
-        return []
 
-    try:
         if not bool(load_settings().review.cross_model.enabled):
             return []
         kinds = [str(k).strip().lower() for k in available_provider_kinds()]
@@ -215,10 +180,9 @@ def check_enabled_with_empty_population() -> list[str]:
     if any(kind != "claude" for kind in kinds):
         return []
     return [
-        "review.cross_model.enabled is true and no non-claude provider is "
-        f"dispatchable; available reviewer kinds: {', '.join(kinds) or 'none'}. "
-        "The diversity requirement can never be met until a provider record is "
-        "added (fno config accounts)."
+        "review.cross_model.enabled is true and no non-claude provider is dispatchable; "
+        f"available reviewer kinds: {', '.join(kinds) or 'none'}. The diversity "
+        "requirement can never be met until a provider record is added."
     ]
 
 

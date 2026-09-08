@@ -114,12 +114,10 @@ def _prefer_toml(paths: list[Path]) -> list[Path]:
 
 
 def _read_settings_doc(path: Path) -> tuple[object, str | None]:
-    """Read and parse one settings file: ``(parsed document, error or None)``.
+    """The ONE parser: ``(parsed document, error or None)``.
 
-    The ONE parser. TOML for a ``.toml`` suffix (config.toml), YAML otherwise
-    (settings.yaml). The error is a human sentence naming the file and the
-    cause; it is None when the file was read and parsed, whatever shape the
-    document turned out to be. Shape is the caller's question.
+    TOML for a ``.toml`` suffix, YAML otherwise. The error names the file and
+    the cause. Shape is the caller's question, not this function's.
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -137,37 +135,24 @@ def _read_settings_doc(path: Path) -> tuple[object, str | None]:
 def _parse_settings(path: Path) -> tuple[dict[str, object], str | None]:
     """Operator-facing read: ``(mapping, human error or None)``.
 
-    Reports both ways a settings file can fail to contribute: it could not be
-    read or parsed, or it parsed to something that is not a table. An empty
-    file and a comments-only file are legal and report no error.
-
-    ``fno config doctor`` reads through this so its verdict is computed from a
-    config it proved it read. :func:`_load_raw` is the loader's own view of the
-    same parse.
+    Reports both ways a file fails to contribute: unreadable, or parsed to
+    something that is not a table. An empty file is legal. `fno config doctor`
+    reads through this so its verdict comes from a config it proved it read.
     """
     doc, error = _read_settings_doc(path)
     if error is not None:
         return ({}, error)
-    if doc is None:
-        return ({}, None)
-    if isinstance(doc, dict):
-        return (doc, None)
-    return (
-        {},
-        f"config file at {path} parsed to a {type(doc).__name__}, not a table",
-    )
+    if doc is None or isinstance(doc, dict):
+        return (doc or {}, None)
+    return ({}, f"config file at {path} parsed to a {type(doc).__name__}, not a table")
 
 
 def _load_raw(path: Path) -> tuple[dict[str, object], bool]:
-    """Load a settings file and return (data, parse_succeeded).
+    """Load a settings file: ``(data, parse_succeeded)``.
 
-    Returns ({}, False) on any OS or parse error so callers can fall through to
-    the next candidate, logging a cause-specific WARNING so a missing file, an
-    unreadable file, and malformed content never share one diagnosis.
-
-    Returns (data, True) when the file parsed successfully (even if the dict is
-    empty, i.e. the file was blank, and even if the document was not a mapping,
-    in which case the layer contributes {}).
+    ``({}, False)`` on any OS or parse error so callers fall through to the
+    next candidate, with a cause-specific WARNING. A document that parsed but
+    is not a mapping contributes ``{}`` and still counts as parsed.
     """
     doc, error = _read_settings_doc(path)
     if error is not None:

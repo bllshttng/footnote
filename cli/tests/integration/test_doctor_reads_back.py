@@ -347,13 +347,15 @@ def test_both_optional_spellings_of_a_dict_block_resolve(tmp_path: Path) -> None
 
     from pydantic import BaseModel
 
-    from fno.config.readback import _mapping_value_model
+    from fno.config.readback import _field_models
 
     class Row(BaseModel):
         name: str = ""
 
-    assert _mapping_value_model(dict[str, Row]) is Row
-    assert _mapping_value_model(Optional[dict[str, Row]]) is Row
-    assert _mapping_value_model(dict[str, Row] | None) is Row
+    assert _field_models(dict[str, Row])[0] is Row
+    assert _field_models(Optional[dict[str, Row]])[0] is Row
+    assert _field_models(dict[str, Row] | None)[0] is Row
     # Positive control on the negative case: a plain map has no schema below it.
-    assert _mapping_value_model(dict[str, str]) is None
+    assert _field_models(dict[str, str])[0] is None
+    # And a plain nested model still resolves on the other slot.
+    assert _field_models(Row)[1] is Row

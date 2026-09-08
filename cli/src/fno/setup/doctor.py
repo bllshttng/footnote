@@ -589,79 +589,63 @@ def run_doctor() -> int:
             print(f"  - {name} = {path_str}: {reason}")
         print("\nRun 'fno config setup migrate-paths --force' to regenerate paths.")
 
-    unread_problems = check_config_files_read()
-    if unread_problems:
-        print(f"\n[doctor] {len(unread_problems)} unreadable settings file(s):")
-        for reason in unread_problems:
+    # One shape, eight checks: heading, the reasons, the remedy line.
+    reports: tuple[tuple[str, list[str], str], ...] = (
+        (
+            "unreadable settings file(s)",
+            check_config_files_read(),
+            "A file that does not parse contributes NOTHING; every key in it is "
+            "silently at its default. config.toml is TOML, settings.yaml is YAML.",
+        ),
+        (
+            "unknown config key(s)",
+            check_unknown_keys(),
+            "An unknown key is ignored for forward compatibility, so it sets nothing.",
+        ),
+        (
+            "switch(es) enabled with an empty population",
+            check_enabled_with_empty_population(),
+            "",
+        ),
+        (
+            "malformed config.kanban.wip_caps entr(ies)",
+            check_wip_caps(),
+            "Each column expects a positive integer (e.g. `now = 20`).",
+        ),
+        (
+            "worktree-policy issue(s)",
+            check_worktree_policy(),
+            "Valid policy values: never | harness-native | external.",
+        ),
+        (
+            "agent-profile issue(s)",
+            check_agent_profiles(s),
+            "Set a substrate each lane's resolved provider can actually launch.",
+        ),
+        (
+            "state-root write issue(s)",
+            check_state_root_writable(),
+            "fno prints this line and never edits a harness settings file; the "
+            "grant is yours to make.",
+        ),
+        (
+            "account / provider issue(s)",
+            check_accounts(),
+            "Fix the accounts or combos configuration in config.toml.",
+        ),
+    )
+    reported = False
+    for heading, problems, remedy in reports:
+        if not problems:
+            continue
+        reported = True
+        print(f"\n[doctor] {len(problems)} {heading}:")
+        for reason in problems:
             print(f"  - {reason}")
-        print(
-            "\nA file that does not parse contributes NOTHING; every key in it is "
-            "silently at its default. config.toml is TOML, settings.yaml is YAML."
-        )
+        if remedy:
+            print(f"\n{remedy}")
 
-    unknown_problems = check_unknown_keys()
-    if unknown_problems:
-        print(f"\n[doctor] {len(unknown_problems)} unknown config key(s):")
-        for reason in unknown_problems:
-            print(f"  - {reason}")
-        print("\nAn unknown key is ignored for forward compatibility, so it sets nothing.")
-
-    population_problems = check_enabled_with_empty_population()
-    if population_problems:
-        print(f"\n[doctor] {len(population_problems)} switch(es) enabled with an empty population:")
-        for reason in population_problems:
-            print(f"  - {reason}")
-
-    cap_problems = check_wip_caps()
-    if cap_problems:
-        print(f"\n[doctor] {len(cap_problems)} malformed config.kanban.wip_caps entr(ies):")
-        for reason in cap_problems:
-            print(f"  - {reason}")
-        print("\nEach column expects a positive integer (e.g. `now: 20`).")
-
-    wt_problems = check_worktree_policy()
-    if wt_problems:
-        print(f"\n[doctor] {len(wt_problems)} worktree-policy issue(s):")
-        for reason in wt_problems:
-            print(f"  - {reason}")
-        print("\nValid policy values: never | harness-native | external.")
-
-    profile_problems = check_agent_profiles(s)
-    if profile_problems:
-        print(f"\n[doctor] {len(profile_problems)} agent-profile issue(s):")
-        for reason in profile_problems:
-            print(f"  - {reason}")
-        print("\nSet a substrate each lane's resolved provider can actually launch.")
-
-    store_problems = check_state_root_writable()
-    if store_problems:
-        print(f"\n[doctor] {len(store_problems)} state-root write issue(s):")
-        for reason in store_problems:
-            print(f"  - {reason}")
-        print(
-            "\nfno prints this line and never edits a harness settings file; the "
-            "grant is yours to make."
-        )
-
-    account_problems = check_accounts()
-    if account_problems:
-        print(f"\n[doctor] {len(account_problems)} account / provider issue(s):")
-        for reason in account_problems:
-            print(f"  - {reason}")
-        print("\nFix the accounts or combos configuration in config.toml.")
-
-    if (
-        errors
-        or issues
-        or unread_problems
-        or unknown_problems
-        or population_problems
-        or cap_problems
-        or wt_problems
-        or profile_problems
-        or store_problems
-        or account_problems
-    ):
+    if errors or issues or reported:
         return 1
 
     print("\n[doctor] OK; no suspicious paths detected.")
