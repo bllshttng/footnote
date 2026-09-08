@@ -31,7 +31,6 @@ crossing	crates/fno-agents/src/loopcheck.rs	3486	fn loopcheck_fno_bin() -> Strin
 crossing	crates/fno-agents/src/loopcheck.rs	8388	&loopcheck_fno_bin(),
 crossing	crates/fno-agents/src/loopcheck.rs	10336	&loopcheck_fno_bin(),
 crossing	crates/fno-agents/src/loopcheck.rs	12921	let fno_bin = loopcheck_fno_bin();
-crossing	crates/fno-agents/src/merge_reap.rs	239	let output = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/nudge.rs	35	let output = Command::new("fno")
 crossing	crates/fno-agents/src/provider.rs	544	let out = match std::process::Command::new("fno")
 crossing	crates/fno-agents/src/reentry.rs	126	let out = std::process::Command::new("fno")

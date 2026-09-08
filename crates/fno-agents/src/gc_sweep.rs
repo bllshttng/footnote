@@ -110,12 +110,35 @@ pub(crate) struct GraphRead {
 }
 
 /// One row the pass decided to retire, with everything the write tail needs.
-struct RetireOrder {
-    id: String,
-    basis: String,
-    created_at: String,
-    tree: TreeAction,
-    worktree: Option<String>,
+pub(crate) struct RetireOrder {
+    pub(crate) id: String,
+    pub(crate) basis: String,
+    pub(crate) created_at: String,
+    pub(crate) tree: TreeAction,
+    pub(crate) worktree: Option<String>,
+}
+
+/// Why a row's session effects refused. The caller names its own bucket: the
+/// sweep files them under `stop_refused` / `kept_no_receipt`, the merge
+/// trigger under its `kept` list.
+pub(crate) enum RetireRefusal {
+    /// The harness stop did not confirm.
+    StopRefused(String),
+    /// The native active-surface removal did not confirm.
+    NativeRemoval(String),
+    /// No resumable receipt could be staged.
+    NoReceipt(String),
+}
+
+/// What one commit actually wrote. `retired_names` is the removal truth: a
+/// name absent from it kept its row (a replacement session owns the name, or
+/// the write failed).
+#[derive(Default)]
+pub(crate) struct CommitReport {
+    pub(crate) retired: Vec<(String, String)>,
+    pub(crate) pruned: Vec<(String, String)>,
+    pub(crate) kept_no_receipt: Vec<(String, String)>,
+    pub(crate) retired_names: std::collections::BTreeSet<String>,
 }
 
 /// The state root's graph file: the one `read_graph_entries` reads (plus the
@@ -678,43 +701,21 @@ pub(crate) fn run(
                 continue;
             }
         }
-        let stopped = if dry_run { true } else { stop_confirmed(e) };
-        if !stopped {
-            summary
-                .stop_refused
-                .push((id, "the stop did not confirm; row kept for retry".into()));
-            continue;
-        }
-        // The ACTIVE-SURFACE removal (x-70e1 task 3): claude's agent list,
-        // codex's session index, cursor-agent's worker servers - through the
-        // same cascade `rm` walks, typed outcome recorded. A `failed` or
-        // `kept` (unverified) outcome HOLDS the row for retry: a retirement
-        // is applied only when every applicable native effect positively
-        // confirmed (or measured not-applicable). DRY-RUN applies nothing.
-        let mut effects: Vec<crate::receipt::EffectRecord> = Vec::new();
-        if !dry_run {
-            let outcome = surface_removal(e);
-            let applied = outcome.satisfies_applied();
-            effects.push(outcome.effect_record("active-surface"));
-            if !applied {
-                summary.stop_refused.push((
-                    id,
-                    "the native active-surface removal did not confirm".into(),
-                ));
-                continue;
-            }
-        }
-        if !stage_reap_receipt(
+        if let Err(refusal) = stage_session_retirement(
             e,
-            &id,
             ledger.as_deref(),
+            dry_run,
+            stop_confirmed,
+            surface_removal,
             &mut receipts,
-            &mut summary.kept_no_receipt,
         ) {
+            match refusal {
+                RetireRefusal::StopRefused(reason) | RetireRefusal::NativeRemoval(reason) => {
+                    summary.stop_refused.push((id, reason))
+                }
+                RetireRefusal::NoReceipt(reason) => summary.kept_no_receipt.push((id, reason)),
+            }
             continue;
-        }
-        if let Some(receipt) = receipts.get_mut(&e.name) {
-            receipt.effects = effects.clone();
         }
         // The tree probes run only now, on a row already retiring: steady
         // state has no such rows, so no subprocess runs on the hot path.
@@ -771,12 +772,98 @@ pub(crate) fn run(
         return summary;
     }
 
+    let report = commit_retirements(
+        home,
+        emitter,
+        "gc_sweep",
+        &registry.entries,
+        &mut to_retire,
+        &receipts,
+        prune_tree,
+    );
+    summary.retired = report.retired;
+    summary.pruned = report.pruned;
+    summary.kept_no_receipt.extend(report.kept_no_receipt);
+    summary
+}
+
+/// The SESSION half of one retirement, shared by the scheduled sweep and the
+/// merge trigger so exactly one sequence exists: confirm the stop, apply the
+/// native ACTIVE-SURFACE removal, stage the resumable receipt carrying both
+/// as typed effects.
+///
+/// The stop refusal keeps the row for retry, and so does a `failed` or `kept`
+/// (unverified) native outcome: a retirement applies only when every
+/// applicable effect positively confirmed (or measured not-applicable).
+/// DRY-RUN stops nothing and applies nothing - a rehearsal that killed the
+/// worker it rehearsed retiring would be the destructive run wearing a dry
+/// flag - but it still stages the receipt, so the rehearsal reports the same
+/// holds the real run would.
+pub(crate) fn stage_session_retirement(
+    e: &state::RegistryEntry,
+    ledger_rows: Option<&[Value]>,
+    dry_run: bool,
+    stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
+    surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
+    receipts: &mut std::collections::BTreeMap<String, ReapReceipt>,
+) -> Result<(), RetireRefusal> {
+    let stopped = if dry_run { true } else { stop_confirmed(e) };
+    if !stopped {
+        return Err(RetireRefusal::StopRefused(
+            "the stop did not confirm; row kept for retry".into(),
+        ));
+    }
+    // The ACTIVE-SURFACE removal (x-70e1 task 3): claude's agent list,
+    // codex's session index, cursor-agent's worker servers - through the
+    // same cascade `rm` walks, typed outcome recorded.
+    let mut effects: Vec<EffectRecord> = Vec::new();
+    if !dry_run {
+        let outcome = surface_removal(e);
+        let applied = outcome.satisfies_applied();
+        effects.push(outcome.effect_record("active-surface"));
+        if !applied {
+            return Err(RetireRefusal::NativeRemoval(
+                "the native active-surface removal did not confirm".into(),
+            ));
+        }
+    }
+    let ledger = ledger_rows
+        .and_then(|rows| ledger_entry_in(rows, e.harness_session_id.as_deref().unwrap_or("")));
+    match build_reap_receipt(e, ledger) {
+        Ok(mut receipt) => {
+            receipt.effects = effects;
+            receipts.insert(e.name.clone(), receipt);
+            Ok(())
+        }
+        Err(reason) => Err(RetireRefusal::NoReceipt(reason)),
+    }
+}
+
+/// The WRITE half of a retirement set, shared by the scheduled sweep and the
+/// merge trigger: persist every receipt, drop the rows under one registry
+/// write guarded by `created_at`, then account and emit only for the names
+/// the write really removed.
+///
+/// `caller` names the emitter's error op so a failed write says which door it
+/// came through. `to_retire` is drained of every order whose receipt refused
+/// to persist: the receipt is the recovery path, so no receipt means no
+/// removal.
+pub(crate) fn commit_retirements(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    caller: &str,
+    entries: &[state::RegistryEntry],
+    to_retire: &mut std::collections::BTreeMap<String, RetireOrder>,
+    receipts: &std::collections::BTreeMap<String, ReapReceipt>,
+    prune_tree: &dyn Fn(&state::RegistryEntry),
+) -> CommitReport {
+    let mut report = CommitReport::default();
     // Persist every receipt BEFORE the write drops its row: the ordering IS
     // the losslessness. A receipt that will not write holds its row for the
     // next sweep instead.
     to_retire.retain(|name, _| {
         let Some(receipt) = receipts.get(name) else {
-            summary
+            report
                 .kept_no_receipt
                 .push((name.clone(), "no staged receipt".to_string()));
             return false;
@@ -789,16 +876,18 @@ pub(crate) fn run(
                 } else {
                     receipt.short_id.clone()
                 };
-                summary
+                report
                     .kept_no_receipt
                     .push((id, format!("receipt did not persist: {err}")));
                 false
             }
         }
     });
+    if to_retire.is_empty() {
+        return report;
+    }
     // Names actually removed under the lock (identity still matched), so the
     // emit + summary report only what really happened.
-    let mut retired_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let write = state::update_registry(&home.registry_json(), |r| {
         r.entries.retain(|e| {
             let Some(order) = to_retire.get(&e.name) else {
@@ -807,17 +896,17 @@ pub(crate) fn run(
             if order.created_at != e.created_at {
                 return true; // a replacement session owns this name now
             }
-            retired_names.insert(e.name.clone());
+            report.retired_names.insert(e.name.clone());
             false
         });
     });
     match write {
         Ok(()) => {
-            for e in &registry.entries {
+            for e in entries {
                 let Some(order) = to_retire.get(&e.name) else {
                     continue;
                 };
-                if !retired_names.contains(&e.name) {
+                if !report.retired_names.contains(&e.name) {
                     continue;
                 }
                 // Dispatch accounting, unchanged from the exit-stamp era: a
@@ -871,6 +960,7 @@ pub(crate) fn run(
                     }
                 }
                 if !accounted {
+                    report.retired_names.remove(&e.name);
                     continue;
                 }
                 let _ = emitter.emit(
@@ -890,16 +980,14 @@ pub(crate) fn run(
                         "resumable": true,
                     }),
                 );
-                summary
-                    .retired
-                    .push((order.id.clone(), order.basis.clone()));
+                report.retired.push((order.id.clone(), order.basis.clone()));
                 if order.tree == TreeAction::Prune {
                     if let Some(path) = &order.worktree {
                         // The same door a human removal walks (production:
                         // gate + merge check + `git worktree remove`; the
                         // branch survives).
                         prune_tree(e);
-                        summary.pruned.push((order.id.clone(), path.clone()));
+                        report.pruned.push((order.id.clone(), path.clone()));
                     }
                 }
             }
@@ -907,15 +995,16 @@ pub(crate) fn run(
         Err(err) => {
             let _ = emitter.emit(
                 "daemon_recovery_error",
-                &json!({"op": "gc_sweep", "error": err.to_string()}),
+                &json!({"op": caller, "error": err.to_string()}),
             );
             // Nothing was removed; report no retirements (no event/disk
             // divergence).
-            summary.retired.clear();
-            summary.pruned.clear();
+            report.retired.clear();
+            report.pruned.clear();
+            report.retired_names.clear();
         }
     }
-    summary
+    report
 }
 
 /// Expire receipts older than `retain_days` in the sweep that also writes
@@ -1031,33 +1120,9 @@ pub(crate) fn ledger_entry_in<'a>(rows: &'a [Value], session_id: &str) -> Option
     })
 }
 
-/// The receipt gate at the retirement arm: stages the receipt before the row
-/// can drop; a row whose receipt cannot be staged is held and named in
-/// `kept_no_receipt`.
-fn stage_reap_receipt(
-    e: &state::RegistryEntry,
-    id: &str,
-    ledger_rows: Option<&[Value]>,
-    receipts: &mut std::collections::BTreeMap<String, ReapReceipt>,
-    kept_no_receipt: &mut Vec<(String, String)>,
-) -> bool {
-    let ledger = ledger_rows
-        .and_then(|rows| ledger_entry_in(rows, e.harness_session_id.as_deref().unwrap_or("")));
-    match build_reap_receipt(e, ledger) {
-        Ok(receipt) => {
-            receipts.insert(e.name.clone(), receipt);
-            true
-        }
-        Err(reason) => {
-            kept_no_receipt.push((id.to_string(), reason));
-            false
-        }
-    }
-}
-
 /// `$HOME/.fno/ledger.json`, the ledger's default global path. Tests inject
 /// their own by building receipts with an explicit `ledger` value instead.
-fn default_ledger_path() -> std::path::PathBuf {
+pub(crate) fn default_ledger_path() -> std::path::PathBuf {
     let base = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
