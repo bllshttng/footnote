@@ -771,8 +771,12 @@ def read_graph(path: Path = GRAPH_JSON) -> list[dict]:
     try:
         result = _client_for(path).read(path)
     except GraphCorruptError:
-        print(f"Warning: {path} is corrupt, backup saved to "
-              f"{path.parent / 'backups' / (path.name + '.bak')}", file=sys.stderr)
+        # Name the backup that actually exists: current keepers write into
+        # backups/, older deployed ones beside the graph file.
+        backup = path.parent / "backups" / (path.name + ".bak")
+        if not backup.exists():
+            backup = path.with_suffix(".json.bak")
+        print(f"Warning: {path} is corrupt, backup saved to {backup}", file=sys.stderr)
         return []
     return result["entries"]
 
