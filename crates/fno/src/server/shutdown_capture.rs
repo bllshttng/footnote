@@ -11,33 +11,32 @@ impl Core {
             eprintln!("fno mux: shutdown while startup restore was pending; no layout captured");
             return false;
         }
-        if self.topology_dirty {
-            self.flush_topology();
-            return true;
-        }
         let sids: Vec<u64> = self.session.squads.iter().map(|s| s.id).collect();
         let snapshots: Vec<_> = sids
             .into_iter()
             .filter_map(|sid| self.snapshot_squad(sid))
             .collect();
-        let generations = match crate::squad_store::set_snapshots_if_generations(
+        let batch = match crate::squad_store::set_snapshots_if_generations(
             &self.store_generations,
             &snapshots,
         ) {
-            Ok(Some(next)) => next,
-            Ok(None) => {
-                eprintln!(
-                    "fno mux: squads.json changed after this session's last write; stale shutdown capture skipped"
-                );
-                return false;
-            }
+            Ok(batch) => batch,
             Err(e) => {
                 self.persist_degraded(&e);
                 return false;
             }
         };
-        self.store_generations.extend(generations);
+        self.store_generations.extend(batch.generations);
+        self.topology_dirty = false;
         self.last_topology_flush = Some(Instant::now());
-        true
+        if batch.conflicts.is_empty() {
+            true
+        } else {
+            eprintln!(
+                "fno mux: stale shutdown snapshots skipped for {}",
+                batch.conflicts.join(", ")
+            );
+            false
+        }
     }
 }

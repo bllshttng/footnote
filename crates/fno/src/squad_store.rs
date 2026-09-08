@@ -360,6 +360,11 @@ pub struct SquadSnapshot {
     pub active_tab: Option<usize>,
 }
 
+pub struct SnapshotBatch {
+    pub generations: std::collections::HashMap<String, u64>,
+    pub conflicts: Vec<String>,
+}
+
 /// The store file: a sibling of the registry under `FNO_AGENTS_HOME`, else
 /// the mux's resolved state root (`squads.json`), so a pinned `FNO_CONFIG`
 /// isolates the squad store with the sockets and view prefs - a demo server
@@ -787,22 +792,21 @@ pub fn set_tab_trees(
 pub fn set_snapshot(
     snapshot: &SquadSnapshot,
 ) -> io::Result<std::collections::HashMap<String, u64>> {
-    set_snapshots_inner(None, std::slice::from_ref(snapshot))
-        .map(|generations| generations.expect("unconditional snapshot write"))
+    set_snapshots_inner(None, std::slice::from_ref(snapshot)).map(|batch| batch.generations)
 }
 
-/// Replace every supplied snapshot in one write if the generation is current.
+/// Replace every current snapshot in one write and report stale identities.
 pub fn set_snapshots_if_generations(
     expected: &std::collections::HashMap<String, u64>,
     snapshots: &[SquadSnapshot],
-) -> io::Result<Option<std::collections::HashMap<String, u64>>> {
+) -> io::Result<SnapshotBatch> {
     set_snapshots_inner(Some(expected), snapshots)
 }
 
 fn set_snapshots_inner(
     expected: Option<&std::collections::HashMap<String, u64>>,
     snapshots: &[SquadSnapshot],
-) -> io::Result<Option<std::collections::HashMap<String, u64>>> {
+) -> io::Result<SnapshotBatch> {
     let keys: Option<Vec<_>> = snapshots
         .iter()
         .map(|snapshot| generation_key(&snapshot.name, &snapshot.key))
@@ -813,50 +817,51 @@ fn set_snapshots_inner(
             "snapshot needs a name or durable key",
         ));
     };
-    mutate_file_if(
-        |file| {
-            expected.is_none_or(|expected| {
-                keys.iter().all(|key| {
-                    file.generations.get(key).copied().unwrap_or(0)
-                        == expected.get(key).copied().unwrap_or(0)
-                })
-            })
-        },
-        |file| {
-            for (snapshot, generation_key) in snapshots.iter().zip(&keys) {
-                let key = if snapshot.name.is_empty() {
-                    snapshot.key.as_str()
-                } else {
-                    ""
-                };
-                let existing = file
-                    .squads
-                    .iter()
-                    .find(|s| same_squad(s, &snapshot.name, key));
-                let created_at = existing
-                    .map(|s| s.created_at.clone())
-                    .filter(|stamp| !stamp.is_empty())
-                    .unwrap_or_else(now_iso);
-                let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
-                file.squads.retain(|s| !same_squad(s, &snapshot.name, key));
-                file.squads.push(StoredSquad {
-                    name: snapshot.name.clone(),
-                    key: key.to_string(),
-                    origins: snapshot.origins.clone(),
-                    members: snapshot.members.clone(),
-                    created_at,
-                    tab_specs,
-                    tab_trees: snapshot.tab_trees.clone(),
-                    active_tab: snapshot.active_tab,
-                });
-                let generation = file.generations.entry(generation_key.clone()).or_default();
-                *generation = generation.saturating_add(1);
+    mutate_file(|file| {
+        let mut generations = std::collections::HashMap::new();
+        let mut conflicts = Vec::new();
+        for (snapshot, generation_key) in snapshots.iter().zip(&keys) {
+            if expected.is_some_and(|expected| {
+                file.generations.get(generation_key).copied().unwrap_or(0)
+                    != expected.get(generation_key).copied().unwrap_or(0)
+            }) {
+                conflicts.push(generation_key.clone());
+                continue;
             }
-            keys.iter()
-                .map(|key| (key.clone(), file.generations[key]))
-                .collect()
-        },
-    )
+            let key = if snapshot.name.is_empty() {
+                snapshot.key.as_str()
+            } else {
+                ""
+            };
+            let existing = file
+                .squads
+                .iter()
+                .find(|s| same_squad(s, &snapshot.name, key));
+            let created_at = existing
+                .map(|s| s.created_at.clone())
+                .filter(|stamp| !stamp.is_empty())
+                .unwrap_or_else(now_iso);
+            let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
+            file.squads.retain(|s| !same_squad(s, &snapshot.name, key));
+            file.squads.push(StoredSquad {
+                name: snapshot.name.clone(),
+                key: key.to_string(),
+                origins: snapshot.origins.clone(),
+                members: snapshot.members.clone(),
+                created_at,
+                tab_specs,
+                tab_trees: snapshot.tab_trees.clone(),
+                active_tab: snapshot.active_tab,
+            });
+            let generation = file.generations.entry(generation_key.clone()).or_default();
+            *generation = generation.saturating_add(1);
+            generations.insert(generation_key.clone(), *generation);
+        }
+        SnapshotBatch {
+            generations,
+            conflicts,
+        }
+    })
 }
 
 /// Delete the entry with this identity (`name` if named, else the durable
@@ -2027,11 +2032,6 @@ fn assert_writable() -> io::Result<()> {
 /// apply `f` to both collections at once, pin the version, and atomically
 /// rename a tmp over the target. `mutate` / `mutate_lifecycle` are thin views
 /// onto it, so every mutation preserves both collections.
-fn mutate_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
-    mutate_file_if(|_| true, f)
-        .map(|result| result.expect("unconditional store mutation cannot be refused"))
-}
-
 fn mutate_squads_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
     mutate_file(|file| {
         let before: std::collections::HashMap<_, _> = file
@@ -2061,10 +2061,7 @@ fn mutate_squads_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
     })
 }
 
-fn mutate_file_if<T>(
-    accept: impl FnOnce(&StoreFile) -> bool,
-    f: impl FnOnce(&mut StoreFile) -> T,
-) -> io::Result<Option<T>> {
+fn mutate_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
     #[cfg(not(test))]
     assert_writable()?;
     let path = squads_path();
@@ -2104,9 +2101,6 @@ fn mutate_file_if<T>(
         Err(e) => return Err(e),
     };
     let mut file = parse_seed(seed, from_legacy)?;
-    if !accept(&file) {
-        return Ok(None);
-    }
     let result = f(&mut file);
     file.version = STORE_VERSION;
 
@@ -2117,7 +2111,7 @@ fn mutate_file_if<T>(
     // Atomic rename: a concurrent reader sees either the old or the new file,
     // never a torn one (AC1-FR).
     std::fs::rename(&tmp, &path)?;
-    Ok(Some(result))
+    Ok(result)
 }
 
 /// The mutate seed parse. Corruption at the PRIMARY path refuses the write

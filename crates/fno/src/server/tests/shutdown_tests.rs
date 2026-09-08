@@ -104,6 +104,65 @@ fn unrelated_squad_write_does_not_block_clean_shutdown_capture() {
 }
 
 #[test]
+fn dirty_shutdown_does_not_overwrite_a_newer_overlapping_snapshot() {
+    let _scratch = StoreScratch::new("shutdown-capture-dirty-conflict");
+    let (mut older, _) = template_core();
+    older.restored = true;
+    older.topology_dirty = true;
+    older.flush_topology();
+    let newer_member = crate::squad_store::StoredMember {
+        attach_id: "deadbeef".into(),
+        tombstone: false,
+        detached: false,
+        tab_name: None,
+        cwd: None,
+        worker: None,
+        harness: None,
+        harness_session_id: None,
+    };
+    crate::squad_store::upsert("sq", "", &["/a".into()], &[newer_member]).unwrap();
+    older.topology_dirty = true;
+
+    assert!(!older.capture_topology_now());
+    let stored = crate::squad_store::load();
+    let squad = stored.squads.iter().find(|s| s.name == "sq").unwrap();
+    assert!(squad.members.iter().any(|m| m.attach_id == "deadbeef"));
+}
+
+#[test]
+fn conflicting_squad_does_not_discard_a_fresh_disjoint_snapshot() {
+    let _scratch = StoreScratch::new("shutdown-capture-partial");
+    let (mut older, pane) = template_core();
+    older
+        .session
+        .add_squad(2, vec!["/b".into()], Some("sq2".into()), leaf_tab(6, pane));
+    older.squad_members.insert(2, Vec::new());
+    older.restored = true;
+    older.topology_dirty = true;
+    older.flush_topology();
+    let newer_member = crate::squad_store::StoredMember {
+        attach_id: "deadbeef".into(),
+        tombstone: false,
+        detached: false,
+        tab_name: None,
+        cwd: None,
+        worker: None,
+        harness: None,
+        harness_session_id: None,
+    };
+    crate::squad_store::upsert("sq", "", &["/a".into()], &[newer_member]).unwrap();
+    older.session.squad_mut(2).unwrap().tabs[0].name = Some("fresh-local".into());
+
+    assert!(!older.capture_topology_now());
+    let stored = crate::squad_store::load();
+    let disjoint = stored.squads.iter().find(|s| s.name == "sq2").unwrap();
+    assert_eq!(
+        disjoint.tab_trees[0].tab_name.as_deref(),
+        Some("fresh-local")
+    );
+}
+
+#[test]
 fn pane_id_reservation_does_not_advance_squad_generation() {
     let _scratch = StoreScratch::new("shutdown-capture-pane-id");
     let before = crate::squad_store::load().generations;
