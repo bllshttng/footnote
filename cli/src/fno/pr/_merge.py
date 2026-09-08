@@ -132,9 +132,9 @@ def _manifest_file(cwd: str) -> str:
     """This run's session manifest: the space slice, falling back to the
     checkout's ``.fno/``.
 
-    ``_repo_state_dir`` still answers where the merge's SENTINELS and journal
-    live (beside the checkout), but the manifest itself moved to the space, so
-    the two are no longer the same directory. Every followup that read
+    ``_repo_state_dir`` still answers where the merge's SENTINELS live (beside
+    the checkout), but the manifest itself moved to the space, so the two are
+    no longer the same directory. Every followup that read
     ``<state_dir>/target-state.md`` was reading a path init stopped writing.
     """
     legacy = os.path.join(_repo_state_dir(cwd), "target-state.md")
@@ -1166,7 +1166,7 @@ def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
 _MERGE_ROW_UNKNOWN = "unknown"
 
 
-def _emit_session_satisfied(pr_url: str, state_dir: str, state_file: str) -> None:
+def _emit_session_satisfied(pr_url: str, state_file: str) -> None:
     """Emit a ``session_satisfied{source:pr_merge}`` row for EVERY merge.
 
     Unconditional on purpose. Three silent early returns used to guard this
@@ -1201,8 +1201,6 @@ def _emit_session_satisfied(pr_url: str, state_dir: str, state_file: str) -> Non
     if not gate_hash:
         gate_hash = _MERGE_ROW_UNKNOWN
     try:
-        from pathlib import Path
-
         from fno.events import append_event, session_satisfied
 
         event = session_satisfied(
@@ -1213,14 +1211,18 @@ def _emit_session_satisfied(pr_url: str, state_dir: str, state_file: str) -> Non
             evidence_url=pr_url or None,
             source="target",
         )
-        append_event(event, events_path=Path(state_dir) / "events.jsonl")
+        # No explicit path: the resolver answers the SPACE journal, which is
+        # what an audit reads. `<checkout>/.fno/events.jsonl` is a plain file
+        # the post-merge worktree reap deletes, so a row written there is as
+        # unauditable as no row at all - the defect this emit exists to close.
+        append_event(event)
     except Exception as exc:  # noqa: BLE001 - best-effort, surface a diagnostic
         sys.stderr.write(
             f"pr-merge: session_satisfied emit failed ({exc}); merge outcome unaffected\n"
         )
 
 
-def _emit_human_touch_merge(pr_number: int, state_dir: str) -> None:
+def _emit_human_touch_merge(pr_number: int) -> None:
     """Emit ``human_touch{source:merge}`` for a MANUAL merge (W4 telemetry).
 
     Only a human at a terminal counts: the autonomous loop's ship gate runs
@@ -1269,7 +1271,9 @@ def _emit_human_touch_merge(pr_number: int, state_dir: str) -> None:
                 "resolution": "ok" if node_id else "failed",
             },
         )
-        append_event(event, events_path=Path(state_dir) / "events.jsonl")
+        # Same journal as the merge audit row above, for the same reason: a
+        # worktree-local write dies with the worktree.
+        append_event(event)
     except Exception as exc:  # noqa: BLE001 - best-effort, surface a diagnostic
         sys.stderr.write(
             f"pr-merge: human_touch emit failed ({exc}); merge outcome unaffected\n"
@@ -1386,7 +1390,7 @@ def _run_post_merge_followups(
         res = _gh(["pr", "view", str(pr_number), "--json", "url", "-q", ".url"], cwd)
         if res.ok:
             pr_url = res.stdout.strip()
-        _emit_session_satisfied(pr_url, state_dir, state_file)
+        _emit_session_satisfied(pr_url, state_file)
     except Exception as exc:  # noqa: BLE001 - telemetry, merge outcome unaffected
         sys.stderr.write(
             f"pr-merge: merge audit row not written ({exc}); merge outcome unaffected\n"
@@ -1394,7 +1398,7 @@ def _run_post_merge_followups(
 
     # W4 touch telemetry: a manual (tty) merge is a human steering action.
     try:
-        _emit_human_touch_merge(pr_number, state_dir)
+        _emit_human_touch_merge(pr_number)
     except Exception as exc:
         sys.stderr.write(
             f"pr-merge: human_touch emit failed ({exc}); merge outcome unaffected\n"

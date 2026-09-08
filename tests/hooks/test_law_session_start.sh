@@ -160,6 +160,24 @@ else
     fail=$((fail + 1))
 fi
 
+# The block is exempt from RENDER_CAP, so it carries its own ceiling. Without
+# one, a store that grows settled rulings grows the preamble every session with
+# nothing measuring it. Six settled rows, cap of three, and the remainder is
+# COUNTED rather than dropped in silence.
+expect_contains "an over-cap settled block names what it left out" \
+    'echo "{\"decisions\":[{\"subject\":\"settled-0\",\"decision\":\"Ruling 0 stands. Do not reopen it.\"},{\"subject\":\"settled-1\",\"decision\":\"Ruling 1 stands. Do not reopen it.\"},{\"subject\":\"settled-2\",\"decision\":\"Ruling 2 stands. Do not reopen it.\"},{\"subject\":\"settled-3\",\"decision\":\"Ruling 3 stands. Do not reopen it.\"},{\"subject\":\"settled-4\",\"decision\":\"Ruling 4 stands. Do not reopen it.\"},{\"subject\":\"settled-5\",\"decision\":\"Ruling 5 stands. Do not reopen it.\"}],\"total\":6}"' \
+    "and 3 more settled ruling(s)"
+
+out="$(run_with_stub 'echo "{\"decisions\":[{\"subject\":\"settled-0\",\"decision\":\"Ruling 0 stands. Do not reopen it.\"},{\"subject\":\"settled-1\",\"decision\":\"Ruling 1 stands. Do not reopen it.\"},{\"subject\":\"settled-2\",\"decision\":\"Ruling 2 stands. Do not reopen it.\"},{\"subject\":\"settled-3\",\"decision\":\"Ruling 3 stands. Do not reopen it.\"},{\"subject\":\"settled-4\",\"decision\":\"Ruling 4 stands. Do not reopen it.\"},{\"subject\":\"settled-5\",\"decision\":\"Ruling 5 stands. Do not reopen it.\"}],\"total\":6}"')"
+if [[ "$out" == *"settled-2"* && "$out" != *"settled-3"* ]]; then
+    echo "  PASS: the settled block stops at its cap"
+    pass=$((pass + 1))
+else
+    echo "  FAIL: the settled block ignored its cap"
+    echo "    got: $out"
+    fail=$((fail + 1))
+fi
+
 echo
 echo "Results: $pass passed, $fail failed"
 [[ $fail -eq 0 ]] || exit 1

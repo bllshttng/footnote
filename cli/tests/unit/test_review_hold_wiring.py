@@ -27,6 +27,7 @@ def taken(monkeypatch):
         "fno.pr._review_hold.acquire_review_hold",
         lambda branch, **kw: calls.append({"branch": branch, **kw}),
     )
+    monkeypatch.setattr("fno.pr._review_hold.review_invocation_refusal", lambda *a, **kw: "")
     monkeypatch.setattr(target_cli, "_git_out", lambda cwd, *args: "feature/x-5ca3")
     return calls
 
@@ -68,11 +69,31 @@ def test_a_detached_head_takes_nothing(taken, monkeypatch) -> None:
     assert taken == []
 
 
+def test_a_refused_invocation_takes_nothing(taken, monkeypatch) -> None:
+    """The deadlock this avoids, and why the gate is here rather than skipped.
+
+    A refused invocation runs no review and emits no attestation, so nothing
+    would ever release the hold. The merge the refusal is telling the worker to
+    take would then be blocked for the full TTL by a review that never started.
+    """
+    monkeypatch.setattr(
+        "fno.pr._review_hold.review_invocation_refusal",
+        lambda *a, **kw: "review rounds spent: 2 of 2",
+    )
+
+    target_cli._hold_branch_under_review(
+        Path("/repo"), head_sha="abc", session_id="s", receipt={"outcome": "queued"}
+    )
+
+    assert taken == []
+
+
 def test_a_lockfile_failure_never_refuses_the_sent_review(monkeypatch) -> None:
     def _boom(branch, **kw):
         raise OSError("claims root read-only")
 
     monkeypatch.setattr("fno.pr._review_hold.acquire_review_hold", _boom)
+    monkeypatch.setattr("fno.pr._review_hold.review_invocation_refusal", lambda *a, **kw: "")
     monkeypatch.setattr(target_cli, "_git_out", lambda cwd, *args: "feature/x")
 
     # Returns, does not raise: the review was already sent.
@@ -81,19 +102,49 @@ def test_a_lockfile_failure_never_refuses_the_sent_review(monkeypatch) -> None:
     )
 
 
-def test_the_python_attest_path_releases_the_hold() -> None:
+def test_the_python_attest_path_releases_the_hold_after_the_row_lands(
+    tmp_path: Path, monkeypatch
+) -> None:
     """The shell producer released here from the start; this one did not.
 
-    Read as source rather than executed: `_attest_from_record` needs a git
-    repo, an origin base, a non-empty diff and an identity resolver, and the
-    ordering is what matters - the release must follow the append, never
-    precede it, or a crashed emit clears a hold with no verdict behind it.
+    Order is the invariant, not the presence of a call: release must FOLLOW
+    the append. A release that ran first would clear the lane on a crashed
+    emit, leaving no verdict behind it and no hold in front of it.
     """
-    from fno.review.cli import _attest_from_record
+    from fno.review import cli as review_cli
 
-    body = inspect.getsource(_attest_from_record)
+    calls: list[str] = []
 
-    assert "release_review_hold(branch)" in body
-    assert body.index("append_event(event, events_path=events_path)") < body.index(
-        "release_review_hold(branch)"
+    git = {
+        ("symbolic-ref", "--short", "refs/remotes/origin/HEAD"): "origin/main",
+        ("merge-base", "HEAD", "origin/main"): "base0000",
+        ("diff", "--name-only", "base0000..HEAD"): "a.py\n",
+        ("diff", "--numstat", "base0000..HEAD"): "3\t1\ta.py\n",
+    }
+    monkeypatch.setattr(review_cli, "_git_out", lambda *args: git.get(tuple(args), ""))
+    monkeypatch.setattr(
+        "fno.review.invocation._settle_head_pin", lambda cwd: ("head1234", "feature/x-5ca3")
     )
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_attester_identity", lambda: ("sess-a", "witness")
+    )
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda *a, **kw: tmp_path)
+    monkeypatch.setattr("fno.paths.project_log", lambda *a, **kw: tmp_path / "events.jsonl")
+    monkeypatch.setattr(
+        "fno.events.append_event", lambda *a, **kw: calls.append("append")
+    )
+    monkeypatch.setattr("fno.events.cli.mirror_to_global_log", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "fno.pr._review_hold.release_review_hold",
+        lambda branch, **kw: calls.append(f"release:{branch}"),
+    )
+
+    verdict = review_cli._attest_from_record(
+        {"findings_blocking": 0, "findings_nonblocking": 0, "findings": []},
+        "code-review",
+        "non-author",
+        tmp_path / "findings.json",
+    )
+
+    assert verdict == "pass"
+    assert calls == ["append", "release:feature/x-5ca3"]

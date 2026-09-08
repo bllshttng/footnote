@@ -781,15 +781,24 @@ def test_post_merge_mode_autonomous_with_megawalk_state(enabled, monkeypatch, tm
 
 
 def test_session_satisfied_emitted_when_state_present(enabled, monkeypatch, tmp_path):
+    """The row lands in the RESOLVED journal, not beside the checkout.
+
+    This test used to assert `<checkout>/.fno/events.jsonl`. That file is a
+    plain file the post-merge worktree reap deletes, so a row written there is
+    as unauditable as no row at all. The destination was never noticed because
+    three early returns meant the emit had produced no row in any journal.
+    """
     fno_dir = tmp_path / ".fno"
     fno_dir.mkdir()
     (fno_dir / "target-state.md").write_text(
         '---\nsession_id: "20260613T000000Z-1-abc"\n---\n'
     )
+    events = tmp_path / "space" / "events.jsonl"
+    events.parent.mkdir()
+    monkeypatch.setattr("fno.paths.project_events_json", lambda *a, **kw: events)
     fake = FakeRun(gh_merge=Result(0, "Merged", ""), toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
     _merge.run_merge(["42"], cwd=str(tmp_path))
-    events = fno_dir / "events.jsonl"
     assert events.exists()
     line = json.loads(events.read_text().strip().splitlines()[-1])
     assert line["type"] == "session_satisfied"

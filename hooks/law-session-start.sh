@@ -26,9 +26,14 @@
 # and `review-rounds-sufficient` spent ninety minutes building a law-shaped
 # case against both, then read them and retracted it. It read the names as
 # topics it already knew. So a ruling that says IN ITS OWN TEXT not to reopen
-# it prints that ruling's first sentence instead of its subject, and prints it
-# first. Everything else stays a name. Two of 28 live rulings carry the clause,
-# so the change costs tens of bytes, not a rewrite of the list.
+# it prints that ruling's first sentence. Everything else stays a name.
+#
+# The trigger is the clause, never the subject. Against the store on
+# 2026-09-07 that is two rows, both under `review-coverage`. The other law
+# that session broke, `review-rounds-sufficient`, carries no such clause and
+# still renders as a bare name, which is the intended narrowness: the block is
+# for rulings the operator wrote a stop sign into, not for every law an agent
+# has broken. Measured cost, whole preamble, 473 to 565 bytes.
 #
 # NEVER gate this on a crown. Law is fleet-wide and applies to every session,
 # crowned or not. `hooks/king-postcompact-reinject.sh` is the cautionary case:
@@ -143,6 +148,11 @@ if not total and not damaged:
 # the clause is the operator writing "settled", not a field anyone maintains.
 SETTLED = re.compile(r"do not reopen|is not reopened|do not re-derive|this is settled", re.I)
 SENTENCE_CAP = 120
+# The block is exempt from RENDER_CAP by design, so it carries its own ceiling.
+# Without one, a store that grows settled rulings grows the preamble every
+# session with nothing measuring it.
+SETTLED_SUBJECT_CAP = 3
+SETTLED_BLOCK_BYTES = 400
 
 settled = {}
 settled_order = []
@@ -207,10 +217,22 @@ print(
 # leaves the preamble holding. It is never truncated by RENDER_CAP: the whole
 # defect is a settled ruling reaching the reader as a name it walks past.
 if settled_order:
-    print()
-    print("Settled, do not re-derive:")
-    for key in settled_order:
-        print(f"- {key}: " + " ".join(settled[key]))
+    lines = []
+    spent = 0
+    for key in settled_order[:SETTLED_SUBJECT_CAP]:
+        line = f"- {key}: " + " ".join(settled[key])
+        if spent + len(line) > SETTLED_BLOCK_BYTES:
+            break
+        lines.append(line)
+        spent += len(line)
+    dropped = len(settled_order) - len(lines)
+    if lines:
+        print()
+        print("Settled, do not re-derive:")
+        for line in lines:
+            print(line)
+        if dropped > 0:
+            print(f"- and {dropped} more settled ruling(s): `fno backlog decisions --lane law`")
 if damaged:
     print()
     print(

@@ -1125,10 +1125,17 @@ def _hold_branch_under_review(
     if str(receipt.get("outcome") or "") in {"refused", "unconfirmed"}:
         return
     try:
-        from fno.pr._review_hold import acquire_review_hold
+        from fno.pr._review_hold import acquire_review_hold, review_invocation_refusal
 
         branch = (_git_out(cwd, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
         if not branch or branch == "HEAD":
+            return
+        # The same gate the other acquire site applies, and for a sharper
+        # reason here. A refused invocation runs no review and emits no
+        # attestation, so nothing would ever release the hold, and the merge
+        # the refusal is telling the worker to take would be blocked for the
+        # full TTL by a review that never started.
+        if review_invocation_refusal(branch, head_sha, cwd=str(cwd)):
             return
         acquire_review_hold(
             branch,
