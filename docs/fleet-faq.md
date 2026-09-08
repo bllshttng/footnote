@@ -6,11 +6,11 @@ This is a FAQ, not a command reference. The full verb surface is `fno agents --h
 
 ## What this list is for
 
-Every entry is a workaround, and a workaround is a gap in the machinery. So this doubles as a standing gap list: the things a human or an agent has to know because the tool does not yet say it, refuse it, or do it.
+Every entry is a workaround, and a workaround is a gap in the machinery. So this doubles as a standing gap list. Each line is something a human or an agent must know because the tool does not yet say it, refuse it, or do it.
 
 That makes each entry a candidate fix, not a permanent teaching. An entry earns its place until the gap closes, and then it leaves.
 
-**Adding an entry.** Write the question a reader would actually type, the answer that survived contact, and the specimen that proves it (a file and line, a command and its real output, a measured number). Add a `Graduates to:` line naming the change that retires it. Prose with no specimen is a guess, and an entry with no exit is a permanent workaround dressed as documentation.
+**Adding an entry.** Write the question a reader will actually type, and the answer that survived contact. Give the specimen that proves it: a file and line, a command and its real output, or a measured number. Add a `Graduates to:` line naming the change that retires it. Prose with no specimen is a guess, and an entry with no exit is a permanent workaround dressed as documentation.
 
 This convention matches the pitfalls corpus in AGENTS.md, which removes an entry in the PR where its guard lands. Do the same here.
 
@@ -84,7 +84,7 @@ In this order:
 
 Before any spawn, check for a duplicate. A node with a live claim or a sibling worker already on it turns a helpful spawn into two workers fighting over one worktree. `fno agents list --json` filtered on the node id is enough. Name every worker after the node it serves, because that name is the only worker-to-node join you get.
 
-*Graduates to:* spawn refusing by default when a live claim or a sibling worker already holds the node.
+*Graduates to:* a spawn that refuses by default once a live claim or a sibling worker already holds the node.
 
 ## A gate refused me
 
