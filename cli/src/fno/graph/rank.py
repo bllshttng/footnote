@@ -58,6 +58,33 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
         return f"dispatcher scope unavailable ({exc})"
 
 
+def agent_harness_writing_rank(env=None) -> str | None:
+    """The harness name when an agent runs this, ``None`` in an operator shell.
+
+    A partial stamp reads as an agent: the fence must fail closed, or a spawn
+    that half-stamps its worker buys that worker the pin back.
+    """
+    from fno.harness_identity import parse_canonical_identity
+
+    identity = parse_canonical_identity(env)
+    if identity.disposition == "absent":
+        return None
+    return identity.harness or "agent"
+
+
+def _agent_rank_refusal(task_id: str, harness: str) -> str:
+    return (
+        f"Error: rank is operator-only; this {harness} session may not write it.\n"
+        "Every --top writes min(rank) - 1, so agent pins form a stack in which "
+        "the last writer wins and importance is never computed.\n"
+        "Vote instead:\n"
+        f"  fno backlog encounter {task_id} --evidence \"what it cost you\"\n"
+        f"  fno backlog update {task_id} --priority p0|p1|p2|p3\n"
+        "An operator pins by hand: pass --operator, or run from a shell with no "
+        "harness stamp."
+    )
+
+
 def cmd_rank(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX) to rank"),
     top: bool = typer.Option(False, "--top", help="Pin to the front of its (column, project) lane"),
@@ -78,8 +105,18 @@ def cmd_rank(
         "--within-epic",
         help="Rank within the node's live epic (child default; refused without one)",
     ),
+    operator: bool = typer.Option(
+        False,
+        "--operator",
+        help="Write the pin from an agent session (the operator's own escape hatch)",
+    ),
 ) -> None:
     """Curate a node's position within its (column, project) board lane.
+
+    Operator-only. An agent session is refused and told to vote with
+    ``fno backlog encounter`` or to propose with ``fno backlog update
+    --priority``; ``--operator`` is the operator's escape hatch from inside an
+    agent shell. Rank is a pin, and a pin every agent may write is a stack.
 
     Rank is a nullable float ordered ahead of the shared epic-aware work-order
     suffix within a lane; it never changes a node's column. ``--before`` /
@@ -102,6 +139,12 @@ def cmd_rank(
             f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
         )
         raise typer.Exit(code=1)
+
+    if not operator:
+        harness = agent_harness_writing_rank()
+        if harness is not None:
+            typer.echo(_agent_rank_refusal(task_id, harness), err=True)
+            raise typer.Exit(code=1)
 
     chosen = [
         name
@@ -203,12 +246,14 @@ def cmd_rank(
             # The child's rank orders only within its epic group, so peers
             # and anchors come from that set, not the board lane.
             scope_label = f"epic {epic_id}"
+            scope_kind = "epic"
             peers = [
                 e for e in entries
                 if isinstance(e, dict) and e.get("id") != tid and _epic_of(e) == epic_id
             ]
         else:
-            scope_label = _lane_label(node)
+            scope_label = f"lane {_lane_label(node)}"
+            scope_kind = "lane"
             target_lane = _lane(node)
             peers = [
                 e for e in entries
@@ -271,7 +316,9 @@ def cmd_rank(
                 action = f"--after {anchor_id}"
 
         node["rank"] = new_rank
-        result.update(action=action, rank=new_rank, lane=scope_label, id=tid)
+        result.update(
+            action=action, rank=new_rank, lane=scope_label, scope_kind=scope_kind, id=tid
+        )
         return entries
 
     graph_path = _graph_path()
@@ -283,8 +330,17 @@ def cmd_rank(
     else:
         note = _dispatch_note(result["id"], graph_path)
         suffix = f"; {note}" if note else ""
+        # The receipt names what the pin is top OF. A bare "Ranked --top" read
+        # as "runs next across the project" and meant "top of its own epic",
+        # which is how a king pinned eighth and believed it pinned first.
+        scope_note = (
+            "orders it among that epic's children only, and the epic's own rank "
+            "decides where the group runs"
+            if result.get("scope_kind") == "epic"
+            else "orders it within that board lane only"
+        )
         typer.echo(
-            f"Ranked {result['id']} {result['action']} (rank={result['rank']}) in "
-            f"{result['lane']}{suffix}"
+            f"Ranked {result['id']} {result['action']} of {result['lane']} "
+            f"(rank={result['rank']}); {scope_note}{suffix}"
         )
     _project_plans_from_graph([result["id"]])
