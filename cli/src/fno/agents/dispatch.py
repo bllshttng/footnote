@@ -854,7 +854,23 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     # spawning session's cwd (inherited), so the parent cwd is always captured.
     parent_cwd: Optional[str] = (os.environ.get("PWD") or os.getcwd()).strip() or None
 
-    return identity.session_id, identity.harness, parent_cwd
+    # x-5c25: with NO marker in the env the resolve above returns nothing, so
+    # the row reads the same as a human-run spawn. The process-tree walk still
+    # names the family, and a harness ANCESTOR cannot be a stranger the way an
+    # inherited MARKER can, so take the harness from it and leave the id null.
+    # Gated on an empty marker set, not on a missing harness: a marker that IS
+    # present and resolved to nothing is the contradiction x-b57a / x-0992 rule
+    # must attribute nothing.
+    harness = identity.harness
+    if not harness and not identity.markers_present:
+        from fno.claims.session_pid import resolve_session_harness
+
+        try:
+            harness = resolve_session_harness()
+        except Exception:  # noqa: BLE001 - the walk never fails a spawn
+            harness = None
+
+    return identity.session_id, harness, parent_cwd
 
 
 def _reign_typed_message(
