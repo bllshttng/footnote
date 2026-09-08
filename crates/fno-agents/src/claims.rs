@@ -357,26 +357,57 @@ pub fn list(prefix: Option<&str>, root: Option<&Path>, include_stale: bool) -> V
 /// `<space>/claims`, a layout no explicit-root spelling of [`list`] reaches
 /// (`--root` appends `.fno/claims` for repo-checkout roots).
 pub fn list_in(dirs: &[PathBuf], prefix: Option<&str>, include_stale: bool) -> Vec<ClaimRecord> {
+    list_in_result(dirs, prefix, include_stale).unwrap_or_default()
+}
+
+/// Strict twin of [`list`]/[`list_in`] for dispatch admission: an unreadable
+/// claims root is UNKNOWN claim state, which must refuse selection rather
+/// than read as "nothing is claimed" (Python's
+/// `live_claimed_node_ids(strict=True)` contract). A missing directory is a
+/// legitimate empty root, not a fault. Corrupted rows stay withheld per the
+/// records contract above.
+pub fn list_strict(
+    prefix: Option<&str>,
+    root: Option<&Path>,
+    include_stale: bool,
+) -> Result<Vec<ClaimRecord>, String> {
+    let mut dirs = Vec::new();
+    if let Some(global) = global_claims_root() {
+        dirs.push(global.join(CLAIMS_DIRNAME));
+    }
+    if let Some(local) = root {
+        dirs.push(local.join(CLAIMS_DIRNAME));
+    }
+    list_in_result(&dirs, prefix, include_stale)
+}
+
+fn list_in_result(
+    dirs: &[PathBuf],
+    prefix: Option<&str>,
+    include_stale: bool,
+) -> Result<Vec<ClaimRecord>, String> {
     let mut seen_dirs = std::collections::BTreeSet::new();
     let mut best: std::collections::BTreeMap<String, (u8, ClaimRecord)> =
         std::collections::BTreeMap::new();
     for dir in dirs {
-        let identity = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        let identity = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
         if !seen_dirs.insert(identity) {
             continue;
         }
-        let entries = match std::fs::read_dir(&dir) {
+        let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return Vec::new(),
+            Err(error) => {
+                return Err(format!("claims root {} unreadable: {error}", dir.display()));
+            }
         };
         for entry in entries {
-            let Ok(entry) = entry else {
-                return Vec::new();
-            };
-            let Ok(file_type) = entry.file_type() else {
-                return Vec::new();
-            };
+            let entry = entry.map_err(|error| {
+                format!("claims root {} unreadable mid-scan: {error}", dir.display())
+            })?;
+            let file_type = entry.file_type().map_err(|error| {
+                format!("claims root {} unreadable mid-scan: {error}", dir.display())
+            })?;
             if !file_type.is_file() || !entry.file_name().to_string_lossy().ends_with(".lock") {
                 continue;
             }
@@ -407,7 +438,7 @@ pub fn list_in(dirs: &[PathBuf], prefix: Option<&str>, include_stale: bool) -> V
             }
         }
     }
-    best.into_values().map(|(_, rec)| rec).collect()
+    Ok(best.into_values().map(|(_, rec)| rec).collect())
 }
 
 // ---------------------------------------------------------------------------

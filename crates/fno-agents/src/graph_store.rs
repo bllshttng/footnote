@@ -188,6 +188,8 @@ pub enum StoreError {
     EmptyFieldUpdate(String),
     #[error("{0}")]
     Invalid(String),
+    #[error("{0}")]
+    ClaimsUnavailable(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -1224,6 +1226,13 @@ pub fn supplied_plan_rung(entry: &Value, rungs: &BTreeMap<String, String>) -> &'
         _ => None,
     }
     .unwrap_or("none");
+    plan_rung_from_status(raw)
+}
+
+/// The rung for one plan-frontmatter status scalar (`ladder.plan_rung`'s
+/// word mapping, shared with the supplied-map reader above): norm, retired
+/// spellings resolved, then the total rung table with UNREADABLE default.
+pub(crate) fn plan_rung_from_status(raw: &str) -> &'static str {
     let s = raw.trim().trim_matches(['\'', '"']).to_lowercase();
     if s == "none" {
         // Not a table member: "nothing on disk" answers NONE directly.

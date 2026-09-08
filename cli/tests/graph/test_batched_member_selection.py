@@ -64,6 +64,16 @@ def graph_file(tmp_path, monkeypatch):
         path.write_text(json.dumps({"entries": entries}), encoding="utf-8")
         return path
 
+    # The selection decision is served by the keeper now: the graph is pinned
+    # through FNO_CONFIG (the client seam), not through a monkeypatched
+    # `_graph_path`, and claims resolve under a redirected root.
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f'[paths]\ngraph_json = "{path}"\n', encoding="utf-8"
+    )
+    (tmp_path / "claims-root/.fno/claims").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("FNO_CONFIG", str(config))
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-root"))
     monkeypatch.setattr("fno.graph.cli._graph_path", lambda: path)
     monkeypatch.setattr(
         "fno.graph.cli._live_claimed_node_ids", lambda **_kwargs: set()

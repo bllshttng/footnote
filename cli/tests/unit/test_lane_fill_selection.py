@@ -298,8 +298,16 @@ def test_cli_ready_mission_filter(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(gcli, "_graph_path", lambda: path)
-    monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda **_kwargs: set())
+    # The selection decision is served by the keeper now: the graph is pinned
+    # through FNO_CONFIG (the client seam), and claims resolve under a
+    # redirected root - never the operator's real claims.
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f'[paths]\\ngraph_json = "{path}"\\n', encoding="utf-8"
+    )
+    (tmp_path / "claims-root/.fno/claims").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("FNO_CONFIG", str(config))
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-root"))
 
     res = CliRunner().invoke(gcli.cli, ["ready", "--all", "--mission", "m-7"])
     assert res.exit_code == 0, res.output

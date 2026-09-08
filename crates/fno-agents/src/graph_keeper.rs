@@ -32,7 +32,7 @@ use crate::identity::{harness_of_session_id, shape_known_harness};
 use serde_json::{json, Map, Value};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -372,6 +372,7 @@ fn store_err_kind(err: &StoreError) -> &'static str {
         StoreError::Conflict => "conflict",
         StoreError::EmptyFieldUpdate(_) => "empty_field_update",
         StoreError::Invalid(_) => "invalid",
+        StoreError::ClaimsUnavailable(_) => "claims_unavailable",
         StoreError::Io(_) => "io",
     }
 }
@@ -406,6 +407,12 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
             graph_store::recompute_statuses_with_plan_rungs(&mut entries, plan_rungs.as_ref());
             entries
         }),
+        // The dispatch admission decision (backlog_ready::select), served so
+        // the Python callers are clients and no second selection leg exists.
+        // With `entries` in the params the verb filters that list (the
+        // external-tracker backend's joined candidates); without, it reads
+        // the graph this keeper owns.
+        "ready" => handle_ready(state, &params),
         // The read-time readiness overlay (statuses.compute_readiness), for
         // the client's pre-render pass: the write path's recompute does not
         // derive `blocked` -- it is a read overlay -- so a mutation that
@@ -439,6 +446,96 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
     match result {
         Ok(v) => json!({"id": id, "ok": true, "result": v}),
         Err(e) => err_reply(id, store_err_kind(&e), e.to_string()),
+    }
+}
+
+/// The dispatch admission decision over client-shipped rows or the graph
+/// this keeper owns: `backlog_ready::select` in, survivors + drops out.
+/// Params: `project`, `all`, `roadmap_id`, `parent`, `mission`,
+/// `include_ideas`, `include_deferred`, `repo_root`, `entries` (optional -
+/// the external-backend path), `claimed` (optional - live claim ids; when
+/// absent the keeper resolves them from the claims store itself).
+fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
+    use crate::backlog_ready::{select, NoSuchParent, ReadyOpts};
+    use std::collections::BTreeSet;
+
+    let opt_str_owned = |k: &str| -> Option<String> {
+        params
+            .get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let opts = ReadyOpts {
+        project: opt_str_owned("project"),
+        all: params.get("all").and_then(Value::as_bool).unwrap_or(false),
+        roadmap_id: opt_str_owned("roadmap_id"),
+        parent: opt_str_owned("parent"),
+        mission: opt_str_owned("mission"),
+        include_ideas: params
+            .get("include_ideas")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        include_deferred: params
+            .get("include_deferred")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        repo_root: opt_str_owned("repo_root"),
+        claimed: match params.get("claimed") {
+            Some(Value::Array(ids)) => ids
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<BTreeSet<String>>(),
+            // Unknown claim state must refuse, not read as "nothing is
+            // claimed": the Python leg this verb replaced failed closed
+            // (`live_claimed_node_ids(strict=True)`).
+            _ => crate::claims::list_strict(Some("node:"), None, false)
+                .map_err(|e| {
+                    StoreError::ClaimsUnavailable(format!(
+                        "live claim state is unavailable; ready selection refused: {e}"
+                    ))
+                })?
+                .iter()
+                .filter_map(|rec| rec.key.strip_prefix("node:").map(str::to_string))
+                .collect(),
+        },
+        // Explicit param first (a client that resolved policy), then the
+        // config beside the graph, then the fail-open default in select().
+        staleness_days: params
+            .get("staleness_days")
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                crate::backlog_ready::configured_staleness_days(
+                    &state.graph.parent().unwrap_or(Path::new("")),
+                )
+            }),
+        now_ms: params
+            .get("now_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| crate::claims::now_ms()),
+    };
+    let entries: Vec<Value> = match params.get("entries") {
+        Some(Value::Array(_)) => params
+            .get("entries")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+        _ => {
+            let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
+            graph_store::read_defaulted(&state.graph, false)?
+        }
+    };
+    match select(&entries, &opts) {
+        Ok(reply) => Ok(json!({
+            "rows": reply.rows,
+            "drops": reply
+                .drops
+                .iter()
+                .map(|d| json!({"id": d.id, "filter": d.filter, "reason": d.reason}))
+                .collect::<Vec<_>>(),
+        })),
+        Err(NoSuchParent(parent)) => Err(StoreError::Invalid(format!("no such node '{parent}'"))),
     }
 }
 

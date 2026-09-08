@@ -82,6 +82,10 @@ STATE_ABSENT = "absent"
 STATE_SPAWN_FAILED = "spawn_failed"
 STATE_UNREACHABLE = "unreachable"
 STATE_SILENT = "silent"
+# The keeper answered but does not know the verb: it predates the client
+# (an installed worker behind the source). Remedied by restarting that
+# keeper on a current binary.
+STATE_STALE_KEEPER = "stale_keeper"
 
 
 class GraphCorruptError(Exception):
@@ -123,6 +127,15 @@ class StoreUnavailable(RuntimeError):
         self.state = state
         self.detail = detail
         super().__init__(f"graph store unavailable ({state}): {detail}")
+
+
+class ClaimsUnavailableError(RuntimeError):
+    """The keeper refused selection because live claim state is unreadable.
+
+    The selection leg fails closed on unknown claim state (the Python leg's
+    ``live_claimed_node_ids(strict=True)`` contract, now enforced keeper
+    side). Never read as "nothing is claimed".
+    """
 
 
 class GraphLockTimeout(TimeoutError):
@@ -552,6 +565,8 @@ def _raise_store_error(kind: str, message: str) -> None:
         raise ValueError(message)
     if kind == "conflict":
         raise _Conflict()
+    if kind == "claims_unavailable":
+        raise ClaimsUnavailableError(message)
     raise RuntimeError(f"store error ({kind}): {message}")
 
 
@@ -671,6 +686,71 @@ def apply_readiness_overlay_via_store(entries: list[dict]) -> list[dict]:
     so a mutation that newly blocks a sibling renders current graph.md."""
     result = _client_for(GRAPH_JSON).request("overlay", {"entries": entries})
     return result["entries"]
+
+
+class ReadyParentMissingError(ValueError):
+    """`ready --parent` named a node the graph does not have."""
+
+
+def ready(
+    *,
+    project: str | None = None,
+    all: bool = False,  # noqa: A002 - the verb flag's own name
+    roadmap_id: str | None = None,
+    parent: str | None = None,
+    mission: str | None = None,
+    include_ideas: bool = False,
+    include_deferred: bool = False,
+    repo_root: str | None = None,
+    entries: "list[dict] | None" = None,
+) -> "dict":
+    """The dispatch admission decision, answered by the native leg.
+
+    One call into ``backlog_ready::select`` through the keeper's ``ready``
+    verb: survivors (dispatch summaries in selection order) plus per-node
+    drops. `next` takes ``rows[0]`` of the same call its sibling verb makes,
+    so the two surfaces cannot drift. When `entries` is given the verb
+    filters that list instead of reading the graph (the external-tracker
+    backend's joined candidates); otherwise the keeper reads the graph it
+    owns. An unreachable keeper raises ``StoreUnavailable`` - selection
+    refuses, it never falls back to a locally recomputed answer.
+    """
+    params: "dict" = {
+        "project": project,
+        "all": all,
+        "roadmap_id": roadmap_id,
+        "parent": parent,
+        "mission": mission,
+        "include_ideas": include_ideas,
+        "include_deferred": include_deferred,
+        "repo_root": repo_root,
+    }
+    if entries is not None:
+        params["entries"] = entries
+    from fno import paths as _paths
+
+    try:
+        # Read the RESOLVER, not the imported facade: a test (or session) that
+        # repins config mid-process would otherwise be served the graph path
+        # frozen at this module's first import.
+        result = _client_for(_paths.graph_json()).request("ready", params)
+    except RuntimeError as exc:
+        text = str(exc)
+        if "no such node" in text:
+            # The verb's own refusal wording, without the store-error prefix
+            # the transport wraps it in.
+            raise ReadyParentMissingError(text[text.index("no such node") :]) from None
+        if "unknown store method" in text:
+            raise StoreUnavailable(
+                STATE_STALE_KEEPER,
+                "the running store keeper predates this verb; restart it on a "
+                "current fno-agents-worker (`fno doctor` names binary lag)",
+            ) from None
+        raise
+    return {
+        "rows": result.get("rows") or [],
+        "drops": result.get("drops") or [],
+    }
 
 
 def settle_blocked_by_edges_via_store(entries: list[dict]) -> dict:

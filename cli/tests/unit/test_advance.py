@@ -1438,10 +1438,11 @@ def test_lane_ready_frontier_recovers_observer_miss_and_records_divergence(
             }
         ],
     }
+    # The ready leg is the native store call; stub it at its own seam so the
+    # test isolates the observer-divergence merge, not the keeper.
     monkeypatch.setattr(
-        adv.subprocess,
-        "run",
-        lambda *args, **kwargs: _FakeProc(0, json.dumps([normal])),
+        "fno.graph.store.ready",
+        lambda *args, **kwargs: {"rows": [normal]},
     )
     monkeypatch.setattr(adv, "_undispatched_nodes", lambda project, mission: observer, raising=False)
     monkeypatch.setattr(adv, "_dispatch_safe_observer", lambda receipt: receipt)

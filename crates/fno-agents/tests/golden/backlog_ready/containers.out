@@ -1,0 +1,25 @@
+[
+  {
+    "slug": "c1",
+    "id": "x-ct2",
+    "title": "Leaf",
+    "priority": "p1",
+    "domain": "code",
+    "project": "fno",
+    "cwd": null,
+    "parent": "x-ct1",
+    "size": null,
+    "difficulty": null,
+    "plan_path": null,
+    "model": null,
+    "dispatch_verb": null,
+    "dispatch_brief": null,
+    "mission_id": null,
+    "mission_wave": null,
+    "mission_slug": null,
+    "mission_from_msg_id": null,
+    "created_at": "<TS>",
+    "touched_at": null,
+    "rank": null
+  }
+]

@@ -1,195 +1,49 @@
-"""Why this node and not that one: the selection cascade, made answerable.
+"""Why this node and not that one: the selection, made answerable.
 
-`fno backlog next` narrows the open graph through a fixed sequence of filters
-and then sorts what survives. Every drop was silent. An operator asking why a
-ready node never launched had no instrument, and the 2026-09-01 orchestration
-audit had to reconstruct the answer by reading source.
-
-The cascade lives HERE and `cmd_next._pick_ready` consumes it, rather than the
-explanation reimplementing the same ten filters beside the selector. A parallel
-implementation is a second selector that lies the moment either one moves, and
-an explanation that disagrees with the selection is worse than none.
-
-A filter narrows a LIST, not a row. That is not indirection for its own sake:
-`filter_by_project` resolves the project by DETECTING it from the candidates it
-is handed, so it cannot be expressed as a per-row predicate without changing
-what it does.
+`fno backlog advance --explain` narrates the selection the native leg makes:
+survivors in selection order plus per-node drops, read straight out of the
+keeper's ``ready`` reply (``backlog_ready::select``). The narrowing cascade
+itself lives in one place, the Rust leg; this module renders its answer
+instead of recomputing it, so an explanation cannot disagree with a
+selection.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Optional
+
+from fno.graph.store import ready as store_ready
+from fno.graph._intake import repo_root
 
 
-@dataclass(frozen=True)
-class SelectionFilter:
-    """One narrowing step, with the sentence an operator needs when it bites."""
+# The cascade's shipped filter order, for stable drop-count rendering.
+FILTER_ORDER: "list[str]" = [
+    "roadmap",
+    "mission",
+    "parent-scope",
+    "project",
+    "live-claim",
+    "unmerged-open-pr",
+    "container",
+    "batched",
+    "selection-guard",
+]
 
-    #: Stable identifier, printed by `advance --explain` and safe to grep for.
-    name: str
-    #: Why a node dropped here, in terms of what the operator can do about it.
-    why: str
-    narrow: Callable[[list[dict]], list[dict]]
-
-
-@dataclass
-class CascadeResult:
-    """What survived, what each filter took, and where each node fell out."""
-
-    survivors: list[dict] = field(default_factory=list)
-    #: filter name -> how many candidates it removed, in cascade order.
-    drops: list[tuple[str, int]] = field(default_factory=list)
-    #: node id -> the name of the first filter that removed it. A node absent
-    #: from this map and from `survivors` was never a candidate at all.
-    dropped_by: dict[str, str] = field(default_factory=dict)
-
-    def reason_for(self, node_id: str) -> Optional[str]:
-        """The filter that dropped ``node_id``, or None if it survived."""
-        return self.dropped_by.get(node_id)
-
-
-def run_cascade(candidates: list[dict], filters: list[SelectionFilter]) -> CascadeResult:
-    """Apply ``filters`` in order, recording what each one took.
-
-    Attribution is to the FIRST filter that removes a node. A node dropped by
-    the project filter may also be a container and also be batched; naming all
-    three would bury the one an operator has to act on.
-    """
-    result = CascadeResult()
-    current = list(candidates)
-    for f in filters:
-        before = {e.get("id") for e in current if e.get("id")}
-        current = f.narrow(current)
-        after = {e.get("id") for e in current if e.get("id")}
-        gone = before - after
-        result.drops.append((f.name, len(gone)))
-        for node_id in gone:
-            if node_id:
-                result.dropped_by.setdefault(node_id, f.name)
-    result.survivors = current
-    return result
-
-
-def build_selection_filters(
-    entries: list[dict],
-    *,
-    roadmap_id: Optional[str],
-    mission: Optional[str],
-    parent_target_id: Optional[str],
-    project_filter: Optional[str],
-    all_: bool,
-    claimed: "set[str] | frozenset[str]",
-    container_ids: "set[str] | frozenset[str]",
-) -> list[SelectionFilter]:
-    """The cascade `fno backlog next` runs, in its exact shipped order.
-
-    ``claimed`` and ``container_ids`` are passed in rather than computed here
-    because the caller already holds them under its graph lock; recomputing
-    would read a different instant than the selection it is explaining.
-    """
-    from datetime import datetime, timezone
-
-    from fno.graph._intake import descendants_of, filter_by_project
-
-    fs: list[SelectionFilter] = []
-
-    if roadmap_id:
-        fs.append(
-            SelectionFilter(
-                "roadmap",
-                f"not on roadmap {roadmap_id}",
-                lambda c: [e for e in c if e.get("roadmap_id") == roadmap_id],
-            )
-        )
-    if mission:
-        fs.append(
-            SelectionFilter(
-                "mission",
-                f"not in mission {mission}",
-                lambda c: [e for e in c if e.get("mission_id") == mission],
-            )
-        )
-    if parent_target_id is not None:
-        scope = descendants_of(entries, parent_target_id)
-        fs.append(
-            SelectionFilter(
-                "parent-scope",
-                f"not a descendant of {parent_target_id}",
-                lambda c: [e for e in c if e.get("id") in scope],
-            )
-        )
-
-    fs.append(
-        SelectionFilter(
-            "project",
-            "belongs to another project (pass --all to widen, or --project)",
-            lambda c: filter_by_project(c, project_filter, all_),
-        )
-    )
-
-    if claimed:
-        fs.append(
-            SelectionFilter(
-                "live-claim",
-                "a live session already holds node:<id>; check `fno agents claim status`",
-                lambda c: [e for e in c if e.get("id") not in claimed],
-            )
-        )
-
-    def _drop_open_pr(c: list[dict]) -> list[dict]:
-        from fno.graph.cli import _has_unmerged_open_pr
-
-        return [e for e in c if e.get("status") != "ready" or not _has_unmerged_open_pr(e)]
-
-    fs.append(
-        SelectionFilter(
-            "unmerged-open-pr",
-            "already carries a PR that has not merged; the work is in review, not waiting",
-            _drop_open_pr,
-        )
-    )
-
-    fs.append(
-        SelectionFilter(
-            "container",
-            "an epic is never built directly; its work lives in its children",
-            lambda c: [e for e in c if e.get("id") not in container_ids],
-        )
-    )
-
-    def _drop_batched(c: list[dict]) -> list[dict]:
-        from fno.graph.cli import _is_batched_member
-
-        return [e for e in c if not _is_batched_member(e)]
-
-    fs.append(
-        SelectionFilter(
-            "batched",
-            "committed to an open batch; it ships via the batch PR",
-            _drop_batched,
-        )
-    )
-
-    def _drop_guarded(c: list[dict]) -> list[dict]:
-        from fno.backlog.advance import _guard_staleness_days, selection_guards
-
-        guard_now = datetime.now(timezone.utc)
-        guard_stale = _guard_staleness_days()
-        guard_by_id = {e.get("id"): e for e in entries if e.get("id")}
-        return [
-            e
-            for e in c
-            if not selection_guards(e, guard_by_id, guard_now, staleness_days=guard_stale)
-        ]
-
-    fs.append(
-        SelectionFilter(
-            "selection-guard",
-            "under a dead ancestor, or ready and untouched past the staleness window",
-            _drop_guarded,
-        )
-    )
-    return fs
+# Why a node dropped, in terms of what the operator can do about it. The
+# selection-guard row is rendered with the drop's inner reason
+# (dead-ancestor:<id>, stale-quarantine, design-stage, idea-stage,
+# contained:<id>, or the dispatch-hold guard reason) when one is attached.
+FILTER_WHY: "dict[str, str]" = {
+    "roadmap": "not on the requested roadmap",
+    "mission": "not in the requested mission",
+    "parent-scope": "not a descendant of the requested epic",
+    "project": "belongs to another project (pass --all to widen, or --project)",
+    "live-claim": "a live session already holds node:<id>; check `fno agents claim status`",
+    "unmerged-open-pr": "already carries a PR that has not merged; the work is in review, not waiting",
+    "container": "an epic is never built directly; its work lives in its children",
+    "batched": "committed to an open batch; it ships via the batch PR",
+    "selection-guard": "under a dead ancestor, contained elsewhere, undesigned, or stale past the quarantine window",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -533,44 +387,26 @@ def build_report(
     _refuse_tracker_owned_on_external_backend("advance")
 
     from fno.backlog import advance as adv
-    from fno.graph._intake import make_selection_sort_key
-    from fno.graph.cli import _container_ids, _require_live_claimed_node_ids
-    from fno.graph.ladder import is_cold_dispatchable
     from fno.graph.store import read_graph
     from fno.paths import graph_json
 
-    entries = read_graph(graph_json())
-    claimed = _require_live_claimed_node_ids("backlog explain")
-    container_ids = _container_ids(entries)
+    # One call into the native leg. The narration reads the reply's drops;
+    # nothing here re-derives a filter.
+    result = store_ready(project=project, all=project is None, repo_root=repo_root())
+    survivors = result["rows"]
+    drops = result["drops"]
+    drop_by_id = {d["id"]: d for d in drops if isinstance(d, dict) and d.get("id")}
 
-    # The same admission predicate `_pick_ready` opens with, and the same
-    # default `allowed` set the autonomous paths use (bare `next`).
-    candidates = [
-        e
-        for e in entries
-        if (e.get("status") == "ready" or is_cold_dispatchable(e))
-        and not e.get("completed_at")
-    ]
-    pool = len(candidates)
-
-    filters = build_selection_filters(
-        entries,
-        roadmap_id=None,
-        mission=None,
-        parent_target_id=None,
-        project_filter=project,
-        all_=project is None,
-        claimed=claimed,
-        container_ids=container_ids,
-    )
-    cascade = run_cascade(candidates, filters)
-    survivors = sorted(
-        cascade.survivors, key=make_selection_sort_key(entries, live_claimed=claimed)
-    )
+    pool = len(survivors) + len(drops)
+    counts: dict = {}
+    for d in drops:
+        name = d.get("filter") or "unknown"
+        counts[name] = counts.get(name, 0) + 1
+    drop_rows = [{"filter": name, "dropped": counts.get(name, 0)} for name in FILTER_ORDER]
 
     winner = survivors[0] if survivors else None
     subject_id = node_id or (winner or {}).get("id")
-    by_id = {e.get("id"): e for e in entries if e.get("id")}
+    by_id = {e.get("id"): e for e in read_graph(graph_json()) if e.get("id")}
     subject = by_id.get(subject_id) if subject_id else None
 
     asked: dict = {}
@@ -578,10 +414,12 @@ def build_report(
         rank = next(
             (i for i, e in enumerate(survivors) if e.get("id") == node_id), None
         )
+        dropped = drop_by_id.get(node_id)
         asked = {
             "id": node_id,
             "known": node_id in by_id,
-            "dropped_by": cascade.reason_for(node_id),
+            "dropped_by": (dropped or {}).get("filter"),
+            "drop_reason": (dropped or {}).get("reason"),
             "rank": rank,
             # A node in neither place was never a candidate: not `ready`, or
             # already carrying completed_at. Reported as its own answer rather
@@ -589,7 +427,7 @@ def build_report(
             "never_a_candidate": (
                 node_id in by_id
                 and rank is None
-                and cascade.reason_for(node_id) is None
+                and dropped is None
             ),
         }
         if asked["never_a_candidate"]:
@@ -601,7 +439,7 @@ def build_report(
     return {
         "selection": {
             "pool": pool,
-            "drops": [{"filter": n, "dropped": d} for n, d in cascade.drops],
+            "drops": drop_rows,
             "survivors": len(survivors),
             "head": [
                 {
@@ -614,7 +452,7 @@ def build_report(
                 }
                 for e in survivors[:top]
             ],
-            "why": {f.name: f.why for f in filters},
+            "why": dict(FILTER_WHY),
         },
         "asked": asked,
         # Routing first: the grid picks the harness, and the harness decides
@@ -668,8 +506,14 @@ def render_report(report: dict) -> str:
         if not asked["known"]:
             out.append(f"ASKED  {asked['id']}: no such node")
         elif asked["dropped_by"]:
-            why = sel["why"].get(asked["dropped_by"], "")
-            out.append(f"ASKED  {asked['id']}: dropped by {asked['dropped_by']} - {why}")
+            # A selection-guard drop narrates its inner reason
+            # (dead-ancestor:<id>, stale-quarantine, ...) over the static why.
+            reason = asked.get("drop_reason")
+            if asked["dropped_by"] == "selection-guard" and reason:
+                out.append(f"ASKED  {asked['id']}: dropped by {reason}")
+            else:
+                why = sel["why"].get(asked["dropped_by"], "")
+                out.append(f"ASKED  {asked['id']}: dropped by {asked['dropped_by']} - {why}")
         elif asked.get("never_a_candidate"):
             out.append(
                 f"ASKED  {asked['id']}: never a candidate "
