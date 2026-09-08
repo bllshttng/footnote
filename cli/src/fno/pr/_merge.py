@@ -1051,8 +1051,8 @@ def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
 
     Branch cleanup is a separate operation from the merge and must never be
     able to fail it. `gh pr merge --delete-branch` also deletes the LOCAL
-    branch, which errors with "is already used by worktree" whenever the
-    session stands in that worktree - worktree-first is the standing principle,
+    branch, which git refuses whenever the session stands in the worktree
+    holding it - worktree-first is the standing principle,
     so the best-disciplined merge was the one most reliably reported failed.
     Splitting cleanup out: the merge command carries no delete flag at all, the
     remote ref goes through `gh api -X DELETE` against the PR's verified base
