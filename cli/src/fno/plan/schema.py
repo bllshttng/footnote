@@ -422,6 +422,11 @@ class PlanFrontmatter(BaseModel):
     # same permissive shape as `kill_criteria`, since the Rust runner parses the
     # raw frontmatter itself.
     close_probes: str | list[Any] | None = None
+    # Acceptance-evidence bindings (x-d098): maps a compiled AC id to the probe
+    # index that measures it (`done_probes[n]` / `close_probes[n]`). Enforced by
+    # the finalize validator and the Rust probe runner, not here; this field
+    # only keeps the declaration from being dropped on frontmatter round-trips.
+    acceptance_evidence: dict | None = None
     dispatch_hold: DispatchHoldBlock | None = None
     company_work: CompanyWorkRefs | None = None
 

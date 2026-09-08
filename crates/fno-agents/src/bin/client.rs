@@ -263,9 +263,9 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::state_path::run(&args[1..]);
     }
 
-    // `probe-run`: see its own doc in loopcheck.rs. Direct dispatch.
+    // `probe-run`: see its own doc in acceptance_evidence.rs. Direct dispatch.
     if verb == "probe-run" {
-        return fno_agents::loopcheck::run_probe_run(&args[1..]);
+        return fno_agents::acceptance_evidence::run_probe_run(&args[1..]);
     }
 
     // `review-coverage`: standalone review_coverage producer (see its own doc
