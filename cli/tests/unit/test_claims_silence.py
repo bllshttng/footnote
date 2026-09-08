@@ -140,3 +140,32 @@ def test_render_scanned_line_is_always_positive_even_at_zero_silent():
     # minutes went unnoticed. Assert the POSITIVE marker, not an absence.
     assert "scanned 0 live claim(s)" in line
     assert "0 silent" in line
+
+
+def test_default_age_lookup_reads_a_codex_holders_transcript_as_codex(monkeypatch):
+    """A codex holder's transcript lives in the codex store: the default
+    lookup must resolve the harness, so a quiet codex holder is reported
+    SILENT instead of pooling in the unreadable bucket forever."""
+    import time as _time
+
+    import fno.agents.watchdog as watchdog_mod
+    from fno.claims.cli import _default_claim_age_lookup
+
+    seen: dict = {}
+
+    def fake_tail_facts(session_id, cwd, *, agent):
+        seen["agent"] = agent
+        epoch = _time.time() - 2400  # 40 quiet minutes
+        return watchdog_mod.TailFacts(
+            [(epoch, "mid task")], epoch, "mid task", "user", "mid task"
+        )
+
+    monkeypatch.setattr(
+        watchdog_mod, "_harness_by_session", lambda: {"thread-9": "codex"}
+    )
+    monkeypatch.setattr(watchdog_mod, "tail_facts", fake_tail_facts)
+
+    age_s = _default_claim_age_lookup("thread-9", "/tmp/wt")
+
+    assert seen["agent"] == "codex"
+    assert age_s is not None and age_s > 900

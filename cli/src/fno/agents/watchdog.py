@@ -23,6 +23,7 @@ the record is wrong - and never wakes or reroutes.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import hashlib
 import logging
@@ -918,16 +919,19 @@ def tail_entries(
     session_id: str,
     cwd: str,
     *,
-    agent: str = "claude",
+    agent: str,
 ) -> Optional[list[dict]]:
     """Resolve a session's transcript and return its parsed tail records.
 
     THE one transcript read per tick: the tail classifier, the outage
     collector and the poll detector all derive from this single parse
-    (measured defect: every transcript was read twice per tick). None means
-    the transcript could not be resolved, read, or decoded - the caller
-    renders that downstream (ghost facts, or a named refusal). A torn or
-    foreign JSONL line is skipped, not fatal.
+    (measured defect: every transcript was read twice per tick). ``agent``
+    names the harness whose transcript store holds the session - there is
+    deliberately no default, because a defaulted read silently opens the
+    claude store for every other harness and reads every such worker as a
+    ghost. None means the transcript could not be resolved, read, or decoded
+    - the caller renders that downstream (ghost facts, or a named refusal).
+    A torn or foreign JSONL line is skipped, not fatal.
     """
     from fno.provenance.observed import resolve_transcript_path
 
@@ -1009,16 +1013,44 @@ def tail_facts(
     session_id: str,
     cwd: str,
     *,
-    agent: str = "claude",
+    agent: str,
     max_records: int = _TAIL_RECORDS,
 ) -> Optional[TailFacts]:
     """Resolve a session's transcript and tail-read it. Never raises. A
     missing transcript is None, which the classifier renders as a fact
-    (ghost / unknown-age), never as fresh. A caller holding its entries
-    already (the tick shares one read) should derive with
-    :func:`_facts_from_entries` instead of reading again.
+    (ghost / unknown-age), never as fresh. ``agent`` is required - see
+    :func:`tail_entries`. A caller holding its entries already (the tick
+    shares one read) should derive with :func:`_facts_from_entries` instead
+    of reading again.
     """
     return _facts_from_entries(tail_entries(session_id, cwd, agent=agent), max_records)
+
+
+@functools.lru_cache(maxsize=1)
+def _harness_by_session() -> dict[str, str]:
+    """Session id -> harness, from the registry. Cached for the life of the
+    process: every caller here is a one-shot CLI command, and the watchdog
+    daemon reads the harness off Row instead."""
+    from fno.agents.registry import load_registry
+
+    try:
+        entries = list(load_registry())
+    except Exception:  # noqa: BLE001 - an unreadable registry answers claude
+        return {}
+    return {
+        str(getattr(e, "harness_session_id", "") or ""): str(
+            getattr(e, "harness", "") or "claude"
+        )
+        for e in entries
+        if getattr(e, "harness_session_id", None)
+    }
+
+
+def harness_for_session(session_id: str) -> str:
+    """The harness that owns this session, or claude when the registry does
+    not know it. The ONE place that answers "which harness is this session"
+    for a caller holding only an id."""
+    return _harness_by_session().get(session_id, "claude")
 
 
 def _record_text(e: dict) -> str:
@@ -2709,7 +2741,7 @@ def confirm_wake_landed(
     message: str,
     before_epoch: Optional[float],
     *,
-    agent: str = "claude",
+    agent: str,
     attempts: Optional[int] = None,
     interval_s: Optional[float] = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -2733,7 +2765,7 @@ def confirm_wake_landed(
 
 
 def _confirm_once(
-    row_id: str, cwd: str, message: str, before_epoch: Optional[float], *, agent: str = "claude"
+    row_id: str, cwd: str, message: str, before_epoch: Optional[float], *, agent: str
 ) -> bool:
     facts = tail_facts(row_id, cwd, agent=agent, max_records=_CONFIRM_RECORDS)
     if facts is None:

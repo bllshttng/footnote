@@ -621,7 +621,7 @@ def test_untimestamped_continue_record_does_not_confirm_wake(monkeypatch):
     )
     monkeypatch.setattr(watchdog, "tail_facts", lambda *a, **k: facts)
     assert not watchdog.confirm_wake_landed(
-        "dddd4444-0000", "/tmp/k1", "continue", before_epoch
+        "dddd4444-0000", "/tmp/k1", "continue", before_epoch, agent="claude"
     )
 
 
@@ -644,7 +644,7 @@ def test_wake_confirmation_requires_the_exact_message(monkeypatch):
     )
     monkeypatch.setattr(watchdog, "tail_facts", lambda *a, **k: facts)
     assert not watchdog.confirm_wake_landed(
-        "dddd4444-0000", "/tmp/k1", "continue", before
+        "dddd4444-0000", "/tmp/k1", "continue", before, agent="claude"
     )
 
 
@@ -666,7 +666,7 @@ def test_wake_confirmation_scans_past_the_classification_tail(monkeypatch):
     )
     monkeypatch.setattr(watchdog, "tail_facts", lambda *a, **k: facts)
     assert watchdog.confirm_wake_landed(
-        "dddd4444-0000", "/tmp/k1", "continue", marker - 60
+        "dddd4444-0000", "/tmp/k1", "continue", marker - 60, agent="claude"
     )
 
 
@@ -783,6 +783,38 @@ def test_apply_wake_confirms_through_the_verdicts_harness(monkeypatch):
     outcome, detail = apply_verdict(v, lanes="all", cwd="/tmp/x", runner=runner)
     assert outcome == "applied"
     assert reads == ["codex", "codex"]
+
+
+def test_a_transcript_read_without_an_agent_refuses():
+    """The silent claude default was the defect: an omitted agent is a bind
+    error, never a wrong-file read."""
+    with pytest.raises(TypeError):
+        watchdog.tail_facts("sid", "/tmp")
+    with pytest.raises(TypeError):
+        watchdog.tail_entries("sid", "/tmp")
+
+
+def test_harness_for_session_answers_from_the_registry(monkeypatch):
+    import fno.agents.watchdog as wd
+
+    monkeypatch.setattr(wd, "_harness_by_session", lambda: {"thread-9": "codex"})
+    assert wd.harness_for_session("thread-9") == "codex"
+    assert wd.harness_for_session("not-in-the-registry") == "claude"
+
+
+def test_harness_for_session_survives_an_unreadable_registry(monkeypatch):
+    import fno.agents.watchdog as wd
+    from fno.agents import registry as registry_mod
+
+    def boom():
+        raise OSError("registry locked")
+
+    monkeypatch.setattr(registry_mod, "load_registry", boom)
+    wd._harness_by_session.cache_clear()
+    try:
+        assert wd.harness_for_session("any-session") == "claude"
+    finally:
+        wd._harness_by_session.cache_clear()
 
 
 def test_fleet_rows_skips_a_name_only_nonclaude_row_loudly(monkeypatch, tmp_path):
@@ -1077,7 +1109,7 @@ def test_wake_confirmation_polls_for_the_flushed_turn(monkeypatch):
     monkeypatch.setattr(watchdog, "tail_facts", fake_tail)
     slept = []
     assert watchdog.confirm_wake_landed(
-        "dddd4444-0000", "/tmp/k1", "continue", NOW_1840 - 600,
+        "dddd4444-0000", "/tmp/k1", "continue", NOW_1840 - 600, agent="claude",
         attempts=6, interval_s=0.01, sleep=slept.append,
     )
     assert slept, "a polling confirm must have waited at least once"
@@ -1087,7 +1119,7 @@ def test_wake_confirmation_polls_for_the_flushed_turn(monkeypatch):
         watchdog, "tail_facts", lambda *a, **k: _facts("stopped mid turn")
     )
     assert not watchdog.confirm_wake_landed(
-        "dddd4444-0000", "/tmp/k1", "continue", NOW_1840 - 600,
+        "dddd4444-0000", "/tmp/k1", "continue", NOW_1840 - 600, agent="claude",
         attempts=3, interval_s=0.0, sleep=lambda _s: None,
     )
 

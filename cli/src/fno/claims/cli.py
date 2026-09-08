@@ -1187,9 +1187,9 @@ def _default_claim_age_lookup(session_id: str, cwd: str) -> Optional[float]:
     try:
         import time as _time
 
-        from fno.agents.watchdog import tail_facts
+        from fno.agents.watchdog import harness_for_session, tail_facts
 
-        facts = tail_facts(session_id, cwd)
+        facts = tail_facts(session_id, cwd, agent=harness_for_session(session_id))
         if facts is None or facts.last_event_epoch is None:
             return None
         return max(0.0, _time.time() - facts.last_event_epoch)
@@ -1459,10 +1459,11 @@ def _transcript_activity(session_id: str, cwd: str):
         from fno.agents.watchdog import (
             QUIET_AFTER_S,
             finished_with_the_tree,
+            harness_for_session,
             tail_facts,
         )
 
-        facts = tail_facts(session_id, cwd)
+        facts = tail_facts(session_id, cwd, agent=harness_for_session(session_id))
         if facts is None:
             return None
         return finished_with_the_tree(facts, time.time(), QUIET_AFTER_S)
@@ -1483,11 +1484,14 @@ def _transcript_says_finished(session_id: str, cwd: str) -> bool:
         from fno.agents.watchdog import (
             QUIET_AFTER_S,
             finished_with_the_tree,
+            harness_for_session,
             tail_facts,
         )
 
         return finished_with_the_tree(
-            tail_facts(session_id, cwd), time.time(), QUIET_AFTER_S
+            tail_facts(session_id, cwd, agent=harness_for_session(session_id)),
+            time.time(),
+            QUIET_AFTER_S,
         )
     except Exception:  # noqa: BLE001 - an unreadable transcript proves nothing
         return False
