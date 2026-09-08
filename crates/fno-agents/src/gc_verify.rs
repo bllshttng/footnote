@@ -6,9 +6,16 @@
 //! the CURRENT binary (a dry run, an older daemon, a fixture run never
 //! counts), a non-empty per-effect record set, and every applicable effect
 //! positively confirmed (or measured not-applicable). An empty store, an
-//! unreadable receipt, a stale build, a partial effect set: each is a named
-//! refusal with a nonzero exit - this verb must fail before its evidence
-//! exists, because it is the plan's done probe.
+//! unreadable receipt, a partial effect set: each is a named refusal with
+//! a nonzero exit - this verb must fail before its evidence exists, because
+//! it is the plan's done probe.
+//!
+//! A stale build (a receipt stamped by any other binary, including the
+//! previous deploy) SKIPS: it can never verify, and it must not rebrand the
+//! fleet's rollout tail as failure - during any rollout the window holds
+//! both builds' receipts, and those refusals would hold the probe red for
+//! a full window. Only current-build receipts enter `verified`, so a
+//! window of nothing but stale receipts still fails on empty evidence.
 
 use std::path::PathBuf;
 
@@ -40,6 +47,9 @@ pub struct VerifyReport {
     pub checked: usize,
     pub verified: Vec<VerifiedRetirement>,
     pub problems: Vec<VerifyProblem>,
+    /// Receipts not this verifier's population (stale build): named, never
+    /// verified, and never a refusal.
+    pub skipped: Vec<VerifyProblem>,
 }
 
 impl VerifyReport {
@@ -62,6 +72,10 @@ impl VerifyReport {
                 "effects": v.effects,
             })).collect::<Vec<_>>(),
             "problems": self.problems.iter().map(|p| json!({
+                "receipt": p.receipt,
+                "reason": p.reason,
+            })).collect::<Vec<_>>(),
+            "skipped": self.skipped.iter().map(|p| json!({
                 "receipt": p.receipt,
                 "reason": p.reason,
             })).collect::<Vec<_>>(),
@@ -151,7 +165,7 @@ pub fn verify(home: &AgentsHome, since_secs: u64) -> VerifyReport {
         }
         let stamped = receipt.writer_build.as_deref().unwrap_or_default();
         if stamped != build {
-            report.problems.push(VerifyProblem {
+            report.skipped.push(VerifyProblem {
                 receipt: name,
                 reason: format!(
                     "stale build: receipt written by {:?}, this verifier is {build:?} (a dry run or an older daemon never counts)",
@@ -260,6 +274,9 @@ mod tests {
 
     #[test]
     fn a_stale_build_never_passes_the_audit() {
+        // A receipt stamped by another binary can never verify. It skips
+        // (not a refusal: any rollout holds both builds' receipts), and the
+        // audit still fails on empty evidence.
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("old"), None).unwrap();
         stamp(&mut receipt, Some("fno-agents 0.0.1"));
@@ -268,18 +285,22 @@ mod tests {
 
         let report = verify(&home, 24 * 3600);
         assert!(!report.passes());
+        assert!(report.verified.is_empty());
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
         assert!(
             report
-                .problems
+                .skipped
                 .iter()
                 .any(|p| p.reason.contains("stale build")),
             "{:?}",
-            report.problems
+            report.skipped
         );
     }
 
     #[test]
     fn an_unstamped_v1_receipt_reads_stale() {
+        // Pre-stamp receipts (writer_build absent) are the deployed fleet's
+        // own history: skip, never verify, never refuse.
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("v1"), None).unwrap();
         stamp(&mut receipt, None);
@@ -288,14 +309,8 @@ mod tests {
 
         let report = verify(&home, 24 * 3600);
         assert!(!report.passes());
-        assert!(
-            report
-                .problems
-                .iter()
-                .any(|p| p.reason.contains("stale build")),
-            "{:?}",
-            report.problems
-        );
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert!(report.skipped.len() == 1, "{:?}", report.skipped);
     }
 
     #[test]
@@ -317,6 +332,29 @@ mod tests {
             .effects
             .iter()
             .any(|e| e == "active-surface=confirmed-removed"));
+    }
+
+    #[test]
+    fn a_rollout_window_passes_on_current_build_evidence_alone() {
+        // The live rollout shape: the previous deploy's receipts sit in the
+        // window beside this build's. They skip; the current-build receipt
+        // verifies; the audit passes - the rollout tail never holds the
+        // probe red for a full window.
+        let home = temp_home();
+        let mut old = build_reap_receipt(&row("prev"), None).unwrap();
+        stamp(&mut old, Some("fno-agents 0.3.2 (2942a5f3b7cf, release)"));
+        old.effects = vec![confirmed_effect()];
+        write_reap_receipt(&home, &old).unwrap();
+        let mut cur = build_reap_receipt(&row("live"), None).unwrap();
+        stamp(&mut cur, Some(current_build().as_str()));
+        cur.effects = vec![confirmed_effect()];
+        write_reap_receipt(&home, &cur).unwrap();
+
+        let report = verify(&home, 24 * 3600);
+        assert!(report.passes(), "{:?}", report.problems);
+        assert_eq!(report.verified.len(), 1);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.checked, 2);
     }
 
     #[test]

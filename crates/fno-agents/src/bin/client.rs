@@ -2130,6 +2130,9 @@ fn run_reap(rest: &[String]) -> i32 {
             for p in &report.problems {
                 println!("  REFUSED {}: {}", p.receipt, p.reason);
             }
+            for s in &report.skipped {
+                println!("  SKIP {}: {}", s.receipt, s.reason);
+            }
         }
         return if report.passes() { 0 } else { 1 };
     }
