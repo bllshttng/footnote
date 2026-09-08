@@ -352,10 +352,11 @@ def test_condition_c_satisfied_passes(tmp_path: Path):
     assert resolve_promise_evidence(node, query=merged).outcome == "ok"
 
 
-def test_condition_c_gh_outage_fails_open_not_refuses(tmp_path: Path):
-    """An unreachable ref is not a missing ship. Counting a gh outage as
-    unmerged told the operator the plan under-shipped when gh was simply down;
-    the merge gate treats the same outage as retryable, not a policy refusal."""
+def test_condition_c_gh_outage_is_unknown_not_ok(tmp_path: Path):
+    """AC1-HP. An unreachable ref is not a missing ship AND it is not a
+    confirmed one. The gate used to return ok here, which closed a declared
+    multi-ship node on the strength of an outage. It now returns a retryable
+    unknown carrying the confirmed and expected counts."""
     from fno.graph._reconcile import ReconcileError, resolve_promise_evidence
 
     plan = _write_plan(tmp_path / "p.md", expected_url_count=2)
@@ -367,12 +368,79 @@ def test_condition_c_gh_outage_fails_open_not_refuses(tmp_path: Path):
         "additional_prs": [{"number": 2, "url": "https://github.com/o/r/pull/2"}],
     }
 
-    def _down(n, **kw):
+    calls: list[int] = []
+
+    def _one_merged_one_down(n, **kw):
+        from fno.graph._reconcile import PrMergeState
+
+        calls.append(n)
+        if n == 1:
+            return PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
         raise ReconcileError("gh pr view timed out")
 
-    v = resolve_promise_evidence(node, query=_down)
-    assert v.outcome == "ok"
-    assert "could not confirm 2 ships" in (v.warning or "")
+    v = resolve_promise_evidence(node, query=_one_merged_one_down)
+    assert v.outcome == "promise_unknown"
+    assert v.satisfied is False
+    assert v.exit_code == 4
+    assert "could not confirm 2 ships" in (v.reason or "")
+    assert "1 confirmed MERGED" in (v.reason or "")
+    assert "timed out" in (v.reason or "")
+
+
+def test_unknown_remedy_names_the_verb_that_can_recover(tmp_path: Path):
+    """The refusal exits BEFORE the close verb persists an explicit --pr ref,
+    so `reconcile --node` cannot see that ship: it would re-count the stored
+    refs, find no failure, and answer the PERMANENT policy refusal about a PR
+    that is merged. With extra_refs the remedy must name the same command."""
+    from fno.graph._reconcile import PrMergeState, ReconcileError, resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md", expected_url_count=2)
+    node = {
+        "id": "x-rem",
+        "plan_path": str(plan),
+        "pr_number": 1,
+        "pr_url": "https://github.com/o/r/pull/1",
+    }
+
+    def _down(n, **kw):
+        if n == 2:
+            return PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
+        raise ReconcileError("gh pr view timed out")
+
+    with_extra = resolve_promise_evidence(
+        node, query=_down, extra_refs=[(2, "https://github.com/o/r/pull/2")]
+    )
+    assert with_extra.outcome == "promise_unknown"
+    assert "Re-run the same close command" in (with_extra.reason or "")
+    assert "reconcile --node" not in (with_extra.reason or "")
+
+    without_extra = resolve_promise_evidence(node, query=_down)
+    assert without_extra.outcome == "promise_unknown"
+    assert "fno backlog reconcile --node x-rem" in (without_extra.reason or "")
+
+
+def test_repeated_ref_never_satisfies_two_ships(tmp_path: Path):
+    """AC1-EDGE. One PR listed twice is one ship. The dedup lives in
+    node_pr_refs; this pins it against the promise gate so a duplicate
+    additional_prs row can never fake a second confirmed ship."""
+    from fno.graph._reconcile import PrMergeState, resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md", expected_url_count=2)
+    node = {
+        "id": "x-dup",
+        "plan_path": str(plan),
+        "pr_number": 1,
+        "pr_url": "https://github.com/o/r/pull/1",
+        "additional_prs": [{"number": 1, "url": "https://github.com/o/r/pull/1"}],
+    }
+
+    def merged(n, **kw):
+        return PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
+
+    assert resolve_promise_evidence(node, query=merged).outcome == "promise_unmet"
+
+    node["additional_prs"] = [{"number": 2, "url": "https://github.com/o/r/pull/2"}]
+    assert resolve_promise_evidence(node, query=merged).satisfied is True
 
 
 def test_condition_c_nonretryable_read_refuses(tmp_path: Path):
@@ -401,6 +469,10 @@ def test_promise_verdict_exit_code_table():
 
     assert PromiseVerdict(outcome="ok").exit_code == 0
     assert PromiseVerdict(outcome="promise_unmet").exit_code == 6
+    assert PromiseVerdict(outcome="promise_unknown").exit_code == 4
+    assert PromiseVerdict(outcome="ok").satisfied is True
+    assert PromiseVerdict(outcome="promise_unmet").satisfied is False
+    assert PromiseVerdict(outcome="promise_unknown").satisfied is False
 
 
 def test_relative_plan_resolved_against_owning_cwd(tmp_path: Path):
@@ -510,6 +582,168 @@ def test_condition_C_holds_open_on_reconcile(routed, tmp_path, monkeypatch):
     assert any(p["node_id"] == "ab-prom01" for p in payload["promise_unmet"])
     assert all(c.get("node_id") != "ab-prom01" for c in payload["closed"])
     assert _node(routed, "ab-prom01").get("completed_at") is None
+
+
+def _outage_world(g: Path, tmp_path: Path, monkeypatch, node_id: str = "ab-out01") -> str:
+    """A node declaring 2 ships with 2 refs: the first reads MERGED, the second
+    times out. The merge gate passes; the ship count is UNKNOWN, not short."""
+    from fno.graph._reconcile import PrMergeState, ReconcileError
+    import fno.graph._reconcile as rec
+    import fno.graph.cli as graph_cli
+    import fno.done.cli as done_cli
+
+    plan = _write_plan(tmp_path / "outage.md", expected_url_count=2)
+    node = _base_node(node_id, str(plan))
+    node["additional_prs"] = [{"number": 43, "url": "https://github.com/o/r/pull/43"}]
+    _seed(g, [node])
+
+    def state(n, **kw):
+        if n == 42:
+            return PrMergeState(number=n, state="MERGED", url=None, merged_at="2026-08-09T00:00:00Z")
+        raise ReconcileError("gh pr view timed out")
+
+    monkeypatch.setattr(graph_cli, "_done_gh_query", state)
+    monkeypatch.setattr(done_cli, "_gh_query", state)
+    monkeypatch.setattr(rec, "query_pr_merge_state", state)
+    return str(plan)
+
+
+def _reconcile_scan(monkeypatch, held_id: str, plan: str):
+    import fno.graph._reconcile as rec
+
+    def _scan(entries, node_id=None):
+        return [rec.MergeDriftRecord(
+            node_id=held_id,
+            plan_path=plan,
+            pr_number=42,
+            pr_url="https://github.com/o/r/pull/42",
+            pr_state="MERGED",
+            merged_at="2026-08-09T00:00:00Z",
+        )]
+
+    monkeypatch.setattr(rec, "scan_merge_drift", _scan)
+
+
+def test_retryable_unknown_holds_open_on_all_three_verbs(routed, tmp_path, monkeypatch):
+    """AC2-HP. The outage fixture through every real close caller: node stays
+    open and the receipt names a retryable read failure. This is the defect -
+    the gate returned ok here, so every one of these three closed the node."""
+    plan = _outage_world(routed, tmp_path, monkeypatch, "ab-out01")
+    from fno.cli import app
+
+    r = CliRunner().invoke(app, ["backlog", "done", "ab-out01"])
+    assert r.exit_code == 4, r.output
+    assert "could not confirm 2 ships" in r.output
+    assert _node(routed, "ab-out01").get("completed_at") is None
+
+    r = CliRunner().invoke(app, ["done", "ab-out01", "--pr", "42", "--repo", "o/r"])
+    assert r.exit_code == 4, r.output
+    assert _node(routed, "ab-out01").get("completed_at") is None
+
+    _reconcile_scan(monkeypatch, "ab-out01", plan)
+    from fno.graph.cli import cli
+
+    r = CliRunner().invoke(cli, ["reconcile", "--json"])
+    payload = json.loads(r.output)
+    assert any(p["node_id"] == "ab-out01" for p in payload["promise_unknown"])
+    assert all(p["node_id"] != "ab-out01" for p in payload["promise_unmet"])
+    assert all(c.get("node_id") != "ab-out01" for c in payload["closed"])
+    assert _node(routed, "ab-out01").get("completed_at") is None
+    assert _node(routed, "ab-out01").get("status") != "done"
+
+
+def test_dependent_stays_blocked_until_the_read_recovers(routed, tmp_path, monkeypatch):
+    """AC2-EDGE. The same fixture: while the read is down the dependent is not
+    eligible; when the second MERGED receipt arrives, reconcile closes the node
+    once and the dependent becomes eligible through the existing mechanism."""
+    from fno.graph._reconcile import PrMergeState
+    import fno.graph._reconcile as rec
+
+    plan = _outage_world(routed, tmp_path, monkeypatch, "ab-out02")
+    entries = json.loads(routed.read_text())["entries"]
+    entries.append({
+        "id": "ab-dep01",
+        "title": "dependent",
+        "domain": "code",
+        "status": "ready",
+        "blocked_by": ["ab-out02"],
+        "created_at": "2026-08-09T00:00:00+00:00",
+    })
+    _seed(routed, entries)
+    _reconcile_scan(monkeypatch, "ab-out02", plan)
+    from fno.graph.cli import cli
+
+    CliRunner().invoke(cli, ["reconcile", "--json"])
+    assert _node(routed, "ab-out02").get("completed_at") is None
+    assert _node(routed, "ab-dep01").get("blocked_by") == ["ab-out02"]
+
+    # The read recovers: both refs now answer MERGED.
+    def _up(n, **kw):
+        return PrMergeState(number=n, state="MERGED", url=None, merged_at="2026-08-09T00:00:00Z")
+
+    monkeypatch.setattr(rec, "query_pr_merge_state", _up)
+    r = CliRunner().invoke(cli, ["reconcile", "--json"])
+    payload = json.loads(r.output)
+    assert any(c.get("node_id") == "ab-out02" for c in payload["closed"])
+    assert not payload["promise_unknown"]
+    assert _node(routed, "ab-out02").get("completed_at") is not None
+
+
+def test_every_read_timing_out_emits_no_closure(routed, tmp_path, monkeypatch):
+    """AC3-HP. All PR reads time out: no closure is emitted anywhere and the
+    persisted node still carries its open status. The positive control is the
+    recovery leg in the AC2-EDGE test above - without it a zero here could
+    mean the sweep never ran."""
+    from fno.graph._reconcile import ReconcileError
+    import fno.graph._reconcile as rec
+    import fno.graph.cli as graph_cli
+
+    plan = _write_plan(tmp_path / "allout.md", expected_url_count=2)
+    node = _base_node("ab-out03", str(plan))
+    node["additional_prs"] = [{"number": 43, "url": "https://github.com/o/r/pull/43"}]
+    _seed(routed, [node])
+
+    def _down(n, **kw):
+        raise ReconcileError("gh pr view timed out")
+
+    monkeypatch.setattr(graph_cli, "_done_gh_query", _down)
+    monkeypatch.setattr(rec, "query_pr_merge_state", _down)
+    _reconcile_scan(monkeypatch, "ab-out03", plan)
+    from fno.graph.cli import cli
+
+    r = CliRunner().invoke(cli, ["reconcile", "--json"])
+    payload = json.loads(r.output)
+    assert payload["closed"] == []
+    assert any(p["node_id"] == "ab-out03" for p in payload["promise_unknown"])
+    assert _node(routed, "ab-out03").get("completed_at") is None
+
+
+def test_held_open_roll_splits_refusal_from_outage():
+    """The sweep's operator-facing roll names the two causes apart: a policy
+    refusal the operator resolves, and a read outage the next sweep retries."""
+    from fno.graph._reconcile import summarize_promise_held
+
+    text = summarize_promise_held(
+        [("ab-1", "Refused: short", "promise_unmet"),
+         ("ab-2", "Unknown: gh down", "promise_unknown")],
+    )
+    assert "Held 1 node(s) open (merged PR, unmet plan promise):" in text
+    assert "Held 1 node(s) open (ship count unconfirmed, retryable read failure):" in text
+    assert "  ab-1: Refused: short" in text
+    assert "  ab-2: Unknown: gh down" in text
+    assert "Holding" in summarize_promise_held([("ab-1", "x", "promise_unmet")], dry_run=True)
+
+
+def test_held_open_roll_never_drops_an_unenumerated_outcome():
+    """A closed enumeration is the shape `satisfied` exists to kill: a fourth
+    refusal outcome must still reach the operator. Held open and printed as a
+    blank line is the silent-gate defect, not a display nit."""
+    from fno.graph._reconcile import summarize_promise_held
+
+    text = summarize_promise_held([("ab-9", "Refused: something new", "promise_future")])
+    assert "Held 1 node(s) open (promise_future):" in text
+    assert "  ab-9: Refused: something new" in text
+    assert text.strip()
 
 
 def test_undeclared_plan_closes_on_all_three_verbs(routed, tmp_path, monkeypatch):

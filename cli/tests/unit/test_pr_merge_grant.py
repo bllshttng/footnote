@@ -500,9 +500,37 @@ def test_manifest_arm_ignores_the_durable_receipt(tmp_path, monkeypatch, capsys)
         "session_id: s1\nauto_merge_approved: false\n", encoding="utf-8"
     )
 
+    # The refusal is the owner's now, so this case has to reach it: the guards
+    # between the posture read and the owner are other nodes' and are stubbed
+    # to their clear answers here.
+    from fno.pr import _base_lineage, _coverage_gate
+
+    monkeypatch.setattr(
+        _merge, "_pr_head_ref_and_oid", lambda pr, repo: ("feature/x", "abc123", "OPEN")
+    )
+    monkeypatch.setattr(
+        _coverage_gate,
+        "coverage_verdict",
+        lambda pr, repo, recompute=False: (_coverage_gate.COVERED, "", "abc123", ""),
+    )
+    monkeypatch.setattr(_merge, "_plan_path_for_pr", lambda pr, repo=None: None)
+    monkeypatch.setattr(_merge, "_live_lane_count", lambda: 0)
+    monkeypatch.setattr(_base_lineage, "lineage_verdict", lambda pr, cwd: ("ok", ""))
+
+    seen: dict = {}
+
+    def _authorized(pr_number, repo, *, effect, approved, source, **kwargs):
+        seen["approved"] = approved
+        seen["source"] = source
+        return {"outcome": "refused", "detail": "per-run no-merge"}
+
+    monkeypatch.setattr(_merge, "_authorized_merge", _authorized)
+
     code = _merge.run_merge([str(PR)], cwd=str(tmp_path))
 
     obj = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert code == 2
     assert obj["outcome"] == "skipped"
-    assert "no-merge" in obj["reason"]
+    # The session lane hands its OWN manifest down, never the durable receipt:
+    # one posture per caller, never a shared shortcut.
+    assert seen["approved"] is False

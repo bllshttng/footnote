@@ -107,8 +107,50 @@ def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
         "merged_at": None,
         "merge_sha": None,
         "author": "alice",
+        # Whether GitHub's auto-merge queue owns the PR rides THIS payload, so
+        # the armed flag and the head it was read against come from one fetch.
+        "auto_merge": None,
     }
     assert calls == [["gh", "api", "repos/Owner/Repo/pulls/42"]]
+
+
+def test_pr_info_carries_the_auto_merge_object_when_the_queue_owns_the_pr():
+    pulls = {
+        "html_url": "https://github.com/Owner/Repo/pull/42",
+        "state": "open",
+        "merged": False,
+        "mergeable": True,
+        "head": {"sha": "abc123def", "ref": "feature/rest-info"},
+        "base": {"ref": "main"},
+        "user": {"login": "alice"},
+        "auto_merge": {"merge_method": "merge", "enabled_by": {"login": "alice"}},
+    }
+    info, reason = _rest.fetch_pr_info_rest(
+        "42", repo="Owner/Repo", runner=_runner(pulls=pulls)
+    )
+    assert reason == ""
+    assert info is not None
+    assert info["auto_merge"] == {
+        "merge_method": "merge",
+        "enabled_by": {"login": "alice"},
+    }
+
+
+def test_pr_info_refuses_a_malformed_auto_merge_object():
+    pulls = {
+        "html_url": "https://github.com/Owner/Repo/pull/42",
+        "state": "open",
+        "merged": False,
+        "mergeable": True,
+        "head": {"sha": "abc123def", "ref": "feature/rest-info"},
+        "base": {"ref": "main"},
+        "auto_merge": "yes",
+    }
+    info, reason = _rest.fetch_pr_info_rest(
+        "42", repo="Owner/Repo", runner=_runner(pulls=pulls)
+    )
+    assert info is None
+    assert "auto_merge" in reason
 
 
 def test_pr_info_preserves_unknown_mergeability():

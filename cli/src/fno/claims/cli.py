@@ -1045,7 +1045,10 @@ def _roster_verdict_line(info: dict) -> str:
                 f"{scanned}; {len(candidates)} unresolved row's worktree names this node: "
                 f"{names}. Confirm with: fno agents peek {candidates[0]}"
             )
-        return scanned
+        # Degraded, not complete: the reader must be able to tell "nobody
+        # holds this and the roster was patchy" from "nobody holds this and
+        # the roster was complete", which both used to render as plain free.
+        return f"{scanned}; roster coverage degraded"
     scanned = f"{state}, no live worker found (roster scanned: {info['roster_rows_scanned']} rows)"
     if workers:
         rendered = ", ".join(w["name"] for w in workers)
@@ -1093,12 +1096,17 @@ def status(
     crosschecked = roster and bool(node_id) and info.get("state") in _UNHELD_STATES
     if crosschecked:
         info.update(_roster_crosscheck(node_id))
-        if info.get("roster_rows_unresolved", 0):
-            # A scanned row with no node join is an unanswered ownership read,
-            # not proof that this claim is free. Keep the raw claim fields, but
-            # make the composite verdict fail closed for dispatch consumers.
+        unresolved = info.get("roster_rows_unresolved", 0)
+        if info.get("roster_unresolved_candidates"):
+            # An unresolved row whose worktree names THIS node is an
+            # unanswered ownership read, so the composite verdict fails
+            # closed for dispatch consumers. A patchy roster that names
+            # nobody here used to fail closed fleet-wide: one unresolved row
+            # anywhere read every node in the fleet as unknown.
             info["state"] = "unknown"
             info["basis"] = "unresolved-roster-row"
+        elif unresolved:
+            info["roster_coverage"] = "degraded"
     if json_output:
         typer.echo(json.dumps(info))
         return
@@ -1187,9 +1195,9 @@ def _default_claim_age_lookup(session_id: str, cwd: str) -> Optional[float]:
     try:
         import time as _time
 
-        from fno.agents.watchdog import tail_facts
+        from fno.agents.watchdog import harness_for_session, tail_facts
 
-        facts = tail_facts(session_id, cwd)
+        facts = tail_facts(session_id, cwd, agent=harness_for_session(session_id))
         if facts is None or facts.last_event_epoch is None:
             return None
         return max(0.0, _time.time() - facts.last_event_epoch)
@@ -1459,10 +1467,11 @@ def _transcript_activity(session_id: str, cwd: str):
         from fno.agents.watchdog import (
             QUIET_AFTER_S,
             finished_with_the_tree,
+            harness_for_session,
             tail_facts,
         )
 
-        facts = tail_facts(session_id, cwd)
+        facts = tail_facts(session_id, cwd, agent=harness_for_session(session_id))
         if facts is None:
             return None
         return finished_with_the_tree(facts, time.time(), QUIET_AFTER_S)
@@ -1483,11 +1492,14 @@ def _transcript_says_finished(session_id: str, cwd: str) -> bool:
         from fno.agents.watchdog import (
             QUIET_AFTER_S,
             finished_with_the_tree,
+            harness_for_session,
             tail_facts,
         )
 
         return finished_with_the_tree(
-            tail_facts(session_id, cwd), time.time(), QUIET_AFTER_S
+            tail_facts(session_id, cwd, agent=harness_for_session(session_id)),
+            time.time(),
+            QUIET_AFTER_S,
         )
     except Exception:  # noqa: BLE001 - an unreadable transcript proves nothing
         return False

@@ -4,6 +4,7 @@
 # as a multiset; the line column is prose. pydoor takes NO baseline: cli/src/fno/rust_binary.py
 # stays the only Python file that execs fno-agents by literal name.
 crossing	crates/fno-agents/src/attach.rs	28	let output = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/authorized_merge.rs	415	let out = Command::new("fno")
 crossing	crates/fno-agents/src/bin/client.rs	696	let err = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/bin/client.rs	717	let err = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/bin/client.rs	1213	let out = std::process::Command::new("fno")
@@ -22,8 +23,6 @@ crossing	crates/fno-agents/src/daemon.rs	8204	let out = std::process::Command::n
 crossing	crates/fno-agents/src/finalize.rs	472	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/finalize.rs	1898	let mut command = Command::new("fno");
 crossing	crates/fno-agents/src/finalize.rs	1954	let ok = Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2339	match Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2386	let lineage = match Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2561	let ok = Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2822	let out = match Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2842	let mut cmd = Command::new("fno");

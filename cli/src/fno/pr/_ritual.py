@@ -438,7 +438,9 @@ class Ritual:
                 closed = [c.get("node_id") for c in (obj.get("closed") or [])
                           if isinstance(c, dict) and c.get("node_id")]
                 self.ctx.node_ids.extend(closed)
-                held = [h.get("node_id") for h in (obj.get("promise_unmet") or [])
+                unmet_rows = obj.get("promise_unmet") or []
+                unknown_rows = obj.get("promise_unknown") or []
+                held = [h.get("node_id") for h in unmet_rows + unknown_rows
                         if isinstance(h, dict) and h.get("node_id")]
                 errs = len(obj.get("contained_errors") or [])
                 sync_obj = obj.get("sync_catchup") or {}
@@ -446,15 +448,19 @@ class Ritual:
                 closure_refused = obj.get("closure_refused")
                 if held:
                     # Held open, not clean: the PR merged but the promise gate
-                    # refused the close (x-40be). status=ok detail=closed=0
+                    # did not clear the close (x-40be). status=ok detail=closed=0
                     # covered "held seven nodes open"; deferred keeps the work
-                    # visibly owed and names who holds it.
+                    # visibly owed and names who holds it. The two causes are
+                    # counted apart: an unmet promise owes the operator work, an
+                    # unknown is a read outage a later sweep clears by itself,
+                    # and one merged count reads the second as the first.
                     ids = ", ".join(str(h) for h in held[:5])
                     more = f" +{len(held) - 5}" if len(held) > 5 else ""
                     self._emit(
                         "reconcile",
                         _DEFERRED,
-                        f"closed={len(closed)} held_open={len(held)}: {ids}{more}",
+                        f"closed={len(closed)} held_open={len(held)} "
+                        f"(unmet={len(unmet_rows)} unknown={len(unknown_rows)}): {ids}{more}",
                     )
                 elif closure_refused:
                     # The trailer-claimed nodes (if any) never got bound - a

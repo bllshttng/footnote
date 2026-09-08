@@ -3047,13 +3047,13 @@ class AutoMergeBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     # MIRROR NOTE (posture readers): the Rust reader at
-    # crates/fno-agents/src/agents_config.rs `auto_merge_enabled` accepts only
-    # a real TOML boolean for this key - deliberately stricter at the
-    # irreversible native-arm - while this coercer also accepts the string
-    # spellings. A config carrying `enabled = "true"` arms the merge verb and
-    # the git-protection hook (both resolve through this tolerant reader) but
-    # not the finalize arm. Any change to either spelling set must move all
-    # three readers, or the gates split on exactly that spelling.
+    # crates/fno-agents/src/agents_config.rs `auto_merge_enabled` accepts the
+    # same affirmative set this coercer does. It was stricter while it read
+    # only for the native arm. `fno do pr merge` now resolves its standing
+    # switch through that reader too, and a split would have refused
+    # `enabled = "true"` at the very verb that honored it a release ago. Any
+    # change to either spelling set must move both readers and the
+    # git-protection hook, or the gates split on exactly that spelling.
     enabled: bool = False
     # ACTOR scope (x-4be1): who may merge once `enabled` passes. Replaces
     # `dispatch.auto_merge`, which spelled the same decision in another table.

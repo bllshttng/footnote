@@ -23,6 +23,7 @@ the record is wrong - and never wakes or reroutes.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import hashlib
 import logging
@@ -40,8 +41,11 @@ from typing import Any, Callable, Iterable, Optional
 # next move, which is a fact about the tail rather than an absence in it.
 from fno.agents.session_truth import classify_tail
 
-Verdict = namedtuple("Verdict", "row_id name state verdict basis action")
-#: ``agent`` (default "claude") resolves the row's transcript store (x-c624).
+Verdict = namedtuple(
+    "Verdict", "row_id name state verdict basis action agent", defaults=("claude",)
+)
+#: ``agent`` (default "claude") resolves the row's transcript store (x-c624);
+#: apply lanes re-read the transcript through it, so it rides the verdict too.
 Row = namedtuple("Row", "row_id name state node cwd agent", defaults=(None, "", "claude"))
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
@@ -156,7 +160,9 @@ def run_recoverable_sweep(
     verdicts_out: list[Verdict] = []
     for candidate in scan.recoverable:
         handle = canonical_handle(candidate.session_id)
-        rows.append(Row(candidate.session_id, handle, "orphaned", None, candidate.cwd))
+        rows.append(
+            Row(candidate.session_id, handle, "orphaned", None, candidate.cwd, "codex")
+        )
         usable = bool(candidate.transcript_usable)
         verdicts_out.append(
             Verdict(
@@ -173,6 +179,7 @@ def run_recoverable_sweep(
                     )
                 ),
                 "adopt" if usable else "refuse",
+                "codex",
             )
         )
     complete = bool(scan.complete)
@@ -725,6 +732,10 @@ def _age_clause(now_s: float, epoch: Optional[float]) -> str:
     return f"{n}m" if n is not None else "unknown"
 
 
+def _verdict(row: Row, verdict: str, basis: str, action: str) -> Verdict:
+    return Verdict(row.row_id, row.name, row.state, verdict, basis, action, row.agent)
+
+
 def _verdict_one(
     row: Row,
     *,
@@ -739,13 +750,17 @@ def _verdict_one(
 
     # ghost: claims working/blocked, no transcript resolves for the id.
     if facts is None and row.state in _GHOST_STATES:
-        return Verdict(row.row_id, row.name, row.state, GHOST,
-                       f"no transcript for {row.row_id}", "report")
+        basis = (
+            f"no transcript for {row.row_id}"
+            if row.agent in {"claude", "codex"}
+            else f"harness {row.agent} keeps no per-session transcript, unmeasurable"
+        )
+        return _verdict(row, GHOST, basis, "report")
 
     # contended: below ghost (liveness outranks a tree fact), report-only.
     if peers:
-        return Verdict(
-            row.row_id, row.name, row.state, CONTENDED,
+        return _verdict(
+            row, CONTENDED,
             f"worktree {row.cwd} holds {len(peers) + 1} live sessions, "
             f"peers {'/'.join(peers)}",
             "report",
@@ -758,12 +773,12 @@ def _verdict_one(
             try:
                 node_state = node_state_for(row.node) if row.node else None
             except Exception:  # noqa: BLE001 - unreadable graph condemns nothing
-                return Verdict(row.row_id, row.name, row.state, LEAVE,
-                               "graph unreadable, silence verdict refused", "none")
+                return _verdict(row, LEAVE,
+                                "graph unreadable, silence verdict refused", "none")
             node_open = node_state is not None and str(node_state.get("status") or "") not in ("done", "superseded")
             if node_open:
-                return Verdict(
-                    row.row_id, row.name, row.state, SILENCE,
+                return _verdict(
+                    row, SILENCE,
                     f"open node {row.node}, transcript quiet {_mins(now_s, facts.last_event_epoch)}m", "drive",
                 )
 
@@ -779,8 +794,8 @@ def _verdict_one(
         facts_age_s = max(0.0, now_s - facts.last_event_epoch)
     if row.state in _WAKE_STATES and facts_age_s is not None:
         if facts_age_s > WAKE_MAX_AGE_S:
-            return Verdict(
-                row.row_id, row.name, row.state, STALE,
+            return _verdict(
+                row, STALE,
                 f"{row.state} {int(facts_age_s // 3600)}h old, past the "
                 f"{int(WAKE_MAX_AGE_S // 3600)}h wake ceiling, needs a human",
                 "report",
@@ -800,14 +815,14 @@ def _verdict_one(
         and facts.last_event_epoch is not None
     ):
         if in_quorum_breaker:
-            return Verdict(
-                row.row_id, row.name, row.state, REROUTE,
+            return _verdict(
+                row, REROUTE,
                 "429 terminal for this session; provider quorum already "
                 "confirmed by a separate breaker row",
                 "redispatch",
             )
-        return Verdict(
-            row.row_id, row.name, row.state, LEAVE,
+        return _verdict(
+            row, LEAVE,
             "429 terminal for this session; waiting for positive provider quorum",
             "none",
         )
@@ -819,28 +834,28 @@ def _verdict_one(
     # is an absence and never a wake reason.
     if row.state in _WAKE_STATES and facts is not None:
         if facts.last_event_epoch is None:
-            return Verdict(row.row_id, row.name, row.state, LEAVE,
-                           "no parseable transcript evidence, not wakeable",
-                           "none")
+            return _verdict(row, LEAVE,
+                            "no parseable transcript evidence, not wakeable",
+                            "none")
         if window == "unknown":
-            return Verdict(row.row_id, row.name, row.state, LEAVE,
-                           f"429 present, reset window unknown "
-                           f"({stamp or 'no stamp'})", "none")
+            return _verdict(row, LEAVE,
+                            f"429 present, reset window unknown "
+                            f"({stamp or 'no stamp'})", "none")
         if window == "live" and reset_epoch is not None:
             reset_utc = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
-            return Verdict(row.row_id, row.name, row.state, LEAVE,
-                           f"429 resets {reset_utc.strftime('%H:%M:%SZ')}, "
-                           f"window not open", "none")
+            return _verdict(row, LEAVE,
+                            f"429 resets {reset_utc.strftime('%H:%M:%SZ')}, "
+                            f"window not open", "none")
         truth = classify_tail(facts.last_role, facts.last_text, facts_age_s)
         if truth != "stalled":
-            return Verdict(row.row_id, row.name, row.state, LEAVE,
-                           f"tail reads {truth}, session does not owe a move",
-                           "none")
+            return _verdict(row, LEAVE,
+                            f"tail reads {truth}, session does not owe a move",
+                            "none")
         clause = ("last 429 window passed" if window == "passed"
                   else "silent, no 429 in tail")
-        return Verdict(row.row_id, row.name, row.state, WAKE,
-                       f"{row.state} {_mins(now_s, facts.last_event_epoch)}m "
-                       f"silent, {clause}", "resume")
+        return _verdict(row, WAKE,
+                        f"{row.state} {_mins(now_s, facts.last_event_epoch)}m "
+                        f"silent, {clause}", "resume")
 
     # leave: everything else, including every healthy injectable row - the
     # watchdog never competes with the normal inject path. Never
@@ -853,7 +868,7 @@ def _verdict_one(
         if facts is not None
         else f"no transcript, state {row.state}"
     )
-    return Verdict(row.row_id, row.name, row.state, LEAVE, basis, "none")
+    return _verdict(row, LEAVE, basis, "none")
 
 
 def _unclaimed_node_basis(
@@ -909,16 +924,19 @@ def tail_entries(
     session_id: str,
     cwd: str,
     *,
-    agent: str = "claude",
+    agent: str,
 ) -> Optional[list[dict]]:
     """Resolve a session's transcript and return its parsed tail records.
 
     THE one transcript read per tick: the tail classifier, the outage
     collector and the poll detector all derive from this single parse
-    (measured defect: every transcript was read twice per tick). None means
-    the transcript could not be resolved, read, or decoded - the caller
-    renders that downstream (ghost facts, or a named refusal). A torn or
-    foreign JSONL line is skipped, not fatal.
+    (measured defect: every transcript was read twice per tick). ``agent``
+    names the harness whose transcript store holds the session - there is
+    deliberately no default, because a defaulted read silently opens the
+    claude store for every other harness and reads every such worker as a
+    ghost. None means the transcript could not be resolved, read, or decoded
+    - the caller renders that downstream (ghost facts, or a named refusal).
+    A torn or foreign JSONL line is skipped, not fatal.
     """
     from fno.provenance.observed import resolve_transcript_path
 
@@ -1000,16 +1018,52 @@ def tail_facts(
     session_id: str,
     cwd: str,
     *,
-    agent: str = "claude",
+    agent: str,
     max_records: int = _TAIL_RECORDS,
 ) -> Optional[TailFacts]:
     """Resolve a session's transcript and tail-read it. Never raises. A
     missing transcript is None, which the classifier renders as a fact
-    (ghost / unknown-age), never as fresh. A caller holding its entries
-    already (the tick shares one read) should derive with
-    :func:`_facts_from_entries` instead of reading again.
+    (ghost / unknown-age), never as fresh. ``agent`` is required - see
+    :func:`tail_entries`. A caller holding its entries already (the tick
+    shares one read) should derive with :func:`_facts_from_entries` instead
+    of reading again.
     """
     return _facts_from_entries(tail_entries(session_id, cwd, agent=agent), max_records)
+
+
+@functools.lru_cache(maxsize=1)
+def _harness_by_session(registry_path: str) -> dict[str, str]:
+    """Session id -> harness, from the registry. Keyed on the declared
+    registry path (the state root this reader depends on), so a re-pointed
+    state root cannot read a stale map. Cached for the life of the process:
+    every caller here is a one-shot CLI command, and the watchdog daemon
+    reads the harness off Row instead."""
+    from fno.agents.registry import load_registry
+
+    try:
+        entries = list(load_registry())
+    except Exception:  # noqa: BLE001 - an unreadable registry answers claude
+        return {}
+    return {
+        str(getattr(e, "harness_session_id", "") or ""): str(
+            getattr(e, "harness", "") or "claude"
+        )
+        for e in entries
+        if getattr(e, "harness_session_id", None)
+    }
+
+
+def harness_for_session(session_id: str) -> str:
+    """The harness that owns this session, or claude when the registry does
+    not know it. The ONE place that answers "which harness is this session"
+    for a caller holding only an id."""
+    from fno.paths import agents_registry_path
+
+    try:
+        key = str(agents_registry_path())
+    except Exception:  # noqa: BLE001 - an unreadable state root answers claude
+        return "claude"
+    return _harness_by_session(key).get(session_id, "claude")
 
 
 def _record_text(e: dict) -> str:
@@ -1254,13 +1308,23 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
         if str(row_id) in seen_row_ids:
             continue
         row_id = str(row_id)
+        # Registry statuses fold through the SAME mapper the claude roster
+        # uses, so lane predicates never gate on a vocabulary only one
+        # producer speaks. An unmapped spelling is carried loudly, never
+        # silently dropped out of every lane set.
+        state, state_warning = _row_state({"status": str(getattr(entry, "status", "") or "")})
+        if state_warning:
+            unmapped_states.add(state_warning)
         out.append(
             Row(
                 row_id=row_id,
                 name=str(getattr(entry, "name", None) or row_id),
-                state=str(getattr(entry, "status", "unknown")),
+                state=state,
                 node=getattr(entry, "node", None),
                 cwd=str(getattr(entry, "cwd", "") or ""),
+                # The loop exists only because this entry is NOT claude; the
+                # harness it filtered on is the one the row must carry.
+                agent=str(getattr(entry, "harness", "") or "claude"),
             )
         )
         seen_row_ids.add(row_id)
@@ -2109,7 +2173,9 @@ def run_sweep(
     if provider_outage_fn is None and rows_provider is None:
         for row in rows:
             try:
-                entries_by_row[row.row_id] = tail_entries(row.row_id, row.cwd)
+                entries_by_row[row.row_id] = tail_entries(
+                    row.row_id, row.cwd, agent=row.agent
+                )
             except Exception:  # noqa: BLE001 - a failed read is never a verdict
                 entries_by_row[row.row_id] = None
         provider_outages = measure_provider_outages(
@@ -2140,11 +2206,14 @@ def run_sweep(
             "provider_outages": provider_outages,
         }, rows
     cwd_by_sid = {r.row_id: r.cwd for r in rows}
+    agent_by_sid = {r.row_id: r.agent for r in rows}
     if transcript_fn is None:
         def transcript_fn(sid: str) -> Optional[TailFacts]:
             if sid in entries_by_row:
                 return _facts_from_entries(entries_by_row[sid], _TAIL_RECORDS)
-            return tail_facts(sid, cwd_by_sid.get(sid, ""))
+            return tail_facts(
+                sid, cwd_by_sid.get(sid, ""), agent=agent_by_sid.get(sid, "claude")
+            )
     claim_fn = claim_fn or _claim_view
     if graph_fn is None:
         index = _graph_index()
@@ -2692,7 +2761,7 @@ def confirm_wake_landed(
     message: str,
     before_epoch: Optional[float],
     *,
-    agent: str = "claude",
+    agent: str,
     attempts: Optional[int] = None,
     interval_s: Optional[float] = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -2716,7 +2785,7 @@ def confirm_wake_landed(
 
 
 def _confirm_once(
-    row_id: str, cwd: str, message: str, before_epoch: Optional[float], *, agent: str = "claude"
+    row_id: str, cwd: str, message: str, before_epoch: Optional[float], *, agent: str
 ) -> bool:
     facts = tail_facts(row_id, cwd, agent=agent, max_records=_CONFIRM_RECORDS)
     if facts is None:
@@ -2760,18 +2829,19 @@ def apply_verdict(
     *,
     lanes: str,
     cwd: str = "",
-    agent: str = "claude",
+    agent: Optional[str] = None,
     runner=subprocess.run,
     failover_fn: Optional[Callable[[Any, Any], str]] = None,
     rotation: Optional[RotationBudget] = None,
 ) -> tuple[str, str]:
     """Execute one verdict inside ``lanes`` ("wake" | "all"); only ``SKIPPED`` is
-    silent. wake/silence resume with ``cwd``/``agent`` set; reroute uses recovery._redispatch."""
+    silent. wake/silence resume with ``cwd`` set; the transcript reads run under
+    the row's own harness (``agent or v.agent``); reroute uses recovery._redispatch."""
     if v.verdict not in LANES.get(lanes, frozenset()):
         return SKIPPED, f"{v.verdict} outside {lanes} lane"
     try:
         if v.verdict in (WAKE, SILENCE):
-            return _apply_wake(v, cwd=cwd, runner=runner, agent=agent)
+            return _apply_wake(v, cwd=cwd, runner=runner, agent=agent or v.agent)
         if v.verdict == REROUTE:
             return _apply_reroute(
                 v, cwd=cwd, failover_fn=failover_fn, rotation=rotation
@@ -2781,7 +2851,7 @@ def apply_verdict(
     return SKIPPED, f"{v.verdict} has no auto-action"
 
 
-def _apply_wake(v: Verdict, *, cwd: str, runner: Callable, agent: str = "claude") -> tuple[str, str]:
+def _apply_wake(v: Verdict, *, cwd: str, runner: Callable, agent: str) -> tuple[str, str]:
     before = tail_facts(v.row_id, cwd, agent=agent)
     before_epoch = before.last_event_epoch if before is not None else None
     proc = runner(
@@ -2835,7 +2905,7 @@ def _apply_reroute(
             f"it respawns is read from a manifest other sessions share. "
             f"Rotate the provider and respawn this row by hand",
         )
-    facts = tail_facts(v.row_id, cwd)
+    facts = tail_facts(v.row_id, cwd, agent=v.agent)
     err = classify_session_error(facts.tail_text if facts is not None else "")
     if err is None or not getattr(err, "triggers_swap", False):
         return "refused", f"reroute refused: tail is not swap-class ({v.basis})"

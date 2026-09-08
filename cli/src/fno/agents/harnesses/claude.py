@@ -964,6 +964,14 @@ _LIVE_STATUS_INPUT = {
     # stopped) is a different axis this vocabulary does not carry; do not
     # widen this mapping to answer that question.
     "stopped": "Done",
+    # The registry's own spellings fold through the same map, so both row
+    # producers (claude's roster and fno's registry) read one watchdog
+    # vocabulary: `live`/`spawning`/`restarting` are alive states, `ready` is
+    # alive with no turn in flight, the same axis as Idle.
+    "live": "Working",
+    "spawning": "Working",
+    "restarting": "Working",
+    "ready": "Idle",
 }
 
 # Field aliases for the row schema. claude's `agents --json` emits `id` and

@@ -171,7 +171,7 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
         typer.echo(f"requeue: {node_id} reads status {status_before!r}, not in_progress; only an in_progress node can be returned to the queue.", err=True)
         raise typer.Exit(code=2)
 
-    # The lockfile reader, never `fno agents claim status`: that CLI consults the worker roster and answers unknown for rows it cannot resolve (x-7421).
+    # The lockfile reader, never `fno agents claim status`: requeue wants the claim record, and the composite verdict still reads unknown when an unresolved roster row's worktree names this node (x-36c3).
     key = f"node:{node_id}"
     claim = claim_status(key, root=claims_root_for(key))
     state = claim.get("state")

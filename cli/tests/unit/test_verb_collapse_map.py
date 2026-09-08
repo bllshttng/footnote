@@ -125,9 +125,11 @@ def test_map_covers_current_surface_once():
     # `agents fallback-chain`, the two client verbs the spawn seam degrades
     # open around (hidden verbs): 578 -> 580. This branch reallocated the
     # retired `agents worker blueprint-feed` pair onto the direct binary
-    # verb `agents blueprint-feed`. Counted from the merged file, never
-    # taken from either side: 582.
-    assert len(mapped) == 582, (
+    # verb `agents blueprint-feed`, and the one-authorized-merge branch
+    # allocates `agents authorized-merge`, the merge/arm decision every
+    # merge path asks through the single Python door (hidden verb).
+    # Counted from the merged file, never taken from either side: 583.
+    assert len(mapped) == 583, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

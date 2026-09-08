@@ -54,7 +54,7 @@ from typing import Any, Literal, NamedTuple, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
-from fno.agents.naming import agent_name
+from fno.agents.naming import agent_name, slug_component
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.provenance import autobrief as _autobrief
 
@@ -582,24 +582,13 @@ def _ready_nodes(
     ``mission`` restricts to that mission's nodes, mirroring the sequential
     path's ``MegawalkQueue::with_mission`` (codex P1 on PR #137).
     """
-    cmd = [*_subprocess_util.fno_py_cmd(), "backlog", "ready"]
-    if project:
-        cmd += ["--project", project]
-    if mission:
-        cmd += ["--mission", mission]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"fno backlog ready exited {proc.returncode}: {proc.stderr.strip()[:200]}"
-        )
-    out = (proc.stdout or "").strip()
-    if not out or out == "null":
-        normal = []
-    else:
-        nodes = json.loads(out)
-        if not isinstance(nodes, list):
-            raise RuntimeError(f"fno backlog ready returned an unexpected shape: {out[:200]}")
-        normal = [n for n in nodes if isinstance(n, dict) and n.get("id")]
+    from fno.graph._intake import repo_root
+    from fno.graph.store import ready as store_ready
+
+    # The native selection leg, one call: admission, cascade, ranking. The
+    # typed client raises on an unreachable keeper - never a locally
+    # recomputed fallback.
+    normal = store_ready(project=project, mission=mission, repo_root=repo_root())["rows"]
     observer = _dispatch_safe_observer(_undispatched_nodes(project, mission))
     from fno.backlog.undispatched import prepend_missed_rows
 
@@ -1090,8 +1079,28 @@ def schedule_shadow(
     }
 
 
+def _verb_qualifier(verb: Optional[str]) -> Optional[str]:
+    """Lifecycle-reason qualifier for the worker name: the bare declared verb.
+
+    ``/fno:blueprint`` becomes ``blueprint`` (the codex ``$fno:`` spelling
+    slugifies to ``fno-blueprint``), so the row name states which verb ran
+    while every ``target-<node>-`` consumer match keeps holding. A node
+    declaring no verb yields ``None``: the builtin target path keeps its
+    exact current name.
+    """
+    v = (verb or "").strip()
+    if not v:
+        return None
+    if v.startswith("/fno:"):
+        v = v[len("/fno:"):]
+    return slug_component(v.lstrip("/")) or None
+
+
 def _worker_agent_name(
-    node_id: str, node_slug: Optional[str], prefix: str = "target"
+    node_id: str,
+    node_slug: Optional[str],
+    prefix: str = "target",
+    qualifier: Optional[str] = None,
 ) -> str:
     """Provenance-carrying bg worker name: ``<prefix>-<full-node-id>-<slug>``.
 
@@ -1100,13 +1109,15 @@ def _worker_agent_name(
     configured node id assembled a name ``fno agents spawn`` rejected, losing
     the dispatch with no session and no event (x-3218). ``prefix`` is
     ``reconcile`` for the G4 de-stub pass so its worker name never collides
-    with the (ended) first pass's ``target-<id>-<slug>``.
+    with the (ended) first pass's ``target-<id>-<slug>``. ``qualifier`` names
+    the declared dispatch verb when the node declares one (see
+    :func:`_verb_qualifier`).
 
     Raises :class:`~fno.agents.naming.AgentNameError` when the required
     identity cannot be represented; the dispatch path projects that as a
     node-identifying failure event rather than a launched lane.
     """
-    return agent_name(prefix, node_id, slug=node_slug)
+    return agent_name(prefix, node_id, slug=node_slug, qualifier=qualifier)
 
 
 def _refuse_repeated_dead_dispatch(
@@ -1253,8 +1264,12 @@ def _spawn_worker(
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     is_reconcile = bool(reconcile_manifest)
+    node_verb = (verb or "").strip() or None
     agent_name = _worker_agent_name(
-        node_id, node_slug, prefix="reconcile" if is_reconcile else "target"
+        node_id,
+        node_slug,
+        prefix="reconcile" if is_reconcile else "target",
+        qualifier=_verb_qualifier(node_verb),
     )
     # --provider selects the account/record (or a bare kind like "claude"); a
     # per-node or dispatch-time pin overrides the claude default. Layer-separate
@@ -1319,7 +1334,6 @@ def _spawn_worker(
     # One axis: `provider` is the harness under an older spelling, so it must
     # reach the resolver too, or the command follows the stage table instead.
     launch_axis = _launch_harness_axis(launch, node_cwd)
-    node_verb = (verb or "").strip() or None
     # x-0961: "declared nothing" and "declaration eaten by a lossy feed" used
     # to produce a byte-identical dispatch. The `verb` param collapses both to
     # None; only the node dict carries the difference, so the receipt names it
@@ -3164,7 +3178,10 @@ def advance(
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
-        _tick(0, reason, f"node={node_id or '-'} reason={reason}")
+        tick_detail = f"node={node_id or '-'} reason={reason}"
+        if detail:
+            tick_detail += f" detail={detail[:120]}"
+        _tick(0, reason, tick_detail)
         return AdvanceResult(
             "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail
         )
@@ -3912,25 +3929,12 @@ def _ready_leaf_children(epic_id: str) -> list[dict]:
     semantics (descendants_of). Raises on a garbled response so the caller skips
     rather than guessing (Failure Modes: Errors).
     """
-    cmd = [
-        *_subprocess_util.fno_py_cmd(),
-        "backlog", "ready", "--parent", epic_id, "--all",
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"fno backlog ready --parent {epic_id} exited {proc.returncode}: "
-            f"{proc.stderr.strip()[:200]}"
-        )
-    out = (proc.stdout or "").strip()
-    if not out or out == "null":
-        return []
-    nodes = json.loads(out)
-    if not isinstance(nodes, list):
-        raise RuntimeError(
-            f"fno backlog ready --parent returned an unexpected shape: {out[:200]}"
-        )
-    return [n for n in nodes if isinstance(n, dict) and n.get("id")]
+    from fno.graph._intake import repo_root
+    from fno.graph.store import ready as store_ready
+
+    # The same native leg the sequential drain rides, scoped to the epic:
+    # container-, claim-, open-PR-, batch- and guard-filtered, rank-sorted.
+    return store_ready(parent=epic_id, all=True, repo_root=repo_root())["rows"]
 
 
 def _binding_provider() -> Optional[str]:

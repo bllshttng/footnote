@@ -4403,11 +4403,9 @@ def cmd_next(
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
         detect_project,
-        make_selection_sort_key,
         descendants_of,
         _find_node,
     )
-    from fno.graph.ladder import is_cold_dispatchable
     from fno.tracker import active_backend_name
 
     result: list = [None]
@@ -4435,8 +4433,8 @@ def cmd_next(
     # transitive children of --parent. Resolve the parent id up-front so a
     # missing node is a hard error (AC2-ERR) and a childless node prints a
     # clear note while still returning null so the walker can fall back
-    # (AC2-EDGE). The actual descendant SET is computed inside _pick_ready
-    # from the entries it receives so that under --claim it reflects the
+    # (AC2-EDGE). The actual descendant SET is computed inside the keeper's
+    # ready verb from the entries it receives so that under --claim it reflects the
     # locked graph state, not a pre-read snapshot (avoids a TOCTOU where a
     # concurrent reparent could claim a node no longer in the subtree).
     parent_target_id: Optional[str] = None
@@ -4450,67 +4448,44 @@ def cmd_next(
         if not descendants_of(pre_entries, parent_target_id):
             typer.echo(f"no children under {parent_target_id}", err=True)
 
-    allowed = {"ready"}
-    if include_ideas:
-        allowed.add("idea")
-    if include_deferred:
-        allowed.add("deferred")
+    def _select(entries):
+        """One call into the native leg: survivors, in selection order.
 
-    def _pick_ready(entries):
-        # read_graph does not recompute status, so a node closed out of band
-        # (e.g. PR merged via reconcile/done in another process) can carry
-        # completed_at while its persisted status is still "ready". Guard on
-        # completed_at so advance / megawalk never dispatch a /target worker for
-        # an already-done node.
-        # `allowed` covers the persisted-status gate (ready, plus idea/deferred
-        # only on explicit --include-ideas/--include-deferred). A plan-less idea
-        # (Rung.NONE) is ALSO admitted by default (): `/target` authors its
-        # plan, so the autonomous drain dispatches it. A linked-but-undesigned
-        # decompose stub (Rung.IDEA) is NOT admitted here - it needs warm
-        # inline-fill and stays behind --include-ideas.
-        candidates = [
-            e
-            for e in entries
-            if (e.get("status") in allowed or is_cold_dispatchable(e)) and not e.get("completed_at")
-        ]
-        # The narrowing cascade lives in `fno.backlog.explain` and is shared
-        # with `fno backlog advance --explain`, so the explanation of a
-        # selection can never drift from the selection. Order is unchanged; each
-        # step's own reasoning now rides on the filter it belongs to:
-        #   roadmap / mission / parent-scope - explicit scoping flags.
-        #   project - detects from the candidate list, so it narrows a LIST.
-        #   live-claim () - a live session already holds the node.
-        #   unmerged-open-pr () - the only in-flight signal left once
-        #     the builder session's pid claim dies; scoped to `ready` so an
-        #     explicitly --include-deferred/--include-ideas row still surfaces.
-        #   container () - build the leaves, not the box.
-        #   batched - ships via the batch PR.
-        #   selection-guard () - dead ancestor / stale-ready quarantine.
-        from fno.backlog.explain import build_selection_filters, run_cascade
+        The admission set, the narrowing cascade, and the ranking are the
+        keeper verb's (backlog_ready::select); `next` takes rows[0] of the
+        same answer its sibling verb serves, so the two surfaces cannot
+        drift. `entries` rides IN so a `--claim` mutation and its selection
+        read the same instant under the graph lock.
+        """
+        from fno.graph._intake import repo_root
+        from fno.graph.store import (
+            ClaimsUnavailableError,
+            ReadyParentMissingError,
+            StoreUnavailable,
+            ready as store_ready,
+        )
 
-        # Selection-time claim enforcement () and the container set
-        # are read ONCE here, under this call's graph read, and handed to the
-        # cascade: recomputing inside it would read a different instant.
-        claimed = _require_live_claimed_node_ids("backlog selection")
-        container_ids = _container_ids(entries)
-        candidates = run_cascade(
-            candidates,
-            build_selection_filters(
-                entries,
+        try:
+            return store_ready(
+                project=project_filter,
+                all=all_,
                 roadmap_id=roadmap_id,
                 mission=mission,
-                parent_target_id=parent_target_id,
-                project_filter=project_filter,
-                all_=all_,
-                claimed=claimed,
-                container_ids=container_ids,
-            ),
-        ).survivors
-        # Epics-first, then flat priority (C3, Locked Decision 7). Build the
-        # key from the FULL graph so epic parents resolve even when filtered
-        # out of the candidate set.
-        candidates.sort(key=make_selection_sort_key(entries, live_claimed=claimed))
-        return candidates
+                parent=parent_target_id,
+                include_ideas=include_ideas,
+                include_deferred=include_deferred,
+                repo_root=repo_root(),
+                entries=entries,
+            )["rows"]
+        except StoreUnavailable as exc:
+            typer.echo(f"Error: store keeper unavailable; selection refused: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        except ReadyParentMissingError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        except ClaimsUnavailableError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
 
     from fno.backlog.undispatched import (
         ObserverReadError,
@@ -4620,7 +4595,7 @@ def cmd_next(
             from fno.claims.io import claims_root_for
 
             assert pre_entries is not None
-            candidates = _with_observer(_pick_ready(pre_entries), pre_entries)
+            candidates = _with_observer(_select(pre_entries), pre_entries)
             for winner in candidates:
                 key = f"node:{winner['id']}"
                 # TWO things have to be true for this lock to protect anything,
@@ -4653,12 +4628,24 @@ def cmd_next(
         else:
 
             def mutator(entries):
-                candidates = _with_observer(_pick_ready(entries), entries)
+                candidates = _with_observer(_select(entries), entries)
                 if candidates:
                     winner = candidates[0]
-                    winner["locked_by"] = claim
-                    winner["locked_at"] = datetime.now(timezone.utc).isoformat()
-                    result[0] = _dispatch_node_summary(winner)
+                    # Rows are serialized summaries, not graph references:
+                    # the lock must land on the graph entry itself or the
+                    # commit publishes nothing (the pre-port leg returned
+                    # graph references from _pick_ready, so this was
+                    # implicit).
+                    target = next(
+                        (e for e in entries if e.get("id") == winner["id"]), None
+                    )
+                    if target is None:
+                        raise RuntimeError(
+                            f"selected node vanished under the lock: {winner['id']}"
+                        )
+                    target["locked_by"] = claim
+                    target["locked_at"] = datetime.now(timezone.utc).isoformat()
+                    result[0] = _dispatch_node_summary(target)
                 return entries
 
             locked_mutate_graph(_graph_path(), mutator)
@@ -4668,7 +4655,7 @@ def cmd_next(
             entries = pre_entries
         else:
             entries = read_graph(_graph_path())
-        candidates = _with_observer(_pick_ready(entries), entries)
+        candidates = _with_observer(_select(entries), entries)
         if candidates:
             result[0] = _dispatch_node_summary(candidates[0])
 
@@ -4792,112 +4779,49 @@ def cmd_ready(
         False, "--json", "-J", help="Emit JSON (default; flag accepted for parity)."
     ),
 ) -> None:
-    from fno.graph.store import read_graph
-    from fno.graph._intake import (
-        filter_by_project,
-        make_selection_sort_key,
-        descendants_of,
-        _find_node,
+    from fno.graph._intake import repo_root
+    from fno.graph.store import (
+        ClaimsUnavailableError,
+        ReadyParentMissingError,
+        StoreUnavailable,
+        ready as store_ready,
     )
-    from fno.graph.ladder import is_cold_dispatchable
     from fno.tracker import active_backend_name
 
     # Joined selection under an external backend: the same filters and ranking
     # run over the transient list_open + sidecar join (fail-closed, never the
-    # local graph), so `ready` and `next` cannot drift between backends.
+    # local graph), so `ready` and `next` cannot drift between backends. The
+    # rows ride IN, the one decision answers both backends.
+    entries = None
     if active_backend_name() != "graph":
         try:
             entries = _joined_open_candidates()
         except _ExternalSelectionError as exc:
             typer.echo(f"Error: {exc}; selection refused", err=True)
             raise typer.Exit(code=1)
-    else:
-        entries = read_graph(_graph_path())
-    allowed = {"ready"}
-    if include_ideas:
-        allowed.add("idea")
-    if include_deferred:
-        allowed.add("deferred")
-    # read_graph does not recompute status, so a node closed out of band can
-    # carry completed_at while its persisted status is still "ready". Guard on
-    # completed_at so a done node never lists as actionable work (the same guard
-    # is in `next`'s _pick_ready, the dispatch path).
-    # Same plan-less idea admission as `next`'s _pick_ready (): a Rung.NONE
-    # idea is cold-dispatchable and surfaces alongside ready work; a linked
-    # Rung.IDEA stub stays behind --include-ideas.
-    ready = [
-        e
-        for e in entries
-        if (e.get("status") in allowed or is_cold_dispatchable(e)) and not e.get("completed_at")
-    ]
-    ready = filter_by_project(ready, project, all_)
-    if roadmap_id:
-        ready = [e for e in ready if e.get("roadmap_id") == roadmap_id]
-    # Mission scope (same rule as `next`): a mission-scoped caller (the
-    # active-backlog daemon's lane-fill, megatron child walks) must never see
-    # out-of-mission nodes as actionable (codex P1 on PR #137).
-    if mission:
-        ready = [e for e in ready if e.get("mission_id") == mission]
-    # Epic-scope filter (C2, ): transitive children of --parent.
-    if parent:
-        target = _find_node(entries, parent)
-        if target is None:
-            typer.echo(f"Error: no such node '{parent}'", err=True)
-            raise typer.Exit(code=1)
-        scope = descendants_of(entries, target["id"])
-        if not scope:
-            typer.echo(f"no children under {target['id']}", err=True)
-        ready = [e for e in ready if e.get("id") in scope]
-    # Selection-time claim enforcement (): hide nodes a live
-    # session already holds (same rule as `graph next`).
-    claimed = _require_live_claimed_node_ids("backlog ready")
-    if claimed:
-        ready = [e for e in ready if e.get("id") not in claimed]
-    # Same in-flight guard as `next` (): a human / megawalk `ready`
-    # listing must not present an already-PR'd node as actionable work.
-    # cmd_ready keeps its own inline status/claim filter (it does not route
-    # through _pick_ready), so the guard is applied here too for parity.
-    # Scoped to status "ready" so an explicitly --include-deferred / -ideas
-    # paused PR-bearing node still lists (the defer contract resurfaces those
-    # on request; codex PR #516 P2).
-    ready = [e for e in ready if e.get("status") != "ready" or not _has_unmerged_open_pr(e)]
-    # Containers are never actionable work ( / codex P2 on PR #69): drop
-    # epics so `fno backlog ready` - and the `dispatch-node.sh --all-ready` bulk
-    # path that enumerates it - never presents/launches the box instead of its
-    # leaves. No all-done exception: the epic auto-closes via
-    # _cascade_close_parents when its last child lands, so it is already done
-    # rather than a lingering ready container. Shares _container_ids with `next`'s
-    # _pick_ready so the surfaces cannot drift.
-    container_ids = _container_ids(entries)
-    ready = [e for e in ready if e.get("id") not in container_ids]
-    # Batch-lane Wave 2: hide open-batch members (they ship via the batch PR, not
-    # as individual ready work). Shares _is_batched_member with `next`'s
-    # _pick_ready so the surfaces cannot drift.
-    ready = [e for e in ready if not _is_batched_member(e)]
-    # G1 guards (): dead-ancestor + stale-ready quarantine, the SAME filter
-    # `next`'s _pick_ready applies. `ready` is a third dispatch-feeding surface -
-    # `select_lane_fill` -> `_ready_nodes` shells `fno backlog ready` for both
-    # parallel lane-fill AND the active-backlog daemon's single-node path, and
-    # `dispatch-node.sh --all-ready` enumerates it - so an unguarded `ready`
-    # would dispatch exactly the nodes `next` quarantines. Shares selection_guards
-    # so the surfaces cannot drift.
-    from fno.backlog.advance import selection_guards, _guard_staleness_days
 
-    _guard_now = datetime.now(timezone.utc)
-    _guard_stale = _guard_staleness_days()
-    _guard_by_id = {e.get("id"): e for e in entries if e.get("id")}
-    ready = [
-        e
-        for e in ready
-        if not selection_guards(e, _guard_by_id, _guard_now, staleness_days=_guard_stale)
-    ]
-    # Epics-first, then flat priority (C3, Locked Decision 7); key built
-    # from the full graph so epic parents always resolve.
-    ready.sort(key=make_selection_sort_key(entries, live_claimed=claimed))
-
-    output = [_dispatch_node_summary(e) for e in ready]
-
-    typer.echo(json.dumps(output, indent=2))
+    try:
+        result = store_ready(
+            project=project,
+            all=all_,
+            roadmap_id=roadmap_id,
+            parent=parent,
+            mission=mission,
+            include_ideas=include_ideas,
+            include_deferred=include_deferred,
+            repo_root=repo_root(),
+            entries=entries,
+        )
+    except StoreUnavailable as exc:
+        typer.echo(f"Error: store keeper unavailable; ready selection refused: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except ReadyParentMissingError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except ClaimsUnavailableError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(result["rows"], indent=2))
 
 
 # -- lane-fill --
@@ -5980,471 +5904,9 @@ def cmd_provenance(
     typer.echo("\n".join(lines))
 
 
-# -- session add (lifecycle provenance, ) --
-
-session_app = typer.Typer(
-    name="session",
-    help="Append-only lifecycle session provenance ().",
-    no_args_is_help=True,
-    add_completion=False,
-)
-
-
-def _plan_claims(plan_path: str) -> "set[str]":
-    """Delegate to the single parser (``_intake.plan_claims``).
-
-    Kept as a thin alias because the stamp-guard call site reads better with
-    a local name; the implementation lives in one place so this reader and
-    collision's self-exclusion default cannot diverge.
-    """
-    from fno.graph._intake import plan_claims
-
-    return plan_claims(plan_path)
-
-
-@session_app.callback()
-def _session_callback() -> None:
-    """Keep ``add`` a real subcommand (a single-command Typer app auto-collapses,
-    which would parse ``session add <node>`` with ``add`` as the node)."""
-
-
-@session_app.command("add")
-def cmd_session_add(
-    node: Optional[str] = typer.Argument(
-        None, help="Node id / slug / bare-hex to stamp (mutually exclusive with --pr-number)."
-    ),
-    phase: str = typer.Option(
-        ..., "--phase", help="Lifecycle phase: think|blueprint|do|review|ship."
-    ),
-    pr: Optional[int] = typer.Option(
-        None,
-        "--pr-number",
-        help="Resolve the UNIQUE node carrying this PR number instead "
-        "of passing NODE (rejects 0 or multiple matches; never fans out).",
-    ),
-    repo: Optional[str] = typer.Option(
-        None,
-        "--repo",
-        help="Scope --pr-number resolution to an <owner>/<repo> slug "
-        "(pr_number is not unique across repos in a cross-project graph). "
-        "Omit and the verb resolves the current checkout's slug itself.",
-    ),
-    harness: Optional[str] = typer.Option(
-        None, "--harness", help="Override harness (default: ambient session identity)."
-    ),
-    session_id: Optional[str] = typer.Option(
-        None, "--session-id", help="Override session id (default: ambient session identity)."
-    ),
-    effort: Optional[str] = typer.Option(
-        None, "--effort", help="Selected reasoning effort, passed through verbatim."
-    ),
-    ended_at: Optional[str] = typer.Option(
-        None,
-        "--ended-at",
-        "--at",
-        help="ISO-8601 UTC instant the phase ended. Omit when there is no honest end "
-        "to record (a row opened mid-session); explicit for backfill of completed work.",
-    ),
-    started_at: Optional[str] = typer.Option(
-        None,
-        "--started-at",
-        "--claimed-at",
-        help="ISO-8601 UTC instant the work began; lands on the "
-        "row so it bounds the window with --ended-at. Honest for every "
-        "phase (a think row starts but claims nothing).",
-    ),
-    require_session: Optional[str] = typer.Option(
-        None,
-        "--require-session",
-        help="Skip (exit 0) unless the ambient session id equals "
-        "this. Identity-continuity guard for stale manifests.",
-    ),
-    guard_plan: Optional[str] = typer.Option(
-        None,
-        "--guard-plan",
-        help="Skip (exit 0) if this plan's frontmatter `claims:` names "
-        "a DIFFERENT node. Requires NODE (not --pr-number).",
-    ),
-    json_out: bool = typer.Option(False, "--json", "-J", help="Emit the result as JSON."),
-) -> None:
-    """Stamp a node with a lifecycle phase record (idempotent, append-only).
-    Full contract: docs/architecture/backlog-graph-verb-contracts.md
-    """
-    from fno.graph.fuzzy import resolve_node
-    from fno.graph.store import (
-        append_session_record,
-        find_nodes_for_pr,
-        read_graph,
-        stamp_session_for_pr,
-    )
-
-    if (node is None) == (pr is None):
-        typer.echo("session add: pass exactly one of NODE or --pr-number.", err=True)
-        raise typer.Exit(code=2)
-    # Refused, never ignored: the guard compares against the node the row lands
-    # on, and the --pr-number path resolves that only after it has stamped.
-    if guard_plan is not None and pr is not None:
-        typer.echo("session add: --guard-plan requires NODE, not --pr-number.", err=True)
-        raise typer.Exit(code=2)
-
-    who = node if node is not None else f"pr#{pr}"
-
-    def _skip(reason: str, node_id: "str | None" = None) -> None:
-        typer.echo(f"session add: {reason} (target={who} phase={phase}). Skipped.", err=True)
-        if json_out:
-            typer.echo(
-                json.dumps(
-                    {
-                        "node_id": node_id,
-                        "status": "skipped",
-                        "reason": reason,
-                        "phase": phase,
-                        "harness": eff_harness,
-                        "session_id": eff_session,
-                        "added": False,
-                    }
-                )
-            )
-
-    from fno.claims.self_identity import resolve_self_identity
-
-    ident = resolve_self_identity()
-    eff_harness = (harness or ident.harness or "").strip()
-    eff_session = (session_id or ident.session_id or "").strip()
-    if not eff_harness or not eff_session:
-        typer.echo(
-            f"session add: no ambient identity for {who} phase={phase}; "
-            "pass --harness/--session-id or run inside a session. Skipped.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    # Identity continuity: the caller vouches for whose session this manifest
-    # belongs to; a mismatch means it belongs to a different conversation (the
-    # stale-manifest squatter), so the record is not this session's to write.
-    # Compared against the AMBIENT id, never the --session-id override: a guard a
-    # caller can satisfy by asserting its own answer is not a guard. No ambient
-    # identity at all therefore also skips - continuity is unprovable.
-    if require_session is not None:
-        # The row must record the identity the guard actually checked. Allowing an
-        # override would verify one identity and permanently write another, which
-        # is the same self-certification hole in a different shape. Refused rather
-        # than ignored, like --guard-plan with --pr-number.
-        if session_id is not None or harness is not None:
-            typer.echo(
-                "session add: --require-session cannot be combined with "
-                "--session-id/--harness (it would verify one identity and "
-                "record another).",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        ambient = (ident.session_id or "").strip()
-        if ambient != require_session.strip():
-            return _skip(f"ambient session {ambient!r} != required {require_session.strip()!r}")
-
-    # After the identity guard: resolution shells out to git and possibly gh, and
-    # a run with no identity is about to skip anyway.
-    if pr is not None and repo is None:
-        from fno.graph._reconcile import resolve_current_repo_slug
-
-        repo = resolve_current_repo_slug()
-        if repo is None:
-            typer.echo(
-                f"session add: could not resolve this checkout's repo slug for pr#{pr}; "
-                "matching on the bare PR number (skips on cross-repo ambiguity).",
-                err=True,
-            )
-        # No bare-number fallback once a slug resolves. The graph is GLOBAL and
-        # cross-project, so a url-less node is unattributable to ANY repo - a
-        # fallback cannot tell "this repo's legacy node" from "another project's
-        # legacy node with the same PR number", and stamping the latter is the
-        # wrong-node write repo scoping exists to prevent. Refusing to guess
-        # costs a stamp on a legacy node; guessing costs a corrupted one, and
-        # the skip is now LOUD (it names the candidates), so nothing is silent.
-
-    try:
-        if pr is not None:
-            node_id, status = stamp_session_for_pr(
-                _graph_path(),
-                pr,
-                phase=phase,
-                harness=eff_harness,
-                session_id=eff_session,
-                ended_at=ended_at,
-                effort=effort,
-                started_at=started_at,
-                repo=repo,
-            )
-            if status in ("no-node", "ambiguous"):
-                cands = find_nodes_for_pr(_graph_path(), pr, repo=repo)
-                detail = f" (candidates: {', '.join(cands)})" if cands else ""
-                repair = ""
-                if status == "no-node":
-                    # Resolution matches the node's STORED pr_number, so a node
-                    # whose PR was never stamped (typical of a session killed
-                    # before ship) is invisible - the exact state the repair
-                    # path is needed in. Name the two ways out instead of
-                    # leaving the operator stuck; a branch guess would risk
-                    # stamping the wrong node, so refuse and explain.
-                    repair = (
-                        " A node whose PR was never stamped is invisible here. "
-                        "Link it with `fno backlog update <node-id> "
-                        f"--pr-number {pr}`, or pass the node id directly: "
-                        f"`fno backlog session add <node-id> --phase {phase}`."
-                    )
-                typer.echo(
-                    f"session add: PR {pr} maps to {status}{detail} (phase={phase}); "
-                    f"resolution is exact and never fans out.{repair} Skipped.",
-                    err=True,
-                )
-                if json_out:
-                    typer.echo(
-                        json.dumps(
-                            {
-                                "node_id": None,
-                                "status": status,
-                                "phase": phase,
-                                "harness": eff_harness,
-                                "session_id": eff_session,
-                                "added": False,
-                                "candidates": cands,
-                            }
-                        )
-                    )
-                return
-            added = status == "added"
-        else:
-            # session add is a mutation verb: local-store resolution, guarded
-            # against external backends by the shared refusal (task 4.2), not
-            # the display-reader seam.
-            match = resolve_node(node, read_graph(_graph_path()))
-            if match.kind != "exact":
-                typer.echo(f"session add: no node matches {node!r} (phase={phase}).", err=True)
-                raise typer.Exit(code=2)
-            node_id = match.candidates[0]["id"]
-            # Plan agreement (mirrors /execute Step 1.5): only a POSITIVE disagreement
-            # skips. An unreadable plan or an absent `claims:` is agreement-
-            # unknown, and absent evidence of conflict is not conflict.
-            #
-            # This is the one guard that does NOT fail closed, so it says so out
-            # loud when it could not evaluate. Otherwise an install whose
-            # plan_path is systematically stale (plan moved, vault unmounted)
-            # runs with G3 disabled and no operator signal anywhere.
-            if guard_plan is not None:
-                claims = _plan_claims(guard_plan)
-                if not claims:
-                    typer.echo(
-                        f"session add: plan {guard_plan} is unreadable or declares no "
-                        f"claims; agreement not evaluated for {node_id}.",
-                        err=True,
-                    )
-                elif node_id not in claims:
-                    return _skip(
-                        f"plan {guard_plan} claims {sorted(claims)} != node {node_id}",
-                        node_id=node_id,
-                    )
-            found, added = append_session_record(
-                _graph_path(),
-                node_id,
-                phase=phase,
-                harness=eff_harness,
-                session_id=eff_session,
-                ended_at=ended_at,
-                effort=effort,
-                started_at=started_at,
-            )
-            if not found:
-                typer.echo(f"session add: node {node_id} not found (phase={phase}).", err=True)
-                raise typer.Exit(code=2)
-    except ValueError as exc:
-        typer.echo(f"session add: {exc} (target={who} phase={phase})", err=True)
-        raise typer.Exit(code=2)
-
-    if json_out:
-        typer.echo(
-            json.dumps(
-                {
-                    "node_id": node_id,
-                    "status": "added" if added else "duplicate",
-                    "phase": phase,
-                    "harness": eff_harness,
-                    "session_id": eff_session,
-                    "added": added,
-                }
-            )
-        )
-    else:
-        state = "recorded" if added else "already recorded"
-        typer.echo(f"{state} {phase} {eff_harness}:{eff_session} on {node_id}")
-
-
-@session_app.command("close")
-def cmd_session_close(
-    node: str = typer.Argument(..., help="Node id / slug / bare-hex."),
-    summary: str = typer.Option(..., "--summary", help="Completion summary for the blueprint."),
-    launch: str = typer.Option(..., "--launch", help="Exact launch command for the next phase."),
-    harness: Optional[str] = typer.Option(None, "--harness"),
-    session_id: Optional[str] = typer.Option(None, "--session-id"),
-    started_at: Optional[str] = typer.Option(None, "--started-at"),
-    json_out: bool = typer.Option(
-        False, "--json", "-J", help="Emit the completion receipt as JSON."
-    ),
-) -> None:
-    """Close the blueprint phase with one identity-guarded completion receipt.
-
-    The close writes the blueprint lifecycle row with an honest end, then emits
-    the summary and exact launch line. Missing identity is a hard refusal: the
-    close cannot claim completion while leaving provenance unresolved.
-    """
-    from datetime import datetime, timezone
-
-    from fno.claims.self_identity import resolve_self_identity
-    from fno.graph.fuzzy import resolve_node
-    from fno.graph.store import append_session_record, read_graph
-
-    summary = summary.strip()
-    launch = launch.strip()
-    if not summary or not launch:
-        typer.echo("session close: summary and launch must be non-empty.", err=True)
-        raise typer.Exit(code=2)
-    ident = resolve_self_identity()
-    eff_harness = (harness or ident.harness or "").strip()
-    eff_session = (session_id or ident.session_id or "").strip()
-    if not eff_harness or not eff_session:
-        typer.echo(
-            f"session close: no ambient identity for {node}; "
-            "pass --harness/--session-id or run inside a session.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    match = resolve_node(node, read_graph(_graph_path()))
-    if match.kind != "exact":
-        typer.echo(f"session close: no exact node matches {node!r}.", err=True)
-        raise typer.Exit(code=2)
-    node_id = match.candidates[0]["id"]
-    ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try:
-        found, added = append_session_record(
-            _graph_path(),
-            node_id,
-            phase="blueprint",
-            harness=eff_harness,
-            session_id=eff_session,
-            ended_at=ended_at,
-            started_at=started_at,
-        )
-    except ValueError as exc:
-        typer.echo(f"session close: {exc}", err=True)
-        raise typer.Exit(code=2)
-    if not found:
-        typer.echo(f"session close: node {node_id} disappeared before close.", err=True)
-        raise typer.Exit(code=2)
-    receipt = {
-        "node_id": node_id,
-        "status": "closed",
-        "phase": "blueprint",
-        "harness": eff_harness,
-        "session_id": eff_session,
-        "summary": summary,
-        "launch": launch,
-        "ended_at": ended_at,
-        "added": added,
-    }
-    if json_out:
-        typer.echo(json.dumps(receipt))
-    else:
-        typer.echo(f"blueprint closed {node_id} ({eff_harness}:{eff_session})")
-        typer.echo(f"summary: {summary}")
-        typer.echo(f"launch: {launch}")
-
-
-@session_app.command("reap-open")
-def cmd_session_reap_open(
-    node: str = typer.Argument(..., help="Node id / slug / bare-hex."),
-    harness: str = typer.Option(..., "--harness", help="Harness owning the dead session."),
-    session_id: str = typer.Option(..., "--session-id", help="Dead harness session id."),
-    phase: str = typer.Option(
-        "do",
-        "--phase",
-        help=(
-            "Lifecycle phase of the open row. 'do' removes the row (it wedges "
-            "node status); any other phase (a spawn-opened review row) fills "
-            "ended_at and keeps the provenance; 'all' settles every open row "
-            "carrying the identity (the death-cascade spelling)."
-        ),
-    ),
-    json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
-) -> None:
-    """Reap one exact open session row after the observer proves session death; the reap sweep settles a done+merged node's open do row on its own, so this verb is the hand path for every other case, including a node still in flight."""
-    from fno.graph.fuzzy import resolve_node
-    from fno.graph.statuses import is_open_do_row, is_open_phase_row
-    from fno.graph.store import reap_open_session_record, read_graph
-    from fno.graph.types import SESSION_PHASES
-
-    entries = read_graph(_graph_path())
-    match = resolve_node(node, entries)
-    if match.kind != "exact":
-        typer.echo(f"session reap-open: no exact node matches {node!r}.", err=True)
-        raise typer.Exit(code=2)
-    node_id = match.candidates[0]["id"]
-    try:
-        receipt = reap_open_session_record(
-            _graph_path(), node_id, phase=phase, harness=harness, session_id=session_id
-        )
-    except (ValueError, OSError, RuntimeError) as exc:
-        typer.echo(f"session reap-open: {exc}", err=True)
-        raise typer.Exit(code=2)
-
-    reread = read_graph(_graph_path())
-    rebound = next((entry for entry in reread if entry.get("id") == node_id), None)
-    if rebound is None:
-        typer.echo(f"session reap-open: node {node_id} disappeared on read-back.", err=True)
-        raise typer.Exit(code=1)
-    rows = rebound.get("sessions") or []
-    want_phases = sorted(SESSION_PHASES) if phase == "all" else [phase]
-    matching_open = any(
-        any(is_open_phase_row(row, ph) for ph in want_phases)
-        and (row.get("harness"), row.get("session_id")) == (harness.strip(), session_id.strip())
-        for row in rows
-    )
-    remaining = sum(is_open_do_row(row) for row in rows)
-    higher_precedence = (
-        any(
-            rebound.get(field)
-            for field in ("completed_at", "superseded_by", "deferred_at", "pr_number")
-        )
-        or rebound.get("status") == "blocked"
-    )
-    expected_in_progress = bool(rebound.get("locked_by")) or remaining > 0
-    status_ok = higher_precedence or (
-        (rebound.get("status") == "in_progress") == expected_in_progress
-    )
-    if matching_open or not status_ok:
-        typer.echo(
-            f"session reap-open: read-back did not settle {node_id} "
-            f"(matching_open={matching_open}, status={rebound.get('status')!r}, "
-            f"remaining_open_do={remaining}).",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    receipt.update(
-        {
-            "node_id": node_id,
-            "settled": True,
-            "status_after": rebound.get("status"),
-            "remaining_open_do": remaining,
-        }
-    )
-    if json_out:
-        typer.echo(json.dumps(receipt, sort_keys=True))
-    else:
-        typer.echo(
-            f"settled {node_id}: row_removed={receipt['row_removed']} "
-            f"row_closed={receipt.get('row_closed')} "
-            f"status={receipt['status_after']} remaining_open_do={remaining}"
-        )
-
+# Session lifecycle verbs (stamp/close/reap) live in _session.py: this file is
+# over its line budget and shrink-only, so code a change touches moves out with it.
+from fno.graph._session import session_app  # noqa: E402
 
 cli.add_typer(session_app, name="session", hidden=True)
 
@@ -9099,7 +8561,7 @@ def _done_gate_pipeline(
     # journaled line (the backlog_done_forced event above) rather than silence.
     if not force:
         promise = resolve_promise_evidence(node, cwd=node.get("cwd"), query=_done_gh_query)
-        if promise.outcome == "promise_unmet":
+        if not promise.satisfied:
             typer.echo(promise.reason, err=True)
             raise typer.Exit(code=promise.exit_code)
         if promise.warning:
@@ -10758,7 +10220,7 @@ def cmd_reconcile(
     # rather than closing silently on the unattended sweep. Reconcile is the
     # MAINSTREAM close (auto-fires on SessionStart), so without this leg a node
     # that cmd_done refused would close here on the next session anyway.
-    promise_unmet: list[tuple[str, str]] = []
+    promise_held: list[tuple[str, str, str]] = []
     promise_warnings: list[dict[str, str]] = []
     if closeable:
         gated: list = []
@@ -10788,11 +10250,11 @@ def cmd_reconcile(
                 typer.echo(f"warning: {verdict.warning}", err=True)
             if verdict.warning:
                 promise_warnings.append({"node_id": record.node_id, "warning": verdict.warning})
-            if verdict.outcome == "promise_unmet":
+            if not verdict.satisfied:
                 # First refusal line only: the full reason belongs to the verb
                 # the operator runs to resolve it, not this one-line sweep roll.
                 first_line = (verdict.reason or "").splitlines()[0]
-                promise_unmet.append((record.node_id, first_line))
+                promise_held.append((record.node_id, first_line, verdict.outcome))
             else:
                 gated.append(record)
         closeable = gated
@@ -11554,7 +11016,8 @@ def cmd_reconcile(
             ],
             # Closeable records held open by the promise gate (): a merged
             # PR whose plan promised work that has not all shipped.
-            "promise_unmet": [{"node_id": nid, "reason": reason} for nid, reason in promise_unmet],
+            "promise_unmet": [{"node_id": n, "reason": r} for n, r, o in promise_held if o == "promise_unmet"],
+            "promise_unknown": [{"node_id": n, "reason": r} for n, r, o in promise_held if o == "promise_unknown"],
             "promise_warnings": promise_warnings,
             "supersession_evidence_failures": owed_evidence_failures,
         }
@@ -11579,7 +11042,7 @@ def cmd_reconcile(
         and not healed_epics
         and not contained_closed
         and not reverted_stamped
-        and not promise_unmet
+        and not promise_held
         and not promise_warnings
         and not owed_evidence_failures
         and not closure_claims
@@ -11644,17 +11107,12 @@ def cmd_reconcile(
 
         typer.echo(summarize_edge_settlement(blocked_by_settlement))
 
-    if promise_unmet:
-        # Held open, not failed: the PR merged but the plan promised more. The
-        # operator resolves it through `fno backlog done <id> --force --reason`
-        # (a deliberate half-ship) or by shipping/filing the remainder.
-        held = "Holding" if dry_run else "Held"
-        typer.echo(
-            f"{held} {len(promise_unmet)} node(s) open (merged PR, unmet plan promise):",
-            err=True,
-        )
-        for nid, reason in promise_unmet:
-            typer.echo(f"  {nid}: {reason}", err=True)
+    if promise_held:
+        # Held open, not failed: either the plan promised more than merged, or
+        # the ship count could not be read. summarize_promise_held splits them.
+        from fno.graph._reconcile import summarize_promise_held
+
+        typer.echo(summarize_promise_held(promise_held, dry_run=dry_run), err=True)
 
     if promise_warnings:
         typer.echo("Promise ship-count warnings:", err=True)

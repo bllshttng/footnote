@@ -508,18 +508,19 @@ pub fn worker_qos_enabled(cwd: &Path) -> bool {
 
 /// Resolve the live `auto_merge.enabled` master switch.
 ///
-/// This value is read at the irreversible native-auto-merge arm, so only a
-/// real TOML `true` grants consent. Missing candidates fall through according
-/// to normal precedence, but a present unreadable or malformed candidate is a
-/// veto: lower-precedence configuration cannot resurrect merge authority.
+/// Missing candidates fall through according to normal precedence, but a
+/// present unreadable or malformed candidate is a veto: lower-precedence
+/// configuration cannot resurrect merge authority.
 ///
-/// MIRROR NOTE (posture readers): the Python coercer
-/// (`AutoMergeBlock._coerce_enabled` via `_coerce_affirmative`) also accepts
-/// string spellings ("true"/"yes"/"1"/"on"), so `enabled = "true"` arms the
-/// merge verb and the git-protection hook (both resolve through that
-/// tolerant reader) but not this arm. Deliberately stricter here; any change
-/// to either spelling set must move all three readers or the gates split on
-/// that spelling.
+/// MIRROR NOTE (posture readers): this accepts the same affirmative spellings
+/// the Python coercer does (`AutoMergeBlock._coerce_enabled` via
+/// `_coerce_affirmative`): a real boolean, the integer 1, and the strings
+/// "true", "yes", "1", "on". It was deliberately stricter while it read only
+/// for the native arm. Now `fno do pr merge` resolves its own standing switch
+/// through here, so a stricter reader would refuse a documented spelling that
+/// the same verb honored a release ago. Any change to either spelling set
+/// must move both readers and the git-protection hook, or the gates split on
+/// exactly that spelling.
 pub fn auto_merge_enabled(cwd: &Path) -> bool {
     for path in config_candidates(cwd) {
         let content = match std::fs::read_to_string(&path) {
@@ -539,9 +540,25 @@ pub fn auto_merge_enabled(cwd: &Path) -> bool {
         let Some(enabled) = auto_merge.get("enabled") else {
             continue;
         };
-        return enabled.as_bool().unwrap_or(false);
+        return affirmative(enabled);
     }
     false
+}
+
+/// The Python coercer's affirmative set, in Rust. Anything else is false, so a
+/// typo still fails safe toward disabled.
+fn affirmative(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Boolean(b) => *b,
+        toml::Value::Integer(i) => *i == 1,
+        toml::Value::String(s) => {
+            matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        }
+        _ => false,
+    }
 }
 
 /// The arming-time automerge floor: `Some(why)` when the live config resolves
@@ -1113,21 +1130,10 @@ mod tests {
 
     // --- auto_merge.enabled live master switch ----------------------------
 
-    #[test]
-    fn auto_merge_enabled_accepts_only_real_true() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        for (name, body, want) in [
-            ("ame-true", "[auto_merge]\nenabled = true\n", true),
-            ("ame-false", "[auto_merge]\nenabled = false\n", false),
-            ("ame-string", "[auto_merge]\nenabled = \"true\"\n", false),
-            ("ame-integer", "[auto_merge]\nenabled = 1\n", false),
-        ] {
-            clear_config_env();
-            let cwd = write_project_settings(name, body);
-            assert_eq!(auto_merge_enabled(&cwd), want, "fixture {name}");
-        }
-        clear_config_env();
-    }
+    // The old `accepts_only_real_true` case is gone, not weakened: it asserted
+    // the divergence from the Python coercer that this reader used to carry,
+    // and `accepts_the_python_affirmative_spellings` below asserts the union
+    // both readers now share.
 
     #[test]
     fn auto_merge_enabled_absent_is_false() {
@@ -1144,7 +1150,9 @@ mod tests {
     fn auto_merge_enabled_malformed_project_value_masks_global_true() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_config_env();
-        let cwd = write_project_settings("ame-malformed", "[auto_merge]\nenabled = \"yes\"\n");
+        // "banana", not "yes": a scalar typo is operator error and still fails
+        // safe toward disabled. "yes" is a documented affirmative spelling.
+        let cwd = write_project_settings("ame-malformed", "[auto_merge]\nenabled = \"banana\"\n");
         let global = write_file("ame-global-true", "[auto_merge]\nenabled = true\n");
         std::env::set_var(
             "FNO_GLOBAL_SETTINGS_PATH",
@@ -1153,6 +1161,38 @@ mod tests {
         let got = auto_merge_enabled(&cwd);
         clear_config_env();
         assert!(!got, "malformed project consent must veto global true");
+    }
+
+    #[test]
+    fn auto_merge_enabled_accepts_the_python_affirmative_spellings() {
+        // This reader now decides `fno do pr merge` too. A stricter set here
+        // would refuse `enabled = "true"` at the verb that honored it before.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (i, literal) in ["true", "\"true\"", "\"yes\"", "\"1\"", "\"ON\"", "1"]
+            .iter()
+            .enumerate()
+        {
+            clear_config_env();
+            let cwd = write_project_settings(
+                &format!("ame-affirmative-{i}"),
+                &format!("[auto_merge]\nenabled = {literal}\n"),
+            );
+            std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
+            let got = auto_merge_enabled(&cwd);
+            clear_config_env();
+            assert!(got, "{literal} must read as enabled");
+        }
+        for (i, literal) in ["false", "\"no\"", "\"banana\"", "0"].iter().enumerate() {
+            clear_config_env();
+            let cwd = write_project_settings(
+                &format!("ame-negative-{i}"),
+                &format!("[auto_merge]\nenabled = {literal}\n"),
+            );
+            std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
+            let got = auto_merge_enabled(&cwd);
+            clear_config_env();
+            assert!(!got, "{literal} must read as disabled");
+        }
     }
 
     #[test]

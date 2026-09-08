@@ -385,13 +385,27 @@ Decide whether a node's plan promised work that has not all shipped.
          ``done_probes``); a declared gate that cannot be evaluated fails closed.
       C. Ship count. ``expected_url_count: N`` (N >= 2) and fewer than N of the
          node's PR refs are MERGED. The right check for multi-repo / split
-         deliveries.
+         deliveries. Refs are de-duplicated by PR number, so one PR listed
+         twice is one ship and can never satisfy two.
 
     A gate that only fires on an explicit promise cannot false-positive, which
     is the reason the count is written at blueprint time rather than inferred
     afterward. Fails open on an absent/unreadable plan or unparseable
     frontmatter: a stale ``plan_path`` must not wedge a close, but the warning
     names the unreadable path so the gap is visible, not silent.
+
+    Three outcomes, not two. ``ok`` is POSITIVE evidence and is the only one
+    that closes; every close boundary reads ``verdict.satisfied``, never a
+    negative test against one refusal name. ``promise_unmet`` is a policy
+    refusal the operator resolves (exit 6). ``promise_unknown`` is a retryable
+    read outage under condition C: a declared count with some refs unreadable
+    is unconfirmed in BOTH directions, so the node stays open and the next
+    sweep retries (exit 4, the merge gate's own outage code). Reading that
+    outage as ``ok`` is what closed declared multi-ship nodes on the strength
+    of a gh timeout. A NON-retryable read failure stays ``promise_unmet``: it
+    is a policy problem (bad credentials, a stale ref) that retrying will not
+    fix. A plan with no declaration never reaches condition C, so legacy
+    behavior is unchanged.
 
 ## emit_session_satisfied_for_record
 
@@ -600,6 +614,10 @@ Select up to ``max_lanes`` ready nodes, each collision-clean to dispatch.
     idempotent only for a single caller's retries). It is NOT a standalone
     distributed lock; do not run two ``--claim`` selectors concurrently outside
     the walker.
+
+## cmd_ready (the selection, served natively)
+
+Which backlog nodes may be dispatched right now, and in what order. The decision lives in `crates/fno-agents/src/backlog_ready.rs` (`backlog_ready::select`), served by the keeper's `ready` verb; `fno backlog ready` and `fno backlog next` are clients. The verb accepts the filter flags (`project`, `all`, `roadmap_id`, `parent`, `mission`, `include_ideas`, `include_deferred`, `repo_root`), an optional `staleness_days` override, and an optional `entries` array - rows ride IN, the one decision answers both backends (the external-tracker branch feeds `_joined_open_candidates` through it). Without the override the keeper reads `config.backlog.staleness_days` from the `config.toml` beside the graph, falling back to the 21-day default. With no `claimed` array the verb resolves live claims itself and FAILS CLOSED: an unreadable claims root refuses the whole selection (the same contract `live_claimed_node_ids(strict=True)` gave the Python leg), never an empty set read as "nothing is claimed". The reply carries survivors plus per-node drops, first-filter attribution, with guard drops naming `dead-ancestor:<id>`, `design-stage`, `idea-stage`, `stale-quarantine`, `contained:<id>`, or the hold verdict's guard reason; `advance --explain` renders from them (AC4). A missing `--parent` node refuses (exit 1, `ReadyParentMissingError` client-side). An unreachable keeper refuses selection: `fno backlog ready` exits non-zero naming the keeper, never a locally recomputed fallback (AC6). The `next` observer merge (`_with_observer`) still re-verifies observer rows through the Python `selection_guards`: a divergence detector over the reply, not a second selection leg. Under `next --claim`, the lock fields land on the graph entry the winner id resolves to - the selection rows are serialized summaries, not references into the commit snapshot.
 
 ## selection_guards
 

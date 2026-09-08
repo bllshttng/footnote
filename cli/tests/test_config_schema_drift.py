@@ -320,5 +320,12 @@ def test_rust_auto_merge_enabled_matches_model_default() -> None:
     assert 'get("auto_merge")' in body and 'get("enabled")' in body, (
         "Rust reader lost the canonical auto_merge.enabled spelling"
     )
-    assert "unwrap_or(false)" in body, "Rust reader no longer fails closed"
+    # Fail-closed, pinned to the mechanism rather than to one spelling of it.
+    # The coercion moved into `affirmative` when this reader stopped being the
+    # native arm's alone and started deciding `fno do pr merge` too, so the
+    # guard reads the arm that decides an unrecognised value.
+    assert "affirmative(enabled)" in body, "Rust reader lost its value coercion"
+    coercer = re.search(r"fn affirmative\(.*?\n\}", src, re.DOTALL)
+    assert coercer, "affirmative() not found (guard inert?)"
+    assert "_ => false" in coercer.group(0), "Rust reader no longer fails closed"
     assert AutoMergeBlock.model_fields["enabled"].default is False

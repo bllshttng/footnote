@@ -548,6 +548,14 @@ fn resolve_dispatch(
         }) {
             Ok(o) if o.status.success() => CloseOutcome::Closed,
             Ok(o) if o.status.code() == Some(5) => CloseOutcome::AwaitingMerge,
+            // Exit 4 is the OUTAGE code: the gh cross-check could not be read,
+            // or the promise gate could not confirm a declared ship count. In
+            // both the node is healthy and the read is retryable, so this is
+            // success-shaped like exit 5 - reconcile closes it once GitHub
+            // answers. Without this arm the catch-all below parks it, and
+            // Parked is `breaker.record_failure`: a long enough gh incident
+            // auto-defers the very node the promise gate held open for safety.
+            Ok(o) if o.status.code() == Some(4) => CloseOutcome::AwaitingMerge,
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
                 CloseOutcome::Parked(if stderr.is_empty() {
@@ -2396,6 +2404,50 @@ mod tests {
             breaker.consecutive_failures("x-awm5001"),
             0,
             "done exit 5 (awaiting merge) is a success, never a failure"
+        );
+        assert!(journal_lines(&project_journal)
+            .iter()
+            .any(|l| l.contains("active_backlog_dispatched") && l.contains("awaiting_merge")));
+    }
+
+    #[test]
+    fn resolve_dispatch_done_exit4_is_awaiting_never_a_failed_drain() {
+        // A retryable read outage exits 4 (the promise gate's unknown verdict,
+        // and the merge gate's own outage code). The node is healthy and the
+        // read retries, so it must land in the keep-set beside exit 5. Parking
+        // it would feed breaker.record_failure and auto-defer a healthy node
+        // during a gh incident.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fno = bin.join("fno");
+        std::fs::write(
+            &fno,
+            "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then\n  echo 'Unknown: x-b6db could not confirm 2 ships (1 confirmed MERGED): gh pr view timed out' >&2\n  exit 4\nfi\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        breaker.record_failure("x-b6db"); // pre-existing streak to prove reset
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-b6db",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: "pr green".to_string(),
+            },
+        );
+
+        assert_eq!(
+            breaker.consecutive_failures("x-b6db"),
+            0,
+            "done exit 4 (retryable read outage) is a success, never a failure"
         );
         assert!(journal_lines(&project_journal)
             .iter()

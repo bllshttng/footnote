@@ -9,12 +9,12 @@
 //!
 //! The speed win is in-process reads. One graph read (the same
 //! `read_defaulted_opts(path, false, false)` the keeper's `read_strict` runs)
-//! feeds claimed-node lookups, PR binding, and crown scope. The claims merge
-//! is a directory scan. `needs` folds in-process over the same sources `fno
-//! agents needs` reads. Four source reads stay subprocesses: `gh pr list` (a
-//! real network boundary), `fno backlog ready` (its selection logic lives
-//! inline in the typer command with no function behind it; re-typing the
-//! filter chain here would drift from `next`'s), `fno inbox outstanding`
+//! feeds claimed-node lookups, PR binding, crown scope, AND the unplanned
+//! queue's ready selection (the same `backlog_ready::select` the verb
+//! serves). The claims merge is a directory scan. `needs` folds in-process
+//! over the same sources `fno
+//! agents needs` reads. Three source reads stay subprocesses: `gh pr list` (a
+//! real network boundary), `fno inbox outstanding`
 //! (measured 2026-09-04: 1.12s wall at load 52, far under its 10s bar - the
 //! plan's change 2 keeps it and records the measurement), and `fno backlog
 //! undispatched`, which used to classify the graph in-process here. That copy
@@ -72,7 +72,9 @@ pub(crate) const LEGACY_DEFER_PREFIX: &str = "deferred:";
 /// The literal commands a reader can re-run; they ARE the checkability
 /// property, so they sit beside the readers (board.py spelled them identically).
 pub(crate) const SRC_UNDISPATCHED: &str = "fno backlog undispatched --json";
-pub(crate) const SRC_READY: &str = "fno backlog ready --json -A";
+/// The unplanned queue's ready source answers in-process now; the label
+/// names the function, the way `agents claim list` labels its source.
+pub(crate) const SRC_READY: &str = "backlog_ready::select (-A)";
 pub(crate) const SRC_CLAIMS: &str = "fno agents claim list -J --include-stale --prefix node:";
 pub(crate) const SRC_PRS: &str =
     "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url";
@@ -353,9 +355,10 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     };
     warnings.extend(claimed_warnings);
 
-    // The five reads that can take real wall time run concurrently: gh pr
-    // list, `fno backlog ready`, `fno inbox outstanding`, the batched truth
-    // probe, and the needs fold (in-process, but its refused-worker leg batch
+    // The reads that can take real wall time run concurrently: gh pr
+    // list, `fno inbox outstanding`, the batched truth
+    // probe, the ready selection (in-process; its plan-document disk reads
+    // still cost the slice), and the needs fold (in-process, but its refused-worker leg batch
     // probes the whole registry and measured ~7s on a busy fleet). Their
     // slices were derived above in the reference's order.
     let entries_ref = entries.as_deref();
@@ -379,16 +382,49 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 (prs, pr_nodes, w, truncated)
             })
         });
-        let t_ready = s_ready.map(|slice| {
+        let t_ready = s_ready.map(|_slice| {
+            let entries = entries_ref.map(|e| e.to_vec());
             let cwd = cwd_for_threads.clone();
             s.spawn(move || {
-                let mut cmd = fno_py_cmd();
-                cmd.extend(
-                    ["backlog", "ready", "--json", "-A"]
-                        .iter()
-                        .map(|s| s.to_string()),
-                );
-                run_json(cmd, &cwd, slice)
+                // In-process now: the admission decision lives in this
+                // binary (backlog_ready::select) and reads the graph the
+                // board already loaded, so the source costs plan-document
+                // disk reads, not an interpreter cold start. The budget
+                // slice stays - the source still costs wall time.
+                let Some(entries) = entries else {
+                    return SourceRead::err("graph unreadable: no entries for ready selection");
+                };
+                // Strict claims read: an unreadable root is unknown claim
+                // state, surfaced as a source error rather than an empty
+                // set that would re-dispatch held work.
+                let claimed_records = crate::claims::list_strict(Some("node:"), None, false);
+                let Ok(claim_records) = claimed_records else {
+                    return SourceRead::err(format!(
+                        "claims unreadable: {}",
+                        claimed_records.err().unwrap_or_default()
+                    ));
+                };
+                let mut claimed = std::collections::BTreeSet::new();
+                for rec in claim_records {
+                    if let Some(id) = rec.key.strip_prefix("node:") {
+                        claimed.insert(id.to_string());
+                    }
+                }
+                let opts = crate::backlog_ready::ReadyOpts {
+                    all: true,
+                    repo_root: crate::paths::canonical_repo_root(&cwd)
+                        .map(|p| p.display().to_string()),
+                    staleness_days: crate::backlog_ready::configured_staleness_days(
+                        &cwd.join(".fno"),
+                    ),
+                    claimed,
+                    now_ms: crate::claims::now_ms(),
+                    ..Default::default()
+                };
+                match crate::backlog_ready::select(&entries, &opts) {
+                    Ok(reply) => SourceRead::ok(Value::Array(reply.rows)),
+                    Err(_) => SourceRead::err("ready: parent scope did not resolve"),
+                }
             })
         });
         let t_outstanding = s_outstanding.map(|slice| {

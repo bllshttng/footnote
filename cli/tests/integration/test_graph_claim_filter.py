@@ -221,15 +221,26 @@ def test_released_claim_does_not_block(tmp_graph, tmp_path):
 
 @pytest.mark.parametrize("command", [("next", "--all"), ("ready", "--all")])
 def test_dispatch_selection_refuses_when_live_claim_state_is_unavailable(
-    tmp_graph, monkeypatch, command
+    tmp_graph, tmp_path, monkeypatch, command
 ):
     entries = _two_ready_entries()
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
 
-    def unavailable(*args, **kwargs):
-        raise OSError("claims unavailable")
+    if command[0] == "ready":
+        # The ready leg enforces claim liveness inside the keeper, so the
+        # refusal is driven through the env the spawned keeper inherits:
+        # a claims root that exists but cannot be read is UNKNOWN state,
+        # which must refuse, never read as "nothing is claimed".
+        locked = tmp_path / "claims-locked"
+        locked.mkdir()
+        locked.chmod(0o000)
+        monkeypatch.setenv("FNO_CLAIMS_ROOT", str(locked))
+    else:
 
-    monkeypatch.setattr("fno.graph.cli._live_claimed_node_ids", unavailable)
+        def unavailable(*args, **kwargs):
+            raise OSError("claims unavailable")
+
+        monkeypatch.setattr("fno.graph.cli._live_claimed_node_ids", unavailable)
 
     result = _invoke("backlog", *command)
 
