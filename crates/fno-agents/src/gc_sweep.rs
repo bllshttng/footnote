@@ -32,10 +32,12 @@ use crate::gc::{
 };
 use crate::graph_store::{self, WorkState};
 use crate::paths::AgentsHome;
-use crate::receipt::{build_reap_receipt, write_reap_receipt, ReapReceipt};
+use crate::receipt::{
+    build_reap_receipt, expire_receipt_details, write_reap_receipt, EffectRecord, ReapReceipt,
+};
 use crate::state;
 
-pub(crate) use crate::daemon::HarnessStoreIndex;
+pub(crate) use crate::gc_inventory::HarnessStoreIndex;
 
 /// Outcome of one retirement pass, for the `fno agents reap` report and
 /// tests. Every row the pass judged lands in exactly one bucket, zero
@@ -857,30 +859,59 @@ fn expire_reap_receipts(home: &AgentsHome, retain_days: u64, summary: &mut GcSum
         let read = std::fs::read(&path)
             .map_err(|e| format!("receipt unreadable: {e}"))
             .and_then(|raw| {
-                serde_json::from_slice::<Value>(&raw).map_err(|e| format!("receipt malformed: {e}"))
+                serde_json::from_slice::<ReapReceipt>(&raw)
+                    .map_err(|e| format!("receipt malformed: {e}"))
             });
-        let reaped = match read {
-            Ok(value) => row_timestamp(value.get("reaped_at")),
+        let mut receipt = match read {
+            Ok(receipt) => receipt,
             Err(reason) => {
                 summary.kept_receipts.push((name, reason));
                 continue;
             }
         };
-        let Some(reaped) = reaped else {
-            summary.kept_receipts.push((
-                name,
-                "reaped_at missing or unparseable; a failed read is not evidence of age"
-                    .to_string(),
-            ));
-            continue;
+        let reaped = match row_timestamp(Some(&Value::String(receipt.reaped_at.clone()))) {
+            Some(ts) => ts,
+            None => {
+                summary.kept_receipts.push((
+                    name,
+                    "reaped_at missing or unparseable; a failed read is not evidence of age"
+                        .to_string(),
+                ));
+                continue;
+            }
         };
         let age_secs = (now - reaped).num_seconds().max(0) as u64;
         if age_secs > window_secs {
-            match std::fs::remove_file(&path) {
-                Ok(()) => summary.expired_receipts.push(name),
-                Err(err) => summary
+            // Past the window: strip the expendable detail, keep the identity
+            // core. The mapping this store exists to preserve outlives the
+            // operation log (AC2-HP); deleting the file would destroy the
+            // only recovery record for a session that may still be resumable.
+            if expire_receipt_details(&mut receipt) {
+                // Rewrite IN PLACE: the expiry's job is to age THIS file's
+                // expendable detail, not to mint a second receipt at the
+                // canonical key while the original keeps its stale copy.
+                let body = match serde_json::to_vec_pretty(&receipt) {
+                    Ok(body) => body,
+                    Err(err) => {
+                        summary
+                            .kept_receipts
+                            .push((name, format!("expiry rewrite failed: {err}")));
+                        continue;
+                    }
+                };
+                match std::fs::write(&path, body) {
+                    Ok(()) => summary.expired_receipts.push(name),
+                    Err(err) => summary
+                        .kept_receipts
+                        .push((name, format!("expiry rewrite failed: {err}"))),
+                }
+            }
+            // Nothing expendable left: the receipt is already the identity
+            // core only; leave it byte-identical and name it as kept.
+            else {
+                summary
                     .kept_receipts
-                    .push((name, format!("expiry failed: {err}"))),
+                    .push((name, "past retention window; identity core kept".into()));
             }
         }
     }
