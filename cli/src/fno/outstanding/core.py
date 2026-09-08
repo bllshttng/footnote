@@ -194,16 +194,19 @@ def events_path(root: Path) -> Path:
     return project_log(EVENTS_NAME, project_root=Path(root))
 
 
-def _iter_question_lines(fh: "Iterable[str]") -> "Iterator[str]":
+def _iter_question_lines(
+    fh: "Iterable[str]", markers: "frozenset[str] | None" = None
+) -> "Iterator[str]":
     """Yield only the lines that can possibly be a question event.
 
     The substring test runs per line as it is read, so neither the whole file
     nor the whole filtered set is ever held beyond what the fold needs. Both
     question types share ``QUESTION_MARKER``, so a line without it cannot be
-    one of ours and skipping it changes no outcome.
+    one of ours and skipping it changes no outcome. ``markers`` widens the
+    pass (the decision rows a fold replays carry none of those substrings).
     """
     for line in fh:
-        if QUESTION_MARKER in line:
+        if any(marker in line for marker in (markers or frozenset({QUESTION_MARKER}))):
             yield line
 
 
@@ -232,8 +235,17 @@ def append_question_event(event: dict[str, Any], root: Path) -> None:
         raise QuestionIndexWriteError(str(question_id), exc) from exc
 
 
-def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, Any]]":
-    """Read valid question envelopes, distinguishing absent from unreadable."""
+def _read_question_events(
+    path: Path,
+    *,
+    missing_hint: bool,
+    types: "frozenset[str] | None" = None,
+    line_markers: "frozenset[str] | None" = None,
+) -> "list[dict[str, Any]]":
+    """Read valid question envelopes, distinguishing absent from unreadable.
+    ``types`` narrows the envelope set (the folds read asks and closes); None
+    keeps every envelope carrying a question_id, decisions included.
+    ``line_markers`` widens the cheap per-line prefilter to match."""
     try:
         path.stat()
     except FileNotFoundError:
@@ -256,15 +268,14 @@ def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, 
     events: "list[dict[str, Any]]" = []
     try:
         with path.open(encoding="utf-8") as fh:
-            for line in _iter_question_lines(fh):
+            for line in _iter_question_lines(fh, markers=line_markers):
                 try:
                     rec = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue
-                if not isinstance(rec, dict) or rec.get("type") not in {
-                    QUESTION_EVENT,
-                    QUESTION_CLOSED_EVENT,
-                }:
+                if not isinstance(rec, dict) or (
+                    types is not None and rec.get("type") not in types
+                ):
                     continue
                 data = rec.get("data")
                 if isinstance(data, dict) and data.get("question_id"):
@@ -432,6 +443,18 @@ def read_answered_questions() -> "list[dict[str, Any]]":
             )
     answered.sort(key=lambda a: (a["closed_ts"], a["id"]))
     return answered
+
+
+def read_question_events() -> "list[dict[str, Any]]":
+    """Every question-journal record (ask, close, decision), oldest-first: the
+    raw stream an answer-suppression fold replays to tell a live answer from
+    one an episode boundary already retired. Decision rows carry none of the
+    question substrings, so this reader widens the per-line prefilter."""
+    return _read_question_events(
+        questions_path(),
+        missing_hint=False,
+        line_markers=frozenset({QUESTION_MARKER, "operator_decision"}),
+    )
 
 
 def _capture_project_roots(root: Path) -> "list[Path]":

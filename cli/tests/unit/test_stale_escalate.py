@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.outstanding.core import read_open_questions
+from fno.outstanding.core import read_open_questions, read_question_events
 
 _NOW = 1_800_000_000.0
 
@@ -210,6 +210,151 @@ def test_answered_finding_ask_suppresses_the_renag(tmp_path: Path) -> None:
     assert outcome == "answered"
     assert seen_id == asked_id
     assert read_open_questions(tmp_path) == []
+
+
+def test_answered_ask_asks_again_after_the_set_empties(tmp_path: Path) -> None:
+    """The suppression is per-episode: an answered row that disappears and
+    later recurs is NEW work, and must ask again - the measured case of a
+    path answered once, cleaned, and re-dirtied weeks later."""
+    from fno.agents.stale_escalate import answered_question
+
+    transcripts = {"dddd4444-0000": _tail("stopped mid turn", 61 * 1440 * 60)}
+    _outcome, asked_id = _stale_run(tmp_path, [_stale_row()], transcripts)
+    _answer(asked_id, "reaped", tmp_path)
+    assert answered_question(
+        tmp_path, _key_of(tmp_path, asked_id), marker="watchdog-stale"
+    ) == asked_id
+
+    _stale_run(tmp_path, [_stale_row()], {})  # the set empties: episode ends
+
+    outcome, fresh_id = _stale_run(tmp_path, [_stale_row()], transcripts)
+
+    assert outcome == "asked"
+    assert fresh_id != asked_id
+    assert answered_question(
+        tmp_path, _key_of(tmp_path, asked_id), marker="watchdog-stale"
+    ) is None
+
+
+def _key_of(root: Path, qid: str) -> str:
+    """The dedupe key inside a question's marker tag (test helper)."""
+    for q in read_open_questions(root):
+        if q.id == qid:
+            return q.question.split("[watchdog-stale:", 1)[1].split("]", 1)[0]
+    for rec in read_question_events():
+        data = rec.get("data") or {}
+        text = str(data.get("question") or "")
+        if data.get("question_id") == qid and "[watchdog-stale:" in text:
+            return text.split("[watchdog-stale:", 1)[1].split("]", 1)[0]
+    raise AssertionError(f"no question {qid} found")
+
+
+def test_answer_stands_when_the_set_changes_without_emptying(
+    tmp_path: Path,
+) -> None:
+    """The only episode boundary is the empty set: a set that changed away
+    and back without ever emptying is still inside the answered episode, so
+    the answer holds and the fold does not re-nag."""
+    one = _stale_row("dddd4444-0000", "k1")
+    transcripts_one = {"dddd4444-0000": _tail("stopped mid turn", 61 * 1440 * 60)}
+    _outcome, first_id = _stale_run(tmp_path, [one], transcripts_one)
+    _answer(first_id, "noted", tmp_path)
+
+    two = _stale_row("eeee5555-0000", "k2")
+    transcripts_two = {
+        "dddd4444-0000": _tail("stopped mid turn", 61 * 1440 * 60),
+        "eeee5555-0000": _tail("blocked mid turn", 30 * 1440 * 60),
+    }
+    _outcome, _second_id = _stale_run(tmp_path, [one, two], transcripts_two)
+
+    outcome, seen_id = _stale_run(tmp_path, [one], transcripts_one)
+
+    assert outcome == "answered"
+    assert seen_id == first_id
+
+
+def test_answered_visit_closes_stragglers(tmp_path: Path) -> None:
+    """The answered branch reconciles like the duplicate branch: an open
+    straggler from an interrupted supersede cannot outlive the visit."""
+    from fno.events import operator_question
+    from fno.outstanding.core import append_question_event
+
+    transcripts = {"dddd4444-0000": _tail("stopped mid turn", 61 * 1440 * 60)}
+    _outcome, asked_id = _stale_run(tmp_path, [_stale_row()], transcripts)
+    _answer(asked_id, "noted", tmp_path)
+
+    straggler_id = "q-feedface"
+    append_question_event(
+        operator_question(
+            question_id=straggler_id,
+            question="[watchdog-stale:000000000000] straggler: k0",
+            session_id="watchdog-test",
+            cwd=str(tmp_path),
+            ask="triage",
+            source="daemon",
+        ),
+        tmp_path,
+    )
+    assert len(read_open_questions(tmp_path)) == 1
+
+    outcome, seen_id = _stale_run(tmp_path, [_stale_row()], transcripts)
+
+    assert outcome == "answered"
+    assert seen_id == asked_id
+    assert read_open_questions(tmp_path) == []
+
+
+def test_answered_finding_asks_again_after_the_finding_disappears(
+    tmp_path: Path,
+) -> None:
+    """The unfinished-work emitter resets the same way: answered dirty:/w/x,
+    cleaned, re-dirtied later asks again instead of staying silent forever."""
+    from types import SimpleNamespace
+
+    from fno.agents.stale_escalate import escalate_unfinished
+
+    finding = SimpleNamespace(
+        kind="dirty", subject="/w/x", basis="82 files dirty",
+        clear_command="fno agents workspace worktree cleanup", node_id=None,
+        pr_number=None, cwd="/w/x", age_s=100.0,
+    )
+    _outcome, asked_id = escalate_unfinished(
+        [finding], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+    _answer(asked_id, "cleaning", tmp_path)
+
+    outcome, _qid = escalate_unfinished(
+        [], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+    assert outcome == "none"  # the empty visit is the episode boundary
+
+    outcome, fresh_id = escalate_unfinished(
+        [finding], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+
+    assert outcome == "recorded"
+    assert fresh_id != asked_id
+
+
+def test_reset_writes_nothing_for_a_clean_fleet(tmp_path: Path) -> None:
+    """The reset row is lazy: an empty visit with no suppressible answer
+    appends no journal row, so a quiet fleet does not grow the journal."""
+    import json
+
+    from fno.outstanding.core import events_path
+
+    _stale_run(tmp_path, [_stale_row()], {})  # empty from the start
+
+    path = events_path(tmp_path)
+    if not path.exists():
+        return  # nothing was ever written: vacuously clean
+    resets = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("type") == "operator_decision"
+        and (json.loads(line).get("data") or {}).get("subject") == "watchdog-stale:reset"
+    ]
+    assert resets == []
 
 
 def test_duplicate_run_closes_straggler_asks_from_an_interrupted_supersede(

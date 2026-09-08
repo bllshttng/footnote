@@ -11,7 +11,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fno.agents.stale_escalate import already_asked, answered_question, dedupe_key
+from fno.agents.stale_escalate import (
+    already_asked,
+    answered_question,
+    dedupe_key,
+    reset_answered,
+)
 
 STALE_MARKER = "watchdog-stale"
 
@@ -86,6 +91,7 @@ def reconcile_channel(
                 q.id, f"no {subject} rows remain at reconcile time", root,
                 lane=subject,
             )
+        reset_answered(root, marker=marker)
         return ("closed", open_qs[0].id) if open_qs else ("none", "")
 
     existing = already_asked(root, key, marker=marker)
@@ -97,6 +103,10 @@ def reconcile_channel(
         return ("duplicate", existing)
     answered = answered_question(root, key, marker=marker)
     if answered:
+        for q in _open_questions(root, marker):
+            if q.id != answered:
+                _close_question(q.id, f"{subject} set changed; superseded by {answered}",
+                                root, lane=subject)
         return ("answered", answered)
 
     import secrets

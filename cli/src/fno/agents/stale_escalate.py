@@ -81,19 +81,113 @@ _MECHANICAL_CLOSERS = frozenset({"stale-escalate", "friction-escalate"})
 
 def answered_question(root: Path, key: str, *, marker: str = MARKER) -> "str | None":
     """The id of the question carrying ``[<marker>:<key>]`` that a HUMAN
-    answered, else None. An answered ask is a consumed ask: re-minting it on
-    the next sweep is the re-nag this fold kills. An unchanged row set after
-    an answer never asks again; a CHANGED set mints a fresh key and asks.
+    answered IN THIS EPISODE, else None. An answered ask is a consumed ask:
+    re-minting it on the next sweep is the re-nag this fold kills. The
+    suppression holds only until an empty-set reset - the episode boundary
+    that makes a returning identity new work. Mechanical supersede closes
+    are not answers and never suppress. Order is read from journal POSITION,
+    never timestamps: second-granularity stamps tie.
     """
-    from fno.outstanding.core import read_answered_questions
+    from fno.outstanding.core import (
+        QUESTION_CLOSED_EVENT,
+        read_answered_questions,
+        read_question_events,
+    )
 
     needle = f"[{marker}:{key}]"
-    for question in read_answered_questions():
-        if needle in question.get("question", "") and (
-            question.get("closed_by") not in _MECHANICAL_CLOSERS
+    hit = next(
+        (
+            question
+            for question in read_answered_questions()
+            if needle in question.get("question", "")
+            and question.get("closed_by") not in _MECHANICAL_CLOSERS
+        ),
+        None,
+    )
+    if hit is None:
+        return None
+    events = read_question_events()
+    answer_idx = None
+    for i, rec in enumerate(events):
+        data = rec.get("data")
+        if (
+            rec.get("type") == QUESTION_CLOSED_EVENT
+            and isinstance(data, dict)
+            and str(data.get("question_id") or "") == hit["id"]
+            and data.get("answer")
         ):
-            return question["id"]
-    return None
+            answer_idx = i
+    if answer_idx is None:
+        return None  # no readable answer event: nothing anchors the episode
+    for rec in events[answer_idx + 1 :]:
+        data = rec.get("data")
+        if (
+            rec.get("type") == "operator_decision"
+            and isinstance(data, dict)
+            and str(data.get("subject") or "") == f"{marker}:reset"
+        ):
+            return None  # the set emptied after the answer: a new episode
+    return hit["id"]
+
+
+def reset_answered(root: Path, *, marker: str) -> None:
+    """Record the episode boundary for a marker: the measured set emptied, so
+    every prior answer stops suppressing and a returning set asks fresh. Not
+    an operator ruling - a mechanical marker the fold reads back. Written
+    only when an answer is actually pending reset, so a clean fleet adds no
+    journal rows. Positional, never timestamp, ordering: stamps tie."""
+    import secrets
+
+    from fno.events import operator_decision
+    from fno.outstanding.core import (
+        QUESTION_CLOSED_EVENT,
+        append_question_event,
+        read_answered_questions,
+        read_question_events,
+    )
+
+    needle = f"[{marker}:"
+    answered_ids = {
+        question["id"]
+        for question in read_answered_questions()
+        if needle in question.get("question", "")
+    }
+    events = read_question_events()
+    last_answer_idx = -1
+    for i, rec in enumerate(events):
+        data = rec.get("data")
+        if (
+            rec.get("type") == QUESTION_CLOSED_EVENT
+            and isinstance(data, dict)
+            and str(data.get("question_id") or "") in answered_ids
+            and data.get("answer")
+        ):
+            last_answer_idx = i
+    if last_answer_idx == -1:
+        return  # nothing is suppressing; there is nothing to reset
+    for rec in events[last_answer_idx + 1 :]:
+        data = rec.get("data")
+        if (
+            rec.get("type") == "operator_decision"
+            and isinstance(data, dict)
+            and str(data.get("subject") or "") == f"{marker}:reset"
+        ):
+            return  # already reset after the newest answer
+    reset_id = f"d-{secrets.token_hex(4)}"
+    append_question_event(
+        operator_decision(
+            decision_id=reset_id,
+            question_id=reset_id,
+            decision="measured set empty; answer suppression resets",
+            subject=f"{marker}:reset",
+            decided_by="fno agents question-fold",
+            origin="scheduler",
+            authority_source="agent",
+            rationale="episode boundary, not an operator ruling",
+            source="daemon",
+        ),
+        root,
+    )
 
 
 def escalate_unfinished(
@@ -104,6 +198,7 @@ def escalate_unfinished(
     cwd: Path,
 ) -> "tuple[str, str]":
     if not findings:
+        reset_answered(root, marker=MARKER)
         return ("none", "")
 
     import secrets
