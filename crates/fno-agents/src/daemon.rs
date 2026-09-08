@@ -3251,6 +3251,7 @@ fn build_claude_stream_entry(
     pid: u32,
     pid_start_time: Option<u64>,
     log_path: PathBuf,
+    node: Option<&str>,
 ) -> RegistryEntry {
     let cwd_s = cwd.to_string_lossy().into_owned();
     // Ambient parent edge (x-132c), captured for shape parity with the other
@@ -3262,7 +3263,9 @@ fn build_claude_stream_entry(
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     let (launch_account, launch_account_source) = crate::state::launch_provenance_from_env();
     RegistryEntry {
-        node: None,
+        // The node this spawn was FOR, from the spawn request - never the
+        // daemon's ambient env, which names the daemon-starting session.
+        node: node.filter(|v| !v.is_empty()).map(str::to_string),
         // Stream-json adoption is gated on host_mode plus mode, not on a
         // substrate, and it is not one of the three names - this row's
         // lifecycle belongs to chat/switchboard/ask, so the axis stays
@@ -3657,6 +3660,7 @@ async fn spawn_claude_stream_lane(
         worker_pid,
         worker_pid_start_time,
         ctx.home.timeline_jsonl(&short_id),
+        req.params.get("node").and_then(Value::as_str),
     );
     let uuid_for_lock = uuid.to_string();
     let insert = update_registry_offloaded(ctx.home.registry_json(), move |r| {
@@ -3704,7 +3708,14 @@ async fn spawn_claude_stream_lane(
     claim_guard.disarm();
     let _ = ctx.emitter.emit(
         "agent_spawned",
-        &json!({"name": name, "provider": "claude", "short_id": short_id, "lane": "stream", "session_uuid": uuid}),
+        &json!({
+            "name": name,
+            "provider": "claude",
+            "short_id": short_id,
+            "lane": "stream",
+            "session_uuid": uuid,
+            "node": req.params.get("node").and_then(Value::as_str),
+        }),
     );
 
     Response::ok(
@@ -3912,6 +3923,7 @@ async fn spawn_codex_thread_lane(
             "lane": "thread",
             "substrate": "thread",
             "cwd": cwd.to_string_lossy(),
+            "node": node,
         }),
     );
     Response::ok(
@@ -13659,6 +13671,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             4242,
             None,
             PathBuf::from("/tmp/log.jsonl"),
+            None,
         );
         assert!(
             entry_holds_session(&row, "sess-uuid-9"),
@@ -13675,6 +13688,19 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             row.account_record_id.as_deref(),
             crate::state::launch_account_from_env().as_deref()
         );
+        // The node rides the spawn REQUEST, never ambient env: a named node
+        // stamps, an unnamed one stays unknown.
+        let bound = build_claude_stream_entry(
+            "peer",
+            "ab12cd34",
+            std::path::Path::new("/work"),
+            "sess-uuid-9",
+            4242,
+            None,
+            PathBuf::from("/tmp/log.jsonl"),
+            Some("x-cafe"),
+        );
+        assert_eq!(bound.node.as_deref(), Some("x-cafe"));
     }
 
     /// A stub family-1 probe answer for the tests that only pin the state.
@@ -15685,6 +15711,7 @@ done
             4242,
             Some(99),
             PathBuf::from("/proj/.fno/agents/sw3/timeline.jsonl"),
+            None,
         );
         assert_eq!(e.harness_name(), "claude");
         assert_eq!(
