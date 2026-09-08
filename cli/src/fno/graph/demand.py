@@ -7,19 +7,16 @@ operator is not looking at. So the score is encounter weight AGAINST operator
 priority, and the table sorts by it.
 
 The goal is an INTERRUPT, not a ranking. The bar is "surprising and true", far
-below accuracy, so there is no normalization and no decay: plain integer
-arithmetic a reader can verify by hand. Sybil-by-dispatch and hot-path bias are
-DISPLAY concerns here, not corrections. `dispatched` renders the dispatch
-context beside the number rather than subtracting it out, because withholding
-the signal is worse than showing it with its context.
+below accuracy, so there is no normalization and no decay: plain arithmetic a
+reader can verify by hand. Sybil-by-dispatch and hot-path bias are DISPLAY
+concerns, not corrections: `dispatched` renders the context beside the number
+rather than subtracting it out.
 
 An operator vote and an operator priority are two expressions from one person,
-so a p3 node the operator voted on and never ranked scores 4 on the strength of
-the operator disagreeing with themselves. That is not corrected. It is
-DISPLAYED: `enc 1 (0a/1o)` tells the reader which kind of disagreement they are
-looking at, and "four agents hit this and I never ranked it" is a different fact
-from "I hit this once and never ranked it". Both are worth knowing. Withholding
-the row is worse than showing it with its provenance.
+so a p3 the operator voted on and never ranked scores 4 on the strength of them
+disagreeing with themselves. Not corrected, DISPLAYED: `enc 1 (0a/1o)` says
+which disagreement this is, and withholding the row is worse than showing it
+with its provenance.
 
 Nothing in this module writes. `demand` never touches `rank` and never consults
 `_kanban_column` as an input, because the board is the work order and a signal
@@ -88,9 +85,8 @@ def divergence_score(entry: dict, effective_priority: str) -> int:
     return len(encounter_voters(entry)) * weight
 
 
-#: Age contributes at most 90/100 of a point, strictly less than the smallest
-#: one vote can be worth (a p0 vote scores 1). So age never buys a vote; it
-#: only breaks ties among rows that already have the same number of them.
+#: Age is worth at most 90/100 of a point, less than the smallest one vote can
+#: be worth (a p0 vote scores 1), so age never buys a vote. It only breaks ties.
 _AGE_CAP_DAYS = 90
 _AGE_DIVISOR = 100.0
 
@@ -98,12 +94,11 @@ _AGE_DIVISOR = 100.0
 def importance_score(entry: dict, effective_priority: str, now=None) -> float:
     """Divergence plus age, for the unranked band of the selection key.
 
-    A projection, never stored, and zero for a node nobody voted on: a score
-    built from age alone would reorder the whole backlog on a signal no one
-    recorded. That test comes first, so the sort parses no timestamp for the
-    overwhelming majority of rows. Difficulty never enters, being a routing
-    axis. Age reads ``touched_at`` (the last curation change) and falls back to
-    birth, the clock ``maintain`` reads; an unparseable stamp is no age signal.
+    A projection, never stored, and zero for an unvoted node: a score from age
+    alone would reorder the backlog on a signal no one recorded. That test runs
+    first, so the sort parses no timestamp for the rows that have no vote.
+    Difficulty never enters, being a routing axis. Age reads ``touched_at`` and
+    falls back to birth; an unparseable stamp is no age signal.
     """
     from datetime import datetime, timezone
 

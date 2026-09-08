@@ -156,8 +156,7 @@ def make_kanban_classifiers(
 ):
     """Bind one live-claim snapshot into board ordering and column routing."""
     # The parameter was overwritten here, so every caller's snapshot was thrown
-    # away and the in-progress-epic term read stored fields only. Binding ONE
-    # snapshot into both halves is the whole point of this function.
+    # away and the in-progress-epic term read stored fields only.
     live_claimed = frozenset() if live_claimed is None else frozenset(live_claimed)
     board_order = make_selection_sort_key(
         entries,

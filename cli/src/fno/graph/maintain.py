@@ -790,9 +790,8 @@ def node_has_movement(entry: dict, now: datetime, staleness_days: int) -> bool:
     fresher than ``staleness_days``). A node with a movement signal is NEVER
     quarantined - the quarantine is only for genuinely-abandoned ready work.
 
-    An encounter is somebody saying this node cost them time, and it does not
-    expire, because the cost it records did not. Without it the drain deletes
-    exactly the rows the fleet keeps hitting.
+    An encounter is somebody saying this node cost them time. It does not
+    expire, because the cost it records did not.
 
     The plan-file mtime probe is best-effort: a missing/unreadable plan is simply
     "no freshness signal from the plan" (not movement), never an error.

@@ -398,10 +398,9 @@ def make_selection_sort_key(
 
     Returns the one key function for sorting board cards and ready candidates.
     ``swimlane=True`` prepends the project lane used by renderers; the remaining
-    suffix is byte-identical to selection precedence. The whole term order, what
-    each term means, and why importance sits below every decision term are in
-    ``docs/architecture/backlog-board-ordering.md``. The invariants a caller
-    relies on:
+    suffix is byte-identical to selection precedence. The term order and what
+    each term means are in ``docs/architecture/backlog-board-ordering.md``. The
+    invariants a caller relies on:
 
     - An operator's pin (band 0) outranks every unranked node, but only among
       the peers it ordered: its lane for a loose node, its live epic's children
@@ -410,7 +409,7 @@ def make_selection_sort_key(
       epics-first behavior that predates both terms.
     - An "epic child" is a node whose ``parent`` resolves in ``entries``. A
       ``parent`` naming a missing node is a loose node, never a crash.
-    - The key is precomputed against ``entries`` once, so sorting stays
+    - Everything is precomputed against ``entries`` once, so sorting stays
       O(N log N): every per-node lookup below is a table read.
     """
     id_to_entry: dict[str, dict] = {
@@ -444,10 +443,9 @@ def make_selection_sort_key(
     scored_at = datetime.now(timezone.utc)
 
     def _score(node: dict) -> float:
-        # Degrade, never raise: this key runs inside the board render inside
-        # locked_mutate_graph, where only OSError is caught upstream. A
-        # hand-edited `encounters: 3` would otherwise take the whole write down.
-        # Its neighbours (_rank_band, orphan_ids) degrade for the same reason.
+        # Degrade like _rank_band and orphan_ids: this key runs inside the board
+        # render inside locked_mutate_graph, where a hand-edited `encounters: 3`
+        # raising would take the whole write down.
         try:
             return -importance_score(node, effective_priority(node), scored_at)
         except Exception:  # noqa: BLE001 - ordering signal; never break selection

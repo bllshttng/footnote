@@ -33,19 +33,16 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
         }
         if task_id in reachable:
             return None
-        # The remedy, not just the diagnosis (x-7f1f): the note names the one
-        # command that makes a dispatcher take the node - activating its epic.
-        # With no epic parent it says so, so the note never prints a command
-        # that cannot work.
+        # The remedy, not just the diagnosis: name the one command that makes a
+        # dispatcher take the node. With no epic parent it says so, so the note
+        # never prints a command that cannot work.
         me = next((e for e in entries if e.get("id") == task_id), None)
         parent = (me or {}).get("parent")
         if parent:
             remedy = f"; Activate its epic: fno backlog advance --epic {parent}"
         else:
-            remedy = (
-                "; no epic to activate (missions are activated per epic with "
-                "fno backlog advance --epic <epic-id>)"
-            )
+            remedy = ("; no epic to activate (missions are activated per epic "
+                      "with fno backlog advance --epic <epic-id>)")
         if missions:
             return (
                 "no live dispatcher will take it "
@@ -60,21 +57,17 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
 def agent_harness_writing_rank(env=None) -> str | None:
     """The harness name when an agent runs this, ``None`` in an operator shell.
 
-    Two provers, either of which is enough. ``resolve_self_identity`` walks the
-    process tree, so it catches a claude or codex session fno never spawned -
-    the fno stamp alone reads those as an operator shell. The stamp is still
-    read, because a codex thread worker owns no process of its own and its
-    ancestry cannot name it. A partial stamp reads as an agent too, so a
-    half-stamped spawn cannot buy its worker the pin back.
+    Two provers, either enough. Ancestry catches a session fno never spawned;
+    the stamp catches a codex thread worker, which owns no process to walk. A
+    half stamp reads as an agent, so a partial spawn buys back no pin.
     """
     from fno.harness_identity import parse_canonical_identity
 
     try:
         from fno.claims.self_identity import resolve_self_identity
 
-        owned = resolve_self_identity(env)
-        if owned.harness:
-            return owned.harness
+        if (owned := resolve_self_identity(env).harness):
+            return owned
     except Exception:  # noqa: BLE001 - the stamp below still answers
         pass
     identity = parse_canonical_identity(env)
@@ -90,9 +83,8 @@ def _agent_rank_refusal(task_id: str, harness: str) -> str:
         "the last writer wins and importance is never computed.\nVote instead:\n"
         f"  fno backlog encounter {task_id} --evidence \"what it cost you\"\n"
         f"  fno backlog update {task_id} --priority p0|p1|p2|p3\n"
-        "The pin is the operator's, and the graph records no writer for it, so "
-        "nothing downstream could tell yours from theirs. Ask; do not reach for "
-        "the escape hatch in --help on your own behalf."
+        "The graph records no writer for a rank, so nothing downstream could "
+        "tell yours from the operator's. The escape hatch in --help is theirs."
     )
 
 
@@ -116,11 +108,7 @@ def cmd_rank(
         "--within-epic",
         help="Rank within the node's live epic (child default; refused without one)",
     ),
-    operator: bool = typer.Option(
-        False,
-        "--operator",
-        help="Write the pin from an agent session (the operator's own escape hatch)",
-    ),
+    operator: bool = typer.Option(False, "--operator", help="The operator's own pin, from inside an agent session"),
 ) -> None:
     """Curate a node's position within its (column, project) board lane.
 
@@ -131,11 +119,11 @@ def cmd_rank(
     suffix within a lane; it never changes a node's column. ``--before`` /
     ``--after`` require a *ranked* anchor in the same lane - seed one with
     ``--top`` first. Float midpoints mean inserts never renumber siblings.
-    A node with a live epic parent ranks WITHIN that epic (peers and anchor
-    are its live-epic siblings, whole graph): the child's rank orders it only
-    among its siblings and never moves its epic group. ``--within-epic``
-    spells that scope out loud and is refused for a node with no live epic
-    parent. Loose nodes and epic containers keep the lane scope.
+    A node with a live epic parent ranks WITHIN that epic (peers and anchor are
+    its live-epic siblings, whole graph): the child's rank orders it only among
+    its siblings and never moves its epic group. ``--within-epic`` spells that
+    scope out loud and is refused without a live epic parent. Loose nodes and
+    epic containers keep the lane scope.
     """
     from fno.graph._constants import has_node_id_prefix, _rank_band
     from fno.graph._intake import _find_node, _live_epic_for, _epics_with_child_progress
@@ -334,8 +322,8 @@ def cmd_rank(
         # A bare "Ranked --top" read as "runs next across the project" and
         # meant "top of its own epic". Name what the pin is top OF.
         scope_note = (
-            "orders it among that epic's children only, and the epic's own rank "
-            "decides where the group runs"
+            "orders it among that epic's children only, and the epic's own "
+            "rank decides where the group runs"
             if result.get("scope_kind") == "epic"
             else "orders it within that board lane only"
         )
