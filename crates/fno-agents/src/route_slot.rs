@@ -720,7 +720,7 @@ fn states_leg(payload: &Value) -> Value {
     let on_unknown = policy_raw("on_unknown", "allow");
     // The lane a spawn would take right now: the same walk a dispatch runs,
     // node-less, so the preview can never disagree with the gate.
-    let walk_verdict = |payload: &Value| -> (Value, &'static str) {
+    let walk_verdict = |payload: &Value| -> (Value, &'static str, Value) {
         let mut slot_payload = payload.clone();
         if let Some(obj) = slot_payload.as_object_mut() {
             obj.remove("mode");
@@ -731,23 +731,75 @@ fn states_leg(payload: &Value) -> Value {
             .and_then(|c| c.get("lane_rung"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        if !lane_rung.is_empty() {
+        // The verdict names WHY nothing is placed: a policy refusal is a
+        // hold, never "exhausted", and capacity is held, not broken.
+        let routing = if !lane_rung.is_empty() {
+            "armed"
+        } else {
+            match slot_out.get("reason_kind").and_then(Value::as_str) {
+                Some("policy-refusal") => "policy-held",
+                Some("capacity-queue") | Some("capacity-exhausted") => "capacity-held",
+                _ => "unarmed",
+            }
+        };
+        let mut facts = json!({});
+        if let Some(obj) = facts.as_object_mut() {
+            let pol = candidate.and_then(|c| c.get("policy"));
+            let get = |k: &str| {
+                pol.and_then(|p| p.get(k))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let (wk, oa, src) = (get("work_kind"), get("operator_access"), get("source"));
+            if !wk.is_empty() {
+                obj.insert("work_kind".into(), json!(wk));
+            }
+            if !oa.is_empty() {
+                obj.insert("operator_access".into(), json!(oa));
+                if !src.is_empty() {
+                    obj.insert("policy_source".into(), json!(src));
+                }
+            }
+            let skips: Vec<Value> = slot_out
+                .get("chain")
+                .and_then(Value::as_array)
+                .map(|c| {
+                    c.iter()
+                        .filter(|l| l.as_str().map_or(false, |s| s.starts_with("slot skip ")))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !skips.is_empty() {
+                obj.insert("skipped".into(), Value::Array(skips));
+            }
+        }
+        let would_take = if !lane_rung.is_empty() {
             let lane = candidate
                 .and_then(|c| c.get("lane"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            (json!(format!("{lane_rung} {lane}")), "armed")
+            json!(format!("{lane_rung} {lane}"))
         } else {
-            let terminal = slot_out
+            slot_out
                 .get("chain")
                 .and_then(Value::as_array)
                 .and_then(|c| c.last())
                 .cloned()
-                .unwrap_or(json!(""));
-            (terminal, "unarmed")
-        }
+                .unwrap_or(json!(""))
+        };
+        (would_take, routing, facts)
     };
-    let (would_take, routing) = walk_verdict(payload);
+    let (would_take, routing, facts) = walk_verdict(payload);
+    let with_facts = |mut out: Value| -> Value {
+        if let (Some(obj), Some(f)) = (out.as_object_mut(), facts.as_object()) {
+            for (k, v) in f {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        out
+    };
     if let Some(bd) = profile
         .get("by_difficulty")
         .and_then(Value::as_object)
@@ -767,12 +819,12 @@ fn states_leg(payload: &Value) -> Value {
                     chain.push(json!(format!(
                         "slot=config {rung_base}.by_difficulty.{diff_key} has unknown field {key:?}"
                     )));
-                    return json!({
+                    return with_facts(json!({
                         "status": "states", "lane_states": [], "chain": chain,
                         "on_exhausted": on_exhausted, "on_low": on_low,
                         "on_unknown": on_unknown,
                         "would_take": would_take, "routing": routing,
-                    });
+                    }));
                 }
             }
             if let Some(ovl_lanes) = ovl.get("lanes") {
@@ -782,12 +834,13 @@ fn states_leg(payload: &Value) -> Value {
                         chain.push(json!(format!(
                             "slot=config {rung_base}.by_difficulty.{diff_key}.lanes must be a non-empty list when declared"
                         )));
-                        return json!({
-                            "status": "states", "lane_states": [], "chain": chain,
+                        return with_facts(json!({
+                            "status": "states", "lane_states": [],
+                            "chain": chain,
                             "on_exhausted": on_exhausted, "on_low": on_low,
                             "on_unknown": on_unknown,
                             "would_take": would_take, "routing": routing,
-                        });
+                        }));
                     }
                 }
             }
@@ -812,10 +865,10 @@ fn states_leg(payload: &Value) -> Value {
         } else {
             json!("no lanes; no inventory; harness default")
         };
-        return json!({
+        return with_facts(json!({
             "status": "states", "lane_states": [], "chain": chain,
-            "would_take": would_take, "routing": "unarmed",
-        });
+            "would_take": would_take, "routing": routing,
+        }));
     }
     if let Some(reason) = diff_note {
         prefix.push(json!(format!("slot note {rung_base} {reason}")));
@@ -829,12 +882,12 @@ fn states_leg(payload: &Value) -> Value {
         Ok(f) => f,
         Err(line) => {
             chain.push(json!(line));
-            return json!({
+            return with_facts(json!({
                 "status": "states", "lane_states": [], "chain": chain,
                 "on_exhausted": on_exhausted, "on_low": on_low,
                 "on_unknown": on_unknown,
                 "would_take": would_take, "routing": routing,
-            });
+            }));
         }
     };
     let mut lane_states = Vec::new();
@@ -883,7 +936,7 @@ fn states_leg(payload: &Value) -> Value {
         lane_states.push(entry);
     }
     chain.extend(prefix);
-    json!({
+    with_facts(json!({
         "status": "states",
         "lane_states": lane_states,
         "chain": chain,
@@ -892,7 +945,7 @@ fn states_leg(payload: &Value) -> Value {
         "on_unknown": on_unknown,
         "would_take": would_take,
         "routing": routing,
-    })
+    }))
 }
 
 /// The resolver core: payload in, `{status, candidate, chain}` out.
@@ -1710,6 +1763,9 @@ pub fn run_route_slot(args: &[String]) -> i32 {
 
 /// Test-friendly variant: returns (exit_code, stdout, stderr) without printing.
 pub fn run_route_slot_capture(args: &[String]) -> (i32, String, String) {
+    if args.first().map(String::as_str) == Some("audit") {
+        return run_route_slot_audit(&args[1..]);
+    }
     let payload: Value = if let Some(path) = args.first() {
         match std::fs::read_to_string(path) {
             Ok(text) => match serde_json::from_str(&text) {
@@ -1748,6 +1804,321 @@ pub fn run_route_slot_capture(args: &[String]) -> (i32, String, String) {
     };
     let out = resolve_slot_payload(&payload);
     (0, format!("{out}\n"), String::new())
+}
+
+/// `route-slot audit`: read-only completion evidence for the routing policy
+/// (x-90a9 task 3.1). The snapshot loader is Python (`fno config route
+/// audit-snapshot`), which reads config, registry, journal and decision
+/// records through their established readers; the VERDICT is made here, the
+/// same owner that qualifies every launch, and repeats read exactly.
+///
+/// Exit 0 prints ROUTING_POLICY_VERIFIED and names each verified session.
+/// Anything missing, stale, contradictory or merely simulated exits 1 and
+/// names the boundary that stopped it.
+pub fn run_route_slot_audit(args: &[String]) -> (i32, String, String) {
+    let mut project = String::new();
+    let mut node = String::new();
+    let mut since = String::from("30m");
+    let mut json_out = false;
+    let mut snapshot_path: Option<&str> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--project" => project = it.next().cloned().unwrap_or_default(),
+            "--node" => node = it.next().cloned().unwrap_or_default(),
+            "--since" => since = it.next().cloned().unwrap_or_else(|| "30m".into()),
+            "--json" => json_out = true,
+            "--snapshot" => snapshot_path = it.next().map(String::as_str),
+            other => {
+                return (
+                    2,
+                    String::new(),
+                    format!("route-slot audit: unknown argument {other:?}\n"),
+                )
+            }
+        }
+    }
+    let snapshot_text = match snapshot_path {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => {
+                return (
+                    1,
+                    String::new(),
+                    format!("route-slot audit: cannot read snapshot {path}: {e}\n"),
+                )
+            }
+        },
+        None => {
+            // No snapshot handed in: load it through the Python front door's
+            // established readers. A missing front door is an incomplete
+            // terminal, never a pass.
+            match std::process::Command::new("fno")
+                .args([
+                    "config",
+                    "route",
+                    "audit-snapshot",
+                    "--project",
+                    &project,
+                    "--node",
+                    &node,
+                    "--since",
+                    &since,
+                ])
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    String::from_utf8_lossy(&out.stdout).into_owned()
+                }
+                Ok(out) => {
+                    let detail = String::from_utf8_lossy(&out.stderr);
+                    return (
+                        1,
+                        String::new(),
+                        format!(
+                            "route-slot audit: snapshot loader failed: {}",
+                            detail.trim()
+                        ),
+                    );
+                }
+                Err(e) => {
+                    return (
+                        1,
+                        String::new(),
+                        format!(
+                            "route-slot audit: no fno front door for the snapshot \
+                             loader: {e}"
+                        ),
+                    )
+                }
+            }
+        }
+    };
+    let snapshot: Value = match serde_json::from_str(&snapshot_text) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                1,
+                String::new(),
+                format!("route-slot audit: bad snapshot: {e}\n"),
+            )
+        }
+    };
+    let (report, code) = audit_verify(&snapshot);
+    if json_out {
+        (code, format!("{report}\n"), String::new())
+    } else {
+        let verdict = report["verdict"].as_str().unwrap_or("UNKNOWN");
+        let mut text = String::new();
+        if code == 0 {
+            text.push_str("ROUTING_POLICY_VERIFIED\n");
+        }
+        text.push_str(&format!("verdict: {verdict}\n"));
+        if let Some(sessions) = report["sessions"].as_array() {
+            for s in sessions {
+                text.push_str(&format!(
+                    "  session {} {} account={} model={:?} basis={:?}\n",
+                    s["session_id"].as_str().unwrap_or("-"),
+                    s["harness"].as_str().unwrap_or("-"),
+                    s["account"].as_str().unwrap_or("-"),
+                    s["model"].as_str().unwrap_or(""),
+                    s["model_basis"].as_str().unwrap_or(""),
+                ));
+            }
+        }
+        if let Some(b) = report["boundaries"].as_array() {
+            for line in b {
+                text.push_str(&format!(
+                    "  boundary {}: {}\n",
+                    line["boundary"].as_str().unwrap_or("-"),
+                    line["detail"].as_str().unwrap_or(""),
+                ));
+            }
+        }
+        (code, text, String::new())
+    }
+}
+
+/// The pure verdict over one bounded snapshot. No I/O: the same snapshot in,
+/// the same verdict out. Every boundary names the missing evidence class from
+/// the plan, so a negative audit is diagnostic, not just non-zero.
+pub fn audit_verify(snapshot: &Value) -> (Value, i32) {
+    let mut boundaries: Vec<Value> = Vec::new();
+    let policy = snapshot.get("policy").cloned().unwrap_or(json!({}));
+    let enforced = policy
+        .get("enforce_inventory")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let fingerprint = snapshot
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if !enforced {
+        boundaries.push(json!({
+            "boundary": "routing-not-enforced",
+            "detail": "config routing.enforce_inventory is off; no armed policy to verify",
+        }));
+    }
+    let sessions = snapshot
+        .get("sessions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if sessions.is_empty() {
+        boundaries.push(json!({
+            "boundary": "no-launch",
+            "detail": "no session for this node inside the window; a preview alone verifies nothing",
+        }));
+    }
+    let mut verified: Vec<Value> = Vec::new();
+    for s in &sessions {
+        let sid = s.get("session_id").and_then(Value::as_str).unwrap_or("");
+        if sid.is_empty() {
+            boundaries.push(json!({
+                "boundary": "missing-session-id",
+                "detail": s.get("name").and_then(Value::as_str).unwrap_or("?"),
+            }));
+            continue;
+        }
+        let account = s.get("account").and_then(Value::as_str).unwrap_or("");
+        if account.is_empty() {
+            boundaries.push(json!({
+                "boundary": "missing-account-identity",
+                "detail": format!("session {sid} names no account record"),
+            }));
+            continue;
+        }
+        let receipt_fp = s
+            .get("receipt_fingerprint")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if receipt_fp.is_empty() {
+            boundaries.push(json!({
+                "boundary": "no-receipt",
+                "detail": format!("session {sid} has no spawn decision receipt in the journal"),
+            }));
+            continue;
+        }
+        if receipt_fp != fingerprint {
+            boundaries.push(json!({
+                "boundary": "stale-receipt",
+                "detail": format!(
+                    "session {sid} launched on fingerprint {receipt_fp}, config is now {fingerprint}"
+                ),
+            }));
+            continue;
+        }
+        let model = s.get("model").and_then(Value::as_str).unwrap_or("");
+        let basis = s.get("model_basis").and_then(Value::as_str).unwrap_or("");
+        if model.is_empty() || basis != "verified" {
+            boundaries.push(json!({
+                "boundary": "unobserved-requested-model",
+                "detail": format!(
+                    "session {sid} model {model:?} carries basis {basis:?}; a requested label is not an observation"
+                ),
+            }));
+            continue;
+        }
+        match view_evidence(s, sid, &fingerprint) {
+            Ok(()) => verified.push(json!({
+                "session_id": sid,
+                "harness": s.get("harness").and_then(Value::as_str).unwrap_or(""),
+                "account": account,
+                "model": model,
+                "model_basis": basis,
+            })),
+            Err(boundary) => boundaries.push(boundary),
+        }
+    }
+    if verified.is_empty() && !boundaries.is_empty() {
+        let report = json!({"verdict": "ROUTING_POLICY_INCOMPLETE", "boundaries": boundaries});
+        return (report, 1);
+    }
+    if boundaries.is_empty() {
+        let report = json!({"verdict": "ROUTING_POLICY_VERIFIED", "sessions": verified});
+        return (report, 0);
+    }
+    // Some sessions verified, some did not: the incomplete ones keep the
+    // audit from a clean pass, and their boundaries are the answer.
+    let report = json!({
+        "verdict": "ROUTING_POLICY_INCOMPLETE",
+        "sessions": verified,
+        "boundaries": boundaries,
+    });
+    (report, 1)
+}
+
+/// The operator-view record for one session: an existing live decision under
+/// subject `routing-view:<session-id>` whose decision text is JSON carrying
+/// the view, the config fingerprint it was confirmed under, and the session
+/// it names. A worker or peer assertion is not operator confirmation; this
+/// record exists only because the operator recorded it.
+fn view_evidence(session: &Value, sid: &str, fingerprint: &str) -> Result<(), Value> {
+    let records = session
+        .get("view_records")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let wanted_subject = format!("routing-view:{sid}");
+    let record = records
+        .iter()
+        .find(|r| r.get("subject").and_then(Value::as_str) == Some(wanted_subject.as_str()));
+    let record = match record {
+        None => {
+            return Err(json!({
+                "boundary": "missing-operator-view",
+                "detail": format!(
+                    "no decision record under routing-view:{sid}; \
+                     the operator must confirm that exact session in the named view"
+                ),
+            }))
+        }
+        Some(r) => r,
+    };
+    let lifecycle = record
+        .get("lifecycle")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if lifecycle != "live" {
+        return Err(json!({
+            "boundary": "view-record-not-live",
+            "detail": format!("routing-view:{sid} is {lifecycle:?}; a retracted or superseded confirmation verifies nothing"),
+        }));
+    }
+    let text = record.get("decision").and_then(Value::as_str).unwrap_or("");
+    let body: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(json!({
+                "boundary": "view-record-unparseable",
+                "detail": format!("routing-view:{sid} decision text is not the JSON evidence shape"),
+            }))
+        }
+    };
+    let view = body.get("view").and_then(Value::as_str).unwrap_or("");
+    if view != "claude-native" && view != "codex-native" {
+        return Err(json!({
+            "boundary": "view-record-bad-view",
+            "detail": format!("routing-view:{sid} names view {view:?}; expected claude-native or codex-native"),
+        }));
+    }
+    if body.get("fingerprint").and_then(Value::as_str) != Some(fingerprint) {
+        return Err(json!({
+            "boundary": "view-fingerprint-mismatch",
+            "detail": format!(
+                "routing-view:{sid} was confirmed under a different configuration fingerprint than the current one"
+            ),
+        }));
+    }
+    let recorded_sid = body.get("session_id").and_then(Value::as_str).unwrap_or("");
+    if recorded_sid != sid {
+        return Err(json!({
+            "boundary": "view-session-mismatch",
+            "detail": format!("routing-view record names session {recorded_sid:?}, not {sid:?}"),
+        }));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1953,7 +2324,7 @@ mod tests {
     }
 
     #[test]
-    fn states_all_lanes_exhausted_reads_unarmed_with_the_terminal() {
+    fn states_all_lanes_exhausted_reads_capacity_held_with_the_terminal() {
         let out = resolve_slot_payload(&json!({
             "mode": "states",
             "rung_base": "agents.profiles.target",
@@ -1964,8 +2335,33 @@ mod tests {
                                     "accounts": {"zai-main": "exhausted"}}},
             "profile": {"on_exhausted": "queue"},
         }));
-        assert_eq!(out["routing"], "unarmed");
+        assert_eq!(out["routing"], "capacity-held");
         assert!(out["would_take"].as_str().unwrap().contains("exhausted"));
+    }
+
+    #[test]
+    fn states_policy_refusal_reads_policy_held_with_the_reasons() {
+        // A remote operator with only unverified views: every lane is skipped
+        // by the operator_access filter. The readout must say policy-held,
+        // never "exhausted", and carry the per-lane skip reasons.
+        let out = resolve_slot_payload(&json!({
+            "mode": "states",
+            "rung_base": "agents.profiles.target",
+            "lanes_raw": ["glm-x"],
+            "declared_rows": {"glm-x": {"name": "glm-x", "harness": "claude",
+                                        "model": "glm", "route": "zai,glm"}},
+            "slot_by_verb": {"blueprint": {"rung_base": "agents.profiles.blueprint",
+                                           "lanes_raw": ["glm-x"]}},
+            "policy": {"enforce_inventory": true, "operator_access": "remote"},
+            "capacity": {"claude": {"state": "ok", "accounts": {}}},
+        }));
+        assert_eq!(out["routing"], "policy-held");
+        let skipped = out["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0]
+            .as_str()
+            .unwrap()
+            .contains("operator_access=remote"));
     }
 
     #[test]
@@ -2363,5 +2759,166 @@ mod tests {
         assert!(chain_of(&out)
             .iter()
             .any(|l| l.starts_with("slot=exhausted queue")));
+    }
+
+    #[test]
+    fn audit_verifies_a_fresh_fully_evidenced_session() {
+        let snapshot = json!({
+            "fingerprint": "fp1",
+            "policy": {"enforce_inventory": true, "operator_access": "local"},
+            "sessions": [{
+                "session_id": "s1", "name": "w1", "harness": "claude",
+                "model": "glm", "model_basis": "verified",
+                "account": "zai-main",
+                "receipt_fingerprint": "fp1",
+                "view_records": [{
+                    "subject": "routing-view:s1", "lifecycle": "live",
+                    "decision": "{\"view\": \"claude-native\", \"fingerprint\": \"fp1\", \"session_id\": \"s1\"}",
+                }],
+            }],
+        });
+        let (report, code) = audit_verify(&snapshot);
+        assert_eq!(code, 0);
+        assert_eq!(report["verdict"], "ROUTING_POLICY_VERIFIED");
+        assert_eq!(report["sessions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn audit_names_the_boundary_when_only_a_preview_exists() {
+        let snapshot = json!({
+            "fingerprint": "fp1",
+            "policy": {"enforce_inventory": true, "operator_access": "local"},
+            "sessions": [],
+        });
+        let (report, code) = audit_verify(&snapshot);
+        assert_eq!(code, 1);
+        assert_eq!(report["verdict"], "ROUTING_POLICY_INCOMPLETE");
+        let names: Vec<&str> = report["boundaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["boundary"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"no-launch"));
+    }
+
+    #[test]
+    fn audit_refuses_when_the_policy_is_not_armed() {
+        let snapshot = json!({
+            "fingerprint": "fp1",
+            "policy": {"enforce_inventory": false, "operator_access": "local"},
+            "sessions": [],
+        });
+        let (report, code) = audit_verify(&snapshot);
+        assert_eq!(code, 1);
+        let names: Vec<&str> = report["boundaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["boundary"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"routing-not-enforced"));
+    }
+
+    #[test]
+    fn audit_names_each_missing_evidence_boundary() {
+        let session = |extra: Value| {
+            let mut s = json!({
+                "session_id": "s1", "name": "w1", "harness": "claude",
+                "model": "glm", "model_basis": "verified",
+                "account": "zai-main",
+                "receipt_fingerprint": "fp1",
+                "view_records": [{
+                    "subject": "routing-view:s1", "lifecycle": "live",
+                    "decision": "{\"view\": \"claude-native\", \"fingerprint\": \"fp1\", \"session_id\": \"s1\"}",
+                }],
+            });
+            if let (Some(obj), Some(e)) = (s.as_object_mut(), extra.as_object()) {
+                for (k, v) in e {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+            s
+        };
+        let snap = |sessions: Value| {
+            json!({
+                "fingerprint": "fp1",
+                "policy": {"enforce_inventory": true, "operator_access": "local"},
+                "sessions": sessions,
+            })
+        };
+        let boundaries = |report: &Value| -> Vec<String> {
+            report["boundaries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["boundary"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let mut s = session(json!({}));
+        s["account"] = json!("");
+        let (report, code) = audit_verify(&snap(json!([s])));
+        assert_eq!(code, 1);
+        assert!(boundaries(&report).contains(&"missing-account-identity".to_string()));
+
+        let mut s = session(json!({}));
+        s["receipt_fingerprint"] = json!("old");
+        let (report, code) = audit_verify(&snap(json!([s])));
+        assert_eq!(code, 1);
+        assert!(boundaries(&report).contains(&"stale-receipt".to_string()));
+
+        let mut s = session(json!({}));
+        s["model_basis"] = json!("requested");
+        let (report, code) = audit_verify(&snap(json!([s])));
+        assert_eq!(code, 1);
+        assert!(boundaries(&report).contains(&"unobserved-requested-model".to_string()));
+
+        let mut s = session(json!({}));
+        s["view_records"] = json!([]);
+        let (report, code) = audit_verify(&snap(json!([s])));
+        assert_eq!(code, 1);
+        assert!(boundaries(&report).contains(&"missing-operator-view".to_string()));
+
+        let mut s = session(json!({}));
+        s["view_records"][0]["decision"] = json!(
+            "{\"view\": \"claude-native\", \"fingerprint\": \"old\", \"session_id\": \"s1\"}"
+        );
+        let (report, code) = audit_verify(&snap(json!([s])));
+        assert_eq!(code, 1);
+        assert!(boundaries(&report).contains(&"view-fingerprint-mismatch".to_string()));
+    }
+
+    #[test]
+    fn audit_reads_a_snapshot_file_and_prints_the_marker() {
+        let snapshot = concat!(
+            r#"{"fingerprint": "fp1","#,
+            r#" "policy": {"enforce_inventory": true, "operator_access": "local"},"#,
+            r#" "sessions": [{"session_id": "s1", "name": "w1", "harness": "claude","#,
+            r#" "model": "glm", "model_basis": "verified", "account": "zai-main","#,
+            r#" "receipt_fingerprint": "fp1", "view_records": [{"subject": "routing-view:s1","#,
+            r#" "lifecycle": "live", "decision": "{\"view\": \"claude-native\", \"fingerprint\": \"fp1\", \"session_id\": \"s1\"}"}]}]}"#,
+        );
+        let dir = std::env::temp_dir().join(format!("fno-audit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("snapshot.json");
+        std::fs::write(&path, snapshot).unwrap();
+        let args: Vec<String> = vec![
+            "audit".into(),
+            "--project".into(),
+            "/tmp/proj".into(),
+            "--node".into(),
+            "x-test".into(),
+            "--json".into(),
+            "--snapshot".into(),
+            path.to_string_lossy().into_owned(),
+        ];
+        let (code, stdout, stderr) = run_route_slot_capture(&args);
+        assert_eq!(stderr, "");
+        assert_eq!(code, 0);
+        assert!(stdout.contains("ROUTING_POLICY_VERIFIED"));
+        let report: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(report["verdict"], "ROUTING_POLICY_VERIFIED");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

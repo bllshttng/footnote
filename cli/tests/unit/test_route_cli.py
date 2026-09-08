@@ -431,3 +431,108 @@ def test_routing_init_appends_the_sample_commented(tmp_path, monkeypatch) -> Non
     res = runner.invoke(route_app, ["init"])
     assert res.exit_code == 0
     assert "already present" in res.output
+
+
+# ---------------------------------------------------------------------------
+# audit-snapshot: the bounded evidence the Rust audit verifies (x-90a9 3.1)
+# ---------------------------------------------------------------------------
+
+
+def _audit_entry(created_at: str, node: str = "x-90a9") -> object:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        node=node,
+        project_root="/tmp/proj",
+        cwd="/tmp/proj",
+        created_at=created_at,
+        harness_session_id="sid-1",
+        fno_id="sid-1",
+        name="worker-1",
+        harness="claude",
+        provider="claude",
+        model="glm",
+        model_basis="verified",
+        requested_model="glm",
+        account_record_id="zai-main",
+    )
+
+
+@pytest.fixture
+def audit_isolation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Pin every reader the snapshot loader touches to hermetic fixtures."""
+    import datetime as dt
+
+    from types import SimpleNamespace
+    fresh = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    def _entry(node: str = "x-90a9", created: str | None = None) -> object:
+        return _audit_entry(created or fresh, node=node)
+
+    entries: list = []
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda *a, **k: entries)
+    monkeypatch.setattr(
+        "fno.decide.list_decisions",
+        lambda subject, limit=0: (subject, [{
+            "subject": subject,
+            "decision": json.dumps({
+                "view": "claude-native", "fingerprint": "fp1", "session_id": "sid-1",
+            }),
+            "ts": fresh, "lifecycle": "live",
+        }], 0),
+    )
+    monkeypatch.setattr("fno.route_resolve.routing_fingerprint", lambda s=None: "fp1")
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SimpleNamespace(
+            routing=SimpleNamespace(enforce_inventory=True, operator_access="local"),
+        ),
+    )
+    events = tmp_path / "events.jsonl"
+    events.write_text(json.dumps({
+        "kind": "spawn_defaults_applied", "name": "worker-1",
+        "fingerprint": "fp1", "ts": fresh,
+    }) + "\n")
+    monkeypatch.setattr("fno.paths.state_dir", lambda *a, **k: tmp_path)
+    return SimpleNamespace(entries=entries, fresh=fresh, entry_factory=_entry)
+
+
+@requires_rust
+def test_audit_snapshot_carries_a_fresh_session_with_full_evidence(
+    audit_isolation,
+) -> None:
+    """AC12-HP: the snapshot names the session, its coordinate, the receipt
+    fingerprint and the view record - everything the verdict reads."""
+    iso = audit_isolation
+    iso.entries.append(iso.entry_factory())
+    res = runner.invoke(route_app, [
+        "audit-snapshot", "--project", "/tmp/proj", "--node", "x-90a9", "--since", "30m",
+    ])
+    assert res.exit_code == 0, res.output
+    snap = json.loads(res.output)
+    assert snap["fingerprint"] == "fp1"
+    assert snap["policy"] == {"enforce_inventory": True, "operator_access": "local"}
+    assert len(snap["sessions"]) == 1
+    session = snap["sessions"][0]
+    assert session["session_id"] == "sid-1"
+    assert session["account"] == "zai-main"
+    assert session["receipt_fingerprint"] == "fp1"
+    assert session["view_records"][0]["subject"] == "routing-view:sid-1"
+
+
+@requires_rust
+def test_audit_snapshot_excludes_stale_and_foreign_sessions(audit_isolation) -> None:
+    """The window and the node are filters, and the answer says so by naming
+    only what passed both."""
+    import datetime as dt
+
+    iso = audit_isolation
+    old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).isoformat()
+    iso.entries.append(iso.entry_factory())  # fresh, in scope
+    iso.entries.append(iso.entry_factory(node="x-other"))  # fresh, other node
+    iso.entries.append(iso.entry_factory(created=old))  # in scope, stale
+    res = runner.invoke(route_app, [
+        "audit-snapshot", "--project", "/tmp/proj", "--node", "x-90a9", "--since", "30m",
+    ])
+    snap = json.loads(res.output)
+    assert [s["session_id"] for s in snap["sessions"]] == ["sid-1"]

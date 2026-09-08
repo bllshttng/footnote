@@ -659,7 +659,10 @@ def slot_states(
         states = route_slot_call(payload)
     except Exception as exc:  # noqa: BLE001 - a missing verb degrades the readout
         states = {"would_take": f"slot=route-slot-unavailable ({exc})"}
-    for key in ("on_exhausted", "on_low", "on_unknown", "would_take", "routing"):
+    for key in (
+        "on_exhausted", "on_low", "on_unknown", "would_take", "routing",
+        "work_kind", "operator_access", "policy_source", "skipped",
+    ):
         if key in states:
             out[key] = states[key]
     # The difficulty note is the verb's vocabulary: take it back verbatim.
