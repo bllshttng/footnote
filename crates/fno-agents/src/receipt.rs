@@ -22,7 +22,7 @@ use crate::state;
 /// reaped row stays recoverable even when its ledger entry does not exist and
 /// never will (kings, blueprint and rescue sessions never open a PR, so no
 /// target run ever writes them one).
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReapReceipt {
     pub row_name: String,
     pub short_id: String,
@@ -45,6 +45,93 @@ pub struct ReapReceipt {
     /// field existed: the key is skipped when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed_by: Option<String>,
+    /// Receipt schema version. v1 receipts predate the field and read as
+    /// `None` (migration reads old receipts without inventing fields); every
+    /// new write stamps `Some(2)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u32>,
+    /// The full native identity and store context: harness, session id,
+    /// store root, project dir. `None` on a v1 receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<serde_json::Value>,
+    /// Where the native history lives (transcript paths, index records), so
+    /// resume can find the same session after every active surface is gone.
+    /// `None` on a v1 receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_locator: Option<serde_json::Value>,
+    /// Known model provenance: what was requested and/or observed for this
+    /// session's lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provenance: Option<serde_json::Value>,
+    /// The resume command as TOKENS with no shell quoting implied. The v1
+    /// `resume` string stays for rendering; tokens are what a launcher runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resume_argv: Vec<String>,
+    /// Per-effect retirement progress, appended as effects land so a
+    /// crash/retry continues instead of repeating (x-70e1 task 3). Empty on
+    /// a v1 receipt and on every receipt until the first effect records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<EffectRecord>,
+    /// Assignment evidence: the node links and completion basis this
+    /// retirement was decided on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment: Option<serde_json::Value>,
+    /// Set when the retention window expired the EXPENDABLE detail (ledger
+    /// enrichment, per-effect rows) but the identity-critical core was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details_expired_at: Option<String>,
+}
+
+/// One retirement effect's durable record: what ran, what answered, when.
+/// The outcome vocabulary is the typed outcome set the lifecycle reports;
+/// a partial failure is never an overall success because each effect names
+/// its own.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EffectRecord {
+    pub op: String,
+    /// `confirmed-removed` | `confirmed-already-absent` | `kept` |
+    /// `failed` | `not-applicable`
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub at: String,
+}
+
+/// Which receipt fields the retention window may expire. The identity core
+/// (who, native locator, resume tokens) is NEVER on this list: the mapping
+/// this store exists to preserve must stay recoverable for as long as the
+/// native session itself is (AC2-HP).
+const EXPENDABLE_FIELDS: &[&str] = &["ledger", "effects", "log_path"];
+
+/// Load one receipt from disk. All v2 fields default, so a v1 file reads
+/// with them absent rather than invented.
+pub fn read_reap_receipt(path: &std::path::Path) -> std::io::Result<ReapReceipt> {
+    let raw = std::fs::read(path)?;
+    serde_json::from_slice(&raw)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// Expire the expendable fields of one aged receipt, keeping the identity
+/// core. Returns true when the file still exists (rewritten); false when it
+/// was already gone. A receipt with nothing expendable left is left
+/// byte-identical.
+pub fn expire_receipt_details(receipt: &mut ReapReceipt) -> bool {
+    let mut changed = false;
+    if receipt.ledger.is_some() {
+        receipt.ledger = None;
+        changed = true;
+    }
+    if !receipt.effects.is_empty() {
+        receipt.effects.clear();
+        changed = true;
+    }
+    if receipt.log_path.take().is_some() {
+        changed = true;
+    }
+    if changed && receipt.details_expired_at.is_none() {
+        receipt.details_expired_at = Some(crate::daemon::now_rfc3339_like());
+    }
+    changed
 }
 
 /// Sanitize a receipt filename component: the session id comes from registry
@@ -111,6 +198,21 @@ pub fn build_reap_receipt(
     let argv = contract
         .render_session_argv(harness, "interactive_resume", Some(sid))
         .map_err(|err| format!("no interactive resume form declared: {err}"))?;
+    // The native locator: every transcript candidate the harness's own store
+    // holds for this session, discovered at receipt time. A store read that
+    // fails leaves the locator absent-but-named rather than blocking the
+    // receipt - the resume tokens above already carry the identity.
+    let transcripts = {
+        let mut index = crate::gc_inventory::HarnessStoreIndex::default();
+        index.matches(e).unwrap_or_default()
+    };
+    let identity = serde_json::json!({
+        "harness": harness,
+        "session_id": sid,
+        "short_id": e.short_id,
+        "store_root": store_root_for(harness).map(|p| p.to_string_lossy().to_string()),
+        "cwd": e.cwd,
+    });
     Ok(ReapReceipt {
         row_name: e.name.clone(),
         short_id: e.short_id.clone(),
@@ -123,7 +225,37 @@ pub fn build_reap_receipt(
         resume: argv.join(" "),
         ledger: ledger.cloned(),
         removed_by: None,
+        schema_version: Some(2),
+        identity: Some(identity),
+        native_locator: Some(serde_json::json!({ "transcripts": transcripts })),
+        model_provenance: model_provenance_of(e),
+        resume_argv: argv,
+        effects: Vec::new(),
+        assignment: None,
+        details_expired_at: None,
     })
+}
+
+/// The store root one harness's transcripts live under, for the receipt's
+/// identity record. `None` for a harness with no transcript store fno reads.
+fn store_root_for(harness: &str) -> Option<std::path::PathBuf> {
+    match harness {
+        "claude" => std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".claude").join("projects")),
+        "codex" => crate::client_verbs::codex_home().map(|h| h.join("sessions")),
+        _ => None,
+    }
+}
+
+/// Requested/observed model provenance from the row's axis fields, in the
+/// x-aa8e shape (a bare model is two facts; the basis travels beside it).
+fn model_provenance_of(e: &state::RegistryEntry) -> Option<serde_json::Value> {
+    let model = e.model.as_deref()?;
+    let mut out = serde_json::json!({ "model": model });
+    if let Some(basis) = e.model_basis.as_deref() {
+        out["basis"] = serde_json::Value::String(basis.to_string());
+    }
+    Some(out)
 }
 
 /// Stage the removal accounting for one row a write path is about to drop

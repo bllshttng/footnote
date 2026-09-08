@@ -625,6 +625,29 @@ fn a_row_whose_receipt_cannot_be_built_is_never_reaped() {
 /// x-6db9: the retention sweep. A receipt past the window expires in the
 /// same GC sweep that writes new ones; the fresh receipt a sweep just
 /// wrote carries `reaped_at` of now and is never its own expiry's victim.
+fn write_receipt_with_ledger_at(
+    home: &AgentsHome,
+    name: &str,
+    reaped_at: &str,
+) -> std::path::PathBuf {
+    let dir = home.root().join("reap-receipts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    let receipt = serde_json::json!({
+        "row_name": "t-expiry",
+        "short_id": "texpiry",
+        "harness": "claude",
+        "harness_session_id": "expiry-sess",
+        "cwd": "/tmp",
+        "created_at": "2020-01-01T00:00:00Z",
+        "reaped_at": reaped_at,
+        "resume": "claude --resume expiry-sess",
+        "ledger": {"feature": "x-9", "cost": 1.0},
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+    path
+}
+
 fn write_receipt_at(home: &AgentsHome, name: &str, reaped_at: &str) -> std::path::PathBuf {
     let dir = home.root().join("reap-receipts");
     std::fs::create_dir_all(&dir).unwrap();
@@ -656,14 +679,32 @@ fn rfc3339_days_ago(days: u64) -> String {
 fn a_receipt_past_the_window_expires_in_the_same_sweep() {
     let home = tmp_home("gc-receipt-expired");
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-    let old = write_receipt_at(&home, "claude-old-sess.json", &rfc3339_days_ago(8));
+    let old = write_receipt_with_ledger_at(&home, "claude-old-sess.json", &rfc3339_days_ago(8));
 
     let summary = gc_sweep(&home, &emitter, 900, 7);
 
-    assert!(!old.exists(), "the receipt past the window must be gone");
+    // x-70e1 (AC2-HP): the retention window strips the EXPENDABLE detail -
+    // the ledger copy here - but the identity core (who, resume, locator)
+    // stays on disk: deleting the file would destroy the only recovery
+    // record for a session that may still be resumable.
+    assert!(old.exists(), "the identity core must outlive the window");
     assert_eq!(
         summary.expired_receipts,
         vec!["claude-old-sess.json".to_string()]
+    );
+    let stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&old).unwrap()).unwrap();
+    assert!(
+        stored.get("ledger").is_none(),
+        "ledger is expendable: {stored}"
+    );
+    assert_eq!(
+        stored["resume"], "claude --resume expiry-sess",
+        "the resume mapping survives expiry: {stored}"
+    );
+    assert!(
+        stored["details_expired_at"].is_string(),
+        "the rewrite stamps when the detail was expired: {stored}"
     );
 }
 
@@ -679,11 +720,46 @@ fn a_receipt_inside_the_window_survives_and_the_window_flows() {
 
     // The same 6-day-old receipt under a 5-day window expires: the
     // configured value reaches the sweep, the default is not hardcoded.
+    // This fixture has nothing expendable (bare v1 shape), so expiry keeps
+    // the byte-identical core and names it in kept_receipts.
     let summary = gc_sweep(&home, &emitter, 900, 5);
-    assert!(!recent.exists());
+    assert!(recent.exists(), "the identity core is never deleted");
+    assert!(summary.expired_receipts.is_empty());
+    let kept: Vec<&str> = summary
+        .kept_receipts
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert!(
+        kept.contains(&"claude-recent-sess.json"),
+        "the stripped-nothing receipt is named, not silent: {kept:?}"
+    );
+}
+
+/// An aged receipt whose expendable fields were ALREADY stripped (a second
+/// sweep after the first expiry) is left byte-identical, not rewritten
+/// forever.
+#[test]
+fn an_already_stripped_receipt_is_not_rewritten_on_later_sweeps() {
+    let home = tmp_home("gc-receipt-idempotent");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let path = write_receipt_with_ledger_at(&home, "claude-old-sess.json", &rfc3339_days_ago(8));
+    let first = gc_sweep(&home, &emitter, 900, 7);
+    assert_eq!(first.expired_receipts.len(), 1);
+    let after_first = std::fs::read_to_string(&path).unwrap();
+
+    let second = gc_sweep(&home, &emitter, 900, 7);
+    assert!(second.expired_receipts.is_empty());
+    let kept: Vec<&str> = second
+        .kept_receipts
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert!(kept.contains(&"claude-old-sess.json"), "{kept:?}");
     assert_eq!(
-        summary.expired_receipts,
-        vec!["claude-recent-sess.json".to_string()]
+        std::fs::read_to_string(&path).unwrap(),
+        after_first,
+        "a stripped receipt is left byte-identical"
     );
 }
 
