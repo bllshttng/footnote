@@ -35,9 +35,9 @@ The `agent_spawned` event (`cli/src/fno/events/schema.yaml`) carries the same `s
 
 Both helpers trim env values and coerce empty/whitespace to `None`. Neither raises: a missing env or absent manifest degrades every field to null and the create path proceeds unchanged.
 
-**Node launch edge** (`cli/src/fno/agents/cli.py`, `_stamp_launch_edge`, called at both spawn sites beside `_stamp_spawned_session_row`). A registry row is reaped and a node is durable, so a spawn that names a node writes the same triple onto the node. Until this stamp existed the graph's three `spawned_by_*` fields were declared, read by `fno backlog provenance`, and written by nothing: 0 of 2356 nodes carried one, flat zero in every `created_at` cohort.
+**Node launch edge** (`cli/src/fno/agents/cli.py`, `_stamp_launch_edge`, called at both spawn sites beside `_stamp_spawned_session_row`). A registry row is reaped and a node is durable, so a spawn that names a node writes the same triple onto the node. Until this stamp existed the three graph fields were declared and read, but written by nothing. 0 of 2356 nodes carried one, flat zero in every `created_at` cohort.
 
-Do not fill this field from `source_session_id`. They answer different questions, and the answers differ: of 506 nodes carrying both a `source_session_id` and a worked session, the filer is not among the workers in 428.
+Do not fill this field from `source_session_id`. They answer different questions. Of 506 nodes carrying both a `source_session_id` and a worked session, the filer is not among the workers in 428.
 
 The stamp refuses rather than half-writes. No node, no write. No proven parent session, no write, because a triple with a null session on a durable node asserts a launch nobody can trace. An existing edge is never overwritten: launch is the FIRST launch, so a second worker on the node does not rewrite who started it.
 
@@ -49,7 +49,7 @@ The stamp refuses rather than half-writes. No node, no write. No proven parent s
 | null | set | a harness process spawned it; its session id could not be proved |
 | null | null | no harness ancestor: a human shell or a daemon |
 
-When the spawning process carries NO identity marker at all, `_capture_parent_edge` takes the harness from the process-tree walk and leaves the session id null. The walk is the prover, and a harness ancestor cannot be a stranger the way an inherited marker can. The fallback is gated on an empty marker set, not on a missing harness: a marker that IS present and resolved to nothing is a contradiction, and a contradiction attributes nothing. The `agent_spawned` event carries the `lineage_reason` in every case.
+When the spawning process carries NO identity marker at all, `_capture_parent_edge` takes the harness from the process-tree walk and leaves the session id null. The walk is the prover, and a harness ancestor cannot be a stranger the way an inherited marker can. The fallback is gated on an empty marker set, not on a missing harness. A marker that IS present and resolved to nothing is a contradiction, and a contradiction attributes nothing. The `agent_spawned` event carries the `lineage_reason` in every case.
 
 
 ## Reading it back: the resolver
