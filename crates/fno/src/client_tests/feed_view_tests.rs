@@ -93,9 +93,16 @@ fn lines_render_newest_first_with_marker() {
     // The viewport is exact: header + ROWS-2 item rows + footer, so the
     // painter can blit 1:1 and short lists render blank below their last row.
     assert_eq!(lines.len(), ROWS);
-    // Newest first: the LAST item renders at the top item row, marker on it.
+    // Newest first: the projection hands rows oldest-first, so display
+    // index d reads storage len-1-d and the top row is x-c, the newest.
+    assert!(
+        lines[1].contains("x-c"),
+        "top row shows the newest: {}",
+        lines[1]
+    );
     assert!(lines[1].starts_with(" ▸"));
-    assert!(lines[2].starts_with("  "));
+    assert!(lines[2].contains("x-b"));
+    assert!(lines[3].contains("x-a"));
     assert!(lines[5].trim().is_empty(), "below the last item: blank");
     assert!(lines.last().unwrap().contains("3 events"));
 }
@@ -107,10 +114,11 @@ fn offset_windows_the_items() {
         feed_item(Some("x-b"), Some("s-2")),
         feed_item(Some("x-c"), Some("s-3")),
     ]);
-    // Display index 1 (the second newest) opens the window.
+    // Display index 1 (the second newest) opens the window: the newest row
+    // (x-c) is scrolled off, x-b leads, x-a follows.
     let lines = feed_panel_lines(&o, W, ROWS, 1);
     assert!(lines[1].contains("x-b"));
-    assert!(lines[2].contains("x-c"));
+    assert!(lines[2].contains("x-a"));
     assert!(lines[3].trim().is_empty());
 }
 
@@ -212,14 +220,23 @@ fn a_click_on_a_feed_row_deep_links_it() {
         feed_item(Some("x-b"), Some("s-2")),
         feed_item(Some("x-c"), Some("s-3")),
     ]));
-    v.feed_offset = 2; // window opens on the OLDEST item (display index 2)
     let w = v.feed_panel_w() as u16;
     assert!(w > 0, "the panel must render at the 100-col view");
     let col = v.term.1 - w + 2; // inside the panel text area
+                                // The TOP item row displays the newest event (x-c) and clicking that
+                                // same row deep-links THAT event's session: painter and resolver must
+                                // name one event, never two.
+    let f = v.feed.as_ref().unwrap();
+    let lines = feed_panel_lines(f, w as usize - 1, v.term.0 as usize, 0);
+    assert!(
+        lines[1].contains("x-c"),
+        "top row is the newest: {}",
+        lines[1]
+    );
     let hit = v.chrome_hit(1, col).unwrap();
     assert!(matches!(hit, ChromeHit::Cmds(c)
     if c == vec![Command::AttachAgent {
-        id: "s-1".into(),
+        id: "s-3".into(),
         placement: PanePlacement { portal: Some(0), ..Default::default() },
     }]));
     // Header and footer rows are chrome, not rows: they never deep-link.
@@ -299,4 +316,57 @@ fn wheel_scrolls_within_the_item_count() {
     assert_eq!(v.feed_offset, 10);
     v.scroll_feed(false);
     assert_eq!(v.feed_offset, 9);
+}
+
+#[test]
+fn terminal_growth_reclamps_the_window() {
+    let mut v = two_pane_view(); // 30 rows
+    let mut items = overlay(vec![]).items;
+    for i in 0..20 {
+        let mut it = feed_item(Some("x-n"), Some("s-n"));
+        it.title = format!("event {i}");
+        items.push(it);
+    }
+    v.feed = Some(overlay(items));
+    // Scroll to the bottom, then grow the terminal: everything fits, so the
+    // window reopens at the newest row instead of parking on blanks.
+    for _ in 0..40 {
+        v.scroll_feed(true);
+    }
+    v.term = (60, 100);
+    v.scroll_feed(false);
+    assert_eq!(v.feed_offset, 0, "scroll re-clamps on growth");
+    v.feed_offset = 7; // a stale offset must not reach paint/click either
+    assert_eq!(v.feed_offset_clamped(), 0);
+    let cells = v.compose().cells;
+    assert!(
+        cells.iter().any(|c| c.c == 'x'),
+        "the panel paints items, not blanks"
+    );
+}
+
+#[test]
+fn a_double_width_glyph_claims_two_cells() {
+    let mut v = two_pane_view();
+    let mut it = feed_item(Some("x-cjk"), Some("s-cjk"));
+    it.title = "世界".into(); // two CJK glyphs, each display width 2
+    v.feed = Some(overlay(vec![it]));
+    // A wide panel so the title column lands inside the text columns.
+    v.term = (30, 200);
+    v.feed_width = 80;
+    let (rows, cols) = (v.term.0 as usize, v.term.1 as usize);
+    let mut cells = vec![Cell::default(); rows * cols];
+    v.draw_feed_panel(&mut cells, rows, cols);
+    // Find the wide glyph's cell; its right neighbor must be a WIDE_SPACER.
+    let wide = cells
+        .iter()
+        .position(|c| c.c == '\u{4e16}')
+        .expect("the CJK glyph paints");
+    let spacer = cells
+        .get(wide + 1)
+        .expect("a right neighbor exists inside the frame");
+    assert!(
+        spacer.flags & cell_flags::WIDE_SPACER != 0,
+        "the wide glyph reserves both cells"
+    );
 }

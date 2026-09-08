@@ -51,11 +51,11 @@ pub(crate) fn open_overlay(prior: Option<FeedOverlay>, gen: u64) -> FeedOverlay 
     }
 }
 
-/// The panel body: one header line, up to `visible_rows - 2` item rows
-/// (the window opens at `offset` in display order), then the footer pinned to
-/// the last row. Every line is padded to `w` (the panel's text width), so the
-/// painter blits lines 1:1 into rows `0..visible_rows` and the click resolver
-/// [`feed_row_item`] inverts the mapping exactly.
+/// The panel body: one header line, up to `visible_rows - 2` item rows, then
+/// the footer pinned to the last row. The projection hands rows OLDEST
+/// FIRST, so display index `d` reads storage index `len - 1 - d` and the top
+/// row is the newest event - the same view `feed_row_item` inverts for the
+/// click resolver, so a row and its deep link always name the same event.
 pub(crate) fn feed_panel_lines(
     o: &FeedOverlay,
     w: usize,
@@ -65,10 +65,14 @@ pub(crate) fn feed_panel_lines(
     let mut lines = vec![pad_to(" activity feed · click row opens · e close", w)];
     let visible = visible_rows.saturating_sub(2);
     for d in offset..offset + visible {
-        match o.items.get(d) {
+        match o
+            .items
+            .len()
+            .checked_sub(d + 1)
+            .and_then(|i| o.items.get(i))
+        {
             Some(item) => {
-                // Display index d is storage index len-1-d (newest first); the
-                // hover marker lands on the row the pointer is on.
+                // The hover marker lands on the row the pointer is on.
                 let marker = if d == o.sel { '▸' } else { ' ' };
                 let node = item.node.as_deref().unwrap_or("-");
                 lines.push(pad_to(
@@ -256,22 +260,35 @@ impl View {
         changed
     }
 
-    /// Wheel-scroll the item window by one row, clamped to the item count.
+    /// Wheel-scroll the item window by one row. The offset re-clamps against
+    /// the CURRENT viewport and item count first, so terminal growth (or a
+    /// shorter fold) can never leave the window parked on blank rows.
     pub(super) fn scroll_feed(&mut self, down: bool) {
         let Some(f) = &self.feed else {
             return;
         };
-        let total = f.items.len();
-        let visible = self.term.0 as usize;
-        let visible = visible.saturating_sub(2); // header + pinned footer
-        if total <= visible || visible == 0 {
-            return;
-        }
-        self.feed_offset = if down {
-            (self.feed_offset + 1).min(total - visible)
+        let visible = (self.term.0 as usize).saturating_sub(2); // header + footer
+        let max_off = f.items.len().saturating_sub(visible);
+        self.feed_offset = if max_off == 0 {
+            0
+        } else if down {
+            (self.feed_offset + 1).min(max_off)
         } else {
             self.feed_offset.saturating_sub(1)
         };
+    }
+
+    /// The scroll offset clamped to what the CURRENT items and viewport can
+    /// show, the single value every read path (paint, click, hover) shares.
+    pub(super) fn feed_offset_clamped(&self) -> usize {
+        let Some(f) = &self.feed else {
+            return 0;
+        };
+        let visible = (self.term.0 as usize).saturating_sub(2); // header + footer
+        if f.items.len() <= visible {
+            return 0;
+        }
+        self.feed_offset.min(f.items.len() - visible)
     }
 
     /// The right-edge panel, [`View::draw_sideline`] inverted: divider on the
@@ -288,18 +305,39 @@ impl View {
             return;
         }
         let x0 = cols - w;
-        let lines = feed_panel_lines(f, w - 1, rows, self.feed_offset);
+        let lines = feed_panel_lines(f, w - 1, rows, self.feed_offset_clamped());
         for (r, line) in lines.iter().enumerate() {
             if r >= rows {
                 break;
             }
-            for (i, ch) in line.chars().take(w - 1).enumerate() {
-                cells[r * cols + x0 + 1 + i] = Cell {
+            // Advance by DISPLAY columns, not char index: a double-width glyph
+            // claims two columns and marks its right half a WIDE_SPACER, the
+            // sideline's own contract, so the row never desyncs against the
+            // terminal. Feed titles are arbitrary text, so the width comes
+            // from unicode-width, not the sideline's trigram-only glyph_cols.
+            let mut dcol = 0usize;
+            for ch in line.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch)
+                    .unwrap_or(0)
+                    .max(1);
+                if dcol + cw > w - 1 {
+                    break;
+                }
+                cells[r * cols + x0 + 1 + dcol] = Cell {
                     c: ch,
                     fg: Color::Default,
                     bg: Color::Default,
                     flags: 0,
                 };
+                if cw == 2 && dcol + 2 < w {
+                    cells[r * cols + x0 + 1 + dcol + 1] = Cell {
+                        c: ' ',
+                        fg: Color::Default,
+                        bg: Color::Default,
+                        flags: cell_flags::WIDE_SPACER,
+                    };
+                }
+                dcol += cw;
             }
         }
         let border_active = self.hover_feed_border || self.feed_drag.is_some();
@@ -339,7 +377,7 @@ impl View {
             f.items.len(),
             row as usize,
             self.term.0 as usize,
-            self.feed_offset,
+            self.feed_offset_clamped(),
         )
         .and_then(|d| {
             let item = f.items.get(f.items.len() - 1 - d)?;
@@ -356,9 +394,14 @@ impl View {
         let len = self.feed.as_ref().map(|f| f.items.len()).unwrap_or(0);
         let feed_w = self.feed_panel_w();
         let d = if feed_w > 0 && col > self.term.1 - feed_w {
-            feed_row_item(len, row as usize, self.term.0 as usize, self.feed_offset)
-                .map(|d| d.min(len.saturating_sub(1)))
-                .unwrap_or(0)
+            feed_row_item(
+                len,
+                row as usize,
+                self.term.0 as usize,
+                self.feed_offset_clamped(),
+            )
+            .map(|d| d.min(len.saturating_sub(1)))
+            .unwrap_or(0)
         } else {
             0
         };

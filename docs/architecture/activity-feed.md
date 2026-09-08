@@ -1,6 +1,6 @@
 # The activity feed
 
-A browsable history of what happened across the fleet, in order, with a deep link per row into the session that produced it. Open it in the mux client with `prefix+e`.
+A browsable history of what happened across the fleet, in order, with a deep link per row into the session that produced it. Open it in the mux client with `e`.
 
 ## The three stores, one timeline
 
@@ -31,7 +31,7 @@ Every row carries the node id and session id the deep link needs.
 
 `fno agents feed [--since-epoch <secs>] [--limit <n>] [--node <id>] [--session <id>] [--json]` is the projection. A missing or unreadable store is not fatal: the rows the other store yielded still emit, with one stderr line naming the store skipped.
 
-`prefix+e` in the mux client opens the overlay. Rows render newest first. j/k move the cursor. Enter deep-links the row. A row that joins a live sideline row resolves through `agent_hit` exactly as a sideline click does: FocusPane, or AttachAgent on portal 0. An unjoined row with a session id attaches that id, and the server's existing `no such agent` notice is what a dead session answers.
+`e` in the mux client toggles the full-height panel on the right edge. Rows render newest first. A click deep-links the row. A row that joins a live sideline row resolves through `agent_hit` exactly as a sideline click does: FocusPane, or AttachAgent on portal 0. An unjoined row with a session id attaches that id, and the server's existing `no such agent` notice is what a dead session answers. The panel is chrome: it consumes no keys, so typing reaches the focused pane, and the border drags to a width that persists.
 
 ## Deploy rule
 
