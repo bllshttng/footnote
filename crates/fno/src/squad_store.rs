@@ -1843,6 +1843,31 @@ fn mutate(f: impl FnOnce(&mut Vec<StoredSquad>)) -> io::Result<()> {
     mutate_file(|sf| f(&mut sf.squads))
 }
 
+/// Retire every member whose (harness, session id) matches, by the store's
+/// own tombstone convention (x-70e1 task 3): a tombstoned member reads Dead,
+/// never renders, and restart/restore cannot resurrect it, while the squad's
+/// other members and the last operator shell stay untouched. Returns the
+/// number of members newly retired; a second call retires none (idempotent).
+/// A resume epoch that re-adds the same native id as a NEW member is real new
+/// membership and is not hidden by the old tombstone.
+pub fn retire_session_members(harness: &str, session_id: &str) -> io::Result<usize> {
+    let mut retired = 0usize;
+    mutate(|squads| {
+        for squad in squads {
+            for member in &mut squad.members {
+                let matches = member.harness.as_deref() == Some(harness)
+                    && member.harness_session_id.as_deref() == Some(session_id)
+                    && !member.tombstone;
+                if matches {
+                    member.tombstone = true;
+                    retired += 1;
+                }
+            }
+        }
+    })?;
+    Ok(retired)
+}
+
 /// The lifecycle-collection twin of [`mutate`] (x-7561): the SAME locked atomic
 /// read-modify-write, applying `f` to `external_lifecycle` while preserving
 /// `squads` byte-for-byte. Both collections ride one version-1 object, so a
@@ -2492,6 +2517,73 @@ mod tests {
         assert_eq!(encoded["members"][0]["harness"], "codex");
     }
 
+    #[test]
+    fn retire_session_members_tombstones_only_the_matching_identity() {
+        // x-70e1 task 3: the exact-session retirement retires ONLY the
+        // member whose (harness, session id) matches; a live sibling, an
+        // already-tombstoned member and a shared-workspace plain pane all
+        // survive, and a second call retires nothing (idempotent).
+        let _s = Scratch::new("retire-session");
+        let mut target = StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("t-abcd-worker".into()),
+            harness: Some("codex".into()),
+            harness_session_id: Some("01a03a85-1111-7222-8333-444455556666".into()),
+        };
+        let sibling = StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("t-abcd-sibling".into()),
+            harness: Some("codex".into()),
+            harness_session_id: Some("22222222-1111-7222-8333-444455556666".into()),
+        };
+        let already_gone = StoredMember {
+            tombstone: true,
+            harness: Some("codex".into()),
+            harness_session_id: Some("01a03a85-1111-7222-8333-444455556666".into()),
+            ..target.clone()
+        };
+        let _ = &mut target;
+        upsert(
+            "work",
+            "",
+            &["/repo".into()],
+            &[target, sibling, already_gone],
+        )
+        .unwrap();
+
+        let retired =
+            super::retire_session_members("codex", "01a03a85-1111-7222-8333-444455556666").unwrap();
+        assert_eq!(retired, 1, "only the live matching member retires");
+
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 1);
+        let members = &loaded.squads[0].members;
+        let target = members
+            .iter()
+            .find(|m| {
+                m.harness_session_id.as_deref() == Some("01a03a85-1111-7222-8333-444455556666")
+                    && m.worker.as_deref() == Some("t-abcd-worker")
+            })
+            .expect("target member still in the store");
+        assert!(target.tombstone, "the target is tombstoned");
+        let sibling = members
+            .iter()
+            .find(|m| m.worker.as_deref() == Some("t-abcd-sibling"))
+            .expect("sibling survives");
+        assert!(!sibling.tombstone, "the sibling is untouched");
+
+        let again =
+            super::retire_session_members("codex", "01a03a85-1111-7222-8333-444455556666").unwrap();
+        assert_eq!(again, 0, "a second retirement retires nothing new");
+    }
     #[test]
     fn hostile_worker_name_is_dropped_at_load() {
         // The load gate's argv-safety half: a worker name carrying a path
