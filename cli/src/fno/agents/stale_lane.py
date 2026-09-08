@@ -11,12 +11,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fno.agents.stale_escalate import (
-    already_asked,
-    answered_question,
-    dedupe_key,
-    reset_answered,
-)
+from fno.agents.stale_escalate import already_asked, answered_question, dedupe_key, reset_answered
 
 STALE_MARKER = "watchdog-stale"
 

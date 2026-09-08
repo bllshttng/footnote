@@ -85,12 +85,9 @@ CONTENDED = "contended"
 POLLING_SETTLED = "polling_settled"
 #: Open node, spawn row, no crown, quiet past the drive threshold (x-c624). Driven like WAKE.
 SILENCE = "silence"
-#: Report-only (the split the stale ask needed): a past-ceiling row whose
-#: evidence says FINISHED work - its node shipped, or its own tail reads
-#: done - is not an abandoned session and must never enter the needs-human
-#: ask. A done-node row can never age out of an ask (a shared worktree can
-#: keep it unfreeable indefinitely), so filing it stale re-asked the same
-#: rows every sweep and grew the ask with fleet throughput.
+#: Report-only: a past-ceiling row whose evidence says FINISHED work (its
+#: node shipped, or its tail reads done) never enters the needs-human ask -
+#: it can never age out of an ask, so filing it stale re-asked it forever.
 SPENT = "spent"
 
 #: Every verdict this module can return. `--only` validates against THIS, not
@@ -750,11 +747,8 @@ def _spent_basis(
     *,
     node_state_for: Callable[[str], Optional[dict]],
 ) -> Optional[str]:
-    """Positive done evidence that a past-ceiling row is finished work, not an
-    abandoned session: its node shipped, or its own tail reads done. A
-    finished row has nothing for a human to triage, and it can never age out
-    of the needs-human ask, so filing it stale re-asked the same rows every
-    sweep. An unreadable read is never evidence: the row stays stale."""
+    """Positive done evidence that a past-ceiling row is finished work, or None."""
+    age = f"quiet {int(facts_age_s // 3600)}h past the wake ceiling"
     if row.node:
         try:
             node_state = node_state_for(row.node) or {}
@@ -762,20 +756,11 @@ def _spent_basis(
             node_state = {}
         status = str(node_state.get("status") or "").lower()
         if status in _FINISHED_NODE_STATUSES:
-            return (
-                f"node {row.node} {status}; quiet {int(facts_age_s // 3600)}h past the "
-                f"{int(WAKE_MAX_AGE_S // 3600)}h wake ceiling; finished row, "
-                "nothing to triage"
-            )
-    if (
-        facts is not None
-        and classify_tail(facts.last_role, facts.last_text, facts_age_s) == "done"
-    ):
-        return (
-            f"tail reads done; quiet {int(facts_age_s // 3600)}h past the "
-            f"{int(WAKE_MAX_AGE_S // 3600)}h wake ceiling; finished row, "
-            "nothing to triage"
-        )
+            return f"node {row.node} {status}; {age}; finished row, nothing to triage"
+    if facts is not None and classify_tail(
+        facts.last_role, facts.last_text, facts_age_s
+    ) == "done":
+        return f"tail reads done; {age}; finished row, nothing to triage"
     return None
 
 

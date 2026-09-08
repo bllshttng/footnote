@@ -73,26 +73,37 @@ def already_asked(root: Path, key: str, *, marker: str = MARKER) -> "str | None"
     return None
 
 
-#: The closers reconcile_channel itself mints. Their close answers are
-#: mechanical ("set changed; superseded by ..."), never a human verdict, so
-#: they do not suppress: a set that changed away and back must re-ask.
+#: The closers reconcile_channel mints. Mechanical, never a human verdict:
+#: they do not suppress, so a set that changed away and back re-asks.
 _MECHANICAL_CLOSERS = frozenset({"stale-escalate", "friction-escalate"})
 
 
-def answered_question(root: Path, key: str, *, marker: str = MARKER) -> "str | None":
-    """The id of the question carrying ``[<marker>:<key>]`` that a HUMAN
-    answered IN THIS EPISODE, else None. An answered ask is a consumed ask:
-    re-minting it on the next sweep is the re-nag this fold kills. The
-    suppression holds only until an empty-set reset - the episode boundary
-    that makes a returning identity new work. Mechanical supersede closes
-    are not answers and never suppress. Order is read from journal POSITION,
-    never timestamps: second-granularity stamps tie.
-    """
-    from fno.outstanding.core import (
-        QUESTION_CLOSED_EVENT,
-        read_answered_questions,
-        read_question_events,
+def _is_answer_close(rec: dict, qids: "set[str]") -> bool:
+    from fno.outstanding.core import QUESTION_CLOSED_EVENT
+
+    data = rec.get("data")
+    return (
+        rec.get("type") == QUESTION_CLOSED_EVENT
+        and isinstance(data, dict)
+        and str(data.get("question_id") or "") in qids
+        and bool(data.get("answer"))
     )
+
+
+def _is_reset(rec: dict, marker: str) -> bool:
+    data = rec.get("data")
+    return (
+        rec.get("type") == "operator_decision"
+        and isinstance(data, dict)
+        and str(data.get("subject") or "") == f"{marker}:reset"
+    )
+
+
+def answered_question(root: Path, key: str, *, marker: str = MARKER) -> "str | None":
+    """The id of the question carrying ``[<marker>:<key>]`` that a human
+    answered and no empty-set reset has retired, else None. Contract:
+    docs/architecture/fleet-watchdog.md."""
+    from fno.outstanding.core import read_answered_questions, read_question_events
 
     needle = f"[{marker}:{key}]"
     hit = next(
@@ -107,84 +118,43 @@ def answered_question(root: Path, key: str, *, marker: str = MARKER) -> "str | N
     if hit is None:
         return None
     events = read_question_events()
-    answer_idx = None
-    for i, rec in enumerate(events):
-        data = rec.get("data")
-        if (
-            rec.get("type") == QUESTION_CLOSED_EVENT
-            and isinstance(data, dict)
-            and str(data.get("question_id") or "") == hit["id"]
-            and data.get("answer")
-        ):
-            answer_idx = i
-    if answer_idx is None:
-        return None  # no readable answer event: nothing anchors the episode
-    for rec in events[answer_idx + 1 :]:
-        data = rec.get("data")
-        if (
-            rec.get("type") == "operator_decision"
-            and isinstance(data, dict)
-            and str(data.get("subject") or "") == f"{marker}:reset"
-        ):
-            return None  # the set emptied after the answer: a new episode
+    answer_idx = max(
+        (i for i, rec in enumerate(events) if _is_answer_close(rec, {hit["id"]})),
+        default=-1,
+    )
+    if answer_idx < 0 or any(_is_reset(rec, marker) for rec in events[answer_idx + 1 :]):
+        return None
     return hit["id"]
 
 
 def reset_answered(root: Path, *, marker: str) -> None:
-    """Record the episode boundary for a marker: the measured set emptied, so
-    every prior answer stops suppressing and a returning set asks fresh. Not
-    an operator ruling - a mechanical marker the fold reads back. Written
-    only when an answer is actually pending reset, so a clean fleet adds no
-    journal rows. Positional, never timestamp, ordering: stamps tie."""
+    """Record the empty-set episode boundary for a marker, lazily: only when
+    an answer is pending reset. The returning set then asks fresh."""
     import secrets
 
     from fno.events import operator_decision
-    from fno.outstanding.core import (
-        QUESTION_CLOSED_EVENT,
-        append_question_event,
-        read_answered_questions,
-        read_question_events,
-    )
+    from fno.outstanding.core import append_question_event, read_answered_questions, read_question_events
 
-    needle = f"[{marker}:"
+    events = read_question_events()
     answered_ids = {
         question["id"]
         for question in read_answered_questions()
-        if needle in question.get("question", "")
+        if f"[{marker}:" in question.get("question", "")
     }
-    events = read_question_events()
-    last_answer_idx = -1
-    for i, rec in enumerate(events):
-        data = rec.get("data")
-        if (
-            rec.get("type") == QUESTION_CLOSED_EVENT
-            and isinstance(data, dict)
-            and str(data.get("question_id") or "") in answered_ids
-            and data.get("answer")
-        ):
-            last_answer_idx = i
-    if last_answer_idx == -1:
-        return  # nothing is suppressing; there is nothing to reset
-    for rec in events[last_answer_idx + 1 :]:
-        data = rec.get("data")
-        if (
-            rec.get("type") == "operator_decision"
-            and isinstance(data, dict)
-            and str(data.get("subject") or "") == f"{marker}:reset"
-        ):
-            return  # already reset after the newest answer
+    last = max(
+        (i for i, rec in enumerate(events) if _is_answer_close(rec, answered_ids)),
+        default=-1,
+    )
+    if last < 0 or any(_is_reset(rec, marker) for rec in events[last + 1 :]):
+        return
     reset_id = f"d-{secrets.token_hex(4)}"
     append_question_event(
         operator_decision(
-            decision_id=reset_id,
-            question_id=reset_id,
+            decision_id=reset_id, question_id=reset_id,
             decision="measured set empty; answer suppression resets",
-            subject=f"{marker}:reset",
-            decided_by="fno agents question-fold",
-            origin="scheduler",
-            authority_source="agent",
-            rationale="episode boundary, not an operator ruling",
-            source="daemon",
+            subject=f"{marker}:reset", decided_by="fno agents question-fold",
+            origin="scheduler", authority_source="agent",
+            rationale="episode boundary, not an operator ruling", source="daemon",
         ),
         root,
     )
