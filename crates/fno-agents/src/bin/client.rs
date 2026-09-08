@@ -665,12 +665,7 @@ async fn run(args: Vec<String>) -> i32 {
         // gone and its policy state is unknown, so it refuses rather than
         // falling through to a harness default the seam could have refused.
         if spawn_needs_python_seam(&params) {
-            use std::os::unix::process::CommandExt;
-            let err = std::process::Command::new("fno")
-                .arg("agents")
-                .args(&args[..])
-                .env("FNO_AGENTS_RUNTIME", "python")
-                .exec();
+            let err = exec_python_front(&args);
             eprintln!(
                 "fno-agents: config.agents.profiles is read only by the Python \
                  spawn seam, and exec of 'fno agents spawn' failed: {err}. No \
@@ -705,7 +700,6 @@ async fn run(args: Vec<String>) -> i32 {
         }
         if substrate == "pane" {
             use fno_agents::claude_ask::py_repr;
-            use std::os::unix::process::CommandExt;
             // Provider parity with the optional-provider Python resolver: a
             // MISSING --provider is legal on the pane substrate (the Python
             // re-exec resolves it from the invoking harness), so let None fall
@@ -733,11 +727,7 @@ async fn run(args: Vec<String>) -> i32 {
                 .filter(|a| !a.starts_with("--defaults-applied"))
                 .cloned()
                 .collect();
-            let err = std::process::Command::new("fno")
-                .arg("agents")
-                .args(&pane_args[..])
-                .env("FNO_AGENTS_RUNTIME", "python")
-                .exec();
+            let err = exec_python_front(&pane_args);
             eprintln!(
                 "fno-agents: substrate 'pane' is mux-hosted via the Python CLI, \
                  but exec of 'fno agents spawn' failed: {err}. Install the fno \
@@ -753,17 +743,12 @@ async fn run(args: Vec<String>) -> i32 {
         // the known "two path gates for a new provider field" drift class.
         // FNO_AGENTS_RUNTIME=python stops the Python front door bouncing back.
         if params.get("account").and_then(|v| v.as_str()).is_some() {
-            use std::os::unix::process::CommandExt;
             let account_args: Vec<String> = args
                 .iter()
                 .filter(|a| !a.starts_with("--defaults-applied"))
                 .cloned()
                 .collect();
-            let err = std::process::Command::new("fno")
-                .arg("agents")
-                .args(&account_args[..])
-                .env("FNO_AGENTS_RUNTIME", "python")
-                .exec();
+            let err = exec_python_front(&account_args);
             eprintln!(
                 "fno-agents: --account resolution runs in the Python CLI, but \
                  exec of 'fno agents spawn' failed: {err}. Run `fno agents \
@@ -1295,6 +1280,27 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
 /// the strict coordinate checks still own that.
 fn spawn_needs_python_seam(params: &Value) -> bool {
     params.get("defaults_applied").is_none()
+}
+
+/// Exec the Python front door with the given spawn argv. `fno` is the entry
+/// point on a deployed machine; a bare venv install (CI runners included)
+/// only ships `fno-py`, so a NotFound on the first candidate falls through
+/// to it. Returns the last exec error so the caller's refusal names reality.
+fn exec_python_front(args: &[String]) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new("fno")
+        .arg("agents")
+        .args(args)
+        .env("FNO_AGENTS_RUNTIME", "python")
+        .exec();
+    if err.kind() == std::io::ErrorKind::NotFound {
+        return std::process::Command::new("fno-py")
+            .arg("agents")
+            .args(args)
+            .env("FNO_AGENTS_RUNTIME", "python")
+            .exec();
+    }
+    err
 }
 
 fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
