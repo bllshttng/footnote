@@ -67,8 +67,8 @@ use crate::loop_runtime::{
     CloseOutcome, Evidence, GlobalJournalPath, Journal, ProjectJournalPath, UnitResult,
 };
 use crate::loopcheck::TerminationReason;
-use crate::territory;
 use crate::run_outcome::classify;
+use crate::territory;
 
 /// Cross-tick per-node consecutive-failure counter (the circuit breaker).
 ///
@@ -1023,13 +1023,12 @@ struct BlueprinterDelivery {
     failed: Vec<serde_json::Value>,
 }
 
-/// One `agents worker blueprint-feed` call: the Python verb owns the policy
-/// (membership, feed windows, the record store, mail transport); the
+/// One `agents blueprint-feed` call: the binary's territory fact set owns the
+/// policy (membership, feed windows, the record store, mail transport); the
 /// supervisor only decides when to spawn and when to deliver.
 fn run_blueprint_feed(cfg: &DrainConfig, extra: &[String]) -> Option<serde_json::Value> {
     let mut args = vec![
         "agents".to_string(),
-        "worker".to_string(),
         "blueprint-feed".to_string(),
         "--scope".to_string(),
         cfg.scope.clone(),
@@ -1367,8 +1366,7 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
         Some(s) => s as u64,
         None => return Ok(Vec::new()),
     };
-    let territories = territory::resolve_territories(config_cwd, registry_path)
-        .map_err(|e| e.0)?;
+    let territories = territory::resolve_territories(config_cwd, registry_path).map_err(|e| e.0)?;
     let mut targets = Vec::new();
     for territory in territories {
         // A rung-2 territory roots at the first member epic's own project
@@ -1418,7 +1416,10 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
 /// tick row: an empty target list from a broken resolver (`env_broken`, the
 /// missing-click class) is a different arm state from an empty list because
 /// nothing is enabled (`no_missions`).
-pub fn resolve_targets_report(config_cwd: &Path, registry_path: &Path) -> (Vec<ResolvedTarget>, Option<String>) {
+pub fn resolve_targets_report(
+    config_cwd: &Path,
+    registry_path: &Path,
+) -> (Vec<ResolvedTarget>, Option<String>) {
     // The crossing is gone: the receipt is computed natively from the
     // territory fact set in this crate (seam-crossings-baseline lost the
     // active-backlog line in the same change).
@@ -1434,7 +1435,10 @@ pub fn resolve_targets_report(config_cwd: &Path, registry_path: &Path) -> (Vec<R
                 Some(format!("active-backlog receipt unrepresentable: {e}")),
             ),
         },
-        Err(reason) => (Vec::new(), Some(reason.chars().take(200).collect::<String>())),
+        Err(reason) => (
+            Vec::new(),
+            Some(reason.chars().take(200).collect::<String>()),
+        ),
     }
 }
 
@@ -3297,9 +3301,9 @@ mod tests {
         assert!(!record.exists(), "no defer on a skipped child");
     }
 
-    /// A stub `fno` that records every argv, answers `agents worker
-    /// blueprint-feed` with `status_json`, and (optionally) fails
-    /// `agents spawn` so the repair path is reachable.
+    /// A stub `fno` that records every argv, answers `agents blueprint-feed`
+    /// with `status_json`, and (optionally) fails `agents spawn` so the repair
+    /// path is reachable.
     fn stub_fno_blueprint_feed(
         dir: &std::path::Path,
         record: &std::path::Path,
@@ -3318,7 +3322,7 @@ mod tests {
             format!(
                 "#!/usr/bin/env bash\n\
                  echo \"$@\" >> \"{}\"\n\
-                 if [ \"$2\" = \"worker\" ]; then\n\
+                 if [ \"$2\" = \"blueprint-feed\" ]; then\n\
                  case \"$*\" in\n\
                  *--deliver*) printf '%s' '{{\"action\":\"deliver\",\"delivered\":[\"x-1\",\"x-2\"],\"failed\":[]}}';;\n\
                  *) printf '%s' '{}';;\n\

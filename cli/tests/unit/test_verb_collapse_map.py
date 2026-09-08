@@ -121,8 +121,10 @@ def test_map_covers_current_surface_once():
     # branch allocated `backlog discover`: 576 -> 577, and the routing
     # branch allocates `agents route-slot`, the delivery-slot resolver the
     # spawn seam's client invokes directly (hidden verb): 577 -> 578.
-    # Counted from the merged file, never taken from either side: 579.
-    assert len(mapped) == 579, (
+    # Counted from the merged file, never taken from either side: the feed
+    # port reallocated the retired `agents worker blueprint-feed` pair onto
+    # the direct binary verb `agents blueprint-feed`: 580.
+    assert len(mapped) == 580, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
