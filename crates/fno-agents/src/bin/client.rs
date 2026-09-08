@@ -711,7 +711,7 @@ async fn run(args: Vec<String>) -> i32 {
     // codex/gemini + --once -> dispatch_codex_once / dispatch_gemini_once.
     // `host` and `promote` must fall through to the daemon RPC unchanged.
     if method == "agent.spawn" && verb_owned == "spawn" {
-        // x-f1ab task 0.1: the seam gate comes FIRST. A spawn that skipped
+        // The seam gate comes FIRST. A spawn that skipped
         // the Python seam carries no configured route/model/effort/account,
         // so it goes back to the front door (FNO_AGENTS_RUNTIME=python stops
         // the loop: the re-exec crosses the seam, gets the marker, and comes
@@ -1346,7 +1346,7 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
 /// no configured route, model, effort or account, so it goes back to the
 /// front door; the marker asserts the crossing and is parsed beside `--yolo`.
 /// A marker is an upstream seam crossing, never proof a model is authorized -
-/// the strict coordinate checks still own that (x-90a9 task 1.1).
+/// the strict coordinate checks still own that.
 fn spawn_needs_python_seam(params: &Value) -> bool {
     params.get("defaults_applied").is_none()
 }
@@ -2833,7 +2833,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 // NOTE: --yolo is accepted and forwarded; daemon ignores it for now.
                 params.insert("yolo".into(), Value::Bool(true));
             }
-            // x-f1ab / x-90a9 task 0.1: the Python spawn seam (rust_runtime
+            // The Python spawn seam (rust_runtime
             // make_context -> inject_spawn_defaults) is the only reader of
             // config.agents.profiles. This token asserts it crossed upstream
             // and carries its enforcement verdict. Consumed here - never

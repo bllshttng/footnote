@@ -753,6 +753,31 @@ fn states_leg(payload: &Value) -> Value {
                     .to_string()
             };
             let (wk, oa, src) = (get("work_kind"), get("operator_access"), get("source"));
+            // On a hold the decision carries no candidate policy: surface the
+            // access filter from the payload's own policy block instead, so a
+            // held readout still names the access that held it.
+            let (oa, src) = if oa.is_empty() {
+                (
+                    payload
+                        .get("policy")
+                        .and_then(|p| p.get("operator_access"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    if payload
+                        .get("policy")
+                        .and_then(|p| p.get("enforce_inventory"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        "config routing.enforce_inventory".to_string()
+                    } else {
+                        String::new()
+                    },
+                )
+            } else {
+                (oa, src)
+            };
             if !wk.is_empty() {
                 obj.insert("work_kind".into(), json!(wk));
             }
@@ -982,7 +1007,7 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
         .filter(|s| !s.trim().is_empty());
     let thread_seatable = payload.get("thread_seatable").cloned().unwrap_or(json!({}));
 
-    // --- strict inventory policy (x-90a9 task 1.1) --------------------------
+    // --- strict inventory policy ---------------------------------------------
     // When routing.enforce_inventory is set, the effective work kind picks
     // WHICH declared slot this dispatch walks, and only that slot's
     // CONFIG-declared lanes can answer. The grid, the built-in fallback and
@@ -1699,7 +1724,7 @@ fn none(chain: Vec<Value>) -> Value {
 }
 
 /// Capacity terminals keep the receipt vocabulary verbatim while naming their
-/// kind for machine consumers (x-90a9 task 1.1).
+/// kind for machine consumers.
 fn queue_decision(chain: Vec<Value>) -> Value {
     json!({"status": "none", "candidate": Value::Null, "reason_kind": "capacity-queue", "chain": chain})
 }
@@ -1733,7 +1758,7 @@ fn native_view_for(harness: &str) -> Option<&'static str> {
     }
 }
 
-/// Rust owns the work-kind ruling (x-90a9 task 1.1): a planless target
+/// Rust owns the work-kind ruling: a planless target
 /// performs planning and qualifies against the blueprint slot, while the
 /// command stays target. A planned target, think, blueprint, review, crown
 /// and every ops stage qualify against their own slots.
@@ -1808,7 +1833,7 @@ pub fn run_route_slot_capture(args: &[String]) -> (i32, String, String) {
 }
 
 /// `route-slot audit`: read-only completion evidence for the routing policy
-/// (x-90a9 task 3.1). The snapshot loader is Python (`fno config route
+/// (x-90a9). The snapshot loader is Python (`fno config route
 /// audit-snapshot`), which reads config, registry, journal and decision
 /// records through their established readers; the VERDICT is made here, the
 /// same owner that qualifies every launch, and repeats read exactly.
@@ -2207,17 +2232,22 @@ pub(crate) fn audit_load_snapshot(
                 let subject = data.get("subject").and_then(Value::as_str).unwrap_or("");
                 let is_view = subject.starts_with("routing-view:");
                 if kind == "decision_retracted" {
-                    let target = data
-                        .get("target_decision_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    if !target.is_empty() {
-                        retired.insert(target.to_string(), ());
+                    if let Some(target) = data.get("target_decision_id").and_then(Value::as_str) {
+                        if !target.is_empty() {
+                            retired.insert(target.to_string(), ());
+                        }
                     }
                     continue;
                 }
                 if !is_view {
                     continue;
+                }
+                // A later ruling naming this one in `supersedes` retires it,
+                // the same derivation the Python decisions reader applies.
+                if let Some(superseded) = data.get("supersedes").and_then(Value::as_str) {
+                    if !superseded.is_empty() {
+                        retired.insert(superseded.to_string(), ());
+                    }
                 }
                 let did = data
                     .get("decision_id")
@@ -2548,6 +2578,8 @@ mod tests {
             "capacity": {"claude": {"state": "ok", "accounts": {}}},
         }));
         assert_eq!(out["routing"], "policy-held");
+        assert_eq!(out["operator_access"], "remote");
+        assert_eq!(out["policy_source"], "config routing.enforce_inventory");
         let skipped = out["skipped"].as_array().unwrap();
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0]
@@ -2774,7 +2806,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // x-90a9 task 1.1: the strict inventory policy leg
+    // The strict inventory policy leg
     // -------------------------------------------------------------------
 
     fn strict_payload(overrides: Value) -> Value {
@@ -3172,7 +3204,7 @@ mod tests {
         std::fs::write(
             state_root.join("decisions.jsonl"),
             format!(
-                "{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view1\",\"subject\":\"routing-view:sid-1\",\"decision\":\"{{\\\"view\\\": \\\"claude-native\\\", \\\"fingerprint\\\": \\\"fp1\\\", \\\"session_id\\\": \\\"sid-1\\\"}}\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view2\",\"subject\":\"routing-view:sid-other\",\"decision\":\"x\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"decision_retracted\",\"data\":{{\"target_decision_id\":\"d-view2\"}}}}\n"
+                "{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view1\",\"subject\":\"routing-view:sid-1\",\"decision\":\"{{\\\"view\\\": \\\"claude-native\\\", \\\"fingerprint\\\": \\\"fp1\\\", \\\"session_id\\\": \\\"sid-1\\\"}}\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view2\",\"subject\":\"routing-view:sid-other\",\"decision\":\"x\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"decision_retracted\",\"data\":{{\"target_decision_id\":\"d-view2\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view3\",\"subject\":\"routing-view:sid-1\",\"decision\":\"older record\",\"supersedes\":\"d-view1\"}}}}\n"
             ),
         )
         .unwrap();
