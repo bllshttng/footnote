@@ -138,7 +138,7 @@ The durable copy must be addressed to the RESOLVED session's canonical handle. D
 
 A non-id token, such as a spawn `--name` like `blueprint-auth-glm`, is not a mail address. The drain is handle-keyed, so a name never matches a session's handle and a durable write under it strands. `--force` is the exception, and for that same reason: it writes no durable row. It types at a pane the registry names, and the registry is what resolves a friendly name to the session behind it.
 
-The codex head-8 refusal and the `--force` guard both sit ABOVE every lane that returns on its own. An address rule that covers only the lanes reached last is not an address rule. A dropped transport flag is worse than a refused one, because the receipt still reads like a success. Neither guard applies where the positional holds the message BODY. `--to-project` and `--to-king` address by option, so an eight-hex body there is content nobody is addressing.
+The codex head-8 refusal and the `--force` guard both sit ABOVE every lane that returns on its own. An address rule that covers only the lanes reached last is not an address rule. A dropped transport flag is worse than a refused one, because the receipt still reads like a success. Neither guard applies where the address was never typed as a bare positional. `--to-project` holds the BODY in the positional, so an eight-hex there is content nobody is addressing. `--to-king` and `--to-self` DERIVE the handle they hand the name lane. A derived handle names exactly one live row, so the ambiguity the head-8 rule guards cannot arise. A crowned row's own `--name` can legitimately be a codex head-8, and the guard there refuses a send the crown resolved correctly.
 
 ## `fno inbox` alias + legacy migration
 

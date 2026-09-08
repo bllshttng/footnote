@@ -217,9 +217,8 @@ def fleet_has_crown() -> bool:
     return fleet_has_crown_at(agents_registry_path())
 
 
-# Deliberately UNCACHED. A cache keyed on the path alone survives a succession,
-# so a long-lived renderer would keep naming the deposed holder - the staleness
-# this line exists to remove. A drain pays one JSON read per message for it.
+# Deliberately UNCACHED: a cache keyed on the path survives a succession, so a
+# long-lived renderer would keep naming the deposed holder. One read per message.
 def crown_at(registry_path: Path, session: Optional[str]) -> Optional[str]:
     """Return the live row's crown label for ``session``, or ``None``.
 
@@ -425,9 +424,9 @@ def wrap_fno_mail(
     ``to_session`` is the RECIPIENT's full session id, when a delivery lane
     resolved one, and it renders the recipient-crown line. A trailer, not a tag
     attribute: the field rule above reserves attributes for what a recipient
-    cannot cheaply look up, and its own crown is what it fails to look up
-   . It sits ABOVE the sender trailer, so the authority notice stays the
-    last thing read inside the envelope.
+    cannot cheaply look up, and its own crown is what it fails to look up. It
+    sits ABOVE the sender trailer, so the authority notice stays the last thing
+    read inside the envelope.
 
     This is the form injected over the ``control.sock`` (claude) and stored in
     the durable bus body, so a delivered message is self-recording -- ``grep

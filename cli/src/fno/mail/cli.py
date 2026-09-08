@@ -2250,8 +2250,9 @@ def _name_lane_send(
                 recipient_session = forced_session
             else:
                 recipient = token
-        if recipient_session is None and token_reachable is not None:
-            recipient_session = token_reachable.session_id
+        if recipient_session is None:
+            recipient_session = token_reachable.session_id if token_reachable else (
+                session_identity_key(token) if is_full_session_id(token) else None)
         provider = (
             token_reachable.agent if token_reachable is not None else provider
         ) or "claude"
