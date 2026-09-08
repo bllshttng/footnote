@@ -47,9 +47,13 @@ impl Core {
     /// (v71) True when a stored member is bound to `pid` (`member_pane`) and
     /// the evidence built from `agents` and the reap journal judges it Dead,
     /// and no registry row is live on this pane. A refused restore placeholder
-    /// reads `true` too: the same category with an earlier marker. The default
-    /// prune closes such a tab; pristine stays the test for tabs that never
-    /// hosted a worker.
+    /// reads `true` too: the same category with an earlier marker. (x-688b) A
+    /// spawned-name pane - the entry carries the worker name the spawn
+    /// captured, `FNO_AGENT_SELF`, but the registry join never resolved an id
+    /// - reads `true` when that name is positively dead: the pane is fno's
+    /// worker pane, not an operator shell, and must not fall through to the
+    /// used-shells opt-in bucket. The default prune closes such a tab;
+    /// pristine stays the test for tabs that never hosted a worker.
     pub(super) fn orphaned_worker_for_pane(
         &self,
         pid: u64,
@@ -65,12 +69,14 @@ impl Core {
         if live_row_on_pane {
             return false;
         }
-        if self
-            .panes
-            .get(&pid)
+        let entry = self.panes.get(&pid);
+        if entry
             .and_then(|entry| entry.refused_worker.as_ref())
             .is_some()
         {
+            return true;
+        }
+        if orphaned_by_spawned_name(entry.and_then(|entry| entry.name.as_deref()), evidence) {
             return true;
         }
         self.squad_members.values().flatten().any(|member| {
@@ -81,4 +87,16 @@ impl Core {
                 )
         })
     }
+}
+
+/// (x-688b) The name tier, pure so it is unit-testable without a live pty:
+/// a pane entry carrying a spawned worker name that the shared fold judged
+/// dead (reaped row, exited row, or never-bound marker - each reuse-guarded
+/// upstream) is an orphaned worker pane. `None`/empty is a shell pane: no
+/// name, no verdict.
+pub(super) fn orphaned_by_spawned_name(
+    name: Option<&str>,
+    evidence: &crate::squad_store::MemberEvidence,
+) -> bool {
+    name.is_some_and(|n| !n.is_empty() && evidence.is_dead_name(n))
 }

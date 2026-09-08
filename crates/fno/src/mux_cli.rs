@@ -2080,9 +2080,12 @@ fn unreachable_notice(unreachable: &[String]) -> String {
 /// (dry-run) or closed (apply) in `tabs_close_named`.
 ///
 /// An orphaned worker tab (v71) - its stored member judged Dead by the
-/// server - closes under the DEFAULT flags, ahead of the pristine test;
-/// `--include-used-shells` stays the opt-in for shells with no worker
-/// history.
+/// server - closes under the DEFAULT flags, ahead of the pristine test. So
+/// does (x-688b) a spawned-name pane: the pane carries the worker name the
+/// spawn captured (`unresolved:spawned-name`), and once the shared evidence
+/// fold judges that name dead the pane routes by the orphan verdict under
+/// default flags too. `--include-used-shells` stays the opt-in for shells
+/// with no worker history at all.
 ///
 /// Two arms run in ONE call and they must not contradict each other. The tab arm
 /// folds surplus pristine tabs; the squad arm decides store rows, and a live pane

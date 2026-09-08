@@ -48,3 +48,37 @@ fn a_pane_with_no_member_binding_is_not_orphaned() {
         "no binding, no verdict"
     );
 }
+
+/// (x-688b) The name tier: a pane whose spawn captured a worker name the
+/// registry join never resolved is fno's worker pane, and it is orphaned the
+/// moment the shared fold judges that name dead. A held receipt (resumable
+/// worker) and a nameless shell pane both stay kept.
+#[test]
+fn a_spawned_name_pane_is_orphaned_only_when_the_name_is_dead() {
+    use crate::server::pane_identity::orphaned_by_spawned_name;
+    let fold = |held: &[&str]| {
+        let mut evidence = crate::squad_store::MemberEvidence::from_sets(
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+        );
+        evidence.fold_registry_rows(
+            &[],
+            ["t-688b-muxtabs".to_string()].into_iter().collect(),
+            held.iter().map(|s| s.to_string()).collect(),
+            true,
+        );
+        evidence
+    };
+    assert!(
+        orphaned_by_spawned_name(Some("t-688b-muxtabs"), &fold(&[])),
+        "a reaped spawned worker's pane closes as orphaned under default flags"
+    );
+    assert!(
+        !orphaned_by_spawned_name(Some("t-688b-muxtabs"), &fold(&["t-688b-muxtabs"])),
+        "a held receipt keeps the worker resumable and the pane kept"
+    );
+    assert!(
+        !orphaned_by_spawned_name(None, &fold(&[])),
+        "a shell pane with no spawned name never reaches the tier"
+    );
+}
