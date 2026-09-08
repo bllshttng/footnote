@@ -2081,6 +2081,12 @@ class RoutingModelBlock(BaseModel):
     # mux's Rust reader (crates/fno/src/sideline_color.rs); declared here so
     # a typo surfaces at config validation, not only at render time.
     color: str = ""
+    # The operator view that can observe a session on this access path
+    # (``claude-native`` or ``codex-native`` on this machine), set only after
+    # the operator actually confirmed the view. Empty means unverified: the
+    # row is invisible to strict routing while remote or unknown. The value
+    # is qualification metadata, never a capability grade.
+    operator_view: str = ""
 
 
 class RoutingBlock(BaseModel):
@@ -2110,6 +2116,19 @@ class RoutingBlock(BaseModel):
     objective: str = "cheapest-that-clears"
     prefer_harness: str = ""
     models: list[RoutingModelBlock] = Field(default_factory=list)
+    # Opt-in strict inventory policy (default off: other installs keep every
+    # documented default). When true, a spawn qualifies against its effective
+    # work-kind slot's CONFIG-declared lanes only - explicit flags constrain
+    # the choice, never bypass it, and an unresolvable request is a named
+    # refusal instead of the harness default. Invalid values refuse at the
+    # resolver, never coerce permissive (x-7fdd: config stays a leaf).
+    enforce_inventory: bool = False
+    # The operator's access posture: ``local`` (attending, native view not
+    # required), ``remote`` (only verified native views qualify), or the
+    # default ``unknown`` (which filters like remote and is labeled unknown
+    # in every receipt). Set through the project-scoped config writer, never
+    # inferred from presence, mail, or a king's opinion.
+    operator_access: str = "unknown"
 
     @field_validator("objective", mode="before")
     @classmethod

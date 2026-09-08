@@ -876,7 +876,8 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
     let rung_base = payload
         .get("rung_base")
         .and_then(Value::as_str)
-        .unwrap_or("agents.profiles");
+        .unwrap_or("agents.profiles")
+        .to_string();
     let profile = payload.get("profile").cloned().unwrap_or(Value::Null);
     let capacity = payload.get("capacity").cloned().unwrap_or(json!({}));
     let gate_bypassed = payload
@@ -895,7 +896,77 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
         .filter(|s| !s.trim().is_empty());
     let thread_seatable = payload.get("thread_seatable").cloned().unwrap_or(json!({}));
 
-    let lanes_raw_value = payload.get("lanes_raw").cloned().unwrap_or(json!([]));
+    // --- strict inventory policy (x-90a9 task 1.1) --------------------------
+    // When routing.enforce_inventory is set, the effective work kind picks
+    // WHICH declared slot this dispatch walks, and only that slot's
+    // CONFIG-declared lanes can answer. The grid, the built-in fallback and
+    // the harness default are all out of the decision path; a request the
+    // slot cannot answer is a named refusal, never an ambient default.
+    let strict_policy = payload.get("policy").cloned().unwrap_or(json!({}));
+    let enforce = strict_policy
+        .get("enforce_inventory")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut strict_ctx: Option<(String, String)> = None; // (operator_access, slot verb)
+    let mut rung_base = rung_base;
+    let mut profile = profile;
+    let mut lanes_raw_value = payload.get("lanes_raw").cloned().unwrap_or(json!([]));
+    if enforce {
+        let operator_access = strict_policy
+            .get("operator_access")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+        if !["local", "remote", "unknown"].contains(&operator_access.as_str()) {
+            chain.push(json!(format!(
+                "slot=config routing.operator_access {operator_access:?} is not local|remote|unknown"
+            )));
+            return refused_decision(
+                chain,
+                "policy-config-invalid",
+                "routing.operator_access is not local|remote|unknown",
+            );
+        }
+        let work_verb = payload
+            .get("work_verb")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| rung_base.trim_start_matches("agents.profiles.").to_string());
+        let plan_path = payload
+            .get("node")
+            .and_then(|n| n.get("plan_path"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let (slot_verb, note) = effective_work_kind(&work_verb, !plan_path.trim().is_empty());
+        if let Some(note) = note {
+            chain.push(json!(note));
+        }
+        let slot = payload
+            .get("slot_by_verb")
+            .and_then(Value::as_object)
+            .and_then(|s| s.get(slot_verb.as_str()));
+        match slot {
+            Some(s) => {
+                rung_base = s
+                    .get("rung_base")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or(&format!("agents.profiles.{slot_verb}"))
+                    .to_string();
+                profile = s.get("profile").cloned().unwrap_or(json!({}));
+                lanes_raw_value = s.get("lanes_raw").cloned().unwrap_or(json!([]));
+            }
+            None => {
+                rung_base = format!("agents.profiles.{slot_verb}");
+                profile = json!({});
+                lanes_raw_value = json!([]);
+            }
+        }
+        strict_ctx = Some((operator_access, slot_verb));
+    }
     let by_difficulty = profile.get("by_difficulty").cloned().unwrap_or(json!({}));
     let by_difficulty_obj = by_difficulty.as_object();
 
@@ -969,7 +1040,18 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
     if lanes_arr.is_empty() {
         // A lane-less verb grids instead: the model axis reads occupied there
         // and the grid stands down; an explicit model pin never reaches the
-        // lanes here, so the grid's own occupied flag governs.
+        // lanes here, so the grid's own occupied flag governs. Strict routing
+        // has no grid: an empty effective slot is the named refusal.
+        if strict_ctx.is_some() {
+            chain.push(json!(format!(
+                "slot=strict-refusal slot {rung_base} declares no lanes; strict routing refuses the harness default"
+            )));
+            return refused_decision(
+                chain,
+                "policy-no-declared-slot",
+                "the effective work-kind slot declares no lanes",
+            );
+        }
         chain.push(json!(format!(
             "slot {rung_base} has no lanes; grid over inventory"
         )));
@@ -981,16 +1063,18 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
             chain.push(json!("grid=model-axis-occupied"));
             return none(chain);
         }
-        return grid_leg(&payload, rung_base, &mut chain);
+        return grid_leg(&payload, &rung_base, &mut chain);
     }
 
     // An explicit model pin outranks the lanes (operator authority); it never
     // borrows a lane's harness or capacity. Config defaults do NOT outrank
-    // lanes; only a typed flag does.
-    if payload
-        .get("explicit_model")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    // lanes; only a typed flag does. Strict routing instead qualifies the
+    // explicit coordinate against the effective slot's membership.
+    if strict_ctx.is_none()
+        && payload
+            .get("explicit_model")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     {
         chain.push(json!(
             "slot=model-pin-override (an explicit model outranks the lanes)"
@@ -1041,7 +1125,7 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let (plan, rows, fields_by_rung) = match fold(rung_base, &lanes_arr, &declared_rows) {
+    let (plan, rows, fields_by_rung) = match fold(&rung_base, &lanes_arr, &declared_rows) {
         Ok(f) => f,
         Err(line) => {
             chain.push(json!(line));
@@ -1070,8 +1154,70 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
         .cloned()
         .unwrap_or_default();
 
+    // Strict: an explicit coordinate is a CONSTRAINT on the slot's membership,
+    // never a bypass. The walk keeps only the lanes naming that exact
+    // coordinate; a coordinate no row names is the named refusal.
+    let mut plan = plan;
+    if strict_ctx.is_some() {
+        let explicit_model_name = payload
+            .get("explicit_model_value")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let explicit_route_name = payload
+            .get("explicit_route_value")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(m) = &explicit_model_name {
+            let member = plan.iter().any(|(_, rn)| {
+                rows.get(rn).map(|r| row_value(r, "model")).as_deref() == Some(m.as_str())
+            });
+            if !member {
+                chain.push(json!(format!(
+                    "slot=strict-refusal explicit model {m:?} is not in slot {rung_base}'s declared lanes"
+                )));
+                return refused_decision(
+                    chain,
+                    "policy-coordinate-not-in-slot",
+                    "the explicit model is not in the effective slot's declared lanes",
+                );
+            }
+        }
+        if let Some(rt) = &explicit_route_name {
+            let member = plan.iter().any(|(_, rn)| {
+                rows.get(rn).map(|r| row_value(r, "route")).as_deref() == Some(rt.as_str())
+            });
+            if !member {
+                chain.push(json!(format!(
+                    "slot=strict-refusal explicit route {rt:?} is not in slot {rung_base}'s declared lanes"
+                )));
+                return refused_decision(
+                    chain,
+                    "policy-coordinate-not-in-slot",
+                    "the explicit route is not in the effective slot's declared lanes",
+                );
+            }
+        }
+        if explicit_model_name.is_some() || explicit_route_name.is_some() {
+            plan.retain(|(_, rn)| {
+                let r = rows.get(rn);
+                let model_ok = explicit_model_name
+                    .as_ref()
+                    .map(|m| r.map(|row| row_value(row, "model")).as_deref() == Some(m.as_str()));
+                let route_ok = explicit_route_name
+                    .as_ref()
+                    .map(|rt| r.map(|row| row_value(row, "route")).as_deref() == Some(rt.as_str()));
+                model_ok.unwrap_or(true) && route_ok.unwrap_or(true)
+            });
+        }
+    }
+
     let mut demoted: Vec<(usize, String, String, String)> = Vec::new();
     let mut identity_skips: Vec<String> = Vec::new();
+    let mut policy_skips: usize = 0;
     let mut resets_seen: Vec<f64> = Vec::new();
 
     for (index, (rung, row_name)) in plan.iter().enumerate() {
@@ -1101,6 +1247,49 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
         }
         let route = row_value(&row, "route");
         let account = row_value(&row, "account");
+        // Strict: native view qualification. Under remote or unknown, only a
+        // row whose operator_view names the harness's native view qualifies; a
+        // label that contradicts the row's own coordinate refuses outright.
+        if let Some((access, _slot_v)) = &strict_ctx {
+            let view = row_value(&row, "operator_view");
+            let native = native_view_for(&harness);
+            // A native view label must name the harness's native view AND a
+            // row with no vendor route: a vendor lane is by definition not the
+            // native coordinate, so the label contradicts the row itself.
+            let contradictory =
+                !view.is_empty() && (native != Some(view.as_str()) || !route.is_empty());
+            if contradictory {
+                chain.push(json!(format!(
+                    "slot=config {rung} row '{row_name}' labels operator_view={view:?} but its coordinate (harness {harness:?}, route {route:?}) is not that native view"
+                )));
+                return refused_decision(
+                    chain,
+                    "policy-view-contradiction",
+                    "an operator_view label contradicts the row's own harness/route coordinate",
+                );
+            }
+            if access != "local" {
+                match native {
+                    None => {
+                        chain.push(json!(format!(
+                            "slot skip {} no native view kind for harness {harness:?} (operator_access={access})",
+                            lane_label(rung, row_name),
+                        )));
+                        policy_skips += 1;
+                        continue;
+                    }
+                    Some(nv) if view != nv => {
+                        chain.push(json!(format!(
+                            "slot skip {} no verified native view (operator_access={access})",
+                            lane_label(rung, row_name),
+                        )));
+                        policy_skips += 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+        }
         let vendor = route
             .split(',')
             .next()
@@ -1262,6 +1451,7 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
             &state,
             &window,
             "",
+            strict_ctx.as_ref(),
         );
     }
 
@@ -1277,7 +1467,25 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
             "low",
             &window,
             "no healthy lane; on_low=prefer_healthy",
+            strict_ctx.as_ref(),
         );
+    }
+
+    // Strict: every lane in the effective slot was refused on policy alone
+    // (no verified native view, or a harness with no native view kind). That
+    // is a refusal naming its boundary, not a capacity queue with a fake
+    // reset time.
+    if let Some((access, _slot_v)) = &strict_ctx {
+        if policy_skips > 0 && policy_skips == plan.len() {
+            chain.push(json!(format!(
+                "slot=strict-refusal every lane in {rung_base} lacked the required operator view (operator_access={access})"
+            )));
+            return refused_decision(
+                chain,
+                "policy-no-qualified-lane",
+                "the operator_access filter left no lane in the effective slot",
+            );
+        }
     }
 
     if explicit_lane || gate_bypassed {
@@ -1309,10 +1517,10 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
             .map(|r| format!(" retry_at={}", r as i64))
             .unwrap_or_default();
         chain.push(json!(format!("slot=exhausted queue{retry}")));
-        return none(chain);
+        return queue_decision(chain);
     }
     chain.push(json!(format!("slot=exhausted {on_exhausted}")));
-    none(chain)
+    exhausted_decision(chain)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1327,6 +1535,7 @@ fn pick(
     state: &str,
     window: &str,
     note: &str,
+    strict: Option<&(String, String)>,
 ) -> Value {
     let mut line = format!("slot {} capacity={state}", lane_label(rung, row_name),);
     if !window.is_empty() {
@@ -1365,6 +1574,16 @@ fn pick(
     candidate.insert("lane_rung".into(), json!(rung));
     candidate.insert("lane_index".into(), json!(index));
     candidate.insert("lane_fields".into(), Value::Object(lane_fields));
+    if let Some((access, slot_v)) = strict {
+        candidate.insert(
+            "policy".into(),
+            json!({
+                "source": "config routing.enforce_inventory",
+                "work_kind": slot_v,
+                "operator_access": access,
+            }),
+        );
+    }
     if !effort.is_empty() {
         candidate.insert("effort".into(), json!(effort));
     }
@@ -1391,6 +1610,58 @@ fn pick(
 
 fn none(chain: Vec<Value>) -> Value {
     json!({"status": "none", "candidate": Value::Null, "chain": chain})
+}
+
+/// Capacity terminals keep the receipt vocabulary verbatim while naming their
+/// kind for machine consumers (x-90a9 task 1.1).
+fn queue_decision(chain: Vec<Value>) -> Value {
+    json!({"status": "none", "candidate": Value::Null, "reason_kind": "capacity-queue", "chain": chain})
+}
+
+fn exhausted_decision(chain: Vec<Value>) -> Value {
+    json!({"status": "none", "candidate": Value::Null, "reason_kind": "capacity-exhausted", "chain": chain})
+}
+
+/// A strict-policy refusal: the decision path is named, the candidate is
+/// Null, and `reason_kind` tells machine consumers this apart from a
+/// capacity queue or an unarmed legacy no-candidate.
+fn refused_decision(chain: Vec<Value>, kind: &str, reason: &str) -> Value {
+    json!({
+        "status": "none",
+        "candidate": Value::Null,
+        "reason_kind": "policy-refusal",
+        "refusal": kind,
+        "reason": reason,
+        "chain": chain,
+    })
+}
+
+/// The native operator view a harness can show, if the harness has one on
+/// this machine. Any other harness has no native view kind, so its rows can
+/// never qualify while the operator is remote or unknown.
+fn native_view_for(harness: &str) -> Option<&'static str> {
+    match harness {
+        "claude" => Some("claude-native"),
+        "codex" => Some("codex-native"),
+        _ => None,
+    }
+}
+
+/// Rust owns the work-kind ruling (x-90a9 task 1.1): a planless target
+/// performs planning and qualifies against the blueprint slot, while the
+/// command stays target. A planned target, think, blueprint, review, crown
+/// and every ops stage qualify against their own slots.
+fn effective_work_kind(work_verb: &str, plan_present: bool) -> (String, Option<String>) {
+    let verb = work_verb.trim().to_lowercase();
+    match verb.as_str() {
+        "target" if !plan_present => (
+            "blueprint".to_string(),
+            Some(format!(
+                "slot note agents.profiles.target planless target -> blueprint eligibility (command stays target)"
+            )),
+        ),
+        other => (other.to_string(), None),
+    }
 }
 
 /// Print stdout/stderr and return the exit code. Used by `bin/client.rs`.
@@ -1846,5 +2117,185 @@ mod tests {
         assert_eq!(out["status"], "pick");
         let chain = chain_of(&out);
         assert!(chain.iter().any(|l| l.contains("provider zai at 2 of 2")));
+    }
+
+    // -------------------------------------------------------------------
+    // x-90a9 task 1.1: the strict inventory policy leg
+    // -------------------------------------------------------------------
+
+    fn strict_payload(overrides: Value) -> Value {
+        let mut base = payload(json!({
+            "policy": {"enforce_inventory": true, "operator_access": "unknown"},
+            "work_verb": "target",
+            "node": {"difficulty": "high", "priority": "p1", "plan_path": ""},
+            "slot_by_verb": {
+                "blueprint": {
+                    "rung_base": "agents.profiles.blueprint",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["opus-x"],
+                },
+                "target": {
+                    "rung_base": "agents.profiles.target",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["flash-x"],
+                },
+            },
+        }));
+        if let (Some(base_obj), Some(ovr)) = (base.as_object_mut(), overrides.as_object()) {
+            for (k, v) in ovr {
+                base_obj.insert(k.clone(), v.clone());
+            }
+        }
+        base
+    }
+
+    #[test]
+    fn strict_planless_target_rides_the_blueprint_slot_and_names_the_work_kind() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                           "operator_view": "claude-native"},
+                "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
+                            "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+            },
+            "capacity": {"claude": {"state": "ok", "window": "w",
+                                    "accounts": {"zai-main": "ok"}, "evidence": {}, "resets": {}}},
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["model"], "claude-opus-5");
+        assert_eq!(out["candidate"]["policy"]["work_kind"], "blueprint");
+        assert_eq!(out["candidate"]["policy"]["operator_access"], "unknown");
+        assert!(
+            chain_of(&out)
+                .iter()
+                .any(|l| l
+                    .contains("planless target -> blueprint eligibility (command stays target)"))
+        );
+    }
+
+    #[test]
+    fn strict_explicit_glm_on_blueprint_work_refuses_by_name() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                           "operator_view": "claude-native"},
+            },
+            "explicit_model_value": "glm",
+        })));
+        assert_eq!(out["status"], "none");
+        assert_eq!(out["refusal"], "policy-coordinate-not-in-slot");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("slot=strict-refusal explicit model \"glm\"")));
+    }
+
+    #[test]
+    fn strict_remote_filter_skips_rows_without_a_verified_native_view() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "policy": {"enforce_inventory": true, "operator_access": "remote"},
+            "node": {"difficulty": "high", "priority": "p1", "plan_path": "/plans/p.md"},
+            "slot_by_verb": {
+                "target": {
+                    "rung_base": "agents.profiles.target",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["flash-x", "opus-x"],
+                },
+            },
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                           "operator_view": "claude-native"},
+                "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
+                            "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+            },
+            "capacity": {"claude": {"state": "ok", "window": "w",
+                                    "accounts": {"zai-main": "ok"}, "evidence": {}, "resets": {}}},
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["model"], "claude-opus-5");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("no verified native view (operator_access=remote)")));
+    }
+
+    #[test]
+    fn strict_local_admits_the_zai_lane() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "policy": {"enforce_inventory": true, "operator_access": "local"},
+            "node": {"difficulty": "high", "priority": "p1", "plan_path": "/plans/p.md"},
+            "slot_by_verb": {
+                "target": {
+                    "rung_base": "agents.profiles.target",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["flash-x"],
+                },
+            },
+            "declared_rows": {
+                "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
+                            "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+            },
+            "capacity": {"claude": {"state": "ok", "window": "w",
+                                    "accounts": {"zai-main": "ok"}, "evidence": {}, "resets": {}}},
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["model"], "glm");
+    }
+
+    #[test]
+    fn strict_mislabeled_native_view_refuses() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "slot_by_verb": {
+                "blueprint": {
+                    "rung_base": "agents.profiles.blueprint",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["bad-row"],
+                },
+            },
+            "declared_rows": {
+                "bad-row": {"name": "bad-row", "harness": "claude", "model": "glm",
+                            "route": "zai/glm", "operator_view": "claude-native"},
+            },
+        })));
+        assert_eq!(out["status"], "none");
+        assert_eq!(out["refusal"], "policy-view-contradiction");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("operator_view=\"claude-native\"")));
+    }
+
+    #[test]
+    fn strict_no_declared_slot_refuses_rather_than_defaulting() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "slot_by_verb": {},
+        })));
+        assert_eq!(out["status"], "none");
+        assert_eq!(out["refusal"], "policy-no-declared-slot");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("strict routing refuses the harness default")));
+    }
+
+    #[test]
+    fn strict_capacity_terminal_keeps_the_queue_vocabulary_and_kind() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                           "operator_view": "claude-native"},
+            },
+            "capacity": {"claude": {"state": "exhausted", "window": "lock",
+                                    "accounts": {}, "evidence": {},
+                                    "resets": {"opus": 1900000000.0}}},
+            "slot_by_verb": {
+                "blueprint": {
+                    "rung_base": "agents.profiles.blueprint",
+                    "profile": {"on_exhausted": "queue", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["opus-x"],
+                },
+            },
+        })));
+        assert_eq!(out["status"], "none");
+        assert_eq!(out["reason_kind"], "capacity-queue");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.starts_with("slot=exhausted queue")));
     }
 }
