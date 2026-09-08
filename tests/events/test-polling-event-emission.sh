@@ -179,16 +179,22 @@ assert_contains "size cap polling message" "$out" "exceeds"
 repo_root="$WORK/repo"
 mkdir -p "$repo_root/nested/source"
 git -C "$repo_root" init -q
-# PATH is narrowed so the case under test is the same one every time: the
-# degrade the library documents for a context with no fno-agents on PATH. With
-# the binary present the resolver answers the space journal instead and this
-# assertion silently stops being about the root branch at all, which is what a
-# developer box was measuring while CI measured the degrade.
+# A stub shadows fno-agents so the case under test is the same one every time:
+# the degrade the library documents for a context that cannot ask the resolver.
+# With the real binary present the resolver answers the space journal and this
+# assertion stops being about the root branch at all, which is what a developer
+# box was measuring while CI measured the degrade. Only that one variable is
+# isolated: narrowing PATH instead would also hide jq and git, and emit_event
+# swallows a missing jq, so the failure would name the wrong branch.
+stub_dir="$WORK/stub"
+mkdir -p "$stub_dir"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$stub_dir/fno-agents"
+chmod +x "$stub_dir/fno-agents"
 emit_from_nested() {
     (
         unset EVENTS_FILE
         unset FNO_EVENTS_PATH
-        export PATH=/usr/bin:/bin
+        export PATH="$stub_dir:$PATH"
         cd "$repo_root/nested/source" || exit 1
         # shellcheck disable=SC1090
         source "$EVENTS_LIB"

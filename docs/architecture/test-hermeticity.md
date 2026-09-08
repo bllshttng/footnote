@@ -146,7 +146,11 @@ A project `.fno/` marks a project that opted in. `fno config setup wizard` and `
 
 An event append never creates one. Before this rule, a session in any git repo with the plugin installed left a `.fno/` and an `events.jsonl` behind. The project did not have to use footnote at all. The directory came from the appender's own `mkdir -p`, so the litter followed the hook, not the user.
 
-The local journal itself stays. The loop gate, the review attestation reader and `fno backlog` all answer per-project questions from it. When the directory is absent the append is skipped and the global journal still takes the row, so the hooks that write both lose nothing. The state root and the spaces under it are fno's own and stay creatable.
+The local journal itself stays. The loop gate, the review attestation reader and `fno backlog` all answer per-project questions from it. When the directory is absent the append is skipped and returns 3, never 0, so no caller reads a skip as a write.
+
+`context-nudge.sh` and the stop hooks write the global journal too, so their rows survive. `guard-mark.sh` and `target-stopfailure.sh` write one path, so their rows drop in a repo that never opted in. That is the intended outcome. A stop failure needs a target session, which creates `.fno/config.toml` first. A guard decision in a repo with no `.fno/` has no reader.
+
+The rule names the directory, not a state root. `STATE_DIR` cannot be read here. `scripts/lib/paths.sh` exports it as the machine-wide root, and `hooks/capture-plan-mode.sh` sets it to `<repo>/.fno`, so the second meaning turns the guard off in exactly the repos it protects. `~/.fno` is named as itself, and the spaces under it have parents that are not `.fno`, so both stay creatable.
 
 ## A declared root or a refusal
 

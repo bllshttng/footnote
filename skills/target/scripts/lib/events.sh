@@ -92,6 +92,91 @@ _end_shell_event_append() {
     rmdir "$(dirname "$token")" 2>/dev/null || true
 }
 
+# Roots a hermetic shell process may write a journal into. The Python half is
+# fno.events._hermetic_allowed_roots; keep the two in step. TMPDIR covers both
+# the neutralise sandbox and a test's own mktemp file, and the parent of an
+# ABSOLUTE FNO_EVENTS_PATH covers a caller that declared its own journal. A
+# relative pin is not a root, exactly as on the Python side.
+_shell_hermetic_roots() {
+    local tmp="${TMPDIR:-/tmp}"
+    local real
+    printf '%s\n' "${tmp%/}"
+    real=$(cd "$tmp" 2>/dev/null && pwd -P) && printf '%s\n' "$real"
+    if [[ "${FNO_EVENTS_PATH:-}" == /* ]]; then
+        local pin_dir="${FNO_EVENTS_PATH%/*}"
+        printf '%s\n' "$pin_dir"
+        real=$(cd "$pin_dir" 2>/dev/null && pwd -P) && printf '%s\n' "$real"
+    fi
+}
+
+# Physical form of a directory that may not exist yet.
+#
+# `cd` reaches only an existing directory, and the journal's parent is often
+# the very directory the append is about to create. Falling back to the raw
+# string there leaves a symlinked ANCESTOR unresolved, and a sandbox path
+# pointing at a live tree then reads as inside the sandbox. So walk up to the
+# deepest existing ancestor, resolve THAT, and re-append the missing tail. The
+# Python half gets this from `os.path.realpath`, which resolves a nonexistent
+# path already.
+_shell_physical_dir() {
+    local dir="${1:?dir required}"
+    local tail="" real
+    while [[ ! -d "$dir" && "$dir" == */* ]]; do
+        tail="/${dir##*/}$tail"
+        dir="${dir%/*}"
+        [[ -n "$dir" ]] || dir="/"
+    done
+    real=$(cd "$dir" 2>/dev/null && pwd -P) || real="$dir"
+    printf '%s%s' "${real%/}" "$tail"
+}
+
+# Refuse a journal write that would leave a test's sandbox.
+#
+# The Python appender has refused this since the events fence shipped; the
+# shell appender did not, and three hooks hand it a `${REPO_ROOT}/.fno/...`
+# path they build themselves, so no pin can reach them. In a worktree that
+# file is a symlink to the canonical journal, which is how 33 fixture rows
+# reached the operator's live question queue on 2026-08-20. Judged on the
+# physical directory, because the symlink is the mechanism.
+_refuse_shell_hermetic_escape() {
+    local events_path="${1:?events path required}"
+    local label="${2:-events}"
+    [[ "${FNO_TEST_HERMETIC:-}" == "1" ]] || return 0
+    local real root
+    real=$(_shell_physical_dir "${events_path%/*}")
+    while IFS= read -r root; do
+        [[ -n "$root" ]] || continue
+        if [[ "$real" == "$root" || "$real" == "$root"/* ]]; then
+            return 0
+        fi
+    done < <(_shell_hermetic_roots)
+    printf '%s: refused a journal write outside the test sandbox: %s\n' \
+        "$label" "$events_path" >&2
+    printf 'A hermetic run must not touch a live events.jsonl. Pass a path under TMPDIR, or set FNO_EVENTS_PATH.\n' >&2
+    return 1
+}
+
+# Whether this append may create the directory it writes into.
+#
+# A project `.fno/` marks a project that opted in. Creating one as a side
+# effect of an event append put a `.fno/` and an events.jsonl in every repo a
+# hook touched, whether or not that project ever used footnote.
+#
+# The rule names the directory, not a state root. `STATE_DIR` cannot be read
+# here: `scripts/lib/paths.sh` exports it as the machine-wide root, and
+# `hooks/capture-plan-mode.sh` sets it to `<repo>/.fno`, so the second meaning
+# turns this guard off in exactly the repos it protects. `~/.fno` is named as
+# itself, and the spaces under it have parents that are not `.fno`, so both
+# stay creatable.
+_shell_events_may_create_parent() {
+    local events_path="${1:?events path required}"
+    local parent="${events_path%/*}"
+    [[ -d "$parent" ]] && return 0
+    [[ "$parent" == "${HOME%/}/.fno" ]] && return 0
+    [[ "${parent##*/}" == ".fno" ]] && return 1
+    return 0
+}
+
 _append_bounded_event() {
     local label="${1:?label required}"
     local event="${2:?event required}"
@@ -110,6 +195,17 @@ _append_bounded_event() {
         if [[ -L "$events_path" ]]; then
             events_path=$(_resolve_event_symlink "$events_path") || return 1
         fi
+        # Both guards run BEFORE the mutex: _begin_shell_event_append mkdir -p's
+        # a writer dir beside the journal, so acquiring the lock itself creates
+        # the `.fno/` this refuses to create, in the file this refuses to touch.
+        #
+        # A skipped append returns 3, never 0. A caller reading 0 as "the line
+        # is on disk" is the shape this whole guard exists to refuse, and the
+        # thrash detector counts appended lines. Silent, because guard-mark
+        # fires per tool call and a note per call is noise in exactly the repos
+        # this leaves alone.
+        _refuse_shell_hermetic_escape "$events_path" "$label" || return 1
+        _shell_events_may_create_parent "$events_path" || return 3
         writer_token=$(_begin_shell_event_append "$events_path" "$writer_pid") || return 1
         current_path="$requested_path"
         if [[ -L "$current_path" ]]; then

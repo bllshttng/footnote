@@ -123,6 +123,33 @@ env -u EVENTS_FILE HOME="$outside_home" TMPDIR="$tmp/sandbox" \
 assert_eq "a symlink into a live journal is refused on its target" \
     "0" "$(count_marker "$outside_home/live/.fno/events.jsonl")"
 
+# The ancestor is the symlink and the leaf directory does not exist yet, which
+# is the real shape: a whole-directory `.fno` link into canonical plus a space
+# subdirectory nothing has created. `cd` cannot reach a directory that is not
+# there, so a fence that resolves only the immediate parent reads the lexical
+# path and lets the write through.
+mkdir -p "$outside_home/escape"
+ln -sfn "$outside_home/escape" "$tmp/sandbox/wt"
+env -u EVENTS_FILE HOME="$outside_home" TMPDIR="$tmp/sandbox" \
+    FNO_TEST_HERMETIC=1 FNO_EVENTS_PATH="$tmp/sandbox/events.jsonl" bash -c '
+        source "$1" >/dev/null 2>&1 || exit 1
+        _append_bounded_event probe "$3" "$2" || true
+    ' _ "$EVENTS_LIB" "$tmp/sandbox/wt/spaces/proj/events.jsonl" "$LINE" >/dev/null 2>&1
+
+assert_eq "a symlinked ancestor with a missing leaf is refused too" \
+    "0" "$(find "$outside_home/escape" -type f 2>/dev/null | wc -l | tr -d ' ')"
+
+# A skipped append must not report success. Every caller reads 0 as "the line
+# is on disk", and one of them counts appended lines.
+skipped="$tmp/never-opted/.fno/events.jsonl"
+mkdir -p "$tmp/never-opted"
+rc=$(env -u EVENTS_FILE -u FNO_TEST_HERMETIC HOME="$home" bash -c '
+        source "$1" >/dev/null 2>&1 || exit 1
+        _append_bounded_event probe "$3" "$2" >/dev/null 2>&1
+        printf "%s" "$?"
+    ' _ "$EVENTS_LIB" "$skipped" "$LINE")
+assert_eq "a skipped append returns 3, not 0" "3" "$rc"
+
 if (( fail )); then
     echo "test-shell-append-guards: FAIL"
     exit 1
