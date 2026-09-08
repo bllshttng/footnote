@@ -771,8 +771,7 @@ def read_graph(path: Path = GRAPH_JSON) -> list[dict]:
     try:
         result = _client_for(path).read(path)
     except GraphCorruptError:
-        # Name the backup that actually exists: current keepers write into
-        # backups/, older deployed ones beside the graph file.
+        # Name the backup that exists: keepers pre-backups/ wrote the sibling.
         backup = path.parent / "backups" / (path.name + ".bak")
         if not backup.exists():
             backup = path.with_suffix(".json.bak")
