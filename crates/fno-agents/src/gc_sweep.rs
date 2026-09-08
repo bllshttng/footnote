@@ -16,10 +16,11 @@
 //! rather than observing it. A row the settle cannot fill on a node still in
 //! flight keeps under `open do row on done node`.
 //!
-//! Retirement never removes the session from its harness's
-//! store, and never deletes a branch. The node's `sessions[]` row and the
-//! transcript survive the retirement, so `fno agents resume` still opens the
-//! session afterwards.
+//! Retirement removes the session from its harness's ACTIVE surface only
+//! (the agent list, the session index); the native history is never deleted,
+//! and neither is a branch. The node's `sessions[]` row and the transcript
+//! survive the retirement, so `fno agents resume` still opens the session
+//! afterwards.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -535,6 +536,7 @@ pub(crate) fn run(
     read_graph: &dyn Fn(&AgentsHome) -> Option<GraphRead>,
     store_matches: &dyn Fn(&state::RegistryEntry) -> Option<Vec<PathBuf>>,
     stop_confirmed: &dyn Fn(&state::RegistryEntry) -> bool,
+    surface_removal: &dyn Fn(&state::RegistryEntry) -> crate::daemon::CascadeOutcome,
     tree_probe: &dyn Fn(&state::RegistryEntry) -> (Option<bool>, Option<bool>),
     prune_tree: &dyn Fn(&state::RegistryEntry),
 ) -> GcSummary {
@@ -683,6 +685,25 @@ pub(crate) fn run(
                 .push((id, "the stop did not confirm; row kept for retry".into()));
             continue;
         }
+        // The ACTIVE-SURFACE removal (x-70e1 task 3): claude's agent list,
+        // codex's session index, cursor-agent's worker servers - through the
+        // same cascade `rm` walks, typed outcome recorded. A `failed` or
+        // `kept` (unverified) outcome HOLDS the row for retry: a retirement
+        // is applied only when every applicable native effect positively
+        // confirmed (or measured not-applicable). DRY-RUN applies nothing.
+        let mut effects: Vec<crate::receipt::EffectRecord> = Vec::new();
+        if !dry_run {
+            let outcome = surface_removal(e);
+            let applied = outcome.satisfies_applied();
+            effects.push(outcome.effect_record("active-surface"));
+            if !applied {
+                summary.stop_refused.push((
+                    id,
+                    "the native active-surface removal did not confirm".into(),
+                ));
+                continue;
+            }
+        }
         if !stage_reap_receipt(
             e,
             &id,
@@ -691,6 +712,9 @@ pub(crate) fn run(
             &mut summary.kept_no_receipt,
         ) {
             continue;
+        }
+        if let Some(receipt) = receipts.get_mut(&e.name) {
+            receipt.effects = effects.clone();
         }
         // The tree probes run only now, on a row already retiring: steady
         // state has no such rows, so no subprocess runs on the hot path.

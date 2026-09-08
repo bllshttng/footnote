@@ -175,6 +175,31 @@ pub fn thread_start_request_json(cwd: &str, approval_policy: &str) -> String {
     .to_string()
 }
 
+/// Build the `thread/archive` request (x-70e1 task 3): the history-preserving
+/// active-surface removal. The stored conversation survives; `thread/resume`
+/// searches the archived store, and `thread/unarchive` (the matching builder
+/// below) puts the same id back before a resume that needs it live.
+pub fn thread_archive_request_json(id: u64) -> String {
+    json!({
+        "id": id,
+        "method": "thread/archive",
+        "params": {}
+    })
+    .to_string()
+}
+
+/// Build the `thread/unarchive` request for a named thread id.
+pub fn thread_unarchive_request_json(id: u64, thread_id: &str) -> String {
+    json!({
+        "id": id,
+        "method": "thread/unarchive",
+        "params": {
+            "threadId": thread_id,
+        }
+    })
+    .to_string()
+}
+
 /// Build the `thread/resume` request. The full thread id and cwd are both
 /// required so recovery cannot silently move a worker onto the canonical repo.
 pub fn thread_resume_request_json(thread_id: &str, cwd: &str, approval_policy: &str) -> String {
@@ -950,10 +975,36 @@ impl CodexThread {
 
     /// Clear `current_turn_id` ONLY when the named turn actually completed,
     /// preserving the drive_turn survivor invariant for the actor path too.
+
+    /// Clear `current_turn_id` ONLY when the named turn actually completed,
+    /// preserving the drive_turn survivor invariant for the actor path too.
     pub fn note_turn_completed(&mut self, turn_id: &str) {
         if self.current_turn_id.as_deref() == Some(turn_id) {
             self.current_turn_id = None;
         }
+    }
+
+    /// Archive this thread history-preservingly (x-70e1 task 3): the codex
+    /// app-server's `thread/archive` removes the thread from the ACTIVE
+    /// surface while the stored conversation survives and `thread/resume`
+    /// (which searches active and archived stores) still opens it. An error
+    /// is returned, never swallowed: the caller records a partial outcome
+    /// and retries rather than claiming retirement.
+    pub async fn archive(&mut self) -> Result<(), ThreadDriverError> {
+        let request = thread_archive_request_json(1);
+        let _answer = self.request(1, request).await?;
+        // The archive answer is a submit receipt, not a completion promise:
+        // accept the ack shape and let the caller's own loaded-list check
+        // prove the effect.
+        Ok(())
+    }
+
+    /// Unarchive this thread id so `thread/resume` finds it in the same
+    /// live store it left. History-preserving in both directions.
+    pub async fn unarchive(&mut self, thread_id: &str) -> Result<(), ThreadDriverError> {
+        let request = thread_unarchive_request_json(1, thread_id);
+        let _answer = self.request(1, request).await?;
+        Ok(())
     }
 
     pub async fn steer(

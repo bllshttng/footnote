@@ -86,6 +86,7 @@ pub mod feed;
 pub mod finalize;
 pub mod gc;
 pub mod gc_inventory;
+pub mod gc_native;
 pub mod gc_sweep;
 pub mod gemini_ask;
 #[cfg(test)]
