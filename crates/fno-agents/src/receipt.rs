@@ -288,9 +288,18 @@ pub fn stage_removal_accounting(
             if reap_receipt_path(home, &receipt).exists() {
                 (true, "receipt already staged for this session".to_string())
             } else {
+                // The door that dropped the row also removes the harness
+                // side, and its receipt records the attempt. The sweep's
+                // receipt already carries its own effects (left untouched
+                // above), so the sweep path never attempts twice.
+                let outcome = crate::gc_native::apply_active_surface_removal(entry);
                 receipt.removed_by = Some(remover.to_string());
+                receipt.effects = vec![outcome.effect_record("active-surface")];
                 match write_reap_receipt(home, &receipt) {
-                    Ok(()) => (true, "removed by an update_registry write".to_string()),
+                    Ok(()) => (
+                        true,
+                        format!("removed by an update_registry write ({})", outcome.as_str()),
+                    ),
                     Err(err) => (false, format!("receipt did not persist: {err}")),
                 }
             }
