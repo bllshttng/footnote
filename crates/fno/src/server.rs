@@ -706,8 +706,8 @@ enum CoreMsg {
     Gone(u64),
     /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
     Query(tokio::sync::oneshot::Sender<ServerMsg>),
-    /// A pre-Attach `KillServer`: Bye every client, kill every pane child,
-    /// exit 0 (Locked 12's second and last exit path).
+    /// A pre-Attach `KillServer`: Bye clients, then the shared choke point
+    /// captures before killing non-keeper children and exits 0.
     Kill,
     // -- v4 control verbs (one-shot: reply on the oneshot, then the
     // connection task closes). Snapshot reads and the spawn/kill mutations
@@ -7328,12 +7328,8 @@ impl Core {
         }
     }
 
-    /// Write the tree capture of every persistable squad when dirty (the
-    /// AgentRows-tick flush and the leaving-clients flush). Membership is
-    /// re-persisted with it: `persist_squad` is the one funnel that derives a
-    /// squad's durable identity, so the tree lane can never key differently
-    /// than the row it belongs to. ponytail: one store mutation per squad per
-    /// flush; batch into a single locked write if the flock ever shows it.
+    /// Write every dirty persistable squad through `persist_squad`, keeping
+    /// membership identity and topology keys on one path.
     fn flush_topology(&mut self) {
         if !self.topology_dirty {
             return;
@@ -7344,6 +7340,16 @@ impl Core {
         for sid in sids {
             self.persist_squad(sid);
         }
+    }
+
+    /// Capture the live topology at teardown, even when the dirty flag is clear.
+    fn capture_topology_now(&mut self) -> bool {
+        if !self.restored {
+            return false;
+        }
+        self.topology_dirty = true;
+        self.flush_topology();
+        true
     }
 
     /// Persist a just-attached session as a member of squad `sid` (idempotent) -
@@ -13748,12 +13754,10 @@ impl Core {
                 Flow::Continue
             }
             CoreMsg::Kill => {
-                // kill-server: the second (and last) sanctioned exit path
-                // (Locked 12). Bye every client, kill every pane child
-                // (AC4-FR: nothing outlives the session), then shut down -
-                // the SocketGuard unlinks on the way out.
+                // Notify clients, then let the shared shutdown choke point
+                // capture before killing non-keeper children. Keeper-held
+                // panes outlive this server and are re-adopted by the next.
                 self.bye_all("killed");
-                self.kill_all_panes();
                 Flow::Shutdown
             }
             CoreMsg::WorkspaceRestore {
@@ -15377,18 +15381,12 @@ async fn serve(
         core.publish_client_count();
     };
     if flow == Flow::Shutdown {
-        // Pane teardown lives at this choke point, not in each arm: every
-        // shutdown path funnels through here (CoreMsg::Kill, the idle reaper,
-        // SIGTERM/SIGINT, last-pane-closed), an arm that forgets the call
-        // leaves pane children to SIGHUP luck (x-48a5: the signal arms once
-        // did), and PtyShell::kill is idempotent, so a path whose panes are
-        // already gone pays nothing.
+        // Every graceful exit captures the live topology before pane teardown.
+        // A server that never attached must not persist its bootstrap layout.
+        if !core.capture_topology_now() {
+            eprintln!("fno mux: shutdown before the first attach; no layout captured");
+        }
         core.kill_all_panes();
-        // (x-caef) The server is going down: write any dirty topology capture
-        // now - this is the "ending fno" moment whose loss is the operator's
-        // whole symptom. SIGTERM and the idle exit land here; a -9 cannot be
-        // caught, which is what the tick flush (<= ~3s of lag) bounds.
-        core.flush_topology();
         core.bye_all("session ended");
         // Give writer tasks a beat to flush the Byes; a lost Bye reads as
         // "session ended (server closed)" client-side, so this is best-effort.
@@ -16445,6 +16443,7 @@ mod tests {
     // (x-b64e) The restore test family, same treatment: the file is
     // shrink-only under the file-budget gate. Moved verbatim.
     mod server_restore_tests;
+    mod shutdown_tests;
 
     #[test]
     fn node_from_argv_reads_the_wrapper_token() {
