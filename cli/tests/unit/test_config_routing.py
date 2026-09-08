@@ -168,3 +168,51 @@ def test_routing_model_row_carries_color():
 def test_routing_model_row_color_defaults_empty():
     row = RoutingModelBlock()
     assert row.color == ""
+
+
+def test_spawn_defaults_carry_a_harness_overlay():
+    """AC1-HP: the per-harness overlay loads beside an unchanged base scalar.
+
+    The base that works for most stays put; a harness whose flag vocabulary
+    differs gets its own answer keyed by harness."""
+    s = _settings({
+        "agents": {
+            "defaults": {
+                "permission_mode": "bypassPermissions",
+                "harness": {
+                    "codex": {
+                        "permission_mode": "yolo",
+                        "args": ["--profile", "fno"],
+                    },
+                },
+            },
+            "profiles": {
+                "target": {
+                    "effort": "high",
+                    "harness": {"codex": {"effort": "xhigh"}},
+                },
+            },
+        },
+    })
+    d = s.agents.defaults
+    assert d.permission_mode == "bypassPermissions"
+    assert d.harness["codex"].permission_mode == "yolo"
+    assert d.harness["codex"].args == ["--profile", "fno"]
+    prof = s.agents.profiles["target"]
+    assert prof.effort == "high"
+    assert prof.harness["codex"].effort == "xhigh"
+
+
+def test_harness_overlay_keeps_smuggled_keys_for_the_seam():
+    """A lane field inside an overlay survives load (extra="allow") so the
+    spawn seam can name it in its refusal; the loader itself never raises."""
+    s = _settings({
+        "agents": {"defaults": {"harness": {"codex": {"model": "opus"}}}},
+    })
+    assert s.agents.defaults.harness["codex"].model_extra.get("model") == "opus"
+
+
+def test_harness_overlay_malformed_table_degrades_to_empty():
+    """One typo must never brick every command at load."""
+    s = _settings({"agents": {"defaults": {"harness": "banana"}}})
+    assert s.agents.defaults.harness == {}

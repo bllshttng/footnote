@@ -596,6 +596,7 @@ def doctor_cmd(
         _report_deprecated_dispatch_harness,
         _report_deprecated_active_backlog_mission,
         _report_band_routing,
+        _report_harness_overlays,
     ):
         try:
             report()
@@ -866,6 +867,88 @@ def _report_band_routing() -> None:
             else ""
         )
     )
+
+
+def _report_harness_overlays() -> None:
+    """Name the (config rung, harness) pairs a scalar cannot serve (x-8975).
+
+    The spawn seam degrades open on config values by design, so this readout
+    is where an operator hears a value will be skipped on some harness.
+    Resolution rides the spawn-overlay verb (the spawn seam's own rungs);
+    silent when every pair maps.
+    """
+    from fno.agents.harnesses import READABLE_PROVIDERS
+    from fno.agents.mux_spawn import effort_tokens, permission_pane_tokens
+    from fno.agents.spawn_defaults import _overlay_payload
+    from fno.agents.spawn_overlay_client import (
+        SpawnOverlayUnavailable,
+        spawn_overlay_call,
+    )
+    from fno.agents.harness_map import CLAUDE_PERMISSION_MODES
+    from fno.config import load_settings
+
+    try:
+        agents = load_settings().agents
+    except Exception:  # noqa: BLE001 - an unreadable config reads as absent
+        return
+    defaults = agents.defaults
+    rows: list = [(v, p) for v, p in (getattr(agents, "profiles", None) or {}).items()]
+    rows.append(("", None))
+    seen: set = set()
+    for verb, prof in rows:
+        try:
+            answer = spawn_overlay_call(
+                {
+                    "kind": "overlay",
+                    "verb": verb,
+                    "defaults": _overlay_payload(defaults),
+                    "profile": _overlay_payload(prof) if prof is not None else None,
+                    "harnesses": list(READABLE_PROVIDERS),
+                }
+            )
+        except SpawnOverlayUnavailable as exc:
+            typer.echo(f"config doctor: harness-overlay readout unavailable: {exc}")
+            return
+        if answer.get("refusal"):
+            # The verb's own guards refused the config (unknown harness
+            # key, a ranking field in an overlay); that IS the finding.
+            typer.echo(answer["refusal"])
+            return
+        for harness, effective in (answer.get("effective_by_harness") or {}).items():
+            for name, mapper in (
+                ("permission_mode", permission_pane_tokens),
+                ("effort", effort_tokens),
+            ):
+                entry = effective.get(name)
+                if not entry:
+                    continue
+                value, rung = entry["value"], entry["rung"]
+                # One line per unique (rung, field, harness, value): every
+                # verb resolves the same defaults scalar beneath it, and the
+                # defect is one, not four.
+                key = (rung, name, harness, value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if harness == "claude" and name == "permission_mode":
+                    # Exact passthrough: the mapper cannot catch another
+                    # harness's spelling, so check claude's own vocabulary.
+                    if value in CLAUDE_PERMISSION_MODES:
+                        continue
+                    typer.echo(
+                        f"config.{rung}.permission_mode = {value!r} is not a "
+                        "claude permission mode; set claude's answer under "
+                        f"[{rung}.harness.claude]"
+                    )
+                    continue
+                try:
+                    mapper(harness, value)
+                except Exception as exc:
+                    typer.echo(
+                        f"config.{rung}.{name} = {value!r} cannot map on "
+                        f"{harness}: {exc}; set {harness}'s answer under "
+                        f"[{rung}.harness.{harness}]"
+                    )
 
 
 @app.command("active-backlog")

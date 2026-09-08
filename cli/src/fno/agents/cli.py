@@ -18,6 +18,7 @@ from typing import Any, Optional
 import typer
 
 from fno.agents import launch_provenance
+from fno.agents.harness_map import PERMISSION_MODE_HELP
 from fno.agents.rust_runtime import make_agents_group_cls
 
 agents_app = typer.Typer(
@@ -1360,18 +1361,7 @@ def cmd_spawn(
     permission_mode: str | None = typer.Option(
         None,
         "--permission-mode",
-        help=(
-            "Permission/approval mode forwarded to the provider (x-dfa4). "
-            "Provider-native values, fail-closed: claude default|acceptEdits|"
-            "plan|bypassPermissions (exact passthrough); gemini --approval-mode "
-            "(or 'yolo'); codex a shortcut (full-auto|yolo) or <sandbox>:"
-            "<approval> (e.g. workspace-write:on-request); opencode 'auto'; agy "
-            "'skip'; cursor-agent 'force' or 'yolo'. An unmappable value errors "
-            "before spawn. Mutually exclusive "
-            "with --yolo. Honored on claude thread/headless (Rust or Python "
-            "fallback); codex/gemini thread/headless one-shots reject it (use "
-            "--substrate pane)."
-        ),
+        help=PERMISSION_MODE_HELP,
     ),
     effort: str | None = typer.Option(
         None,

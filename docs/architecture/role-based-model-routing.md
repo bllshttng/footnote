@@ -153,6 +153,27 @@ model = "gpt-5.6-luna"
 effort = "xhigh"
 ```
 
+### The harness overlay: one base, per-harness answers
+
+A permission mode, an effort value, and a substrate are not fleet policies. Each is a flag spelling the harness defines, so one scalar under `agents.defaults` or `agents.profiles.<verb>` cannot serve every harness. The stage table therefore carries a `harness` table on the defaults and on every profile, keyed by harness name, whose entries re-answer `permission_mode`, `effort`, or `substrate` for that one harness, plus an opaque `args` list appended behind the spawn's `--` passthrough fence. `args` is how an operator references the harness's own bundle (`codex --profile <name>`, `claude --settings <file>`) instead of asking fno for a behavior column per harness: the overlay carries flags whose vocabulary the harness defines and fno already forwards, never a ranking field. `provider`, `model`, `route`, and `account` refuse at the spawn seam when found in an overlay: those are lane fields.
+
+Precedence across the six rungs, one line: `explicit flag > lane > profiles.<verb>.harness.<h> > profiles.<verb> > defaults.harness.<h> > defaults`. The scalars keep their meaning as the base that works for most; nothing migrates. `fno config doctor` names every (rung, harness) pair a scalar cannot serve, with the overlay table that fixes it.
+
+```toml
+[agents.defaults]
+permission_mode = "bypassPermissions"      # works for most: claude, grok
+
+[agents.defaults.harness.codex]
+permission_mode = "yolo"
+args = ["--profile", "fno"]                # codex resolves the rest from [profiles.fno]
+
+[agents.profiles.target]
+effort = "high"
+
+[agents.profiles.target.harness.codex]
+effort = "xhigh"
+```
+
 When a profile has `lanes`, the list is the rank. The live-worker count plays no part in where the walk starts. A lane is either the name of a `[[routing.models]]` row or an inline table with the same fields. Both spellings fold into one row inventory, so there is one selection path. The inline shape is sugar, never a second leg. The spawn walks the lanes in declared order and takes the first lane that passes. A lane skips for three reasons. The pinned substrate or permission mode cannot ride its harness. Its routed vendor sits at `agents.provider_limits`. Live capacity reads `exhausted` for the account the row names. Every skip names the lane and the reason in the spawn receipt. A verb with lanes never consults the difficulty grid. A verb without lanes falls through to the grid over the whole inventory, exactly as before lanes existed.
 
 Capacity resolves per lane, not per harness. Quota locks out at the ACCOUNT. A row that names a `config.accounts.records` id reads that account's own state. A lane pinned to a locked-out account skips. A sibling lane on a healthy account answers. The old harness-wide MAX read that same fleet as healthy. A row that names no account reads the harness-wide aggregate. That aggregate is the correct answer for an unnamed row. An account the capacity snapshot does not name reads `unknown`, which permits.

@@ -25,7 +25,8 @@ from fno.agents.spawn_defaults import inject_spawn_defaults, resolve_lane_vendor
 class _Defaults:
     def __init__(self, provider="", model="", effort="", substrate="", permission_mode="",
                  route="", account="", pane_group="", lanes=None, on_exhausted="",
-                 by_difficulty=None, on_low="prefer_healthy", on_unknown="allow"):
+                 by_difficulty=None, on_low="prefer_healthy", on_unknown="allow",
+                 harness=None, **extra):
         self.provider = provider
         self.model = model
         self.effort = effort
@@ -34,6 +35,12 @@ class _Defaults:
         self.route = route
         self.account = account
         self.pane_group = pane_group
+        self.harness = harness
+        # Lane dicts are raw (the schema keeps `lanes: Any`), so a lane-only
+        # field like args rides through as an attribute, mirroring the seam's
+        # getattr read.
+        for k, v in extra.items():
+            setattr(self, k, v)
         self.lanes = [
             _Defaults(**lane) if isinstance(lane, dict) else lane
             for lane in (lanes or [])
@@ -748,6 +755,7 @@ def test_profile_lane_unknown_harness_refuses(monkeypatch):
 
 
 @requires_rust
+@requires_rust
 def test_profile_lane_injects_pane_group(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
 
@@ -1385,300 +1393,11 @@ def test_ac3_hp_explicit_wins_every_injectable_field():
         assert forbidden_value not in out, (explicit_flags, profile_fields)
 
 
-# ---------------------------------------------------------------------------
-# The fallback chain (AC5-*)
-# ---------------------------------------------------------------------------
-
-
-class _ChainSettings:
-    def __init__(self, agents):
-        self.agents = agents
-
-
-def _chain_settings(table):
-    from fno.config import AgentsBlock
-
-    return _ChainSettings(AgentsBlock(fallback=table))
-
-
-_OPERATOR_RULE = {
-    "S": [
-        {"harness": "claude", "model": "sonnet", "substrate": "bg"},
-        {"harness": "codex", "model": "gpt-5.6-sol", "effort": "medium"},
-    ],
-    "L": [
-        {"harness": "codex", "model": "gpt-5.6-sol", "effort": "high"},
-        {"harness": "claude", "model": "sonnet", "substrate": "bg"},
-    ],
-    "default": [
-        {"harness": "claude", "model": "sonnet", "substrate": "bg"},
-        {"harness": "codex", "model": "gpt-5.6-sol", "effort": "high"},
-    ],
-}
-
-
-class TestResolveFallbackChain:
-    def test_ac5_hp_size_picks_the_operators_own_split(self, monkeypatch) -> None:
-        # "Simple work goes to a claude sonnet background thread, complex work
-        # goes to codex" - the sentence, executable.
-        from fno.agents import spawn_defaults as sd
-
-        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: False)
-        st = _chain_settings(_OPERATOR_RULE)
-
-        assert sd.link_id(sd.resolve_fallback_chain("L", settings=st)[0]) == (
-            "codex/gpt-5.6-sol"
-        )
-        assert sd.link_id(sd.resolve_fallback_chain("S", settings=st)[0]) == (
-            "claude/sonnet"
-        )
-
-    def test_every_size_has_more_than_one_link(self, monkeypatch) -> None:
-        # A chain with one link is not a chain: a claude weekly cap and a z.ai
-        # five-hour cap are different meters, and either can be the one down.
-        from fno.agents import spawn_defaults as sd
-
-        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: False)
-        st = _chain_settings(_OPERATOR_RULE)
-        for size in ("S", "L", "M"):
-            assert len(sd.resolve_fallback_chain(size, settings=st)) >= 2, size
-
-    def test_an_absent_size_reads_default(self, monkeypatch) -> None:
-        from fno.agents import spawn_defaults as sd
-
-        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: False)
-        st = _chain_settings(_OPERATOR_RULE)
-        assert sd.link_id(sd.resolve_fallback_chain("M", settings=st)[0]) == (
-            "claude/sonnet"
-        )
-        assert sd.link_id(sd.resolve_fallback_chain(None, settings=st)[0]) == (
-            "claude/sonnet"
-        )
-
-    def test_an_absent_table_yields_no_spawns(self) -> None:
-        from fno.agents import spawn_defaults as sd
-
-        assert sd.resolve_fallback_chain("L", settings=_chain_settings({})) == []
-
-    def test_ac5_edge_an_exhausted_link_is_skipped(self, monkeypatch) -> None:
-        from fno.agents import spawn_defaults as sd
-
-        monkeypatch.setattr(
-            sd, "link_is_exhausted",
-            lambda link, now=None, repo_root=None: sd.link_id(link) == "codex/gpt-5.6-sol",
-        )
-        chain = sd.resolve_fallback_chain("L", settings=_chain_settings(_OPERATOR_RULE))
-        assert [sd.link_id(x) for x in chain] == ["claude/sonnet"]
-
-    def test_ac5_edge_an_all_exhausted_chain_returns_empty(self, monkeypatch) -> None:
-        # NOT link zero. Routing into a known-capped provider is worse than
-        # holding, and holding is what an empty chain makes the caller do.
-        from fno.agents import spawn_defaults as sd
-
-        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: True)
-        assert sd.resolve_fallback_chain(
-            "L", settings=_chain_settings(_OPERATOR_RULE)
-        ) == []
-
-    def test_an_already_spent_link_is_not_offered_again(self, monkeypatch) -> None:
-        from fno.agents import spawn_defaults as sd
-
-        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: False)
-        chain = sd.resolve_fallback_chain(
-            "L", exclude=["codex/gpt-5.6-sol"],
-            settings=_chain_settings(_OPERATOR_RULE),
-        )
-        assert [sd.link_id(x) for x in chain] == ["claude/sonnet"]
-
-
-class TestChainValidatorRefuses:
-    """AC5-NEG: the failover path is where degrading open costs money.
-
-    The refusal lives on the READ, not on the load. A field validator would
-    fail load_settings() process-wide, so one typo would make every fno command
-    raise and kill the pr-watch tick at its settings phase - taking down the
-    daemon that runs the failover, which is worse than the mis-spawn it
-    prevents.
-    """
-
-    def _refuses(self, table):
-        import pytest as _pytest
-
-        from fno.agents.spawn_defaults import (
-            FallbackConfigError,
-            resolve_fallback_chain,
-        )
-
-        with _pytest.raises(FallbackConfigError) as exc:
-            resolve_fallback_chain("L", settings=_chain_settings(table))
-        return str(exc.value)
-
-    def test_an_out_of_enum_harness_is_refused_by_name(self) -> None:
-        message = self._refuses({"L": [{"harness": "banana", "model": "x"}]})
-        assert "banana" in message
-        assert "agents.fallback.L[0].harness" in message
-
-    def test_an_unknown_size_key_is_refused_by_name(self) -> None:
-        assert "agents.fallback.XL" in self._refuses({"XL": [{"harness": "codex"}]})
-
-    def test_a_non_list_chain_is_refused(self) -> None:
-        assert "agents.fallback.L" in self._refuses({"L": "codex"})
-
-    def test_a_non_table_link_is_refused(self) -> None:
-        assert "agents.fallback.L[0]" in self._refuses({"L": ["codex"]})
-
-    def test_a_malformed_chain_never_fails_the_config_load(self) -> None:
-        # The whole point of moving the refusal: every one of these loads.
-        from fno.config import AgentsBlock
-
-        for bad in (
-            {"XL": [{"harness": "codex"}]},
-            {"L": "codex"},
-            {"L": ["codex"]},
-            {"L": [{"harness": "banana"}]},
-            "banana",
-        ):
-            AgentsBlock(fallback=bad)
-
-    def test_the_profiles_table_still_degrades_open(self) -> None:
-        # The contrast that makes the refusal deliberate: a typo in profiles
-        # must never brick ordinary spawning.
-        from fno.config import AgentsBlock
-
-        assert AgentsBlock(profiles="banana").profiles == {}
-
-    def test_an_empty_table_is_legal(self) -> None:
-        from fno.config import AgentsBlock
-
-        assert AgentsBlock(fallback={}).fallback == {}
-
-
-class TestLinkToSpawnFlags:
-    def test_no_new_axis_vocabulary(self) -> None:
-        from fno.agents import spawn_defaults as sd
-
-        codex, claude = sd.validate_fallback(_OPERATOR_RULE)["L"]
-        assert sd.link_to_spawn_flags(codex) == [
-            "-H", "codex", "-m", "gpt-5.6-sol", "--effort", "high",
-            "--substrate", "pane",
-        ]
-        assert sd.link_to_spawn_flags(claude) == [
-            "-H", "claude", "-m", "sonnet", "--substrate", "bg",
-        ]
-
-    def test_a_codex_link_defaults_to_a_pane_not_bg(self) -> None:
-        # The Rust client rejects --substrate bg for a non-claude harness, so
-        # this is a real difference in the spawn call, not a naming change.
-        from fno.agents import spawn_defaults as sd
-
-        link = sd.validate_fallback({"L": [{"harness": "codex", "model": "m"}]})["L"][0]
-        flags = sd.link_to_spawn_flags(link)
-        assert "--substrate" in flags
-        assert flags[flags.index("--substrate") + 1] == "pane"
-
-    def test_effort_alone_does_not_make_two_links_one_destination(self) -> None:
-        # Retrying the same vendor at a different reasoning setting does not
-        # answer a cap, so the walk's memory key ignores effort.
-        from fno.agents import spawn_defaults as sd
-
-        a, b = sd.validate_fallback({"L": [
-            {"harness": "codex", "model": "m", "effort": "high"},
-            {"harness": "codex", "model": "m", "effort": "low"},
-        ]})["L"]
-        assert sd.link_id(a) == sd.link_id(b)
-
-
-class TestLinkIdentityIncludesTheAccountAxis:
-    def test_two_accounts_on_one_model_are_two_destinations(self) -> None:
-        # An account names a different bill and a different meter. Folding two
-        # links together spends the first and skips the second as spent.
-        from fno.agents import spawn_defaults as sd
-
-        a, b = sd.validate_fallback({"L": [
-            {"harness": "claude", "model": "sonnet", "account": "primary"},
-            {"harness": "claude", "model": "sonnet", "account": "secondary"},
-        ]})["L"]
-        assert sd.link_id(a) != sd.link_id(b)
-
-    @requires_rust
-    def test_an_unpinned_link_keeps_the_bare_identity(self) -> None:
-        from fno.agents import spawn_defaults as sd
-
-        link = sd.validate_fallback({"L": [{"harness": "codex", "model": "m"}]})["L"][0]
-        assert sd.link_id(link) == "codex/m"
-
-    def test_the_second_account_is_still_offered_after_the_first(
-        self, monkeypatch
-    ) -> None:
-        from fno.agents import spawn_defaults as sd
-
-        monkeypatch.setattr(
-            sd, "link_is_exhausted",
-            lambda link, now=None, repo_root=None: False, raising=True,
-        )
-        table = {"L": [
-            {"harness": "claude", "model": "sonnet", "account": "primary"},
-            {"harness": "claude", "model": "sonnet", "account": "secondary"},
-        ]}
-        chain = sd.resolve_fallback_chain(
-            "L", exclude=["claude/sonnet@primary"],
-            settings=_chain_settings(table),
-        )
-        assert [sd.link_id(x) for x in chain] == ["claude/sonnet@secondary"]
-
-
-class TestForeignProjectRooting:
-    def test_the_chain_is_read_from_the_candidates_repo(self, monkeypatch, tmp_path):
-        # The recovery roster is global. A foreign worker resolving the
-        # daemon's chain would spawn on a vendor its own project never
-        # authorized.
-        from fno.agents import spawn_defaults as sd
-
-        seen = {}
-
-        def _for_repo(root):
-            seen["root"] = root
-            return _chain_settings(_OPERATOR_RULE)
-
-        monkeypatch.setattr(
-            "fno.config.load_settings_for_repo", _for_repo, raising=True
-        )
-        monkeypatch.setattr(
-            sd, "link_is_exhausted",
-            lambda link, now=None, repo_root=None: False, raising=True,
-        )
-        sd.resolve_fallback_chain("L", repo_root=str(tmp_path))
-        assert str(seen["root"]) == str(tmp_path)
-
-    def test_headroom_is_read_from_the_candidates_repo(self, monkeypatch, tmp_path):
-        from fno.agents import spawn_defaults as sd
-
-        seen = {}
-
-        class _V:
-            state = object()
-
-        monkeypatch.setattr(
-            sd, "_harness_records",
-            lambda harness, repo_root=None: [type("R", (), {"id": "acct"})()],
-            raising=True,
-        )
-
-        def _headroom(pid, now=None, repo_root=None):
-            seen["root"] = repo_root
-            return _V()
-
-        monkeypatch.setattr(
-            "fno.adapters.providers.runtime_state.headroom", _headroom, raising=True
-        )
-        link = sd.validate_fallback({"L": [{"harness": "codex", "model": "m"}]})["L"][0]
-        sd.link_is_exhausted(link, repo_root=str(tmp_path))
-        assert str(seen["root"]) == str(tmp_path)
-
 
 # --- model-implies-vendor mismatch warning (change 5, spawn half) ------------
 
 
+@requires_rust
 def test_model_vendor_mismatch_warns_naming_both_sides():
     # --model glm-5.3 with no zai route resolved: the spawn proceeds AND warns,
     # naming the implied vendor (zai) and the resolved lane (anthropic, the
@@ -1709,6 +1428,7 @@ def test_route_matching_model_is_silent():
     assert "implies vendor" not in err.getvalue()
 
 
+@requires_rust
 def test_mismatch_warns_with_no_config_at_all():
     # The warning must not depend on config being present: a bare argv with a
     # cross-vendor model is the exact operator typo it exists to catch.
@@ -1733,6 +1453,7 @@ def test_explicit_route_with_cross_vendor_model_is_silent():
     assert "implies vendor" not in err.getvalue()
 
 
+@requires_rust
 def test_injected_cross_vendor_model_refuses_and_names_the_config_key():
     # The specimen, 2026-08-21: agents.defaults.model was a gpt-* id, every
     # spawn that named no model inherited it, and the worker started, reported
@@ -1748,6 +1469,7 @@ def test_injected_cross_vendor_model_refuses_and_names_the_config_key():
     assert "openai" in msg and "anthropic" in msg
 
 
+@requires_rust
 def test_typed_cross_vendor_model_still_warns_and_proceeds():
     # The other half of the same predicate, and the one that must NOT change.
     # A caller who types a cross-vendor model means it; passthrough is
@@ -1773,6 +1495,7 @@ def test_injected_model_matching_the_lane_is_silent():
     assert err.getvalue() == "" or "implies vendor" not in err.getvalue()
 
 
+@requires_rust
 def test_account_in_play_downgrades_the_refusal_to_a_warning():
     """An account can carry its own vendor credential, and `resolve_lane_vendor`
     never reads the `--account` axis.
@@ -1809,6 +1532,7 @@ def test_lane_vendor_resolves_unrouted_harness_from_final_argv():
     assert resolve_lane_vendor(["codex", "-C", "/tmp/workspace"]) == "openai"
 
 
+@requires_rust
 def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
     emitted = []
     monkeypatch.setattr(
@@ -1838,6 +1562,7 @@ def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
     ]
 
 
+@requires_rust
 def test_refused_mismatch_event_names_the_config_key_that_supplied_the_model(
     monkeypatch,
 ):
@@ -2164,6 +1889,7 @@ def test_lane_validation_refusals_run_on_real_dict_lanes(monkeypatch):
         assert "no worker launched" in err.getvalue()
 
 
+@requires_rust
 def test_config_pane_group_degrades_open_beside_an_explicit_split(monkeypatch):
     """dispatch hard-refuses a pane group beside --split/--at. That refusal is
     right for a group the operator TYPED and wrong for one config injected: it
@@ -2181,6 +1907,7 @@ def test_config_pane_group_degrades_open_beside_an_explicit_split(monkeypatch):
     assert out[out.index("--harness") + 1] == "codex"
 
 
+@requires_rust
 def test_config_pane_group_still_injects_without_a_conflicting_flag(monkeypatch):
     err = io.StringIO()
     out = _inject(
@@ -2191,6 +1918,7 @@ def test_config_pane_group_still_injects_without_a_conflicting_flag(monkeypatch)
     assert out[out.index("--tab") + 1] == "codex"
 
 
+@requires_rust
 def test_config_pane_group_degrades_open_beside_once(monkeypatch):
     """cli.py refuses placement on `substrate != "pane" OR once`, so a one-shot
     spawn has no pane geometry even though its substrate resolves to pane. The
@@ -2210,6 +1938,7 @@ def test_config_pane_group_degrades_open_beside_once(monkeypatch):
     assert "--once" in err.getvalue()
 
 
+@requires_rust
 def test_config_pane_group_survives_a_fenced_provider_argv(monkeypatch):
     """`spawn ... -- claude --at 3` names a SEED token, not an fno flag. Scanning
     raw argv would drop the config's pane_group and blame a flag the caller never
@@ -2237,6 +1966,7 @@ def test_config_pane_group_defers_to_a_valueless_trailing_tab(monkeypatch):
     assert out.count("--tab") == 1
 
 
+@requires_rust
 def test_config_pane_group_skips_on_a_glued_short_placement_flag(monkeypatch):
     """click accepts `-xdown`. Missing that spelling let a real placement flag
     read as absent, inject the group, and then hit the hard refusal on a value
@@ -2682,3 +2412,213 @@ def test_explicit_model_pin_overrides_the_lanes(monkeypatch):
     assert "slot=model-pin-override" in err.getvalue()
     applied = err.getvalue()
     assert "applied slot=" not in applied or "model-pin-override" in applied
+
+
+# ---------------------------------------------------------------------------
+# Harness-keyed spawn defaults (x-8975): the overlay rungs
+# ---------------------------------------------------------------------------
+
+
+_PROFILE_OVERLAY = {
+    "target": {
+        "permission_mode": "yolo",
+        "effort": "high",
+        "harness": {
+            "claude": {"permission_mode": "bypassPermissions"},
+            "codex": {"effort": "xhigh"},
+        },
+    },
+}
+
+
+@requires_rust
+def test_profile_harness_overlay_answers_claude_scalar_answers_codex():
+    """AC2-HP: the same verb carries two harnesses' answers to one question.
+
+    -H claude reads profiles.target.harness.claude; -H codex falls through to
+    the profiles.target scalar, which is a codex spelling."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-H", "claude", "--name", "w", "/target x"],
+        err=err,
+        profiles=_PROFILE_OVERLAY,
+    )
+    assert out[out.index("--permission-mode") + 1] == "bypassPermissions"
+    assert "agents.profiles.target.harness.claude.permission_mode" in err.getvalue()
+
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-H", "codex", "--name", "w", "/target x"],
+        err=err,
+        profiles=_PROFILE_OVERLAY,
+    )
+    assert out[out.index("--permission-mode") + 1] == "yolo"
+    assert "agents.profiles.target.permission_mode" in err.getvalue()
+
+
+@requires_rust
+def test_effort_overlay_read_happens_after_harness_resolution():
+    """AC2-EDGE: no -H on the argv; the profile's own provider=codex resolves
+    the harness, and the effort read through THAT harness picks xhigh."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/target x"],
+        err=err,
+        profiles={
+            "target": {
+                "provider": "codex",
+                "effort": "high",
+                "harness": {"codex": {"effort": "xhigh"}},
+            },
+        },
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert out[out.index("--effort") + 1] == "xhigh"
+    assert "agents.profiles.target.harness.codex.effort" in err.getvalue()
+
+
+@requires_rust
+def test_defaults_harness_overlay_answers_when_profile_is_silent():
+    """The defaults rung keeps its own harness table: a codex answer there
+    wins on -H codex over the defaults scalar, with no profile in play."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-H", "codex", "--name", "w", "hi"],
+        err=err,
+        permission_mode="bypassPermissions",
+        harness={"codex": {"permission_mode": "yolo"}},
+    )
+    assert out[out.index("--permission-mode") + 1] == "yolo"
+    assert "agents.defaults.harness.codex.permission_mode" in err.getvalue()
+
+
+def test_explicit_flag_still_beats_every_overlay_rung():
+    """Precedence head: an explicit --permission-mode wins over lane, overlay
+    and scalar alike."""
+    out = _inject(
+        ["spawn", "-H", "claude", "--permission-mode", "plan", "--name", "w", "/target x"],
+        profiles=_PROFILE_OVERLAY,
+    )
+    assert out[out.index("--permission-mode") + 1] == "plan"
+    assert out.count("--permission-mode") == 1
+
+
+@requires_rust
+def test_harness_args_appended_behind_tail_fence():
+    """The overlay bundle rides the -- passthrough fence at the argv TAIL, so
+    the caller's own pre-fence tokens stay pre-fence."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-H", "codex", "--name", "w", "hi"],
+        err=err,
+        harness={"codex": {"args": ["--profile", "fno"]}},
+    )
+    i = out.index("--")
+    assert out[i + 1 : i + 3] == ["--profile", "fno"]
+    assert "agents.defaults.harness.codex.args" in err.getvalue()
+    assert "unverified" in err.getvalue()
+
+
+@requires_rust
+def test_harness_args_skipped_when_argv_already_fenced():
+    """AC2-ERR: the caller's fence selects their complete bundle; the
+    configured one is displaced by name, and no second fence is added."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-H", "codex", "--name", "w", "hi", "--", "--profile", "other"],
+        err=err,
+        harness={"codex": {"args": ["--profile", "fno"]}},
+    )
+    assert out.count("--") == 1
+    assert "harness args skipped" in err.getvalue()
+    assert "agents.defaults.harness.codex.args" in err.getvalue()
+
+
+@requires_rust
+def test_harness_args_skipped_behind_an_argv_payload():
+    """The --argv payload boundary owns everything after it too (the Rust
+    parser reads it as the provider command line), so it displaces the
+    configured bundle the same way a typed fence does."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-H", "claude", "--argv", "--", "claude", "--at", "3"],
+        err=err,
+        harness={"claude": {"args": ["--settings", "a.json"]}},
+    )
+    assert "--settings" not in out
+    assert "harness args skipped" in err.getvalue()
+    assert "--argv" in err.getvalue()
+
+
+@requires_rust
+def test_bundle_reserves_the_empty_message_slot():
+    """A pane spawn with no prompt keeps its message slot: click fills
+    positionals in order, so without the explicit empty the bundle's first
+    token becomes the worker seed."""
+    out = _inject(
+        ["spawn", "-H", "codex", "--name", "w"],
+        harness={"codex": {"args": ["--profile", "fno"]}},
+    )
+    assert out[-4:] == ["", "--", "--profile", "fno"]
+
+
+@requires_rust
+def test_lane_args_win_over_overlay_bundle():
+    """The lane rung sits above the overlays for args too, and bundles are
+    never concatenated."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/target x"],
+        err=err,
+        profiles={
+            "target": {
+                "lanes": [_lane("codex", effort="high", args=["--profile", "lane"])],
+                "harness": {"codex": {"args": ["--profile", "overlay"]}},
+            },
+        },
+    )
+    i = out.index("--")
+    assert out[i + 1 : i + 3] == ["--profile", "lane"]
+    assert "overlay" not in out
+    assert ".lanes[0].args" in err.getvalue()
+
+
+@requires_rust
+def test_unknown_overlay_harness_name_refuses():
+    """AC1-ERR sibling: a typo'd harness key refuses at the seam by name."""
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "-H", "claude", "--name", "w", "/target x"],
+            err=err,
+            profiles={"target": {"harness": {"codx": {"effort": "high"}}}},
+        )
+    assert exc.value.code == 2
+    assert "agents.profiles.target.harness.codx" in err.getvalue()
+
+
+@requires_rust
+def test_lane_field_inside_overlay_refuses():
+    """AC1-ERR: a ranking field in an overlay is a lane field, refused by
+    name; nothing launches."""
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "-H", "claude", "--name", "w", "hi"],
+            err=err,
+            harness={"codex": {"model": "opus"}},
+        )
+    assert exc.value.code == 2
+    assert "agents.defaults.harness.codex.model" in err.getvalue()
+    assert "lane field" in err.getvalue()
+
+
+@requires_rust
+def test_overlay_scoped_to_this_verbs_profile():
+    """A typo in an unrelated verb's overlay must not block this dispatch."""
+    out = _inject(
+        ["spawn", "--name", "w", "/target x"],
+        harness={"claude": {"effort": "high"}},
+        profiles={"review": {"harness": {"codx": {"effort": "high"}}}},
+    )
+    assert "--effort" in out

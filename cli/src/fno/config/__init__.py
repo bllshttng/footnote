@@ -1995,54 +1995,13 @@ class AgentProviderBlock(BaseModel):
     headless_yolo: bool = False
 
 
-class SpawnDefaultsBlock(BaseModel):
-    """Default spawn routing (nested under 'config.agents.defaults').
-
-    The bottom-most operator rung of the spawn precedence chain: an explicit
-    CLI flag > these defaults > the built-in. Empty string = unset; an unset
-    field falls through to the built-in. These defaults reach every spawn that
-    has not pinned a field, including autonomous dispatch; an explicit flag
-    always wins. No value validation here: config stays a leaf module (x-7fdd,
-    no import from agents/harnesses at load time) - provider is checked
-    against the known set at the spawn seam, effort against the per-provider
-    surface.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    provider: str = ""
-    model: str = ""
-    effort: str = ""
-    # Config-sourced values degrade open with a warning on provider
-    # incompatibility at the spawn seam; an explicit flag stays fail-closed.
-    substrate: str = ""
-    permission_mode: str = ""
-    # route/account sit BESIDE the legacy provider field (ruling 4): provider
-    # keeps meaning harness and is allowlisted as a harness literal, so a
-    # stage that needed to say zai had no field. route carries vendor/model
-    # (forwarded as --route, fail-closed downstream); account forwards
-    # --account. The names carry no axis word, so the four-axis guard never
-    # reads them as bindings.
-    route: str = ""
-    account: str = ""
-
-
-class SpawnProfileBlock(SpawnDefaultsBlock):
-    """Per-verb overlay plus its strict ordered delivery-lane vocabulary.
-
-    lanes/by_difficulty stay raw: the slot resolver validates and refuses
-    by name, so a malformed list never breaks every config read.
-    """
-
-    pane_group: str = ""
-    lanes: Any = Field(default_factory=list)
-    # Terminal when every lane is skipped: refuse | degrade | queue (exit 78).
-    on_exhausted: str = "refuse"
-    # Overlays keyed low|medium|high; omitted fields inherit this block.
-    by_difficulty: Any = Field(default_factory=dict)
-    # on_low demotes a low lane behind healthy ones; on_unknown permits.
-    on_low: str = "prefer_healthy"
-    on_unknown: str = "allow"
+# The spawn-defaults schema blocks live in spawn_blocks (the config hub is
+# over the file budget and shrink-only); re-exported for every reader.
+from fno.config.spawn_blocks import (  # noqa: E402
+    HarnessOverlayBlock as HarnessOverlayBlock,
+    SpawnDefaultsBlock as SpawnDefaultsBlock,
+    SpawnProfileBlock as SpawnProfileBlock,
+)
 
 
 class RoutingModelBlock(BaseModel):
@@ -2383,10 +2342,10 @@ class AgentsBlock(SweepKeys):
     # only when a provider refuses and the account queue cannot answer. Every
     # size wants more than one link, because providers cap on different meters
     # with different periods. Held RAW and typed loosely on purpose: the
-    # strict check lives in `spawn_defaults.validate_fallback`. A field
-    # validator here would fail `load_settings()` for the whole process, so
-    # one typo kills every `fno` command at its settings phase. Refuse on the
-    # path that reads it, not the path that loads it.
+    # strict check lives in the `fallback-chain` verb. A field validator here
+    # would fail `load_settings()` for the whole process, so one typo kills
+    # every `fno` command at its settings phase. Refuse on the path that reads
+    # it, not the path that loads it.
     fallback: dict[str, Any] = Field(default_factory=dict)
     # Seconds of transcript silence after which `fno agents sweep` reports a
     # worker as silent. A REPORT, never an action - nothing is stopped, spawned
@@ -2476,8 +2435,8 @@ class AgentsBlock(SweepKeys):
         A non-mapping value cannot be a chain, so it reads as no chain and the
         pre-existing no-failover behavior stands. Everything else passes
         through untouched, INCLUDING a malformed link, because the failover
-        path has to be able to see the mistake and name it. The strict check is
-        ``spawn_defaults.validate_fallback``.
+        path has to be able to see the mistake and name it. The strict check
+        lives in the ``fallback-chain`` verb (crates/fno-agents).
         """
         return v if isinstance(v, dict) else {}
 
