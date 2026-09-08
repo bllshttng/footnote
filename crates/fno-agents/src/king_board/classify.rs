@@ -1,10 +1,8 @@
 //! Pure classification over the fetched sources: undispatched selection,
 //! claimed-node reads, holder activity, driver state.
 use super::prs::derived_status;
-use super::{
-    s_str, truthy, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, SRC_UNDISPATCHED, TERMINAL_RUNGS,
-};
-use serde_json::{json, Value};
+use super::{s_str, truthy, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, TERMINAL_RUNGS};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 /// Live node claims resolved per board read; the cut is reported (the
@@ -20,118 +18,6 @@ pub(crate) const ACTIVE_STATES: [&str; 3] = ["working", "watching", "your-move"]
 /// Transcript age past which an active-looking holder reads stalled
 /// (session_truth.STALLED_AFTER_S; same pin as ACTIVE_STATES).
 pub(crate) const STALLED_AFTER_S: f64 = 2.0 * 3600.0;
-
-// ---------------------------------------------------------------------------
-// Undispatched: classify_planned_unclaimed over the graph we already hold
-// ---------------------------------------------------------------------------
-
-/// Pure port of `backlog/undispatched.classify_planned_unclaimed`, minus the
-/// selector filters the board never sets (project/mission/roadmap/parent).
-/// Reads the same entries and claims rows the other queues use.
-pub(crate) fn classify_planned_unclaimed(
-    entries: &[Value],
-    claims: &[Value],
-) -> Result<Value, String> {
-    let by_id: HashMap<&str, &Value> = entries
-        .iter()
-        .filter_map(|e| s_str(e, "id").map(|id| (id, e)))
-        .collect();
-    let mut claimed: HashMap<&str, &str> = HashMap::new();
-    for claim in claims {
-        let Some(key) = s_str(claim, "key") else {
-            return Err("claims unreadable: claim key is not a string".to_string());
-        };
-        if let Some(node_id) = key.strip_prefix("node:") {
-            claimed.insert(node_id, s_str(claim, "state").unwrap_or("unknown"));
-        }
-    }
-    let child_ids: HashSet<&str> = entries.iter().filter_map(|e| s_str(e, "parent")).collect();
-
-    let priority_rank = |p: &str| match p {
-        "p0" => 0,
-        "p1" => 1,
-        "p2" => 2,
-        "p3" => 3,
-        _ => 99,
-    };
-    let mut rows: Vec<(i32, String, Value)> = Vec::new();
-    for entry in entries {
-        let Some(node_id) = s_str(entry, "id") else {
-            return Err("graph unreadable: entry id is not a string".to_string());
-        };
-        let plan_finalized = s_str(entry, "plan_path")
-            .map(|p| !p.trim().is_empty())
-            .unwrap_or(false);
-        let status_ready = s_str(entry, "status") == Some("ready");
-        let leaf = s_str(entry, "type") != Some("epic") && !child_ids.contains(&node_id);
-        let completed = entry.get("completed_at").map(truthy).unwrap_or(false);
-        let has_pr = node_has_pr(entry);
-        let batch_owner = entry.get("batch").map(truthy).unwrap_or(false);
-        let blocked = entry
-            .get("blocked_by")
-            .and_then(Value::as_array)
-            .is_some_and(|blockers| {
-                blockers.iter().any(|b| {
-                    let Some(blocker_id) = b.as_str() else {
-                        return true;
-                    };
-                    match by_id.get(blocker_id) {
-                        None => true,
-                        Some(blocker) => {
-                            s_str(blocker, "status") != Some("done")
-                                && !blocker.get("completed_at").map(truthy).unwrap_or(false)
-                        }
-                    }
-                })
-            });
-        let claim_state = claimed.get(node_id).copied();
-        let selected = status_ready
-            && plan_finalized
-            && leaf
-            && !completed
-            && !has_pr
-            && !batch_owner
-            && !blocked
-            && claim_state.is_none();
-        if !selected {
-            continue;
-        }
-        let priority = s_str(entry, "priority").unwrap_or("unknown").to_string();
-        let mut row = json!({
-            "id": node_id,
-            "priority": entry.get("priority"),
-            "domain": entry.get("domain"),
-            "plan_path": entry.get("plan_path"),
-            "facts": {
-                "status_ready": status_ready,
-                "plan_finalized": plan_finalized,
-                "leaf": leaf,
-                "completed": completed,
-                "has_pr": has_pr,
-                "batch_owner": batch_owner,
-                "blocked": blocked,
-                "claim_state": claim_state,
-            },
-        });
-        if let Some(obj) = row.as_object_mut() {
-            for key in ["title", "project", "mission_id", "roadmap_id", "parent"] {
-                if !entry.get(key).unwrap_or(&Value::Null).is_null() {
-                    obj.insert(key.to_string(), entry.get(key).cloned().unwrap());
-                }
-            }
-        }
-        let rank = priority_rank(&priority);
-        rows.push((rank, node_id.to_string(), row));
-    }
-    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    Ok(json!({
-        "source": SRC_UNDISPATCHED,
-        "status": "ok",
-        "entries_scanned": entries.len(),
-        "claims_scanned": claims.len(),
-        "rows": rows.into_iter().map(|(_, _, r)| r).collect::<Vec<_>>(),
-    }))
-}
 
 // ---------------------------------------------------------------------------
 // Claimed nodes + holder activity
@@ -296,49 +182,7 @@ pub(crate) fn node_driver<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn undispatched_selects_planned_leaf_ready_rows_with_no_claim() {
-        let entries = vec![
-            json!({"id": "x-aaaa", "status": "ready", "priority": "p0", "plan_path": "/p.md", "type": "feature"}),
-            json!({"id": "x-bbbb", "status": "ready", "priority": "p1", "type": "epic", "plan_path": "/q.md"}),
-            json!({"id": "x-cccc", "status": "in_progress", "priority": "p0", "plan_path": "/r.md", "type": "feature"}),
-            json!({"id": "x-dddd", "status": "ready", "priority": "p2", "plan_path": "/s.md", "type": "feature"}),
-        ];
-        let claims = vec![json!({"key": "node:x-cccc", "state": "live", "holder": "h"})];
-        let receipt = classify_planned_unclaimed(&entries, &claims).unwrap();
-        let rows = receipt.get("rows").and_then(Value::as_array).unwrap();
-        // The receipt is priority-blind (p2 x-dddd stays); the board's
-        // undispatched queue applies the king-priority filter.
-        assert_eq!(rows.len(), 2, "{receipt}");
-        assert_eq!(rows[0]["id"], "x-aaaa");
-        assert_eq!(receipt["status"], "ok");
-    }
-
-    #[test]
-    fn degenerate_field_values_read_as_absent_like_python_bool() {
-        // Python bool("") and bool(0) are false: an empty completed_at is not
-        // closure, a zero pr_number is not a PR, an empty batch is not a batch.
-        let entries = vec![json!({"id": "x-aaaa", "status": "ready", "priority": "p0",
-                   "plan_path": "/p.md", "type": "feature",
-                   "completed_at": "", "pr_number": 0, "batch": ""})];
-        let receipt = classify_planned_unclaimed(&entries, &[]).unwrap();
-        let rows = receipt.get("rows").and_then(Value::as_array).unwrap();
-        assert_eq!(rows.len(), 1, "{receipt}");
-        let facts = rows[0]["facts"].clone();
-        assert_eq!(facts["completed"], false, "{facts}");
-        assert_eq!(facts["has_pr"], false, "{facts}");
-        assert_eq!(facts["batch_owner"], false, "{facts}");
-    }
-
-    #[test]
-    fn a_blocked_sibling_excludes_undispatched_until_the_blocker_closes() {
-        let entries = vec![
-            json!({"id": "x-aaaa", "status": "ready", "priority": "p1", "plan_path": "/p.md", "type": "feature", "blocked_by": ["x-bbbb"]}),
-            json!({"id": "x-bbbb", "status": "in_progress", "priority": "p1", "type": "feature"}),
-        ];
-        let receipt = classify_planned_unclaimed(&entries, &[]).unwrap();
-        assert_eq!(receipt["rows"].as_array().unwrap().len(), 0);
-    }
+    use serde_json::json;
 
     #[test]
     fn holder_activity_reads_only_positive_evidence() {

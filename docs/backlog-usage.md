@@ -19,7 +19,7 @@ changing the field that drives its placement:
 |--------------|------------------|
 | **Column** (Now / Next / Later / Triage / Done) | `_kanban_column` over lifecycle overlays plus live-epic effective priority |
 | **Swimlane** (the per-project cluster inside a column) | `project` |
-| **Position within a lane** | `rank` (curated), else the shared epic-aware work-order suffix |
+| **Position within a lane** | `rank` (the operator's pin), else the shared epic-aware work-order suffix, which ends in the encounter-driven importance score |
 
 `_kanban_column` is the sole column authority, `make_kanban_column(entries)` binds its whole-graph overlays, and `rank` never changes a card's column.
 
@@ -104,7 +104,11 @@ One voter votes once per node. Agent voters use their session identity. The oper
 
 The local `~/.fno/graph.html` board shows a vote pill on EVERY row. A row with no encounter yet reads `0`, muted, so a first vote is one click. Click it to copy `fno backlog encounter <id> --operator --evidence "REPLACE: what it cost"`, then paste and replace the evidence. The page is a self-contained `file://` document and does not write `graph.json`. The `Demand` toggle filters to voted rows and sorts within each group by the same divergence score as the CLI read. Turning it off restores board order. Public projections do not carry vote data or the clipboard command.
 
-`demand` is a READ. It never writes `rank`, never touches `_kanban_column`, and never reorders anything. The board stays the work order and demand is a column you rank FROM, by hand, with `fno backlog rank`.
+`demand` is a READ. It never writes `rank` and never touches `_kanban_column`. The verb itself reorders nothing.
+
+Votes do move the order, in one place and below every decision. `demand.importance_score` is a projection: divergence plus a capped age term, zero for a node nobody voted on. Nothing stores it. `make_selection_sort_key` reads it after priority and fan-out. A measurement must not outrank a judgement, and an operator's pin outranks both. A graph with no encounters sorts as it did before the term existed.
+
+Votes also stop the age drain. `maintain` counts an encounter as movement, so a node somebody paid for is never deferred for sitting still. Before that, 807 rows were drained by age with no reader. The top demand row was 15 days from being one of them.
 
 An encounter has no correction verb. It cannot be edited or withdrawn, because an edit path makes the record deniable. A later correction is a progress note.
 
@@ -131,17 +135,29 @@ The swimlane is the project cluster, so reproject the node:
 fno backlog update <id> --project <name> --cwd <path>
 ```
 
-### Reorder within a lane
+### Reorder within a lane (operator only)
 
 `rank` floats a card inside its `(column, project)` lane without changing its column. Board order == work order, so `--top` decides where the card sits in that order. It does not dispatch the node. When the node is inside an active mission scope, a drain reaches it. A top-ranked node outside every active mission scope stays undispatched.
 
+`--top` means top of that scope and nothing wider. A node with a live epic parent ranks among its epic's children. A pinned child is therefore not the project's next node. The receipt names the scope it ordered within.
+
 ```bash
-fno backlog rank <id> --top            # front of the lane (order only, no dispatch)
+fno backlog rank <id> --top            # front of the scope (order only, no dispatch)
 fno backlog rank <id> --bottom
 fno backlog rank <id> --before <id>    # anchor must already be ranked
 fno backlog rank <id> --after <id>
 fno backlog rank <id> --clear          # rejoin the priority fallback
+fno backlog rank <id> --top --operator # from inside an agent shell
 ```
+
+An agent session is refused. `--top` writes `min(rank) - 1`. With several callers on the same lever, every writer undercut the last. The resulting order was arrival order wearing the word "importance". Agents vote instead, and the selection key reads the votes:
+
+```bash
+fno backlog encounter <id> --evidence "what this cost me"   # the vote
+fno backlog update <id> --priority p1                        # the proposal
+```
+
+Priority is bounded to four values, so two agents disagreeing about a node produce a visible split on `fno backlog demand` instead of a silent stack. The pin stays with the operator, and it outranks every vote.
 
 ## Lifecycle
 

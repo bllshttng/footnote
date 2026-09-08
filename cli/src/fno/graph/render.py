@@ -132,7 +132,9 @@ def make_kanban_column(
     strict_claims: bool = False,
 ):
     """Bind whole-graph overlays into the sole kanban column authority."""
-    live_claimed = frozenset()
+    # Overwriting the parameter here discarded every caller's claim snapshot and
+    # made `strict_claims` dead, so rank.py's refusal could never fire.
+    live_claimed = frozenset(live_claimed or ())
     in_progress_epics = in_progress_epic_ids(entries)
     priority_for = make_effective_priority(entries)
 
@@ -155,12 +157,9 @@ def make_kanban_classifiers(
     live_claimed: Collection[str] | None = None,
 ):
     """Bind one live-claim snapshot into board ordering and column routing."""
-    live_claimed = frozenset()
+    live_claimed = frozenset(live_claimed or ())
     board_order = make_selection_sort_key(
-        entries,
-        orphans,
-        swimlane=swimlane,
-        live_claimed=live_claimed,
+        entries, orphans, swimlane=swimlane, live_claimed=live_claimed
     )
     return board_order, make_kanban_column(entries, live_claimed)
 

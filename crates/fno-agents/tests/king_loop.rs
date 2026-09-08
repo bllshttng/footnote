@@ -156,10 +156,32 @@ fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
     } else {
         "{}"
     };
+    // The board reads undispatched through this verb rather than classifying
+    // the graph in-process, so the stub owes the same answer the graph above
+    // encodes: every spec row, planned and unclaimed. An unparseable spec is
+    // the blind case, and a refusal there is what keeps it distinguishable
+    // from an empty board.
+    let undispatched = match king_spec_rows(&spec) {
+        None => "exit 1".to_string(),
+        Some(ids) => format!(
+            "echo '{}'",
+            serde_json::json!({
+                "rows": ids
+                    .iter()
+                    .map(|id| serde_json::json!({
+                        "id": id,
+                        "priority": "p0",
+                        "plan_path": "/plans/p.md",
+                        "parent": "drain",
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        ),
+    };
     fs::write(
         stubs.join("fno-py"),
         format!(
-            "#!/bin/sh\ncase \"$*\" in\n  *\"backlog ready\"*) echo '[]';;\n  *\"inbox outstanding\"*) echo '{outstanding}';;\n  *) echo '{{}}';;\nesac\n"
+            "#!/bin/sh\ncase \"$*\" in\n  *\"backlog undispatched\"*) {undispatched};;\n  *\"backlog ready\"*) echo '[]';;\n  *\"inbox outstanding\"*) echo '{outstanding}';;\n  *) echo '{{}}';;\nesac\n"
         ),
     )
     .unwrap();

@@ -65,8 +65,6 @@ A	harness_capabilities.toml	py=cli/src/fno/agents/harness_map.py|scripts/diagnos
 A	cli/src/fno/agents/harness_capabilities.toml	py=cli/src/fno/agents/harness_probe.py;rs=crates/fno-agents/build.rs	# data: the copy's path is the probe's freshness diff spec and build.rs's write target
 A	crates/fno/src/harness_capabilities.toml	py=cli/src/fno/agents/harness_probe.py;rs=crates/fno-agents/build.rs	# data: the copy's path is the probe's freshness diff spec and build.rs's write target
 A	holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claims.rs	# msg-twin
-A	claims unreadable: claim key is not a string	py=cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/king_board/classify.rs	# msg-twin: the ported undispatched reader rejects a malformed claim row in the same words
-A	graph unreadable: entry id is not a string	py=cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/king_board/classify.rs	# msg-twin: the ported undispatched reader rejects a malformed graph row in the same words
 A	fno backlog undispatched --json	py=cli/src/fno/backlog/advance.py|cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/king_board.rs	# protocol: the argv the Rust board runs must stay the same verb Python composes and parses
 A	claim pid must be positive	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers must reject non-positive anchors identically
 A	codex_companion_session_id	py=cli/src/fno/harness_identity.py;rs=crates/fno-agents/src/claims.rs	# protocol: the shared Python/Rust ambient scrub inventory must remove this Codex marker on every spawn path

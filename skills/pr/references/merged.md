@@ -99,7 +99,7 @@ fno backlog find 'deferred from PR #<n>'
 For each open node, offer a one-touch decision (in autonomous mode: log each as
 `undecided` and continue - no regression over today):
 
-- **promote** -> `fno backlog rank <id> --top`
+- **promote** -> `fno backlog update <id> --priority p1` (rank is the operator's pin and refuses this session)
 - **keep** as filed -> no-op
 - **defer** explicitly -> `fno backlog defer <id>`
 - **supersede** -> `fno backlog supersede <other-id> --replaces <id> --cause "..." --surface <path>`, or

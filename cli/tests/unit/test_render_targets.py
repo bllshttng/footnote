@@ -222,10 +222,10 @@ def test_state_file_collision_skips_target(_isolate, tmp_path, monkeypatch, caps
     assert "collides with graph state file" in err and "graph.md" in err
     # The state file keeps its markdown render; public HTML never landed in it.
     assert "public items" not in md.read_text(encoding="utf-8")
-    # The rest of the family: lock, sidecar, backup, archive, ledger.
+    # The rest of the family: lock, backup, archive, ledger. The `.sha256`
+    # sidecar is retired, so the guard does not name it and neither does this.
     for state_path in (
         str(gc.GRAPH_JSON) + ".lock",
-        str(gc.GRAPH_JSON) + ".sha256",
         str(gc.GRAPH_JSON) + ".bak",
         gc.GRAPH_ARCHIVE_JSON,
         gc.LEDGER_JSON,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Optional
 
 import typer
@@ -27,35 +26,60 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
                 raise ValueError("active-backlog target has no readable mission")
             missions.append(mission)
         missions = sorted(set(missions))
-        reachable = {
-            child_id
-            for mission in missions
-            for child_id in descendants_of(entries, mission)
-        }
-        if task_id in reachable:
+        if any(task_id in descendants_of(entries, m) for m in missions):
             return None
-        # The remedy, not just the diagnosis (x-7f1f): the note names the one
-        # command that makes a dispatcher take the node - activating its epic.
-        # With no epic parent it says so, so the note never prints a command
-        # that cannot work.
+        # The remedy, not just the diagnosis: name the one command that makes a
+        # dispatcher take the node. With no epic parent it says so, so the note
+        # never prints a command that cannot work.
         me = next((e for e in entries if e.get("id") == task_id), None)
         parent = (me or {}).get("parent")
         if parent:
             remedy = f"; Activate its epic: fno backlog advance --epic {parent}"
         else:
-            remedy = (
-                "; no epic to activate (missions are activated per epic with "
-                "fno backlog advance --epic <epic-id>)"
-            )
-        if missions:
-            return (
-                "no live dispatcher will take it "
-                f"(outside active mission scopes: {', '.join(missions)})"
-                + remedy
-            )
-        return "no live dispatcher will take it (no resolved active missions)" + remedy
+            remedy = ("; no epic to activate (missions are activated per epic "
+                      "with fno backlog advance --epic <epic-id>)")
+        scope = (
+            f"outside active mission scopes: {', '.join(missions)}"
+            if missions else "no resolved active missions"
+        )
+        return f"no live dispatcher will take it ({scope}){remedy}"
     except Exception as exc:  # noqa: BLE001 - rank already committed; qualify unknowns
         return f"dispatcher scope unavailable ({exc})"
+
+
+def agent_harness_writing_rank(env=None) -> str | None:
+    """The harness name when an agent runs this, ``None`` in an operator shell.
+
+    Two provers, either enough. Ancestry catches a session fno never spawned;
+    the stamp catches a codex thread worker, which owns no process to walk. A
+    half stamp reads as an agent, and an unreadable ancestry fails CLOSED: the
+    stamp cannot see what the prover was added for, so falling through to it
+    would open the fence exactly when the stronger check broke.
+    """
+    from fno.harness_identity import parse_canonical_identity
+
+    try:
+        from fno.claims.self_identity import resolve_self_identity
+
+        if (owned := resolve_self_identity(env).harness):
+            return owned
+    except Exception as exc:  # noqa: BLE001 - fail closed, and name why
+        typer.echo(f"note: harness ancestry unreadable ({exc}); refusing", err=True)
+        return "unprovable"
+    identity = parse_canonical_identity(env)
+    return None if identity.disposition == "absent" else (identity.harness or "agent")
+
+
+def _agent_rank_refusal(task_id: str, harness: str) -> str:
+    return (
+        f"Error: rank is operator-only; this {harness} session may not write it.\n"
+        "Every --top writes min(rank) - 1, so agent pins form a stack in which "
+        "the last writer wins and importance is never computed.\nVote instead:\n"
+        f"  fno backlog encounter {task_id} --evidence \"what it cost you\"\n"
+        f"  fno backlog update {task_id} --priority p1|p2|p3\n"
+        "The graph records no writer for a rank, so nothing downstream could "
+        "tell yours from the operator's. The escape hatch in --help is theirs."
+    )
 
 
 def cmd_rank(
@@ -78,20 +102,24 @@ def cmd_rank(
         "--within-epic",
         help="Rank within the node's live epic (child default; refused without one)",
     ),
+    operator: bool = typer.Option(False, "--operator", help="The operator's own pin, from inside an agent session"),
 ) -> None:
     """Curate a node's position within its (column, project) board lane.
+
+    Operator-only: a pin every agent can write is a stack. ``--operator`` is
+    the escape hatch from inside an agent shell.
 
     Rank is a nullable float ordered ahead of the shared epic-aware work-order
     suffix within a lane; it never changes a node's column. ``--before`` /
     ``--after`` require a *ranked* anchor in the same lane - seed one with
     ``--top`` first. Float midpoints mean inserts never renumber siblings.
-    A node with a live epic parent ranks WITHIN that epic (peers and anchor
-    are its live-epic siblings, whole graph): the child's rank orders it only
-    among its siblings and never moves its epic group. ``--within-epic``
-    spells that scope out loud and is refused for a node with no live epic
-    parent. Loose nodes and epic containers keep the lane scope.
+    A node with a live epic parent ranks WITHIN that epic (peers and anchor are
+    its live-epic siblings, whole graph): the child's rank orders it only among
+    its siblings and never moves its epic group. ``--within-epic`` spells that
+    scope out loud and is refused without a live epic parent. Loose nodes and
+    epic containers keep the lane scope.
     """
-    from fno.graph._constants import has_node_id_prefix
+    from fno.graph._constants import has_node_id_prefix, _rank_band
     from fno.graph._intake import _find_node, _live_epic_for, _epics_with_child_progress
     from fno.graph.render import _project_key, make_kanban_column
     from fno.graph.store import locked_mutate_graph
@@ -102,6 +130,12 @@ def cmd_rank(
             f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
         )
         raise typer.Exit(code=1)
+
+    if not operator:
+        harness = agent_harness_writing_rank()
+        if harness is not None:
+            typer.echo(_agent_rank_refusal(task_id, harness), err=True)
+            raise typer.Exit(code=1)
 
     chosen = [
         name
@@ -131,17 +165,9 @@ def cmd_rank(
     result: dict = {}
 
     def _is_ranked(e: dict) -> bool:
-        # Match render._rank_band: a non-finite OR huge-int rank (from a
-        # hand-edited graph.json) is treated as unranked, so a poisoned peer
-        # can't corrupt the --top/--bottom/midpoint arithmetic or persist a
-        # NaN/inf rank. float() guards the OverflowError a giant int raises.
-        r = e.get("rank")
-        if isinstance(r, bool) or not isinstance(r, (int, float)):
-            return False
-        try:
-            return math.isfinite(float(r))
-        except (OverflowError, ValueError):
-            return False
+        # The board's own definition, not a second copy of it: a poisoned peer
+        # degrades to unranked there, so it cannot corrupt the arithmetic here.
+        return _rank_band(e)[0] == 0
 
     def mutator(entries):
         try:
@@ -203,12 +229,14 @@ def cmd_rank(
             # The child's rank orders only within its epic group, so peers
             # and anchors come from that set, not the board lane.
             scope_label = f"epic {epic_id}"
+            scope_kind = "epic"
             peers = [
                 e for e in entries
                 if isinstance(e, dict) and e.get("id") != tid and _epic_of(e) == epic_id
             ]
         else:
-            scope_label = _lane_label(node)
+            scope_label = f"lane {_lane_label(node)}"
+            scope_kind = "lane"
             target_lane = _lane(node)
             peers = [
                 e for e in entries
@@ -271,7 +299,9 @@ def cmd_rank(
                 action = f"--after {anchor_id}"
 
         node["rank"] = new_rank
-        result.update(action=action, rank=new_rank, lane=scope_label, id=tid)
+        result.update(
+            action=action, rank=new_rank, lane=scope_label, scope_kind=scope_kind, id=tid
+        )
         return entries
 
     graph_path = _graph_path()
@@ -283,8 +313,16 @@ def cmd_rank(
     else:
         note = _dispatch_note(result["id"], graph_path)
         suffix = f"; {note}" if note else ""
+        # A bare "Ranked --top" read as "runs next across the project" and
+        # meant "top of its own epic". Name what the pin is top OF.
+        scope_note = (
+            "orders it among that epic's children only, and the epic's own "
+            "rank decides where the group runs"
+            if result.get("scope_kind") == "epic"
+            else "orders it within that board lane only"
+        )
         typer.echo(
-            f"Ranked {result['id']} {result['action']} (rank={result['rank']}) in "
-            f"{result['lane']}{suffix}"
+            f"Ranked {result['id']} {result['action']} of {result['lane']} "
+            f"(rank={result['rank']}); {scope_note}{suffix}"
         )
     _project_plans_from_graph([result["id"]])
