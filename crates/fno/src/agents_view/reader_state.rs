@@ -16,12 +16,12 @@ pub struct ReaderState {
     reg_stamp: Option<(std::time::SystemTime, u64)>,
     roster_raw: Option<String>,
     roster_stamp: Option<(std::time::SystemTime, u64)>,
-    /// (x-688b) The registry file is CONFIRMED absent (vanished, or no agents
-    /// system at all) - distinct from a stamp that never advanced because a
-    /// present file's read keeps failing. Feeds `read_ok`.
-    reg_absent: bool,
-    /// (x-688b) The same confirmed-absence fact for the roster file.
-    roster_absent: bool,
+    /// (x-688b) The registry leg resolved for the death rule: parsed bytes,
+    /// real last-good rows, or a confirmed absence. A present-but-garbage
+    /// document with nothing last-good reads false.
+    reg_ok: bool,
+    /// (x-688b) The same resolved fact for the roster leg.
+    roster_ok: bool,
     /// Last successfully-derived rows per source, so a torn concurrent write
     /// keeps that source's last-good instead of blanking it (the merged
     /// `last_sent` alone can't distinguish which source went stale).
@@ -33,6 +33,9 @@ pub struct ReaderState {
     /// blanking the default roster or the other accounts (AC1-FR per source).
     isolated: std::collections::HashMap<String, IsolatedRoster>,
     last_sent: Option<Vec<RegistryAgent>>,
+    /// (x-688b) The read_ok published with `last_sent`, so a readability flip
+    /// with unchanged rows still republishes.
+    last_sent_ok: bool,
 }
 
 /// (x-c914) One isolated account's roster cache: the mtime stamp gate plus the
@@ -72,15 +75,13 @@ impl ReaderState {
         self.isolated.get(account).and_then(|c| c.stamp)
     }
 
-    /// (x-688b) Both primary stores resolved: parsed-or-last-good bytes, or a
-    /// CONFIRMED absence. A present-but-unreadable file leaves its stamp
-    /// unadvanced with no cached bytes and reads false - the daemon-side
-    /// registry-absence death rule must stay inert in exactly that state.
-    /// A file whose stat itself fails reads absent (the same exotic
-    /// stat-perm surface the CLI's `exists()` probe has).
+    /// (x-688b) Both primary stores resolved: PARSED bytes, real last-good
+    /// rows, or a confirmed absence. A present-but-garbage document with no
+    /// last-good reads false, and so does a present file whose read keeps
+    /// failing (its stamp never advances) - the daemon-side registry-absence
+    /// death rule must stay inert in exactly those states.
     pub fn read_ok(&self) -> bool {
-        (self.reg_raw.is_some() || self.reg_absent)
-            && (self.roster_raw.is_some() || self.roster_absent)
+        self.reg_ok && self.roster_ok
     }
 
     /// One tick: fold fresh stats/reads of BOTH files (taken OFF the core loop
@@ -106,10 +107,8 @@ impl ReaderState {
         // (stamp != cached) re-attempts the SAME stamp instead of freezing the
         // last-good rows until an unrelated later write happens to move mtime.
         // (x-688b) A no-file-on-either-side agreement is a confirmed absence
-        // too (the startup-before-first-write state never enters the arms).
-        if reg_stamp.is_none() && self.reg_stamp.is_none() {
-            self.reg_absent = true;
-        }
+        // too (the startup-before-first-write state never enters the arms);
+        // the derivation below folds absence into `reg_ok`/`roster_ok`.
         if reg_stamp != self.reg_stamp {
             match (reg_read(), reg_stamp) {
                 (Some(raw), _) => {
@@ -119,13 +118,9 @@ impl ReaderState {
                 (None, None) => {
                     self.reg_raw = None; // vanished
                     self.reg_stamp = None;
-                    self.reg_absent = true;
                 }
                 (None, Some(_)) => {} // raced/failed read: keep last-good AND retry next tick
             }
-        }
-        if roster_stamp.is_none() && self.roster_stamp.is_none() {
-            self.roster_absent = true;
         }
         if roster_stamp != self.roster_stamp {
             match (roster_read(), roster_stamp) {
@@ -136,18 +131,32 @@ impl ReaderState {
                 (None, None) => {
                     self.roster_raw = None;
                     self.roster_stamp = None;
-                    self.roster_absent = true;
                 }
                 (None, Some(_)) => {}
             }
         }
 
-        let mut reg_rows = match &self.reg_raw {
-            Some(raw) => derive_rows(raw, now_secs)
-                .or_else(|| self.last_good_reg.clone())
-                .unwrap_or_default(),
-            None => Vec::new(),
+        // (x-688b) Completeness is PARSE success, not byte presence: a
+        // present-but-garbage registry with no last-good rows reads NOT ok,
+        // and so does a file whose read keeps failing (cached bytes absent
+        // while this tick still SAW the file). Last-good rows carry the ok
+        // forward across a torn write (the same fail-safe the row cache
+        // itself uses).
+        let reg_derived = self
+            .reg_raw
+            .as_deref()
+            .and_then(|raw| derive_rows(raw, now_secs));
+        self.reg_ok = match (&self.reg_raw, &reg_derived) {
+            (None, _) => reg_stamp.is_none(), // nothing cached AND nothing there
+            (Some(_), Some(_)) => true,
+            (Some(_), None) => self
+                .last_good_reg
+                .as_ref()
+                .is_some_and(|good| !good.is_empty()),
         };
+        let mut reg_rows = reg_derived
+            .or_else(|| self.last_good_reg.clone())
+            .unwrap_or_default();
         // fno-truth junior badge (x-4a48): fill the no-badge/Idle gap for a
         // bg /target worker between turns from its claim + loop_check recency.
         if let Some(raw) = &self.reg_raw {
@@ -155,12 +164,18 @@ impl ReaderState {
         }
         self.last_good_reg = Some(reg_rows.clone());
 
-        let roster = match &self.roster_raw {
-            Some(raw) => parse_roster(raw)
-                .or_else(|| self.last_good_roster.clone())
-                .unwrap_or_default(),
-            None => Vec::new(),
+        let roster_parsed = self.roster_raw.as_deref().and_then(parse_roster);
+        self.roster_ok = match (&self.roster_raw, &roster_parsed) {
+            (None, _) => roster_stamp.is_none(),
+            (Some(_), Some(_)) => true,
+            (Some(_), None) => self
+                .last_good_roster
+                .as_ref()
+                .is_some_and(|good| !good.is_empty()),
         };
+        let roster = roster_parsed
+            .or_else(|| self.last_good_roster.clone())
+            .unwrap_or_default();
         self.last_good_roster = Some(roster.clone());
 
         // (x-c914) Fold each isolated account's roster into the union, tagging
@@ -199,11 +214,82 @@ impl ReaderState {
         }
 
         let rows = merge_rows(reg_rows, &all);
-        if self.last_sent.as_ref() != Some(&rows) {
+        // (x-688b) Publish when the READ STATE moves too, not only the rows:
+        // a readability flip with unchanged last-good rows must still reach
+        // the core, or `agents_read_ok` goes stale over a file nobody
+        // re-mentions.
+        if self.last_sent.as_ref() != Some(&rows) || self.last_sent_ok != self.read_ok() {
             self.last_sent = Some(rows.clone());
+            self.last_sent_ok = self.read_ok();
             Some(rows)
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stamp(n: u64) -> Option<(std::time::SystemTime, u64)> {
+        Some((std::time::UNIX_EPOCH, n))
+    }
+
+    /// (x-688b, codex P1) A present-but-garbage registry with no last-good
+    /// rows is NOT a successful read: the absence death rule must stay inert
+    /// over a document that was never derived.
+    #[test]
+    fn a_garbage_registry_with_no_last_good_reads_not_ok() {
+        let mut state = ReaderState::default();
+        state.tick(
+            stamp(1),
+            || Some("not json at all".into()),
+            None,
+            || None,
+            Vec::new(),
+            1_000,
+        );
+        assert!(!state.read_ok(), "garbage bytes with nothing derived");
+        // The same bytes stay not-ok on the next tick.
+        state.tick(stamp(1), || None, None, || None, Vec::new(), 1_000);
+        assert!(!state.read_ok());
+    }
+
+    /// (x-688b, codex P1) A readability flip with unchanged rows must still
+    /// publish: garbage-from-startup (not ok) turning into a valid empty
+    /// registry (ok) keeps the row set identical, and the core would never
+    /// learn the read succeeded.
+    #[test]
+    fn a_read_state_flip_republishes_even_with_unchanged_rows() {
+        let mut state = ReaderState::default();
+        let first = state.tick(
+            stamp(1),
+            || Some("garbage".into()),
+            None,
+            || None,
+            Vec::new(),
+            1_000,
+        );
+        assert!(first.is_some(), "the first tick always publishes");
+        assert!(!state.read_ok());
+        let unchanged = state.tick(stamp(1), || None, None, || None, Vec::new(), 1_000);
+        assert!(
+            unchanged.is_none(),
+            "same bytes, same ok: nothing to publish"
+        );
+        let flipped = state.tick(
+            stamp(2),
+            || Some(r#"{"agents":[]}"#.into()),
+            None,
+            || None,
+            Vec::new(),
+            1_000,
+        );
+        assert!(
+            flipped.is_some(),
+            "rows are still empty but the read state moved"
+        );
+        assert!(state.read_ok(), "a valid empty registry reads ok");
     }
 }

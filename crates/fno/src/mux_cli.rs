@@ -2128,7 +2128,11 @@ fn squad_prune(args: &[OsString]) -> i32 {
     let (tabs, live_cwds, answered_names, unreachable) = live_tabs();
     let answered = answered_names.len();
     let scope = sweep_scope(answered, &unreachable);
-    let tab_outcome = if scope.fold_tabs && !dead_only {
+    // (x-688b) `--dead-only` ALONE skips the tab fold (store-only scope), but
+    // the combined `--tabs-only --dead-only` scope runs BOTH halves - the
+    // sweep modal's "both" queues exactly that pair, and gating tabs on bare
+    // `!dead_only` made it close zero tabs while reporting both.
+    let tab_outcome = if scope.fold_tabs && (!dead_only || tabs_only) {
         prune_live_tabs(&tabs, include_named, dry_run, include_used_shells)
     } else {
         TabPruneOutcome {
