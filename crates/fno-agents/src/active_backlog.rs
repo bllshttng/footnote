@@ -1348,8 +1348,8 @@ impl ConvergeGate {
 /// Shell `fno config active-backlog --json` to discover enabled drain targets.
 /// Best-effort: any failure (missing fno, non-zero exit, unparseable output)
 /// yields an empty list, so the feature simply stays dormant.
-pub fn resolve_targets(fno_bin: &str) -> Vec<ResolvedTarget> {
-    resolve_targets_report(fno_bin).0
+pub fn resolve_targets(config_cwd: &Path, registry_path: &Path) -> Vec<ResolvedTarget> {
+    resolve_targets_report(config_cwd, registry_path).0
 }
 
 /// The drain-target receipt, computed natively from the territory fact set
@@ -1418,33 +1418,23 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
 /// tick row: an empty target list from a broken resolver (`env_broken`, the
 /// missing-click class) is a different arm state from an empty list because
 /// nothing is enabled (`no_missions`).
-pub fn resolve_targets_report(fno_bin: &str) -> (Vec<ResolvedTarget>, Option<String>) {
-    match fno_cmd(fno_bin)
-        .args(["config", "active-backlog", "--json"])
-        .output()
-    {
-        Ok(o) if o.status.success() => match serde_json::from_slice(&o.stdout) {
+pub fn resolve_targets_report(config_cwd: &Path, registry_path: &Path) -> (Vec<ResolvedTarget>, Option<String>) {
+    // The crossing is gone: the receipt is computed natively from the
+    // territory fact set in this crate (seam-crossings-baseline lost the
+    // active-backlog line in the same change).
+    match native_receipt(config_cwd, registry_path) {
+        Ok(targets) => match targets
+            .into_iter()
+            .map(|t| serde_json::from_value::<ResolvedTarget>(t))
+            .collect::<Result<Vec<_>, _>>()
+        {
             Ok(targets) => (targets, None),
             Err(e) => (
                 Vec::new(),
-                Some(format!("active-backlog receipt unparseable: {e}")),
+                Some(format!("active-backlog receipt unrepresentable: {e}")),
             ),
         },
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            (
-                Vec::new(),
-                Some(format!(
-                    "active-backlog resolve exited {}: {}",
-                    o.status,
-                    stderr.chars().take(120).collect::<String>()
-                )),
-            )
-        }
-        Err(e) => (
-            Vec::new(),
-            Some(format!("active-backlog resolve failed: {e}")),
-        ),
+        Err(reason) => (Vec::new(), Some(reason.chars().take(200).collect::<String>())),
     }
 }
 
@@ -1664,7 +1654,10 @@ pub async fn run_supervisor(
         tasks.retain(|_, h| !h.is_finished());
         fanout_tasks.retain(|_, h| !h.is_finished());
 
-        let (targets, resolve_failure) = resolve_targets_report(&fno_bin);
+        let (targets, resolve_failure) = resolve_targets_report(
+            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            &crate::paths::AgentsHome::from_env().registry_json(),
+        );
         // Re-sync the cap every recheck so `fno config set` lands without a
         // daemon restart. With no targets there is nothing to gate.
         if let Some(cap) = targets.iter().map(|t| t.max_concurrent).max() {
@@ -1803,7 +1796,10 @@ async fn mission_drain_loop(
         // supervisor will not respawn it). The position in this list (already
         // scope-ordered) names the rotation in the tick's detail row; a lone
         // territory prints no `(1 of 1)` - that reads as a fault, not a count.
-        let all = resolve_targets(&fno_bin);
+        let all = resolve_targets(
+            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            &crate::paths::AgentsHome::from_env().registry_json(),
+        );
         let Some(pos) = all.iter().position(|t| territory_key(t) == key) else {
             break;
         };
@@ -3341,24 +3337,18 @@ mod tests {
         p.display().to_string()
     }
 
-    /// A stub `fno` for the converge-cap tests: it answers `config
-    /// active-backlog --json` with `targets_json`, and every `backlog advance
-    /// --epic` writes `S`, holds the slot for 300ms, writes `E`, then prints a
-    /// benign receipt. The S/E log is the positive marker: overlap in it is
-    /// concurrent converge runs measured directly, never a config read.
-    fn stub_fno_converge(
-        dir: &std::path::Path,
-        log: &std::path::Path,
-        targets_json: &str,
-    ) -> String {
+    /// A stub `fno` for the converge-cap tests: every `backlog advance`
+    /// (epic or loose) writes `S`, holds the slot for 300ms, writes `E`, then
+    /// prints a benign receipt. The S/E log is the positive marker: overlap in
+    /// it is concurrent converge runs measured directly, never a config read.
+    /// The receipt itself is native now, so the fixture files carry it.
+    fn stub_fno_converge(dir: &std::path::Path, log: &std::path::Path) -> String {
         std::fs::create_dir_all(dir).unwrap();
         let p = dir.join("fno");
         std::fs::write(
             &p,
             format!(
                 "#!/usr/bin/env bash\n\
-                 if [[ \"$1\" == config && \"$2\" == active-backlog ]]; then \
-                 cat <<'JSON'\n{targets_json}\nJSON\nexit 0; fi\n\
                  if [[ \"$1\" == backlog && \"$2\" == advance ]]; then \
                  echo S >> \"{log}\"\nsleep 0.3\necho E >> \"{log}\"\n\
                  printf '%s' '{{\"epic_id\":\"x-e\",\"deactivated\":false,\"all_done\":false,\"children\":[]}}'\nexit 0; fi\n\
@@ -3508,14 +3498,6 @@ mod tests {
         assert!(status.ideas.is_empty());
     }
 
-    /// One drain target line for the stub's `config active-backlog` receipt.
-    fn converge_target(index: usize, cwd: &std::path::Path, cap: u32) -> String {
-        format!(
-            r#"{{"project":"p{index}","cwd":"{cwd}","interval_seconds":1,"failure_limit":3,"mission":"x-m{index}","max_concurrent":{cap}}}"#,
-            cwd = cwd.display()
-        )
-    }
-
     /// The greatest number of converge runs that overlapped, replayed from the
     /// stub's S/E log, plus how many ran at all. A cap enforced as a permanent
     /// block would show a low overlap AND a low run count, so both are read.
@@ -3547,17 +3529,46 @@ mod tests {
         run_ms: u64,
     ) -> String {
         std::env::set_var("HOME", tmp);
+        std::env::set_var("FNO_HOME", tmp);
+        std::env::set_var("FNO_AGENTS_HOME", tmp.join("agents-home"));
+        std::env::set_var("FNO_CONFIG", tmp.join("config.toml"));
         let log = tmp.join("converges.log");
-        let targets: Vec<String> = (0..missions)
-            .map(|i| converge_target(i, tmp, cap))
-            .collect();
-        let fno = stub_fno_converge(&tmp.join("bin"), &log, &format!("[{}]", targets.join(",")));
+        // The receipt is native: N workspace projects with no crowns resolve
+        // to N kingless rung-1 territories rooted at the fixture dir.
+        let mut projects = String::new();
+        for i in 0..missions {
+            projects.push_str(&format!(
+                "[[work.workspaces.main.projects]]\nname = \"p{i}\"\npath = \"{}\"\n",
+                tmp.display()
+            ));
+        }
+        std::fs::write(
+            tmp.join("config.toml"),
+            format!(
+                "[active_backlog]\nenabled = true\ninterval = \"1s\"\nfailure_limit = 3\nmax_concurrent = {cap}\n[work.workspaces.main]\n{projects}"
+            ),
+        )
+        .unwrap();
+        std::fs::write(tmp.join("graph.json"), "{\"entries\": []}").unwrap();
+        let registry = crate::paths::AgentsHome::from_env().registry_json();
+        if let Some(parent) = registry.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            &registry,
+            format!(
+                "{{\"schema_version\": {}, \"agents\": []}}",
+                crate::state::REGISTRY_SCHEMA_VERSION
+            ),
+        )
+        .unwrap();
+        let fno = stub_fno_converge(&tmp.join("bin"), &log);
 
-        let resolved = resolve_targets(&fno);
+        let resolved = resolve_targets(&std::env::current_dir().unwrap(), &registry);
         assert_eq!(
             resolved.len(),
             missions,
-            "the stub must resolve every mission"
+            "the fixture must resolve every mission"
         );
         let gate = Arc::new(ConvergeGate::new(cap));
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -3637,7 +3648,7 @@ mod tests {
             queued[0]
         );
         assert!(
-            queued[0].contains("mission=x-m"),
+            queued[0].contains("mission=p"),
             "the row must name the mission: {}",
             queued[0]
         );

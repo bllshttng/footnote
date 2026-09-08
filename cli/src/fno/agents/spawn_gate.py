@@ -246,15 +246,6 @@ class LiveCensus:
     crowned_sessions: set[str] = field(default_factory=set)
     #: Worker rows per ``spawned_by_session``; None = the LD4 bucket.
     worker_rows: dict[Optional[str], list[str]] = field(default_factory=dict)
-    #: The backlog node each live fno row WORKS (x-e221), positionally aligned
-    #: with the rows counted in ``fno_slot_workers``. ``None`` for machinery
-    #: rows (kings, blueprinters, ad-hoc panes): they consume the machine cap
-    #: but never the per-territory team cap.
-    live_row_nodes: list[Optional[str]] = field(default_factory=list)
-    #: Names of the live fno registry rows (x-e221): the same liveness oracles
-    #: the slot count rides, exposed so the blueprinter feed can answer "is my
-    #: territory's standing worker alive" without a second implementation.
-    live_registry_names: set[str] = field(default_factory=set)
 
     @property
     def count(self) -> int:
@@ -417,6 +408,9 @@ def census() -> LiveCensus:
             claim_alive = True
         else:
             claim_alive = False
+        # The row's own name dedups its slot claim below (a revived row does
+        # not pay twice for the claim that spawned it).
+        live_registry_names.add(row.name)
         # A live fno row is fno work: it holds a slot regardless of the display
         # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
@@ -424,8 +418,6 @@ def census() -> LiveCensus:
         # x-5283: a crowned row divides the cap and pays no per-king tax.
         if row.crown_level is None:
             out.worker_rows.setdefault(row.spawned_by_session, []).append(row.name)
-        out.live_row_nodes.append(getattr(row, "node", None))
-        live_registry_names.add(row.name)
         dedup_key = row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
             # Already shown as its roster row in the display union. That roster
@@ -497,7 +489,6 @@ def census() -> LiveCensus:
         )
 
     out.slot_claims = _live_worker_slot_claims(out.warnings, live_registry_names)
-    out.live_registry_names = live_registry_names
 
     # The divisor reads crowns through the court's own primitive (LD1/AC3).
     if out.registry_readable:
@@ -1570,104 +1561,68 @@ def _check_king_share(
         )
 
 
-def _territory_of_node(node: str) -> "tuple[str, frozenset[str]] | None":
-    """The (territory key, member node ids) a spawning node belongs to.
+def _territory_verdict(node: str) -> dict:
+    """The per-territory cap verdict for `node`, asked from the Rust gate.
 
-    Membership is EXCLUSIVE and most-specific-first: a node under a live crown
-    scope counts for that crown's territory; an uncrowned node counts for its
-    project's loose territory (project nodes minus every crowned set), so one
-    worker never consumes two territories' caps. Returns None when the answer
-    cannot be READ (unreadable graph, node absent) - the caller refuses; None
-    here is "unknown", never "no cap".
+    One counting leg (crates/fno-agents territory fact set): Python passes the
+    node through the binary door and recomputes nothing. The JSON receipt
+    carries verdict ok | territory_cap | territory_unknown with its counts; a
+    binary or payload fault reads as territory_unknown, never as headroom.
     """
+    import json as _json
+    import subprocess as _sp
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        return {"verdict": "territory_unknown", "reason": "territory_unknown", "node": node}
     try:
-        from fno.active_backlog import _live_crowns
-        from fno.graph.store import read_graph
-        from fno.king.scope import compile_scope_ids
-        from fno.paths import graph_json
-
-        entries = read_graph(graph_json())
-        by_id = {
-            str(row.get("id")): row
-            for row in entries
-            if isinstance(row, dict) and row.get("id")
-        }
-        if node not in by_id:
-            return None
-        crowned: frozenset[str] = frozenset()
-        for crown in sorted(_live_crowns(), key=lambda c: c["scope"]):
-            scope = crown["scope"]
-            try:
-                ids = frozenset(compile_scope_ids(scope, entries))
-            except (ValueError, KeyError, TypeError):
-                # An uncompilable live crown leaves its territory unreadable:
-                # a node that would fall under it has no decidable cap.
-                return None
-            if node in ids:
-                return scope, ids
-            crowned |= ids
-        project = str(by_id[node].get("project") or "")
-        if not project:
-            return None
-        loose = frozenset(
-            rid
-            for rid, row in by_id.items()
-            if (row.get("project") or "") == project and rid not in crowned
+        proc = _sp.run(
+            [str(binary), "territory-verdict", "--node", node],
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
-        return f"loose:{project}", loose
-    except Exception:  # noqa: BLE001 - an unreadable source is unknown, not uncapped
-        return None
+    except OSError as exc:
+        return {"verdict": "territory_unknown", "reason": str(exc)[:200], "node": node}
+    try:
+        receipt = _json.loads(proc.stdout)
+        if isinstance(receipt, dict) and receipt.get("verdict"):
+            return receipt
+    except ValueError:
+        pass
+    detail = (proc.stderr or "").strip()[:200]
+    return {"verdict": "territory_unknown", "reason": detail or "unreadable verdict", "node": node}
 
 
-def _check_territory_cap(
-    node: Optional[str], census_obj: "LiveCensus", cap: int
-) -> None:
-    """Refuse (never queue) when the node's territory is at its team cap (x-e221).
+def _check_territory_cap(node: Optional[str]) -> None:
+    """Refuse (never queue) when the node's territory is at its team cap.
 
-    Counts the live rows whose WORKED NODE is contained in the spawning node's
-    territory; machinery rows (kings, blueprinters, panes with no node) never
-    count. A spawn that works no node skips the check entirely - it is out of
-    the team cap's scope, not an unknown. Unknown attribution (unreadable
-    graph, absent node) refuses closed with a positive receipt: it must never
-    silently disappear from the count. Waiting cannot help - the team is full
-    where the caller is standing - so this refuses like the provider cap.
+    The cap stays enforced under --force: force speaks for the MACHINE being
+    busy, never for one territory overrunning its team. Waiting cannot help -
+    the team is full where the caller is standing - so this refuses like the
+    provider cap.
     """
     if not node:
         return
-    state = _territory_of_node(node)
-    if state is None:
+    receipt = _territory_verdict(node)
+    verdict = receipt.get("verdict")
+    if verdict == "ok":
+        return
+    cap = receipt.get("max_live_per_territory", "?")
+    if verdict == "territory_cap":
+        _warn(
+            f"spawn-gate: territory {receipt.get('territory')} holds "
+            f"{receipt.get('current_count')} live workers >= max_live_per_territory "
+            f"{cap}; refusing -- other territories are not affected"
+        )
+    else:
         _warn(
             f"spawn-gate: territory attribution for node {node} is unreadable; "
             "refusing (the per-territory cap never counts an unknown as headroom)"
         )
-        _refuse(
-            EXIT_TERRITORY_CAP,
-            {
-                "status": "refused",
-                "reason": "territory_unknown",
-                "node": node,
-                "max_live_per_territory": cap,
-            },
-        )
-    scope, members = state
-    live = sum(1 for n in census_obj.live_row_nodes if n is not None and n in members)
-    if live >= cap:
-        _warn(
-            f"spawn-gate: territory {scope} holds {live} live workers >= "
-            f"max_live_per_territory {cap}; refusing -- other territories are "
-            "not affected"
-        )
-        _refuse(
-            EXIT_TERRITORY_CAP,
-            {
-                "status": "refused",
-                "reason": "territory_cap",
-                "territory": scope,
-                "count": live,
-                "current_count": live,
-                "max_live_per_territory": cap,
-            },
-        )
+    _refuse(EXIT_TERRITORY_CAP, receipt)
 
 
 def _acquire_worker_slot(
@@ -1752,17 +1707,12 @@ def run_gate(
         # into a cap bug three test modules away from it.
         max_fleet_cpu_share = float(getattr(agents_cfg, "max_fleet_cpu_share", 0.5))
         hard_max_load_per_cpu = float(getattr(agents_cfg, "hard_max_load_per_cpu", 40.0))
-        # getattr, not a strict read: a safe default (4) exists, so a settings
-        # object built before the field existed must not discard the caller's
-        # max_live the way the strict provider-limit read once did.
-        territory_cap = int(getattr(agents_cfg, "max_live_per_territory", 4))
         # A real attribute read, not a getattr fallback: a missing field must
         # fail loudly here rather than silently uncapping every provider.
         limits = dict(agents_cfg.provider_limits)
     except Exception:
         cap, floor_gb, max_load_per_cpu = 3, 4.0, 8.0
         max_fleet_cpu_share, hard_max_load_per_cpu = 0.5, 40.0
-        territory_cap = 4
         # The same budget the built-in table carries, coerced through the same
         # model so this fail-safe path cannot disagree with the configured one
         # about zai's caps.
@@ -1814,10 +1764,7 @@ def run_gate(
         # (x-e221): force speaks for the MACHINE being busy, never for one
         # territory overrunning its team.
         if node:
-            c = census()
-            for w in c.warnings:
-                _warn(w)
-            _check_territory_cap(node, c, territory_cap)
+            _check_territory_cap(node)
         _warn("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)")
         if substrate == "headless":
             _acquire_worker_slot(guard, name, holder, route_provider)
@@ -1957,7 +1904,7 @@ def run_gate(
                     guard.release()
                     raise
                 try:
-                    _check_territory_cap(node, c, territory_cap)
+                    _check_territory_cap(node)
                 except GateRefused:
                     guard.release()
                     raise

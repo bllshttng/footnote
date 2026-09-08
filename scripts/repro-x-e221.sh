@@ -41,6 +41,9 @@ py() {
 
 # --- fixture: settings (the one candidate FNO_CONFIG names) -----------------
 mkdir -p "$FNO_HOME_DIR"
+# Python readers parse YAML by suffix and honor FNO_GLOBAL_SETTINGS_PATH; the
+# binary readers parse TOML and honor FNO_CONFIG as the sole candidate. The
+# fixture feeds each leg the file it can actually read.
 cat > "$FIXTURE/.fno/settings.yaml" <<EOF
 config:
   state_dir: "$FNO_HOME_DIR"
@@ -52,11 +55,22 @@ active_backlog:
   enabled: true
   interval: "5m"
 EOF
-export FNO_CONFIG="$FIXTURE/.fno/settings.yaml"
+cat > "$FIXTURE/.fno/config.toml" <<EOF
+state_dir = "$FNO_HOME_DIR"
+[active_backlog]
+enabled = true
+interval = "5m"
+[work.projects.fno]
+path = "$FIXTURE"
+EOF
+export FNO_CONFIG="$FIXTURE/.fno/config.toml"
 # The work-map reader consults the GLOBAL settings file directly (a different
 # reader from load_settings); redirect it too so the real machine's workspace
 # map cannot leak into the fixture.
 export FNO_GLOBAL_SETTINGS_PATH="$FIXTURE/.fno/settings.yaml"
+# The binary the feed verbs run through, built from this tree.
+AGENTS_BIN="$ROOT/crates/fno-agents/target/debug/fno-agents"
+[ -x "$AGENTS_BIN" ] || AGENTS_BIN=$(command -v fno-agents) || fail "fno-agents binary required (cargo build -p fno-agents)"
 # Claims root must leave the machine before the fixture claims step writes.
 export FNO_CLAIMS_ROOT="$FNO_HOME_DIR"
 
@@ -151,7 +165,7 @@ print("MARKER kingless: true (resolver)")
 ' || fail "resolver markers"
 
 echo "== 2. blueprinter feed: status =="
-STATUS=$( (cd "$FIXTURE" && fno_py agents worker --json blueprint-feed --scope fno) ) || fail "feed status verb"
+STATUS=$( (cd "$FIXTURE" && "$AGENTS_BIN" blueprint-feed --scope fno) ) || fail "feed status verb"
 echo "$STATUS" | python3 -c '
 import json, sys
 out = json.load(sys.stdin)
@@ -166,14 +180,14 @@ print("MARKER feed-idea: x-idea (design-rung stub selected)")
 ' || fail "feed status markers"
 
 echo "== 3. blueprinter feed: deliver refuses with no live worker, idea preserved =="
-( cd "$FIXTURE" && fno_py agents worker --json blueprint-feed --scope fno --deliver ) | python3 -c '
+( cd "$FIXTURE" && "$AGENTS_BIN" blueprint-feed --scope fno --deliver ) | python3 -c '
 import json, sys
 out = json.load(sys.stdin)
 assert out["action"] == "blocked", out
 assert out["reason"] == "worker_not_live", out
 assert out["kingless"] is True, out
 ' || fail "deliver refusal"
-( cd "$FIXTURE" && fno_py agents worker --json blueprint-feed --scope fno ) | python3 -c '
+( cd "$FIXTURE" && "$AGENTS_BIN" blueprint-feed --scope fno ) | python3 -c '
 import json, sys
 out = json.load(sys.stdin)
 assert out["worker"] is None and out["worker_name_next"].startswith("blueprinter-fno-"), out

@@ -23,6 +23,7 @@ use std::io::IsTerminal;
 
 const ALL_CLIENT_ACTIONS: &[&str] = &[
     "--emit-schema",
+    "active-backlog-receipt",
     "adopt",
     "ask",
     "attach",
@@ -80,6 +81,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "stop",
     "subscribe",
     "territory-rows",
+    "territory-verdict",
     "trace",
     "verify-evidence",
     "version",
@@ -336,6 +338,12 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if verb == "blueprint-feed" {
         return fno_agents::territory::run_blueprint_feed(&args[1..]);
+    }
+    if verb == "active-backlog-receipt" {
+        return fno_agents::territory::run_active_backlog_receipt(&args[1..]);
+    }
+    if verb == "territory-verdict" {
+        return fno_agents::spawn_gate::run_territory_verdict(&args[1..]);
     }
 
     // `board` (x-25b8): the king board collector, read-only, daemon-free. Not a

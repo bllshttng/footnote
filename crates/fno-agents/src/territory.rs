@@ -14,8 +14,8 @@
 //! source, never an empty territory list and never a silently-drained scope.
 
 use crate::agents_config::config_lookup;
-use crate::paths::AgentsHome;
 use crate::king_board::{graph_json_path, home_dot_fno, project_map};
+use crate::paths::AgentsHome;
 use crate::state::{load_registry, Registry, RegistryEntry};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -861,7 +861,11 @@ fn feed_rung(entry: &Value) -> &'static str {
             return None;
         }
         // _norm_status: strip whitespace and quote pairs, lowercase.
-        let v = raw.trim().trim_matches('\'').trim_matches('"').to_lowercase();
+        let v = raw
+            .trim()
+            .trim_matches('\'')
+            .trim_matches('"')
+            .to_lowercase();
         Some(v)
     });
     match status {
@@ -885,7 +889,12 @@ fn feed_candidate(row: &Value) -> bool {
     let Some(id) = row.get("id").and_then(Value::as_str) else {
         return false;
     };
-    if id.is_empty() || row.get("completed_at").map(|v| !v.is_null()).unwrap_or(false) {
+    if id.is_empty()
+        || row
+            .get("completed_at")
+            .map(|v| !v.is_null())
+            .unwrap_or(false)
+    {
         return false;
     }
     if let Some(status) = row.get("status").and_then(Value::as_str) {
@@ -918,11 +927,7 @@ fn fed_due(fed: Option<&Value>, now: DateTime<Utc>) -> bool {
 /// plus the standing worker's handle and liveness. The decision core the
 /// supervisor's tick runs natively; delivery goes through the standard mail
 /// transport.
-pub fn blueprint_feed_status(
-    config_cwd: &Path,
-    registry_path: &Path,
-    scope: &str,
-) -> Value {
+pub fn blueprint_feed_status(config_cwd: &Path, registry_path: &Path, scope: &str) -> Value {
     let entries = match graph_entries(config_cwd) {
         Ok(e) => e,
         Err(TerritoryUnknown(reason)) => {
@@ -941,9 +946,7 @@ pub fn blueprint_feed_status(
     let projects = project_map(config_cwd);
     let (key, ids) = match compile_territory(&territory.key, &entries, &projects) {
         Ok(pair) => pair,
-        Err(reason) => {
-            return json!({"action": "unknown", "scope": scope, "reason": reason})
-        }
+        Err(reason) => return json!({"action": "unknown", "scope": scope, "reason": reason}),
     };
     let territory_rung = territory.rung;
     let territory_kingless = territory.kingless;
@@ -953,15 +956,19 @@ pub fn blueprint_feed_status(
     let ideas: Vec<Value> = entries
         .iter()
         .filter(|row| {
-            row.get("id").and_then(Value::as_str)
+            row.get("id")
+                .and_then(Value::as_str)
                 .map(|id| ids.contains(id))
                 .unwrap_or(false)
                 && feed_candidate(row)
-                && fed_due(record.get("fed").and_then(|f| f.get(row["id"].as_str().unwrap())), now)
+                && fed_due(
+                    record
+                        .get("fed")
+                        .and_then(|f| f.get(row["id"].as_str().unwrap())),
+                    now,
+                )
         })
-        .map(|row| {
-            json!({"id": row["id"], "rung": feed_rung(row)})
-        })
+        .map(|row| json!({"id": row["id"], "rung": feed_rung(row)}))
         .collect();
 
     let worker = record.get("worker").filter(|w| !w.is_null()).cloned();
@@ -1096,7 +1103,13 @@ pub fn blueprint_feed_deliver(
 fn deliver_one(bin: &str, worker_name: &str, node_id: &str) -> bool {
     use std::process::Command;
     let out = Command::new(bin)
-        .args(["agents", "mail", "send", worker_name, &format!("/fno:blueprint {node_id}")])
+        .args([
+            "agents",
+            "mail",
+            "send",
+            worker_name,
+            &format!("/fno:blueprint {node_id}"),
+        ])
         .output();
     match out {
         Ok(o) => o.status.success(),
@@ -1110,8 +1123,34 @@ pub fn run_territory_rows(args: &[String]) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let registry = AgentsHome::from_env().registry_json();
     let rows = territory_rows(&cwd, &registry);
-    println!("{}", serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string()));
+    println!(
+        "{}",
+        serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
+    );
     0
+}
+
+/// `fno-agents active-backlog-receipt`: the drain-target receipt as JSON on
+/// stdout. Exit 1 with the reason on stderr when a source is unreadable -
+/// `unknown` must never print as an empty list. Invoked by the
+/// `fno config active-backlog` passthrough and rank's dispatcher note.
+pub fn run_active_backlog_receipt(args: &[String]) -> i32 {
+    let _ = args;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let registry = AgentsHome::from_env().registry_json();
+    match crate::active_backlog::native_receipt(&cwd, &registry) {
+        Ok(targets) => {
+            println!(
+                "{}",
+                serde_json::to_string(&targets).unwrap_or_else(|_| "[]".to_string())
+            );
+            0
+        }
+        Err(reason) => {
+            eprintln!("active-backlog: {reason}");
+            1
+        }
+    }
 }
 
 /// `fno-agents blueprint-feed --scope <s> [--deliver] [--repair <r>]`: the
@@ -1143,7 +1182,10 @@ pub fn run_blueprint_feed(args: &[String]) -> i32 {
     } else {
         blueprint_feed_status(&cwd, &registry, &scope)
     };
-    println!("{}", serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string()));
+    println!(
+        "{}",
+        serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
+    );
     0
 }
 
@@ -1241,8 +1283,6 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
         })
         .collect()
 }
-
-
 
 #[cfg(test)]
 mod moved_scope_tests {
@@ -1436,16 +1476,17 @@ path = \"/repo/alpha\"
         let scopes: Vec<&str> = ts.iter().map(|t| t.key.as_str()).collect();
         // The rung-2 crown over e-1 (rooted in alpha) plus alpha's loose
         // rung-1 territory: the crown rules its descendants, not the
-        // project's parentless nodes.
-        assert_eq!(scopes, ["alpha", "e-1"]);
-        assert_eq!(ts[0].rung, 1);
-        assert!(ts[0].kingless);
+        // project's parentless nodes. Crowns come first in scope order, then
+        // the kingless loose territories sorted - the recorded Python order.
+        assert_eq!(scopes, ["e-1", "alpha"]);
+        assert_eq!(ts[0].rung, 2);
+        assert!(!ts[0].kingless);
+        assert_eq!(ts[0].members, ["e-1"]);
         assert_eq!(ts[0].project, "alpha");
-        assert_eq!(ts[0].cwd, "/repo/alpha");
-        assert_eq!(ts[1].rung, 2);
-        assert!(!ts[1].kingless);
-        assert_eq!(ts[1].members, ["e-1"]);
+        assert_eq!(ts[1].rung, 1);
+        assert!(ts[1].kingless);
         assert_eq!(ts[1].project, "alpha");
+        assert_eq!(ts[1].cwd, "/repo/alpha");
     }
 
     #[test]
@@ -1631,17 +1672,37 @@ path = "/repo/alpha"
         std::fs::write(&anchored, "---\nstatus: design\n---\n").unwrap();
 
         assert_eq!(feed_rung(&json!({"id": "n"})), "", "no plan_path: NONE");
-        assert_eq!(feed_rung(&json!({"id": "n", "plan_path": design.to_str().unwrap()})), "design");
-        assert_eq!(feed_rung(&json!({"id": "n", "plan_path": idea_doc.to_str().unwrap()})), "idea", "a stub reads idea");
-        assert_eq!(feed_rung(&json!({"id": "n", "plan_path": silent.to_str().unwrap()})), "ready");
-        assert_eq!(feed_rung(&json!({"id": "n", "plan_path": unknown.to_str().unwrap()})), "", "unknown word: UNREADABLE");
         assert_eq!(
-            feed_rung(&json!({"id": "n", "plan_path": "relative.md", "cwd": tmp.path().to_str().unwrap()})),
-            "", "relative without a file on disk: cannot tell, never ready"
+            feed_rung(&json!({"id": "n", "plan_path": design.to_str().unwrap()})),
+            "design"
         );
         assert_eq!(
-            feed_rung(&json!({"id": "n", "plan_path": "anchored.md", "cwd": tmp.path().to_str().unwrap()})),
-            "design", "a relative path anchors at the NODE's cwd"
+            feed_rung(&json!({"id": "n", "plan_path": idea_doc.to_str().unwrap()})),
+            "idea",
+            "a stub reads idea"
+        );
+        assert_eq!(
+            feed_rung(&json!({"id": "n", "plan_path": silent.to_str().unwrap()})),
+            "ready"
+        );
+        assert_eq!(
+            feed_rung(&json!({"id": "n", "plan_path": unknown.to_str().unwrap()})),
+            "",
+            "unknown word: UNREADABLE"
+        );
+        assert_eq!(
+            feed_rung(
+                &json!({"id": "n", "plan_path": "relative.md", "cwd": tmp.path().to_str().unwrap()})
+            ),
+            "",
+            "relative without a file on disk: cannot tell, never ready"
+        );
+        assert_eq!(
+            feed_rung(
+                &json!({"id": "n", "plan_path": "anchored.md", "cwd": tmp.path().to_str().unwrap()})
+            ),
+            "design",
+            "a relative path anchors at the NODE's cwd"
         );
     }
 
@@ -1673,23 +1734,44 @@ path = "/repo/alpha"
             "i-fed-ok": {"at": "2020-01-01T00:00:00Z", "ok": true},
             "i-due-later": {"at": "2020-01-01T00:00:00Z", "ok": false}
         });
-        rec["fed"]["i-fed-fail"] = json!({"at": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(), "ok": false});
+        rec["fed"]["i-fed-fail"] =
+            json!({"at": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(), "ok": false});
         // i-fed-ok keeps the 2020 stamp: past the redo window, so it IS due.
         rec["fed"]["i-fed-ok"] = json!({"at": "2020-01-01T00:00:00Z", "ok": false});
-        rec["worker"] = json!({"name": "blueprinter-e-1-abcdef", "spawned_at": "2020-01-01T00:00:00Z"});
+        rec["worker"] =
+            json!({"name": "blueprinter-e-1-abcdef", "spawned_at": "2020-01-01T00:00:00Z"});
         write_record(tmp.path(), "e-1", &mut rec);
 
         let status = blueprint_feed_status(tmp.path(), &registry, "e-1");
         assert_eq!(status["action"], "status", "{status}");
-        let ids: Vec<&str> = status["ideas"].as_array().unwrap()
-            .iter().map(|i| i["id"].as_str().unwrap()).collect();
+        let ids: Vec<&str> = status["ideas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap())
+            .collect();
         assert!(ids.contains(&"i-due"), "unfed: {ids:?}");
-        assert!(ids.contains(&"i-fed-ok"), "ok stamp past the redo window is due again: {ids:?}");
-        assert!(!ids.contains(&"i-fed-fail"), "failed stamp inside the retry window: {ids:?}");
-        assert!(!ids.contains(&"i-blocked"), "a blocked graph status never feeds: {ids:?}");
-        assert!(!ids.contains(&"i-loose"), "loose nodes belong to the project territory, not the epic crown: {ids:?}");
+        assert!(
+            ids.contains(&"i-fed-ok"),
+            "ok stamp past the redo window is due again: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"i-fed-fail"),
+            "failed stamp inside the retry window: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"i-blocked"),
+            "a blocked graph status never feeds: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"i-loose"),
+            "loose nodes belong to the project territory, not the epic crown: {ids:?}"
+        );
         assert_eq!(status["worker"]["name"], "blueprinter-e-1-abcdef");
-        assert_eq!(status["worker"]["live"], false, "no such registry row: not live");
+        assert_eq!(
+            status["worker"]["live"], false,
+            "no such registry row: not live"
+        );
     }
 
     #[test]
@@ -1701,7 +1783,10 @@ path = "/repo/alpha"
         assert_ne!(a1, b);
         assert!(a1.len() <= 40, "{a1}");
         assert!(a1.starts_with("blueprinter-"), "{a1}");
-        let slug: String = a1.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+        let slug: String = a1
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
         assert_eq!(slug, a1, "registry-safe: {a1}");
     }
 
@@ -1711,19 +1796,22 @@ path = "/repo/alpha"
         let _env = env_guard();
         std::env::set_var("FNO_CONFIG", tmp.path().join("config.toml"));
         std::env::set_var("FNO_HOME", tmp.path());
-        let (_cwd, registry) = write_fixture(
-            tmp.path(),
-            BASE_CONFIG,
-            graph_fixture(),
-            registry_fixture(),
-        );
+        let (_cwd, registry) =
+            write_fixture(tmp.path(), BASE_CONFIG, graph_fixture(), registry_fixture());
         let before = read_record(tmp.path(), "e-1");
         let out = blueprint_feed_deliver(tmp.path(), &registry, "e-1", Some("/bin/false"));
         assert_eq!(out["action"], "blocked", "{out}");
         assert_eq!(out["reason"], "worker_not_live");
         let after = read_record(tmp.path(), "e-1");
         let repairs = after["repairs"].as_array().unwrap();
-        assert_eq!(repairs.len(), (before["repairs"].as_array().map(|a| a.len()).unwrap_or(0)) + 1, "{after}");
-        assert!(repairs.last().unwrap()["reason"].as_str().unwrap().contains("worker_not_live"));
+        assert_eq!(
+            repairs.len(),
+            (before["repairs"].as_array().map(|a| a.len()).unwrap_or(0)) + 1,
+            "{after}"
+        );
+        assert!(repairs.last().unwrap()["reason"]
+            .as_str()
+            .unwrap()
+            .contains("worker_not_live"));
     }
 }

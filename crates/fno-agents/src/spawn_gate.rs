@@ -254,7 +254,7 @@ pub fn slot_count(registry_path: &Path, warnings: &mut Vec<String>) -> usize {
 /// crown's territory; an uncrowned node counts for its project's loose
 /// territory (project nodes minus every crowned set), so one worker never
 /// consumes two territories' caps. AC9-HP parity: keep both sides agreeing.
-fn territory_of_node(
+pub(crate) fn territory_of_node(
     config_cwd: &Path,
     registry_path: &Path,
     node: &str,
@@ -359,7 +359,7 @@ fn territory_of_node(
 /// caller prints; `None` territory reads as UNKNOWN and refuses closed - the
 /// cap never counts an unknown as headroom. A spawn that works no node skips
 /// the check entirely: the team cap does not apply to it.
-fn check_territory_cap(
+pub(crate) fn check_territory_cap(
     config_cwd: &Path,
     registry_path: &Path,
     node: &str,
@@ -401,6 +401,72 @@ fn check_territory_cap(
         .to_string());
     }
     Ok(())
+}
+
+/// `fno-agents territory-verdict --node <id>`: the per-territory cap verdict
+/// for one node as JSON on stdout. The single counting leg: the Python gate
+/// passes the node through this door and recomputes nothing. Exit is 0 for
+/// every READABLE verdict (including a refusal - the verdict is the answer);
+/// only a malformed invocation exits non-zero.
+pub fn run_territory_verdict(args: &[String]) -> i32 {
+    let mut node: Option<String> = None;
+    let mut iter = args.iter();
+    while let Some(a) = iter.next() {
+        if a == "--node" {
+            node = iter.next().cloned();
+        }
+    }
+    let Some(node) = node else {
+        eprintln!("territory-verdict: --node is required");
+        return 2;
+    };
+    let config_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let registry_path = crate::paths::AgentsHome::from_env().registry_json();
+    let cap = agents_config::territory_max_live(&config_cwd);
+    let mut warnings = Vec::new();
+    let state = territory_of_node(&config_cwd, &registry_path, &node, &mut warnings);
+    let verdict = match state {
+        None => serde_json::json!({
+            "verdict": "territory_unknown",
+            "reason": "territory_unknown",
+            "node": node,
+            "max_live_per_territory": cap,
+        }),
+        Some((scope, members)) => {
+            let live = live_rows(&registry_path, &mut warnings);
+            let count = live
+                .iter()
+                .filter(|r| {
+                    r.node
+                        .as_deref()
+                        .map(|n| members.contains(n))
+                        .unwrap_or(false)
+                })
+                .count();
+            if count as u32 >= cap {
+                serde_json::json!({
+                    "verdict": "territory_cap",
+                    "reason": "territory_cap",
+                    "territory": scope,
+                    "count": count,
+                    "current_count": count,
+                    "max_live_per_territory": cap,
+                })
+            } else {
+                serde_json::json!({
+                    "verdict": "ok",
+                    "territory": scope,
+                    "current_count": count,
+                    "max_live_per_territory": cap,
+                })
+            }
+        }
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".to_string())
+    );
+    0
 }
 
 /// Live `worker:<name>` slot claims under the GLOBAL claims root. Headless
@@ -2151,9 +2217,12 @@ MemAvailable:    8000000 kB\n";
         std::env::remove_var("FNO_CLAUDE_DAEMON_DIR");
     }
     // --- the per-territory team cap fixture (x-e221 AC9) -------------------
+    // The scenarios were recorded when the Python gate was a second counting
+    // leg; the Python leg is deleted and these are the recorded contract now,
+    // checked honestly against the one remaining count.
 
     #[test]
-    fn territory_cap_agrees_with_python_gate_fixture() {
+    fn territory_cap_characterized_by_recorded_scenarios() {
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -2233,11 +2302,7 @@ MemAvailable:    8000000 kB\n";
                                 .unwrap_or(false)
                         })
                         .count();
-                    let cap_hit = count >= cap as usize
-                        && sc["expect"]["verdict"].as_str() == Some("territory_cap")
-                        && sc["expect"]["territory"].as_str() == Some(scope.as_str())
-                        && sc["expect"]["count"].as_u64() == Some(count as u64);
-                    if cap_hit {
+                    if count >= cap as usize {
                         "territory_cap".to_string()
                     } else {
                         format!("ok:{scope}:{count}")

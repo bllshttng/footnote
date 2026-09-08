@@ -877,29 +877,42 @@ def active_backlog_cmd(
         False, "--json", "-J", help="Emit a JSON list of drain targets for the daemon."
     ),
 ) -> None:
-    """Resolve which projects the active-backlog daemon should drain.
+    """Print the active-backlog drain targets the daemon resolves.
 
-    Reads config.active_backlog + the workspace project->path map and prints the
-    enabled drain targets (project, cwd, interval, failure_limit, mission). The
-    daemon shells this on entering Serving to discover its targets. Read-only and
-    best-effort: a malformed config yields an empty list, never an error.
+    A passthrough over the Rust receipt (crates/fno-agents territory fact
+    set): the binary resolves territories from the graph, the crown registry,
+    the workspace map, and config.active_backlog, and this verb prints that
+    answer verbatim. Read-only; exit 1 names the unreadable source.
     """
     import json as _json
+    import subprocess as _sp
 
-    from fno.active_backlog import drain_targets_as_dicts
+    from fno.rust_binary import resolve_binary
 
-    targets = drain_targets_as_dicts()
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("active-backlog: fno-agents binary not found", err=True)
+        raise typer.Exit(code=1)
+    proc = _sp.run([str(binary), "active-backlog-receipt"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        typer.echo((proc.stderr or "receipt unavailable").strip(), err=True)
+        raise typer.Exit(code=proc.returncode or 1)
     if json_out:
-        typer.echo(_json.dumps(targets))
+        typer.echo(proc.stdout.rstrip())
+        return
+    try:
+        targets = _json.loads(proc.stdout)
+    except ValueError:
+        typer.echo(proc.stdout.rstrip())
         return
     if not targets:
-        typer.echo("active-backlog: no active missions to drain")
+        typer.echo("active-backlog: no territories to drain")
         return
-    for t in targets:
-        mission = f" mission={t['mission']}" if t["mission"] else ""
+    for tg in targets:
+        mission = f" mission={tg['mission']}" if tg.get("mission") else ""
         typer.echo(
-            f"{t['project']}\t{t['cwd']}\tinterval={t['interval_seconds']}s\t"
-            f"failure_limit={t['failure_limit']}{mission}"
+            f"{tg['scope']}\t{tg['cwd']}\tinterval={tg['interval_seconds']}s\t"
+            f"failure_limit={tg['failure_limit']}{mission}"
         )
 
 
@@ -911,20 +924,29 @@ def active_backlog_territories_cmd(
 ) -> None:
     """The territory readout (x-e221 AC7): one row per scope.
 
-    Names each territory's canonical scope, mission, crown holder or
-    kingless state, live count against the per-territory cap, and the
-    standing blueprinter's handle. The same projection the king check-in
-    and the operational probe read, so none of them can disagree.
-    Read-only and best-effort, like active-backlog.
+    A passthrough over the Rust projection: scope, missions, king or kingless
+    state, live count against the per-territory cap, and the standing
+    blueprinter's handle. The king check-in and the operational probe read the
+    same projection, so none of them can disagree. Read-only.
     """
+    import subprocess as _sp
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("territories: fno-agents binary not found", err=True)
+        raise typer.Exit(code=1)
+    proc = _sp.run([str(binary), "territory-rows"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        typer.echo((proc.stderr or "territory read failed").strip(), err=True)
+        raise typer.Exit(code=proc.returncode or 1)
+    if json_out:
+        typer.echo(proc.stdout.rstrip())
+        return
     import json as _json
 
-    from fno.active_backlog import territory_rows
-
-    rows = territory_rows()
-    if json_out:
-        typer.echo(_json.dumps(rows))
-        return
+    rows = _json.loads(proc.stdout or "[]")
     if not rows:
         typer.echo("territories: none")
         return

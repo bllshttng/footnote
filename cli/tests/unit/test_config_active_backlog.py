@@ -217,7 +217,7 @@ def test_doctor_silent_when_mission_unset_or_empty(monkeypatch, tmp_path):
 
 def test_mission_key_stays_parseable_but_is_documented_ignored():
     # The key parses for one release (an old config never fails the load) and
-    # nothing in the drain branches on it: resolve_drain_targets derives its
+    # nothing in the drain branches on it: the native receipt derives its
     # missions from the graph's mission_active field, not this field.
     b = ActiveBacklogConfig(enabled=True, mission="x-5317")
     assert b.any_enabled() is True

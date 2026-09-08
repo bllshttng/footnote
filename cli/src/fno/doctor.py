@@ -1302,9 +1302,15 @@ def _mission_active_count() -> int:
     ``{"entries": null}`` because the null value iterated outside the try, which
     broke this function's own ``never crashes`` promise."""
     try:
-        from fno.active_backlog import _active_missions
+        from fno import paths as _paths
+        from fno.graph.store import read_graph
 
-        return len(_active_missions())
+        entries = read_graph(_paths.graph_json())
+        return sum(
+            1
+            for e in entries
+            if isinstance(e, dict) and e.get("mission_active") is True
+        )
     except Exception:  # noqa: BLE001 - advisory; never crash doctor
         return 0
 
