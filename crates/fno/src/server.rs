@@ -2410,8 +2410,8 @@ pub(crate) struct Core {
     restored: bool,
     /// True while startup restore waits for off-loop re-entry plans.
     restore_pending: bool,
-    /// Store generation produced or restored by this server.
-    store_generation: Option<u64>,
+    /// Per-squad store generations produced or restored by this server.
+    store_generations: HashMap<String, u64>,
     /// Squads created before first attach. Their empty bootstrap persist must
     /// not overwrite an older squad waiting for restore.
     pre_restore_squads: HashSet<u64>,
@@ -7197,7 +7197,7 @@ impl Core {
             return;
         };
         match crate::squad_store::set_snapshot(&snapshot) {
-            Ok(generation) => self.store_generation = Some(generation),
+            Ok(generations) => self.store_generations.extend(generations),
             Err(e) => self.persist_degraded(&e),
         }
     }
@@ -8097,7 +8097,7 @@ impl Core {
             self.notice_all(format!("squad collapse at restore skipped: {e}"));
         }
         let loaded = crate::squad_store::load();
-        self.store_generation = Some(loaded.generation);
+        self.store_generations = loaded.generations;
         if let Some(n) = loaded.notice {
             self.notice_all(n);
         }
@@ -14677,7 +14677,7 @@ async fn serve(
         persist_degraded_notified: false,
         restored: false,
         restore_pending: false,
-        store_generation: None,
+        store_generations: HashMap::new(),
         pre_restore_squads: HashSet::new(),
         topology_dirty: false,
         last_topology_flush: None,
@@ -25242,7 +25242,7 @@ mod tests {
             persist_degraded_notified: false,
             restored: false,
             restore_pending: false,
-            store_generation: None,
+            store_generations: HashMap::new(),
             pre_restore_squads: HashSet::new(),
             topology_dirty: false,
             last_topology_flush: None,

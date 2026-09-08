@@ -15,16 +15,15 @@ impl Core {
             self.flush_topology();
             return true;
         }
-        let Some(mut generation) = self.store_generation else {
-            eprintln!("fno mux: shutdown without a store baseline; no layout captured");
-            return false;
-        };
         let sids: Vec<u64> = self.session.squads.iter().map(|s| s.id).collect();
         let snapshots: Vec<_> = sids
             .into_iter()
             .filter_map(|sid| self.snapshot_squad(sid))
             .collect();
-        generation = match crate::squad_store::set_snapshots_if_generation(generation, &snapshots) {
+        let generations = match crate::squad_store::set_snapshots_if_generations(
+            &self.store_generations,
+            &snapshots,
+        ) {
             Ok(Some(next)) => next,
             Ok(None) => {
                 eprintln!(
@@ -37,7 +36,7 @@ impl Core {
                 return false;
             }
         };
-        self.store_generation = Some(generation);
+        self.store_generations.extend(generations);
         self.last_topology_flush = Some(Instant::now());
         true
     }

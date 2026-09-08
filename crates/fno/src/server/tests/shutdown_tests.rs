@@ -6,7 +6,7 @@ fn capture_topology_now_writes_restored_clean_layout() {
     let (mut core, _) = template_core();
     core.restored = true;
     core.topology_dirty = false;
-    core.store_generation = Some(crate::squad_store::load().generation);
+    core.store_generations = crate::squad_store::load().generations;
 
     assert!(core.capture_topology_now());
     assert!(!core.topology_dirty, "capture drains the dirty flag");
@@ -26,7 +26,7 @@ fn capture_topology_now_skips_pending_startup_restore() {
     let (mut core, _) = template_core();
     core.restored = true;
     core.restore_pending = true;
-    core.store_generation = Some(crate::squad_store::load().generation);
+    core.store_generations = crate::squad_store::load().generations;
 
     assert!(!core.capture_topology_now());
     assert!(
@@ -54,7 +54,7 @@ fn clean_shutdown_does_not_overwrite_a_newer_store_generation() {
     older.restored = true;
     older.topology_dirty = true;
     older.flush_topology();
-    let baseline = older.store_generation.expect("older capture generation");
+    let baseline = older.store_generations.clone();
 
     let newer_member = crate::squad_store::StoredMember {
         attach_id: "deadbeef".into(),
@@ -68,8 +68,8 @@ fn clean_shutdown_does_not_overwrite_a_newer_store_generation() {
     };
     crate::squad_store::upsert("sq", "", &["/a".into()], &[newer_member]).unwrap();
     assert!(
-        crate::squad_store::load().generation > baseline,
-        "the newer writer advances the squad generation"
+        crate::squad_store::load().generations != baseline,
+        "the newer writer advances the overlapping squad generation"
     );
 
     assert!(!older.capture_topology_now());
@@ -83,11 +83,32 @@ fn clean_shutdown_does_not_overwrite_a_newer_store_generation() {
 }
 
 #[test]
+fn unrelated_squad_write_does_not_block_clean_shutdown_capture() {
+    let _scratch = StoreScratch::new("shutdown-capture-disjoint");
+    let (mut older, _) = template_core();
+    older.restored = true;
+    older.topology_dirty = true;
+    older.flush_topology();
+    older.session.squad_mut(1).unwrap().tabs[0].name = Some("new-local-name".into());
+
+    crate::squad_store::upsert("other", "", &["/other".into()], &[]).unwrap();
+
+    assert!(older.capture_topology_now());
+    let stored = crate::squad_store::load();
+    let local = stored.squads.iter().find(|s| s.name == "sq").unwrap();
+    assert_eq!(
+        local.tab_trees[0].tab_name.as_deref(),
+        Some("new-local-name")
+    );
+    assert!(stored.squads.iter().any(|s| s.name == "other"));
+}
+
+#[test]
 fn pane_id_reservation_does_not_advance_squad_generation() {
     let _scratch = StoreScratch::new("shutdown-capture-pane-id");
-    let before = crate::squad_store::load().generation;
+    let before = crate::squad_store::load().generations;
     crate::squad_store::reserve_next_pane_id(1).unwrap();
-    assert_eq!(crate::squad_store::load().generation, before);
+    assert_eq!(crate::squad_store::load().generations, before);
 }
 
 #[test]
@@ -117,13 +138,16 @@ fn clean_shutdown_batches_multiple_squads_into_one_generation() {
     core.restored = true;
     core.topology_dirty = true;
     core.flush_topology();
-    let before = core.store_generation.expect("baseline generation");
+    let before = core.store_generations.clone();
 
     assert!(core.capture_topology_now());
 
-    assert_eq!(
-        core.store_generation,
-        Some(before + 1),
-        "all shutdown snapshots commit in one store generation"
-    );
+    assert_eq!(before.len(), 2, "both squads have generation baselines");
+    for (key, generation) in before {
+        assert_eq!(
+            core.store_generations.get(&key),
+            Some(&(generation + 1)),
+            "each shutdown snapshot advances exactly once"
+        );
+    }
 }
