@@ -154,3 +154,102 @@ def test_unreadable_roles_still_prints_the_line(monkeypatch):
     text = "\n".join(out)
     assert "band routing inactive:" in text
     assert "model_routing.roles" not in text
+
+
+# ---------------------------------------------------------------------------
+# Harness overlay readout (x-8975)
+# ---------------------------------------------------------------------------
+
+
+def _pin_overlay_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    profiles: dict | None = None,
+    defaults: dict | None = None,
+):
+    """Settings whose agents block carries raw harness overlays."""
+    from types import SimpleNamespace
+
+    agents = SimpleNamespace(
+        defaults=SimpleNamespace(
+            permission_mode=defaults.get("permission_mode", "") if defaults else "",
+            effort=defaults.get("effort", "") if defaults else "",
+            harness=defaults.get("harness", {}) if defaults else {},
+        ),
+        profiles={
+            verb: SimpleNamespace(
+                permission_mode=cfg.get("permission_mode", ""),
+                effort=cfg.get("effort", ""),
+                harness=cfg.get("harness", {}),
+            )
+            for verb, cfg in (profiles or {}).items()
+        },
+    )
+    monkeypatch.setattr(
+        "fno.config.load_settings", lambda: SimpleNamespace(agents=agents)
+    )
+
+
+def test_doctor_names_a_codex_scalar_that_cannot_serve_claude(monkeypatch):
+    """AC3-HP: the live-shaped defect - a codex spelling on the target profile
+    - gets one line naming the verb, the harness, the value, and the overlay
+    path that fixes it."""
+    from fno.config_cli import _report_harness_overlays
+
+    _pin_overlay_settings(
+        monkeypatch,
+        profiles={"target": {"permission_mode": "yolo", "effort": "high"}},
+    )
+    out = _capture(monkeypatch)
+
+    _report_harness_overlays()
+
+    text = "\n".join(out)
+    assert "agents.profiles.target.permission_mode" in text
+    assert "'yolo'" in text and "claude" in text
+    assert "[agents.profiles.target.harness.claude]" in text
+
+
+def test_doctor_names_an_effort_value_with_no_surface(monkeypatch):
+    """A profile effort on gemini (no reasoning-effort surface) is named with
+    the mapper's own reason and the overlay fix path."""
+    from fno.config_cli import _report_harness_overlays
+
+    _pin_overlay_settings(
+        monkeypatch,
+        profiles={"target": {"effort": "high"}},
+    )
+    out = _capture(monkeypatch)
+
+    _report_harness_overlays()
+
+    text = "\n".join(out)
+    assert "config.agents.profiles.target.effort = 'high'" in text
+    assert "gemini" in text
+    assert "[agents.profiles.target.harness.gemini]" in text
+
+
+def test_doctor_silent_when_every_pair_maps(monkeypatch):
+    """AC3-EDGE: with the scalars empty and each harness's answer under its
+    own overlay, every (verb, harness) pair maps and the readout prints
+    nothing. One scalar CANNOT be silent (no value maps on every harness),
+    which is exactly why the overlay exists."""
+    from fno.config_cli import _report_harness_overlays
+
+    _pin_overlay_settings(
+        monkeypatch,
+        profiles={
+            "target": {
+                "permission_mode": "",
+                "harness": {
+                    "claude": {"permission_mode": "bypassPermissions"},
+                    "codex": {"permission_mode": "yolo", "effort": "xhigh"},
+                },
+            },
+        },
+    )
+    out = _capture(monkeypatch)
+
+    _report_harness_overlays()
+
+    assert out == []

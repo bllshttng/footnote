@@ -596,6 +596,7 @@ def doctor_cmd(
         _report_deprecated_dispatch_harness,
         _report_deprecated_active_backlog_mission,
         _report_band_routing,
+        _report_harness_overlays,
     ):
         try:
             report()
@@ -866,6 +867,61 @@ def _report_band_routing() -> None:
             else ""
         )
     )
+
+
+def _report_harness_overlays() -> None:
+    """Name the (config rung, harness) pairs a scalar cannot serve (x-8975).
+
+    The spawn seam degrades open on config values by design - a bad config
+    never bricks spawning - so the READOUT is where an operator hears that a
+    configured value will be skipped on some harness. Resolution goes through
+    the same ``effective_field`` rungs the spawn seam uses (one precedence
+    implementation), and each value is checked with the per-harness mapper
+    that would carry it. Silent when every pair maps.
+    """
+    from fno.agents.harnesses import READABLE_PROVIDERS
+    from fno.agents.mux_spawn import effort_tokens, permission_pane_tokens
+    from fno.agents.spawn_defaults import effective_field
+    from fno.agents.cli import CLAUDE_PERMISSION_MODES
+    from fno.config import load_settings
+
+    try:
+        agents = load_settings().agents
+    except Exception:  # noqa: BLE001 - an unreadable config reads as absent
+        return
+    defaults = agents.defaults
+    rows: list = [(f"agents.profiles.{v}", p, p, v) for v, p in (getattr(agents, "profiles", None) or {}).items()]
+    rows.append(("agents.defaults", defaults, None, ""))
+    for label, _block, prof, verb in rows:
+        for harness in READABLE_PROVIDERS:
+            for name, mapper in (
+                ("permission_mode", permission_pane_tokens),
+                ("effort", effort_tokens),
+            ):
+                value, rung = effective_field(defaults, prof, verb, name, harness)
+                if not value:
+                    continue
+                if harness == "claude" and name == "permission_mode":
+                    # claude is exact passthrough, so the mapper alone cannot
+                    # catch a codex spelling: check the value against the
+                    # vocabulary claude's own --help lists.
+                    if value in CLAUDE_PERMISSION_MODES:
+                        continue
+                    typer.echo(
+                        f"config.{rung}.permission_mode = {value!r} is not a "
+                        "claude permission mode; set claude's answer under "
+                        f"[{label}.harness.claude] or move the scalar to the "
+                        "harness that speaks it"
+                    )
+                    continue
+                try:
+                    mapper(harness, value)
+                except Exception as exc:
+                    typer.echo(
+                        f"config.{rung}.{name} = {value!r} cannot map on "
+                        f"{harness}: {exc}; set {harness}'s answer under "
+                        f"[{label}.harness.{harness}]"
+                    )
 
 
 @app.command("active-backlog")
