@@ -246,7 +246,7 @@ def resolve_inventory(
 
 
 #: The verbs fno dispatches, and therefore the slots an operator fills.
-SLOT_VERBS = ("think", "blueprint", "target", "review", "crown")
+SLOT_VERBS = ("think", "blueprint", "target", "review", "crown", "pr-create")
 
 
 def slot_verbs(settings: object = None, inventory: Optional[Inventory] = None) -> list[str]:
