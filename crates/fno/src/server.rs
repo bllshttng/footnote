@@ -46,6 +46,10 @@ use crate::proto::{
     MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
+use crate::restore_liveness::{
+    classify_member, no_resume_form_reason, restore_worker_refusal_reason, worker_registry_match,
+    MemberVerdict,
+};
 #[cfg(test)]
 use crate::spawn_journal::parse_spawn_receipts;
 use crate::spawn_journal::{
@@ -895,6 +899,11 @@ enum CoreMsg {
         rows: Vec<RegistryAgent>,
         branches: HashMap<String, String>,
         tails: HashMap<String, String>,
+        /// (x-688b) The reader's registry+roster read succeeded (parsed bytes,
+        /// last-good, or a confirmed-vanished file; a present-but-unreadable
+        /// file reads false). Gates the daemon-side registry-absence death
+        /// rule, which must stay inert while the read state is unknown.
+        read_ok: bool,
     },
     /// (x-b186) A fresh session-uuid -> message-tail map with no row change
     /// behind it. Transcripts grow independently of the registry, so the tail
@@ -1665,21 +1674,6 @@ fn clear_known_workers() {
 }
 
 #[cfg(test)]
-fn set_restore_registry_rows(rows: Vec<RegistryAgent>) {
-    RESTORE_REGISTRY_ROWS.with(|p| *p.borrow_mut() = Some(Some(rows)));
-}
-
-#[cfg(test)]
-struct RestoreRegistryRowsGuard;
-
-#[cfg(test)]
-impl Drop for RestoreRegistryRowsGuard {
-    fn drop(&mut self) {
-        RESTORE_REGISTRY_ROWS.with(|p| *p.borrow_mut() = None);
-    }
-}
-
-#[cfg(test)]
 struct KnownWorkersGuard;
 
 #[cfg(test)]
@@ -2196,6 +2190,16 @@ pub(crate) struct Core {
     /// fact and squad assignment are joined at layout time, where the live
     /// pane set and the squad catalog live.
     agents: Vec<RegistryAgent>,
+    /// (x-688b) The last `AgentRows` reader's registry+roster read succeeded.
+    /// Starts false (no read yet = unknown), so the registry-absence death
+    /// rule stays inert until a successful read proves it may fire.
+    agents_read_ok: bool,
+    /// (x-688b) The spawn journal as of the last row change. Refreshed only
+    /// when `AgentRows` publishes (row changes are rare; journal appends ride
+    /// them), never on the layout path: `dead_sweep_count` feeds every
+    /// layout push, and a per-push journal scan would read the whole file
+    /// every second.
+    journal: crate::spawn_journal::SpawnJournal,
     /// (x-cd67 US4) Latest cwd -> git-branch map from the off-loop reader,
     /// joined into each agent row's `subline` at layout time. A cwd absent from
     /// the map has no resolvable branch (non-git dir, unreadable HEAD); the
@@ -2717,75 +2721,9 @@ pub(crate) fn restore_member_cwd(
     }
 }
 
-fn restore_worker_refusal_reason(
-    member: &crate::squad_store::StoredMember,
-    row: Option<&RegistryAgent>,
-    receipt_store_error: Option<&str>,
-    receipts: &HashMap<(String, String), HeldWorker>,
-    never_bound: &HashMap<String, String>,
-) -> String {
-    if let Some(reason) = row
-        .and_then(Core::row_no_pane_reason)
-        .map(Core::no_pane_reason_text)
-    {
-        return reason.to_string();
-    }
-    let Some(session_id) = member.harness_session_id.as_deref() else {
-        // (x-6b0b) No session id and no harness is the never-bound shape; when
-        // the journal carries the name's removal marker, say why the member
-        // can never bind instead of only that it did not.
-        if member.harness.is_none() {
-            if let Some(reason) = member.worker.as_deref().and_then(|w| never_bound.get(w)) {
-                return format!("never bound: {reason}");
-            }
-        }
-        return "session id is missing".into();
-    };
-    if let Some(error) = receipt_store_error {
-        return error.to_string();
-    }
-    if let Some(receipt) = receipt_for_member(receipts, member) {
-        let harness = member
-            .harness
-            .as_deref()
-            .unwrap_or(receipt.harness.as_str());
-        return format!("{harness} session {session_id} is not resumable");
-    }
-    let Some(harness) = member.harness.as_deref() else {
-        return "harness is unknown".into();
-    };
-    if !Core::resume_form(harness) {
-        return no_resume_form_reason(harness, session_id);
-    }
-    format!("spawn receipt is missing for {harness} session {session_id}")
-}
-
-/// (x-7b5e) The one no-form refusal string, shared by the held-worker
-/// restore reason and the bulk driver's report so the two surfaces cannot
-/// teach different vocabularies for the same structural gap.
-fn no_resume_form_reason(harness: &str, session_id: &str) -> String {
-    format!("{harness} has no resume form; session {session_id} is not resumable")
-}
-
-// The registry rows the restore verb classifies against, read fresh from
-// the registry file at verb time. In tests, `RESTORE_REGISTRY_ROWS`
-// overrides the file (a unit test cannot populate the real registry, and
-// reading it would clobber the fake rows the test installed).
-#[cfg(test)]
-thread_local! {
-    static RESTORE_REGISTRY_ROWS: std::cell::RefCell<Option<Option<Vec<RegistryAgent>>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn restore_registry_rows() -> Option<Vec<RegistryAgent>> {
-    #[cfg(test)]
-    if let Some(rows) = RESTORE_REGISTRY_ROWS.with(|p| p.borrow().clone()) {
-        return rows;
-    }
-    std::fs::read_to_string(agents_view::registry_path())
-        .ok()
-        .and_then(|raw| agents_view::derive_rows(&raw, 0))
-}
+// The registry rows the restore verb classifies against: the reader and its
+// test override live in `restore_gate`, next to the restore refusals.
+use crate::restore_gate::restore_registry_rows;
 
 /// (x-9052) The restore gate's done set, overridable in tests (a unit test
 /// cannot populate the real graph). `None` falls through to the live
@@ -2834,23 +2772,6 @@ pub(crate) fn agent_harness_session_id(agent: &RegistryAgent) -> Option<&str> {
         .harness_session_id
         .as_deref()
         .or(agent.claude_session_uuid.as_deref())
-}
-
-fn worker_registry_match(
-    member: &crate::squad_store::StoredMember,
-    agent: &RegistryAgent,
-    worker_name: &str,
-) -> bool {
-    match (
-        member.harness.as_deref(),
-        member.harness_session_id.as_deref(),
-    ) {
-        (Some(harness), Some(session_id)) => {
-            agent.harness.as_deref() == Some(harness)
-                && agent_harness_session_id(agent) == Some(session_id)
-        }
-        _ => agent.name == worker_name,
-    }
 }
 
 /// The set of attach-ids live NOW, from the raw registry + roster contents
@@ -6303,7 +6224,7 @@ impl Core {
     /// itself is built later by [`resume_argv_for`] from the same declared
     /// form, so adding a harness to
     /// `cli/src/fno/agents/harness_capabilities.toml` is the whole change.
-    fn resume_form(harness: &str) -> bool {
+    pub(crate) fn resume_form(harness: &str) -> bool {
         declared_resume_form(harness).is_some()
     }
 
@@ -6411,7 +6332,7 @@ impl Core {
     /// A live attachable row has a higher-priority client action, so it carries
     /// no registry refusal reason. Every other registry-backed paneless row can
     /// expose the classification that explains its branch-four notice.
-    fn row_no_pane_reason(a: &RegistryAgent) -> Option<AgentNoPaneReason> {
+    pub(crate) fn row_no_pane_reason(a: &RegistryAgent) -> Option<AgentNoPaneReason> {
         if a.attach_id.is_some() && !a.exited {
             return None;
         }
@@ -6421,7 +6342,7 @@ impl Core {
         }
     }
 
-    fn no_pane_reason_text(reason: AgentNoPaneReason) -> &'static str {
+    pub(crate) fn no_pane_reason_text(reason: AgentNoPaneReason) -> &'static str {
         match reason {
             AgentNoPaneReason::LivePaneless => "session is live elsewhere",
             AgentNoPaneReason::MissingHarness => "harness is missing",
@@ -6791,17 +6712,25 @@ impl Core {
     /// (x-7b5e) The live, non-tombstoned worker members a restore acts on,
     /// as (worker name, member) pairs in stored order. `harness` narrows the
     /// run to one harness's members. A member with no worker name records no
-    /// resumable identity, so it is never a candidate.
+    /// resumable identity, so it is never a candidate. (x-b64e) The same
+    /// classifier the startup loop answers to drops the Gone members here,
+    /// so the verb and the startup path can never disagree about who is a
+    /// corpse.
     fn restore_candidates(
         &self,
         harness: Option<&str>,
     ) -> Vec<(String, crate::squad_store::StoredMember)> {
+        let known_workers = self.known_worker_names();
+        let receipts = crate::spawn_journal::scan_spawn_journal().receipts;
         self.squad_members
             .values()
             .flatten()
             .filter(|m| !m.tombstone)
             .filter(|m| m.worker.as_deref().is_some_and(|w| !w.trim().is_empty()))
             .filter(|m| harness.is_none_or(|h| m.harness.as_deref() == Some(h)))
+            .filter(|m| {
+                classify_member(m, known_workers.as_ref(), &receipts) != MemberVerdict::Gone
+            })
             .map(|m| (m.worker.clone().expect("checked above"), m.clone()))
             .collect()
     }
@@ -6891,8 +6820,27 @@ impl Core {
             *name_counts.entry(name.clone()).or_default() += 1;
         }
         let dims = (crate::vt::DEFAULT_ROWS, crate::vt::DEFAULT_COLS);
+        // A reap receipt is the session's death record: a member it preserves
+        // must not read as a live restore candidate, or restore resurrects a
+        // session the fleet deliberately retired.
+        let retired = crate::restore_gate::retired_receipt_session_ids().unwrap_or_default();
         let mut rows = Vec::with_capacity(candidates.len());
         for (name, member) in candidates {
+            if let Some(reason) =
+                crate::restore_gate::retired_refusal(member.harness_session_id.as_deref(), &retired)
+            {
+                rows.push(RestoreRow {
+                    member: name,
+                    harness: member.harness.clone(),
+                    squad: 0,
+                    outcome: "refused".into(),
+                    pane: None,
+                    tab: None,
+                    reason: Some(reason),
+                    notice: None,
+                });
+                continue;
+            }
             if name_counts.get(name.as_str()).copied().unwrap_or(0) > 1 {
                 rows.push(RestoreRow {
                     member: name,
@@ -7901,66 +7849,6 @@ impl Core {
         live_attach_ids_snapshot()
     }
 
-    /// Fold the cached registry rows into the same exact identity evidence the
-    /// standalone workspace-prune verb consumes. Unknown rows contribute no
-    /// verdict; only a positive `Alive` or `Dead` reading enters a set.
-    fn member_evidence(&self) -> crate::squad_store::MemberEvidence {
-        let mut evidence =
-            crate::squad_store::MemberEvidence::from_sets(HashSet::new(), HashSet::new());
-        for agent in &self.agents {
-            if let (Some(harness), Some(session_id)) =
-                (agent.harness.as_deref(), agent_harness_session_id(agent))
-            {
-                match agent.liveness {
-                    agents_view::Liveness::Alive => evidence.add_live_pair(harness, session_id),
-                    agents_view::Liveness::Dead => evidence.add_dead_pair(harness, session_id),
-                    agents_view::Liveness::Unmeasured => {}
-                }
-                continue;
-            }
-            let mut keys = Vec::new();
-            keys.push(agent.name.as_str());
-            if let Some(id) = agent.attach_id.as_deref() {
-                keys.push(id);
-            }
-            if let Some(id) = agent.effective_identity() {
-                keys.push(id);
-            }
-            let target = match agent.liveness {
-                agents_view::Liveness::Alive => true,
-                agents_view::Liveness::Dead => false,
-                agents_view::Liveness::Unmeasured => continue,
-            };
-            for key in keys {
-                if target {
-                    evidence.add_live(key);
-                } else {
-                    evidence.add_dead(key);
-                }
-            }
-        }
-        evidence
-    }
-
-    fn dead_sweep_count(&self) -> usize {
-        let mut evidence = self.member_evidence();
-        for entry in self.panes.values() {
-            if let Some(worker) = &entry.refused_worker {
-                evidence.add_dead(worker.clone());
-            }
-        }
-        self.squad_members
-            .values()
-            .flatten()
-            .filter(|member| {
-                matches!(
-                    evidence.verdict(member),
-                    crate::squad_store::MemberLiveness::Dead
-                )
-            })
-            .count()
-    }
-
     fn worker_identity_published(&self, rows: &[RegistryAgent]) -> bool {
         self.squad_members.values().flatten().any(|member| {
             let Some(worker) = member.worker.as_deref() else {
@@ -8356,6 +8244,7 @@ impl Core {
         let SpawnJournal {
             receipts: spawn_receipts,
             never_bound,
+            spawned_names: _,
             error: receipt_store_error,
         } = journal;
         let mut worker_members_total = 0usize;
@@ -8508,6 +8397,21 @@ impl Core {
                         member_panes.push((binding, pid, m.tab_name.clone()));
                         continue;
                     }
+                    // (x-b64e) Classify BEFORE the policy branch so the
+                    // default `hold` policy reaches the retirement. A member
+                    // the registry forgot and the journal never received is
+                    // Gone: mint no pane, keep no member row on the persist,
+                    // and put its binding in done_bindings so the tree lane
+                    // skips its tab instead of shell-substituting it.
+                    if classify_member(m, known_workers.as_ref(), &spawn_receipts)
+                        == MemberVerdict::Gone
+                    {
+                        pruned_workers += 1;
+                        done_bindings.insert(
+                            worker_binding_key(m).unwrap_or_else(|| worker_name.to_string()),
+                        );
+                        continue;
+                    }
                     if hold_workers {
                         // (x-9052) Doneness gate: a worker whose node is done
                         // (status done / merge_status merged / completed_at
@@ -8609,21 +8513,13 @@ impl Core {
                         }
                         continue;
                     }
-                    match &known_workers {
-                        // An unreadable registry prunes NOTHING - keeping a
-                        // ghost idle row costs nothing, deleting every worker
-                        // member on a transient IO error costs the record.
-                        None => members.push(m.clone()),
-                        Some(known) => {
-                            let listed = m.worker.as_deref().is_some_and(|w| known.contains(w));
-                            if listed {
-                                members.push(m.clone());
-                                idle_workers += 1;
-                            } else {
-                                pruned_workers += 1;
-                            }
-                        }
-                    }
+                    // (x-b64e) Only the idle/resume policies reach here: the
+                    // classifier above already retired every Gone member, so
+                    // the old known_workers arm is gone with it. A kept
+                    // member restores as an idle row; nothing respawns
+                    // silently.
+                    members.push(m.clone());
+                    idle_workers += 1;
                     continue;
                 }
                 if !live.contains(&m.attach_id) {
@@ -9012,7 +8908,7 @@ impl Core {
         }
         if pruned_workers > 0 {
             self.notice_all(format!(
-                "restore: pruned {pruned_workers} worker member(s) whose registry row is gone"
+                "restore: retired {pruned_workers} worker member(s) whose registry row is gone"
             ));
         }
         if done_workers_total > 0 || skipped_done_tabs > 0 {
@@ -14038,16 +13934,22 @@ impl Core {
                 let cols = cols.unwrap_or(vt::DEFAULT_COLS);
                 // Capture the exact-placement intent before `placement` moves
                 // into run_pane, so the receipt can echo the committed context.
-                let exact =
-                    placement.at.is_some() && placement.fallback == PlacementFallback::Refuse;
-                let (anchor, direction) = (placement.at, placement.split);
+                // (x-18c4) ANY selector placement (tab or anchor) now gets the
+                // receipt, not just `--at current`: the bounded pane lane
+                // verifies placement by re-reading `pane ls`, and this receipt
+                // is the only record of where the server actually committed
+                // the pane. Wire shape is unchanged (`placement` was already
+                // `Option<ResolvedPlacement>`).
+                let wants_receipt = placement.tab.is_some() || placement.at.is_some();
+                let (anchor, direction, fallback_policy) =
+                    (placement.at, placement.split, placement.fallback);
                 let msg = match self
                     .run_pane(squad_key, cwd, argv, rows, cols, claim, placement, worker)
                 {
                     Ok(pane_id) => {
-                        let resolved = if exact {
-                            // The new pane now sits beside the anchor in the
-                            // anchor's squad+tab; read its real location back.
+                        let resolved = if wants_receipt {
+                            // The new pane now sits in its committed squad+tab;
+                            // read its real location back.
                             let (sid, tid, tab_name, tab_ordinal) = self
                                 .session
                                 .find_pane(pane_id)
@@ -14059,9 +13961,9 @@ impl Core {
                                 })
                                 .unwrap_or((0, 0, None, None));
                             Some(ResolvedPlacement {
-                                anchor: anchor.unwrap(),
+                                anchor: anchor.unwrap_or(0),
                                 direction: direction.unwrap_or(Dir::Down),
-                                fallback: PlacementFallback::Refuse,
+                                fallback: fallback_policy,
                                 squad: sid,
                                 tab: tid,
                                 tab_name,
@@ -14431,7 +14333,9 @@ impl Core {
                 rows,
                 branches,
                 tails,
+                read_ok,
             } => {
+                self.agents_read_ok = read_ok;
                 let identity_published = self.worker_identity_published(&rows);
                 // (x-07c2) Discoverability, once per server lifetime: the
                 // first paneless live row to appear with no portal open names
@@ -14457,6 +14361,10 @@ impl Core {
                 self.agents = rows;
                 self.branch_by_cwd = branches;
                 self.tail_by_session = tails;
+                // (x-688b) Row changes are the journal's change signal: a
+                // spawn or removal writes both. Refresh the cached scan here,
+                // off the per-push paths that read it.
+                self.journal = crate::spawn_journal::scan_spawn_journal();
                 if identity_published {
                     // A registry row can publish after a worker pane was
                     // recorded. Force the existing debounce funnel to flush
@@ -14790,6 +14698,8 @@ async fn serve(
         exit_tx,
         self_tx: core_tx.clone(),
         agents: Vec::new(),
+        agents_read_ok: false,
+        journal: crate::spawn_journal::scan_spawn_journal(),
         branch_by_cwd: HashMap::new(),
         tail_by_session: HashMap::new(),
         truth_by_name: HashMap::new(),
@@ -15044,6 +14954,7 @@ async fn serve(
                             rows,
                             branches,
                             tails,
+                            read_ok: state.read_ok(),
                         })
                         .await
                         .is_err()
@@ -16544,6 +16455,7 @@ async fn client_writer(
 mod tests {
     use super::*;
     use crate::pty::ChildGuard;
+    use crate::restore_gate::{set_restore_registry_rows, RestoreRegistryRowsGuard};
 
     #[path = "../server_thread_viewer_tests.rs"]
     mod thread_viewer_tests;
@@ -16565,6 +16477,10 @@ mod tests {
 
     // The per-pane orphan verdict family.
     mod pane_identity_tests;
+
+    // (x-b64e) The restore test family, same treatment: the file is
+    // shrink-only under the file-budget gate. Moved verbatim.
+    mod server_restore_tests;
 
     #[test]
     fn node_from_argv_reads_the_wrapper_token() {
@@ -18900,80 +18816,11 @@ mod tests {
         core.reap_pane(new_pid);
     }
 
-    #[test]
-    fn run_pane_places_at_named_tab_and_anchor() {
-        // AC2-HP: --tab <id> --at <pane> --split down lands below the anchor in
-        // that exact tab; a bad anchor is BAD_REQUEST with no orphan pane.
-        let mut core = two_tab_core();
-        core.shells = vec!["/bin/cat".into()];
-        let before_panes = core.panes.len();
-        let pid = core
-            .run_pane(
-                "/a".into(),
-                "/a".into(),
-                vec!["/bin/cat".into()],
-                24,
-                80,
-                false,
-                PanePlacement {
-                    portal_new: false,
-                    portal: None,
-                    target: PaneTarget::SquadId(1),
-                    split: Some(Dir::Down),
-                    here: false,
-                    tab: Some(TabSel::Id(10)),
-                    at: Some(2),
-                    fallback: PlacementFallback::NewTab,
-                    max_panes: None,
-                    thread_pane: false,
-                },
-                None,
-            )
-            .unwrap();
-        let tab = core
-            .session
-            .squad(1)
-            .unwrap()
-            .tabs
-            .iter()
-            .find(|t| t.id == 10)
-            .unwrap();
-        assert!(tree::leaves(&tab.root).contains(&pid), "landed in tab 10");
-        core.reap_pane(pid);
-
-        // Bad anchor: pane 999 is not in tab 10 -> BAD_REQUEST, no orphan pane.
-        let panes_now = core.panes.len();
-        let err = core
-            .run_pane(
-                "/a".into(),
-                "/a".into(),
-                vec!["/bin/cat".into()],
-                24,
-                80,
-                false,
-                PanePlacement {
-                    portal_new: false,
-                    portal: None,
-                    target: PaneTarget::SquadId(1),
-                    split: Some(Dir::Down),
-                    here: false,
-                    tab: Some(TabSel::Id(10)),
-                    at: Some(999),
-                    fallback: PlacementFallback::NewTab,
-                    max_panes: None,
-                    thread_pane: false,
-                },
-                None,
-            )
-            .unwrap_err();
-        assert_eq!(err.0, err_code::BAD_REQUEST);
-        assert_eq!(
-            core.panes.len(),
-            panes_now,
-            "a bad anchor reaps the pre-spawned pane (no orphan)"
-        );
-        let _ = before_panes;
-    }
+    // The pane-run placement family (x-18c4 receipt plus the named-tab/anchor
+    // placement test) moved verbatim into its own module: this file is over
+    // the shrink-only line, and test motion is the sanctioned shrink.
+    #[path = "pane_run_receipt_tests.rs"]
+    mod pane_run_receipt_tests;
 
     #[test]
     fn exact_current_refuses_conflicting_tab_selector() {
@@ -20807,495 +20654,6 @@ mod tests {
     }
 
     #[test]
-    fn restore_policy_resume_runs_the_bulk_driver_and_idle_spawns_nothing() {
-        // (x-7b5e) The widened knob, both new states. `resume` walks the same
-        // idle path as hold and THEN runs the bulk driver, so the stored
-        // workers come back through their own harness at startup. `idle`
-        // spawns nothing and claims no harness process - the explicit
-        // opt-out. The default stays byte-identical (the pinning test above).
-        let _guard = ResumeProgramGuard;
-        set_resume_program(&["/bin/cat"]);
-        let names = ["t-codex-one", "t-codex-two"];
-        let rows_for = || -> Vec<RegistryAgent> {
-            [
-                ("t-codex-one", "codex-session-one"),
-                ("t-codex-two", "codex-session-two"),
-            ]
-            .iter()
-            .map(|(n, sid)| {
-                let mut row = exited_claude_row(n, None);
-                row.harness = Some("codex".into());
-                row.harness_session_id = Some((*sid).into());
-                row
-            })
-            .collect()
-        };
-        let seed = |scratch: &str| {
-            let s = StoreScratch::new(scratch);
-            let origin = s.dir.join("repo");
-            std::fs::create_dir_all(&origin).unwrap();
-            crate::squad_store::upsert(
-                "",
-                &crate::squad_store::origin_key(&[origin.to_string_lossy().into_owned()]),
-                &[origin.to_string_lossy().into_owned()],
-                &[
-                    crate::squad_store::StoredMember {
-                        attach_id: String::new(),
-                        tombstone: false,
-                        detached: false,
-                        tab_name: None,
-                        cwd: None,
-                        worker: Some("t-codex-one".into()),
-                        harness: Some("codex".into()),
-                        harness_session_id: Some("codex-session-one".into()),
-                    },
-                    crate::squad_store::StoredMember {
-                        attach_id: String::new(),
-                        tombstone: false,
-                        detached: false,
-                        tab_name: None,
-                        cwd: None,
-                        worker: Some("t-codex-two".into()),
-                        harness: Some("codex".into()),
-                        harness_session_id: Some("codex-session-two".into()),
-                    },
-                ],
-            )
-            .unwrap();
-            s
-        };
-
-        // policy = resume: the driver runs at the end of restore and each
-        // member is resumed through the (overridden) harness form.
-        let _s1 = seed("restore-resume");
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        core.agents = rows_for();
-        let _known = KnownWorkersGuard;
-        set_known_workers(&names);
-        // The verb's own registry read is pinned to the same fake rows, so it
-        // cannot clobber them with the real machine registry.
-        let _rows = RestoreRegistryRowsGuard;
-        set_restore_registry_rows(rows_for());
-        {
-            let _policy = RestorePolicyGuard;
-            set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Resume);
-            core.restore_squads(24, 80, 999);
-        }
-        assert_eq!(
-            core.worker_pane.len(),
-            2,
-            "the bulk driver resumed both stored workers: {:?}",
-            core.worker_pane
-        );
-        let resumed: Vec<u64> = core.worker_pane.values().flatten().copied().collect();
-        assert_eq!(resumed.len(), 2, "one pane per resumed member");
-        for pid in resumed {
-            core.reap_pane(pid);
-        }
-
-        // policy = idle: the same members restore as idle rows and nothing
-        // claims a harness process.
-        let _s2 = seed("restore-policy-idle");
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        core.agents = rows_for();
-        let _known2 = KnownWorkersGuard;
-        set_known_workers(&names);
-        {
-            let _policy = RestorePolicyGuard;
-            set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Idle);
-            core.restore_squads(24, 80, 999);
-        }
-        assert!(
-            core.worker_pane.is_empty(),
-            "idle policy claims no harness process"
-        );
-        let members: Vec<String> = core
-            .squad_members
-            .values()
-            .flat_map(|ms| ms.iter().filter_map(|m| m.worker.clone()))
-            .collect();
-        assert_eq!(
-            members,
-            vec!["t-codex-one".to_string(), "t-codex-two".to_string()],
-            "both worker members stay as idle rows"
-        );
-    }
-
-    #[test]
-    fn restore_builds_named_held_panes_without_resuming_workers() {
-        // x-5f7f task 4: worker members are ALWAYS dead after a restart (their
-        // pty was a child of the previous server). Restore must not spawn
-        // them, must keep them as members so the rows stay idle, and must
-        // name the count (the positive-marker rule: an operator who sees no
-        // resumed worker can tell zero-recorded from never-ran).
-        let s = StoreScratch::new("restore-idle");
-        let origin = s.dir.join("repo");
-        std::fs::create_dir_all(&origin).unwrap();
-        crate::squad_store::upsert(
-            "",
-            &crate::squad_store::origin_key(&[origin.to_string_lossy().into_owned()]),
-            &[origin.to_string_lossy().into_owned()],
-            &[
-                crate::squad_store::StoredMember {
-                    attach_id: String::new(),
-                    tombstone: false,
-                    detached: false,
-                    tab_name: None,
-                    cwd: None,
-                    worker: Some("t-codex-one".into()),
-                    harness: Some("codex".into()),
-                    harness_session_id: Some("codex-session-one".into()),
-                },
-                crate::squad_store::StoredMember {
-                    attach_id: String::new(),
-                    tombstone: false,
-                    detached: false,
-                    tab_name: None,
-                    cwd: None,
-                    worker: Some("t-codex-two".into()),
-                    harness: Some("codex".into()),
-                    harness_session_id: Some("codex-session-two".into()),
-                },
-            ],
-        )
-        .unwrap();
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let mut one = exited_claude_row("t-codex-one", None);
-        one.harness = Some("codex".into());
-        one.harness_session_id = Some("codex-session-one".into());
-        let mut two = exited_claude_row("t-codex-two", None);
-        two.harness = Some("codex".into());
-        two.harness_session_id = Some("codex-session-two".into());
-        core.agents = vec![one, two];
-        // Pin the registry name set: restore reads the real registry, which a
-        // unit test cannot reach deterministically.
-        let _known = KnownWorkersGuard;
-        set_known_workers(&["t-codex-one", "t-codex-two"]);
-        let (c, mut rx) = client_with_rx(1);
-        core.clients.push(c);
-        core.restore_squads(24, 80, 999);
-        // One held shell exists per worker, but no codex process was resumed.
-        assert_eq!(
-            core.panes.len(),
-            2,
-            "every stored worker position becomes a held pane"
-        );
-        assert!(
-            core.worker_pane.is_empty(),
-            "holding a position must not claim the harness process exists"
-        );
-        assert_eq!(
-            core.held_workers.len(),
-            2,
-            "both panes wait for first focus"
-        );
-        assert!(
-            core.held_workers.keys().all(|pane| {
-                core.panes[pane].vt.text().contains("held across restart")
-                    && !core.panes[pane].vt.is_pristine_idle_shell()
-            }),
-            "held panes carry visible state and cannot be pruned as pristine shells"
-        );
-        let members: Vec<String> = core
-            .squad_members
-            .values()
-            .flat_map(|ms| ms.iter().filter_map(|m| m.worker.clone()))
-            .collect();
-        assert_eq!(
-            members,
-            vec!["t-codex-one".to_string(), "t-codex-two".to_string()],
-            "both worker members stay as idle rows"
-        );
-        let notices = drain_notices(&mut rx).join("\n");
-        assert!(
-            notices.contains("held 2 worker pane(s)"),
-            "the count is named, not silence: {notices}"
-        );
-
-        let held_pid = core
-            .held_workers
-            .iter()
-            .find_map(|(pane, worker)| (worker.name == "t-codex-one").then_some(*pane))
-            .unwrap();
-        assert_eq!(
-            core.resolve_local_pane("t-codex-one"),
-            Some(held_pid),
-            "template restore resolves the held slot instead of making a shell"
-        );
-        let (sid, ti) = core.session.find_pane(held_pid).unwrap();
-        let (trees, _) = core.stored_tab_trees(sid).unwrap();
-        assert!(
-            trees.iter().flat_map(|tree| &tree.slots).any(|slot| {
-                matches!(&slot.binding, LayoutBinding::Fno(id) if id == "worker:codex:codex-session-one")
-            }),
-            "topology capture keeps the exact held worker binding, not a name-only join or shell"
-        );
-        let tid = core.session.squad(sid).unwrap().tabs[ti].id;
-        core.clients[0].view = (sid, tid);
-        set_resume_program(&["/bin/cat"]);
-        let _resume_guard = ResumeProgramGuard;
-        core.command(1, Command::FocusPane(held_pid));
-        let resumed_pid = core.worker_pane["t-codex-one"][0];
-        assert_ne!(resumed_pid, held_pid, "focus swaps in the harness process");
-        assert!(
-            !core.panes.contains_key(&held_pid),
-            "the held shell is reaped"
-        );
-        assert_eq!(
-            core.panes.len(),
-            2,
-            "the fixed position is replaced, not split"
-        );
-        assert_eq!(core.held_workers.len(), 1, "the marker is one-shot");
-        core.agents[0].name = "rewritten-registry-name".into();
-        assert_eq!(
-            core.agent_rows()
-                .into_iter()
-                .find(|row| row.name == "rewritten-registry-name")
-                .and_then(|row| row.pane_id),
-            Some(resumed_pid),
-            "full session id keeps the resumed pane joined after a name rewrite"
-        );
-        let next = core.next_pane_id;
-        core.command(1, Command::FocusPane(resumed_pid));
-        assert_eq!(core.next_pane_id, next, "a second focus spawns nothing");
-    }
-
-    #[test]
-    fn restore_skips_done_members_and_prunes_their_tree_leaves() {
-        // x-9052 AC2-HP / AC3-HP: a worker whose node is done-and-merged is
-        // shipped work. It earns no held pane, no refused pane, and no shell
-        // substitute; the receipt names it once.
-        let s = StoreScratch::new("restore-done");
-        let origin = s.dir.join("repo");
-        std::fs::create_dir_all(&origin).unwrap();
-        let origin_str = origin.to_string_lossy().into_owned();
-        crate::squad_store::upsert(
-            "",
-            &crate::squad_store::origin_key(&[origin_str.clone()]),
-            &[origin_str.clone()],
-            &[
-                crate::squad_store::StoredMember {
-                    attach_id: String::new(),
-                    tombstone: false,
-                    detached: false,
-                    tab_name: None,
-                    cwd: None,
-                    worker: Some("t-done-one".into()),
-                    harness: Some("codex".into()),
-                    harness_session_id: Some("done-session".into()),
-                },
-                crate::squad_store::StoredMember {
-                    attach_id: String::new(),
-                    tombstone: false,
-                    detached: false,
-                    tab_name: None,
-                    cwd: None,
-                    worker: Some("t-live-one".into()),
-                    harness: Some("codex".into()),
-                    harness_session_id: Some("live-session".into()),
-                },
-            ],
-        )
-        .unwrap();
-        // Two one-slot tabs: one for the done member, one for the live one.
-        let slot_for = |session: &str| {
-            crate::proto::LayoutSlot::new(
-                "s0".into(),
-                LayoutBinding::Fno(format!("worker:codex:{session}")),
-            )
-        };
-        let tree_for = |session: &str| crate::proto::LayoutTreeSpec::Slot("s0".into());
-        crate::squad_store::set_tab_trees(
-            "",
-            &crate::squad_store::origin_key(&[origin_str.clone()]),
-            &[],
-            &[
-                crate::squad_store::StoredTabTree {
-                    tab_name: None,
-                    tree: tree_for("done-session"),
-                    slots: vec![slot_for("done-session")],
-                    focus: None,
-                },
-                crate::squad_store::StoredTabTree {
-                    tab_name: None,
-                    tree: tree_for("live-session"),
-                    slots: vec![slot_for("live-session")],
-                    focus: None,
-                },
-            ],
-            None,
-        )
-        .unwrap();
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let mut one = exited_claude_row("t-done-one", None);
-        one.harness = Some("codex".into());
-        one.harness_session_id = Some("done-session".into());
-        core.agents = vec![one];
-        let _known = KnownWorkersGuard;
-        set_known_workers(&["t-done-one", "t-live-one"]);
-        let _done = DoneSessionsGuard;
-        set_done_sessions(
-            [("codex".to_string(), "done-session".to_string())]
-                .into_iter()
-                .collect(),
-        );
-        set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Hold);
-        let _pol = RestorePolicyGuard;
-        let (c, mut rx) = client_with_rx(1);
-        core.clients.push(c);
-        core.restore_squads(24, 80, 999);
-        assert_eq!(
-            core.panes.len(),
-            1,
-            "one pane: the live member's held pane; the done member earns none"
-        );
-        assert_eq!(core.held_workers.len(), 1, "only the live member is held");
-        let notices = drain_notices(&mut rx).join("\n");
-        assert!(
-            notices.contains("skipped 1 done worker pane(s)"),
-            "the skip is named once: {notices}"
-        );
-        assert!(
-            notices.contains("t-done-one"),
-            "the done member is named: {notices}"
-        );
-        assert!(
-            notices.contains("1 done tab(s)"),
-            "the skipped tab is counted: {notices}"
-        );
-        // The live member's tree came back with its held pane bound.
-        let held_pid = core.panes.keys().copied().next().unwrap();
-        let (sid, _ti) = core.session.find_pane(held_pid).unwrap();
-        let members: Vec<String> = core
-            .squad_members
-            .values()
-            .flat_map(|ms| ms.iter().filter_map(|m| m.worker.clone()))
-            .collect();
-        assert_eq!(
-            members,
-            vec!["t-done-one".to_string(), "t-live-one".to_string()],
-            "both members stay as rows (history, not garbage)"
-        );
-    }
-
-    #[test]
-    fn restore_retires_members_the_registry_forgot_but_keeps_exited_rows() {
-        // x-2990: a member whose attach-id NO row names is dead weight; one
-        // whose EXITED row still names it is the resumable dim card and stays.
-        let s = StoreScratch::new("restore-retire");
-        let origin = s.dir.join("repo");
-        std::fs::create_dir_all(&origin).unwrap();
-        let origin_str = origin.to_string_lossy().into_owned();
-        crate::squad_store::upsert(
-            "",
-            &crate::squad_store::origin_key(&[origin_str.clone()]),
-            &[origin_str.clone()],
-            &[
-                crate::squad_store::StoredMember {
-                    attach_id: "deadbeef".into(),
-                    tombstone: true,
-                    detached: false,
-                    tab_name: None,
-                    cwd: None,
-                    worker: None,
-                    harness: None,
-                    harness_session_id: None,
-                },
-                crate::squad_store::StoredMember {
-                    attach_id: "c0ffee00".into(),
-                    tombstone: true,
-                    detached: false,
-                    tab_name: None,
-                    cwd: None,
-                    worker: None,
-                    harness: None,
-                    harness_session_id: None,
-                },
-            ],
-        )
-        .unwrap();
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let mut exited = exited_claude_row("t-exited-agent", None);
-        exited.attach_id = Some("c0ffee00".into());
-        exited.exited = true;
-        core.agents = vec![exited.clone()];
-        let _reg = RestoreRegistryRowsGuard;
-        set_restore_registry_rows(vec![exited]);
-        let _known = KnownWorkersGuard;
-        set_known_workers(&[]);
-        set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Hold);
-        let _pol = RestorePolicyGuard;
-        let (c, mut rx) = client_with_rx(1);
-        core.clients.push(c);
-        core.restore_squads(24, 80, 999);
-        let notices = drain_notices(&mut rx).join("\n");
-        assert!(
-            notices.contains("retired 1 member(s) the registry no longer names"),
-            "the retirement is named: {notices}"
-        );
-        let members: Vec<String> = core
-            .squad_members
-            .values()
-            .flat_map(|ms| ms.iter().map(|m| m.attach_id.clone()))
-            .collect();
-        assert!(
-            !members.contains(&"deadbeef".to_string()),
-            "the forgotten member is gone: {members:?}"
-        );
-        assert!(
-            members.contains(&"c0ffee00".to_string()),
-            "the exited-row member stays: {members:?}"
-        );
-    }
-
-    #[test]
-    fn restore_refusal_names_the_never_bound_marker() {
-        let never_bound = crate::squad_store::StoredMember {
-            attach_id: String::new(),
-            tombstone: false,
-            detached: false,
-            tab_name: None,
-            cwd: None,
-            worker: Some("residue".into()),
-            harness: None,
-            harness_session_id: None,
-        };
-        let markers = HashMap::from([(
-            String::from("residue"),
-            String::from("missing harness session identity"),
-        )]);
-        assert_eq!(
-            restore_worker_refusal_reason(&never_bound, None, None, &HashMap::new(), &markers),
-            "never bound: missing harness session identity",
-            "the placeholder pane says WHY the member can never bind"
-        );
-        // AC7-EDGE: a member carrying a session id keeps the session-keyed
-        // path; the name marker is last-resort identity only.
-        let mut bound = never_bound.clone();
-        bound.harness = Some("codex".into());
-        bound.harness_session_id = Some("s".into());
-        let receipts = HashMap::from([(
-            (String::from("codex"), String::from("s")),
-            HeldWorker {
-                name: "residue".into(),
-                harness: "codex".into(),
-                harness_session_id: "s".into(),
-                cwd: String::new(),
-            },
-        )]);
-        assert_eq!(
-            restore_worker_refusal_reason(&bound, None, None, &receipts, &markers),
-            "codex session s is not resumable"
-        );
-    }
-
-    #[test]
     fn refused_placeholder_marker_roundtrips_through_argv() {
         // AC8-HP: the keeper re-adoption parse recovers the refused worker.
         let argv = vec![
@@ -21330,35 +20688,6 @@ mod tests {
             .expect("placeholder spawns");
         let entry = core.panes.get(&pid).expect("registered");
         assert_eq!(entry.refused_worker.as_deref(), Some("w"));
-    }
-
-    #[test]
-    fn restore_legacy_member_uses_unique_receipt_harness() {
-        let member = crate::squad_store::StoredMember {
-            attach_id: String::new(),
-            tombstone: false,
-            detached: false,
-            tab_name: None,
-            cwd: None,
-            worker: Some("worker".into()),
-            harness: None,
-            harness_session_id: Some("full-session".into()),
-        };
-        let receipts = HashMap::from([(
-            (String::from("codex"), String::from("full-session")),
-            HeldWorker {
-                name: "worker".into(),
-                harness: "codex".into(),
-                harness_session_id: "full-session".into(),
-                cwd: "/repo".into(),
-            },
-        )]);
-        let receipt = receipt_for_member(&receipts, &member).expect("unique receipt");
-        assert_eq!(receipt.harness, "codex");
-        assert_eq!(
-            restore_worker_refusal_reason(&member, None, None, &receipts, &HashMap::new()),
-            "codex session full-session is not resumable"
-        );
     }
 
     #[test]
@@ -21519,156 +20848,6 @@ mod tests {
         assert!(
             drain_notices(&mut rx).join("\n").contains("live elsewhere"),
             "the client receives the same reason"
-        );
-    }
-
-    #[test]
-    fn restore_prunes_worker_members_whose_registry_row_is_gone() {
-        // x-5f7f: a worker member whose name no longer exists in the registry
-        // can never resume, so restore drops it and says so - otherwise every
-        // restart counts a ghost idle row forever (a reaped worker, an `fno
-        // agents rm`). A name that still exists stays, exited or not.
-        let s = StoreScratch::new("restore-prune");
-        let origin = s.dir.join("repo");
-        std::fs::create_dir_all(&origin).unwrap();
-        crate::squad_store::upsert(
-            "",
-            &crate::squad_store::origin_key(&[origin.to_string_lossy().into_owned()]),
-            &[origin.to_string_lossy().into_owned()],
-            &[
-                crate::squad_store::StoredMember {
-                    attach_id: String::new(),
-                    tombstone: false,
-                    detached: false,
-                    tab_name: None,
-                    cwd: None,
-                    worker: Some("t-codex-live".into()),
-                    harness: None,
-                    harness_session_id: None,
-                },
-                crate::squad_store::StoredMember {
-                    attach_id: String::new(),
-                    tombstone: false,
-                    detached: false,
-                    tab_name: None,
-                    cwd: None,
-                    worker: Some("t-codex-reaped".into()),
-                    harness: None,
-                    harness_session_id: None,
-                },
-            ],
-        )
-        .unwrap();
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let _known = KnownWorkersGuard;
-        let _hold = HoldWorkersGuard;
-        set_hold_workers(false);
-        set_known_workers(&["t-codex-live"]);
-        let (c, mut rx) = client_with_rx(1);
-        core.clients.push(c);
-        core.restore_squads(24, 80, 999);
-        assert!(
-            core.held_workers.is_empty(),
-            "hold_workers=false keeps the legacy idle-row-only behavior"
-        );
-        let members: Vec<String> = core
-            .squad_members
-            .values()
-            .flat_map(|ms| ms.iter().filter_map(|m| m.worker.clone()))
-            .collect();
-        assert_eq!(
-            members,
-            vec!["t-codex-live".to_string()],
-            "the known name stays, the reaped one is pruned"
-        );
-        let notices = drain_notices(&mut rx).join("\n");
-        assert!(
-            notices.contains("pruned 1 worker member(s) whose registry row is gone"),
-            "the prune is named, never silent: {notices}"
-        );
-        assert!(
-            notices.contains("1 worker row(s) idle"),
-            "the survivor still counts as idle: {notices}"
-        );
-        // The prune is persisted, not just in-memory: the next load sees one.
-        let stored = crate::squad_store::load();
-        let all: Vec<&str> = stored
-            .squads
-            .iter()
-            .flat_map(|sq| sq.members.iter().filter_map(|m| m.worker.as_deref()))
-            .collect();
-        assert_eq!(all, vec!["t-codex-live"], "the prune reaches the store");
-    }
-
-    #[test]
-    fn restore_skips_the_prune_entirely_when_the_registry_is_unreadable() {
-        // The fail-safe half of the prune: an unreadable registry must delete
-        // NOTHING. Mapping a failed read to an empty set would prune every
-        // worker member and persist the deletion - ghosts are cheap, deletion
-        // on a transient IO error is not. Every member stays, idle-counted,
-        // and the skip is named in a notice.
-        let s = StoreScratch::new("restore-prune-skip");
-        let origin = s.dir.join("repo");
-        std::fs::create_dir_all(&origin).unwrap();
-        crate::squad_store::upsert(
-            "",
-            &crate::squad_store::origin_key(&[origin.to_string_lossy().into_owned()]),
-            &[origin.to_string_lossy().into_owned()],
-            &[
-                crate::squad_store::StoredMember {
-                    attach_id: String::new(),
-                    tombstone: false,
-                    detached: false,
-                    tab_name: None,
-                    cwd: None,
-                    worker: Some("t-codex-one".into()),
-                    harness: None,
-                    harness_session_id: None,
-                },
-                crate::squad_store::StoredMember {
-                    attach_id: String::new(),
-                    tombstone: false,
-                    detached: false,
-                    tab_name: None,
-                    cwd: None,
-                    worker: Some("t-codex-two".into()),
-                    harness: None,
-                    harness_session_id: None,
-                },
-            ],
-        )
-        .unwrap();
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let _known = KnownWorkersGuard;
-        let _hold = HoldWorkersGuard;
-        set_hold_workers(false);
-        set_known_workers_unreadable();
-        let (c, mut rx) = client_with_rx(1);
-        core.clients.push(c);
-        core.restore_squads(24, 80, 999);
-        let members: Vec<String> = core
-            .squad_members
-            .values()
-            .flat_map(|ms| ms.iter().filter_map(|m| m.worker.clone()))
-            .collect();
-        assert_eq!(
-            members.len(),
-            2,
-            "an unreadable registry keeps every member: {members:?}"
-        );
-        let stored = crate::squad_store::load();
-        let all: Vec<&str> = stored
-            .squads
-            .iter()
-            .flat_map(|sq| sq.members.iter().filter_map(|m| m.worker.as_deref()))
-            .collect();
-        assert_eq!(all.len(), 2, "nothing was deleted from the store");
-        let notices = drain_notices(&mut rx).join("\n");
-        assert!(
-            notices.contains("prune skipped"),
-            "the skip is named, never silent: {notices}"
         );
     }
 
@@ -24266,36 +23445,6 @@ mod tests {
     }
 
     #[test]
-    fn restore_member_cwd_prefers_the_stored_cwd_when_it_still_exists() {
-        // x-caef case 2: a worktree worker restores into its own worktree, not
-        // the squad's origins[0].
-        let (cwd, notice) = restore_member_cwd(Some("/worktrees/x-caef"), "/repo", |p| {
-            p == "/worktrees/x-caef"
-        });
-        assert_eq!(cwd, "/worktrees/x-caef");
-        assert!(notice.is_none(), "no fallback happened, no notice");
-    }
-
-    #[test]
-    fn restore_member_cwd_falls_back_and_names_the_gone_path_on_a_vanished_worktree() {
-        // x-caef case 3: an archived worktree is not silently swallowed - the
-        // pane still lands (at origins[0]) and the caller gets both paths to
-        // notice, not just a bare fallback.
-        let (cwd, notice) = restore_member_cwd(Some("/worktrees/archived"), "/repo", |_| false);
-        assert_eq!(cwd, "/repo", "falls back to cwd0");
-        assert_eq!(notice.as_deref(), Some("/worktrees/archived"));
-    }
-
-    #[test]
-    fn restore_member_cwd_falls_back_silently_for_a_pre_xcaef_member() {
-        // A member persisted before this field existed has no stored cwd at
-        // all - that is not a vanished path, so no notice.
-        let (cwd, notice) = restore_member_cwd(None, "/repo", |_| true);
-        assert_eq!(cwd, "/repo");
-        assert!(notice.is_none());
-    }
-
-    #[test]
     fn live_ids_from_marks_live_registry_and_roster_rows() {
         // AC1-HP hinges on a FRESH liveness read at first attach (self.agents is
         // still empty then). Pure over the raw file contents: an exited registry
@@ -24314,104 +23463,6 @@ mod tests {
         );
         // Missing files (None) yield an empty live set.
         assert!(live_ids_from(None, None, 0).is_empty());
-    }
-
-    #[test]
-    fn restore_zero_live_squad_gets_a_shell_and_tombstones_dead_members() {
-        // AC1-EDGE: a persisted workspace whose members are all dead
-        // materializes with one shell pane, each dead member a tombstone; the
-        // reconciled tombstone is written back to the store.
-        let _s = StoreScratch::new("restore-dead");
-        crate::squad_store::upsert(
-            "dead-ws",
-            "",
-            &["/tmp".into()],
-            &[stored_member("deadbeef", false)],
-        )
-        .unwrap();
-        let mut core = empty_core();
-        core.shells = shell_candidates(std::env::var_os("SHELL").as_deref());
-        // No live set (no registry/roster under the scratch home).
-        core.restore_squads(24, 80, 999);
-        assert_eq!(core.session.squads.len(), 1);
-        let sq = &core.session.squads[0];
-        assert_eq!(sq.name.as_deref(), Some("dead-ws"));
-        assert_eq!(sq.tabs.len(), 1, "zero live members -> one shell tab");
-        let sid = sq.id;
-        assert!(
-            core.squad_members[&sid][0].tombstone,
-            "the dead member is tombstoned at restore"
-        );
-        let loaded = crate::squad_store::load();
-        assert!(
-            loaded.squads[0].members[0].tombstone,
-            "the tombstone is persisted"
-        );
-        // Reap the spawned shell so the test leaks no process.
-        let pids: Vec<u64> = core.panes.keys().copied().collect();
-        for pid in pids {
-            core.reap_pane(pid);
-        }
-    }
-
-    #[test]
-    fn restore_is_a_noop_on_an_empty_store() {
-        let _s = StoreScratch::new("restore-empty");
-        let mut core = empty_core();
-        core.restore_squads(24, 80, 999);
-        assert!(
-            core.session.squads.is_empty(),
-            "nothing persisted -> nothing restored"
-        );
-    }
-
-    #[test]
-    fn restore_self_heal_sweeps_an_unnamed_dead_origin_orphan() {
-        // x-a572 US4: at restore, an unnamed squad whose every origin is gone
-        // and which hosts no restorable member is removed (the store converges
-        // without a manual prune) and skipped. A named squad in the same store
-        // is never touched (Locked Decision 3).
-        let _s = StoreScratch::new("restore-selfheal");
-        crate::squad_store::upsert(
-            "",
-            "orphan",
-            &["/no/such/selfheal".into()],
-            &[stored_member("deadbeef", false)],
-        )
-        .unwrap();
-        crate::squad_store::upsert(
-            "real",
-            "",
-            &["/no/such/selfheal".into()],
-            &[stored_member("deadbeef", false)],
-        )
-        .unwrap();
-
-        let mut core = empty_core();
-        core.shells = shell_candidates(std::env::var_os("SHELL").as_deref());
-        core.restore_squads(24, 80, 999);
-
-        // The orphan was swept from the store; the named squad remains.
-        let loaded = crate::squad_store::load();
-        assert!(
-            !loaded.squads.iter().any(|s| s.key == "orphan"),
-            "unnamed dead-origin orphan swept: {:?}",
-            loaded.squads
-        );
-        assert!(
-            loaded.squads.iter().any(|s| s.name == "real"),
-            "named squad kept: {:?}",
-            loaded.squads
-        );
-        // Only the named squad was restored into the session.
-        assert_eq!(core.session.squads.len(), 1, "the orphan is not restored");
-        assert_eq!(core.session.squads[0].name.as_deref(), Some("real"));
-
-        // Reap the spawned shell so the test leaks no process.
-        let pids: Vec<u64> = core.panes.keys().copied().collect();
-        for pid in pids {
-            core.reap_pane(pid);
-        }
     }
 
     #[test]
@@ -24689,370 +23740,6 @@ mod tests {
     /// resolution -> apply) is exercised by the handler split itself; these
     /// tests drive the apply half directly so the gates, rows and rerun
     /// semantics are deterministic.
-    fn run_workspace_restore(core: &mut Core, dry_run: bool) -> Vec<RestoreRow> {
-        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
-        core.handle(CoreMsg::WorkspaceRestoreApply {
-            dry_run,
-            harness: None,
-            plans: HashMap::new(),
-            reply: tx,
-        });
-        match rx.blocking_recv().expect("a reply") {
-            ServerMsg::WorkspaceRestored { rows } => rows,
-            other => panic!("expected WorkspaceRestored, got {other:?}"),
-        }
-    }
-
-    fn stored_worker(
-        name: &str,
-        harness: &str,
-        sid: &str,
-        cwd: &str,
-    ) -> crate::squad_store::StoredMember {
-        crate::squad_store::StoredMember {
-            attach_id: String::new(),
-            tombstone: false,
-            detached: false,
-            tab_name: None,
-            cwd: Some(cwd.into()),
-            worker: Some(name.into()),
-            harness: Some(harness.into()),
-            harness_session_id: Some(sid.into()),
-        }
-    }
-
-    #[test]
-    fn workspace_restore_before_the_first_attach_refuses_not_reports_empty() {
-        // The persisted squads reach memory only on the first real attach, so
-        // a pre-attach verb must name the precondition rather than answer an
-        // empty member list that reads as "nothing to restore".
-        let mut core = empty_core();
-        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
-        core.handle(CoreMsg::WorkspaceRestore {
-            dry_run: false,
-            harness: None,
-            reply: tx,
-        });
-        match rx.blocking_recv().expect("a reply") {
-            ServerMsg::Err { code, msg } => {
-                assert_eq!(code, crate::proto::err_code::RESTORE_NOT_RUN);
-                assert!(
-                    msg.contains("attach"),
-                    "refusal must name the remedy: {msg}"
-                );
-            }
-            other => panic!("expected Err, got {other:?}"),
-        }
-        // After the first real attach ran the startup restore, the same verb
-        // proceeds instead of refusing.
-        core.restored = true;
-        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
-        core.handle(CoreMsg::WorkspaceRestore {
-            dry_run: true,
-            harness: None,
-            reply: tx,
-        });
-        assert!(
-            matches!(
-                rx.blocking_recv().expect("a reply"),
-                ServerMsg::WorkspaceRestored { .. }
-            ),
-            "a post-attach restore must not be refused"
-        );
-    }
-
-    #[test]
-    fn workspace_restore_refuses_duplicated_worker_names_up_front() {
-        // Two stored members may share one display name with distinct session
-        // identities (a supported store state). The bulk path refuses both by
-        // name instead of letting the second twin find the first one's pane
-        // through the name-only map and report "focused" while its own
-        // session was never restored.
-        let _guard = ResumeProgramGuard;
-        set_resume_program(&["/bin/cat"]);
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let cwd = std::env::temp_dir().join("fno-ws-restore-dup");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let shell = core
-            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
-            .unwrap();
-        core.session.add_squad(
-            7,
-            vec![cwd.to_string_lossy().into_owned()],
-            None,
-            Tab {
-                name: None,
-                id: 70,
-                root: Node::Leaf(shell),
-                focus: shell,
-            },
-        );
-        core.squad_members.insert(
-            7,
-            vec![
-                stored_worker("twin", "codex", "codex-session-one", &cwd.to_string_lossy()),
-                stored_worker("twin", "codex", "codex-session-two", &cwd.to_string_lossy()),
-            ],
-        );
-        let rows = run_workspace_restore(&mut core, false);
-        assert_eq!(rows.len(), 2, "both twins report");
-        for row in &rows {
-            assert_eq!(row.outcome, "refused");
-            assert!(
-                row.reason
-                    .as_deref()
-                    .is_some_and(|r| r.contains("ambiguous")),
-                "the refusal names the ambiguity: {:?}",
-                row.reason
-            );
-        }
-        assert!(
-            core.worker_pane.is_empty(),
-            "the guard refuses before any spawn: {:?}",
-            core.worker_pane
-        );
-    }
-
-    #[test]
-    fn workspace_restore_resumes_members_and_a_rerun_focuses() {
-        // AC1-HP + AC6-ERR: one apply resumes the stored worker through the
-        // (overridden) harness form; a second apply FOCUSES the live pane and
-        // spawns nothing. Tombstoned and non-worker members are not
-        // candidates.
-        let _guard = ResumeProgramGuard;
-        set_resume_program(&["/bin/cat"]);
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let cwd = std::env::temp_dir().join("fno-ws-restore");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let shell = core
-            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
-            .unwrap();
-        core.session.add_squad(
-            7,
-            vec![cwd.to_string_lossy().into_owned()],
-            None,
-            Tab {
-                name: None,
-                id: 70,
-                root: Node::Leaf(shell),
-                focus: shell,
-            },
-        );
-        core.agents = vec![RegistryAgent {
-            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
-            harness: Some("codex".into()),
-            name: "t-codex-one".into(),
-            cwd: cwd.to_string_lossy().into_owned(),
-            exited: true,
-            liveness: agents_view::Liveness::Dead,
-            ..Default::default()
-        }];
-        core.squad_members.insert(
-            7u64,
-            vec![
-                stored_worker(
-                    "t-codex-one",
-                    "codex",
-                    "01a027ad-fe00-7c12-a116-9ee37c6bdfec",
-                    cwd.to_string_lossy().as_ref(),
-                ),
-                // Not candidates: an attach-recorded member carries no worker
-                // name, and a tombstoned member is dead by operator ruling.
-                crate::squad_store::StoredMember {
-                    attach_id: "deadbee1".into(),
-                    tombstone: false,
-                    detached: false,
-                    tab_name: None,
-                    cwd: None,
-                    worker: None,
-                    harness: Some("claude".into()),
-                    harness_session_id: None,
-                },
-                {
-                    let mut dead = stored_worker("gone-row", "codex", "sid-gone", "/x");
-                    dead.tombstone = true;
-                    dead
-                },
-            ],
-        );
-
-        let rows = run_workspace_restore(&mut core, false);
-        assert_eq!(rows.len(), 1, "exactly the live worker is a candidate");
-        assert_eq!(rows[0].member, "t-codex-one");
-        assert_eq!(rows[0].outcome, "resumed", "{:?}", rows[0]);
-        let resumed_pane = rows[0].pane.expect("resumed row names its pane");
-        let new_panes: Vec<u64> = core
-            .panes
-            .keys()
-            .filter(|&&p| p != shell)
-            .copied()
-            .collect();
-        assert_eq!(
-            new_panes,
-            vec![resumed_pane],
-            "one new pane, the reported one"
-        );
-
-        // The rerun focuses the SAME pane: no second writer ever starts.
-        let rows = run_workspace_restore(&mut core, false);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].outcome, "focused", "{:?}", rows[0]);
-        assert_eq!(rows[0].pane, Some(resumed_pane), "the live pane is focused");
-        let still_one: Vec<u64> = core
-            .panes
-            .keys()
-            .filter(|&&p| p != shell)
-            .copied()
-            .collect();
-        assert_eq!(still_one, vec![resumed_pane], "the rerun spawned nothing");
-
-        core.reap_pane(resumed_pane);
-        core.reap_pane(shell);
-        let _ = std::fs::remove_dir_all(&cwd);
-    }
-
-    #[test]
-    fn workspace_restore_dry_run_classifies_without_spawning() {
-        // --dry-run is load-bearing: the plan is readable before twenty
-        // processes start. Every gate runs; nothing does.
-        let _guard = ResumeProgramGuard;
-        set_resume_program(&["/bin/cat"]);
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let cwd = std::env::temp_dir().join("fno-ws-restore-dry");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let shell = core
-            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
-            .unwrap();
-        core.session.add_squad(
-            7,
-            vec![cwd.to_string_lossy().into_owned()],
-            None,
-            Tab {
-                name: None,
-                id: 70,
-                root: Node::Leaf(shell),
-                focus: shell,
-            },
-        );
-        core.agents = vec![RegistryAgent {
-            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
-            harness: Some("codex".into()),
-            name: "t-codex-one".into(),
-            cwd: cwd.to_string_lossy().into_owned(),
-            exited: true,
-            liveness: agents_view::Liveness::Dead,
-            ..Default::default()
-        }];
-        core.squad_members.insert(
-            7u64,
-            vec![stored_worker(
-                "t-codex-one",
-                "codex",
-                "01a027ad-fe00-7c12-a116-9ee37c6bdfec",
-                cwd.to_string_lossy().as_ref(),
-            )],
-        );
-
-        let rows = run_workspace_restore(&mut core, true);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].outcome, "planned", "{:?}", rows[0]);
-        assert!(rows[0].pane.is_none(), "a plan names no pane");
-        assert_eq!(
-            core.panes.len(),
-            1,
-            "the dry run spawned nothing beyond the seed shell"
-        );
-        core.reap_pane(shell);
-        let _ = std::fs::remove_dir_all(&cwd);
-    }
-
-    #[test]
-    fn workspace_restore_names_every_refused_member_and_restores_the_rest() {
-        // AC5-ERR: a member the table gives no form for, and a claude member
-        // whose plan never resolved, are NAMED with their reasons while the
-        // resumable member still resumes. A silent skip would look identical
-        // to "the code never ran".
-        let _guard = ResumeProgramGuard;
-        set_resume_program(&["/bin/cat"]);
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let cwd = std::env::temp_dir().join("fno-ws-restore-refused");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let shell = core
-            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
-            .unwrap();
-        core.session.add_squad(
-            7,
-            vec![cwd.to_string_lossy().into_owned()],
-            None,
-            Tab {
-                name: None,
-                id: 70,
-                root: Node::Leaf(shell),
-                focus: shell,
-            },
-        );
-        core.agents = vec![RegistryAgent {
-            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
-            harness: Some("codex".into()),
-            name: "t-codex-one".into(),
-            cwd: cwd.to_string_lossy().into_owned(),
-            exited: true,
-            liveness: agents_view::Liveness::Dead,
-            ..Default::default()
-        }];
-        core.squad_members.insert(
-            7u64,
-            vec![
-                stored_worker(
-                    "t-codex-one",
-                    "codex",
-                    "01a027ad-fe00-7c12-a116-9ee37c6bdfec",
-                    cwd.to_string_lossy().as_ref(),
-                ),
-                // A harness no table row declares: the negative arm names it.
-                stored_worker("mystery", "iambad", "sid-9", "/x"),
-                // A claude member whose plan never resolved on the bulk path.
-                stored_worker("routed-glm", "claude", "uuid-1", "/x"),
-            ],
-        );
-
-        let rows = run_workspace_restore(&mut core, false);
-        let by_name = |n: &str| {
-            rows.iter()
-                .find(|r| r.member == n)
-                .unwrap_or_else(|| panic!("no row for {n} in {rows:?}"))
-        };
-        assert_eq!(by_name("t-codex-one").outcome, "resumed", "{rows:?}");
-        let mystery = by_name("mystery");
-        assert_eq!(mystery.outcome, "refused");
-        let reason = mystery
-            .reason
-            .as_deref()
-            .expect("the refusal names a reason");
-        assert!(reason.contains("iambad"), "the harness is named: {reason}");
-        let routed = by_name("routed-glm");
-        assert_eq!(routed.outcome, "refused");
-        let reason = routed
-            .reason
-            .as_deref()
-            .expect("the refusal names a reason");
-        assert!(
-            reason.contains("re-entry plan unresolved"),
-            "the missing plan is named: {reason}"
-        );
-
-        let resumed: Vec<u64> = rows.iter().filter_map(|r| r.pane).collect();
-        for pid in resumed {
-            core.reap_pane(pid);
-        }
-        core.reap_pane(shell);
-        let _ = std::fs::remove_dir_all(&cwd);
-    }
-
     #[test]
     fn recruit_consumes_staged_batch_plans() {
         // The picker is N spawns under one gesture: every claude id's plan
@@ -25150,131 +23837,6 @@ mod tests {
             "the replayed recruit spawned the planned pane"
         );
         core.reap_pane(new_pid);
-    }
-
-    #[test]
-    fn restore_merges_unnamed_lane_into_home_squad() {
-        // Operator decision: an unnamed lane persists and comes back. Because
-        // restore runs AFTER attach() minted the connecting client's home squad,
-        // a restored unnamed lane whose origins match home merges its members INTO
-        // home rather than duplicating it. (A dead member stands in for the live
-        // re-attach, whose spawn path the named-restore tests already cover.)
-        let _s = StoreScratch::new("restore-home-merge");
-        // A real cwd so the self-heal sweep sees a SURVIVING origin and keeps the
-        // lane (a gone-origin lane would be reaped at restore, x-a572 US4).
-        let home = std::env::temp_dir().join(format!("fno-restore-merge-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let home_str = home.to_str().unwrap().to_string();
-        crate::squad_store::upsert(
-            "",
-            "homekey1",
-            std::slice::from_ref(&home_str),
-            &[stored_member("deadbeef", false)],
-        )
-        .unwrap();
-        let mut core = empty_core();
-        core.shells = shell_candidates(std::env::var_os("SHELL").as_deref());
-        // A freshly-minted home squad for the SAME cwd, exactly as attach() leaves it.
-        let home_pid = core.spawn_pane(24, 80, &home_str).expect("home shell");
-        core.session.add_squad(
-            1,
-            vec![home_str.clone()],
-            None,
-            Tab {
-                name: None,
-                id: 1,
-                root: Node::Leaf(home_pid),
-                focus: home_pid,
-            },
-        );
-        let squads_before = core.session.squads.len();
-
-        core.restore_squads(24, 80, 1);
-
-        assert_eq!(
-            core.session.squads.len(),
-            squads_before,
-            "no duplicate squad - the lane merged into home"
-        );
-        assert_eq!(core.session.squads[0].id, 1, "still the home squad");
-        assert_eq!(
-            core.session.squads[0].tabs.len(),
-            1,
-            "home keeps its one shell tab - no extra fallback shell"
-        );
-        assert!(
-            core.squad_members[&1]
-                .iter()
-                .any(|m| m.attach_id == "deadbeef"),
-            "the lane's member folded into home"
-        );
-        let pids: Vec<u64> = core.panes.keys().copied().collect();
-        for pid in pids {
-            core.reap_pane(pid);
-        }
-    }
-
-    #[test]
-    fn restore_reconstructs_a_separate_unnamed_lane_as_its_own_squad() {
-        // A persisted unnamed lane whose origins DON'T match home restores as its
-        // own squad (not merged) - every squad remains, TUI or API.
-        let _s = StoreScratch::new("restore-separate-lane");
-        // A real cwd so the self-heal sweep keeps the lane (a gone-origin lane
-        // would be reaped at restore, x-a572 US4).
-        let lane_cwd =
-            std::env::temp_dir().join(format!("fno-restore-separate-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&lane_cwd);
-        std::fs::create_dir_all(&lane_cwd).unwrap();
-        let lane_cwd_str = lane_cwd.to_str().unwrap().to_string();
-        crate::squad_store::upsert(
-            "",
-            "lanekey1",
-            std::slice::from_ref(&lane_cwd_str),
-            &[stored_member("deadbeef", false)],
-        )
-        .unwrap();
-        let mut core = empty_core();
-        core.shells = shell_candidates(std::env::var_os("SHELL").as_deref());
-        let home_pid = core.spawn_pane(24, 80, "/tmp/home").expect("home shell");
-        core.session.add_squad(
-            1,
-            vec!["/tmp/home".into()],
-            None,
-            Tab {
-                name: None,
-                id: 1,
-                root: Node::Leaf(home_pid),
-                focus: home_pid,
-            },
-        );
-
-        core.restore_squads(24, 80, 1);
-
-        assert_eq!(
-            core.session.squads.len(),
-            2,
-            "the separate lane restored as its own squad"
-        );
-        let lane = core
-            .session
-            .squads
-            .iter()
-            .find(|s| s.origins == vec![lane_cwd_str.clone()])
-            .expect("lane restored");
-        assert!(lane.name.is_none(), "restored unnamed");
-        assert_eq!(lane.tabs.len(), 1, "zero-live lane gets its fallback shell");
-        let lane_sid = lane.id;
-        assert!(
-            core.squad_members[&lane_sid]
-                .iter()
-                .any(|m| m.attach_id == "deadbeef" && m.tombstone),
-            "the dead member restored as a tombstone under its own lane"
-        );
-        let pids: Vec<u64> = core.panes.keys().copied().collect();
-        for pid in pids {
-            core.reap_pane(pid);
-        }
     }
 
     #[test]
@@ -26687,6 +25249,13 @@ mod tests {
             exit_tx,
             self_tx,
             agents: Vec::new(),
+            agents_read_ok: false,
+            journal: crate::spawn_journal::SpawnJournal {
+                receipts: HashMap::new(),
+                never_bound: HashMap::new(),
+                spawned_names: HashSet::new(),
+                error: None,
+            },
             branch_by_cwd: HashMap::new(),
             tail_by_session: HashMap::new(),
             truth_by_name: HashMap::new(),

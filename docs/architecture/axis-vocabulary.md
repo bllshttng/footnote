@@ -88,6 +88,8 @@ The caller sets one value on the effort axis. Each harness spells the reasoning-
 
 claude accepts `max`, and codex does not. codex accepts `minimal`, and claude does not. An `--effort` value valid for one harness can be invalid for another, so `effort_tokens` validates against the resolved harness's own set, not the union.
 
+Because the accepted set differs per harness, effort is STORED per verb and per harness: `config.agents.profiles.<verb>.harness.<harness>.effort` re-answers the scalar for one harness (`xhigh` on codex, `high` on claude), with `config.agents.defaults.harness.<harness>.effort` beneath it. The scalar stays the base that works for most; `fno config doctor` names a scalar a harness cannot serve.
+
 ## Provider translation, and why an unset effort costs money
 
 A harness's own effort parameter is not the final word. The provider on the other end of the wire applies its own translation, recorded verbatim from z.ai's own model documentation.
@@ -160,6 +162,7 @@ A literal like `agy` or `openclaw` under a provider-named binding is still a def
 | `config.accounts.records` | account | |
 | `config.agent_harnesses` | harness | |
 | `config.agents.defaults.effort`, `config.agents.profiles.<verb>.effort` | effort | |
+| `config.agents.defaults.harness.<h>.effort`, `config.agents.profiles.<verb>.harness.<h>.effort` | effort | the per-harness overlay rungs |
 | `config.agents.defaults.provider`, `config.agents.profiles.<verb>.provider` | harness | the field name is parked by the value rule; the resolver receipt names the axis it feeds, not the field |
 | `FNO_AGENT_HARNESS` | harness | injected at spawn, read for identity |
 | `FNO_HARNESS_NAME` | harness | fno-owned canonical family stamp on spawned children; vendor markers remain the fallback for operator-started or adopted sessions |

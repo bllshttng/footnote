@@ -9325,7 +9325,7 @@ fn review_posture_explicit_github_rung_is_satisfied_by_app_review() {
 
 /// Posture unset with a legacy github_apps gate: one visible legacy rung,
 /// self_and_github (the shipped floor composes with the App gate), and the
-/// satisfaction is false because the self lane has no evidence.
+/// one reviewed App verdict covers both named components (origin never gates).
 #[test]
 fn review_posture_legacy_inference_names_self_and_github() {
     let tmp = TempDir::new().unwrap();
@@ -9346,14 +9346,12 @@ fn review_posture_legacy_inference_names_self_and_github() {
     assert_eq!(p["posture"], "self_and_github");
     assert_eq!(p["rank"], 7);
     assert_eq!(p["source"], "legacy");
-    assert_eq!(p["posture_satisfied"], false);
-    let gaps = p["posture_gaps"].as_array().unwrap();
+    assert_eq!(p["posture_satisfied"], true, "{p}");
     assert_eq!(
-        gaps.len(),
-        1,
-        "the github lane is covered, self is not: {p}"
+        p["posture_gaps"].as_array().unwrap().len(),
+        0,
+        "one reviewed verdict covers the two named components: {p}"
     );
-    assert!(gaps[0].as_str().unwrap().starts_with("self:"), "{p}");
 }
 
 /// independent_review: other evidence without the fresh-context marker never

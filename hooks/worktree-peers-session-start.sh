@@ -126,16 +126,46 @@ _STRANDED_DIR="$SCRIPT_DIR/../.fno"
 if [[ "${FNO_TEST_HERMETIC:-}" == "1" ]]; then
   # Through the emitted stub, never a bare `$HOME/.fno`:
   # scripts/ci/check-no-hardcoded-paths.sh bars that spelling in hooks/, and it
-  # caught this exact line. The stub is plain bash with no subprocess, and
-  # REPO_ROOT is pre-set so it skips its own `git rev-parse` on a hot path.
+  # caught this exact line.
+  #
+  # Read in a SUBSHELL, so only STATE_DIR crosses back. The stub exports
+  # STATE_DIR, LATCHES_DIR, GRAPH_JSON_PATH, WORKTREES_BASE and CONFIG_FILE,
+  # and its own header says it is config-blind. Sourcing it here put those
+  # built-in defaults into the environment of every child this hook spawns,
+  # and other hooks do read them: context-nudge.sh reads ${STATE_DIR} and
+  # ${LATCHES_DIR} straight from the environment.
   _PATHS_STUB="$SCRIPT_DIR/../scripts/lib/paths.sh"
+  _STRANDED_DIR=""
   if [[ -f "$_PATHS_STUB" ]]; then
-    REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-    # shellcheck source=/dev/null
-    source "$_PATHS_STUB"
-    _STRANDED_DIR="${STATE_DIR}"
-    mkdir -p "$_STRANDED_DIR" 2>/dev/null || true
+    _STRANDED_DIR="$(
+      REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+      # shellcheck source=/dev/null
+      source "$_PATHS_STUB" >/dev/null 2>&1
+      printf '%s' "${STATE_DIR:-}"
+    )"
   fi
+  if [[ -z "$_STRANDED_DIR" ]]; then
+    # NEVER fall back to the checkout path. That is the write this branch
+    # exists to prevent, and a harness that copies only hooks/ into a sandbox
+    # would silently reintroduce it while believing it was hermetic. A temp
+    # dir loses the cache between runs, which costs a sweep and nothing else.
+    #
+    # Keyed by the sandbox HOME, not by uid alone. A uid-only path is stable
+    # across every repository and every run for one user, so its cache and its
+    # 15-minute refresh stamp outlive the run that wrote them: one run then
+    # shows another repository's stranded rows, or suppresses its own refresh
+    # against a stamp it never wrote.
+    #
+    # The WHOLE path, not its leaf. Sandbox roots are named by their purpose
+    # under a per-run parent, so leaves repeat across runs while the parent
+    # does not: two concurrent runs both holding a HOME that ends `/home`
+    # would share one key again, which is the collision this key exists to
+    # end. Substitution, not a subprocess, because this is a hot hook path.
+    _STRANDED_KEY="${HOME//\//_}"
+    _STRANDED_DIR="${TMPDIR:-/tmp}/fno-stranded-$(id -u)-${_STRANDED_KEY:-nohome}"
+    echo "worktree-peers: $_PATHS_STUB is missing under FNO_TEST_HERMETIC=1; using $_STRANDED_DIR rather than the checkout state root" >&2
+  fi
+  mkdir -p "$_STRANDED_DIR" 2>/dev/null || true
 fi
 _CACHE_FILE="$_STRANDED_DIR/.worktree-stranded-cache.json"
 # A dedicated stamp, not the cache file's own mtime: the window must be

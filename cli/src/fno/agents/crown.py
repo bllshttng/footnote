@@ -587,6 +587,27 @@ def crown_scope_matches(held: Optional[str], requested: Optional[str]) -> bool:
     return _same_territory(held, requested)
 
 
+def resolve_to_king(scope: str, *, registry_path=None) -> list[str]:
+    """Every live row holding crown ``scope`` right now, by name, sorted.
+
+    Read at send time, never off a handle a peer learned while that handle was
+    crowned; a pointer written at abdication goes stale the second time the crown
+    moves. Empty is vacant, one is the holder, more is the split crown
+    ``fno agents court`` already reports."""
+    from fno.agents.registry import TERMINAL_STATUSES, load_registry
+
+    rows = load_registry(path=registry_path) if registry_path else load_registry()
+    return sorted(
+        {
+            row.name
+            for row in rows
+            if getattr(row, "crown_level", None) is not None
+            and crown_scope_matches(getattr(row, "crown_scope", None), scope)
+            and getattr(row, "status", None) not in TERMINAL_STATUSES
+        }
+    )
+
+
 class CrownPromotionError(RuntimeError):
     """An attended in-place grant that refused without changing the registry."""
 

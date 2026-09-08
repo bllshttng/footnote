@@ -57,6 +57,7 @@ from fno.agents.writable_dirs import (
 )
 from fno.agents.lock import hold_agent_lock
 from fno.agents.model_routing import DEFAULT_SECONDARY_MODEL
+from fno.agents.placement_verify import verify_bounded_placement
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
@@ -4250,32 +4251,20 @@ def dispatch_spawn_pane(
 
         child_pid = _lookup_child_pid(session, pane_id, runner)
         if tab_id or enforce_tab_capacity:
-            expected_tab_id = int(tab_id[3:]) if tab_id else None
             try:
-                listed = _strict_json_list(
-                    ["mux", "pane", "ls", "--session", session, "--json"],
-                    runner,
-                    noun="pane listing",
+                # x-18c4: one listing read must not condemn the pane. The
+                # verifier re-lists once and names its cause; the reap wrapper
+                # below keeps the fail-closed contract.
+                verify_bounded_placement(
+                    pane_id,
+                    expected_tab_id=int(tab_id[3:]) if tab_id else None,
+                    placement_receipt=placement_receipt,
+                    list_panes=lambda: _strict_json_list(
+                        ["mux", "pane", "ls", "--session", session, "--json"],
+                        runner,
+                        noun="pane listing",
+                    ),
                 )
-                if expected_tab_id is None:
-                    spawned_row = next(
-                        (item for item in listed if item.get("pane_id") == pane_id), None
-                    )
-                    expected_tab_id = (
-                        spawned_row.get("tab_id") if isinstance(spawned_row, dict) else None
-                    )
-                in_tab = [
-                    item for item in listed
-                    if isinstance(item, dict) and item.get("tab_id") == expected_tab_id
-                ]
-                placed = expected_tab_id is not None and any(
-                    item.get("pane_id") == pane_id for item in in_tab
-                )
-                if not placed or len(in_tab) > 4:
-                    reason = "wrong tab" if not placed else "fifth pane"
-                    raise DispatchAskError(
-                        f"bounded placement verification failed: {reason}", exit_code=1
-                    )
             except DispatchAskError as exc:
                 reaped, detail = _reap_spawned_pane(session, pane_id, runner)
                 if reaped:

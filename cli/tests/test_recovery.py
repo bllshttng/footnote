@@ -2085,39 +2085,87 @@ class TestNotifyManualResume:
 
 
 class _FakeLink:
-    """One fallback link, in SpawnDefaultsBlock's own field spelling."""
+    """One fallback link, in the config's own field spelling."""
 
     def __init__(self, provider, model="", effort="", substrate=""):
-        self.provider = provider
-        self.model = model
-        self.effort = effort
-        self.substrate = substrate
-        self.permission_mode = ""
-        self.route = ""
-        self.account = ""
+        self.link = {"harness": provider}
+        if model:
+            self.link["model"] = model
+        if effort:
+            self.link["effort"] = effort
+        if substrate:
+            self.link["substrate"] = substrate
 
 
+from fno.rust_binary import find_dev_binary  # noqa: E402
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents)`",
+)
+
+
+@requires_rust
 class TestChainRedispatch:
-    """The operator's sentence, executed: complex work reaches codex."""
+    """The operator's sentence, executed: complex work reaches codex.
+
+    The walk lives in the fallback-chain verb (crates/fno-agents). The Python
+    half pinned here: settings wiring, walk memory, the refuse and
+    unavailable postures, with the verb faked at its payload boundary."""
 
     def _wire(self, monkeypatch, tmp_path, chain, redispatch_ok=True):
-        """Point the walk at a tmp state file and a fixed chain."""
+        """Point the walk at a tmp state file, a fixed chain, and a fake verb.
+
+        The fake walks the same contract the verb answers: the exclude
+        filter, the id mint and the axis-spelled flags."""
         from fno import fleet_state
 
         hb = tmp_path / "fleet-sweep-state.json"
         monkeypatch.setattr(fleet_state, "fleet_state_path", lambda: hb, raising=True)
         monkeypatch.setattr(recovery, "_node_size", lambda node: "L", raising=True)
 
-        import fno.agents.spawn_defaults as sd
+        import fno.config as config_mod
+
+        links = [link.link for link in chain]
+
+        class _Agents:
+            fallback = {"L": links}
+
+        class _Settings:
+            agents = _Agents()
 
         monkeypatch.setattr(
-            sd, "resolve_fallback_chain",
-            lambda size, exclude=(), **kw: [
-                link for link in chain
-                if sd.link_id(link) not in set(exclude)
-            ],
+            config_mod, "load_settings_for_repo", lambda root: _Settings(),
             raising=True,
         )
+        monkeypatch.setattr(
+            config_mod, "load_settings", lambda: _Settings(), raising=True,
+        )
+
+        def _fake_verb(verb, payload, unavailable=None):
+            assert verb == "fallback-chain"
+            spent = set(payload["exclude"])
+            out = []
+            for i, link in enumerate(payload["links"]):
+                h = link.get("harness") or link.get("provider") or ""
+                m = link.get("model") or link.get("route") or "default"
+                a = link.get("account") or ""
+                link_id = f"{h}/{m}" + (f"@{a}" if a else "")
+                if link_id in spent:
+                    continue
+                flags = []
+                if h:
+                    flags += ["-H", h]
+                if link.get("model"):
+                    flags += ["-m", link["model"]]
+                if link.get("effort"):
+                    flags += ["--effort", link["effort"]]
+                substrate = link.get("substrate") or ("bg" if h == "claude" else "pane")
+                flags += ["--substrate", substrate]
+                out.append({"index": i, "id": link_id, "flags": flags})
+            return {"eligible": out}
+
+        monkeypatch.setattr("fno.rust_binary.verb_call", _fake_verb, raising=True)
 
         spawned: list[list[str]] = []
 
@@ -2199,12 +2247,23 @@ class TestChainRedispatch:
         monkeypatch.setattr(fleet_state, "fleet_state_path", lambda: hb, raising=True)
         monkeypatch.setattr(recovery, "_node_size", lambda node: "L", raising=True)
 
-        import fno.agents.spawn_defaults as sd
+        import fno.config as config_mod
 
-        def _boom(size, exclude=(), **kw):
-            raise ValueError("config.agents.fallback.L[0].harness='banana'")
+        class _Agents:
+            fallback = {"L": [{"harness": "banana", "model": "m"}]}
 
-        monkeypatch.setattr(sd, "resolve_fallback_chain", _boom, raising=True)
+        class _Settings:
+            agents = _Agents()
+
+        monkeypatch.setattr(
+            config_mod, "load_settings_for_repo", lambda root: _Settings(),
+            raising=True,
+        )
+
+        def _error_verb(verb, payload, unavailable=None):
+            return {"error": "config.agents.fallback.L[0].harness='banana'"}
+
+        monkeypatch.setattr("fno.rust_binary.verb_call", _error_verb, raising=True)
 
         spawned = []
         monkeypatch.setattr(
@@ -2222,6 +2281,98 @@ class TestChainRedispatch:
         assert spawned == [], "a malformed chain must never bill a spawn"
         assert events[0][0] == "failover_exhausted"
         assert "banana" in events[0][1]["reason"]
+
+    def test_an_unavailable_verb_holds_with_a_named_reason(
+        self, tmp_path, monkeypatch
+    ):
+        from fno import fleet_state
+        from fno.rust_binary import VerbUnavailable
+
+        hb = tmp_path / "fleet-sweep-state.json"
+        monkeypatch.setattr(fleet_state, "fleet_state_path", lambda: hb, raising=True)
+        monkeypatch.setattr(recovery, "_node_size", lambda node: "L", raising=True)
+
+        import fno.config as config_mod
+
+        class _Agents:
+            fallback = {"L": [{"harness": "codex", "model": "m"}]}
+
+        class _Settings:
+            agents = _Agents()
+
+        monkeypatch.setattr(
+            config_mod, "load_settings_for_repo", lambda root: _Settings(),
+            raising=True,
+        )
+
+        def _boom(verb, payload, unavailable=None):
+            raise VerbUnavailable("no binary")
+
+        monkeypatch.setattr("fno.rust_binary.verb_call", _boom, raising=True)
+
+        spawned = []
+        monkeypatch.setattr(
+            recovery, "_redispatch",
+            lambda c, **kw: spawned.append(kw) or True, raising=True,
+        )
+        events = []
+        monkeypatch.setattr(
+            recovery, "_emit_recovery_event",
+            lambda t, d: events.append((t, dict(d))), raising=True,
+        )
+
+        c = _stale_candidate(tmp_path)
+        assert recovery._chain_redispatch(c, reason="r") == "rotated-no-worker"
+        assert spawned == [], "an unavailable verb must hold, never mis-bill"
+        assert events[0][1]["reason"].startswith("chain-unavailable")
+
+    def test_the_real_verb_walks_the_configured_chain(self, tmp_path, monkeypatch):
+        # Contract test against the compiled verb: one round-trip from a raw
+        # config table to the first eligible link's id and flags. The state
+        # file is a fixture: the machine's real provider health must never
+        # decide this test.
+        from fno import fleet_state
+
+        state = tmp_path / "runtime-state.json"
+        state.write_text("{}")
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(state))
+        hb = tmp_path / "fleet-sweep-state.json"
+        monkeypatch.setattr(fleet_state, "fleet_state_path", lambda: hb, raising=True)
+        monkeypatch.setattr(recovery, "_node_size", lambda node: "L", raising=True)
+
+        import fno.config as config_mod
+
+        class _Agents:
+            fallback = {"L": [
+                {"harness": "codex", "model": "gpt-5.6-sol", "effort": "high"},
+                {"harness": "claude", "model": "sonnet", "substrate": "bg"},
+            ]}
+
+        class _Settings:
+            agents = _Agents()
+
+        monkeypatch.setattr(
+            config_mod, "load_settings_for_repo", lambda root: _Settings(),
+            raising=True,
+        )
+
+        spawned = []
+        monkeypatch.setattr(
+            recovery, "_redispatch",
+            lambda c, pre_spawn=None, flags=None:
+                spawned.append(list(flags or [])) or True,
+            raising=True,
+        )
+        events = []
+        monkeypatch.setattr(
+            recovery, "_emit_recovery_event",
+            lambda t, d: events.append((t, dict(d))), raising=True,
+        )
+
+        c = _stale_candidate(tmp_path)
+        assert recovery._chain_redispatch(c, reason="r") == "swapped"
+        assert spawned == [["-H", "codex", "-m", "gpt-5.6-sol",
+                           "--effort", "high", "--substrate", "pane"]]
 
     def test_a_node_less_worktree_never_walks_a_chain(self, tmp_path, monkeypatch):
         spawned, _events, _hb = self._wire(

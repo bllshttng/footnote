@@ -62,7 +62,6 @@ def _load_settings_at(key: tuple[Optional[str], ...]) -> "SettingsModel":
         _layer_worktree_local_override,
         _revoke_unbacked_optouts,
         _unwrap_config_dict,
-        _warn_unknown_keys,
     )
 
     # Collect every candidate that exists and parses, in priority order
@@ -107,10 +106,16 @@ def _load_settings_at(key: tuple[Optional[str], ...]) -> "SettingsModel":
     raw = _unwrap_config_dict(raw)
 
     # Warn about unknown top-level and nested keys BEFORE model construction
-    # so the message appears even if validation later raises.
-    # The recursive walker handles nested blocks (paths, review, etc.) automatically;
-    # there is no need for an additional explicit nested call (which caused duplicate emission).
-    _warn_unknown_keys(raw, SettingsModel)
+    # so the message appears even if validation later raises. The recursive
+    # walker handles nested blocks, so no second explicit nested call.
+    #
+    # Loaded by importlib, never a static import: an edge from this package to
+    # the walker puts fno.config in a mypy SCC where graph._constants' lazy
+    # __getattr__ re-exports degrade to Optional[Path] and fail two unrelated
+    # modules. Measured: three errors with the plain import, none with this.
+    import importlib
+
+    importlib.import_module("fno.config_readback").warn_unknown_keys(raw, SettingsModel)
 
     raw = _revoke_unbacked_optouts(raw)
     return SettingsModel.model_validate(raw)

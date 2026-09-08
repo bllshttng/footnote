@@ -87,6 +87,31 @@ pub fn interrupt_total_bound() -> Duration {
 const COMPLETED_PARK_CAP: usize = 8;
 const THREAD_CHANNEL_CAP: usize = 32;
 
+/// What the driver's own turn state says, fired at the transitions the actor
+/// already observes (x-fd66). The daemon maps these onto inside-leg reports:
+/// the ack and every refresh write `working`, the completion writes `done`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadTurnPhase {
+    /// A turn was accepted (or is still driving at a keepalive tick).
+    Working,
+    /// The turn routed `turn/completed`; the thread is at its prompt.
+    Done,
+}
+
+/// Keepalive cadence for the `working` report: half the reader TTL, the same
+/// convention the claude inside-leg hook uses (`hooks/inside-leg-report.sh`).
+/// Env-overridable so tests can exercise the refresh without sleeping 45s.
+pub fn thread_turn_refresh() -> Duration {
+    std::env::var("FNO_THREAD_TURN_REFRESH_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map_or(
+            Duration::from_millis(crate::state::THREAD_TURN_TTL_MS / 2),
+            Duration::from_millis,
+        )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThreadStartError {
     InvalidResponse,
@@ -145,6 +170,31 @@ pub fn thread_start_request_json(cwd: &str, approval_policy: &str) -> String {
             "cwd": cwd,
             "sandbox": "workspace-write",
             "approvalPolicy": approval_policy,
+        }
+    })
+    .to_string()
+}
+
+/// Build the `thread/archive` request (x-70e1 task 3): the history-preserving
+/// active-surface removal. The stored conversation survives; `thread/resume`
+/// searches the archived store, and `thread/unarchive` (the matching builder
+/// below) puts the same id back before a resume that needs it live.
+pub fn thread_archive_request_json(id: u64) -> String {
+    json!({
+        "id": id,
+        "method": "thread/archive",
+        "params": {}
+    })
+    .to_string()
+}
+
+/// Build the `thread/unarchive` request for a named thread id.
+pub fn thread_unarchive_request_json(id: u64, thread_id: &str) -> String {
+    json!({
+        "id": id,
+        "method": "thread/unarchive",
+        "params": {
+            "threadId": thread_id,
         }
     })
     .to_string()
@@ -931,6 +981,29 @@ impl CodexThread {
         }
     }
 
+    /// Archive this thread history-preservingly (x-70e1 task 3): the codex
+    /// app-server's `thread/archive` removes the thread from the ACTIVE
+    /// surface while the stored conversation survives and `thread/resume`
+    /// (which searches active and archived stores) still opens it. An error
+    /// is returned, never swallowed: the caller records a partial outcome
+    /// and retries rather than claiming retirement.
+    pub async fn archive(&mut self) -> Result<(), ThreadDriverError> {
+        let request = thread_archive_request_json(1);
+        let _answer = self.request(1, request).await?;
+        // The archive answer is a submit receipt, not a completion promise:
+        // accept the ack shape and let the caller's own loaded-list check
+        // prove the effect.
+        Ok(())
+    }
+
+    /// Unarchive this thread id so `thread/resume` finds it in the same
+    /// live store it left. History-preserving in both directions.
+    pub async fn unarchive(&mut self, thread_id: &str) -> Result<(), ThreadDriverError> {
+        let request = thread_unarchive_request_json(1, thread_id);
+        let _answer = self.request(1, request).await?;
+        Ok(())
+    }
+
     pub async fn steer(
         &mut self,
         expected_turn_id: &str,
@@ -1044,9 +1117,16 @@ impl CodexThread {
     /// `on_turn_done` fires once per completed turn, from the actor task, for
     /// every submitter class (ask, seed, mail steer) - the daemon uses it for
     /// the `agent_ask_done` event and the `last_message_at` bump.
+    ///
+    /// `on_turn_phase` fires at the driver's own turn transitions (x-fd66):
+    /// [`ThreadTurnPhase::Working`] at the ack and on every keepalive tick
+    /// that lands while a turn drives, [`ThreadTurnPhase::Done`] at the
+    /// completion. The daemon maps these onto the row's inside-leg report, so
+    /// a thread row's status comes from its driver with no pane attached.
     pub fn into_actor(
         mut self,
         on_turn_done: Arc<dyn Fn(TurnReceipt) + Send + Sync>,
+        on_turn_phase: Arc<dyn Fn(ThreadTurnPhase) + Send + Sync>,
     ) -> CodexThreadActor {
         let pid = self.pid();
         let (cmd_tx, cmd_rx) = mpsc::channel(THREAD_CHANNEL_CAP);
@@ -1065,6 +1145,7 @@ impl CodexThread {
             cmd_rx,
             Arc::clone(&shared),
             on_turn_done,
+            on_turn_phase,
         ));
         CodexThreadActor {
             tx: cmd_tx,
@@ -1285,6 +1366,7 @@ struct ActorCtx {
     driving: Option<Driving>,
     shared: Arc<ActorShared>,
     on_turn_done: Arc<dyn Fn(TurnReceipt) + Send + Sync>,
+    on_turn_phase: Arc<dyn Fn(ThreadTurnPhase) + Send + Sync>,
 }
 
 async fn actor_task(
@@ -1293,6 +1375,7 @@ async fn actor_task(
     mut cmds: mpsc::Receiver<ThreadCommand>,
     shared: Arc<ActorShared>,
     on_turn_done: Arc<dyn Fn(TurnReceipt) + Send + Sync>,
+    on_turn_phase: Arc<dyn Fn(ThreadTurnPhase) + Send + Sync>,
 ) {
     let mut ctx = ActorCtx {
         driver,
@@ -1301,9 +1384,28 @@ async fn actor_task(
         driving: None,
         shared,
         on_turn_done,
+        on_turn_phase,
     };
+    // The driver-status keepalive (x-fd66) lives as a select arm, NOT a
+    // separate task: a separate task would hold a `cmd_tx` clone forever, and
+    // `cmds.recv()` would then never answer None - the "every handle dropped"
+    // exit the arm below promises would be unreachable. A turn drives while
+    // the actor sits at this loop (the completion routes through the frame
+    // arm), so the tick is observable exactly while it matters; only the
+    // bounded interrupt-settle wait pauses it.
+    let mut next_keepalive = tokio::time::Instant::now() + thread_turn_refresh();
     loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(next_keepalive) => {
+                next_keepalive = tokio::time::Instant::now() + thread_turn_refresh();
+                if ctx.driving.is_some() {
+                    // Rewrite `working` while a turn drives so a turn longer
+                    // than the report's ttl never ages to Unmeasured. The
+                    // check runs in the actor loop, so a tick landing after
+                    // the completion fires nothing.
+                    (ctx.on_turn_phase)(ThreadTurnPhase::Working);
+                }
+            }
             cmd = cmds.recv() => {
                 match cmd {
                     None => {
@@ -1382,6 +1484,7 @@ impl ActorCtx {
         for waiter in driving.waiters {
             let _ = waiter.send(Ok(receipt.clone()));
         }
+        (self.on_turn_phase)(ThreadTurnPhase::Done);
         (self.on_turn_done)(receipt);
     }
 
@@ -1630,6 +1733,7 @@ impl ActorCtx {
                     turn_id,
                     waiters: vec![reply],
                 });
+                (self.on_turn_phase)(ThreadTurnPhase::Working);
             }
             Err(error) => {
                 if let Some(accept) = accept {

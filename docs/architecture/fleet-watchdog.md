@@ -153,3 +153,13 @@ The sweep enumerates from `claude agents --json --all` and joins registry identi
 `fno.recovery` keeps its own job: provider failover on swap-class deaths and close-surfacing for finished-but-lingering sessions. The watchdog adds the transcript-truth decisions recovery never had: wake on a passed 429 window and the ghost flag. `claude_agents_rows` (`--all`) is the one enumeration both read, so stopped rows are never invisible to either. Row retirement lives in the Rust daemon's sweep (`crates/fno-agents/src/gc.rs`, `gc_sweep.rs`), keyed by the reverse join through `node.sessions[]`.
 
 A fleet-watching agent was proposed and refused. The proposal's load-bearing argument was that "a verb answers when someone runs it". That fails here. This sweep already runs on a cadence: `config.recovery.watchdog` rides the pr_watch tick, so nobody has to remember to run it. Its findings already push: mail digest, events, reconciled operator questions. A second watcher restates the decision table and both its traps in a new component. That is the duplication the port law exists to refuse. The two lanes added for that proposal are the shape any future friction detector takes: `contended` and `polling_settled`, with their one reconciled question. Extend the table. Never propose a new watcher.
+
+## One retirement owner
+
+Row retirement is the daemon GC sweep, not the watchdog. The classifier is `gc.rs`: work-done through the reverse join, or the planning lane, plus quiet past grace. The lifecycle is `gc_sweep.rs`: stop, active-surface removal, registry drop, tree prune. The native effects are `gc_native.rs`: the same cascade `fno agents rm` walks, typed per effect.
+
+Only confirmed native effects let a retirement apply. Every applicable effect must confirm, and a failed or unverified one holds the row for retry.
+
+The receipts store (`<agents home>/reap-receipts/`) keeps the recovery mapping: identity, native locator, resume argv, and the per-effect outcome records. Retention strips the expendable detail and keeps the identity core. `fno agents reap --verify --since 24h --json` audits the store against the CURRENT build. It refuses an empty window, a stale build, or a partial effect set, because a green CI is not applied evidence.
+
+The watchdog retirement lane is gone. A classifier that only reported and never executed was the measured zero this document once described. Do not restore it.

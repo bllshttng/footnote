@@ -237,6 +237,9 @@ async fn ask_a_codex_pane_row_refuses_naming_the_pane_verb() {
 /// would look granted while actually ungranted.
 #[tokio::test(flavor = "current_thread")]
 async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
+    // CODEX_HOME is process-global: hold the same guard every other fake
+    // user holds, or a parallel test's driver reads THIS test's fake.
+    let _guard = crate::path_test_guard();
     let home = tmp_home("codex-resume-records-posture");
     let cwd = tempfile::tempdir().unwrap();
     let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
@@ -949,4 +952,280 @@ async fn switchboard_to_idle_codex_thread_delivers_on_start_ack() {
         std::fs::remove_dir_all(home.root()).ok();
     })
     .await;
+}
+
+/// x-fd66: a thread row's status comes from its driver, not from a pane that
+/// is not there. A codex thread worker mid-turn reads `working` (ttl set,
+/// fresh stamp) with no pane attached at any point, then `done` (no ttl) once
+/// the completion routes - through the same seq-gated writer the claude
+/// inside-leg hook uses. Asserted against the row's stored report, the
+/// driver's own turn state, never a rendered glyph.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_thread_row_reports_working_then_done_with_no_pane() {
+    with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
+        let home = tmp_home("codex-inside-leg-e2e");
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
+        assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+        await_driving_turn(&ctx, "t").await;
+
+        // Mid-turn: Working, ttl set, seq allocated. The write is offloaded,
+        // so poll for the marker instead of betting on a fixed sleep.
+        let working = poll_thread_row(&home.registry_json(), |report| {
+            report.state == state::InsideLegState::Working
+        })
+        .await;
+        assert_eq!(working.ttl_ms, Some(state::THREAD_TURN_TTL_MS));
+        let working_seq = working.seq;
+        assert!(working_seq >= 1);
+
+        // After the completion routes: Done, no ttl, seq above the working one.
+        await_ask_done(&home).await;
+        let done = poll_thread_row(&home.registry_json(), |report| {
+            report.state == state::InsideLegState::Done
+        })
+        .await;
+        assert_eq!(done.ttl_ms, None, "a done report never ages out");
+        assert!(
+            done.seq > working_seq,
+            "done seq {} must clear above working seq {working_seq}",
+            done.seq
+        );
+
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// The refresh half (x-fd66): while the driver keeps answering, the working
+/// report is rewritten at the keepalive cadence, so a turn longer than the
+/// report ttl never ages to `?` mid-flight. The fake's 30s turn against a
+/// 100ms refresh proves the seq advances with no completion in between; the
+/// interrupt then ends the turn and the row settles Done.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_thread_working_report_refreshes_while_the_turn_drives() {
+    struct RefreshGuard;
+    impl Drop for RefreshGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("FNO_THREAD_TURN_REFRESH_MS");
+        }
+    }
+    with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::long(), async {
+        // Set INSIDE the guard: the var is process-wide and parallel tests'
+        // actors read it at birth - a 100ms cadence leaking into another
+        // test floods the offloaded registry-write queue and races the
+        // stop path's status write.
+        std::env::set_var("FNO_THREAD_TURN_REFRESH_MS", "100");
+        let _refresh = RefreshGuard;
+        let home = tmp_home("codex-inside-leg-refresh");
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
+        assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+        await_driving_turn(&ctx, "t").await;
+
+        // At least one REFRESH landed: seq advanced past the ack's write with
+        // the same turn still driving (no completion ever routed).
+        let refreshed = poll_thread_row(&home.registry_json(), |report| report.seq >= 3).await;
+        assert_eq!(refreshed.state, state::InsideLegState::Working);
+        assert_eq!(refreshed.ttl_ms, Some(state::THREAD_TURN_TTL_MS));
+
+        // Ending the turn routes the completion; the row settles Done.
+        let stop = handle_stop(&ctx, &Request::new(3, "agent.stop", json!({"name": "t"}))).await;
+        assert_eq!(
+            stop.result().expect("stop errored")["interrupt"],
+            "interrupted"
+        );
+        let done = poll_thread_row(&home.registry_json(), |report| {
+            report.state == state::InsideLegState::Done
+        })
+        .await;
+        assert_eq!(done.ttl_ms, None);
+
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// The resume half (x-fd66): the actor's report seq starts ABOVE the row's
+/// current seq, so the resumed thread's first report clears the gate instead
+/// of dying under the previous incarnation's seq. The row is seeded with a
+/// done report at seq 7, as a prior life of this thread would have left it.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_thread_resume_writes_above_the_row_seq() {
+    // CODEX_HOME is process-global: hold the same guard every other fake
+    // user holds, or a parallel test's driver reads THIS test's fake.
+    let _guard = crate::path_test_guard();
+    let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+        crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-seq"),
+    );
+    let home = tmp_home("codex-inside-leg-resume-seq");
+    state::update_registry(&home.registry_json(), |registry| {
+        let mut entry = thread_entry("t-seq", AgentStatus::Live, None);
+        let cwd = home.root().join("worktree");
+        std::fs::create_dir_all(&cwd).unwrap();
+        entry.cwd = cwd.to_string_lossy().into_owned();
+        entry.project_root = entry.cwd.clone();
+        entry.harness_session_id = Some("thread-seq".into());
+        entry.codex_session_id = Some("thread-seq".into());
+        entry.inside_leg = Some(state::InsideLegReport {
+            state: state::InsideLegState::Done,
+            seq: 7,
+            reason: None,
+            received_at: "2020-01-01T00:00:00Z".into(),
+            ttl_ms: None,
+        });
+        registry.entries.push(entry);
+    })
+    .unwrap();
+    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+    let entry = state::load_registry(&home.registry_json())
+        .unwrap()
+        .find("t-seq")
+        .cloned()
+        .unwrap();
+    ensure_codex_thread_handle(&ctx, &entry)
+        .await
+        .expect("the fake daemon answers thread/resume");
+
+    // One completed turn: the seeded counter (8) is what the row accepts.
+    let ask = handle_ask(
+        &ctx,
+        &Request::new(2, "agent.ask", json!({"name": "t-seq", "message": "hi"})),
+    )
+    .await;
+    let res = ask.result().expect("ask errored");
+    assert_eq!(
+        res["reply"], "REPLY-1",
+        "the resumed thread answers: {res:?}"
+    );
+    let done = poll_thread_row_named(&home.registry_json(), "t-seq", |report| {
+        report.state == state::InsideLegState::Done
+    })
+    .await;
+    assert!(
+        done.seq >= 8,
+        "the resumed thread's write must clear a row at seq 7, got seq {}",
+        done.seq
+    );
+
+    ctx.codex_threads.lock().await.remove("t-seq");
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// The episode gate (x-fd66 + x-dd84): notify intent fires on the EDGE into
+/// done, once per episode, never on a repeat; a stale-seq write is dropped by
+/// the same gate; the scrape verdict is cleared on the flip; a row holding no
+/// such session is a no-op. The thread writer and the hook flush share this
+/// core, so one test pins both.
+#[test]
+fn gate_inside_leg_onto_row_notifies_once_per_done_episode() {
+    let mut registry = state::Registry::default();
+    let mut row = thread_entry("t-gate", AgentStatus::Live, None);
+    row.codex_session_id = Some("sid-gate".into());
+    registry.entries.push(row);
+    registry.entries[0].screen_state = Some(state::ScreenStateReport {
+        state: "working".into(),
+        rule: "busy".into(),
+        seq: 1,
+        at: "2020-01-01T00:00:00Z".into(),
+        ttl_ms: None,
+        answerable: None,
+    });
+
+    let rep = |seq, st| state::InsideLegReport {
+        state: st,
+        seq,
+        reason: None,
+        received_at: "2020-01-01T00:00:00Z".into(),
+        ttl_ms: None,
+    };
+
+    // Working: accepted, no notify, scrape verdict cleared.
+    let n = gate_inside_leg_onto_row(
+        &mut registry,
+        "sid-gate",
+        rep(1, state::InsideLegState::Working),
+    );
+    assert_eq!(n, None, "working is not an episode edge");
+    assert_eq!(registry.entries[0].inside_leg.as_ref().unwrap().seq, 1);
+    assert!(
+        registry.entries[0].screen_state.is_none(),
+        "the flip clears the scrape verdict"
+    );
+
+    // Done: the episode edge, exactly one intent, and it names is_done.
+    let n = gate_inside_leg_onto_row(
+        &mut registry,
+        "sid-gate",
+        rep(2, state::InsideLegState::Done),
+    );
+    assert_eq!(n, Some(("done".to_string(), true)));
+
+    // A repeat Done (seq 3): accepted by the seq gate but NOT a new episode.
+    let n = gate_inside_leg_onto_row(
+        &mut registry,
+        "sid-gate",
+        rep(3, state::InsideLegState::Done),
+    );
+    assert_eq!(n, None, "a repeat done must not re-fire the episode");
+    assert_eq!(registry.entries[0].inside_leg.as_ref().unwrap().seq, 3);
+
+    // A stale-seq write (seq 3 again): dropped entirely.
+    let n = gate_inside_leg_onto_row(
+        &mut registry,
+        "sid-gate",
+        rep(3, state::InsideLegState::Working),
+    );
+    assert_eq!(n, None, "seq <= current is dropped");
+    assert_eq!(
+        registry.entries[0].inside_leg.as_ref().unwrap().state,
+        state::InsideLegState::Done
+    );
+
+    // A row holding no such session: no-op.
+    let n = gate_inside_leg_onto_row(
+        &mut registry,
+        "sid-other",
+        rep(9, state::InsideLegState::Done),
+    );
+    assert_eq!(n, None);
+}
+
+/// Poll until the row named `t` carries an inside-leg report matching
+/// `pred`, and return it. Polling instead of a fixed sleep: the writer runs
+/// off the actor task, so a sleep bets the write landed; this waits for the
+/// marker itself.
+async fn poll_thread_row_named(
+    registry_path: &std::path::Path,
+    name: &str,
+    pred: impl Fn(&state::InsideLegReport) -> bool,
+) -> state::InsideLegReport {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let report = load_registry_offloaded(registry_path.to_path_buf())
+            .await
+            .ok()
+            .and_then(|registry| registry.find(name).cloned())
+            .and_then(|entry| entry.inside_leg);
+        if let Some(report) = report {
+            if pred(&report) {
+                return report;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no matching inside-leg report ever landed for {name}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// [`poll_thread_row_named`] for the default test row name `t`.
+async fn poll_thread_row(
+    registry_path: &std::path::Path,
+    pred: impl Fn(&state::InsideLegReport) -> bool,
+) -> state::InsideLegReport {
+    poll_thread_row_named(registry_path, "t", pred).await
 }

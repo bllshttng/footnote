@@ -855,149 +855,12 @@ pub fn worktree_sweep(
     swept
 }
 
-/// One per-sweep index of the harness transcript stores. A registry-wide
-/// question ("which rows' sessions still exist in their own store") is answered
-/// by ONE walk per harness and in-memory lookups, never a walk per row: the
-/// first cut of this walked `~/.claude/projects` twice per past-grace row, and
-/// a live dry-run against a 125-row registry outran any operator's patience.
-///
-/// `None` from [`HarnessStoreIndex::matches`] means "cannot judge": no session
-/// id recorded, an unknown harness, or a store directory that could not be
-/// read (AC5 fail-closed - an unreadable store has two explanations and only
-/// one of them is a dead session).
-///
-/// claude: `~/.claude/projects/*/<session_id>*.jsonl`, across EVERY project
-/// dir because a session's transcript can live in more than one (EnterWorktree
-/// re-keys it; the other dir keeps a stub). codex: the rollout jsonl under
-/// `~/.codex/sessions/` embedding the session id in its filename - the same
-/// shape `fno.agents.discover.codex_rollout_for_session` resolves. A harness a
-/// reaper cannot speak for is NEVER judged by another harness's store (AC3): a
-/// codex row has no claude transcript by construction, so a claude-keyed probe
-/// would reap every codex worker on the machine.
-#[derive(Default)]
-pub(crate) struct HarnessStoreIndex {
-    /// Resolved store roots; `None` until the first lookup resolves them from
-    /// `$HOME` (or forever, for an index built `with_roots` in tests).
-    claude_root: Option<std::path::PathBuf>,
-    codex_root: Option<std::path::PathBuf>,
-    /// `(filename, path)` for every candidate file, or `None` until the first
-    /// lookup walks the store. `Some(Err(()))` marks a walk that hit an
-    /// unreadable directory: every later lookup answers None, fail closed.
-    claude: Option<Result<Vec<(String, std::path::PathBuf)>, ()>>,
-    codex: Option<Result<Vec<(String, std::path::PathBuf)>, ()>>,
-}
-
-impl HarnessStoreIndex {
-    /// Test seam: fixed roots, so the per-harness keying is unit-testable
-    /// against temp trees instead of the developer's real `~/.claude`/`~/.codex`.
-    /// (Called only from the lib test suite. Deliberately NOT gated with the
-    /// test cfg attribute: the emit-kind scanner in lib.rs truncates each file
-    /// at the first byte-level occurrence of that attribute's text, so a
-    /// mid-file gate would classify every later production emit as test-only.)
-    #[allow(dead_code)]
-    fn with_roots(claude_root: std::path::PathBuf, codex_root: std::path::PathBuf) -> Self {
-        HarnessStoreIndex {
-            claude_root: Some(claude_root),
-            codex_root: Some(codex_root),
-            ..Default::default()
-        }
-    }
-
-    fn root(&self, harness: &str) -> Option<std::path::PathBuf> {
-        let slot = match harness {
-            "claude" => &self.claude_root,
-            "codex" => &self.codex_root,
-            _ => return None,
-        };
-        slot.clone().or_else(|| {
-            let home = std::path::PathBuf::from(std::env::var("HOME").ok()?);
-            match harness {
-                "claude" => Some(home.join(".claude").join("projects")),
-                // Resolve the codex home the way codex itself does, so a
-                // CODEX_HOME redirect never reads this reaper into a store
-                // the worker never wrote (an empty wrong-store read would
-                // read as "session gone" - death evidence from an absence).
-                _ => crate::client_verbs::codex_home().map(|h| h.join("sessions")),
-            }
-        })
-    }
-
-    /// Every transcript candidate this row's harness store holds for its
-    /// session id. Empty vector = the session is GONE from its own store.
-    pub(crate) fn matches(&mut self, e: &state::RegistryEntry) -> Option<Vec<std::path::PathBuf>> {
-        let sid = e.harness_session_id.as_deref().filter(|s| !s.is_empty())?;
-        let harness = e.harness_name();
-        let root = match harness {
-            "claude" | "codex" => self.root(harness)?,
-            // Unknown/unsupported harness (gemini, opencode, ...): no store
-            // this reaper can read. Answer None, never another harness's store.
-            _ => return None,
-        };
-        let cached_empty = match harness {
-            "claude" => self.claude.is_none(),
-            _ => self.codex.is_none(),
-        };
-        if cached_empty {
-            // First lookup for this harness: one walk, cached for the sweep
-            // (an unreadable store caches as Err, so it stays fail-closed
-            // for every later row too instead of re-walking per row).
-            let indexed = index_tree(&root, 0);
-            let parked = match harness {
-                "claude" => &mut self.claude,
-                _ => &mut self.codex,
-            };
-            *parked = Some(indexed);
-        }
-        let files = match harness {
-            "claude" => self.claude.as_ref()?,
-            _ => self.codex.as_ref()?,
-        };
-        let files = files.as_ref().ok()?;
-        Some(
-            files
-                .iter()
-                .filter(|(name, _)| match harness {
-                    // `<uuid>.jsonl` and its stub artifacts (`<uuid>.orphaned-...`)
-                    // all prove the session still EXISTS in the store; which of
-                    // them carries conversation is a content question this
-                    // existence probe does not need to answer.
-                    "claude" => name.starts_with(sid) && name.ends_with(".jsonl"),
-                    _ => crate::client_verbs::codex_rollout_matches(&name, sid),
-                })
-                .map(|(_, p)| p.clone())
-                .collect(),
-        )
-    }
-}
+pub(crate) use crate::gc_inventory::{index_tree, HarnessStoreIndex};
 
 /// Wall-clock bound for one harness removal subprocess (`run_claude_rm`). A
 /// hung removal must never wedge its caller (the operator measured a 300s+
 /// hang on a stuck row; the removal cannot inherit it).
 const CASCADE_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Bounded walk collecting `(filename, path)` for every regular file under
-/// `dir` (claude is two levels, codex four; depth 5 covers both). `Err` on any
-/// unreadable directory: an unreadable store answers nothing, fail closed.
-pub(crate) fn index_tree(
-    dir: &std::path::Path,
-    depth: usize,
-) -> Result<Vec<(String, std::path::PathBuf)>, ()> {
-    let mut out = Vec::new();
-    if depth > 5 {
-        return Ok(out);
-    }
-    for entry in std::fs::read_dir(dir).map_err(|_| ())? {
-        let entry = entry.map_err(|_| ())?;
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|_| ())?;
-        if file_type.is_dir() {
-            out.extend(index_tree(&path, depth + 1)?);
-        } else {
-            out.push((entry.file_name().to_string_lossy().into_owned(), path));
-        }
-    }
-    Ok(out)
-}
 
 /// Remove a reaped row's session from its OWN harness's store (AC6). Returns
 /// `Some((row_id, reason))` when harness removal refused or failed; `None` on
@@ -1013,7 +876,7 @@ pub(crate) fn index_tree(
 /// teardown arm). opencode/gemini: registry-only by contract - nothing to
 /// cascade.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CascadeOutcome {
+pub(crate) enum CascadeOutcome {
     Removed,
     AlreadyAbsent(String),
     Unverified(String),
@@ -1063,7 +926,7 @@ fn claude_row_provably_absent(
         .is_some_and(|snap| snap.is_known() && row_id.is_some_and(|id| snap.find(id).is_none()))
 }
 
-fn cascade_harness_session_result_with(
+pub(crate) fn cascade_harness_session_result_with(
     e: &state::RegistryEntry,
     claude_agents: Option<&crate::claude_roster::ClaudeAgentsSnapshot>,
     read_claude_agents: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
@@ -1107,9 +970,16 @@ fn cascade_harness_session_result_with(
             let Some(sid) = e.harness_session_id.as_deref() else {
                 return CascadeOutcome::NotApplicable;
             };
-            let index = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                .join(".codex")
-                .join("session_index.jsonl");
+            // Resolve the codex home the way codex itself does: a CODEX_HOME
+            // redirect must move this removal, or the default index reads
+            // absent, absence reads as a confirmed effect, and the REAL index
+            // keeps the session alive after the row is dropped.
+            let Some(codex_dir) = crate::client_verbs::codex_home() else {
+                return CascadeOutcome::Failed(
+                    "no codex home: CODEX_HOME and HOME are both unset".into(),
+                );
+            };
+            let index = codex_dir.join("session_index.jsonl");
             match cascade_codex_index(&index, sid, &row_id) {
                 Ok(true) => CascadeOutcome::Removed,
                 Ok(false) => CascadeOutcome::AlreadyAbsent("codex index row already absent".into()),
@@ -1145,7 +1015,7 @@ fn cascade_harness_session_result_with(
     }
 }
 
-fn run_claude_rm(short_id: &str) -> Result<(), String> {
+pub(crate) fn run_claude_rm(short_id: &str) -> Result<(), String> {
     let mut child = std::process::Command::new("claude")
         .args(["rm", short_id])
         .stdout(std::process::Stdio::piped())
@@ -2831,49 +2701,12 @@ type CodexThreadHandle = Arc<crate::codex_thread::CodexThreadActor>;
 
 use crate::codex_thread::{InterruptOutcome, TurnReceipt};
 
-/// The per-completion hook every codex-thread actor gets at construction:
-/// bump the row (`Live` + `last_message_at`) and emit `agent_ask_done`, for
-/// every submitter class (ask, seed, mail steer) in ONE place - previously
-/// the ask path and the seed task each kept their own copy of this.
-fn codex_thread_on_done(
-    emitter: &EventEmitter,
-    registry_path: std::path::PathBuf,
-    name: &str,
-) -> Arc<dyn Fn(TurnReceipt) + Send + Sync> {
-    let emitter = emitter.clone();
-    let name = name.to_string();
-    Arc::new(move |receipt: TurnReceipt| {
-        let emitter = emitter.clone();
-        let name = name.clone();
-        let turn_id = receipt.turn_id.clone();
-        let status = receipt.status.clone();
-        let registry_path = registry_path.clone();
-        tokio::spawn(async move {
-            let bump_name = name.clone();
-            let _ = update_registry_offloaded(registry_path, move |registry| {
-                if let Some(entry) = registry.find_mut(&bump_name) {
-                    entry.status = AgentStatus::Live;
-                    entry.last_message_at = Some(now_rfc3339_like());
-                }
-            })
-            .await;
-            let _ = emitter.emit(
-                "agent_ask_done",
-                &json!({
-                    "name": name,
-                    "backend": "codex-thread",
-                    "turn_id": turn_id,
-                    "turn_status": status,
-                }),
-            );
-        });
-    })
-}
+mod thread_row_status;
+use thread_row_status::{codex_thread_on_done, codex_thread_on_status, gate_inside_leg_onto_row};
 
 fn emit_state(emitter: &EventEmitter, state: DaemonState) {
     let _ = emitter.emit("daemon_state", &json!({"state": state.as_str()}));
 }
-
 /// The final `daemon_exited` payload (x-3498). Every exit path flows through
 /// one tail, and before this it emitted `clean: true` unconditionally, so the
 /// socket-lost retirement - where something unlinked and rebound our socket
@@ -4014,11 +3847,18 @@ async fn spawn_codex_thread_lane(
             )
         }
     }
-    let handle = Arc::new(driver.into_actor(codex_thread_on_done(
-        &ctx.emitter,
-        ctx.home.registry_json(),
-        name,
-    )));
+    let handle = Arc::new(driver.into_actor(
+        codex_thread_on_done(&ctx.emitter, ctx.home.registry_json(), name),
+        codex_thread_on_status(
+            &ctx.emitter,
+            ctx.home.registry_json(),
+            name,
+            &session_id,
+            1,
+            ctx.opts.notify_on_blocked,
+            ctx.opts.notify_on_done,
+        ),
+    ));
     ctx.codex_threads
         .lock()
         .await
@@ -4178,11 +4018,27 @@ async fn ensure_codex_thread_handle(
     if let Some(handle) = threads.get(&entry.name).cloned() {
         return Ok(handle);
     }
-    let handle = Arc::new(driver.into_actor(codex_thread_on_done(
-        &ctx.emitter,
-        ctx.home.registry_json(),
-        &entry.name,
-    )));
+    // x-fd66: the resumed actor's report seq starts ABOVE the row's current
+    // seq, so its first write clears the gate instead of dying under the
+    // previous incarnation's seq. The counter itself lives on the callback,
+    // one per thread start/resume, never on the row.
+    let first_seq = entry
+        .inside_leg
+        .as_ref()
+        .map(|report| report.seq + 1)
+        .unwrap_or(1);
+    let handle = Arc::new(driver.into_actor(
+        codex_thread_on_done(&ctx.emitter, ctx.home.registry_json(), &entry.name),
+        codex_thread_on_status(
+            &ctx.emitter,
+            ctx.home.registry_json(),
+            &entry.name,
+            &session_id,
+            first_seq,
+            ctx.opts.notify_on_blocked,
+            ctx.opts.notify_on_done,
+        ),
+    ));
     threads.insert(entry.name.clone(), Arc::clone(&handle));
     Ok(handle)
 }
@@ -9159,32 +9015,12 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
         return;
     };
     let (seq, state_str) = (rep.seq, inside_leg_state_str(rep.state));
-    // Badge-transition notify intent (x-dd84): an early-push report is the row's
-    // first, so an initial `blocked`/`done` is an episode entry too. Captured
-    // before `rep` moves into the row; fired after the write.
-    let (rep_state, rep_reason) = (rep.state, rep.reason.clone());
     let mut notify: Option<(String, String, bool)> = None;
     // Apply under the seq gate: a store-path report that landed on the row after
     // it became visible (but before this drain) set a >= seq; never regress it.
     let _ = state::update_registry(&ctx.home.registry_json(), |r| {
-        if let Some(e) = r
-            .entries
-            .iter_mut()
-            .find(|e| entry_holds_session(e, session_uuid))
-        {
-            let newer = e.inside_leg.as_ref().is_none_or(|cur| rep.seq > cur.seq);
-            if newer {
-                let prev_state = e.inside_leg.as_ref().map(|r| r.state);
-                let body = rep_reason.clone().unwrap_or_else(|| state_str.to_string());
-                if state::enters(prev_state, rep_state, state::InsideLegState::Blocked) {
-                    notify = Some((name.to_string(), body, false));
-                } else if state::enters(prev_state, rep_state, state::InsideLegState::Done) {
-                    notify = Some((name.to_string(), body, true));
-                }
-                e.inside_leg = Some(rep);
-                // Capability flip (see handle_report): hook beats scrape.
-                e.screen_state = None;
-            }
+        if let Some((body, is_done)) = gate_inside_leg_onto_row(r, session_uuid, rep.clone()) {
+            notify = Some((name.to_string(), body, is_done));
         }
     });
     if let Some((title, body, is_done)) = notify {

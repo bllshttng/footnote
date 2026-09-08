@@ -36,8 +36,8 @@ Each is reversible or additive, which is what makes an unattended daily pass saf
 | `fno backlog supersede <new-id> --replaces <old-id> --cause "..." --surface <path>` | A node genuinely replaced by another (dedup families, retitles). `--cause` and `--surface` are required: the old node stays open until a merged PR covers every surface |
 | `fno backlog defer <id>... --reason "..."` | Work that should stop being selected, with the why recorded |
 | `fno backlog undefer <id>...` | A deferred node whose blocker is demonstrably gone |
-| `fno backlog update <id> --priority <p0..p3>` | A priority the evidence contradicts |
-| `fno backlog rank <id> --top` | Float a card that should run next within its lane |
+| `fno backlog update <id> --priority <p0..p3>` | A priority the evidence contradicts. Say the evidence in the same breath |
+| `fno backlog encounter <id> --evidence "..."` | A node that cost this pass time. One vote per voter, and it is what the drain reads |
 | `fno backlog idea "..."` | File genuinely NEW follow-up work you noticed |
 | `fno backlog intake <plan-path>` | Promote a demonstrably blueprint-complete plan into a tracked node |
 | `fno backlog update <id> --blocked-by <ids>` | Encode the order a track must run in (see Auto-convene) |
@@ -54,6 +54,13 @@ A `PreToolUse` hook blocks direct edits as a backstop, but the rule is yours to 
 - The graph: `fno backlog find`, `fno backlog get <id>`, and the triage pile (`deferred` nodes with their `deferred_reason`).
 - Recently merged PRs, to catch nodes whose work landed but never closed.
 - Starvation receipts and any guard exclusions from the selection path.
+- `fno backlog demand`: the rows the fleet keeps hitting. It ranks them by how far the votes diverge from the priority they were filed at. Every other read reports what the backlog contains. This one reports what it costs, so it is the signal your priority lever moves on.
+
+## You are the PM, and you propose
+
+Priority is the proposal, and it is the only ordering field you write. It is bounded to four values, so two writers disagreeing produce a visible conflict on the demand table instead of a silent stack. Rank is the operator's pin, and `fno backlog rank` refuses this session by design.
+
+Act on the shape of a `demand` row with several agent votes and a low priority. The fleet keeps paying for something nobody is looking at. Raise it with `fno backlog update <id> --priority p1`. p0 needs `--blocks-everything` and means the fleet is down. Put the evidence in the report line, so the operator can overrule you from the same facts. A row you cannot decide from the evidence goes to the pile as a question, exactly like any other.
 
 ## The decision rule
 

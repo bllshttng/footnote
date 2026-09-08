@@ -18,6 +18,7 @@ from typing import Any, Optional
 import typer
 
 from fno.agents import launch_provenance
+from fno.agents.harness_map import PERMISSION_MODE_HELP
 from fno.agents.rust_runtime import make_agents_group_cls
 
 agents_app = typer.Typer(
@@ -978,7 +979,7 @@ def cmd_court(
 # verb: the x-4342 complaint shape is a review worker spawned with the node id
 # in its prompt. A do worker whose prompt mentions a SIBLING id must not get a
 # reviewer row stamped on that sibling, so prose and other verbs arm nothing.
-_REVIEW_VERB_PREFIXES = ("/code-review", "/review", "/fno:review")
+from fno.agents.spawn_phase import REVIEW_VERB_PREFIXES as _REVIEW_VERB_PREFIXES  # noqa: E402
 
 
 def _resolve_spawn_merge_grant(message: str) -> dict:
@@ -1360,18 +1361,7 @@ def cmd_spawn(
     permission_mode: str | None = typer.Option(
         None,
         "--permission-mode",
-        help=(
-            "Permission/approval mode forwarded to the provider (x-dfa4). "
-            "Provider-native values, fail-closed: claude default|acceptEdits|"
-            "plan|bypassPermissions (exact passthrough); gemini --approval-mode "
-            "(or 'yolo'); codex a shortcut (full-auto|yolo) or <sandbox>:"
-            "<approval> (e.g. workspace-write:on-request); opencode 'auto'; agy "
-            "'skip'; cursor-agent 'force' or 'yolo'. An unmappable value errors "
-            "before spawn. Mutually exclusive "
-            "with --yolo. Honored on claude thread/headless (Rust or Python "
-            "fallback); codex/gemini thread/headless one-shots reject it (use "
-            "--substrate pane)."
-        ),
+        help=PERMISSION_MODE_HELP,
     ),
     effort: str | None = typer.Option(
         None,
@@ -2134,7 +2124,6 @@ def cmd_spawn(
         DispatchResolveError,
         apply_merge_posture_env,
         check_loop_participation,
-        is_target_family,
         message_carries_no_merge,
         normalize_legacy_no_merge,
     )
@@ -2159,11 +2148,11 @@ def cmd_spawn(
     # --session-phase is the operator's label and wins; empty infers from the
     # work's own shape - a /target-family message names a do worker (whose
     # claim-acquire stamp duplicate-fills the same row), a review verb names
-    # the contributor shape that motivated the stamp, prose defaults to review.
-    # Any OTHER leading verb is a label this code cannot guess (a /think worker
-    # stamped review would lie on an append-only record), so it stamps nothing
-    # and says so. Fail-closed on an unknown explicit value, like the guards
-    # above, before anything spawns.
+    # the reviewer, a blueprint or think verb names the planner. Arbitrary
+    # prose is a label this code cannot guess and never defaults to review: a
+    # review row is a retirement blocker for life, so an unlabeled task keeps
+    # no row rather than a lying one. Fail-closed on an unknown explicit
+    # value, like the guards above, before anything spawns.
     from fno.graph.types import SESSION_PHASES
 
     if session_phase:
@@ -2176,13 +2165,9 @@ def cmd_spawn(
             raise typer.Exit(code=2)
         stamp_phase = session_phase
     else:
-        _verb = (message or "").lstrip().split(maxsplit=1)[0] if message else ""
-        if is_target_family(message):
-            stamp_phase = "do"
-        elif _verb.startswith(_REVIEW_VERB_PREFIXES) or not _verb.startswith("/"):
-            stamp_phase = "review"
-        else:
-            stamp_phase = ""  # unlabelable verb: the helper skips, named
+        from fno.agents.spawn_phase import infer_phase
+
+        stamp_phase = infer_phase(message)
     # A resume may restore a recorded route inside dispatch_spawn. Resolve its
     # separately stored provider axis before admission so the gate judges the
     # destination the revived worker will actually use.

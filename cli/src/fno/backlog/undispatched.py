@@ -7,7 +7,6 @@ from typing import Any
 
 
 OBSERVER_COMMAND = "fno backlog undispatched --json"
-_PRIORITY_ORDER = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
 
 
 class ObserverReadError(RuntimeError):
@@ -144,12 +143,16 @@ def classify_planned_unclaimed(
             }
         )
 
-    rows.sort(
-        key=lambda row: (
-            _PRIORITY_ORDER.get(str(row.get("priority")), 99),
-            str(row["id"]),
-        )
-    )
+    # One ordering for both queues. Sorting by (priority, id string) here made
+    # the stop hook's `next:` line name a node the rank-aware drain never
+    # picked next. Reuse the shared key; never re-implement it.
+    from fno.graph._intake import make_selection_sort_key
+
+    live = frozenset(n for n, state in claimed.items() if state == "live")
+    # The key sorts full entries; a row is a projection that already dropped
+    # rank and created_at, so sort through `by_id` rather than through the row.
+    order = make_selection_sort_key(entries, live_claimed=live)
+    rows.sort(key=lambda row: (order(by_id[row["id"]]), str(row["id"])))
     return {
         "source": OBSERVER_COMMAND,
         "status": "ok",

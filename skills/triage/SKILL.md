@@ -224,15 +224,10 @@ translate positional words into the equivalent flag:
 
    It aggregates by Copeland score (wins minus losses), tolerating the
    occasional contradictory or cyclic verdict, and emits a best-first `order`.
-   Apply that order to the board so board position matches work order: seed the
-   top item with `fno backlog rank <first-id> --top`, then chain each remaining
-   id after its predecessor with `fno backlog rank <id> --after <previous-id>`.
-   Do NOT call `--top` for every id in a forward pass: `--top` inserts before
-   the current front of the lane, so iterating best-first would reverse the
-   order (the last id processed would land first). Feed the ranking into the
-   `priority_changes` rationale too. For a small backlog the one-shot proposal
-   above is cheaper and fine; reserve the pairwise pass for when the node count
-   makes it worthwhile.
+
+   Apply that order as priority proposals with `fno backlog update <id> --priority p1..p3`, banding the best-first order across those three values. p0 is not yours to hand out. It needs `--blocks-everything` and means the fleet is down. Never through `fno backlog rank`, which is the operator's pin and refuses an agent session. A careful comparative judgement serialised through min-minus-one writes became arrival order. Feed the ranking into the `priority_changes` rationale too.
+
+   For a small backlog the one-shot proposal above is cheaper and fine. When the node count makes it worthwhile, reserve the pairwise pass for that.
 
 3. **Validate.** Run:
 

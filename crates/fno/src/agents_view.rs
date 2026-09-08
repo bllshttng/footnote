@@ -1409,57 +1409,9 @@ fn hostname() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
-/// Process create time in epoch ms, or None if the pid is gone/uninspectable
-/// (permission denied counts as dead). Focused copy of
-/// `claims.rs::process_create_time_ms`.
-#[cfg(target_os = "macos")]
-fn process_create_time_ms(pid: i32) -> Option<i64> {
-    use std::mem;
-    if pid <= 0 {
-        return None;
-    }
-    let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
-    let size = mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    let written = unsafe {
-        libc::proc_pidinfo(
-            pid as libc::c_int,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            &mut info as *mut _ as *mut libc::c_void,
-            size,
-        )
-    };
-    if written != size {
-        return None;
-    }
-    Some((info.pbi_start_tvsec as i64) * 1000 + (info.pbi_start_tvusec as i64) / 1000)
-}
+mod pid_probe;
 
-#[cfg(target_os = "linux")]
-fn process_create_time_ms(pid: i32) -> Option<i64> {
-    if pid <= 0 {
-        return None;
-    }
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after = stat.rsplit_once(')')?.1;
-    let starttime: i64 = after.split_whitespace().nth(19)?.parse().ok()?;
-    static BTIME: std::sync::OnceLock<Option<i64>> = std::sync::OnceLock::new();
-    let btime = (*BTIME.get_or_init(|| {
-        let stat = std::fs::read_to_string("/proc/stat").ok()?;
-        stat.lines()
-            .find_map(|l| l.strip_prefix("btime ").and_then(|r| r.trim().parse().ok()))
-    }))?;
-    let tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if tck <= 0 {
-        return None;
-    }
-    Some(btime * 1000 + starttime * 1000 / tck as i64)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn process_create_time_ms(_pid: i32) -> Option<i64> {
-    None
-}
+use pid_probe::{probe_is_live, probe_pid};
 
 /// macOS IOPlatformUUID (mirror of `claims.rs::platform_machine_id`).
 #[cfg(target_os = "macos")]
@@ -1545,7 +1497,7 @@ fn holder_is_live(host: &str, machine: Option<&str>, pid: i32, acquired_at: i64)
     if !is_same_machine(host, machine) {
         return false;
     }
-    matches!(process_create_time_ms(pid), Some(create_ms) if create_ms <= acquired_at)
+    probe_is_live(probe_pid(pid), acquired_at)
 }
 
 /// The session id of a live `node:<id>` claim, or None (missing / unparseable /
@@ -1706,7 +1658,7 @@ pub fn overlay_truth_badges(rows: &mut [RegistryAgent], truth: &TruthBadges) {
 
 /// Process start time in the REGISTRY'S own units (x-caef): macOS folds
 /// `proc_bsdinfo` to microseconds, Linux keeps the raw `/proc/<pid>/stat`
-/// starttime ticks. Deliberately NOT `process_create_time_ms`: the registry's
+/// starttime ticks. Deliberately NOT `probe_pid`: the registry's
 /// `pid_start_time` is a per-host, per-boot quantity compared only for
 /// equality against a value captured for the SAME pid, so it must be read
 /// with the same units `fno-agents`' registry writer used (daemon.rs
@@ -1866,17 +1818,29 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .get("liveness_measured_at")
             .and_then(|v| v.as_str())
             .and_then(rfc3339_like_to_secs);
-        let liveness = served_liveness(
-            row.get("liveness").and_then(|v| v.as_str()),
-            measured_at,
-            now_secs,
-        )
-        .unwrap_or_else(|| {
-            derive_liveness(
-                status,
-                row.get("pid").and_then(|v| v.as_u64()),
-                row.get("short_id").and_then(|v| v.as_str()).unwrap_or(""),
-            )
+        let served_word = row.get("liveness").and_then(|v| v.as_str());
+        let pid = row.get("pid").and_then(|v| v.as_u64());
+        let ladder = derive_liveness(
+            status,
+            pid,
+            row.get("short_id").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        let liveness = served_liveness(served_word, measured_at, now_secs).unwrap_or_else(|| {
+            // (x-688b) A stale served "dead" on a TERMINAL, pid-less row still
+            // corroborates the terminal status: the daemon stamped it from an
+            // observed exit, and with no pid recorded there is no reused-pid
+            // contradiction to wait for - the stamp is the only evidence
+            // either side has, and age must not erase it. Any other stale
+            // reading keeps the ladder's verdict.
+            if exited
+                && pid.is_none()
+                && served_word == Some("dead")
+                && ladder == Liveness::Unmeasured
+            {
+                Liveness::Dead
+            } else {
+                ladder
+            }
         });
         let liveness_age_s = measured_at.and_then(|t| now_secs.checked_sub(t));
         let harness_title = row
@@ -2780,188 +2744,20 @@ pub fn reconcile_external(
     (out, notices)
 }
 
-/// The reader's between-tick memory. The interval task itself lives in
-/// server.rs (it owns the `CoreMsg` sender); this holds the mtime-gated
-/// document caches (registry + roster) and the last-sent MERGED row set so
-/// the derivation stays pure and unit-testable here.
-#[derive(Default)]
-pub struct ReaderState {
-    reg_raw: Option<String>,
-    reg_stamp: Option<(std::time::SystemTime, u64)>,
-    roster_raw: Option<String>,
-    roster_stamp: Option<(std::time::SystemTime, u64)>,
-    /// Last successfully-derived rows per source, so a torn concurrent write
-    /// keeps that source's last-good instead of blanking it (the merged
-    /// `last_sent` alone can't distinguish which source went stale).
-    last_good_reg: Option<Vec<RegistryAgent>>,
-    last_good_roster: Option<Vec<RosterWorker>>,
-    /// (x-c914) Per-isolated-account roster caches, keyed by account id. Each
-    /// isolated account's `<config_dir>/daemon/roster.json` is stamp-gated and
-    /// parsed independently so a torn/corrupt one keeps ITS last-good without
-    /// blanking the default roster or the other accounts (AC1-FR per source).
-    isolated: std::collections::HashMap<String, IsolatedRoster>,
-    last_sent: Option<Vec<RegistryAgent>>,
-}
+/// The reader's between-tick memory lives in its own module; this file
+/// is shrink-only under the file-budget gate.
+mod reader_state;
 
-/// (x-c914) One isolated account's roster cache: the mtime stamp gate plus the
-/// already-parsed+tagged workers (re-parsed only when the stamp moves).
-#[derive(Default)]
-struct IsolatedRoster {
-    stamp: Option<(std::time::SystemTime, u64)>,
-    last_good: Option<Vec<RosterWorker>>,
-}
-
-/// (x-c914) One isolated account's per-tick roster read, assembled by the
-/// server's off-loop scanner (the same stat+conditional-read the default
-/// roster uses): `raw` is `Some` only when `stamp` moved past the cache.
-pub struct IsolatedRead {
-    pub account: String,
-    pub stamp: Option<(std::time::SystemTime, u64)>,
-    pub raw: Option<String>,
-}
-
-impl ReaderState {
-    /// The stamp of the currently-cached registry document (the reader's
-    /// mtime+len gate for the registry read).
-    pub fn reg_stamp(&self) -> Option<(std::time::SystemTime, u64)> {
-        self.reg_stamp
-    }
-
-    /// The stamp of the currently-cached roster document (the reader's
-    /// mtime+len gate for the roster read).
-    pub fn roster_stamp(&self) -> Option<(std::time::SystemTime, u64)> {
-        self.roster_stamp
-    }
-
-    /// (x-c914) The cached stamp of `account`'s isolated roster, so the
-    /// server's scanner gates that dir's read the same way it gates the
-    /// default roster. `None` for a never-seen account (its first scan reads).
-    pub fn isolated_stamp(&self, account: &str) -> Option<(std::time::SystemTime, u64)> {
-        self.isolated.get(account).and_then(|c| c.stamp)
-    }
-
-    /// One tick: fold fresh stats/reads of BOTH files (taken OFF the core loop
-    /// by the caller, each behind its own mtime+len gate) and return the
-    /// merged row set to publish, or `None` when the merged set is unchanged.
-    /// TTL aging re-derives from the cached registry every tick, so a badge
-    /// can lapse without a file write. For each source: a torn/garbage
-    /// document keeps that source's last-good rows; a vanished file empties
-    /// them (the two cases are distinct, AC2-FR).
-    #[allow(clippy::too_many_arguments)]
-    pub fn tick(
-        &mut self,
-        reg_stamp: Option<(std::time::SystemTime, u64)>,
-        reg_read: impl FnOnce() -> Option<String>,
-        roster_stamp: Option<(std::time::SystemTime, u64)>,
-        roster_read: impl FnOnce() -> Option<String>,
-        isolated: Vec<IsolatedRead>,
-        now_secs: u64,
-    ) -> Option<Vec<RegistryAgent>> {
-        // Advance the cached stamp ONLY when the read resolves (fresh bytes, or
-        // a confirmed vanish). A changed stamp whose read came back empty is a
-        // raced/failed read: leave the stamp behind so the next tick's scan gate
-        // (stamp != cached) re-attempts the SAME stamp instead of freezing the
-        // last-good rows until an unrelated later write happens to move mtime.
-        if reg_stamp != self.reg_stamp {
-            match (reg_read(), reg_stamp) {
-                (Some(raw), _) => {
-                    self.reg_raw = Some(raw);
-                    self.reg_stamp = reg_stamp;
-                }
-                (None, None) => {
-                    self.reg_raw = None; // vanished
-                    self.reg_stamp = None;
-                }
-                (None, Some(_)) => {} // raced/failed read: keep last-good AND retry next tick
-            }
-        }
-        if roster_stamp != self.roster_stamp {
-            match (roster_read(), roster_stamp) {
-                (Some(raw), _) => {
-                    self.roster_raw = Some(raw);
-                    self.roster_stamp = roster_stamp;
-                }
-                (None, None) => {
-                    self.roster_raw = None;
-                    self.roster_stamp = None;
-                }
-                (None, Some(_)) => {}
-            }
-        }
-
-        let mut reg_rows = match &self.reg_raw {
-            Some(raw) => derive_rows(raw, now_secs)
-                .or_else(|| self.last_good_reg.clone())
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
-        // fno-truth junior badge (x-4a48): fill the no-badge/Idle gap for a
-        // bg /target worker between turns from its claim + loop_check recency.
-        if let Some(raw) = &self.reg_raw {
-            overlay_truth_badges(&mut reg_rows, &build_truth_badges(raw, now_secs));
-        }
-        self.last_good_reg = Some(reg_rows.clone());
-
-        let roster = match &self.roster_raw {
-            Some(raw) => parse_roster(raw)
-                .or_else(|| self.last_good_roster.clone())
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
-        self.last_good_roster = Some(roster.clone());
-
-        // (x-c914) Fold each isolated account's roster into the union, tagging
-        // its workers with the source account. Same stamp-gate + per-source
-        // last-good contract as the default roster above; a torn/corrupt file
-        // keeps THIS account's last-good and never blanks the others (AC1-FR),
-        // a vanished file empties just this account (AC2-EDGE).
-        let mut all = roster;
-        for r in isolated {
-            let cache = self.isolated.entry(r.account.clone()).or_default();
-            // Parse + tag ONLY when the stamp moved; an unchanged tick reuses the
-            // cached tagged workers (gemini review: no re-parse of an unchanged
-            // roster per tick, N accounts x every second). A torn/garbage read
-            // keeps last-good (AC1-FR), a vanished file empties it (AC2-EDGE).
-            if r.stamp != cache.stamp {
-                match (r.raw, r.stamp) {
-                    (Some(raw), _) => {
-                        if let Some(mut ws) = parse_roster(&raw) {
-                            for w in &mut ws {
-                                w.account = Some(r.account.clone());
-                            }
-                            cache.last_good = Some(ws);
-                        } // else garbage bytes: keep last-good (AC1-FR)
-                        cache.stamp = r.stamp;
-                    }
-                    (None, None) => {
-                        cache.last_good = None;
-                        cache.stamp = None;
-                    }
-                    (None, Some(_)) => {} // raced/failed read: keep last-good, retry
-                }
-            }
-            if let Some(workers) = &cache.last_good {
-                all.extend(workers.iter().cloned());
-            }
-        }
-
-        let rows = merge_rows(reg_rows, &all);
-        if self.last_sent.as_ref() != Some(&rows) {
-            self.last_sent = Some(rows.clone());
-            Some(rows)
-        } else {
-            None
-        }
-    }
-}
+pub use reader_state::{IsolatedRead, ReaderState};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // The parked-fork-child test family lives in its own module;
-    // this file is shrink-only under the file-budget gate.
+    // Test families live in their own modules; this file is shrink-only.
+    mod liveness_rule_tests;
     mod parked_child_tests;
+    mod thread_row_status_tests;
     fn reg(rows: &str) -> String {
         format!(r#"{{"schema_version": 6, "agents": [{rows}]}}"#)
     }

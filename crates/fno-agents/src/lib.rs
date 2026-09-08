@@ -44,6 +44,7 @@
 // schemas/agents-list-row.json; the crate-level recursion_limit above covers
 // the macro expansion since `spawned_by_session` joined the contract.
 
+pub mod acceptance_evidence;
 pub mod active_backlog;
 mod agent_lock;
 pub mod agents_config;
@@ -69,6 +70,7 @@ pub mod codex_ask;
 #[doc(hidden)]
 pub mod codex_fake_daemon;
 pub mod codex_inject;
+pub mod codex_store;
 pub mod codex_thread;
 mod codex_thread_entry;
 mod completion_output;
@@ -82,10 +84,14 @@ pub mod drift;
 pub mod envelope;
 pub mod events;
 pub mod events_limits;
+pub mod fallback_chain;
 pub mod feed;
 pub mod finalize;
 pub mod gc;
+pub mod gc_inventory;
+pub mod gc_native;
 pub mod gc_sweep;
+pub mod gc_verify;
 pub mod gemini_ask;
 #[cfg(test)]
 mod git_test_helpers;
@@ -136,6 +142,7 @@ pub mod receipt;
 pub mod reentry;
 pub mod rename;
 pub mod resume_args;
+pub mod resume_receipt;
 pub mod review_freshness;
 pub mod review_summary;
 pub mod roster_progress;
@@ -148,6 +155,7 @@ pub mod session_names_fold;
 pub mod session_start_bytes;
 pub mod single_flight;
 pub mod spawn_gate;
+pub mod spawn_overlay;
 pub mod spawn_payload;
 pub mod state;
 pub mod state_path;
@@ -1048,6 +1056,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // flushed onto the row at creation.
     "inside_leg_report_buffered",
     "inside_leg_buffer_flushed",
+    // Driver-sourced thread-row status (x-fd66): the codex thread actor's
+    // turn phases land on the row's inside_leg through the shared seq gate;
+    // one event per accepted write.
+    "codex_thread_inside_leg",
     // Screen-manifest fallback rung (daemon-emitted, scrape sweep): a scraped
     // verdict was stored/refreshed/cleared on a hook-less mux row, or a
     // provider's manifest failed to load.

@@ -191,6 +191,7 @@ fn the_portal_notice_latches_on_delivery() {
         rows,
         branches: HashMap::new(),
         tails: HashMap::new(),
+        read_ok: false,
     });
 
     let notices = drain_notices(&mut rx);
@@ -214,6 +215,7 @@ fn the_portal_notice_waits_for_a_client() {
         rows: rows.clone(),
         branches: HashMap::new(),
         tails: HashMap::new(),
+        read_ok: false,
     });
     assert!(!core.portal_noticed, "no client: the latch stays unset");
 
@@ -234,6 +236,7 @@ fn the_portal_notice_waits_for_a_client() {
         rows,
         branches: HashMap::new(),
         tails: HashMap::new(),
+        read_ok: false,
     });
 
     assert!(
@@ -2202,6 +2205,7 @@ fn the_notice_latch_holds_through_the_restart_path() {
         rows: core.agents.clone(),
         branches: HashMap::new(),
         tails: HashMap::new(),
+        read_ok: false,
     });
 
     let notices = drain_notices(&mut rx);

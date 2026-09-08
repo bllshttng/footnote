@@ -398,30 +398,19 @@ def make_selection_sort_key(
 
     Returns the one key function for sorting board cards and ready candidates.
     ``swimlane=True`` prepends the project lane used by renderers; the remaining
-    suffix is byte-identical to selection precedence: curated ``rank`` first,
-    then epics-first, then flat priority.
-    The key always includes the same ``_rank_band`` term, so a ``fno backlog
-    rank --top`` node is *worked* next, not merely floated on the board.
-    A ranked node (band 0, ascending rank) outranks every
-    unranked node, so an explicit rank overrides the epics-first heuristic;
-    with no ranks set every node shares the ``(1, 0.0)`` band and ordering is
-    byte-for-byte today's epics-first behavior. A node is an "epic child"
-    when its ``parent`` resolves to another node in ``entries``; such
-    children always outrank loose nodes regardless of raw priority, so a
-    walk stays focused on one epic before starting loose work. Among epic
-    children the order is: the epic's own rank band (a ranked epic floats
-    its whole group), in-progress epics first (an epic with a done or
-    claimed child), then higher-priority epics, then the epic's own
-    ``created_at`` (keeps one epic's children grouped), then the child's
-    own rank (orders it only among its live-epic siblings - it can never
-    pull its epic group ahead of another epic or a loose node), then the
-    child's own priority and ``created_at``. Loose nodes fall back to flat
-    priority then ``created_at`` (matching ``_graph_sort_key_fn``).
+    suffix is byte-identical to selection precedence. The term order and what
+    each term means are in ``docs/architecture/backlog-board-ordering.md``. The
+    invariants a caller relies on:
 
-    The key is precomputed against ``entries`` once so sorting stays O(N
-    log N): epic lookup, child grouping, and in-progress detection are all
-    table lookups. A ``parent`` that names a missing node is treated as a
-    loose node (never crashes on a malformed graph).
+    - An operator's pin (band 0) outranks every unranked node, but only among
+      the peers it ordered: its lane for a loose node, its live epic's children
+      for a child. A pinned child is not the project's next node.
+    - With no rank and no encounter anywhere, ordering is byte-for-byte the
+      epics-first behavior that predates both terms.
+    - An "epic child" is a node whose ``parent`` resolves in ``entries``. A
+      ``parent`` naming a missing node is a loose node, never a crash.
+    - Everything is precomputed against ``entries`` once, so sorting stays
+      O(N log N): every per-node lookup below is a table read.
     """
     id_to_entry: dict[str, dict] = {
         e["id"]: e
@@ -444,6 +433,22 @@ def make_selection_sort_key(
 
     def _fanout(node_id: object) -> int:
         return -dependents.get(node_id, 0) if isinstance(node_id, str) else 0
+    # Evidence, read once per sort: zero for every unvoted row, so a graph with
+    # no encounters keeps its exact previous order.
+    from datetime import datetime, timezone
+
+    from fno.graph.demand import importance_score
+
+    effective_priority = make_effective_priority(entries)
+    scored_at = datetime.now(timezone.utc)
+
+    def _score(node: dict) -> float:
+        # Degrade like _rank_band and orphan_ids: a hand-edited `encounters: 3`
+        # raising here would take down the whole locked_mutate_graph write.
+        try:
+            return -importance_score(node, effective_priority(node), scored_at)
+        except Exception:  # noqa: BLE001 - ordering signal; never break selection
+            return 0.0
     # Board == work order: `next` must demote orphans exactly where the board
     # does, or the board shows one order and the walker works another. Computed
     # here (not passed by every caller) so no call site can forget it; fails
@@ -492,6 +497,7 @@ def make_selection_sort_key(
                 child_prio,
                 _fanout(node_id),    # in-band: after priority, before orphan
                 child_orphan,
+                _score(node),        # evidence, below every judgement above it
                 child_created,
             )
         # Loose node: tier 1. Middle fields mirror the child fields so the
@@ -503,8 +509,8 @@ def make_selection_sort_key(
         # epic branch's arity; tier (index 1) already separates the two, so
         # it is never compared.
         return lane + (
-            band, 1, 0, child_prio, _fanout(node_id), child_orphan, child_created,
-            child_prio, _fanout(node_id), child_created,
+            band, 1, 0, child_prio, _fanout(node_id), child_orphan, _score(node),
+            child_created, child_prio, _fanout(node_id), child_created,
         )
 
     return key

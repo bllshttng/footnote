@@ -13,7 +13,7 @@
 
 use serde_json::{json, Map, Value};
 
-const SLOT_LANE_FIELDS: [&str; 8] = [
+const SLOT_LANE_FIELDS: [&str; 9] = [
     "provider",
     "model",
     "effort",
@@ -22,8 +22,9 @@ const SLOT_LANE_FIELDS: [&str; 8] = [
     "route",
     "account",
     "pane_group",
+    "args",
 ];
-const LANE_PASSTHROUGH_FIELDS: [&str; 3] = ["substrate", "permission_mode", "pane_group"];
+const LANE_PASSTHROUGH_FIELDS: [&str; 4] = ["substrate", "permission_mode", "pane_group", "args"];
 const ON_EXHAUSTED: [&str; 3] = ["queue", "degrade", "refuse"];
 const ON_LOW: [&str; 3] = ["allow", "prefer_healthy", "skip"];
 const ON_UNKNOWN: [&str; 2] = ["allow", "skip"];
@@ -113,6 +114,21 @@ fn fold(
                     return Err(fault(&rung, format!("has unknown field '{first}'")));
                 }
                 for (k, v) in table {
+                    if k == "args" {
+                        // x-8975: the lane's native-bundle vector, opaque and
+                        // passed through verbatim; never a ranked field.
+                        match v.as_array() {
+                            Some(items)
+                                if !items.is_empty() && items.iter().all(Value::is_string) => {}
+                            _ => {
+                                return Err(fault(
+                                    &rung,
+                                    format!(".args must be a non-empty list of strings; got {v}"),
+                                ))
+                            }
+                        }
+                        continue;
+                    }
                     if !v.is_string() {
                         return Err(fault(&rung, format!(".{k} must be a string; got {v}")));
                     }
@@ -131,6 +147,11 @@ fn fold(
                     if !v.is_empty() {
                         fields.insert(k.to_string(), Value::String(v));
                     }
+                }
+                // args is an array, not a string, so the loop above cannot
+                // carry it; copy it verbatim (x-8975).
+                if let Some(args) = table.get("args").and_then(Value::as_array) {
+                    fields.insert("args".into(), Value::Array(args.clone()));
                 }
                 if fields.is_empty() {
                     return Err(fault(&rung, "is empty".into()));

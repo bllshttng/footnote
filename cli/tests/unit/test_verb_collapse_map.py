@@ -120,11 +120,14 @@ def test_map_covers_current_surface_once():
     # `worktree cargo-offload`) took 574 -> 576, the two-lane discovery
     # branch allocated `backlog discover`: 576 -> 577, and the routing
     # branch allocates `agents route-slot`, the delivery-slot resolver the
-    # spawn seam's client invokes directly (hidden verb): 577 -> 578.
-    # Counted from the merged file, never taken from either side: the feed
-    # port reallocated the retired `agents worker blueprint-feed` pair onto
-    # the direct binary verb `agents blueprint-feed`: 580.
-    assert len(mapped) == 580, (
+    # spawn seam's client invokes directly (hidden verb): 577 -> 578. The
+    # harness-keyed-defaults branch allocates `agents spawn-overlay` and
+    # `agents fallback-chain`, the two client verbs the spawn seam degrades
+    # open around (hidden verbs): 578 -> 580. This branch reallocated the
+    # retired `agents worker blueprint-feed` pair onto the direct binary
+    # verb `agents blueprint-feed`. Counted from the merged file, never
+    # taken from either side: 582.
+    assert len(mapped) == 582, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

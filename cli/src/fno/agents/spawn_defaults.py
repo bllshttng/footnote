@@ -1,15 +1,11 @@
 """Config-sourced spawn defaults, injected argv-level at the dispatch seam.
 
 Every `fno agents spawn` passes this seam before the Rust/Python routing
-fork, so config injection covers pane, bg, headless and the Rust route with
-zero Rust changes (Locked Decision 9). Per field: explicit CLI flag >
-`agents.profiles.<verb>` > `agents.defaults` > built-in; the profile layer
-(x-3d5b) keys on the seed's leading slash-verb and reaches autonomous
-dispatch the same way. The one field-wise exception: a bare scalar `model` is
-scoped to the harness it was written for (the config `provider`, else
-claude), never the ambient harness, and an explicit `-m/--model` always wins.
-A `--role` whose lane resolves owns the model, so a stage table never
-reroutes a field the dispatch pinned.
+fork (Locked Decision 9). Per field: explicit CLI flag > lane >
+`agents.profiles.<verb>` (per-harness overlays inside) > `agents.defaults` >
+built-in. A bare scalar `model` is scoped to the config `provider`'s harness,
+never the ambient one; an explicit `-m/--model` always wins; a resolved
+`--role` lane owns the model.
 """
 from __future__ import annotations
 
@@ -829,77 +825,89 @@ def _lane_value(lane: object, name: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _overlays_present(defaults: object, profile: object, lane: object = None) -> bool:
+    """A harness overlay table (or lane args) can carry the ONLY value this
+    spawn injects, so an empty harness-blind scalar read must not end
+    composition before the post-resolution reads run (x-8975)."""
+    for obj in (defaults, profile):
+        table = getattr(obj, "harness", None)
+        if isinstance(table, Mapping) and table:
+            return True
+    if lane is not None:
+        lv = (
+            lane.get("args")
+            if isinstance(lane, Mapping)
+            else getattr(lane, "args", None)
+        )
+        if lv:
+            return True
+    return False
+
+
+def _overlay_payload(obj: object) -> dict:
+    """One spawn-defaults block as the verb's JSON view. ``model_dump()`` is
+    the pydantic shape (extra=allow keeps smuggled keys visible); getattr is
+    the test-fixture shape."""
+    dump = getattr(obj, "model_dump", None)
+    if callable(dump):
+        return dump()
+    out: dict = {}
+    for k in (
+        "provider", "model", "effort", "substrate", "permission_mode",
+        "route", "account", "pane_group",
+    ):
+        out[k] = getattr(obj, k, "") or ""
+    harness = getattr(obj, "harness", None)
+    if isinstance(harness, Mapping):
+        out["harness"] = {
+            h: (b.model_dump() if callable(getattr(b, "model_dump", None)) else dict(b))
+            for h, b in harness.items()
+        }
+    return out
 
 
 # A model string's implied vendor, by prefix or tier word. A pure string
 # opinion and never a routing input: the warning it drives is advisory, because
 # the pairing is legal and --model is deliberate passthrough (cli.py).
-_MODEL_VENDOR_HINTS: Tuple[Tuple[str, str], ...] = (
-    ("glm-", "zai"),
-    ("gpt-", "openai"),
-    ("deepseek", "deepseek"),
-    ("gemini-", "google"),
-    ("claude-", "anthropic"),
-)
-_MODEL_WORD_VENDORS = {"opus": "anthropic", "sonnet": "anthropic", "haiku": "anthropic"}
-
-# The vendor a harness's own primary lane bills when no route/vendor was named.
-# opencode is operator-configured, so it holds no opinion here.
-_HARNESS_DEFAULT_VENDOR = {
-    "claude": "anthropic",
-    "codex": "openai",
-    "gemini": "google",
-    "agy": "google",
-}
-
-
-def _implied_vendor(model: Optional[str]) -> Optional[str]:
-    if not model:
-        return None
-    for candidate in (model.lower(), model.lower().rsplit("/", 1)[-1]):
-        for prefix, vendor in _MODEL_VENDOR_HINTS:
-            if candidate.startswith(prefix):
-                return vendor
-        base = candidate.split("[", 1)[0].split("-", 1)[0]
-        word_vendor: Optional[str] = _MODEL_WORD_VENDORS.get(base)
-        if word_vendor:
-            return word_vendor
-    return None
-
-
 def resolve_lane_vendor(
     argv: Sequence[str],
     env: Optional[Mapping[str, str]] = None,
     *,
     harness: Optional[str] = None,
 ) -> Optional[str]:
-    """Resolve the model vendor carried by a final spawn argv."""
-    values = list(argv)
-    tokens = values[1:] if values else []
-    explicit_route = _flag_value(tokens, "--route")
-    if explicit_route:
-        return explicit_route.replace(",", "/").split("/", 1)[0].strip().lower() or None
-    explicit_vendor = _flag_value(tokens, "--provider", "-P")
-    if explicit_vendor:
-        return explicit_vendor.strip().lower() or None
-    resolved_harness = (
-        harness or _flag_value(tokens, "--harness", "-H") or ""
-    ).strip().lower()
-    if not resolved_harness and values and values[0] in _HARNESS_DEFAULT_VENDOR:
-        resolved_harness = values[0]
-    if not resolved_harness:
+    """The model vendor a final spawn argv bills: route > provider > harness.
+    The vocabulary and the judgment live in the spawn-overlay verb; this shim
+    resolves the harness-side inputs (explicit arg, then -H, then dispatch
+    inference from env) and reads the answer."""
+    from fno.agents.spawn_overlay_client import (
+        SpawnOverlayUnavailable,
+        spawn_overlay_call,
+    )
+
+    toks = [str(t) for t in (list(argv)[1:] if argv else [])]
+    env_harness = None
+    if not (harness and str(harness).strip()):
+        harness = _flag_value(toks, "--harness", "-H")
+    if not (harness and str(harness).strip()):
         try:
             from fno.dispatch_flags import resolve_dispatch_harness
 
-            resolved_harness = resolve_dispatch_harness(None, env=env)[0]
+            env_harness = resolve_dispatch_harness(None, env=env)[0]
         except Exception:
-            resolved_harness = "claude"
-    lane = _HARNESS_DEFAULT_VENDOR.get(resolved_harness)
-    if lane:
-        return lane
-    if resolved_harness == "opencode":
-        return _implied_vendor(_flag_value(tokens, "--model", "-m"))
-    return None
+            env_harness = "claude"
+    try:
+        return spawn_overlay_call(
+            {
+                "kind": "lane-vendor",
+                "argv_tail": toks,
+                "argv_head": argv[0] if argv else None,
+                "harness": harness,
+                "env_harness": env_harness,
+            }
+        ).get("vendor")
+    except SpawnOverlayUnavailable:
+        # No binary: no vendor opinion (the documented no-opinion answer).
+        return None
 
 
 def _check_model_vendor_mismatch(
@@ -909,85 +917,64 @@ def _check_model_vendor_mismatch(
     *,
     model_source: Optional[str] = None,
 ) -> None:
-    """Judge a model string whose implied vendor the resolved lane does not
-    match (a glm-* model with no zai route, a gpt-* under a claude harness).
+    """Judge a model whose implied vendor the resolved lane does not match.
 
     WHAT THE CALLER TYPED AND WHAT CONFIG SUPPLIED ARE DIFFERENT FACTS, and
-    ``model_source`` is the only thing that separates them. It carries the
-    config path when this model was INJECTED, and None when the caller named it.
-
-    A typed model still warns and proceeds, unchanged: that pairing is legal
-    and the passthrough is deliberate. An INJECTED model that cannot run on the
-    resolved lane REFUSES, because nobody chose that pairing. The worker it
-    would otherwise start accepts a seed, reports live, and dies on its first
-    inference, so the receipt reads healthy for a session that cannot work.
-
-    This ran on the FINAL argv alone for exactly the reason it could not tell
-    the two apart: by then an injected default and an explicit flag look the
-    same. Both messages name BOTH sides, because naming only the mismatch does
-    not tell the caller which half to change; the refusal also names the config
-    key, which is the half a caller who typed nothing has to edit.
-
-    An explicit --route suppresses both: the caller named the lane AND the
-    model, which is a deliberate override, not the misroute this catches.
+    ``model_source`` carries the config path when the model was INJECTED and
+    None when the caller named it: a typed mismatch warns and proceeds (the
+    passthrough is deliberate), an injected one REFUSES - nobody chose that
+    pairing, and the worker it would start dies on its first inference.
+    An explicit --route suppresses both. The judgment lives in the
+    spawn-overlay verb; this shim keeps the Python side effects (event,
+    stderr line, exit 2).
     """
-    toks = list(argv[1:])
-    model = _flag_value(toks, "--model", "-m")
-    implied = _implied_vendor(model)
-    if not implied:
+    toks = [str(t) for t in argv[1:]]
+    # Pure fast path: with no model named there is nothing to judge, and the
+    # spawn must compose on installs with no fno-agents binary at all.
+    if _flag_value(toks, "--model", "-m") is None:
         return
-    if _flag_value(toks, "--route") is not None:
-        # Explicit route: a deliberate lane choice beside a deliberate model.
-        # (A config route is never injected beside an explicit model, so a
-        # --route in the final argv is always operator-typed.)
-        return
-    lane = resolve_lane_vendor(argv, env=env)
-    if not lane or lane == implied:
-        return
-    # One predicate, read once. Deriving the event's `outcome` separately
-    # from the branch below is how a measurement starts disagreeing with
-    # the thing it measures.
-    refusing = bool(model_source) and _flag_value(toks, "--account") is None
-    from fno.agents import events
+    # The lane's harness, resolved in the verb's precedence order: an explicit
+    # -H flag wins, then dispatch inference from env (as a LATE input; the
+    # argv head may still name the harness first).
+    harness = _flag_value(toks, "--harness", "-H")
+    env_harness = None
+    if not (harness and str(harness).strip()):
+        try:
+            from fno.dispatch_flags import resolve_dispatch_harness
 
-    events.emit(
-        "model_vendor_mismatch",
-        model=model,
-        implied_vendor=implied,
-        resolved_vendor=lane,
-        model_source=model_source or "explicit",
-        outcome="refused" if refusing else "warned",
+            env_harness = resolve_dispatch_harness(None, env=env)[0]
+        except Exception:
+            env_harness = "claude"
+    from fno.agents.spawn_overlay_client import (
+        SpawnOverlayUnavailable,
+        spawn_overlay_call,
     )
-    if refusing:
-        # THE ACCOUNT AXIS IS INVISIBLE HERE, so its presence downgrades the
-        # refusal back to a warning. `resolve_lane_vendor` reads route, then
-        # provider, then harness; it never consults `--account`, and an account
-        # can carry its own vendor credential. So a zai account paired with a
-        # glm model under a claude harness is a WORKING spawn this check reads
-        # as a mismatch. Refusing it stops the fleet spawning to prevent a
-        # failure that was not going to happen, and the `-P` escape the message
-        # suggests would compose a different credential and a different bill.
-        # Refuse only where nothing could have chosen the pairing.
-        #
-        # Fail closed with empty stdout, the posture `fno workspace worktree
-        # ensure` takes on an out-of-enum policy value: a caller holding a
-        # refusal is better off than one holding a live-looking worker.
-        print(
-            f"fno agents spawn: refusing to spawn. {model_source} supplies "
-            f"--model {model!r}, which implies vendor {implied}, but this spawn "
-            f"resolves the {lane} lane. Nothing typed this pairing, and the "
-            f"worker would start, report live, and fail on its first inference. "
-            f"Set a model for the {lane} lane at {model_source}, or name the vendor "
-            f"on this spawn with -P {implied}.",
-            file=err,
+
+    try:
+        answer = spawn_overlay_call(
+            {
+                "kind": "model-vendor",
+                "argv_tail": toks,
+                "argv_head": argv[0] if argv else None,
+                "harness": harness,
+                "env_harness": env_harness,
+                "model_source": model_source,
+            }
         )
+    except SpawnOverlayUnavailable as exc:
+        # No binary: the check degrades open with a named line. The refusal
+        # contract is kept wherever the verb actually ran.
+        print(f"fno agents spawn: vendor check skipped ({exc})", file=err)
+        return
+    if answer.get("event"):
+        from fno.agents import events
+
+        events.emit("model_vendor_mismatch", **answer["event"])
+    if answer.get("verdict") == "refuse":
+        print(answer.get("message"), file=err)
         raise SystemExit(2)
-    print(
-        f"fno agents spawn: --model {model!r} implies vendor {implied}, but the "
-        f"resolved lane is {lane}; the model rides that lane's CLI as-is. Name "
-        f"the vendor with -P {implied} to route it.",
-        file=err,
-    )
+    if answer.get("verdict") == "warn":
+        print(answer.get("message"), file=err)
 
 
 def inject_spawn_defaults(
@@ -1057,6 +1044,10 @@ def inject_spawn_defaults(
             profile = profiles.get(legacy_verb)
             if profile is not None:
                 profile_verb = legacy_verb
+    # Overlay table guards (x-8975): the spawn-overlay verb owns them now -
+    # an unknown harness name, or a ranking field inside an overlay, refuses
+    # the composition from the same call that resolves the rungs. Scoped to
+    # the rungs THIS spawn reads; an unrelated verb's typo must not block it.
     lane: Optional[object] = None
     lane_index: Optional[int] = None
     slot_candidate: Optional[dict] = None
@@ -1244,10 +1235,9 @@ def inject_spawn_defaults(
     _LANE_EXCLUSIVE = ("route", "model")
 
     def field(name: str) -> Tuple[str, Optional[str]]:
-        """Effective value + source rung: lane > profile > defaults.
-
-        ``route`` and ``model`` stop at the lane when one was selected; see
-        ``_LANE_EXCLUSIVE`` above."""
+        """Effective value + source rung: lane > profile > defaults, harness-
+        blind (the two harness rungs live in the verb's answer; this read is
+        exact whenever no overlay table exists, which gates the verb path)."""
         if lane is not None and lane_index is not None:
             lv = _lane_value(lane, name)
             if lv:
@@ -1291,10 +1281,13 @@ def inject_spawn_defaults(
         else None
     )
     from_config.extend(slot_receipt)
+
     if not (
         cfg_harness or cfg_model or cfg_effort or cfg_substrate or cfg_permission
         or cfg_route or cfg_account or cfg_pane_group
-    ) and grid_candidate is None and not from_config:
+    ) and grid_candidate is None and not from_config and not _overlays_present(
+        defaults, profile, lane
+    ):
         # No config field resolved at all, so any --model here was typed.
         _check_model_vendor_mismatch(out, err, env)
         return out
@@ -1531,39 +1524,88 @@ def inject_spawn_defaults(
                     file=err,
                 )
 
-    if cfg_effort and not has_effort:
-        # Effort surface depends on the RESOLVED HARNESS, not the vendor: an
-        # explicit -H flag, else the config `provider` field (harness-valued),
-        # else harness inference / builtin claude. effort_tokens branches on
-        # harness names (gemini/agy have no effort surface at all), so feeding
-        # it a vendor would refuse a legal spawn and pass an illegal one.
-        eff_harness = (explicit_harness or "").strip() or cfg_harness
-        if not eff_harness:
-            from fno.dispatch_flags import resolve_dispatch_harness
+    # The spawn-overlay verb owns the harness-keyed rungs (x-8975): one
+    # round-trip answers effort/substrate/permission plus the ONE bundle and
+    # refuses a bad overlay. Gated on an overlay table (or lane args) being
+    # present, so an overlay-free spawn pays zero subprocesses and the
+    # harness-blind field() reads below answer it exactly.
+    _overlay_answer: Optional[dict] = None
+    if _overlays_present(defaults, profile, lane):
+        from fno.agents.spawn_overlay_client import (
+            SpawnOverlayUnavailable,
+            spawn_overlay_call,
+        )
 
-            # `None` = no explicit harness, so resolve_dispatch_harness does
-            # harness inference (env-based via infer_invoking_harness) then the
-            # builtin claude. Its first arg is the explicit harness STRING, not
-            # argv, and inference reads env markers, not command-line args.
-            eff_harness, _ = resolve_dispatch_harness(None, env=env)
-        from fno.agents.mux_spawn import effort_tokens
-
-        reason = None
+        _lv = (
+            lane.get("args") if isinstance(lane, Mapping) else getattr(lane, "args", None)
+        ) if lane is not None else None
         try:
-            effort_tokens(eff_harness, cfg_effort)
-        except Exception as exc:
-            reason = str(exc)
-        else:
-            inject += ["--effort", cfg_effort]
-            from_config.append(("effort", cfg_effort, f"{effort_rung}.effort"))  # type: ignore[arg-type]
-        if reason is not None:
-            # Config-sourced effort degrades open on a lane with no effort
-            # surface. Explicit --effort remains fail-closed in cmd_spawn.
+            _overlay_answer = spawn_overlay_call(
+                {
+                    "kind": "overlay",
+                    "verb": profile_verb or "",
+                    "harness": resolved_harness() or "",
+                    "defaults": _overlay_payload(defaults) if defaults is not None else {},
+                    "profile": _overlay_payload(profile) if profile is not None else None,
+                    "lane": {"args": list(_lv)} if _lv else None,
+                    "lane_index": lane_index,
+                    "argv_tail": [str(t) for t in out[1:]],
+                }
+            )
+        except SpawnOverlayUnavailable as exc:
+            # Transport unavailable (no fno-agents binary): degrade open like
+            # every config-sourced field here. Only the verb's own VERDICT
+            # refusal below fails the spawn.
             print(
-                f"fno agents spawn: effort skipped ({reason}); "
-                f"{effort_rung}.effort = {cfg_effort!r} ignored",
+                f"fno agents spawn: harness-keyed defaults skipped ({exc})",
                 file=err,
             )
+            _overlay_answer = None
+        if _overlay_answer is not None and _overlay_answer.get("refusal"):
+            print(_overlay_answer["refusal"], file=err)
+            raise SystemExit(2)
+
+    def _seamed(name: str) -> Tuple[str, Optional[str]]:
+        """The post-resolution read for the three posture fields: the lane
+        first (a lane is a complete coordinate), then the verb's harness-keyed
+        answer, then the harness-blind scalars - field()'s order with the two
+        harness rungs spliced in above them."""
+        if lane is not None and lane_index is not None:
+            lv = _lane_value(lane, name)
+            if lv:
+                return lv, f"agents.profiles.{profile_verb}.lanes[{lane_index}]"
+        entry = (_overlay_answer or {}).get("effective", {}).get(name)
+        if entry:
+            return entry["value"], entry["rung"]
+        return field(name)
+
+    if not has_effort:
+        # Effort surface depends on the RESOLVED HARNESS, not the vendor, so
+        # the value is re-read through the harness rungs HERE, after the grid
+        # or slot has settled the harness (x-8975) - a codex-keyed overlay
+        # effort must win on codex while the scalar still answers claude.
+        # resolved_harness() is the same lazy answer the substrate and
+        # permission blocks read: explicit -H > config provider > inference.
+        cfg_effort, effort_rung = _seamed("effort")
+        if cfg_effort:
+            from fno.agents.mux_spawn import effort_tokens
+
+            reason = None
+            try:
+                effort_tokens(resolved_harness() or "", cfg_effort)
+            except Exception as exc:
+                reason = str(exc)
+            else:
+                inject += ["--effort", cfg_effort]
+                from_config.append(("effort", cfg_effort, f"{effort_rung}.effort"))  # type: ignore[arg-type]
+            if reason is not None:
+                # Config-sourced effort degrades open on a lane with no effort
+                # surface. Explicit --effort remains fail-closed in cmd_spawn.
+                print(
+                    f"fno agents spawn: effort skipped ({reason}); "
+                    f"{effort_rung}.effort = {cfg_effort!r} ignored",
+                    file=err,
+                )
 
     # Substrate (x-3d5b): inject when no explicit substrate is pinned (flag,
     # positional token, --headless/-o, or resume-implied bg - all post-normalize).
@@ -1571,47 +1613,58 @@ def inject_spawn_defaults(
     # provider, degrades open (warn, skip) rather than failing at the spawn parser.
     explicit_substrate = _has_explicit_substrate(out[1:])
     injected_substrate: Optional[str] = None
-    if cfg_substrate and explicit_substrate is None:
+    if explicit_substrate is None:
+        # Re-read through the harness rungs (x-8975): a substrate that only a
+        # harness overlay carries must still reach its harness here.
         prov = resolved_harness()
-        if prov and _substrate_compatible(cfg_substrate, prov):
-            inject += ["--substrate", cfg_substrate]
-            injected_substrate = cfg_substrate
-            from_config.append(("substrate", cfg_substrate, f"{substrate_rung}.substrate"))  # type: ignore[arg-type]
-        else:
-            if not prov:
-                reason = "harness resolution failed"
-            elif cfg_substrate not in _SUBSTRATES:
-                reason = f"unknown substrate (valid: {', '.join(_SUBSTRATES)})"
+        cfg_substrate, substrate_rung = _seamed("substrate")
+        if cfg_substrate:
+            if prov and _substrate_compatible(cfg_substrate, prov):
+                inject += ["--substrate", cfg_substrate]
+                injected_substrate = cfg_substrate
+                from_config.append(("substrate", cfg_substrate, f"{substrate_rung}.substrate"))  # type: ignore[arg-type]
             else:
-                reason = (
-                    f"{prov} does not support substrate {cfg_substrate!r}; thread "
-                    "requires a journey-proven lane (claude and codex today; "
-                    "opencode remains unearned), so the spawn falls back to the "
-                    "pane default"
+                if not prov:
+                    reason = "harness resolution failed"
+                elif cfg_substrate not in _SUBSTRATES:
+                    reason = f"unknown substrate (valid: {', '.join(_SUBSTRATES)})"
+                else:
+                    reason = (
+                        f"{prov} does not support substrate {cfg_substrate!r}; thread "
+                        "requires a journey-proven lane (claude and codex today; "
+                        "opencode remains unearned), so the spawn falls back to the "
+                        "pane default"
+                    )
+                print(
+                    f"fno agents spawn: substrate skipped ({reason}); "
+                    f"{substrate_rung}.substrate = {cfg_substrate!r} ignored",
+                    file=err,
                 )
-            print(
-                f"fno agents spawn: substrate skipped ({reason}); "
-                f"{substrate_rung}.substrate = {cfg_substrate!r} ignored",
-                file=err,
-            )
 
     # Permission mode (x-3d5b): same shape as substrate, but the compatibility
     # check depends on the EFFECTIVE substrate (explicit pin > this-run injection >
     # per-provider default), because a non-claude bg/headless lane refuses a
     # mapped --permission-mode. An explicit --permission-mode/--yolo keeps the
     # fail-closed behavior (has_permission short-circuits this branch).
-    if cfg_permission and not _has_permission_mode(out[1:]):
+    if not _has_permission_mode(out[1:]):
         prov = resolved_harness()
+        # Re-read through the harness rungs (x-8975): the value is a flag
+        # spelling the HARNESS defines, so the answer can be keyed by harness.
+        # An empty re-read keeps the harness-blind read alive: that is the
+        # builtin.autonomous rung (x-7198), which field() cannot see.
+        h_permission, h_rung = _seamed("permission_mode")
+        if h_permission:
+            cfg_permission, permission_rung = h_permission, h_rung
         # The effective substrate this spawn resolves to: an explicit pin, else a
         # config value injected this run, else the `fno agents spawn` default -
         # PANE (cli.py, not the autonomous-dispatch substrate_default, which picks
         # headless for providers whose spawn claim is not native and would wrongly
         # skip a pane-mappable mode).
         eff_substrate = explicit_substrate or injected_substrate or "pane"
-        if prov and _permission_mappable(prov, cfg_permission, eff_substrate):
+        if cfg_permission and prov and _permission_mappable(prov, cfg_permission, eff_substrate):
             inject += ["--permission-mode", cfg_permission]
             from_config.append(("permission_mode", cfg_permission, f"{permission_rung}.permission_mode"))  # type: ignore[arg-type]
-        else:
+        elif cfg_permission:
             reason = (
                 f"{prov} cannot map permission mode {cfg_permission!r} on substrate {eff_substrate!r}"
                 if prov
@@ -1625,68 +1678,71 @@ def inject_spawn_defaults(
 
     # _flag_present, not _flag_value: a valueless trailing `--tab` reads as
     # absent to a value read, and injecting beside it puts TWO `--tab` tokens in
-    # the argv, so click fails the spawn on the operator's own flag. This is the
-    # same presence-not-value rule the conflict scan below states, applied to the
-    # flag the block is actually guarding on.
+    # the argv, so click fails the spawn on the operator's own flag.
     if cfg_pane_group and not _flag_present(out[1:], "--tab"):
-        eff_substrate = explicit_substrate or injected_substrate or "pane"
-        # A pane group places the pane by moving its OWN tab, so dispatch
-        # hard-refuses a group beside --split/--at (the pane then sits in a tab
-        # it does not own). That refusal is right for a group the operator
-        # TYPED and wrong for one this config injected: it would fail-close a
-        # spawn on a value the caller never asked for. Every other
-        # config-sourced field here degrades open with a named line, so this
-        # one does too.
-        # --once/-o is in this list because cli.py refuses placement on
-        # `substrate != "pane" OR once`, so a one-shot spawn has no pane
-        # geometry either even though its substrate resolves to "pane".
-        # PRESENCE, not value: `_flag_value` answers None for a valueless
-        # trailing `--at`, which read as "no conflict" and injected the group,
-        # so dispatch then hard-refused on a flag the caller never typed. A
-        # `--flag=value` spelling has to be matched on its prefix.
-        # Scanned through _spawn_tokens like every other flag read here, so a
-        # fenced provider argv cannot suppress the group: `spawn ... -- claude
-        # --at 3` names a seed token, not an fno flag, and dropping the config's
-        # pane_group over it would blame the caller for a flag they never passed.
-        _placement_flags = ("--split", "-x", "--at", "--once", "-o")
-
-        def _names(tok: str) -> "Optional[str]":
-            for f in _placement_flags:
-                if tok == f or tok.startswith(f + "="):
-                    return f
-                # The glued short form click also accepts (`-xdown`), matched the
-                # same way _flag_value matches `-Pvalue`. Missing it let a real
-                # placement flag read as absent, inject the group, and then hit
-                # the hard refusal on a value the operator never typed.
-                if len(f) == 2 and f[1] != "-" and tok != f and tok.startswith(f):
-                    return f
-            return None
-
-        conflicting = next(
-            (
-                named
-                for _, tok in _spawn_tokens(out[1:])
-                if (named := _names(tok)) is not None
-            ),
-            None,
-        )
-        if eff_substrate != "pane":
-            print(
-                f"fno agents spawn: pane group skipped (resolved substrate "
-                f"{eff_substrate!r} has no pane geometry); "
-                f"{pane_group_rung}.pane_group = {cfg_pane_group!r} ignored",
-                file=err,
+        # Placement judgment (conflicts, pane geometry) lives in the verb;
+        # config-sourced fields degrade open, so an unavailable verb skips the
+        # group with a named line instead of failing the spawn.
+        _pg_rung = f"{pane_group_rung}.pane_group"
+        try:
+            from fno.agents.spawn_overlay_client import (
+                SpawnOverlayUnavailable,
+                spawn_overlay_call,
             )
-        elif conflicting:
+
+            _pg = spawn_overlay_call(
+                {
+                    "kind": "pane-group",
+                    "group": cfg_pane_group,
+                    "rung": _pg_rung,
+                    "eff_substrate": explicit_substrate or injected_substrate or "pane",
+                    "argv_tail": [t for _, t in _spawn_tokens(out[1:])],
+                }
+            )
+        except SpawnOverlayUnavailable as exc:
             print(
-                f"fno agents spawn: pane group skipped ({conflicting} places this "
-                f"pane in a tab it does not own, which a group cannot move); "
-                f"{pane_group_rung}.pane_group = {cfg_pane_group!r} ignored",
+                f"fno agents spawn: pane group skipped ({exc}); {_pg_rung} ignored",
                 file=err,
             )
         else:
-            inject += ["--tab", cfg_pane_group]
-            from_config.append(("tab", cfg_pane_group, f"{pane_group_rung}.pane_group"))  # type: ignore[arg-type]
+            if _pg.get("inject"):
+                inject += ["--tab", cfg_pane_group]
+                from_config.append(("tab", cfg_pane_group, _pg_rung))  # type: ignore[arg-type]
+            elif _pg.get("skipped"):
+                print(_pg["skipped"], file=err)
+
+    # Harness bundle (x-8975): the verb's ONE bundle answer (lane args >
+    # profile harness overlay > defaults harness overlay, never concatenated)
+    # lands behind the -- passthrough fence at the argv TAIL, so the caller's
+    # own pre-fence tokens stay pre-fence; a boundary the caller already typed
+    # displaces the configured bundle (the verb names it), and the off-pane
+    # gate below re-reads the final argv, so a bundle on an explicit
+    # bg/headless substrate is refused exactly like a typed one.
+    _bundle_inject: List[str] = []
+    _bundle_json = (_overlay_answer or {}).get("bundle")
+    if isinstance(_bundle_json, dict) and "displaced" in _bundle_json:
+        _d = _bundle_json["displaced"]
+        print(
+            "fno agents spawn: harness args skipped (argv already "
+            f"carries a {_d['boundary']} passthrough); {_d['rung']} ignored",
+            file=err,
+        )
+    elif isinstance(_bundle_json, dict):
+        _tokens = [str(a) for a in _bundle_json["tokens"]]
+        _rung = _bundle_json["rung"]
+        # click fills positionals in order, so a spawn with no message would
+        # eat the bundle's first token as MESSAGE; an explicit empty keeps the
+        # slot reserved for the prompt.
+        if not _positional_indices(out[1:]):
+            out = [*out, ""]
+        _bundle_inject = ["--", *_tokens]
+        from_config.append(("args", " ".join(_tokens), _rung))  # type: ignore[arg-type]
+        print(
+            "fno agents spawn: bundle "
+            f"{_rung} applied unverified (fno reads no effective "
+            "harness config; confirm on the worker receipt)",
+            file=err,
+        )
 
     if from_config:
         # AC9-UI / AC1-HP: config-sourced routing is never invisible; name the
@@ -1700,6 +1756,9 @@ def inject_spawn_defaults(
         )
     if inject:
         out = [out[0], *inject, *out[1:]]
+    if _bundle_inject:
+        out = [*out, *_bundle_inject]
+    if inject or _bundle_inject:
         # x-1caa: injection can pin the substrate the operator left open, and
         # the Rust-routed lane never reaches the Python CLI's own refusal - so
         # the off-pane passthrough gate re-runs on the final argv, not just the
@@ -1716,242 +1775,3 @@ def inject_spawn_defaults(
     return out
 
 
-# ---------------------------------------------------------------------------
-# The fallback chain: where a refused node goes next
-# ---------------------------------------------------------------------------
-
-#: Sizes that resolve to their own chain. Anything else reads `default`.
-_CHAIN_SIZES = ("S", "M", "L")
-
-_CHAIN_KEYS = frozenset({"S", "M", "L", "default"})
-# The harness axis is the BINARY (docs/architecture/axis-vocabulary.md).
-# `opencode` is legally both a harness and a provider, so never infer the axis
-# from the value.
-_CHAIN_HARNESSES = frozenset({"claude", "codex", "agy", "opencode"})
-
-
-class FallbackConfigError(ValueError):
-    """A fallback chain that cannot be trusted to name a vendor."""
-
-
-def validate_fallback(table: object) -> dict:
-    """Return the chain table as links, or raise naming the offending key.
-
-    Called on the failover path, never at config load. Unlike
-    ``_coerce_profiles``, which degrades a typo to no-profiles so a bad config
-    cannot brick spawning, this REFUSES: a chain is read only when a provider
-    has already refused, and degrading open there spawns a worker at an
-    unintended vendor and bills it. Refusing leaves the worker alive and the
-    node claimed, which is a bounded stop.
-
-    Raising here rather than in the config model is deliberate. A field
-    validator would fail ``load_settings()`` process-wide, so one typo would
-    make every ``fno`` command raise and stop the pr-watch tick at its settings
-    phase - taking down the daemon that runs the failover, which is a strictly
-    worse outcome than the one being prevented.
-    """
-    from fno.config import SpawnDefaultsBlock
-
-    if not isinstance(table, dict):
-        raise FallbackConfigError(
-            "config.agents.fallback must be a table keyed by size "
-            f"(S|M|L|default); got {type(table).__name__}"
-        )
-    out: dict[str, list] = {}
-    for size, chain in table.items():
-        if size not in _CHAIN_KEYS:
-            raise FallbackConfigError(
-                f"config.agents.fallback.{size}: unknown size key; "
-                f"expected one of {'|'.join(sorted(_CHAIN_KEYS))}"
-            )
-        if not isinstance(chain, list):
-            raise FallbackConfigError(
-                f"config.agents.fallback.{size} must be a list of links; "
-                f"got {type(chain).__name__}"
-            )
-        links = []
-        for i, link in enumerate(chain):
-            if isinstance(link, SpawnDefaultsBlock):
-                links.append(link)
-                continue
-            if not isinstance(link, dict):
-                raise FallbackConfigError(
-                    f"config.agents.fallback.{size}[{i}] must be a table of "
-                    f"axis fields; got {type(link).__name__}"
-                )
-            # A link is spelled with the CORRECT axis word, `harness` (the
-            # binary). SpawnDefaultsBlock's own field is the legacy `provider`,
-            # which its comment records as meaning harness. Both spellings
-            # read and `harness` wins. The value is checked either way, because
-            # `extra="ignore"` would otherwise drop a typo'd harness silently
-            # and the link would spawn on the ambient binary.
-            link = dict(link)
-            harness = str(
-                link.pop("harness", "") or link.get("provider", "") or ""
-            ).strip()
-            if harness and harness not in _CHAIN_HARNESSES:
-                raise FallbackConfigError(
-                    f"config.agents.fallback.{size}[{i}].harness={harness!r} "
-                    f"is not a known harness "
-                    f"({'|'.join(sorted(_CHAIN_HARNESSES))})"
-                )
-            if harness:
-                link["provider"] = harness
-            links.append(SpawnDefaultsBlock(**link))
-        out[size] = links
-    return out
-
-
-def link_id(link) -> str:
-    """A stable ``harness/model`` name for one chain link.
-
-    Used as the walk's memory key, so a node never re-dispatches onto a link it
-    has already spent. Two links that differ only in effort are the SAME
-    destination for that purpose: retrying the same vendor at a different
-    reasoning setting does not answer a cap.
-
-    ``account`` DOES participate, because it names a different bill and a
-    different meter. Two links on one harness and model that differ only by
-    account are the operator's second credential, and folding them together
-    would spend the first and then skip the second as already tried.
-    """
-    harness = (getattr(link, "provider", "") or "").strip() or "?"
-    model = (getattr(link, "model", "") or "").strip()
-    route = (getattr(link, "route", "") or "").strip()
-    account = (getattr(link, "account", "") or "").strip()
-    base = f"{harness}/{model or route or 'default'}"
-    return f"{base}@{account}" if account else base
-
-
-def _harness_records(harness: str, repo_root=None):
-    """Account records whose harness is ``harness``, or [] when unreadable.
-
-    Rooted at ``repo_root`` because the recovery roster is global and a
-    candidate can belong to another project. A same-id record in the
-    dispatcher's own project must never answer for a foreign worker.
-    """
-    try:
-        from fno.adapters.providers.loader import load_providers
-
-        from pathlib import Path as _Path
-
-        cfg = load_providers(repo_root=_Path(repo_root) if repo_root else None)
-        return [r for r in cfg.records if r.harness == harness]
-    except Exception:  # noqa: BLE001 - an unreadable config means UNKNOWN, not exhausted
-        return []
-
-
-def link_is_exhausted(link, *, now: Optional[float] = None, repo_root=None) -> bool:
-    """True only when every account this link can land on is KNOWN exhausted.
-
-    This is the check task 1.2 made real. Before the harvested reset, a claude
-    record's lock expired seconds after the cap and a z.ai record had no probe
-    at all, so every link looked eligible and the chain routed straight back
-    into the provider that had just refused.
-
-    UNKNOWN stays eligible, matching the invariant `rotation.py` already
-    enforces: unknown is not exhausted. So does an unreadable config, no
-    matching record, and any error on the way - the failure mode of guessing
-    "exhausted" is holding a node that could have run.
-    """
-    from fno.adapters.providers.runtime_state import HeadroomState, headroom
-
-    account = (getattr(link, "account", "") or "").strip()
-    harness = (getattr(link, "provider", "") or "").strip()
-    ids = (
-        [account] if account
-        else [r.id for r in _harness_records(harness, repo_root)]
-    )
-    if not ids:
-        return False
-    try:
-        from pathlib import Path as _Path
-
-        root = _Path(repo_root) if repo_root else None
-        verdicts = [headroom(pid, now=now, repo_root=root) for pid in ids]
-    except Exception:  # noqa: BLE001 - a failed read is UNKNOWN, never exhausted
-        return False
-    return all(v.state is HeadroomState.EXHAUSTED for v in verdicts)
-
-
-def resolve_fallback_chain(
-    size: Optional[str],
-    *,
-    exclude: Sequence[str] = (),
-    settings: object = None,
-    now: Optional[float] = None,
-    repo_root=None,
-) -> List[object]:
-    """The eligible fallback links for a node of ``size``, in order.
-
-    ``size`` is the node's existing ``--size S|M|L``, which is already the
-    operator's own simple-versus-complex split; an absent or unrecognised size
-    reads the ``default`` chain. ``exclude`` carries the links this node has
-    already spent, by :func:`link_id`.
-
-    Returns [] for three different situations that share one correct action -
-    spawn nothing: no chain configured (the pre-existing behavior), every link
-    already tried, and every remaining link's own provider known exhausted.
-    Routing into a known-capped provider is worse than holding, so an
-    all-exhausted chain deliberately does NOT fall back to link zero.
-
-    Raises whatever the config validator raises on a malformed chain. That is
-    the point: a chain is read on the failover path only, and degrading open
-    there spawns a worker at an unintended vendor and bills it.
-    """
-    if settings is None:
-        # Rooted at the CANDIDATE's project, not the daemon's cwd. The recovery
-        # roster is global, so a foreign worker resolving the dispatcher's
-        # chain would spawn on a vendor its own project never authorized.
-        if repo_root:
-            from pathlib import Path as _Path
-
-            from fno.config import load_settings_for_repo
-
-            settings = load_settings_for_repo(_Path(repo_root))
-        else:
-            from fno.config import load_settings
-
-            settings = load_settings()
-    table = validate_fallback(
-        getattr(settings.agents, "fallback", None) or {}  # type: ignore[attr-defined]
-    )
-    key = size if size in _CHAIN_SIZES else "default"
-    chain = table.get(key) or table.get("default") or []
-    spent = set(exclude)
-    return [
-        link for link in chain
-        if link_id(link) not in spent
-        and not link_is_exhausted(link, now=now, repo_root=repo_root)
-    ]
-
-
-def link_to_spawn_flags(link) -> List[str]:
-    """One chain link as spawn flags, in the codebase's existing axis spelling.
-
-    No new axis vocabulary: harness is ``-H``, the vendor/model route is
-    ``--route``, and model, effort, substrate, permission-mode and account keep
-    their own flags. ``--substrate bg`` is the deprecated thread alias; the
-    dispatch resolver seats it from the harness's spawn claim (``native``),
-    so a codex link that left substrate unset resolves to a pane rather than
-    being handed a substrate its harness rejects.
-    """
-    harness = (getattr(link, "provider", "") or "").strip()
-    out: List[str] = []
-    if harness:
-        out += ["-H", harness]
-    for flag, field in (
-        ("-m", "model"),
-        ("--effort", "effort"),
-        ("--permission-mode", "permission_mode"),
-        ("--route", "route"),
-        ("--account", "account"),
-    ):
-        val = (getattr(link, field, "") or "").strip()
-        if val:
-            out += [flag, val]
-    substrate = (getattr(link, "substrate", "") or "").strip()
-    if not substrate:
-        substrate = "bg" if harness == "claude" else "pane"
-    out += ["--substrate", substrate]
-    return out

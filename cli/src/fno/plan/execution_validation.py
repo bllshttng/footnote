@@ -388,6 +388,82 @@ def _validate_compiled_acceptance(
                         f"references {ref_str!r}, which resolves to no compiled criterion",
                     )
                 )
+    out.extend(_validate_acceptance_evidence(doc, codes))
+    return out
+
+
+_EVIDENCE_REF_RE = re.compile(r"^(done_probes|close_probes)\[(\d+)\]$")
+
+
+def _validate_acceptance_evidence(
+    doc: PlanDoc, codes: set[str]
+) -> list[ExecutionViolation]:
+    """Validate `acceptance_evidence` bindings against compiled criteria.
+
+    Unknown AC ids and malformed or out-of-range probe references refuse by
+    name. `required` must arm the session terminal: a required plan with no
+    done_probes binding is a session gate that could never pass. A criterion
+    with no binding stays unmeasured - an unarmed label, never an invented
+    execution.
+    """
+    out: list[ExecutionViolation] = []
+    decl = doc.frontmatter.get("acceptance_evidence")
+    if decl is None:
+        return out
+    if not isinstance(decl, dict):
+        out.append(_violation("acceptance_evidence", "must be a mapping"))
+        return out
+    required = bool(decl.get("required", False))
+    bindings = decl.get("bindings", {})
+    if not isinstance(bindings, dict):
+        out.append(
+            _violation("acceptance_evidence", "`bindings` must be a map of AC id to probe reference")
+        )
+        return out
+    probe_lists: dict[str, list[str]] = {}
+    for key in ("done_probes", "close_probes"):
+        raw = doc.frontmatter.get(key)
+        items = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
+        probe_lists[key] = [str(p) for p in items if str(p).strip()]
+    binds_done = False
+    for ac, probe_ref in bindings.items():
+        ac_str = str(ac).strip()
+        ref_str = str(probe_ref).strip()
+        if ac_str not in codes:
+            out.append(
+                _violation(
+                    "acceptance_evidence",
+                    f"binds {ac_str!r}, which resolves to no compiled criterion",
+                )
+            )
+            continue
+        m = _EVIDENCE_REF_RE.fullmatch(ref_str)
+        if not m:
+            out.append(
+                _violation(
+                    "acceptance_evidence",
+                    f"binds {ac_str!r} to {ref_str!r}: expected `done_probes[n]` or `close_probes[n]`",
+                )
+            )
+            continue
+        key, index = m.group(1), int(m.group(2))
+        if index >= len(probe_lists[key]):
+            out.append(
+                _violation(
+                    "acceptance_evidence",
+                    f"binds {ac_str!r} to {ref_str}, but {key} declares {len(probe_lists[key])} probe(s): the bound probe is missing",
+                )
+            )
+            continue
+        if key == "done_probes":
+            binds_done = True
+    if required and not binds_done:
+        out.append(
+            _violation(
+                "acceptance_evidence",
+                "asserts required evidence but has no done_probes binding: the session terminal could never pass",
+            )
+        )
     return out
 
 

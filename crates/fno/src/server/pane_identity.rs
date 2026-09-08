@@ -1,4 +1,5 @@
-//! Per-pane worker identity: the `fno_id` join and the orphan verdict (v71).
+//! Per-pane worker identity: the `fno_id` join, the shared member-evidence
+//! fold the daemon sweeps consume, and the orphan verdict (v71, x-688b).
 
 use super::*;
 
@@ -44,12 +45,66 @@ impl Core {
         (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
     }
 
+    /// Fold the cached registry rows and the spawn journal into the same
+    /// evidence the standalone workspace-prune verb computes - one shared
+    /// fold (`fold_registry_rows`), so the daemon sweep and the CLI apply
+    /// can never drift on what a row or a reaped name proves. Unknown rows
+    /// contribute no verdict; only a positive `Alive` or `Dead` reading
+    /// enters a set. The journal read is injected so tests never touch the
+    /// operator's real events.jsonl.
+    pub(super) fn member_evidence(&self) -> crate::squad_store::MemberEvidence {
+        self.member_evidence_with_journal(&self.journal)
+    }
+
+    /// The path-injected core of [`Self::member_evidence`].
+    pub(super) fn member_evidence_with_journal(
+        &self,
+        journal: &crate::spawn_journal::SpawnJournal,
+    ) -> crate::squad_store::MemberEvidence {
+        let mut evidence =
+            crate::squad_store::MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        let held = crate::spawn_journal::held_worker_names(&journal.receipts);
+        evidence.fold_registry_rows(
+            &self.agents,
+            journal.spawned_names.clone(),
+            held,
+            self.agents_read_ok,
+        );
+        for name in journal.never_bound.keys() {
+            evidence.add_dead_name(name.clone());
+        }
+        evidence
+    }
+
+    pub(super) fn dead_sweep_count(&self) -> usize {
+        let mut evidence = self.member_evidence();
+        for entry in self.panes.values() {
+            if let Some(worker) = &entry.refused_worker {
+                evidence.add_dead(worker.clone());
+            }
+        }
+        self.squad_members
+            .values()
+            .flatten()
+            .filter(|member| {
+                matches!(
+                    evidence.verdict(member),
+                    crate::squad_store::MemberLiveness::Dead
+                )
+            })
+            .count()
+    }
+
     /// (v71) True when a stored member is bound to `pid` (`member_pane`) and
     /// the evidence built from `agents` and the reap journal judges it Dead,
     /// and no registry row is live on this pane. A refused restore placeholder
-    /// reads `true` too: the same category with an earlier marker. The default
-    /// prune closes such a tab; pristine stays the test for tabs that never
-    /// hosted a worker.
+    /// reads `true` too: the same category with an earlier marker. (x-688b) A
+    /// spawned-name pane - the entry carries the worker name the spawn
+    /// captured, `FNO_AGENT_SELF`, but the registry join never resolved an id
+    /// - reads `true` when that name is positively dead: the pane is fno's
+    /// worker pane, not an operator shell, and must not fall through to the
+    /// used-shells opt-in bucket. The default prune closes such a tab;
+    /// pristine stays the test for tabs that never hosted a worker.
     pub(super) fn orphaned_worker_for_pane(
         &self,
         pid: u64,
@@ -65,12 +120,14 @@ impl Core {
         if live_row_on_pane {
             return false;
         }
-        if self
-            .panes
-            .get(&pid)
+        let entry = self.panes.get(&pid);
+        if entry
             .and_then(|entry| entry.refused_worker.as_ref())
             .is_some()
         {
+            return true;
+        }
+        if orphaned_by_spawned_name(entry.and_then(|entry| entry.name.as_deref()), evidence) {
             return true;
         }
         self.squad_members.values().flatten().any(|member| {
@@ -81,4 +138,16 @@ impl Core {
                 )
         })
     }
+}
+
+/// (x-688b) The name tier, pure so it is unit-testable without a live pty:
+/// a pane entry carrying a spawned worker name that the shared fold judged
+/// dead (reaped row, exited row, or never-bound marker - each reuse-guarded
+/// upstream) is an orphaned worker pane. `None`/empty is a shell pane: no
+/// name, no verdict.
+pub(super) fn orphaned_by_spawned_name(
+    name: Option<&str>,
+    evidence: &crate::squad_store::MemberEvidence,
+) -> bool {
+    name.is_some_and(|n| !n.is_empty() && evidence.is_dead_name(n))
 }

@@ -1,0 +1,13 @@
+# Acceptance-evidence regression: the probe-runner journey must stay green.
+# Grade-only (no worker step): the suite already exists at
+# crates/fno-agents/tests/acceptance_evidence_journey.rs and asserts the
+# x-d098 contract - presence alone cannot satisfy a bound criterion, the
+# positive control does, and a required declaration never passes unarmed.
+id: regression-acceptance-proof
+tier: regression
+grade:
+  - kind: exit
+    command: "cargo test --manifest-path crates/fno-agents/Cargo.toml --test acceptance_evidence_journey"
+    expect: 0
+timeout_minutes: 15
+tags: [regression, acceptance-evidence]

@@ -43,6 +43,19 @@ def _home_repo(monkeypatch, tmp_path: Path) -> str:
     return root
 
 
+def _pin_journal(monkeypatch, tmp_path: Path) -> Path:
+    """The journal the RESOLVER answers, which is where the row now goes.
+
+    The merge emitters used to write to `<checkout>/.fno/events.jsonl`, a plain
+    file the post-merge worktree reap deletes. Pinning the resolver is what
+    proves the destination rather than assuming it.
+    """
+    path = tmp_path / "space" / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("fno.paths.project_events_json", lambda *a, **kw: path)
+    return path
+
+
 def test_manual_merge_emits_with_resolved_node(tmp_path, monkeypatch):
     """A tty merge emits human_touch{merge} carrying the pr's graph node."""
     root = _home_repo(monkeypatch, tmp_path)
@@ -51,11 +64,11 @@ def test_manual_merge_emits_with_resolved_node(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     _tty(monkeypatch, True)
-    state_dir = tmp_path / ".fno"
+    journal = _pin_journal(monkeypatch, tmp_path)
 
-    _merge._emit_human_touch_merge(42, str(state_dir))
+    _merge._emit_human_touch_merge(42)
 
-    rows = _events(state_dir / "events.jsonl")
+    rows = _events(journal)
     assert len(rows) == 1
     assert rows[0]["type"] == "human_touch"
     assert rows[0]["data"] == {
@@ -68,11 +81,11 @@ def test_manual_merge_emits_with_resolved_node(tmp_path, monkeypatch):
 def test_loop_merge_never_emits(tmp_path, monkeypatch):
     """No tty = the autonomous loop's ship gate; it must not count as touch."""
     _tty(monkeypatch, False)
-    state_dir = tmp_path / ".fno"
+    journal = _pin_journal(monkeypatch, tmp_path)
 
-    _merge._emit_human_touch_merge(42, str(state_dir))
+    _merge._emit_human_touch_merge(42)
 
-    assert _events(state_dir / "events.jsonl") == []
+    assert _events(journal) == []
 
 
 def test_manual_merge_unresolved_node_counts_as_failed(tmp_path, monkeypatch):
@@ -83,11 +96,11 @@ def test_manual_merge_unresolved_node_counts_as_failed(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     _tty(monkeypatch, True)
-    state_dir = tmp_path / ".fno"
+    journal = _pin_journal(monkeypatch, tmp_path)
 
-    _merge._emit_human_touch_merge(42, str(state_dir))
+    _merge._emit_human_touch_merge(42)
 
-    rows = _events(state_dir / "events.jsonl")
+    rows = _events(journal)
     assert len(rows) == 1
     assert rows[0]["data"]["graph_node_id"] is None
     assert rows[0]["data"]["resolution"] == "failed"
@@ -102,11 +115,11 @@ def test_manual_merge_never_attributes_foreign_repo_node(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     _tty(monkeypatch, True)
-    state_dir = tmp_path / ".fno"
+    journal = _pin_journal(monkeypatch, tmp_path)
 
-    _merge._emit_human_touch_merge(42, str(state_dir))
+    _merge._emit_human_touch_merge(42)
 
-    rows = _events(state_dir / "events.jsonl")
+    rows = _events(journal)
     assert rows[0]["data"]["graph_node_id"] is None
     assert rows[0]["data"]["resolution"] == "failed"
 
@@ -121,11 +134,11 @@ def test_manual_merge_ambiguous_match_counts_as_failed(tmp_path, monkeypatch):
     ])
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     _tty(monkeypatch, True)
-    state_dir = tmp_path / ".fno"
+    journal = _pin_journal(monkeypatch, tmp_path)
 
-    _merge._emit_human_touch_merge(42, str(state_dir))
+    _merge._emit_human_touch_merge(42)
 
-    rows = _events(state_dir / "events.jsonl")
+    rows = _events(journal)
     assert rows[0]["data"]["graph_node_id"] is None
     assert rows[0]["data"]["resolution"] == "failed"
 
@@ -140,11 +153,11 @@ def test_manual_merge_matches_additional_prs(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     _tty(monkeypatch, True)
-    state_dir = tmp_path / ".fno"
+    journal = _pin_journal(monkeypatch, tmp_path)
 
-    _merge._emit_human_touch_merge(42, str(state_dir))
+    _merge._emit_human_touch_merge(42)
 
-    rows = _events(state_dir / "events.jsonl")
+    rows = _events(journal)
     assert rows[0]["data"]["graph_node_id"] == "x-5678"
 
 

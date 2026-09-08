@@ -197,3 +197,45 @@ def find_dev_binary() -> Optional[Path]:
         if candidate.is_file():
             return candidate
     return None
+
+
+class VerbUnavailable(RuntimeError):
+    """The fno-agents binary is missing, failed, or answered malformed JSON."""
+
+
+def verb_call(verb: str, payload: dict, unavailable: type = VerbUnavailable) -> dict:
+    """One subprocess round-trip with the fno-agents binary: JSON payload in,
+    parsed JSON answer out. The dev checkout's own build outranks any stale
+    installed copy. Raises the caller's ``unavailable`` exception - a named
+    refusal, never a silent fallback."""
+    import json
+    import os
+    import subprocess
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        raise unavailable(
+            "the fno-agents binary was not found; reinstall fno,"
+            " run `fno doctor update --rust`, or set FNO_AGENTS_BIN"
+        )
+    try:
+        proc = subprocess.run(
+            [str(binary), verb],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise unavailable(f"fno-agents {verb} failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise unavailable(
+            f"fno-agents {verb} exited {proc.returncode}: {proc.stderr.strip()[:200]}"
+        )
+    try:
+        return json.loads(proc.stdout)
+    except ValueError as exc:
+        raise unavailable(f"fno-agents {verb} bad output: {exc}") from exc
+    finally:
+        if os.environ.get("FNO_ROUTE_SLOT_DEBUG"):
+            print(json.dumps({"payload": payload}), flush=True)

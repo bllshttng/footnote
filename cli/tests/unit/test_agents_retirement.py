@@ -1,122 +1,101 @@
-"""x-1379: the retirement verdict joins a worker row to its node's doneness.
+"""The retirement verdict is the Rust GC's, and this module only maps it.
 
-A king reads ``fno agents top``, sees a provider lane at its cap, and cannot
-tell that a holder's node already merged. These tests pin the one rule that
-decides "has this worker's node shipped": done AND merged AND no additional
-PR, resolved fail-closed from the graph.
+These tests pin the forwarding contract: bucket -> verdict mapping, the
+NODE column's survival for retirable rows, and the fail-closed direction
+when the Rust projection cannot be read.
 """
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from fno.agents.retirement import resolve_node, verdicts
-
-IDS = {"x-7fbb", "x-ba96", "x-d15a", "x-dcf0", "x-feed", "x-abc1", "y-abc1"}
+from fno.agents.retirement import Retirement, verdicts
 
 
-def _node(id, status="done", merge="merged", pr=None, extra=None):
+def _summary() -> dict:
+    """One sweep summary carrying a row in every mapped bucket."""
     return {
-        "id": id,
-        "status": status,
-        "merge_status": merge,
-        "pr_number": pr,
-        "additional_prs": extra or [],
+        "retired": [{"id": "w-done", "basis": "every named node done: x-70e1, x-2188"}],
+        "kept_open_work": [{"id": "w-open", "node": "x-9", "status": "in_review"}],
+        "kept_open_do_row": [{"id": "w-door", "node": "x-8"}],
+        "kept_not_spawn": [{"id": "w-adopt", "reason": "adopted"}],
+        "kept_operator": ["w-op"],
+        "kept_crowned": ["w-crown"],
+        "kept_no_provenance": ["w-lost"],
+        "kept_active": [{"id": "w-live", "age_s": 10}],
+        "kept_transcript_unresolved": ["w-dark"],
+        "stop_refused": [{"id": "w-stuck", "reason": "the stop did not confirm"}],
+        "kept_no_receipt": [{"id": "w-norc", "reason": "no staged receipt"}],
     }
 
 
-def test_done_merged_no_extra_pr_retires():
-    """AC1-HP: the x-7fbb shape - the reason names the merged PR."""
-    entries = [_node("x-7fbb", pr=1553)]
-    out = verdicts([("t-7fbb-toby", None)], entries=entries)
-    v = out["t-7fbb-toby"]
+def _runner_with(summary: dict):
+    return lambda: json.dumps(summary)
+
+
+def test_retired_row_maps_to_true_with_node_and_basis():
+    out = verdicts([("w-done", None)], runner=_runner_with(_summary()))
+    v = out["w-done"]
     assert v.retire is True
-    assert v.node == "x-7fbb"
-    assert v.node_basis == "name"
-    assert v.reason == "done+merged PR 1553"
+    assert v.node == "x-70e1"
+    assert v.node_basis == "graph"
+    assert "x-70e1" in v.reason
 
 
-def test_done_merged_with_additional_pr_holds():
-    """AC1-EDGE: the x-ba96 shape - the one test that stops this feature
-    from telling a king to kill live work."""
-    entries = [
-        _node(
-            "x-ba96",
-            pr=1507,
-            extra=[
-                {"number": 1522, "url": "http://x/1522"},
-                {"number": 1600, "url": "http://x/1600"},
-            ],
-        )
-    ]
-    out = verdicts([("t-ba96-w", None)], entries=entries)
-    v = out["t-ba96-w"]
-    assert v.retire is False
-    assert v.reason == "extra-pr:1522,1600"
+def test_every_keep_bucket_maps_to_named_not_retirable():
+    out = verdicts(
+        [
+            ("w-open", None),
+            ("w-door", None),
+            ("w-adopt", None),
+            ("w-op", None),
+            ("w-crown", None),
+            ("w-lost", None),
+            ("w-live", None),
+            ("w-dark", None),
+            ("w-stuck", None),
+            ("w-norc", None),
+        ],
+        runner=_runner_with(_summary()),
+    )
+    assert out["w-open"].retire is False
+    assert out["w-open"].node == "x-9"
+    assert out["w-open"].reason == "status=in_review"
+    assert out["w-adopt"].reason == "not a spawn row: origin adopted"
+    assert out["w-op"].reason == "operator row"
+    assert out["w-lost"].reason == "no-node"
+    assert out["w-live"].reason == "active: written 10s ago"
+    assert "stop refused" in out["w-stuck"].reason
+    for name in ("w-door", "w-crown", "w-dark", "w-norc"):
+        assert out[name].retire is False
 
 
-def test_done_without_merge_status_holds():
-    entries = [_node("x-7fbb", merge=None, pr=1553)]
-    (v,) = verdicts([("t-7fbb-toby", None)], entries=entries).values()
-    assert v.retire is False
-    assert v.reason == "merge=None"
-
-
-def test_in_review_holds():
-    entries = [_node("x-7fbb", status="in_review", merge=None)]
-    (v,) = verdicts([("t-7fbb-toby", None)], entries=entries).values()
-    assert v.retire is False
-    assert v.reason == "status=in_review"
-
-
-def test_unresolved_name_reads_no_node():
-    """AC2-EDGE shape: an unresolvable row is a real answer, never a crash."""
-    (v,) = verdicts([("just-a-king", None)], entries=[]).values()
-    assert v.node is None
-    assert v.node_basis is None
-    assert v.retire is False
-    assert v.reason == "no-node"
-
-
-def test_name_resolution_token_forms():
-    """The joined token-1+2 form and the bare-hex form both resolve; a hex
-    word in a later token is never minted into an id."""
-    assert resolve_node("target-x-dcf0-slug", None, IDS) == ("x-dcf0", "name")
-    assert resolve_node("t-7fbb-toby", None, IDS) == ("x-7fbb", "name")
-    # x-feed exists in the graph; `feed` is token 2 and is never consulted.
-    assert resolve_node("t-d15a-feed-timeout", None, IDS) == ("x-d15a", "name")
-
-
-def test_ambiguous_bare_hex_resolves_to_none():
-    assert resolve_node("t-abc1-worker", None, IDS) == (None, None)
-
-
-def test_registry_node_wins_and_stamps_basis():
-    assert resolve_node("t-7fbb-toby", "x-ba96", IDS) == ("x-ba96", "registry")
-
-
-def test_unreadable_graph_fails_closed_for_every_row(monkeypatch):
-    """AC1-ERR: an unreadable graph is a hold for the whole roster, and the
-    roster is never an empty dict (which would read as no rows)."""
-    import fno.graph.load as graph_load
-
+def test_unreadable_projection_fails_closed_for_every_row():
     def boom():
-        raise RuntimeError("locked")
+        raise RuntimeError("binary missing")
 
-    monkeypatch.setattr(graph_load, "load_graph", boom)
-    out = verdicts([("t-7fbb-toby", None), ("t-ba96-w", None)])
-    assert sorted(out) == ["t-7fbb-toby", "t-ba96-w"]
-    assert all(v.retire is False for v in out.values())
-    assert all(v.reason.startswith("graph-unreadable") for v in out.values())
+    out = verdicts([("a", None), ("b", None)], runner=boom)
+    for name in ("a", "b"):
+        v = out[name]
+        assert v.retire is False
+        assert "rust-reap-unreadable" in v.reason
 
 
-def test_missing_graph_file_fails_closed(monkeypatch):
-    import fno.graph.load as graph_load
+def test_row_outside_the_summary_is_never_retirable():
+    out = verdicts([("ghost", None)], runner=_runner_with(_summary()))
+    assert out["ghost"] == Retirement(None, None, False, "not in sweep summary")
+
+
+def test_default_runner_shells_the_installed_binary(monkeypatch):
+    # The wiring seam: _default_runner resolves the SAME binary the rest of
+    # the fleet uses. A missing binary is the fail-closed path, not a crash.
+    import fno.agents.retirement as retirement
 
     monkeypatch.setattr(
-        graph_load, "GRAPH_JSON", graph_load.Path("/nonexistent/graph.json")
+        "fno.rust_binary.resolve_binary", lambda: None, raising=False
     )
-    out = verdicts([("t-7fbb-toby", None)])
-    (v,) = out.values()
-    assert v.retire is False
-    assert v.reason.startswith("graph-unreadable")
+    out = retirement.verdicts([("x", None)])
+    assert out["x"].retire is False
+    assert "rust-reap-unreadable" in out["x"].reason

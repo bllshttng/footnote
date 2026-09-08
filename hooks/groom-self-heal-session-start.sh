@@ -20,6 +20,12 @@ git rev-parse --show-toplevel >/dev/null 2>&1 || exit 0
 today="$(date -u +%Y-%m-%d 2>/dev/null || echo "")"
 [[ -n "$today" ]] || exit 0
 
+# A project that never opted in gets nothing, not even a probe. `mkdir -p .fno`
+# below put a `.fno/` in every repo a session touched, and it ran before the
+# events appender could refuse anything. Same gate
+# hooks/reconcile-session-start.sh applies, for the same reason.
+[[ -d .fno ]] || exit 0
+
 watermark=".fno/.groom-heal-${today}"
 [[ -e "$watermark" ]] && exit 0
 
@@ -30,7 +36,6 @@ fno backlog groom --check >/dev/null 2>&1 || exit 0
 
 # noclobber makes the create itself the arbiter, so N worktree sessions starting
 # at once yield exactly one winner. run_groom's daily claim is the backstop.
-mkdir -p .fno 2>/dev/null || exit 0
 ( set -o noclobber; : >"$watermark" ) 2>/dev/null || exit 0
 
 ( fno backlog groom >/dev/null 2>&1 & ) 2>/dev/null || true

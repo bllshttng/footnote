@@ -2414,6 +2414,22 @@ event_types:
         seq:
           type: integer
 
+  - name: codex_thread_inside_leg
+    description: "Driver-sourced thread-row status (x-fd66): the codex thread actor's turn phases landed on the row's inside_leg through the shared seq gate; one event per accepted write."
+    sources: [daemon]
+    data:
+      required: [name, session_id, state, seq]
+      properties:
+        name:
+          type: string
+        session_id:
+          type: string
+        state:
+          type: string
+          enum: [working, done]
+        seq:
+          type: integer
+
   - name: inside_leg_completed
     description: "Ordered exit teardown (E3.3, AC-X2-4): a claude row carrying an inside-leg report is transitioning to Exited. Emitted BEFORE the registry write clears the report, so list/waiters observe the final state before the badge goes blank."
     sources: [daemon]

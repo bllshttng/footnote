@@ -9,16 +9,19 @@
 //!
 //! The speed win is in-process reads. One graph read (the same
 //! `read_defaulted_opts(path, false, false)` the keeper's `read_strict` runs)
-//! feeds undispatched, claimed-node lookups, PR binding, and crown scope. The
-//! claims merge is a directory scan. `needs` folds in-process over the same
-//! sources `fno agents needs` reads. Three source reads stay subprocesses: `gh
-//! pr list` (a real network boundary), `fno backlog ready` (its selection
-//! logic lives inline in the typer command with no function behind it;
-//! re-typing the filter chain here would drift from `next`'s), and `fno inbox
-//! outstanding` (measured 2026-09-04: 1.12s wall at load 52, far under its
-//! 10s bar - the plan's change 2 keeps it and records the measurement). The
-//! batched truth probe is a fourth spawn: one interpreter per holder it
-//! measures, when any holder exists.
+//! feeds claimed-node lookups, PR binding, and crown scope. The claims merge
+//! is a directory scan. `needs` folds in-process over the same sources `fno
+//! agents needs` reads. Four source reads stay subprocesses: `gh pr list` (a
+//! real network boundary), `fno backlog ready` (its selection logic lives
+//! inline in the typer command with no function behind it; re-typing the
+//! filter chain here would drift from `next`'s), `fno inbox outstanding`
+//! (measured 2026-09-04: 1.12s wall at load 52, far under its 10s bar - the
+//! plan's change 2 keeps it and records the measurement), and `fno backlog
+//! undispatched`, which used to classify the graph in-process here. That copy
+//! ordered the board differently from the Python selection key, so the two
+//! named different next nodes on one graph. One implementation costs one
+//! spawn. The batched truth probe is a fifth spawn: one interpreter per holder
+//! it measures, when any holder exists.
 //!
 //! Output keeps the Python JSON shape: `actionable`, `unreadable`, `queues`
 //! (same names, same order, same row dicts), `warnings`, `exit_code` - plus a
@@ -28,7 +31,7 @@
 //!
 //! Module layout: `budget` (the one whole-board budget + bounded
 //! subprocess runner), `claims` (the merged lock scan), `classify`
-//! (undispatched/holder/driver selection), `prs` (one listing, binding,
+//! (holder/driver selection), `prs` (one listing, binding,
 //! mergeable filter), `scope` (config paths + crown scope), `queues`
 //! (the lane parser + the eleven-queue build). This parent holds the
 //! shared value vocabulary, the options, the collection orchestration,
@@ -49,7 +52,7 @@ use std::path::{Path, PathBuf};
 pub(crate) use crate::territory::compile_scope_ids;
 pub(crate) use budget::{fno_py_cmd, now_secs_board, run_json, Budget, HAND_RUN_BUDGET_MS};
 pub(crate) use claims::read_claims;
-pub(crate) use classify::{classify_planned_unclaimed, read_claimed_nodes};
+pub(crate) use classify::read_claimed_nodes;
 pub(crate) use prs::read_prs;
 pub(crate) use queues::{build_board, parse_lane, queue_json, BoardInputs, Queue};
 pub(crate) use scope::{
@@ -286,9 +289,9 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let s_outstanding = budget.start(SRC_QUESTIONS);
     let s_needs = budget.start(SRC_NEEDS);
 
-    // In-process sources: graph already read; claims scan, undispatched
-    // classify, claimed-node lookups, the needs fold, and the lane file. None
-    // of them spawn.
+    // Mostly in-process: graph already read; claims scan, claimed-node lookups,
+    // the needs fold, and the lane file. Undispatched is the exception and
+    // spawns, for the reason given at its own block below.
     let claims = match s_claims {
         None => {
             spent(&mut sources, "claims", &budget);
@@ -300,40 +303,36 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             read
         }
     };
+    // Undispatched is the one source this board SHELLS OUT for rather than
+    // classifying in-process. The in-process copy was a declared pure port of
+    // `backlog/undispatched.classify_planned_unclaimed`, and a port has to be
+    // re-ported every time the original moves. It did not move for a long
+    // time, then the Python side adopted the shared selection key and the two
+    // named different next nodes on the same graph. One implementation, at the
+    // cost of one subprocess inside the slice the source already had.
     let undispatched = match s_undispatched {
         None => {
             spent(&mut sources, "undispatched", &budget);
             SourceRead::err(budget.spent_error())
         }
-        Some(_) => match (&entries, &claims) {
-            (Some(entries), claims) if claims.is_ok() => {
-                match classify_planned_unclaimed(entries, &claims.rows()) {
-                    Ok(receipt) => {
-                        let read = SourceRead::ok(receipt);
-                        let rows = read
-                            .payload
-                            .as_ref()
-                            .and_then(|r| r.get("rows").and_then(Value::as_array).cloned());
-                        mark(&mut sources, "undispatched", &read, false);
-                        match rows {
-                            Some(rows) => SourceRead::ok(Value::Array(rows)),
-                            None => read,
-                        }
-                    }
-                    Err(e) => {
-                        let read = SourceRead::err(format!("undispatched: {e}"));
-                        mark(&mut sources, "undispatched", &read, false);
-                        read
-                    }
-                }
+        Some(slice) => {
+            let mut cmd = fno_py_cmd();
+            cmd.extend([
+                "backlog".to_string(),
+                "undispatched".to_string(),
+                "--json".to_string(),
+            ]);
+            let read = run_json(cmd, &cwd, slice);
+            mark(&mut sources, "undispatched", &read, false);
+            let rows = read
+                .payload
+                .as_ref()
+                .and_then(|r| r.get("rows").and_then(Value::as_array).cloned());
+            match rows {
+                Some(rows) => SourceRead::ok(Value::Array(rows)),
+                None => read,
             }
-            (_, claims) if !claims.is_ok() => SourceRead::err(format!(
-                "undispatched: {}",
-                claims.error.clone().unwrap_or_default()
-            )),
-            (None, _) => SourceRead::err("undispatched: graph unreadable"),
-            _ => SourceRead::err("undispatched: unreadable"),
-        },
+        }
     };
 
     // Claimed nodes: from the locks to the rows, one graph read.

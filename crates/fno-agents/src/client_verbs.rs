@@ -1985,51 +1985,9 @@ const CODEX_ROLLOUT_FRESH_SECS: u64 = 1800;
 /// store readers - rung 4's freshness index and `HarnessStoreIndex`'s
 /// existence index - must resolve the same home, or one of them reads a store
 /// the worker never writes.
-pub(crate) fn codex_home() -> Option<std::path::PathBuf> {
-    if let Ok(h) = std::env::var("CODEX_HOME") {
-        if !h.is_empty() {
-            return Some(std::path::PathBuf::from(h));
-        }
-    }
-    std::env::var("HOME")
-        .ok()
-        .map(|h| std::path::PathBuf::from(h).join(".codex"))
-}
-
-/// THE codex rollout filename predicate, spelled once: `HarnessStoreIndex`
-/// (existence for the death-corroboration side) and rung 4 (freshness for
-/// the liveness side) must agree on what a rollout file is, or a store-layout
-/// change fixed in one walker silently strands the other. (name, session id)
-pub(crate) fn codex_rollout_matches(name: &str, session_id: &str) -> bool {
-    name.starts_with("rollout-") && name.contains(session_id)
-}
-
-/// One walk of the codex store, as `(filename, mtime secs)` for every rollout
-/// file - the sweep-shaped input to rung 4, built ONCE per sweep by
-/// `live_liveness_prober` the same way the claude socket index is. `None`
-/// root resolves `$HOME/.codex/sessions`. An unreadable store answers `None`
-/// (fail closed: the rung goes silent, `Unknown`, which keeps).
-pub(crate) fn codex_rollout_index(root: Option<&std::path::Path>) -> Option<Vec<(String, u64)>> {
-    let root = root
-        .map(std::borrow::Cow::Borrowed)
-        .or_else(|| codex_home().map(|h| std::borrow::Cow::Owned(h.join("sessions"))))?;
-    crate::daemon::index_tree(root.as_ref(), 0)
-        .ok()
-        .map(|files| {
-            files
-                .into_iter()
-                .filter(|(name, _)| name.starts_with("rollout-"))
-                .filter_map(|(name, path)| {
-                    let secs = std::fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())?
-                        .as_secs();
-                    Some((name, secs))
-                })
-                .collect()
-        })
-}
+// codex store helpers (codex_home, codex_rollout_matches, codex_rollout_index)
+// moved to `codex_store.rs`; the re-export below keeps every existing caller.
+pub(crate) use crate::codex_store::{codex_home, codex_rollout_index, codex_rollout_matches};
 
 /// Rung 4's freshness read against a prebuilt [`codex_rollout_index`]: any
 /// rollout for `session_id` written within the window proves the worker is
@@ -2712,6 +2670,12 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
                 // variant, unreachable through this call, kept here only for
                 // exhaustiveness over `AdoptError`.
                 Ok(None) | Err(AdoptError::NoEvidence) => {
+                    // A retired session keeps its resume tokens even though
+                    // its registry row is gone: consult the receipts store
+                    // before refusing.
+                    if crate::resume_receipt::maybe_hint_preserved_session(home, &name) {
+                        return 13;
+                    }
                     eprintln!(
                         "fno agents resume: {}. Use `fno agents list` to see registered agents, or pass a full session id to resume an orphaned session.",
                         err.message()
@@ -5786,6 +5750,7 @@ mod tests {
             owns_worktree: true,
             worktree_clean: None,
             branch_merged: None,
+            planning: None,
         };
         assert_eq!(crate::gc::gc_decide(&row, 60).0, crate::gc::GcAction::Keep);
     }

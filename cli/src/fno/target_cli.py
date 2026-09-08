@@ -1027,6 +1027,7 @@ def _read_pr_metadata(pr_number: int, cwd: Path) -> dict[str, Any]:
     return {
         "number": info.get("pr", pr_number),
         "headRefOid": info.get("head_sha") or "",
+        "headRefName": info.get("head_ref") or "",
         "baseRefName": info.get("base_ref") or "",
     }
 
@@ -1102,6 +1103,38 @@ def _self_review_refusal(
     }
 
 
+def _hold_branch_under_review(
+    cwd: Path, *, head_sha: str, session_id: str, receipt: dict[str, Any], branch: str = ""
+) -> None:
+    """Register that a review of ``branch`` at ``head_sha`` is RUNNING.
+
+    The requester side, so every pipeline review is held without a reviewer
+    remembering. On PR 1575 the merge fired mid-review and discarded eight
+    findings, one HIGH. The hold existed and nothing took it. ``branch`` is the
+    PR's own head ref on the post-push form: a local alias with a matching sha
+    keys a hold the merge guard, which reads GitHub, never looks up.
+
+    Best-effort throughout. An unconfirmed send takes nothing. A refused
+    invocation takes nothing, since it emits no attestation and nothing would
+    release the hold. A lockfile failure never turns a sent review into a
+    refusal. Counts no round, gates on no origin (d-0fa92eb9, d-777e7d1f).
+    """
+    if str(receipt.get("outcome") or "") in {"refused", "unconfirmed"}:
+        return
+    try:
+        from fno.pr._review_hold import acquire_review_hold, review_invocation_refusal
+
+        branch = branch or (_git_out(cwd, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
+        if not branch or branch == "HEAD":
+            return
+        if review_invocation_refusal(branch, head_sha, cwd=str(cwd)):
+            return
+        holder = f"review-session:{session_id or 'unknown'}"
+        acquire_review_hold(branch, head=head_sha, holder=holder, verb="/fno:review")
+    except Exception:  # noqa: BLE001 - see docstring
+        pass
+
+
 @target_app.command("request-self-review", hidden=True)
 def request_self_review_cmd(
     pr_number: Optional[int] = typer.Option(
@@ -1119,6 +1152,7 @@ def request_self_review_cmd(
     head_sha = _git_out(cwd, "rev-parse", "HEAD") or ""
     base_branch = ""
     branch = ""
+    hold_branch = ""  # empty: the helper reads the local branch for itself
     metadata: dict[str, Any] = {}
     try:
         if not head_sha:
@@ -1149,6 +1183,11 @@ def request_self_review_cmd(
             metadata = _read_pr_metadata(pr_number, cwd)
             pr_head = str(metadata.get("headRefOid") or "").strip()
             base_branch = str(metadata.get("baseRefName") or "").strip()
+            # The hold keys on the PR's OWN head ref, since a local alias with
+            # a matching sha keys one the merge guard never looks up. Apart
+            # from `branch`, the payload target the renderer refuses beside a
+            # pr_number.
+            hold_branch = str(metadata.get("headRefName") or "").strip()
             if not pr_head:
                 raise RuntimeError("PR has no headRefOid")
             if head_sha.lower() != pr_head.lower():
@@ -1169,6 +1208,9 @@ def request_self_review_cmd(
         )
         receipt = _send_self_review_payload(
             payload=payload, harness=harness, session_id=session_id
+        )
+        _hold_branch_under_review(
+            cwd, head_sha=head_sha, session_id=session_id, receipt=receipt, branch=hold_branch
         )
     except (RuntimeError, ValueError) as exc:
         receipt = _self_review_refusal(

@@ -99,6 +99,11 @@
 #      crates/fno/src/transcript_tail.rs reads Claude Code's own
 #      ~/.claude/projects transcript tree (the sideline's last-msg column) -
 #      read-only, same category as agents_view.rs above.
+#      gc_inventory.rs and receipt.rs are the retirement census and the reap
+#      receipt: they resolve Claude Code's own ~/.claude/projects transcript
+#      tree to join a session's store existence and locator - read-only, the
+#      same category as claude_roster.rs/client_verbs.rs/daemon.rs, from
+#      which this code moved. Footnote stores nothing there.
 #   2. The worktree-harness integration: `.claude/worktrees/<name>` is the
 #      documented, SANCTIONED harness-native worktree default (see
 #      .claude/rules/worktrees.md - "this is now allowed"), and
@@ -256,8 +261,10 @@ crates/fno-agents/src/claude_roster.rs
 crates/fno-agents/src/client_verbs.rs
 crates/fno-agents/src/daemon.rs
 crates/fno-agents/src/finalize.rs
+crates/fno-agents/src/gc_inventory.rs
 crates/fno-agents/src/model_env_scrub.rs
 crates/fno-agents/src/provider.rs
+crates/fno-agents/src/receipt.rs
 crates/fno-agents/src/session_start_bytes.rs
 crates/fno-agents/src/state.rs
 crates/fno-agents/src/stream_worker.rs

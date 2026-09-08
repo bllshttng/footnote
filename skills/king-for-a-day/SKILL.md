@@ -285,8 +285,12 @@ Never edit `~/.fno/graph.json`.
 ```bash
 fno backlog update <id> --add-blocker <upstream>     # serialize a chain
 fno backlog update <id> --blocked-by <a,b>           # replace the whole list
-fno backlog rank <id> --top                          # order within one wave
+fno backlog update <id> --priority p1                # what should run first
 ```
+
+Order within a wave comes from blockers and priority, never from rank.
+`fno backlog rank` is the operator's pin and refuses an agent session.
+To say a node cost you time, vote: `fno backlog encounter <id> --evidence "..."`.
 
 Siblings that share a file get chained.
 A wave is the set with no unsatisfied blocker; everything behind it waits.

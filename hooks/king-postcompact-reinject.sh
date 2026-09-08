@@ -97,7 +97,7 @@ if [[ -n "$REIGN_MANIFEST" && -f "$REIGN_MANIFEST" ]]; then
 
 ## You are still reigning (shape: ${REIGN_SHAPE})
 
-The loop, goal and monitors survive a compact: verify with \`/hooks\` and the loop receipt, and re-arm any that is missing. The six monitors: unread mail (60s), board-change proxy (120s), crown liveness (300s), main-branch CI (300s), capacity band debounced across two samples (300s), arm staleness (600s). The two self-injected commands: \`/loop <king.checkin_interval> <king.checkin_text>\` and \`/goal <king.goal_text>\`. Levers in order: mail the stalled worker, \`fno backlog rank --top\`, undefer or supersede, ask the operator. Journal \`reign_checkin\`; dispatch only on a red dispatching arm, journaled as \`reign_dispatch_exception\`. Never \`/goal clear\` on NoProgress - escalate-and-park is the stop path."
+The loop, goal and monitors survive a compact: verify with \`/hooks\` and the loop receipt, and re-arm any that is missing. The six monitors: unread mail (60s), board-change proxy (120s), crown liveness (300s), main-branch CI (300s), capacity band debounced across two samples (300s), arm staleness (600s). The two self-injected commands: \`/loop <king.checkin_interval> <king.checkin_text>\` and \`/goal <king.goal_text>\`. Levers in order: mail the stalled worker, \`fno backlog encounter <id> --evidence\` and \`fno backlog update <id> --priority\` (rank is the operator's pin and refuses you), undefer or supersede, ask the operator. Journal \`reign_checkin\`; dispatch only on a red dispatching arm, journaled as \`reign_dispatch_exception\`. Never \`/goal clear\` on NoProgress - escalate-and-park is the stop path."
     fi
 fi
 postcompact_emit "$(postcompact_carrier "$SOURCE")" "$CONTEXT"

@@ -64,6 +64,10 @@ Two harnesses need a launch completion no field can express, so it lives in Pyth
 
 The mint is per row too. `cursor-agent` and `agy` are callee-minted-read-back: the harness makes the id and fno reads it back before the TUI launches. `pi` and `grok` take fno's own UUIDv4. Either way the id exists before any worker starts. A caller-supplied id is validated, never minted: a truncated id is a different conversation to the harness, not a resume.
 
+## Row status
+
+A row's status comes from what drives it, never from a pane that is not there. A pane row's verdict is scraped from its grid. A thread row's is written by its driver: the inside-leg hooks on claude, the daemon's own turn state on codex. Both land in the same `inside_leg` field, so the reader never knows or cares which driver wrote it. A driver fno cannot reach answers nothing. Its ttl'd report ages out and the row honestly reads `?`, the gap admitted rather than a death inferred.
+
 ## The gate rule
 
 A `thread` row flips to true only in the same commit as a passing unattended restart journey. The journey is a dispatched worker that resumes into a fresh session, completes its task, and stops on its own; for a keeper lane it is the restart journey above, asserting a named pid outlived a named death. Flip the row early and the honest refusal becomes a spawn that accepts and then fails at launch. Until that commit lands, a false row records an fno backlog item. It never records a harness verdict.
