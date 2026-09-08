@@ -22,7 +22,6 @@ import pytest
 
 from fno.claims.core import (
     ClaimHeldByOther,
-    ClaimVerdictError,
     acquire_claim,
     claim_status,
     release_claim,
@@ -51,15 +50,6 @@ def _try_acquire(root_str: str, key: str, holder: str, result_queue, hold_secs: 
             _t.sleep(hold_secs)
     except ClaimHeldByOther as exc:
         result_queue.put(("lost", holder, exc.holder))
-    except ClaimVerdictError as exc:
-        # A sweep-omission refusal (the native door could not enumerate a
-        # claim it knows exists) fires while this worker is classifying an
-        # existing claim, so the winner already recreated the file - the
-        # racer lost, it just learned it through the verdict door's refusal.
-        if "sweep omitted existing claim" in str(exc):
-            result_queue.put(("lost", holder, str(exc)))
-        else:
-            result_queue.put(("error", holder, repr(exc)))
     except Exception as exc:
         result_queue.put(("error", holder, repr(exc)))
 

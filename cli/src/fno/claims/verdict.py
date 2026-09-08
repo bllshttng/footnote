@@ -21,6 +21,15 @@ class ClaimVerdictError(RuntimeError):
     """The native claim decision returned an invalid or failed response."""
 
 
+class ClaimSweepOmission(ClaimVerdictError):
+    """The sweep omitted a claim the on-disk state says exists.
+
+    Raised rather than the bare ClaimVerdictError so a racer whose directory
+    snapshot straddled another worker's archive-and-recreate can be told
+    apart from a genuinely failed sweep and simply re-classify.
+    """
+
+
 def process_create_time_ms(pid: int | None) -> int | None:
     """Read a process create time for the re-anchor fact check."""
     if pid is None:
@@ -87,6 +96,6 @@ def claim_verdicts(
         if key in verdicts:
             continue
         if claim_path(key, root=root).exists():
-            raise ClaimVerdictError(f"native claim sweep omitted existing claim {key!r}; refusing to assume free")
+            raise ClaimSweepOmission(f"native claim sweep omitted existing claim {key!r}; refusing to assume free")
         verdicts[key] = {"key": key, "state": "free"}
     return verdicts

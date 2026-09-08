@@ -53,7 +53,12 @@ from .io import (
 )
 from .self_identity import resolve_self_identity
 from ..mutex import acquire_dir_mutex, release_dir_mutex
-from .verdict import ClaimVerdictError, ClaimVerdictUnavailable, claim_verdicts
+from .verdict import (
+    ClaimSweepOmission,
+    ClaimVerdictError,
+    ClaimVerdictUnavailable,
+    claim_verdicts,
+)
 from .types import (
     MAX_ENCODED_FILENAME_BYTES,
     MAX_KEY_LENGTH,
@@ -157,6 +162,7 @@ __all__ = [
     "ClaimCorrupted",
     "ClaimGoneAway",
     "ClaimHeldByOther",
+    "ClaimSweepOmission",
     "ClaimValidationError",
     "ClaimVerdictError",
     "ClaimVerdictUnavailable",
@@ -497,6 +503,14 @@ def acquire_claim(
         existing_is_live = _existing_is_live(existing, root=root)
     except ClaimGoneAway:
         return _retry()
+    except ClaimSweepOmission:
+        # The sweep's directory snapshot straddled another racer's
+        # archive-and-recreate: the door refused to attest the key free,
+        # which says nothing about liveness. Re-read and re-dispatch like
+        # the other transient races on this path instead of leaking a
+        # verdict-instrument error out of acquire's return-or-ClaimHeldByOther
+        # contract (same disposition the create collision got, x-88cc).
+        return _retry()
     if not existing_is_live:
         recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
         acquired_lock = False
@@ -546,6 +560,10 @@ def acquire_claim(
             try:
                 existing_is_live = _existing_is_live(existing, root=root)
             except ClaimGoneAway:
+                return _release_and_retry()
+            except ClaimSweepOmission:
+                # Same transient snapshot race as above, now under the
+                # recovery mutex: release and re-dispatch rather than leak.
                 return _release_and_retry()
             if existing_is_live:
                 # Raced - now it's live. Fall through to ClaimHeldByOther.
