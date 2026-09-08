@@ -613,7 +613,7 @@ def _state_root_selector(row: "StateFile") -> str:
     WHICH file set it, so the receipt cannot drift from the loader's own merge
     semantics - it is reading the loader's answer rather than re-deriving one.
     """
-    from fno.config import resolve_source
+    from fno.config import source_note
 
     for token in row.selector.split(","):
         key = token.strip().removeprefix("else ").strip()
@@ -625,12 +625,9 @@ def _state_root_selector(row: "StateFile") -> str:
         key = key.split("(", 1)[0].strip()
         if not key.startswith("config."):
             continue
-        try:
-            decided = resolve_source(key.removeprefix("config."))
-        except Exception:  # noqa: BLE001 - a receipt, not the loader
-            decided = None
-        if decided is not None:
-            return f"{key} (set in {decided[0]})"
+        note = source_note(key.removeprefix("config."))
+        if note is not None:
+            return f"{key} ({note})"
     return row.selector
 
 

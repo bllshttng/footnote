@@ -5154,39 +5154,53 @@ def loaded_from() -> Optional[Path]:
     return _loaded_from
 
 
-def _warn_unknown_keys(data: dict[str, object], model: type[BaseModel], prefix: str = "") -> None:
-    """Emit a DEBUG-level WARNING for keys not in the model's field set.
+def _warn_unknown_keys(
+    data: dict[str, object], model: type[BaseModel], prefix: str = ""
+) -> list[str]:
+    """Return the dotted keys not in the model's field set, and log them.
 
-    Only emits when the FNO_DEBUG environment variable is set (any non-empty
-    value).  This keeps the default UX quiet while still letting power users
-    see the detail with ``FNO_DEBUG=1 fno ...``.
+    Always walks and always returns; the ``FNO_DEBUG`` gate now governs only
+    the WARNING, so the default UX stays quiet while ``fno config doctor``
+    (``check_unknown_keys``) can report the same finding on demand.
+
+    An unknown SECTION is expanded to its leaf paths, so a typo'd ``[reveiw]``
+    reports ``reveiw.cross_model`` rather than a bare section name the operator
+    then has to open the file to interpret.
     """
-    if not os.environ.get("FNO_DEBUG"):
-        return
+    debug = bool(os.environ.get("FNO_DEBUG"))
+    unknown: list[str] = []
     known = set(model.model_fields.keys())
     for key in data:
         qualified = f"{prefix}.{key}" if prefix else key
         if key not in known:
+            value = data[key]
+            if isinstance(value, dict) and value:
+                unknown.extend(f"{qualified}.{leaf}" for leaf, _ in _flatten_leaf_paths(value))
+            else:
+                unknown.append(qualified)
+            continue
+        # Recurse into nested dicts if the field is itself a BaseModel
+        sub_value = data[key]
+        field_info = model.model_fields[key]
+        annotation = field_info.annotation
+        # For Optional[X] the annotation may be a Union; unwrap it
+        args = getattr(annotation, "__args__", ())
+        inner = None
+        for arg in args:
+            if arg is not type(None) and isinstance(arg, type) and issubclass(arg, BaseModel):
+                inner = arg
+                break
+        if inner is None and isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            inner = annotation
+        if inner is not None and isinstance(sub_value, dict):
+            unknown.extend(_warn_unknown_keys(sub_value, inner, prefix=qualified))
+    if debug:
+        for qualified in unknown:
             _LOG.warning(
                 "settings.yaml: unknown key %r (ignored for forward compatibility)",
                 qualified,
             )
-        else:
-            # Recurse into nested dicts if the field is itself a BaseModel
-            sub_value = data[key]
-            field_info = model.model_fields[key]
-            annotation = field_info.annotation
-            # For Optional[X] the annotation may be a Union; unwrap it
-            args = getattr(annotation, "__args__", ())
-            inner = None
-            for arg in args:
-                if arg is not type(None) and isinstance(arg, type) and issubclass(arg, BaseModel):
-                    inner = arg
-                    break
-            if inner is None and isinstance(annotation, type) and issubclass(annotation, BaseModel):
-                inner = annotation
-            if inner is not None and isinstance(sub_value, dict):
-                _warn_unknown_keys(sub_value, inner, prefix=qualified)
+    return unknown
 
 
 def _flatten_leaf_paths(
@@ -5604,6 +5618,21 @@ def resolve_source(
         return None
     assert decider is not None  # the first setter introduces the value: a change
     return (decider, [p for p in setters if p != decider])
+
+
+def source_note(key: str, root: Optional[Path] = None) -> Optional[str]:
+    """``"set in <file>"`` when a config file decides ``key``, else ``None``.
+
+    The ONE renderer for provenance on a printed value, so every receipt names
+    the deciding file in the same words and reads the loader's own answer
+    rather than re-deriving one. ``None`` means the value is a built-in
+    default, which a caller renders however its line reads best.
+    """
+    try:
+        decided = resolve_source(key, root)
+    except Exception:  # noqa: BLE001 - a receipt, not the loader
+        return None
+    return f"set in {decided[0]}" if decided is not None else None
 
 
 def agents_headless_yolo(provider: str) -> bool:

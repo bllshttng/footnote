@@ -39,41 +39,22 @@ _ACCESSOR_NAMES = (
 )
 
 
-def check_wip_caps() -> list[str]:
-    """Report malformed ``config.kanban.wip_caps`` entries (ab-554d37ef).
+def _settings_candidates_for(path: Path) -> list[Path]:
+    """The ``config.toml``-first pair at one settings location.
 
-    The board renderer (``render_html._load_wip_caps``) silently drops a
-    malformed cap so a config typo never crashes a backlog mutation - a
-    deliberate "never raise" contract on the render path. The cost is zero
-    feedback: a quoted, negative, or mistyped cap just stops working. This
-    surfaces those drops as advisory messages at ``fno config doctor`` time,
-    reading the same GLOBAL settings file the renderer reads. Returns a
-    (possibly empty) list of human-readable reasons.
+    ``_global_settings_path`` still names ``settings.yaml``; after the
+    yaml-to-toml migration the file that exists is its ``config.toml``
+    sibling. A check that reads only the yaml name is a check that stopped
+    running.
     """
-    try:
-        import yaml
+    return [path.with_name("config.toml"), path]
 
-        from fno.config import _global_settings_path
-    except Exception:
-        return []
 
-    path = _global_settings_path()
-    if not path.is_file():
-        return []
-    try:
-        with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except Exception:
-        return []
-
-    # A YAML doc that parses to a non-mapping (list/scalar) would make the
-    # data.get(...) below raise AttributeError and crash `doctor`. Degrade to
-    # "nothing to check" instead - matching render_html._load_wip_caps, which
-    # wraps the same access in a blanket try/except.
+def _wip_cap_problems_in(data: object) -> list[str]:
+    """Malformed ``kanban.wip_caps`` entries in one FLAT config dict."""
     if not isinstance(data, dict):
         return []
-
-    kanban = (data.get("config") or {}).get("kanban")
+    kanban = data.get("kanban")
     if not isinstance(kanban, dict) or "wip_caps" not in kanban:
         return []
     raw = kanban.get("wip_caps")
@@ -97,6 +78,43 @@ def check_wip_caps() -> list[str]:
             problems.append(
                 f"wip_caps[{k!r}] = {v!r} is not a positive integer; column left uncapped"
             )
+    return problems
+
+
+def check_wip_caps() -> list[str]:
+    """Report malformed ``config.kanban.wip_caps`` entries (ab-554d37ef).
+
+    The board renderer (``render_html._load_wip_caps``) silently drops a
+    malformed cap so a config typo never crashes a backlog mutation - a
+    deliberate "never raise" contract on the render path. The cost is zero
+    feedback: a quoted, negative, or mistyped cap just stops working. This
+    surfaces those drops as advisory messages at ``fno config doctor`` time,
+    reading the GLOBAL settings location the renderer reads - both the
+    ``config.toml`` that exists after migration and the legacy
+    ``settings.yaml``. Returns a (possibly empty) list of human-readable
+    reasons.
+    """
+    try:
+        from fno.config import _global_settings_path
+        from fno.config_io import _load_raw, _unwrap_config_dict
+    except Exception:
+        return []
+
+    problems: list[str] = []
+    seen: set[Path] = set()
+    for path in _settings_candidates_for(_global_settings_path()):
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        parsed, ok = _load_raw(path)
+        if not ok:
+            continue
+        for msg in _wip_cap_problems_in(_unwrap_config_dict(parsed)):
+            if msg not in problems:
+                problems.append(msg)
     return problems
 
 
@@ -183,13 +201,12 @@ def check_worktree_policy() -> list[str]:
     except Exception:
         return []
 
-    yaml_path = _global_settings_path()
-    paths: list[Path] = [yaml_path.with_name("config.toml"), yaml_path]
+    paths: list[Path] = _settings_candidates_for(_global_settings_path())
     try:
         from fno.paths import resolve_repo_root
 
         repo_fno = Path(resolve_repo_root()) / ".fno"
-        paths[:0] = [repo_fno / "config.toml", repo_fno / "settings.yaml"]
+        paths[:0] = _settings_candidates_for(repo_fno / "settings.yaml")
     except Exception:
         pass
 
@@ -467,12 +484,142 @@ def check_accounts() -> list[str]:
     return list(dict.fromkeys(problems))
 
 
+def check_config_files_read() -> list[str]:
+    """Report every settings file the loader could not read back (x-b052).
+
+    ``_load_raw`` swallows a parse failure so one bad file never makes every
+    fno command exit. The cost was that ``fno config doctor`` printed a file as
+    the settings source, printed OK, and exited 0 - a verdict computed from a
+    config it never proved it read. An operator who copies a documented schema
+    into the documented path gets a file that no-ops and a doctor that agrees.
+
+    A file that parses to an EMPTY table reports nothing: an empty file and a
+    comments-only file are both legal.
+    """
+    try:
+        from fno.config import _candidate_paths
+        from fno.config_io import _parse_settings
+    except Exception:
+        return []
+
+    problems: list[str] = []
+    seen: set[Path] = set()
+    for path in _candidate_paths():
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        _, error = _parse_settings(path)
+        if error is not None:
+            problems.append(error)
+    return problems
+
+
+def _near_miss_keys(unknown: str) -> list[str]:
+    """Modeled keys sharing ``unknown``'s trailing leaf name, in schema order.
+
+    The operator wrote a real leaf name in the wrong section. ``[agents]
+    max_lanes = 4`` is the specimen: it reads as a lane cap and sets nothing
+    the parallel lanes consult. Naming ``parallel.max_lanes`` beside it is the
+    whole remedy.
+    """
+    try:
+        from fno.config.registry import FIELD_META
+    except Exception:
+        return []
+    leaf = unknown.rsplit(".", 1)[-1]
+    return [key for key in FIELD_META if key != unknown and key.rsplit(".", 1)[-1] == leaf]
+
+
+def check_unknown_keys() -> list[str]:
+    """Report keys the model ignores, naming the file that holds each (x-b052).
+
+    ``extra="ignore"`` is forward compatibility, and it also means a typo'd
+    section (``[reveiw]``) or leaf (``cros_model``) is accepted in silence.
+    ``_warn_unknown_keys`` already finds them and, without ``FNO_DEBUG``, says
+    nothing.
+
+    Each candidate layer is walked SEPARATELY rather than the merged result, so
+    every message names the file that actually holds the key. A clean install
+    reports nothing, because a clean install sets no unknown keys - the report
+    is the operator's own wrong key, never the schema's shape.
+    """
+    try:
+        from fno.config import SettingsModel, _candidate_paths, _warn_unknown_keys
+        from fno.config_io import _parse_settings, _unwrap_config_dict
+    except Exception:
+        return []
+
+    problems: list[str] = []
+    seen: set[Path] = set()
+    for path in _candidate_paths():
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        parsed, error = _parse_settings(path)
+        if error is not None:
+            continue  # check_config_files_read owns the unreadable file
+        try:
+            unknown = _warn_unknown_keys(_unwrap_config_dict(parsed), SettingsModel)
+        except Exception:  # noqa: BLE001 - a report, not the loader
+            continue
+        for key in unknown:
+            hints = _near_miss_keys(key)
+            tail = f"did you mean {' or '.join(hints)}?" if hints else "ignored"
+            problems.append(f"{key} (set in {path}) is not a modeled config key; {tail}")
+    return problems
+
+
+def check_enabled_with_empty_population() -> list[str]:
+    """Report a switch that is on with nothing that can satisfy it (x-b052).
+
+    ``review.cross_model`` is the pair verified by reading its consumer:
+    ``review_assurance`` widens the reviewer set from
+    ``available_provider_kinds()``, so with no dispatchable non-claude provider
+    the diversity requirement can never be met, and the gate reads as
+    configured rather than as unsatisfiable.
+
+    Only pairs proved coupled by reading the consumer belong here. A pair added
+    from the leaf name alone is how this defect was first mis-diagnosed.
+    """
+    try:
+        from fno.config import load_settings
+        from fno.review.provider_resolution import available_provider_kinds
+    except Exception:
+        return []
+
+    try:
+        enabled = bool(load_settings().review.cross_model.enabled)
+    except Exception:  # noqa: BLE001 - a report, not the loader
+        return []
+    if not enabled:
+        return []
+
+    try:
+        kinds = [str(k).strip().lower() for k in available_provider_kinds()]
+    except Exception:  # noqa: BLE001
+        return []
+    if any(kind != "claude" for kind in kinds):
+        return []
+    return [
+        "review.cross_model.enabled is true and no non-claude provider is "
+        f"dispatchable; available reviewer kinds: {', '.join(kinds) or 'none'}. "
+        "The diversity requirement can never be met until a provider record is "
+        "added (fno config accounts)."
+    ]
+
+
 def run_doctor() -> int:
     """Run the doctor diagnostic. Returns 0 if clean, non-zero on errors or suspicious paths."""
     import os
 
     from fno import paths
-    from fno.config import _candidate_paths, load_settings, loaded_from
+    from fno.config import _candidate_paths, load_settings, loaded_from, source_note
 
     test_mode = os.environ.get("FNO_TEST_MODE") == "1"
 
@@ -509,7 +656,16 @@ def run_doctor() -> int:
     # file) may not match what was actually parsed.
     settings_path = loaded_from() or found_path
 
-    print(f"[doctor] settings source: {settings_path}")
+    # Contributors, not presences. The old line named the highest-priority file
+    # PRESENT, so an unreadable project config was printed as the source of
+    # values the global file actually decided.
+    try:
+        from fno.config import _aliased_layers
+
+        contributors = [str(path) for path, _ in _aliased_layers(tuple(_candidate_paths()))]
+    except Exception:  # noqa: BLE001 - a receipt, not the loader
+        contributors = []
+    print(f"[doctor] settings source: {', '.join(contributors) or settings_path}")
     print(f"[doctor] schema_version: {s.schema_version}")
 
     # A key that degraded to its default rather than raising. The degrade keeps
@@ -541,6 +697,9 @@ def run_doctor() -> int:
             continue
 
         resolved_str = str(resolved)
+        key = accessor_name if accessor_name == "state_dir" else f"paths.{accessor_name}"
+        note = source_note(key) or "default"
+        print(f"[doctor]   {accessor_name}: {resolved_str}  (config.{key} {note})")
         # Skip /tmp/ suspicious checks in test mode (FNO_TEST_MODE=1) to avoid
         # false positives when pytest's tmp_path is under /tmp/ on Linux runners.
         suspicious = [
@@ -561,6 +720,29 @@ def run_doctor() -> int:
         for name, path_str, reason in issues:
             print(f"  - {name} = {path_str}: {reason}")
         print("\nRun 'fno config setup migrate-paths --force' to regenerate paths.")
+
+    unread_problems = check_config_files_read()
+    if unread_problems:
+        print(f"\n[doctor] {len(unread_problems)} unreadable settings file(s):")
+        for reason in unread_problems:
+            print(f"  - {reason}")
+        print(
+            "\nA file that does not parse contributes NOTHING; every key in it is "
+            "silently at its default. config.toml is TOML, settings.yaml is YAML."
+        )
+
+    unknown_problems = check_unknown_keys()
+    if unknown_problems:
+        print(f"\n[doctor] {len(unknown_problems)} unknown config key(s):")
+        for reason in unknown_problems:
+            print(f"  - {reason}")
+        print("\nAn unknown key is ignored for forward compatibility, so it sets nothing.")
+
+    population_problems = check_enabled_with_empty_population()
+    if population_problems:
+        print(f"\n[doctor] {len(population_problems)} switch(es) enabled with an empty population:")
+        for reason in population_problems:
+            print(f"  - {reason}")
 
     cap_problems = check_wip_caps()
     if cap_problems:
@@ -600,7 +782,18 @@ def run_doctor() -> int:
             print(f"  - {reason}")
         print("\nFix the accounts or combos configuration in config.toml.")
 
-    if errors or issues or cap_problems or wt_problems or profile_problems or store_problems or account_problems:
+    if (
+        errors
+        or issues
+        or unread_problems
+        or unknown_problems
+        or population_problems
+        or cap_problems
+        or wt_problems
+        or profile_problems
+        or store_problems
+        or account_problems
+    ):
         return 1
 
     print("\n[doctor] OK; no suspicious paths detected.")
