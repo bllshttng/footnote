@@ -842,7 +842,7 @@ migrated.
 
 Ready PARENTLESS (loose) nodes of one project, in board order.
 
-The rung-1 territory's selection surface (x-e221 WIDENED): the shipped
+The rung-1 territory's selection surface, widened to parentless rows: the shipped
 ``fno backlog ready -p <project>`` read (claim-filtered, PR-filtered,
 rank-sorted like the epic selection) filtered to rows with no parent and no
 epic box. A loose node is exactly what an epic-territory drain can never
@@ -851,7 +851,7 @@ response so the caller skips rather than guessing.
 
 ## advance_project_loose
 
-Drain one project territory's loose nodes (x-e221 rung-1 path).
+Drain one project territory's loose nodes (the rung-1 path).
 
 The project-rung counterpart of ``advance_epic``: same gates (auto-continue
 opt-in, walker-live), same shared ``_converge_one`` core and lane math, but
