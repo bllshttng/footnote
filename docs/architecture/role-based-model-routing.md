@@ -200,7 +200,7 @@ The second easy misread is a wave's `mode`. `mode: sequential | parallel` descri
 
 ## The declared inventory and the dispatch grid
 
-`config.routing` declares the model inventory. One `[[routing.models]]` row per model carries `name`, `harness`, `model`, and optional `band`, `effort`, `cost_per_mtok_in`, `context`, `route`, `account`.
+`config.routing` declares the model inventory. One `[[routing.models]]` row per model carries `name`, `harness`, `model`, and optional `band`, `effort`, `cost_per_mtok_in`, `context`, `route`, `account`, and `color` (the sideline lane color when the row matches an agent, parsed by the mux's Rust reader and declared in the schema so a typo surfaces at config validation).
 
 A small built-in table sits under this key as a **fallback**, never the authority. Config overrides it and extends it. A row naming an existing model replaces only the fields it names. A new name is added to the set. Adding a model, provider or harness stays a config edit. It is never a Python edit. A stranger's install declares a fleet that outranks every built-in row.
 
@@ -233,6 +233,18 @@ The optional OpenRouter snapshot can supply a percentile for a row whose `band` 
 **A crown spawn gets a profile key.** A seed with no leading slash-verb is every king seed, and it resolves the profile key `crown`. `[agents.profiles.crown]` reaches a crown spawn exactly like every other stage row. The attended/unattended axis is declared this way, never inferred. The response-time instrument was retracted because fno mail is injected as user-shaped text.
 
 `fno config doctor` checks the resolved posture before a worker is launched. It reports a substrate/provider pair the spawn seam cannot honor. It also probes whether THIS session can write the claim store, by writing a real file there and removing it. A hand-started session cannot receive a per-spawn grant, so that probe is the only thing covering it. A spawned worker is covered instead by the computed `--add-dir` set (see [coordination.md](coordination.md)).
+
+## The spawn seam contract
+
+Every launch crosses the Python seam (`agents.spawn_defaults.inject_spawn_defaults`). The seam resolves provider, model, effort, substrate, permission-mode, route, account and pane-group from config and profile defaults, injects the flags, and marks the launch `--defaults-applied=<state>` straight after the verb. The binary reads no config: an unmarked direct `fno-agents spawn` is bounced back to the front door once, and the re-exec falls back to `fno-py` because a bare venv install ships no `fno` entrypoint.
+
+The receipt is exactly one `spawn_defaults_applied` row per completed resolution in the agents journal (`state_dir/events.jsonl`; the `FNO_EVENTS_PATH` pin redirects it under the hermetic guard). The row keeps the flat envelope - `kind` plus named fields, no nesting - and carries `name`, `verb`, `seed`, the routing config `fingerprint`, `resolved` (every axis as value and rung, empties included: "the config read as empty here" and "the value was suppressed" are different facts), `applied`, and `suppressed` (each omitted axis with its reason). The WRITE belongs to the `route-slot journal` op, not Python: the seam resolves the journal path and feeds the payload, the verb appends. The emit can never raise: a missing binary or an unwritable journal never turns an already-valid launch into a crash, and a diagnostic failure never waives strict qualification, which is decided upstream of the emit.
+
+The `fingerprint` is a short hash of the routing-relevant non-secret config inputs: declared rows, the policy fields, and the slot table. It answers "was the config that decided this the config that launched". A changed fingerprint says the next launch re-selects; it is never an ownership token.
+
+The walk's answer carries `refusal_terminal {class, text}` beside the verbatim chain. A `config` fault's text is bare; a `strict` refusal's carries the policy annotation naming `config routing.enforce_inventory`. Consumers read the field; the chain strings stay verbatim for the seam, advance and doctor matchers.
+
+Config is a leaf: the schema validates types only, and the spawn seam and the resolver validate meaning. No value validation lives in the config blocks.
 
 ## Two keys, two axes
 

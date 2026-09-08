@@ -175,7 +175,6 @@ def inventory_from_rows(
     )
 
 
-
 def _builtin_rows() -> list[dict[str, Any]]:
     """The built-in table as inventory rows: a FALLBACK, never the authority.
     One row per name, the strongest band winning; config overrides per field
@@ -231,18 +230,6 @@ def resolve_inventory(
         )
     except Exception:  # noqa: BLE001 - a routing read never breaks a spawn
         return Inventory()
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 #: The verbs fno dispatches, and therefore the slots an operator fills.
@@ -348,9 +335,6 @@ def routing_fingerprint(settings: object = None) -> str:
         return hashlib.sha256(text.encode()).hexdigest()[:12]
     except Exception:  # noqa: BLE001 - an unreadable config carries no fingerprint
         return ""
-
-
-
 
 
 def _answer(out: dict[str, Any], key: str) -> tuple[Any, list[str]]:
@@ -784,8 +768,6 @@ def runtime_capacity(
         return out
     except Exception:  # noqa: BLE001 - unknown capacity never breaks dispatch
         return {}
-
-
 
 
 def resolve_tier(

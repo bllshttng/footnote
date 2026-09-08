@@ -1100,11 +1100,9 @@ def inject_spawn_defaults(
         or _above_defaults(_scalar_rung("route"))
     )
     slot_receipt: List[Tuple[str, str, str]] = []
-    # (axis, value, rung, reason): a config-resolved axis this spawn did NOT
-    # get. Route is the axis that bills, so an omission there names itself.
+    # (axis, value, rung, reason): a config-resolved axis this spawn did NOT get.
     suppressed: List[Tuple[str, str, str, str]] = []
-    # Strict inventory: the resolver runs on EVERY spawn; a pin qualifies,
-    # never bypasses.
+    # Strict inventory: the resolver runs on EVERY spawn; a pin qualifies, never bypasses.
     enforced = bool(
         getattr(getattr(settings, "routing", None), "enforce_inventory", False)
     )
@@ -1191,7 +1189,7 @@ def inject_spawn_defaults(
                     raise SystemExit(2)
                 slot_candidate = None
                 slot_chain = []
-        # Receipt + refusal seam: the chain's last element is the terminal.
+        # Chain notes print and bill; the terminal rules.
         for _line in slot_chain:
             if _line.startswith(("slot skip", "slot note", "slot demote")):
                 print(f"fno agents spawn: {_line}", file=err)
@@ -1204,8 +1202,7 @@ def inject_spawn_defaults(
 
         if slot_chain:
             _terminal = slot_chain[-1]
-            # Config faults and strict refusals arrive pre-composed from the
-            # verb's refusal_terminal; only transport faults parse here.
+            # Refusals arrive pre-composed from the verb; transport faults parse here.
             _refusal = _slot_meta.get("refusal") or {}
             if _refusal.get("text"):
                 _refuse(f"fno agents spawn: {_refusal['text']}")
@@ -1910,11 +1907,7 @@ def inject_spawn_defaults(
 
 
 def _seam_axes_view(scope: dict) -> dict:
-    """Every config-resolved spawn axis as ``(value, rung)``, empties included.
-
-    "The config read as empty here" and "the value was suppressed" are
-    different facts; the event must tell them apart.
-    """
+    """Every config-resolved spawn axis as ``(value, rung)``, empties included."""
     axes = {}
     for axis, value_key, rung_key in (
         ("provider", "cfg_harness", "provider_rung"),
@@ -1931,8 +1924,7 @@ def _seam_axes_view(scope: dict) -> dict:
 
 
 def _journal_path() -> str:
-    """The agents journal the receipt rides: the test/hermetic pin, else the
-    state dir's events.jsonl (the same file the old in-process writer hit)."""
+    """The agents journal: the FNO_EVENTS_PATH pin, else the state dir."""
     import os
 
     pin = os.environ.get("FNO_EVENTS_PATH")
@@ -1952,14 +1944,10 @@ def _emit_defaults_applied(
     suppressed: Sequence[Tuple[str, str, str, str]],
     fingerprint: str = "",
 ) -> None:
-    """Journal one spawn_defaults_applied decision receipt for this spawn.
+    """Journal the spawn_defaults_applied receipt through the route-slot verb.
 
-    Exactly one event per completed seam resolution. The WRITE belongs to the
-    route-slot verb; the journal path is resolved here because the binary
-    reads no config. The call must not be able to raise - a missing binary or
-    an unwritable journal can never turn an already-valid launch into a
-    crash. Diagnostic failure also never waives strict qualification; that
-    decision lives upstream of this call.
+    Contract: docs/architecture/role-based-model-routing.md. The call never
+    raises; a dead journal never bricks a valid launch.
     """
     try:
         from fno.route_slot_client import route_slot_call
