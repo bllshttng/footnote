@@ -21,7 +21,7 @@ So "declutter the human `--help`" only touches the handful of *Python-registered
 
 | Subcommand | Routed by `/agent`? | What it does |
 |------|:---:|--------------|
-| `spawn` | yes (default) | Launch a worker (substrate `pane`/`bg`/`headless`). |
+| `spawn` | yes (default) | Launch a worker (substrate `pane`/`thread`/`headless`; `bg` is the deprecated alias). |
 | `ask` | yes (`ask`) | Sync message to an EXISTING worker (`ln` short-command): deliver, wait, print the reply on stdout. |
 | `stop` | yes | Terminate a worker (confirm). |
 | `watch` / `list` / `logs` | yes | Observe. |

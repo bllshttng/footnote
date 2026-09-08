@@ -37,7 +37,7 @@ The fetch is the point: a stale local `origin/main` ref answers zero for a branc
 | You are trying to | Verb | The gotcha |
 |---|---|---|
 | Move the operator's view to a pane | `fno mux pane focus <n>` | The only pane verb that acts on the OPERATOR's view. Every other pane verb acts FOR an agent. This is the one that answers "show me that". |
-| Find where a handle lives | `fno mux where <handle>` | Pane-only. Any bg agent answers `hosts no live pane` (exit 17). That is a true answer, not an error. |
+| Find where a handle lives | `fno mux where <handle>` | Pane-only. Any thread agent answers `hosts no live pane` (exit 17). That is a true answer, not an error. |
 | Read a worker that has no pane | `fno agents peek <handle> --follow` | Tails the transcript. This is the read that works after `where` says there is no pane. |
 | Read a worker's output log | `fno agents logs <name> --tail <n>` | Registry-scoped output log, distinct from `peek` (a transcript tail through the mux ref). |
 | Place a squad in one visible tab | `fno agents spawn --workspace <name> --split <dir>` | Short forms `-s` and `-x`. Without them every spawn scatters across tabs. A too-small split falls back to a tab in the same workspace. |
@@ -56,7 +56,7 @@ Every axis is already config-sourced. `agents.defaults.*` fills a bare spawn (pr
 | Name the CLI binary | That is `-H/--harness`. `-P` is not it, and `-H` no longer means headless. |
 | Fire a one-shot | `-p` off spawn is a refusal, not a synonym. `--substrate headless` or `--once` is the one-shot. |
 | Escape an inherited tier remap | `ANTHROPIC_DEFAULT_SONNET_MODEL` and its siblings remap a tier for the whole inherited environment, so a `sonnet` spawn can land on another vendor's model. `env -u` escapes. Pinned by `cli/tests/unit/test_inherited_tier_remap.py` and `cli/tests/unit/test_model_routing.py`. |
-| Spawn through a crippled daemon | `--substrate bg` needs no mux pane, so it survives an EMFILE-crippled daemon. It is claude + opencode. |
+| Spawn through a crippled daemon | `--substrate thread` needs no mux pane, so it survives an EMFILE-crippled daemon; `bg` is its deprecated alias. The supported provider lanes are defined in `docs/architecture/thread-lanes.md`. |
 
 The prompt prefix is per harness: claude `/fno:target`, codex `$fno:target`, opencode prose only, with no slash surface. On codex the `$fno:` token does not reliably expand. An audit of one night's spawns (`scripts/diagnostics/codex-skill-load-audit.py`, 2026-08-18) found the harness `<skill>` injection in 4 of 15 wrapped prompts. The worker's own first-action read of the deployed SKILL.md carried most of the rest. Three of 15 never loaded it. Spawn the skill invocation as the prompt, never prose wrapping it.
 
@@ -70,7 +70,7 @@ A pane worker, the default `--substrate pane`, is reaped with `fno mux pane kill
 
 Killing the pane does not touch the registry row. A row that lingers after the pane is gone still goes through `fno agents rm`.
 
-A bg or daemon worker is reaped stop first, then rm.
+A thread or daemon worker is reaped stop first, then rm.
 
 | Step | Verb | The gotcha |
 |---|---|---|

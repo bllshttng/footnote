@@ -58,7 +58,7 @@ no `/target` wrap, no build inference. The focused core:
 
 | Verb | Envelope | Routes to | Cost |
 |------|----------|-----------|------|
-| `spawn` (default) | normalize + honest-receipt (no confirm: free lane) | `fno agents spawn` - substrate axis (x-2c27): default `pane` (owned-PTY drivable); trailing `bg` -> detached `claude --bg` thread; trailing `headless` -> one-shot (`claude -p` / `codex --exec` / `agy -p`) | free (claude subscription) |
+| `spawn` (default) | normalize + honest-receipt (no confirm: free lane) | `fno agents spawn` - substrate axis (x-61df): default `pane` (owned-PTY drivable); `substrate thread` -> persistent thread; `substrate headless` -> one-shot (`claude -p` / `codex --exec` / `agy -p`) | free (claude subscription) |
 | `handoff <doc>` | normalize `--handoff` + honest-receipt (free lane) | `fno agents spawn` (Claude/Codex/Gemini continuation seed, NO `/target`; default `pane`) | free (provider subscription) |
 | `send <name> "..."` | normalize recipient + addressed write | `fno agents mail send` (the addressed jsonl bus, sender-excluded) | free |
 | `ask <name> "..."` | parse + refuse-empty + honest reply relay | `fno agents ask` - sync deliver into a live worker + reply-wait poll; reply on stdout | free |
@@ -90,14 +90,16 @@ otherwise the whole argument is the spawn payload.
 
 | Provider | Dispatch | Worker | Receipt |
 |---|---|---|---|
-| `claude` | `fno agents spawn` (default `pane` owned-PTY; `bg` -> `claude --bg`; `headless` -> `claude -p`) | owned pane, or backgrounded `/target` thread (`bg`) | compact JSON `.short_id` (reply on `headless`) |
+| `claude` | `fno agents spawn` (default `pane` owned-PTY; `thread` -> `claude --bg`; `headless` -> `claude -p`) | owned pane, or persistent thread (`thread`) | compact JSON `.short_id` (reply on `headless`) |
 | `codex` | `fno agents spawn` (exec) / `fno agents host` (`-i`); `headless` -> `codex --exec` | daemon-managed PTY worker | pretty JSON `.short_id` |
 | `gemini` | `fno agents spawn` (exec) / `fno agents host` (`-i`); `headless` -> `agy -p` | daemon-managed PTY worker | pretty JSON `.short_id` |
 
-All three create via `spawn`. The substrate axis (x-2c27) selects the host:
-`pane` (default, owned-PTY drivable), `bg` (claude `--bg`; opencode serve session
-thread), `headless` (one-shot `claude -p` / `codex --exec` / `agy -p`). `bg` on a
-non-claude provider is a hard error pointing to `headless`. A one-shot Q&A is the
+All three create via `spawn`. The substrate axis (x-61df) selects the host:
+`pane` (default, owned-PTY drivable), `thread` (a persistent continuation lane),
+`headless` (one-shot `claude -p` / `codex --exec` / `agy -p`). The per-harness
+support matrix, including refusals, lives in
+`docs/architecture/thread-lanes.md`; this skill does not restate provider verdicts.
+A one-shot Q&A is the
 `headless` substrate (x-cbb0: it subsumes the retired one-shot ask; today's `ask` verb is the sync lane to an existing worker). A codex/gemini
 exec worker is a **single autonomous pass**, not the claude "refuse to stop until
 shipped" loop - do not imply loop-grade completion guarantees for them.
@@ -356,7 +358,7 @@ so even a delegated `next`/`all` is never a silent surprise.
     confusing `already-running`. `/agent` does NOT reassign the node from here:
     a node claim can be released only by the two sanctioned sites (`handoff.sh`
     or `fno backlog unclaim`, holder-verified - a helper subprocess release is
-    an authority violation), and a bg spawn cannot emit the `delegated` event a
+    an authority violation), and a thread spawn cannot emit the `delegated` event a
     clean takeover needs. For an immediate clean handoff use `/target`'s
     self-handoff (it archives state, emits the delegated event, and releases the
     claim atomically); or run `fno backlog unclaim <node>` and re-dispatch.
@@ -442,8 +444,9 @@ default). Pass `--effort "$effort"` only when normalize emitted a non-empty
 when `fresh=1` and `--here` only when `here=1` (spawn.sh forwards each to `fno
 agents spawn`, which validates values fail-closed). Pass `--yolo` only when
 normalize emitted `yolo=1`. Pass `--substrate "$substrate"`
-only when normalize emitted a non-empty `substrate` (`bg` -> a detached `claude
---bg` thread; `headless` -> a one-shot `claude -p` / `codex --exec` / `agy -p`);
+only when normalize emitted a non-empty `substrate` (`thread` -> a persistent
+thread; the deprecated `bg` alias canonicalizes to `thread`; `headless` -> a
+one-shot `claude -p` / `codex --exec` / `agy -p`);
 an empty `substrate` is the default `pane` (owned-PTY) and the flag is omitted.
 Pass `--node` whenever `node` is non-empty. Choose the `--cwd` source in this priority order, so launch cwd
 follows the work-map root:
@@ -568,7 +571,7 @@ takes the JSON `.short_id` family below, not a bare 8-hex line):
   exit 0) is FAILED, never a fabricated answer.
 - **`spawn` / `host`**: stdout is JSON
   carrying `{"short_id",...}` (compact or pretty depending on runtime and
-  substrate). `.short_id` is parsed with `jq`; `bg` requires a whole-string
+  substrate). `.short_id` is parsed with `jq`; `thread` requires a whole-string
   8-hex id. The default/pane lane accepts the runtime's identifier-shaped
   handle: Rust returns a name-slug `short_id`; Python pane receipts have an
   empty worker-socket id, so `spawn.sh` uses the receipt's registry `name` only
@@ -600,8 +603,10 @@ mostly-non-code continuation work that never produces a single green PR. So
 `handoff` spawns a **plain autonomous worker** on Claude, Codex, or Gemini (no
 `/target`, no loop-grade "refuse to stop" guarantee) seeded to read the doc and
 continue from where it left off. The default substrate is the owned-PTY `pane`;
-the worker starts autonomously and can later be driven through the provider's
-supported pane tools. Work that is really a feature build belongs in a node id
+append `substrate thread` to select a persistent thread, or `substrate headless`
+for a one-shot. The deprecated bare alias `bg` canonicalizes to `thread`. The
+worker starts autonomously and can later be driven through the provider's
+supported tools. Work that is really a feature build belongs in a node id
 or an explicit `/target`, not `handoff`.
 
 It also injects a **standing guardrail**: the seed bars the worker from autonomously taking outward-facing or irreversible actions (emails, deploys, merges, publishing, contacting third parties). Before it stops, the worker checks `fno inbox decisions <topic>` with no lane or state filter (both hide real rulings: a king ruling records under coord, an older operator ruling under unattributed) and, when the topic is a node, `fno backlog get <node>`; a king's ruling on the node governs with no decision record at all. An empty result means nothing answered the query, not that no rule exists; it surfaces `<help reason="outward-action" evidence="...">` for human confirmation rather than proceed on a prior instruction.
@@ -633,7 +638,7 @@ outward actions.
    ```bash
    bash "${SKILL_DIR}/scripts/spawn.sh" --name "$name" --provider "$provider" \
      --message "$message" --mode exec --payload-mode handoff [--cwd "<cwd>"] \
-     [--model "$model"] [--yolo]
+     [--substrate "$substrate"] [--model "$model"] [--yolo]
    ```
 
 4. **REPORT** the real receipt exactly as the `spawn` section's REPORT does
@@ -641,8 +646,13 @@ outward actions.
    `fno agents logs <name>` plus `grid`/`drive` for the default pane;
    `result=pending` -> the pane exists and runs but has no bound identity yet,
    so relay the pane ref and `fno mux attach`, never a session handle;
-   `result=failed` -> FAILED with the real reason, no fabricated short-id). Note
-   it is an autonomously seeded, drivable continuation worker, not a
+   `result=failed` -> FAILED with the real reason, no fabricated short-id). A
+   pane receipt carries `mux_session:pane_id` and is observed with `fno mux
+   attach`; a thread receipt carries the session-shaped `short_id` and is
+   observed with `fno agents logs <short_id>`. A Codex thread worker owns no
+   process of its own: it shares the app-server daemon, so liveness, reap, and
+   deduplication must not key it on a process id. Note it is an autonomously
+   seeded, drivable continuation worker, not a
    refuse-to-stop loop, and that the outward-action guardrail is prompt-level.
 
 ---

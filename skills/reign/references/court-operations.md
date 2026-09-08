@@ -14,7 +14,7 @@ The pane layer owns placement, lifecycle, and I/O; fno stays the authority for i
 
 | Duty | Verb | Notes |
 |---|---|---|
-| **Place** a teammate near the king | `fno agents spawn --name <n> "<payload>" --substrate pane --at current --split <dir>` | `--at current` anchors to the CALLING pane (yours) via `FNO_PANE`, so focus races cannot redirect it; strict, so it refuses rather than minting a tab elsewhere, and the `--json` receipt names the committed anchor and tab. The teammate inherits your workspace. Use `--workspace <w> --split <dir>` only to place into a workspace you are not in - it targets that workspace's *focused* pane and races. Pane substrate only; `bg` and `headless` refuse both. |
+| **Place** a teammate near the king | `fno agents spawn --name <n> "<payload>" --substrate pane --at current --split <dir>` | `--at current` anchors to the CALLING pane (yours) via `FNO_PANE`, so focus races cannot redirect it; strict, so it refuses rather than minting a tab elsewhere, and the `--json` receipt names the committed anchor and tab. The teammate inherits your workspace. Use `--workspace <w> --split <dir>` only to place into a workspace you are not in - it targets that workspace's *focused* pane and races. Pane substrate only; `thread` and `headless` refuse both. |
 | **Inject** the next phase into a live session | `fno agents mail send <handle> "<ruling + /fno:verb>" --from-self` | A direct send to a live pane injects as a notification it acts on this turn. Receipt-gated - see delivery truth below. Auto-wrapped in the `<fno_mail>` envelope; a raw pane-layer prompt is not - see the envelope rule below. |
 | **Sweep** at a boundary (nonblocking) | `fno agents top` + `fno agents peek <handle>` | Push-first (the teammate's report mail); this is the backstop sweep, run at a named boundary while you are already awake, not on a repeating timer. `top` = who is alive; `peek` = is a quiet pane done/blocked/dead. Both return immediately and wake nobody. `fno-agents needs --json` is a separate loop-wedge signal, not pane completion. |
 | **Wait** on lifecycle (blocking) | ONE unreconciled teammate: `fno-agents wait --agent <name> --state done --timeout-ms <n>` · a fleet of them: `fno-agents subscribe` | The actual wake source, and the only duty here that is one. `wait` parses a single `--agent` and serves exactly one unreconciled teammate; with two or more in the wait set, arm one unfiltered `subscribe` instead - it streams registry state transitions and pane exits as NDJSON from EOF, so the first teammate to move wakes you whichever it is; on wake sweep, reconcile, re-arm. Launch each as its OWN harness-tracked task and never append `&` - a trailing `&` returns the call instantly, the harness marks it finished, and nothing is left waiting. Cover one wake per live teammate you have not yet reconciled - an expected report is not coverage, because the report is exactly what goes missing, but a reconciled row still reading `done` matches instantly and spins, so it leaves the set. Always `done`, never `idle`: `idle` is the default verdict (lapsed hook, unknown or absent screen state) so it can return instantly and spin the re-arm loop. No wake arm covers `blocked`: the inside-leg hook emits `working`/`done` only (`blocked` has no wired trigger), so a blocked teammate reaches you by its report mail or your sweep's `BlockedAnswerable` badge, never by this verb. On a hookless pane (gemini/opencode/agy) `done` is a death detector plus a timeout rather than a completion signal - bounded, which is the point. On timeout with the teammate still live, re-arm. |
@@ -51,16 +51,16 @@ Every agent-to-agent AUTHORED payload carries the `<fno_mail>` envelope - king t
 | The loop-wedge fold | `fno-agents needs --json` (review_wedged / budget_stop; NOT pane completion) |
 | Wake a blocked/stopped teammate | `fno agents resume <handle>` (then re-send) |
 | Close a teammate pane | `fno mux pane kill` (a mux row's short_id is empty, so `fno agents stop` refuses it) |
-| End a bg/daemon worker | `fno agents stop <name>` |
+| End a thread/daemon worker | `fno agents stop <name>` |
 | Encode a ruling | `fno backlog update <id> --dispatch-verb /fno:... --dispatch-brief "..." --add-blocker <up>` |
 | Land a green child | `fno do pr merge <n>` (only when config permits) |
 
-**Anointing on the bg substrate.**
-`--crown` is not pane-only: it rides `--substrate bg` too (claude-only there), and only `headless` is refused, since a one-shot exits before it can reign.
-What a bg sub-king gives up is placement, not authority.
-The placement flags are mux geometry and refuse outside a pane, and `--at current` resolves the anchor from `FNO_PANE`, which a bg session does not have.
-So a bg sub-king seats its own teammates in fresh tabs and never forms a co-located court.
-Anoint on bg for a sub-king that will pass; anoint on a pane for one that will hold court.
+**Anointing on the thread substrate.**
+`--crown` is not pane-only: it rides `--substrate thread` too, and only `headless` is refused, since a one-shot exits before it can reign. The deprecated `bg` alias maps to `thread`.
+What a thread sub-king gives up is placement, not authority.
+The placement flags are mux geometry and refuse outside a pane, and `--at current` resolves the anchor from `FNO_PANE`, which a thread session does not have.
+So a thread sub-king seats its own teammates in fresh tabs and never forms a co-located court.
+Anoint on thread for a sub-king that will pass; anoint on a pane for one that will hold court.
 
 ## Lifecycle state semantics
 
@@ -138,7 +138,7 @@ fno backlog update x-b3a8 --add-blocker x-7a53   # if a merge-order constraint a
 ## Caveats
 
 - **`--workspace` is the canonical spelling.** A deprecated alias still resolves, which is the trap: a stale command runs clean in a manual test and teaches the wrong flag anyway. The migration note is in the [spawn guide](../../../docs/guides/fno-agents-spawn.md#place-a-pane-in-a-mux-workspace).
-- **Placement is pane-only.** `--workspace`/`-s`, `--split`/`-x`, and `--at` are refused for `bg` and `headless`, which have no mux geometry. A court teammate is a pane, so this never binds court; it binds a pass that dispatches unattended, which carries mission provenance in the graph instead.
+- **Placement is pane-only.** `--workspace`/`-s`, `--split`/`-x`, and `--at` are refused for `thread` and `headless`, which have no mux geometry. A court teammate is a pane, so this never binds court; it binds a pass that dispatches unattended, which carries mission provenance in the graph instead.
 - **You never create a workspace first.** The first placement into a name creates it; there is no create verb. A blank name is a CLI error, not a fallback to the default.
 - **Moving a running pane is a layout operation, not a pane verb.** No `fno mux pane` verb migrates one - `break` detaches a pane into a new tab in the same session. `fno mux layout apply` does relocate a bound live pane, PTY intact, but it applies a whole shape to the destination tab and needs that template's full slot set, so use it to shape a tab rather than to shuffle a worker. A human at the TUI also has lighter paths you do not: move-pane, move-tab, and recruiting a running agent into a named workspace as a watch-only member (create-if-absent, persisted). Default to adopting an already-running worker logically (claim + mail), and do not kill a healthy one for layout.
 - **Sweep at boundaries, not on a repeating clock.** A heartbeat poll re-reads context every pass. It surfaces nothing the teammate's projected events do not. But never stop with a live teammate and no armed wake. A report can land `queued (durable)`. A pane can die reporting nothing. So an expected report is not coverage. The teammate you counted on to write is the one that strands you. Cover every live teammate you have not yet reconciled, owed report or not. Use one `wait` each, or one `subscribe` stream for the whole fleet. A reconciled `done` row matches instantly and spins, so it leaves the set. One armed wake is a backstop. A timer that fires regardless is the poll.
@@ -146,7 +146,7 @@ fno backlog update x-b3a8 --add-blocker x-7a53   # if a merge-order constraint a
 - **Read decisions before dispatch.** Before dispatching any node, run `fno backlog decisions <id>` in addition to reading status and `plan_path`. A recorded verdict is the same stop signal as a closure. Reconcile it before deciding whether work remains.
 - **Qualified verbs, always.** Bare `/execute`, `/think`, `/blueprint` in a mixed-plugin session can resolve to a different plugin. Use `/fno:...` in every payload, routing mail, and `--dispatch-verb`.
 - **`/fno:target` is the execution verb, all sizes.** Raw `/fno:execute` has no claim, no gates, no ship, no finalize. A small PR is not an exemption.
-- **Lane accounting counts corpses.** Dead bg claims can starve court spawns; check `fno agents claim` liveness before concluding the project is saturated.
+- **Lane accounting counts corpses.** Dead thread claims can starve court spawns; check `fno agents claim` liveness before concluding the project is saturated.
 - **`done` is stamped at finalize, not merge.** The wave gate needs `gh pr view --json state` truth, and pr-watch can be silently dead - verify it at crowning.
 - **Linking a plan to an unencumbered node arms the daemon within about a minute.** Wire blockers first, then link - same ordering as the pass (3a before 3b).
 - **`--to-project` is anycast into a possibly-ghost inbox with a success-shaped receipt.** Court messaging uses direct handle sends, or `--to-king <scope>` when you mean the role. A handle learned while its session was crowned keeps arriving after succession moves the crown, and the abdicated session answers as if crowned; `--to-king` resolves the holder off the registry at send time and refuses when nobody holds it.
