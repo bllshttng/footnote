@@ -3891,11 +3891,12 @@ fn dead_pid_proves_the_stop() {
             .push(claude_worker_row("row-pid", "dddd4444"));
     })
     .unwrap();
-    // u32::MAX cannot name a live process on any supported platform, so the
+    // i32::MAX cannot name a live process on any supported platform (and it
+    // casts to a positive pid_t, so kill reads it as an existence probe), so the
     // probe must answer "gone".
     let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
         crate::claude_roster::ClaudeAgentRow::new("dddd4444", Some("working"))
-            .with_pid(Some(u32::MAX)),
+            .with_pid(Some(i32::MAX as u32)),
     ]);
     let stops = std::cell::RefCell::new(0usize);
     let summary = evidence_sweep(

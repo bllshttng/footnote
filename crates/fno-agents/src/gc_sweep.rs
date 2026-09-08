@@ -589,12 +589,10 @@ pub(crate) fn claude_death_reason(
         return Some(format!("row {row_id} present, state {state}"));
     }
     if let Some(pid) = row.pid {
-        // A failed lookup also answers None, and None is being read as death:
-        // demand two consecutive Nones so one transient probe failure cannot
-        // forge death evidence for a live worker.
-        if crate::daemon::process_start_time(pid).is_none()
-            && crate::daemon::process_start_time(pid).is_none()
-        {
+        // ESRCH or nothing: a failed lookup is not death, so the verdict
+        // needs the existence-specific probe, not start_time's conflated
+        // None (two Nones also prove a persistent failure).
+        if crate::daemon::pid_is_gone(pid) {
             return Some(format!("row {row_id} pid {pid} is gone"));
         }
     }

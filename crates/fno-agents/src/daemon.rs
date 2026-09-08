@@ -575,6 +575,30 @@ pub fn process_start_time(_pid: u32) -> Option<u64> {
     None
 }
 
+/// Existence-specific death probe: ESRCH is the one errno that means "no such
+/// process". Every other answer is NOT death - EPERM is a live foreign-uid
+/// process, and any other failure is a broken instrument. A broken instrument
+/// must never read as a dead worker: `process_start_time`'s None conflates
+/// gone with lookup-failed, so the reaper and rm must decide on this probe.
+#[cfg(unix)]
+pub(crate) fn pid_is_gone(pid: u32) -> bool {
+    // kill(0, sig) and kill(-1, sig) are group/broadcast forms, never
+    // existence probes; a pid above i32::MAX casts to a negative pid_t and
+    // would read as one of those broadcasts. Only a positive, representable
+    // pid may vote on death.
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+/// No kill(2) surface: the probe can never answer, and never-death holds.
+#[cfg(not(unix))]
+pub(crate) fn pid_is_gone(_pid: u32) -> bool {
+    false
+}
+
 /// Distinct canonical repo roots the registry knows about, deduplicated.
 ///
 /// A linked worktree is not its own repo, so its rows fold into the checkout
@@ -6981,12 +7005,14 @@ async fn handle_rm_with(
     // keeps it in the roster, and a pane row whose pane the probe cannot find
     // is provably gone because the pane is that row's ONE live ref. Anything
     // less than proof keeps refusing, and `--force` remains the only escape.
-    let row_state_terminal = claude_agents
+    // One death verdict for the whole gate, shared with the reaper: a claude
+    // row whose roster state is terminal, or whose roster pid is provably
+    // gone, is finished even though Claude keeps the row listed. The reaper
+    // accepts the same evidence - a merge cleanup whose stop cleared on it
+    // must not be refused by the very next `fno agents rm`.
+    let provably_gone = claude_agents
         .as_ref()
-        .and_then(|snapshot| harness_row_id.as_deref().and_then(|id| snapshot.find(id)))
-        .and_then(|row| row.state.as_deref())
-        .is_some_and(|state| crate::claude_roster::is_terminal_roster_state(state));
-    let provably_gone = row_state_terminal
+        .is_some_and(|snapshot| crate::gc_sweep::claude_death_reason(&entry, snapshot).is_some())
         || claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
         || off_executor(|| pane_provably_absent(entry.mux.as_ref(), mux_pane_probe));
     if entry.status == AgentStatus::Live && !force && !provably_gone {

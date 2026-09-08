@@ -200,22 +200,23 @@ fn merge_cleanup_rows(
 
 /// Stop the row's harness before the registry row drops. `Some(short)` is the
 /// confirmed stop (empty for a pane row, whose pane `fno agents rm` already
-/// kills); `None` refuses and keeps the row for the next pass.
+/// kills); `None` refuses and keeps the row for the next pass. `agents` is
+/// the pass-level snapshot: read at most once per reaper pass, on the first
+/// claude row that reaches this seam.
 fn stop_harness_confirmed(
     home: &AgentsHome,
     entry: &state::RegistryEntry,
+    agents: &crate::claude_roster::ClaudeAgentsSnapshot,
 ) -> Result<String, &'static str> {
     // A mux row's pane death IS the harness stop; rm handles it.
     if entry.mux.is_some() {
         return Ok(String::new());
     }
     // Positive death evidence first: a finished claude agent never leaves the
-    // roster, so its stop can never be confirmed by absence. One snapshot
-    // read per merge cleanup, and only for a claude row - the evidence
-    // instrument is claude's roster.
+    // roster, so its stop can never be confirmed by absence. The evidence
+    // instrument is claude's roster, so only a claude row consults it.
     if entry.harness_name() == "claude"
-        && crate::gc_sweep::claude_death_reason(entry, &crate::claude_roster::read_all_agents())
-            .is_some()
+        && crate::gc_sweep::claude_death_reason(entry, agents).is_some()
     {
         return Ok(row_stop_short(entry).unwrap_or_default());
     }
@@ -577,6 +578,11 @@ pub(crate) fn consume_merge_cleanup_requests(
     let mut total_requests = 0usize;
     let mut in_grace = 0usize;
     let mut acted: u64 = 0;
+    // The agents snapshot is read at most once per reaper pass, on the first
+    // claude row that reaches a stop seam - never rows x 15s on a degraded
+    // roster.
+    let agents_memo: std::cell::RefCell<Option<crate::claude_roster::ClaudeAgentsSnapshot>> =
+        std::cell::RefCell::new(None);
     for root in roots {
         for request in pending.iter().filter(|r| r.repo == *root) {
             total_requests += 1;
@@ -603,7 +609,11 @@ pub(crate) fn consume_merge_cleanup_requests(
                 continue;
             }
             let seams = RequestSeams {
-                stop: &|entry| stop_harness_confirmed(home, entry),
+                stop: &|entry| {
+                    let mut memo = agents_memo.borrow_mut();
+                    let agents = memo.get_or_insert_with(crate::claude_roster::read_all_agents);
+                    stop_harness_confirmed(home, entry, agents)
+                },
                 surface_removal: &crate::gc_native::apply_active_surface_removal,
                 tree_holds: &tree_unreachable_from_origin_main,
                 take_tree: &remove_tree,

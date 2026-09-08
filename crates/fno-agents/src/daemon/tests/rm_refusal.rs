@@ -74,3 +74,56 @@ async fn rm_absence_is_not_proof_on_a_warning_carrying_list() {
     );
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+/// The reaper's dead-pid verdict must clear this gate too: a merge cleanup
+/// that accepted the evidence is refused one verb later if rm does not read
+/// it, and the refused cleanup tombstones its request.
+#[tokio::test]
+async fn rm_accepts_a_dead_pid_as_provably_gone() {
+    let home = short_home("rmdeadpid");
+    let mut row = claude_rm_row(
+        "finished-worker",
+        "aaabbb15",
+        "aaabbb15-1111-2222-3333-444444444444",
+    );
+    row.status = AgentStatus::Live;
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.rm", json!({"name": "finished-worker"}));
+    let first = std::sync::atomic::AtomicBool::new(true);
+    // i32::MAX cannot name a live process on any supported platform (and it
+    // casts to a positive pid_t, so kill reads it as an existence probe), so the
+    // ESRCH probe must answer "gone".
+    let response = handle_rm_with(
+        &ctx,
+        &request,
+        &|| {
+            if first.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("aaabbb15", Some("working"))
+                        .with_pid(Some(i32::MAX as u32)),
+                ])
+            } else {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new())
+            }
+        },
+        &|_| Ok(()),
+        &|_, _| Ok(true),
+        &|_, _| PaneProbe::Unknown,
+    )
+    .await;
+
+    assert!(
+        response.error().is_none(),
+        "dead-pid evidence must clear the rm live gate: {:?}",
+        response.error().map(|e| e.message.clone())
+    );
+    assert_eq!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .len(),
+        0
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
