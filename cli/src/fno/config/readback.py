@@ -186,10 +186,10 @@ def check_enabled_with_empty_population() -> list[str]:
     if any(kind != "claude" for kind in kinds):
         return []
     return [
-        "review.cross_model.enabled is true and no non-claude provider is dispatchable; "
-        f"available reviewer kinds: {', '.join(kinds) or 'none'}. The switch buys "
-        "nothing for a claude-written change, which is most of them; a claude "
-        "reviewer is a different family only when codex or gemini wrote the code."
+        "review.cross_model.enabled is true and no non-claude provider is dispatchable. "
+        f"available reviewer kinds: {', '.join(kinds) or 'none'}. The switch buys nothing "
+        "for a claude-written change. Only where codex or gemini wrote the code is a "
+        "claude reviewer a different family."
     ]
 
 
