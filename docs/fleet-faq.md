@@ -378,7 +378,11 @@ Two kings acted on the false half within an hour. One warned the other that PR n
 
 **Specimen.** On 2026-09-05 one PR reached 5 of 2 this way and its merge hold refused. On 2026-09-08 another reached the same count, burned across a revival fix, a collection fix, an import fix, and a merge of main. Coverage still read covered at the final head, so the extra rounds bought nothing. Two reviews complete a review, so rounds three through five were spent on commits that changed no finding.
 
-*Graduates to:* rounds keyed to a findings round rather than to a pushed head, so a mechanical commit cannot spend one.
+Carry-forward already exists, and knowing that is the practical remedy. A verdict carries across a docs-only interdiff on its own, reported as `freshness: carried_docs_only`, and it spends no round. The standing law is wider than the code: it says a rebase or a fix commit under 100 lines of interdiff carries too. The implementation carries docs only, so a small code fix demands a fresh verdict and spends a round.
+
+Watch for a second reading on the same payload. One live PR reported `reviewed_count` 1 beside `rounds_used` 5. A law already names that pair a defect rather than a distinction.
+
+*Graduates to:* the carry widened to the interdiff the law names, so a mechanical commit cannot spend a round. Until then, do not hand-emit a verdict at a new head. Let the carry do it.
 
 ## A peer confirmed my finding and we were both wrong
 
