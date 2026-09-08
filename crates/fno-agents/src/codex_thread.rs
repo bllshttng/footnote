@@ -87,6 +87,31 @@ pub fn interrupt_total_bound() -> Duration {
 const COMPLETED_PARK_CAP: usize = 8;
 const THREAD_CHANNEL_CAP: usize = 32;
 
+/// What the driver's own turn state says, fired at the transitions the actor
+/// already observes (x-fd66). The daemon maps these onto inside-leg reports:
+/// the ack and every refresh write `working`, the completion writes `done`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadTurnPhase {
+    /// A turn was accepted (or is still driving at a keepalive tick).
+    Working,
+    /// The turn routed `turn/completed`; the thread is at its prompt.
+    Done,
+}
+
+/// Keepalive cadence for the `working` report: half the reader TTL, the same
+/// convention the claude inside-leg hook uses (`hooks/inside-leg-report.sh`).
+/// Env-overridable so tests can exercise the refresh without sleeping 45s.
+pub fn thread_turn_refresh() -> Duration {
+    std::env::var("FNO_THREAD_TURN_REFRESH_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map_or(
+            Duration::from_millis(crate::state::THREAD_TURN_TTL_MS / 2),
+            Duration::from_millis,
+        )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThreadStartError {
     InvalidResponse,
@@ -1044,9 +1069,16 @@ impl CodexThread {
     /// `on_turn_done` fires once per completed turn, from the actor task, for
     /// every submitter class (ask, seed, mail steer) - the daemon uses it for
     /// the `agent_ask_done` event and the `last_message_at` bump.
+    ///
+    /// `on_turn_phase` fires at the driver's own turn transitions (x-fd66):
+    /// [`ThreadTurnPhase::Working`] at the ack and on every keepalive tick
+    /// that lands while a turn drives, [`ThreadTurnPhase::Done`] at the
+    /// completion. The daemon maps these onto the row's inside-leg report, so
+    /// a thread row's status comes from its driver with no pane attached.
     pub fn into_actor(
         mut self,
         on_turn_done: Arc<dyn Fn(TurnReceipt) + Send + Sync>,
+        on_turn_phase: Arc<dyn Fn(ThreadTurnPhase) + Send + Sync>,
     ) -> CodexThreadActor {
         let pid = self.pid();
         let (cmd_tx, cmd_rx) = mpsc::channel(THREAD_CHANNEL_CAP);
@@ -1065,6 +1097,7 @@ impl CodexThread {
             cmd_rx,
             Arc::clone(&shared),
             on_turn_done,
+            on_turn_phase,
         ));
         CodexThreadActor {
             tx: cmd_tx,
@@ -1285,6 +1318,7 @@ struct ActorCtx {
     driving: Option<Driving>,
     shared: Arc<ActorShared>,
     on_turn_done: Arc<dyn Fn(TurnReceipt) + Send + Sync>,
+    on_turn_phase: Arc<dyn Fn(ThreadTurnPhase) + Send + Sync>,
 }
 
 async fn actor_task(
@@ -1293,6 +1327,7 @@ async fn actor_task(
     mut cmds: mpsc::Receiver<ThreadCommand>,
     shared: Arc<ActorShared>,
     on_turn_done: Arc<dyn Fn(TurnReceipt) + Send + Sync>,
+    on_turn_phase: Arc<dyn Fn(ThreadTurnPhase) + Send + Sync>,
 ) {
     let mut ctx = ActorCtx {
         driver,
@@ -1301,9 +1336,28 @@ async fn actor_task(
         driving: None,
         shared,
         on_turn_done,
+        on_turn_phase,
     };
+    // The driver-status keepalive (x-fd66) lives as a select arm, NOT a
+    // separate task: a separate task would hold a `cmd_tx` clone forever, and
+    // `cmds.recv()` would then never answer None - the "every handle dropped"
+    // exit the arm below promises would be unreachable. A turn drives while
+    // the actor sits at this loop (the completion routes through the frame
+    // arm), so the tick is observable exactly while it matters; only the
+    // bounded interrupt-settle wait pauses it.
+    let mut next_keepalive = tokio::time::Instant::now() + thread_turn_refresh();
     loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(next_keepalive) => {
+                next_keepalive = tokio::time::Instant::now() + thread_turn_refresh();
+                if ctx.driving.is_some() {
+                    // Rewrite `working` while a turn drives so a turn longer
+                    // than the report's ttl never ages to Unmeasured. The
+                    // check runs in the actor loop, so a tick landing after
+                    // the completion fires nothing.
+                    (ctx.on_turn_phase)(ThreadTurnPhase::Working);
+                }
+            }
             cmd = cmds.recv() => {
                 match cmd {
                     None => {
@@ -1382,6 +1436,7 @@ impl ActorCtx {
         for waiter in driving.waiters {
             let _ = waiter.send(Ok(receipt.clone()));
         }
+        (self.on_turn_phase)(ThreadTurnPhase::Done);
         (self.on_turn_done)(receipt);
     }
 
@@ -1630,6 +1685,7 @@ impl ActorCtx {
                     turn_id,
                     waiters: vec![reply],
                 });
+                (self.on_turn_phase)(ThreadTurnPhase::Working);
             }
             Err(error) => {
                 if let Some(accept) = accept {

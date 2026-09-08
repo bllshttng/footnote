@@ -2754,10 +2754,10 @@ pub use reader_state::{IsolatedRead, ReaderState};
 mod tests {
     use super::*;
 
-    // The parked-fork-child test family lives in its own module;
-    // this file is shrink-only under the file-budget gate.
+    // Test families live in their own modules; this file is shrink-only.
     mod liveness_rule_tests;
     mod parked_child_tests;
+    mod thread_row_status_tests;
     fn reg(rows: &str) -> String {
         format!(r#"{{"schema_version": 6, "agents": [{rows}]}}"#)
     }

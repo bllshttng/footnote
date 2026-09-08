@@ -2831,49 +2831,12 @@ type CodexThreadHandle = Arc<crate::codex_thread::CodexThreadActor>;
 
 use crate::codex_thread::{InterruptOutcome, TurnReceipt};
 
-/// The per-completion hook every codex-thread actor gets at construction:
-/// bump the row (`Live` + `last_message_at`) and emit `agent_ask_done`, for
-/// every submitter class (ask, seed, mail steer) in ONE place - previously
-/// the ask path and the seed task each kept their own copy of this.
-fn codex_thread_on_done(
-    emitter: &EventEmitter,
-    registry_path: std::path::PathBuf,
-    name: &str,
-) -> Arc<dyn Fn(TurnReceipt) + Send + Sync> {
-    let emitter = emitter.clone();
-    let name = name.to_string();
-    Arc::new(move |receipt: TurnReceipt| {
-        let emitter = emitter.clone();
-        let name = name.clone();
-        let turn_id = receipt.turn_id.clone();
-        let status = receipt.status.clone();
-        let registry_path = registry_path.clone();
-        tokio::spawn(async move {
-            let bump_name = name.clone();
-            let _ = update_registry_offloaded(registry_path, move |registry| {
-                if let Some(entry) = registry.find_mut(&bump_name) {
-                    entry.status = AgentStatus::Live;
-                    entry.last_message_at = Some(now_rfc3339_like());
-                }
-            })
-            .await;
-            let _ = emitter.emit(
-                "agent_ask_done",
-                &json!({
-                    "name": name,
-                    "backend": "codex-thread",
-                    "turn_id": turn_id,
-                    "turn_status": status,
-                }),
-            );
-        });
-    })
-}
+mod thread_row_status;
+use thread_row_status::{codex_thread_on_done, codex_thread_on_status, gate_inside_leg_onto_row};
 
 fn emit_state(emitter: &EventEmitter, state: DaemonState) {
     let _ = emitter.emit("daemon_state", &json!({"state": state.as_str()}));
 }
-
 /// The final `daemon_exited` payload (x-3498). Every exit path flows through
 /// one tail, and before this it emitted `clean: true` unconditionally, so the
 /// socket-lost retirement - where something unlinked and rebound our socket
@@ -4014,11 +3977,18 @@ async fn spawn_codex_thread_lane(
             )
         }
     }
-    let handle = Arc::new(driver.into_actor(codex_thread_on_done(
-        &ctx.emitter,
-        ctx.home.registry_json(),
-        name,
-    )));
+    let handle = Arc::new(driver.into_actor(
+        codex_thread_on_done(&ctx.emitter, ctx.home.registry_json(), name),
+        codex_thread_on_status(
+            &ctx.emitter,
+            ctx.home.registry_json(),
+            name,
+            &session_id,
+            1,
+            ctx.opts.notify_on_blocked,
+            ctx.opts.notify_on_done,
+        ),
+    ));
     ctx.codex_threads
         .lock()
         .await
@@ -4178,11 +4148,27 @@ async fn ensure_codex_thread_handle(
     if let Some(handle) = threads.get(&entry.name).cloned() {
         return Ok(handle);
     }
-    let handle = Arc::new(driver.into_actor(codex_thread_on_done(
-        &ctx.emitter,
-        ctx.home.registry_json(),
-        &entry.name,
-    )));
+    // x-fd66: the resumed actor's report seq starts ABOVE the row's current
+    // seq, so its first write clears the gate instead of dying under the
+    // previous incarnation's seq. The counter itself lives on the callback,
+    // one per thread start/resume, never on the row.
+    let first_seq = entry
+        .inside_leg
+        .as_ref()
+        .map(|report| report.seq + 1)
+        .unwrap_or(1);
+    let handle = Arc::new(driver.into_actor(
+        codex_thread_on_done(&ctx.emitter, ctx.home.registry_json(), &entry.name),
+        codex_thread_on_status(
+            &ctx.emitter,
+            ctx.home.registry_json(),
+            &entry.name,
+            &session_id,
+            first_seq,
+            ctx.opts.notify_on_blocked,
+            ctx.opts.notify_on_done,
+        ),
+    ));
     threads.insert(entry.name.clone(), Arc::clone(&handle));
     Ok(handle)
 }
@@ -9159,32 +9145,12 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
         return;
     };
     let (seq, state_str) = (rep.seq, inside_leg_state_str(rep.state));
-    // Badge-transition notify intent (x-dd84): an early-push report is the row's
-    // first, so an initial `blocked`/`done` is an episode entry too. Captured
-    // before `rep` moves into the row; fired after the write.
-    let (rep_state, rep_reason) = (rep.state, rep.reason.clone());
     let mut notify: Option<(String, String, bool)> = None;
     // Apply under the seq gate: a store-path report that landed on the row after
     // it became visible (but before this drain) set a >= seq; never regress it.
     let _ = state::update_registry(&ctx.home.registry_json(), |r| {
-        if let Some(e) = r
-            .entries
-            .iter_mut()
-            .find(|e| entry_holds_session(e, session_uuid))
-        {
-            let newer = e.inside_leg.as_ref().is_none_or(|cur| rep.seq > cur.seq);
-            if newer {
-                let prev_state = e.inside_leg.as_ref().map(|r| r.state);
-                let body = rep_reason.clone().unwrap_or_else(|| state_str.to_string());
-                if state::enters(prev_state, rep_state, state::InsideLegState::Blocked) {
-                    notify = Some((name.to_string(), body, false));
-                } else if state::enters(prev_state, rep_state, state::InsideLegState::Done) {
-                    notify = Some((name.to_string(), body, true));
-                }
-                e.inside_leg = Some(rep);
-                // Capability flip (see handle_report): hook beats scrape.
-                e.screen_state = None;
-            }
+        if let Some((body, is_done)) = gate_inside_leg_onto_row(r, session_uuid, rep.clone()) {
+            notify = Some((name.to_string(), body, is_done));
         }
     });
     if let Some((title, body, is_done)) = notify {

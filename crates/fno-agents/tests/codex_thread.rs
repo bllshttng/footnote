@@ -83,7 +83,10 @@ async fn start_actor() -> (CodexThreadActor, tempfile::TempDir) {
     let driver = CodexThread::start(worktree.path(), None, false, None)
         .await
         .expect("thread starts against the fake daemon");
-    (driver.into_actor(Arc::new(|_| {})), worktree)
+    (
+        driver.into_actor(Arc::new(|_| {}), Arc::new(|_| {})),
+        worktree,
+    )
 }
 
 /// AC1: two back-to-back submits against an idle thread make ONE turn/start,
@@ -274,9 +277,12 @@ async fn expired_submit_wait_leaves_turn_running_and_receipt_arrives_later() {
             let driver = CodexThread::start(worktree.path(), None, false, None)
                 .await
                 .expect("thread starts");
-            let actor = driver.into_actor(Arc::new(move |receipt| {
-                seen.lock().unwrap().push(receipt.turn_id.clone());
-            }));
+            let actor = driver.into_actor(
+                Arc::new(move |receipt| {
+                    seen.lock().unwrap().push(receipt.turn_id.clone());
+                }),
+                Arc::new(|_| {}),
+            );
             let reply = actor.submit("slow question".into()).await.unwrap();
             let expired = tokio::time::timeout(std::time::Duration::from_millis(250), reply).await;
             assert!(expired.is_err(), "the bounded wait expires first");
@@ -297,6 +303,47 @@ async fn expired_submit_wait_leaves_turn_running_and_receipt_arrives_later() {
             actor.shutdown().await.unwrap();
         },
     )
+    .await;
+}
+
+/// x-fd66: the actor fires `Working` at the turn ack and `Done` when the
+/// completion routes - the transitions the driver itself observes, no pane
+/// required. The seq counter is the daemon's, not the actor's, so this pins
+/// the phase order and nothing else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actor_fires_working_at_ack_and_done_at_completion() {
+    use std::sync::Mutex;
+    let phases: Arc<Mutex<Vec<fno_agents::codex_thread::ThreadTurnPhase>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&phases);
+    with_fake_daemon(Behavior::quick(), async move {
+        let worktree = tempfile::tempdir().unwrap();
+        let driver = CodexThread::start(worktree.path(), None, false, None)
+            .await
+            .expect("thread starts");
+        let actor = driver.into_actor(
+            Arc::new(|_: fno_agents::codex_thread::TurnReceipt| {}),
+            Arc::new(move |phase| seen.lock().unwrap().push(phase)),
+        );
+        let reply = actor.submit("hello".into()).await.unwrap();
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(10), reply)
+            .await
+            .expect("turn completes")
+            .expect("receipt channel")
+            .expect("turn ok");
+        assert_eq!(receipt.turn_id, "turn-1");
+        actor.shutdown().await.unwrap();
+        // The phase fires are synchronous in the actor task; the shutdown ack
+        // orders after the waiter resolution, so both have happened by here.
+        assert_eq!(
+            phases.lock().unwrap().as_slice(),
+            [
+                fno_agents::codex_thread::ThreadTurnPhase::Working,
+                fno_agents::codex_thread::ThreadTurnPhase::Done
+            ],
+            "phase order: ack then completion"
+        );
+    })
     .await;
 }
 
