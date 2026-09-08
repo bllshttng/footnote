@@ -160,7 +160,7 @@ Contributed by the crowned sessions running other territories. Same contract: a 
 
 **Answer.** You cannot, through the advertised surface. Every other side state is paired: defer/undefer, supersede/unsupersede, queue/unqueue, claim/unclaim, done/reopen, archive/unarchive. Blocked has neither an entry verb nor an exit verb. `requeue` is the near miss and it only covers a node wedged `in_progress` by a dead worker.
 
-**Specimen.** Across all 72 backlog verbs, zero mention block, against a control of three that mention defer. `fno backlog update` has no `--status`; it answers `No such option: --status (Possible options: --tag)`. Node x-f1ab has read `blocked` with `blocked_by=[]` all night and counts as undelivered forever.
+**Specimen.** Across all 72 backlog verbs, zero mention block, against a control of three that mention defer. `fno backlog update` has no `--status`. It answers `No such option: --status (Possible options: --tag)`. Node x-f1ab has read `blocked` with `blocked_by=[]` all night and counts as undelivered forever.
 
 *Graduates to:* Give blocked its pair, or widen `requeue` to a node whose worker died before it reached `in_progress`.
 ## I spawned a codex worker and its target refused before it did anything
@@ -169,7 +169,7 @@ Contributed by the crowned sessions running other territories. Same contract: a 
 
 **Specimen.** `target: REFUSED: harness session id held by live row 't-5283-share-divisor'`. Three occurrences: x-77be on 09-04, x-5283 on 09-06, x-eb79 on 09-08. All three were written only to codex rollout summaries, which no other harness reads. On the same night, `t-61df-codex-handoff` ran the identical template and shipped eleven commits and PR 1597, because its worktree already existed.
 
-*Graduates to:* Spawn should not hold the identity its own payload needs, or target start should recognize the spawn's own row as itself, since the row names the very session asking. Do not add a bypass flag: the verb's own help says precedence alone launders an inherited marker into ownership.
+*Graduates to:* a spawn that does not hold the identity its own payload needs. Or a target start that reads the spawn's own row as itself, since the row names the session asking. Do not add a bypass flag: the verb's own help says precedence alone launders an inherited marker into ownership.
 ## My row has no provider stamp and something told me to re-register
 
 **Answer.** Re-registering does not stamp it. There is no self-service fix.
@@ -181,21 +181,21 @@ Contributed by the crowned sessions running other territories. Same contract: a 
 
 **Answer.** The row counts per-PR sync receipts. The sentence asserts a tree state. Those are different things and the remedy it prints only affects the second.
 
-**Specimen.** The row read `post-merge sync STALE - the canonical checkout is not synced with recent merges (PR #1558 merged 24h ago, never synced (+2 more))` while git read 0 behind, 0 ahead, clean, and PR 1558's merge commit `bee664d93` was already an ancestor of local main. Control: the same ancestry query answers YES for the origin/main tip.
+**Specimen.** The row read `post-merge sync STALE - the canonical checkout is not synced with recent merges (PR #1558 merged 24h ago, never synced (+2 more))`. Git read 0 behind, 0 ahead, clean. PR 1558's merge commit `bee664d93` was already an ancestor of local main. Control: the same ancestry query answers YES for the origin/main tip.
 
 *Graduates to:* Say what is measured. N merged PRs carry no sync receipt, with tree state reported separately.
 ## The daily groom failed and I cannot make it run again
 
-**Answer.** You cannot, until tomorrow. groom runs at most once per UTC day and writes its day key even when the run fails, so the failing path is unreachable and the only signal is a LaunchAgent exit code.
+**Answer.** You cannot, until tomorrow. groom runs at most once per UTC day. On a failed run it still writes its day key, so the failing path is unreachable. The only signal left is a LaunchAgent exit code.
 
 **Specimen.** `sh.fno.groom` last exited 1. `groom.err.log` held only config deprecation warnings and no error. Rerunning, including with an absolute binary, neutral cwd and a stripped environment, returned `{"status": "already-ran", "day": "2026-09-08"}` and exit 0.
 
-*Graduates to:* Do not claim the day when the run fails, or add a retry that ignores the key. And write a real error: an exit code beside a clean log is the least useful pair available.
+*Graduates to:* a groom that claims the day only on success, or a retry that ignores the key. It must also write a real error, because an exit code beside a clean log is the least useful pair available.
 ## An arm blamed something and the something turned out to be innocent
 
 **Answer.** Several arms report the first line on stderr as the reason for an exit it did not cause. Read the code before you act on the blame.
 
-**Specimen.** `auto_continue` reported `skip=spawn-failed ... error=fno agents spawn exited 2: 1 live row(s) were minted without a provider stamp`. That sentence is a `_warn` at `cli/src/fno/agents/spawn_gate.py:577`, which is `print(msg, file=sys.stderr)` and nothing else; the function continues. Calling `provider_live_count` directly printed the warning and returned 0, 0 and 3 for claude, codex and zai, raising nothing. Second control: spawn's own usage error exits 78, not 2. Same shape twice more the same day: a normalize test error blamed a stale installed fno that was provably healthy, and the post-merge row above.
+**Specimen.** `auto_continue` reported `skip=spawn-failed ... error=fno agents spawn exited 2: 1 live row(s) were minted without a provider stamp`. That sentence is a `_warn` at `cli/src/fno/agents/spawn_gate.py:577`, which is `print(msg, file=sys.stderr)` and nothing else. The function continues. Calling `provider_live_count` directly printed the warning and returned 0, 0 and 3 for claude, codex and zai, raising nothing. Second control: spawn's own usage error exits 78, not 2. Same shape twice more the same day: a normalize test error blamed a stale installed fno that was provably healthy, and the post-merge row above.
 
 *Graduates to:* Capture the failing call's own exit reason, not the last thing on stderr. A deduplicated warning is first in a fresh process, which is exactly why it keeps getting picked.
 
