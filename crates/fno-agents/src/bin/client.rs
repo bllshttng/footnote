@@ -711,6 +711,28 @@ async fn run(args: Vec<String>) -> i32 {
     // codex/gemini + --once -> dispatch_codex_once / dispatch_gemini_once.
     // `host` and `promote` must fall through to the daemon RPC unchanged.
     if method == "agent.spawn" && verb_owned == "spawn" {
+        // x-f1ab task 0.1: the seam gate comes FIRST. A spawn that skipped
+        // the Python seam carries no configured route/model/effort/account,
+        // so it goes back to the front door (FNO_AGENTS_RUNTIME=python stops
+        // the loop: the re-exec crosses the seam, gets the marker, and comes
+        // back marked). On exec failure this spawn's only decision path is
+        // gone and its policy state is unknown, so it refuses rather than
+        // falling through to a harness default the seam could have refused.
+        if spawn_needs_python_seam(&params) {
+            use std::os::unix::process::CommandExt;
+            let err = std::process::Command::new("fno")
+                .arg("agents")
+                .args(&args[..])
+                .env("FNO_AGENTS_RUNTIME", "python")
+                .exec();
+            eprintln!(
+                "fno-agents: config.agents.profiles is read only by the Python \
+                 spawn seam, and exec of 'fno agents spawn' failed: {err}. No \
+                 configured route, model, effort or account was applied; policy \
+                 state unknown; refusing."
+            );
+            return 2;
+        }
         // 4a-G2: the `pane` substrate (the default) is mux-hosted now, and the
         // Python back half owns it (fno.agents.mux_spawn: front-half reuse +
         // `fno mux pane run` + the registry mux ref). The Python front door
@@ -756,9 +778,18 @@ async fn run(args: Vec<String>) -> i32 {
                 }
                 Some(_) => {}
             }
+            // A marked call that still lands here must not forward the marker
+            // into the Python CLI (an unknown flag there): strip it from the
+            // re-exec argv. The seam gate above already sent unmarked spawns
+            // back; this keeps even a hand-built marked pane argv clean.
+            let pane_args: Vec<String> = args
+                .iter()
+                .filter(|a| !a.starts_with("--defaults-applied"))
+                .cloned()
+                .collect();
             let err = std::process::Command::new("fno")
                 .arg("agents")
-                .args(&args[..])
+                .args(&pane_args[..])
                 .env("FNO_AGENTS_RUNTIME", "python")
                 .exec();
             eprintln!(
@@ -777,9 +808,14 @@ async fn run(args: Vec<String>) -> i32 {
         // FNO_AGENTS_RUNTIME=python stops the Python front door bouncing back.
         if params.get("account").and_then(|v| v.as_str()).is_some() {
             use std::os::unix::process::CommandExt;
+            let account_args: Vec<String> = args
+                .iter()
+                .filter(|a| !a.starts_with("--defaults-applied"))
+                .cloned()
+                .collect();
             let err = std::process::Command::new("fno")
                 .arg("agents")
-                .args(&args[..])
+                .args(&account_args[..])
                 .env("FNO_AGENTS_RUNTIME", "python")
                 .exec();
             eprintln!(
@@ -1303,6 +1339,16 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
         print!("{}", String::from_utf8_lossy(&out.stdout));
     }
     Ok(())
+}
+
+/// The Python seam (rust_runtime.make_context -> inject_spawn_defaults) is
+/// the only reader of config.agents.profiles. A spawn that skipped it carries
+/// no configured route, model, effort or account, so it goes back to the
+/// front door; the marker asserts the crossing and is parsed beside `--yolo`.
+/// A marker is an upstream seam crossing, never proof a model is authorized -
+/// the strict coordinate checks still own that (x-90a9 task 1.1).
+fn spawn_needs_python_seam(params: &Value) -> bool {
+    params.get("defaults_applied").is_none()
 }
 
 fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
@@ -2786,6 +2832,28 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--yolo" | "-Y" => {
                 // NOTE: --yolo is accepted and forwarded; daemon ignores it for now.
                 params.insert("yolo".into(), Value::Bool(true));
+            }
+            // x-f1ab / x-90a9 task 0.1: the Python spawn seam (rust_runtime
+            // make_context -> inject_spawn_defaults) is the only reader of
+            // config.agents.profiles. This token asserts it crossed upstream
+            // and carries its enforcement verdict. Consumed here - never
+            // forwarded, never read past the `--` fence - so no harness argv
+            // or worker message can see it. Not in VALUE_FLAGS on purpose:
+            // the bare token must not eat a neighbor as its value.
+            "--defaults-applied" => {
+                params.insert(
+                    "defaults_applied".into(),
+                    Value::String("unenforced".into()),
+                );
+            }
+            other if other.starts_with("--defaults-applied=") => {
+                // if/else, not a match: an inner `"word" =>` arm would read as
+                // a phantom verb to the Python parity parser's arm scan.
+                let v = &other["--defaults-applied=".len()..];
+                if v != "enforced" && v != "unenforced" {
+                    return Err("--defaults-applied takes 'enforced' or 'unenforced'".into());
+                }
+                params.insert("defaults_applied".into(), Value::String(v.into()));
             }
             "--permission-mode" => {
                 // x-dfa4: provider permission/approval mode. Parsed here so the

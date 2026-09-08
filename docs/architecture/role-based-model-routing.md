@@ -46,6 +46,12 @@ cmd_spawn --role  ->  dispatch_spawn  ->  _claude_create_path  ->  bg_create(rol
 
 **Fail safe, not fail closed.** If no key is configured for the role's provider (the named env var / `.env` file has none), the role falls back to the primary Anthropic model with a one-line stderr notice, and the spawn still succeeds. `resolve_route` never raises.
 
+## The spawn seam: every launch crosses it
+
+Every `fno agents spawn` crosses the Python seam (`inject_spawn_defaults`). The binary enforces this: a direct `fno-agents spawn` without the `--defaults-applied` marker is sent back to the front door once, and a marked spawn dispatches natively. The marker carries the seam's enforcement verdict (`enforced` or `unenforced`). It records a decision the seam already made; it never grants one.
+
+A configured axis that was not applied says so. stderr names the dropped value, the config rung it came from, and the reason. One `spawn_defaults_applied` journal event per spawn records every resolved, applied, and suppressed axis, with empty values included. If you add a fifth config-sourced spawn axis, these two invariants already cover it: route the value through the seam, and let the seam name whatever it did not apply.
+
 ## What the guard does and does not cover
 
 The guard covers two role *names*. It does not cover the two things a reader reasonably assumes it covers.

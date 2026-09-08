@@ -482,6 +482,8 @@ def _hermetic_worker_add_dirs(monkeypatch):
 _PLAN_JOURNAL_PINNED_MODULES = frozenset(
     {
         "test_spawn_gate_refusal_events",
+        "test_spawn_defaults",
+        "test_rust_runtime",
         "test_advance_explain",
         "test_agents_top",
         "test_epic_status",

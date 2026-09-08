@@ -1100,6 +1100,10 @@ def inject_spawn_defaults(
         or _above_defaults(_scalar_rung("route"))
     )
     slot_receipt: List[Tuple[str, str, str]] = []
+    # (axis, value, rung, reason): a config-resolved axis this spawn did NOT
+    # get. Route is the axis that bills, so an omission there must name itself
+    # (x-f1ab: the four-way silent drop); the others already print.
+    suppressed: List[Tuple[str, str, str, str]] = []
     if lanes_present or not model_occupied:
         if not model_occupied:
             grid_node_entry = _grid_node(out[1:], env)
@@ -1165,6 +1169,7 @@ def inject_spawn_defaults(
         for _line in slot_chain:
             if _line.startswith(("slot skip", "slot note", "slot demote")):
                 print(f"fno agents spawn: {_line}", file=err)
+                suppressed.append(("slot", "", "", _line))
 
         def _refuse(msg: str) -> None:
             print(msg, file=err)
@@ -1291,6 +1296,14 @@ def inject_spawn_defaults(
     ):
         # No config field resolved at all, so any --model here was typed.
         _check_model_vendor_mismatch(out, err, env)
+        _emit_defaults_applied(
+            out, profile_verb, seed, _resolved_axes_view(
+                cfg_harness, provider_rung, cfg_model, model_rung, cfg_effort,
+                effort_rung, cfg_substrate, substrate_rung, cfg_permission,
+                permission_rung, cfg_route, route_rung, cfg_account, account_rung,
+                cfg_pane_group, pane_group_rung,
+            ), from_config, suppressed,
+        )
         return out
 
     # A spawn carrying --role whose lane resolves to a real route is billed on
@@ -1441,6 +1454,32 @@ def inject_spawn_defaults(
         inject += ["--route", cfg_route]
         route_injected = True
         from_config.append(("route", cfg_route, f"{route_rung}.route"))  # type: ignore[arg-type]
+    elif cfg_route:
+        # AC9-UI: config-sourced routing is never invisible. The account
+        # branch below already says this; the route axis is the one that
+        # bills, so a dropped route names which condition fired.
+        if explicit_route:
+            why = "the caller passed --route"
+        elif explicit_vendor_present:
+            why = f"the caller passed --provider {explicit_vendor!r}"
+        elif grid_candidate is not None:
+            # The grid branch above sets has_model, so the grid case must be
+            # named before any --model read: a grid candidate excludes an
+            # explicit -m anyway (model_occupied would have stood it down).
+            why = (
+                "the capacity grid chose a lane ("
+                + ("; ".join(slot_chain) or "no reason recorded") + ")"
+            )
+        elif explicit_model_present:
+            why = "the caller passed --model"
+        else:
+            why = "no suppression reason recorded"
+        print(
+            f"fno agents spawn: route skipped ({why}); {route_rung}.route "
+            f"{cfg_route!r} NOT applied - this worker bills at the caller default",
+            file=err,
+        )
+        suppressed.append(("route", cfg_route, route_rung or "", why))
     # route_present covers BOTH ways --route ends up in the final argv: injected
     # from config just above, or already explicit on the caller's argv. Gating
     # the model-suppression below on route_injected alone missed the explicit
@@ -1469,6 +1508,10 @@ def inject_spawn_defaults(
                 f"{cfg_account!r} ignored",
                 file=err,
             )
+            suppressed.append(
+                ("account", cfg_account, account_rung or "",
+                 f"accounts are claude-only; resolved provider {prov!r}")
+            )
 
     if cfg_model and not has_model:
         # The config model is suppressed when something else already owns the
@@ -1482,6 +1525,7 @@ def inject_spawn_defaults(
                 f"{model_rung}.model {cfg_model!r}",
                 file=err,
             )
+            suppressed.append(("model", cfg_model, model_rung or "", "--route owns the model"))
         elif explicit_vendor_present:
             # A bare explicit -P/--provider (vendor, no -m) already names the
             # vendor half of a route; cmd_spawn pairs it with whatever --model
@@ -1497,6 +1541,10 @@ def inject_spawn_defaults(
                 "(add --model yourself to complete the route)",
                 file=err,
             )
+            suppressed.append(
+                ("model", cfg_model, model_rung or "",
+                 f"--provider {explicit_vendor!r} names a vendor")
+            )
         elif role and _role_resolves(role, settings, env):
             # resolve_route is fail-SAFE: a protected role, a disabled block, an
             # unconfigured lane, or a missing key all return None (spawn falls
@@ -1507,6 +1555,10 @@ def inject_spawn_defaults(
                 f"model to the route (not injecting {model_rung}.model "
                 f"{cfg_model!r})",
                 file=err,
+            )
+            suppressed.append(
+                ("model", cfg_model, model_rung or "",
+                 f"--role {role!r} resolves to a route")
             )
         else:
             # A provider-less config model is scoped to the harness it was written
@@ -1537,6 +1589,9 @@ def inject_spawn_defaults(
                     "leaving model to the harness",
                     file=err,
                 )
+                suppressed.append(
+                    ("model", cfg_model, model_rung or "", "harness resolution failed")
+                )
                 target = None
             if target and target == home:
                 inject += ["--model", cfg_model]
@@ -1547,6 +1602,10 @@ def inject_spawn_defaults(
                     f"{home}; spawn resolves {target}, leaving model to the harness "
                     f"(bind {model_rung}.provider to apply it cross-harness)",
                     file=err,
+                )
+                suppressed.append(
+                    ("model", cfg_model, model_rung or "",
+                     f"scoped to {home}; spawn resolves {target}")
                 )
 
     # The spawn-overlay verb owns the harness-keyed rungs (x-8975): one
@@ -1585,10 +1644,6 @@ def inject_spawn_defaults(
                 f"fno agents spawn: harness-keyed defaults skipped ({exc})",
                 file=err,
             )
-            _overlay_answer = None
-        if _overlay_answer is not None and _overlay_answer.get("refusal"):
-            print(_overlay_answer["refusal"], file=err)
-            raise SystemExit(2)
 
     def _seamed(name: str) -> Tuple[str, Optional[str]]:
         """The post-resolution read for the three posture fields: the lane
@@ -1665,6 +1720,7 @@ def inject_spawn_defaults(
                     f"{substrate_rung}.substrate = {cfg_substrate!r} ignored",
                     file=err,
                 )
+            suppressed.append(("substrate", cfg_substrate, substrate_rung or "", reason))
 
     # Permission mode (x-3d5b): same shape as substrate, but the compatibility
     # check depends on the EFFECTIVE substrate (explicit pin > this-run injection >
@@ -1700,6 +1756,9 @@ def inject_spawn_defaults(
                 f"{permission_rung}.permission_mode = {cfg_permission!r} ignored",
                 file=err,
             )
+            suppressed.append(
+                ("permission_mode", cfg_permission, permission_rung or "", reason)
+            )
 
     # _flag_present, not _flag_value: a valueless trailing `--tab` reads as
     # absent to a value read, and injecting beside it puts TWO `--tab` tokens in
@@ -1729,12 +1788,18 @@ def inject_spawn_defaults(
                 f"fno agents spawn: pane group skipped ({exc}); {_pg_rung} ignored",
                 file=err,
             )
+            suppressed.append(
+                ("pane_group", cfg_pane_group, pane_group_rung or "", str(exc))
+            )
         else:
             if _pg.get("inject"):
                 inject += ["--tab", cfg_pane_group]
                 from_config.append(("tab", cfg_pane_group, _pg_rung))  # type: ignore[arg-type]
             elif _pg.get("skipped"):
                 print(_pg["skipped"], file=err)
+                suppressed.append(
+                    ("pane_group", cfg_pane_group, pane_group_rung or "", _pg["skipped"])
+                )
 
     # Harness bundle (x-8975): the verb's ONE bundle answer (lane args >
     # profile harness overlay > defaults harness overlay, never concatenated)
@@ -1797,6 +1862,333 @@ def inject_spawn_defaults(
         (source for axis, _value, source in from_config if axis == "model"), None
     )
     _check_model_vendor_mismatch(out, err, env, model_source=model_source)
+    _emit_defaults_applied(
+        out, profile_verb, seed, _resolved_axes_view(
+            cfg_harness, provider_rung, cfg_model, model_rung, cfg_effort,
+            effort_rung, cfg_substrate, substrate_rung, cfg_permission,
+            permission_rung, cfg_route, route_rung, cfg_account, account_rung,
+            cfg_pane_group, pane_group_rung,
+        ), from_config, suppressed,
+    )
     return out
 
 
+def _resolved_axes_view(
+    cfg_harness: Optional[str], provider_rung: Optional[str],
+    cfg_model: Optional[str], model_rung: Optional[str],
+    cfg_effort: Optional[str], effort_rung: Optional[str],
+    cfg_substrate: Optional[str], substrate_rung: Optional[str],
+    cfg_permission: Optional[str], permission_rung: Optional[str],
+    cfg_route: Optional[str], route_rung: Optional[str],
+    cfg_account: Optional[str], account_rung: Optional[str],
+    cfg_pane_group: Optional[str], pane_group_rung: Optional[str],
+) -> dict:
+    """Every config-resolved spawn axis as ``(value, rung)``, empties included.
+
+    "The config read as empty here" and "the value was suppressed" are
+    different facts; the event must tell them apart (x-f1ab).
+    """
+    return {
+        "provider": (cfg_harness or "", provider_rung),
+        "model": (cfg_model or "", model_rung),
+        "effort": (cfg_effort or "", effort_rung),
+        "substrate": (cfg_substrate or "", substrate_rung),
+        "permission_mode": (cfg_permission or "", permission_rung),
+        "route": (cfg_route or "", route_rung),
+        "account": (cfg_account or "", account_rung),
+        "pane_group": (cfg_pane_group or "", pane_group_rung),
+    }
+
+
+def _emit_defaults_applied(
+    out: Sequence[str],
+    verb: Optional[str],
+    seed: Optional[str],
+    resolved: dict,
+    applied: Sequence[Tuple[str, str, str]],
+    suppressed: Sequence[Tuple[str, str, str, str]],
+) -> None:
+    """Journal one spawn_defaults_applied decision for this spawn.
+
+    Exactly one event per completed seam resolution: the applied axes with
+    their rungs, the suppressed ones with their reasons. The emit must not
+    be able to raise - an unwritable journal (or a raising
+    ``paths.state_dir()`` under the hermetic guard) can never turn an
+    already-valid launch into a crash. Diagnostic failure also never waives
+    strict qualification; that decision lives upstream of this call.
+    """
+    try:
+        from fno.agents.events import emit
+
+        emit(
+            "spawn_defaults_applied",
+            name=_flag_value(out[1:], "--name"),
+            verb=verb,
+            seed=seed,
+            resolved={axis: {"value": v, "rung": r} for axis, (v, r) in resolved.items()},
+            applied=[list(entry) for entry in applied],
+            suppressed=[list(entry) for entry in suppressed],
+        )
+    except Exception:  # noqa: BLE001 - a dead journal never bricks a spawn
+        pass
+
+
+def routing_enforcement_state(settings: object = None) -> str:
+    """The enforcement verdict the spawn marker carries to the Rust client.
+
+    The binary reads no config, so ``--defaults-applied=<state>`` is the
+    only record it sees of the seam's decision: bare-or-unenforced means
+    legacy permissive, ``enforced`` means strict routing. Any read failure
+    degrades open: the seam itself is the enforcement decision maker and a
+    strict seam refuses upstream, before this value ever matters.
+    """
+    try:
+        if settings is None:
+            from fno.config import load_settings
+
+            settings = load_settings()
+        routing = getattr(settings, "routing", None)
+        return "enforced" if getattr(routing, "enforce_inventory", False) else "unenforced"
+    except Exception:  # noqa: BLE001 - unknown reads as legacy, never as strict
+        return "unenforced"
+
+
+# ---------------------------------------------------------------------------
+# The fallback chain: where a refused node goes next
+# ---------------------------------------------------------------------------
+
+#: Sizes that resolve to their own chain. Anything else reads `default`.
+_CHAIN_SIZES = ("S", "M", "L")
+
+_CHAIN_KEYS = frozenset({"S", "M", "L", "default"})
+# The harness axis is the BINARY (docs/architecture/axis-vocabulary.md).
+# `opencode` is legally both a harness and a provider, so never infer the axis
+# from the value.
+_CHAIN_HARNESSES = frozenset({"claude", "codex", "agy", "opencode"})
+
+
+class FallbackConfigError(ValueError):
+    """A fallback chain that cannot be trusted to name a vendor."""
+
+
+def validate_fallback(table: object) -> dict:
+    """Return the chain table as links, or raise naming the offending key.
+
+    Called on the failover path, never at config load. Unlike
+    ``_coerce_profiles``, which degrades a typo to no-profiles so a bad config
+    cannot brick spawning, this REFUSES: a chain is read only when a provider
+    has already refused, and degrading open there spawns a worker at an
+    unintended vendor and bills it. Refusing leaves the worker alive and the
+    node claimed, which is a bounded stop.
+
+    Raising here rather than in the config model is deliberate. A field
+    validator would fail ``load_settings()`` process-wide, so one typo would
+    make every ``fno`` command raise and stop the pr-watch tick at its settings
+    phase - taking down the daemon that runs the failover, which is a strictly
+    worse outcome than the one being prevented.
+    """
+    from fno.config import SpawnDefaultsBlock
+
+    if not isinstance(table, dict):
+        raise FallbackConfigError(
+            "config.agents.fallback must be a table keyed by size "
+            f"(S|M|L|default); got {type(table).__name__}"
+        )
+    out: dict[str, list] = {}
+    for size, chain in table.items():
+        if size not in _CHAIN_KEYS:
+            raise FallbackConfigError(
+                f"config.agents.fallback.{size}: unknown size key; "
+                f"expected one of {'|'.join(sorted(_CHAIN_KEYS))}"
+            )
+        if not isinstance(chain, list):
+            raise FallbackConfigError(
+                f"config.agents.fallback.{size} must be a list of links; "
+                f"got {type(chain).__name__}"
+            )
+        links = []
+        for i, link in enumerate(chain):
+            if isinstance(link, SpawnDefaultsBlock):
+                links.append(link)
+                continue
+            if not isinstance(link, dict):
+                raise FallbackConfigError(
+                    f"config.agents.fallback.{size}[{i}] must be a table of "
+                    f"axis fields; got {type(link).__name__}"
+                )
+            # A link is spelled with the CORRECT axis word, `harness` (the
+            # binary). SpawnDefaultsBlock's own field is the legacy `provider`,
+            # which its comment records as meaning harness. Both spellings
+            # read and `harness` wins. The value is checked either way, because
+            # `extra="ignore"` would otherwise drop a typo'd harness silently
+            # and the link would spawn on the ambient binary.
+            link = dict(link)
+            harness = str(
+                link.pop("harness", "") or link.get("provider", "") or ""
+            ).strip()
+            if harness and harness not in _CHAIN_HARNESSES:
+                raise FallbackConfigError(
+                    f"config.agents.fallback.{size}[{i}].harness={harness!r} "
+                    f"is not a known harness "
+                    f"({'|'.join(sorted(_CHAIN_HARNESSES))})"
+                )
+            if harness:
+                link["provider"] = harness
+            links.append(SpawnDefaultsBlock(**link))
+        out[size] = links
+    return out
+
+
+def link_id(link) -> str:
+    """A stable ``harness/model`` name for one chain link.
+
+    Used as the walk's memory key, so a node never re-dispatches onto a link it
+    has already spent. Two links that differ only in effort are the SAME
+    destination for that purpose: retrying the same vendor at a different
+    reasoning setting does not answer a cap.
+
+    ``account`` DOES participate, because it names a different bill and a
+    different meter. Two links on one harness and model that differ only by
+    account are the operator's second credential, and folding them together
+    would spend the first and then skip the second as already tried.
+    """
+    harness = (getattr(link, "provider", "") or "").strip() or "?"
+    model = (getattr(link, "model", "") or "").strip()
+    route = (getattr(link, "route", "") or "").strip()
+    account = (getattr(link, "account", "") or "").strip()
+    base = f"{harness}/{model or route or 'default'}"
+    return f"{base}@{account}" if account else base
+
+
+def _harness_records(harness: str, repo_root=None):
+    """Account records whose harness is ``harness``, or [] when unreadable.
+
+    Rooted at ``repo_root`` because the recovery roster is global and a
+    candidate can belong to another project. A same-id record in the
+    dispatcher's own project must never answer for a foreign worker.
+    """
+    try:
+        from fno.adapters.providers.loader import load_providers
+
+        from pathlib import Path as _Path
+
+        cfg = load_providers(repo_root=_Path(repo_root) if repo_root else None)
+        return [r for r in cfg.records if r.harness == harness]
+    except Exception:  # noqa: BLE001 - an unreadable config means UNKNOWN, not exhausted
+        return []
+
+
+def link_is_exhausted(link, *, now: Optional[float] = None, repo_root=None) -> bool:
+    """True only when every account this link can land on is KNOWN exhausted.
+
+    This is the check task 1.2 made real. Before the harvested reset, a claude
+    record's lock expired seconds after the cap and a z.ai record had no probe
+    at all, so every link looked eligible and the chain routed straight back
+    into the provider that had just refused.
+
+    UNKNOWN stays eligible, matching the invariant `rotation.py` already
+    enforces: unknown is not exhausted. So does an unreadable config, no
+    matching record, and any error on the way - the failure mode of guessing
+    "exhausted" is holding a node that could have run.
+    """
+    from fno.adapters.providers.runtime_state import HeadroomState, headroom
+
+    account = (getattr(link, "account", "") or "").strip()
+    harness = (getattr(link, "provider", "") or "").strip()
+    ids = (
+        [account] if account
+        else [r.id for r in _harness_records(harness, repo_root)]
+    )
+    if not ids:
+        return False
+    try:
+        from pathlib import Path as _Path
+
+        root = _Path(repo_root) if repo_root else None
+        verdicts = [headroom(pid, now=now, repo_root=root) for pid in ids]
+    except Exception:  # noqa: BLE001 - a failed read is UNKNOWN, never exhausted
+        return False
+    return all(v.state is HeadroomState.EXHAUSTED for v in verdicts)
+
+
+def resolve_fallback_chain(
+    size: Optional[str],
+    *,
+    exclude: Sequence[str] = (),
+    settings: object = None,
+    now: Optional[float] = None,
+    repo_root=None,
+) -> List[object]:
+    """The eligible fallback links for a node of ``size``, in order.
+
+    ``size`` is the node's existing ``--size S|M|L``, which is already the
+    operator's own simple-versus-complex split; an absent or unrecognised size
+    reads the ``default`` chain. ``exclude`` carries the links this node has
+    already spent, by :func:`link_id`.
+
+    Returns [] for three different situations that share one correct action -
+    spawn nothing: no chain configured (the pre-existing behavior), every link
+    already tried, and every remaining link's own provider known exhausted.
+    Routing into a known-capped provider is worse than holding, so an
+    all-exhausted chain deliberately does NOT fall back to link zero.
+
+    Raises whatever the config validator raises on a malformed chain. That is
+    the point: a chain is read on the failover path only, and degrading open
+    there spawns a worker at an unintended vendor and bills it.
+    """
+    if settings is None:
+        # Rooted at the CANDIDATE's project, not the daemon's cwd. The recovery
+        # roster is global, so a foreign worker resolving the dispatcher's
+        # chain would spawn on a vendor its own project never authorized.
+        if repo_root:
+            from pathlib import Path as _Path
+
+            from fno.config import load_settings_for_repo
+
+            settings = load_settings_for_repo(_Path(repo_root))
+        else:
+            from fno.config import load_settings
+
+            settings = load_settings()
+    table = validate_fallback(
+        getattr(settings.agents, "fallback", None) or {}  # type: ignore[attr-defined]
+    )
+    key = size if size in _CHAIN_SIZES else "default"
+    chain = table.get(key) or table.get("default") or []
+    spent = set(exclude)
+    return [
+        link for link in chain
+        if link_id(link) not in spent
+        and not link_is_exhausted(link, now=now, repo_root=repo_root)
+    ]
+
+
+def link_to_spawn_flags(link) -> List[str]:
+    """One chain link as spawn flags, in the codebase's existing axis spelling.
+
+    No new axis vocabulary: harness is ``-H``, the vendor/model route is
+    ``--route``, and model, effort, substrate, permission-mode and account keep
+    their own flags. ``--substrate bg`` is the deprecated thread alias; the
+    dispatch resolver seats it from the harness's spawn claim (``native``),
+    so a codex link that left substrate unset resolves to a pane rather than
+    being handed a substrate its harness rejects.
+    """
+    harness = (getattr(link, "provider", "") or "").strip()
+    out: List[str] = []
+    if harness:
+        out += ["-H", harness]
+    for flag, field in (
+        ("-m", "model"),
+        ("--effort", "effort"),
+        ("--permission-mode", "permission_mode"),
+        ("--route", "route"),
+        ("--account", "account"),
+    ):
+        val = (getattr(link, field, "") or "").strip()
+        if val:
+            out += [flag, val]
+    substrate = (getattr(link, "substrate", "") or "").strip()
+    if not substrate:
+        substrate = "bg" if harness == "claude" else "pane"
+    out += ["--substrate", substrate]
+    return out
