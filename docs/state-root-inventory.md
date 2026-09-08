@@ -37,6 +37,7 @@ One file per install. These belong at the root.
 | `health-throttle.json`, `health-history.jsonl` | `health_monitor.py` | append-only |
 | `convo-signals.jsonl` | `inbox/drain.py` | append-only |
 | `recovery-nudges.json` | `recovery.py` | permanent |
+| `.canary` | `scripts/ci/check-state-canary.sh` `plant` | permanent, and written ONLY into a root with no live graph, which in practice means a CI runner. A live operator root is watched read-only and never receives it. One byte of content; its job is to give the walk a file it can prove it saw. |
 | `notify-signals.json` | `crates/fno-agents/src/operator_notice.rs` (the notify_watch arm) | permanent; one entry per subscribed signal, the last token + ts; safe to delete (the next state change re-sends) |
 | `watchdog-sweep.json` | `agents/watchdog.py` | permanent (rewritten per sweep) |
 | `recovery/provider-outages.json`, `.lock`, `.provider-outages-*.tmp` | `agents/provider_outage.py` | permanent breaker/evidence journal; lock and atomic temp sidecars live only for one write and stale temps are safe to remove when no writer holds the lock; stores fingerprints, bounded raw refusal text, and explicit route IDs, never credentials or full transcripts |

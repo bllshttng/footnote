@@ -964,11 +964,18 @@ def _smoke_env(root: Path) -> dict:
 
 
 def _state_canary_snapshot() -> str:
-    """Snapshot path for this process, so two runs on one box never share one.
+    """Snapshot path for this process, so two runs on one box never share a FILE.
 
     plant and verify run in the SAME process, so the pid keys both halves. CI
     gives each shard its own runner and would not collide anyway; a developer
     running two checkouts at once would.
+
+    It separates the snapshots, not the measurements. Both runs still watch one
+    HOME state root, so run B's writes land between run A's plant and verify
+    and read as ADDED there. On a live operator root that is already true of
+    every other session on the box, which is why a watching run is advisory
+    (see check-state-canary.sh). On a fresh root, two concurrent smoke runs
+    can still cross-report.
     """
     return str(Path(tempfile.gettempdir()) / f"fno-state-canary.{os.getpid()}.snapshot")
 
@@ -2037,13 +2044,19 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     # The canary brackets the whole run: plant before the first step, verify
     # after the last. Both halves sit around the single _execute_steps call
     # site, so this is one pair rather than a per-step hook.
-    _run_state_canary(root, "plant")
+    plant_rc = _run_state_canary(root, "plant")
     results, first_rc = _execute_steps(
         root, env, [steps[i] for i in selected], keep_going,
         pytest_shard=shard_spec if shard_total > 1 else "",
     )
+    # A plant that never took a baseline makes verify refuse for want of a
+    # snapshot. That is the instrument failing, not a step writing to the
+    # operator state root, and the two must never share a message: an
+    # unwritable HOME would otherwise redden every green run while naming a
+    # leak that did not happen.
+    canary_broken = plant_rc != 0
     canary_rc = _run_state_canary(root, "verify")
-    if canary_rc != 0:
+    if canary_rc != 0 and not canary_broken:
         # Recorded beside the exit code, not only in it: `--state both` throws
         # the populated lane's rc away on purpose.
         _STATE_CANARY_LEAKED = True
@@ -2065,7 +2078,15 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         print(f"  {s:6} {d:4.0f}s  {n}", flush=True)
 
     _write_failure_record(failure_record, [n for n, s, _ in results if s == "fail"])
-    if canary_rc != 0 and not failed:
+    if canary_broken:
+        sys.stderr.write(
+            f"smoke: the state canary could not take a baseline (plant exit "
+            f"{plant_rc}), so nothing was measured. This is the INSTRUMENT "
+            "failing, not a step writing to the operator state root. The run "
+            "is not called green, because an unmeasured root is not a clean "
+            "one.\n"
+        )
+    elif canary_rc != 0 and not failed:
         sys.stderr.write(
             "smoke: every step passed but the state canary refused - a step "
             "wrote to the operator state root. The run is NOT green.\n"
