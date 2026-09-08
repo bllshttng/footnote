@@ -33,6 +33,7 @@ case "$1 $2" in
     [[ -n "${STUB_VERDICT:-}" ]] && printf '%s\n' "$STUB_VERDICT"
     exit "${STUB_VERDICT_RC:-0}" ;;
   "agents dispatch")
+    [[ "${STUB_CAPABILITIES_FAIL:-0}" == "1" ]] && exit 1
     case "${4:-}" in
       claude) printf '%s\n' '{"resume_strategy":{"forms":{"interactive_attach":{"tokens":["claude","attach","{short_id}"]}}}}' ;;
       codex) printf '%s\n' '{"resume_strategy":{"forms":{"interactive_attach":{"tokens":["codex","resume","{session_id}"]}}}}' ;;
@@ -66,6 +67,9 @@ case "$1 $2" in
     fi
     if [[ "${STUB_CODEX_THREAD:-0}" == "1" ]]; then
       thread_session="${STUB_THREAD_SESSION_ID-019f0000-0000-7000-8000-000000000001}"
+      if [[ "${STUB_THREAD_SHORT_ONLY:-0}" == "1" ]]; then
+        echo "{\"name\":\"codex-thread\",\"short_id\":\"$thread_session\",\"harness\":\"codex\",\"status\":\"live\"}"; exit 0
+      fi
       echo "{\"name\":\"codex-thread\",\"short_id\":\"\",\"session_id\":\"$thread_session\",\"harness_session_id\":\"$thread_session\",\"harness\":\"codex\",\"status\":\"live\"}"; exit 0
     fi
     if [[ "${STUB_KEEPER_THREAD:-0}" == "1" ]]; then
@@ -75,6 +79,9 @@ case "$1 $2" in
     if [[ "${STUB_OPENCODE_THREAD:-0}" == "1" ]]; then
       if [[ "${STUB_OPENCODE_TORN:-0}" == "1" ]]; then
         echo '{"name":"opencode-thread","short_id":"deadbeef","harness":"opencode","status":"live"}'; exit 0
+      fi
+      if [[ "${STUB_OPENCODE_SHORT_ONLY:-0}" == "1" ]]; then
+        echo '{"name":"opencode-thread","short_id":"ses_dispatchtest1","harness":"opencode","status":"live"}'; exit 0
       fi
       echo '{"name":"opencode-thread","short_id":"ses_dispatchtest1","session_id":"ses_dispatchtest1","harness":"opencode","status":"live"}'; exit 0
     fi
@@ -292,6 +299,10 @@ out="$(STUB_VERDICT="$DISP" STUB_CODEX_THREAD=1 STUB_THREAD_SESSION_ID="$CODEX_T
 ok   'codex thread full session -> launched' "$(field "$out")" 'launched'
 has  'codex thread full session surfaced'     "$out" "short_id=$CODEX_THREAD_SESSION"
 has  'codex thread logs use full session'    "$out" "fno agents logs $CODEX_THREAD_SESSION"
+out="$(STUB_VERDICT="$DISP" STUB_CODEX_THREAD=1 STUB_THREAD_SHORT_ONLY=1 STUB_THREAD_SESSION_ID="$CODEX_THREAD_SESSION" \
+  run --name codex-thread-short --provider codex --yolo --node "$NODE" --message 'Implement x' --substrate thread)"
+ok   'codex short-only session -> launched'   "$(field "$out")" 'launched'
+has  'codex short-only session surfaced'      "$out" "short_id=$CODEX_THREAD_SESSION"
 
 KEEPER_THREAD_SESSION='019f0000-0000-7000-8000-000000000002'
 out="$(STUB_VERDICT="$DISP" STUB_KEEPER_THREAD=1 STUB_THREAD_SESSION_ID="$KEEPER_THREAD_SESSION" \
@@ -303,9 +314,18 @@ out="$(STUB_VERDICT="$DISP" STUB_OPENCODE_THREAD=1 \
   run --name opencode-thread --provider opencode --message 'Implement x' --substrate thread)"
 ok   'opencode ses session -> launched' "$(field "$out")" 'launched'
 has  'opencode ses session surfaced'    "$out" 'short_id=ses_dispatchtest1'
+out="$(STUB_VERDICT="$DISP" STUB_OPENCODE_THREAD=1 STUB_OPENCODE_SHORT_ONLY=1 \
+  run --name opencode-thread-short --provider opencode --node "$NODE" --message 'Implement x' --substrate thread)"
+ok   'opencode short-only session -> launched' "$(field "$out")" 'launched'
+has  'opencode short-only session surfaced'    "$out" 'short_id=ses_dispatchtest1'
 out="$(STUB_VERDICT="$DISP" STUB_OPENCODE_THREAD=1 STUB_OPENCODE_TORN=1 \
   run --name opencode-thread-torn --provider opencode --message 'Implement x' --substrate thread)"
 ok   'opencode torn short_id -> failed'  "$(field "$out")" 'failed'
+
+out="$(STUB_VERDICT="$DISP" STUB_CAPABILITIES_FAIL=1 \
+  run --name thread-capabilities-fail --provider codex --yolo --message 'Implement x' --substrate thread)"
+ok 'capability read failure -> failed' "$(field "$out")" 'failed'
+no 'capability read failure did not spawn' "$(calllog)" 'agents spawn --harness'
 
 # --- pane worker observability hint (PR #341 delta) --------------------------
 # A matched mux-pane receipt launches (main's verified-identity path), but a pane

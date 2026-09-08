@@ -471,6 +471,20 @@ cmd=(agents "$VERB" --harness "$PROVIDER")
 [[ -n "$NODE" ]] && cmd+=(--node "$NODE")
 cmd+=(--name "$NAME")
 [[ -n "$MESSAGE" ]] && cmd+=("$MESSAGE")
+
+# Resolve the receipt field before launch. A capability read after a successful
+# spawn can turn infrastructure drift into a false failure with a live worker.
+THREAD_RECEIPT_FIELD=""
+case "$SUBSTRATE" in
+  thread|bg)
+    THREAD_RECEIPT_FIELD="$(thread_receipt_field)" || fail "thread receipt capability lookup failed for harness '$PROVIDER'; no worker launched"
+    case "$THREAD_RECEIPT_FIELD" in
+      short_id|session_id) : ;;
+      *) fail "no receipt field in harness map for thread substrate '$PROVIDER'; no worker launched" ;;
+    esac
+    ;;
+esac
+
 # x-8151: the x-9d11 refusal-carrier case block that lived here is deleted.
 # This wrapper's `fno agents spawn` call re-derives the identical verdict one
 # process later (cmd_spawn in-process, or the fno-agents binary's own spawn
@@ -610,10 +624,16 @@ else
   # OpenCode `ses_*` id is accepted while a torn short-id-only receipt fails.
   case "$SUBSTRATE" in
     thread|bg)
-      receipt_field="$(thread_receipt_field)"
+      receipt_field="$THREAD_RECEIPT_FIELD"
       case "$receipt_field" in
         short_id) short_id="$short_id" ;;
-        session_id) short_id="${harness_session_id:-$session_id}" ;;
+        session_id)
+          if [[ -n "$harness_session_id" || -n "$session_id" ]]; then
+            short_id="${harness_session_id:-$session_id}"
+          elif [[ "$short_id" =~ ^[0-9a-f]{8}$ ]]; then
+            fail "no valid receipt (thread session field missing; short_id is only a torn 8-hex value): $(sanitize "${spawn_out:-$spawn_err}")"
+          fi
+          ;;
         *) fail "no receipt field in harness map for thread substrate '$PROVIDER'" ;;
       esac
       valid_receipt_identity "$short_id" || fail "no valid receipt ($VERB JSON canonical identity empty/malformed for substrate '${SUBSTRATE:-pane}'): $(sanitize "${spawn_out:-$spawn_err}")"
