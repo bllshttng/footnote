@@ -106,9 +106,9 @@ The local `~/.fno/graph.html` board shows a vote pill on EVERY row. A row with n
 
 `demand` is a READ. It never writes `rank` and never touches `_kanban_column`. The verb itself reorders nothing.
 
-Votes do move the order, in one place and below every decision. `demand.importance_score` is a projection computed at sort time: divergence plus a capped age term, zero for a node nobody voted on. `make_selection_sort_key` reads it after priority and fan-out, so a measurement never outranks a judgement and an operator's pin outranks both. Nothing stores it. A graph with no encounters sorts exactly as it did before the term existed.
+Votes do move the order, in one place and below every decision. `demand.importance_score` is a projection: divergence plus a capped age term, zero for a node nobody voted on. Nothing stores it. `make_selection_sort_key` reads it after priority and fan-out. A measurement must not outrank a judgement, and an operator's pin outranks both. A graph with no encounters sorts as it did before the term existed.
 
-Votes also stop the age drain. `maintain` counts an encounter as movement, so a node somebody paid for is never deferred for sitting still. 807 rows were drained by age with no reader before that; the top demand row was 15 days from being one of them.
+Votes also stop the age drain. `maintain` counts an encounter as movement, so a node somebody paid for is never deferred for sitting still. Before that, 807 rows were drained by age with no reader. The top demand row was 15 days from being one of them.
 
 An encounter has no correction verb. It cannot be edited or withdrawn, because an edit path makes the record deniable. A later correction is a progress note.
 
@@ -139,7 +139,7 @@ fno backlog update <id> --project <name> --cwd <path>
 
 `rank` floats a card inside its `(column, project)` lane without changing its column. Board order == work order, so `--top` decides where the card sits in that order. It does not dispatch the node. When the node is inside an active mission scope, a drain reaches it. A top-ranked node outside every active mission scope stays undispatched.
 
-`--top` means top of that scope and nothing wider. A node with a live epic parent ranks among its epic's children, so a pinned child is not the project's next node, and the receipt names which scope it ordered within.
+`--top` means top of that scope and nothing wider. A node with a live epic parent ranks among its epic's children. A pinned child is therefore not the project's next node. The receipt names the scope it ordered within.
 
 ```bash
 fno backlog rank <id> --top            # front of the scope (order only, no dispatch)
@@ -150,7 +150,7 @@ fno backlog rank <id> --clear          # rejoin the priority fallback
 fno backlog rank <id> --top --operator # from inside an agent shell
 ```
 
-An agent session is refused. `--top` writes `min(rank) - 1`, so with several callers pushing the same lever every writer undercut the last and the resulting order was arrival order wearing the word "importance". Agents vote instead, and the selection key reads the votes:
+An agent session is refused. `--top` writes `min(rank) - 1`. With several callers on the same lever, every writer undercut the last. The resulting order was arrival order wearing the word "importance". Agents vote instead, and the selection key reads the votes:
 
 ```bash
 fno backlog encounter <id> --evidence "what this cost me"   # the vote
