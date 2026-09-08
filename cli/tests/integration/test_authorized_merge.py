@@ -74,7 +74,7 @@ def test_an_unreachable_owner_never_reads_as_a_merge(tmp_path, monkeypatch):
     """
     from fno.rust_binary import VerbUnavailable
 
-    def _gone(verb, payload, unavailable=VerbUnavailable):
+    def _gone(verb, payload, unavailable=VerbUnavailable, **_kw):
         raise unavailable("the fno-agents binary was not found")
 
     monkeypatch.setattr("fno.rust_binary.verb_call", _gone)

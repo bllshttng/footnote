@@ -2653,7 +2653,7 @@ def test_an_unreachable_owner_holds_rather_than_merging(monkeypatch, capsys, tmp
     """
     from fno.rust_binary import VerbUnavailable
 
-    def _boom(verb, payload, unavailable=VerbUnavailable):
+    def _boom(verb, payload, unavailable=VerbUnavailable, **_kw):
         raise unavailable("the fno-agents binary was not found")
 
     monkeypatch.setattr("fno.rust_binary.verb_call", _boom)

@@ -2124,7 +2124,12 @@ def _authorized_merge(
     if covered_head:
         payload["covered_head"] = covered_head
     try:
-        return verb_call("authorized-merge", payload)
+        # The owner makes its own network round trips: the PR fetch, the two
+        # holds, base lineage and the checks verdict, each a `fno` cold start.
+        # The door's 30s default reported it UNREACHABLE while it was merely
+        # still running, and an unread authorization refuses the merge - so a
+        # slow network made this verb unable to merge at all.
+        return verb_call("authorized-merge", payload, timeout=300)
     except VerbUnavailable as exc:
         return {
             "outcome": "unknown",
