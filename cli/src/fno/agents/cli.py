@@ -94,7 +94,7 @@ _SPAWN_CLI_HOLDER_PREFIX = "spawn-cli:"
 #: doctor overlay readout checks claude's exact-passthrough values against it
 #: (x-8975) instead of keeping a second copy.
 CLAUDE_PERMISSION_MODES = frozenset(
-    {"default", "acceptEdits", "plan", "bypassPermissions"}
+    {"default", "acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"}
 )
 
 #: Buckets where force-release advice is HONEST: recovery ran, nobody was found
