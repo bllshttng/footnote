@@ -1174,6 +1174,11 @@ def inject_spawn_defaults(
                     explicit_route_value=(
                         _flag_value(out[1:], "--route") if explicit_route else None
                     ),
+                    explicit_vendor_value=(
+                        (explicit_vendor or "").strip() or None
+                        if explicit_vendor_present
+                        else None
+                    ),
                 )
             except Exception as _exc:  # noqa: BLE001 - legacy degrades; strict refuses
                 if enforced:

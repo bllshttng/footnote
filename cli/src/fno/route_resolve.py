@@ -283,6 +283,7 @@ def resolve_slot(
     work_verb: Optional[str] = None,
     explicit_model_value: Optional[str] = None,
     explicit_route_value: Optional[str] = None,
+    explicit_vendor_value: Optional[str] = None,
 ) -> tuple[Optional[dict[str, Any]], list[str]]:
     """Which lane does this dispatch ride right now: the ONE slot resolver.
     Selection is Rust (``fno-agents route-slot``); chain strings come back
@@ -313,6 +314,7 @@ def resolve_slot(
             work_verb=work_verb or verb,
             explicit_model_value=explicit_model_value,
             explicit_route_value=explicit_route_value,
+            explicit_vendor_value=explicit_vendor_value,
         )), "candidate")
     except RouteSlotUnavailable as exc:
         return None, [f"slot=route-slot-unavailable ({exc})"]
@@ -557,6 +559,7 @@ def _slot_payload(
     work_verb: Optional[str] = None,
     explicit_model_value: Optional[str] = None,
     explicit_route_value: Optional[str] = None,
+    explicit_vendor_value: Optional[str] = None,
 ) -> dict[str, Any]:
     """The slot/grid payload: both legs' inputs plus the gather the verb cannot do."""
     rows = _declared_rows(settings)
@@ -601,6 +604,7 @@ def _slot_payload(
         "slot_by_verb": _slot_profiles_table(settings),
         "explicit_model_value": explicit_model_value,
         "explicit_route_value": explicit_route_value,
+        "explicit_vendor_value": explicit_vendor_value,
     }
     try:
         payload["effort_ok"] = _effort_ok_table(inv_rows)

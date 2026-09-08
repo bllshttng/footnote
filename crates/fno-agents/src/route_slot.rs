@@ -1282,6 +1282,41 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let explicit_vendor_name = payload
+            .get("explicit_vendor_value")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(v) = &explicit_vendor_name {
+            // The vendor pin bills whoever it names, so only a row whose
+            // route names that same vendor may satisfy it; a row with no
+            // vendor route is the native coordinate, never the pin's.
+            let vendor_of = |r: Option<&Value>| -> String {
+                r.map(|row| row_value(row, "route"))
+                    .unwrap_or_default()
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let member = plan
+                .iter()
+                .any(|(_, rn)| vendor_of(rows.get(rn)).as_str() == v.as_str());
+            if !member {
+                chain.push(json!(format!(
+                    "slot=strict-refusal explicit vendor {v:?} is not in slot {rung_base}'s declared lanes"
+                )));
+                return refused_decision(
+                    chain,
+                    "policy-coordinate-not-in-slot",
+                    "the explicit vendor is not in the effective slot's declared lanes",
+                );
+            }
+        }
         if let Some(m) = &explicit_model_name {
             let member = plan.iter().any(|(_, rn)| {
                 rows.get(rn).map(|r| row_value(r, "model")).as_deref() == Some(m.as_str())
@@ -1312,7 +1347,21 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
                 );
             }
         }
-        if explicit_model_name.is_some() || explicit_route_name.is_some() {
+        if explicit_model_name.is_some()
+            || explicit_route_name.is_some()
+            || explicit_vendor_name.is_some()
+        {
+            let vendor_of = |r: Option<&Value>| -> String {
+                r.map(|row| row_value(row, "route"))
+                    .unwrap_or_default()
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            };
             plan.retain(|(_, rn)| {
                 let r = rows.get(rn);
                 let model_ok = explicit_model_name
@@ -1321,7 +1370,10 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
                 let route_ok = explicit_route_name
                     .as_ref()
                     .map(|rt| r.map(|row| row_value(row, "route")).as_deref() == Some(rt.as_str()));
-                model_ok.unwrap_or(true) && route_ok.unwrap_or(true)
+                let vendor_ok = explicit_vendor_name
+                    .as_ref()
+                    .map(|v| vendor_of(r).as_str() == v.as_str());
+                model_ok.unwrap_or(true) && route_ok.unwrap_or(true) && vendor_ok.unwrap_or(true)
             });
         }
     }
@@ -2012,6 +2064,19 @@ pub fn audit_verify(snapshot: &Value) -> (Value, i32) {
             }));
             continue;
         }
+        let requested = s
+            .get("requested_model")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !requested.is_empty() && requested != model {
+            boundaries.push(json!({
+                "boundary": "misrouted-model",
+                "detail": format!(
+                    "session {sid} requested model {requested:?} but was observed on {model:?}"
+                ),
+            }));
+            continue;
+        }
         match view_evidence(s, sid, &fingerprint) {
             Ok(()) => verified.push(json!({
                 "session_id": sid,
@@ -2095,6 +2160,17 @@ fn view_evidence(session: &Value, sid: &str, fingerprint: &str) -> Result<(), Va
             "detail": format!("routing-view:{sid} names view {view:?}; expected claude-native or codex-native"),
         }));
     }
+    let harness = session.get("harness").and_then(Value::as_str).unwrap_or("");
+    let native = native_view_for(harness);
+    if native != Some(view) {
+        return Err(json!({
+            "boundary": "view-harness-mismatch",
+            "detail": format!(
+                "routing-view:{sid} names view {view:?} but the session's harness {harness:?} is only observable from {:?}",
+                native.unwrap_or("no known native view")
+            ),
+        }));
+    }
     if body.get("fingerprint").and_then(Value::as_str) != Some(fingerprint) {
         return Err(json!({
             "boundary": "view-fingerprint-mismatch",
@@ -2113,12 +2189,23 @@ fn view_evidence(session: &Value, sid: &str, fingerprint: &str) -> Result<(), Va
     Ok(())
 }
 
+/// The config-facts subprocess: the inventory surface resolves config from
+/// the CWD's project root, so the fingerprint and policy must be read from
+/// the AUDITED project, not from whatever checkout invoked the audit.
+fn inventory_command(project: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new("fno");
+    cmd.args(["config", "route", "inventory", "--json"]);
+    if !project.trim().is_empty() {
+        cmd.current_dir(project);
+    }
+    cmd
+}
+
 /// Config facts (fingerprint, policy) come from the public inventory surface;
 /// everything else loads from the machine stores. A missing front door is an
 /// incomplete terminal, never a pass.
 fn load_audit_snapshot(project: &str, node: &str, since: &str) -> Result<Value, String> {
-    let inv = std::process::Command::new("fno")
-        .args(["config", "route", "inventory", "--json"])
+    let inv = inventory_command(project)
         .output()
         .map_err(|e| format!("no fno front door for config facts: {e}"))?;
     if !inv.status.success() {
@@ -2881,6 +2968,45 @@ mod tests {
     }
 
     #[test]
+    fn strict_explicit_vendor_pin_qualifies_against_the_route_vendor() {
+        // The model matches a row on ANOTHER vendor too, but the -P pin names
+        // zai: only the row whose route bills zai survives the walk.
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "policy": {"enforce_inventory": true, "operator_access": "local"},
+            "node": {"difficulty": "medium", "priority": "p1", "plan_path": "/plans/p.md"},
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "glm",
+                           "operator_view": "claude-native"},
+                "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
+                            "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+            },
+            "capacity": {"claude": {"state": "ok", "window": "w",
+                                    "accounts": {"zai-main": "ok"}, "evidence": {}, "resets": {}}},
+            "explicit_model_value": "glm",
+            "explicit_vendor_value": "zai",
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(
+            out["candidate"]["lane_fields"]["route"],
+            "zai/glm-5.3-flash[1m]"
+        );
+
+        // The pin names a vendor no lane's route declares: refusal by name.
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                           "operator_view": "claude-native"},
+            },
+            "explicit_vendor_value": "zai",
+        })));
+        assert_eq!(out["status"], "none");
+        assert_eq!(out["refusal"], "policy-coordinate-not-in-slot");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("slot=strict-refusal explicit vendor \"zai\"")));
+    }
+
+    #[test]
     fn strict_remote_filter_skips_rows_without_a_verified_native_view() {
         let out = resolve_slot_payload(&strict_payload(json!({
             "policy": {"enforce_inventory": true, "operator_access": "remote"},
@@ -3116,6 +3242,19 @@ mod tests {
         let (report, code) = audit_verify(&snap(json!([s])));
         assert_eq!(code, 1);
         assert!(boundaries(&report).contains(&"view-fingerprint-mismatch".to_string()));
+
+        let mut s = session(json!({}));
+        s["requested_model"] = json!("glm");
+        s["model"] = json!("sonnet");
+        let (report, code) = audit_verify(&snap(json!([s])));
+        assert_eq!(code, 1);
+        assert!(boundaries(&report).contains(&"misrouted-model".to_string()));
+
+        let mut s = session(json!({}));
+        s["harness"] = json!("codex");
+        let (report, code) = audit_verify(&snap(json!([s])));
+        assert_eq!(code, 1);
+        assert!(boundaries(&report).contains(&"view-harness-mismatch".to_string()));
     }
 
     #[test]
@@ -3158,6 +3297,23 @@ mod tests {
         assert_eq!(parse_since_seconds("7d").unwrap(), 604800);
         assert_eq!(parse_since_seconds("90").unwrap(), 90);
         assert!(parse_since_seconds("abc").is_err());
+    }
+
+    #[test]
+    fn inventory_command_runs_inside_the_audited_project() {
+        // The inventory surface resolves config from the subprocess's CWD, so
+        // the audit's facts must come from the audited project, never from
+        // whatever checkout happened to invoke the audit.
+        let dir = std::env::temp_dir().join(format!("fno-auditcwd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cmd = inventory_command(dir.to_str().unwrap());
+        assert_eq!(
+            cmd.get_current_dir(),
+            Some(dir.as_path()),
+            "facts must be read from the audited project"
+        );
+        assert_eq!(inventory_command("").get_current_dir(), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

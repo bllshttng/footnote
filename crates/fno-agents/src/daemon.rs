@@ -9139,8 +9139,12 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
             if entry.model.as_deref() != Some(m.as_str()) {
                 axis_changes.push(("agent_model_changed", entry.model.clone(), m.clone()));
                 entry.model = Some(m.clone());
-                entry.model_basis = Some("verified".to_string());
             }
+            // A report is an observation whether it agrees with the request
+            // or not: a matching report is the normal success case, and only
+            // marking the disagreeing ones would leave a healthy worker's
+            // row labeled "requested" forever.
+            entry.model_basis = Some("verified".to_string());
         }
         if let Some(eff) = &effort {
             if entry.effort.as_deref() != Some(eff.as_str()) {
@@ -16341,6 +16345,41 @@ done
         assert!(
             events.iter().any(|e| e["type"] == "inside_leg_report"),
             "inside_leg_report not emitted: {events:?}"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// A model report is an observation whether it agrees with the request
+    /// or not: the normal case (the row already carries the requested model)
+    /// must flip `model_basis` to "verified" too, or a healthy worker reads
+    /// as unobserved forever - the audit's requested-vs-observed boundary
+    /// reads this field.
+    #[test]
+    fn handle_report_marks_a_matching_model_as_verified() {
+        let home = tmp_home("report-matching-model-verified");
+        seed_stream_row(&home, "worker-A", "repM");
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries[0].model = Some("glm-5.3-flash[1m]".into());
+            r.entries[0].model_basis = Some("requested".into());
+        })
+        .unwrap();
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        let resp = handle_report(
+            &ctx,
+            &Request::new(
+                1,
+                "agent.report",
+                json!({"session_id": "uuid-repM", "seq": 1, "state": "working",
+                       "model": "glm-5.3-flash[1m]"}),
+            ),
+        );
+        assert_eq!(resp.result().unwrap()["stored"], true);
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(reg.entries[0].model_basis.as_deref(), Some("verified"));
+        let events = read_events(&home);
+        assert!(
+            !events.iter().any(|e| e["type"] == "agent_model_changed"),
+            "a matching report is not a change: {events:?}"
         );
         std::fs::remove_dir_all(home.root()).ok();
     }

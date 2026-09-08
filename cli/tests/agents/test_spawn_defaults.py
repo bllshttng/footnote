@@ -412,6 +412,44 @@ def test_strict_seam_qualifies_explicit_pins_and_preserves_the_command(
     assert payload["explicit_model_value"] == "glm"
 
 
+def test_strict_seam_forwards_the_vendor_pin_to_the_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC4. A -P pin reaches the owner, so a slot qualifying the model on
+    another vendor's row can never launch the pinned vendor's binary."""
+    seen = _stub_route_slot(
+        monkeypatch,
+        {
+            "status": "pick",
+            "candidate": {
+                "harness": "claude",
+                "model": "glm",
+                "lane": "flash-x",
+                "lane_rung": "agents.profiles.target.lanes[0]",
+                "lane_index": 0,
+                "lane_fields": {"route": "zai/glm-5.3-flash[1m]"},
+                "evidence": {"capacity": "ok"},
+            },
+            "chain": ["slot agents.profiles.target lanes walked in declared order"],
+        },
+    )
+    import fno.agents.spawn_defaults as sd
+
+    monkeypatch.setattr(
+        sd, "_grid_node", lambda toks, env=None: {"id": "x-1", "plan_path": ""}
+    )
+    err = io.StringIO()
+    _inject(
+        ["spawn", "--name", "p", "--node", "x-1", "-P", "zai", "-m", "glm", "/target x"],
+        err=err,
+        routing=_Routing(enforce_inventory=True),
+        env={"FNO_NODE": "x-1"},
+    )
+    payload = seen[0]
+    assert payload["explicit_vendor_value"] == "zai"
+    assert payload["explicit_model_value"] == "glm"
+
+
 def test_strict_seam_forwards_the_verb_on_every_spawn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
