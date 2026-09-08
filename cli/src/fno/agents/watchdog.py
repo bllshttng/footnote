@@ -40,8 +40,11 @@ from typing import Any, Callable, Iterable, Optional
 # next move, which is a fact about the tail rather than an absence in it.
 from fno.agents.session_truth import classify_tail
 
-Verdict = namedtuple("Verdict", "row_id name state verdict basis action")
-#: ``agent`` (default "claude") resolves the row's transcript store (x-c624).
+Verdict = namedtuple(
+    "Verdict", "row_id name state verdict basis action agent", defaults=("claude",)
+)
+#: ``agent`` (default "claude") resolves the row's transcript store (x-c624);
+#: apply lanes re-read the transcript through it, so it rides the verdict too.
 Row = namedtuple("Row", "row_id name state node cwd agent", defaults=(None, "", "claude"))
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
@@ -156,7 +159,9 @@ def run_recoverable_sweep(
     verdicts_out: list[Verdict] = []
     for candidate in scan.recoverable:
         handle = canonical_handle(candidate.session_id)
-        rows.append(Row(candidate.session_id, handle, "orphaned", None, candidate.cwd))
+        rows.append(
+            Row(candidate.session_id, handle, "orphaned", None, candidate.cwd, "codex")
+        )
         usable = bool(candidate.transcript_usable)
         verdicts_out.append(
             Verdict(
@@ -173,6 +178,7 @@ def run_recoverable_sweep(
                     )
                 ),
                 "adopt" if usable else "refuse",
+                "codex",
             )
         )
     complete = bool(scan.complete)
@@ -725,6 +731,10 @@ def _age_clause(now_s: float, epoch: Optional[float]) -> str:
     return f"{n}m" if n is not None else "unknown"
 
 
+def _verdict(row: Row, verdict: str, basis: str, action: str) -> Verdict:
+    return Verdict(row.row_id, row.name, row.state, verdict, basis, action, row.agent)
+
+
 def _verdict_one(
     row: Row,
     *,
@@ -739,13 +749,12 @@ def _verdict_one(
 
     # ghost: claims working/blocked, no transcript resolves for the id.
     if facts is None and row.state in _GHOST_STATES:
-        return Verdict(row.row_id, row.name, row.state, GHOST,
-                       f"no transcript for {row.row_id}", "report")
+        return _verdict(row, GHOST, f"no transcript for {row.row_id}", "report")
 
     # contended: below ghost (liveness outranks a tree fact), report-only.
     if peers:
-        return Verdict(
-            row.row_id, row.name, row.state, CONTENDED,
+        return _verdict(
+            row, CONTENDED,
             f"worktree {row.cwd} holds {len(peers) + 1} live sessions, "
             f"peers {'/'.join(peers)}",
             "report",
@@ -758,12 +767,12 @@ def _verdict_one(
             try:
                 node_state = node_state_for(row.node) if row.node else None
             except Exception:  # noqa: BLE001 - unreadable graph condemns nothing
-                return Verdict(row.row_id, row.name, row.state, LEAVE,
-                               "graph unreadable, silence verdict refused", "none")
+                return _verdict(row, LEAVE,
+                                "graph unreadable, silence verdict refused", "none")
             node_open = node_state is not None and str(node_state.get("status") or "") not in ("done", "superseded")
             if node_open:
-                return Verdict(
-                    row.row_id, row.name, row.state, SILENCE,
+                return _verdict(
+                    row, SILENCE,
                     f"open node {row.node}, transcript quiet {_mins(now_s, facts.last_event_epoch)}m", "drive",
                 )
 
@@ -779,8 +788,8 @@ def _verdict_one(
         facts_age_s = max(0.0, now_s - facts.last_event_epoch)
     if row.state in _WAKE_STATES and facts_age_s is not None:
         if facts_age_s > WAKE_MAX_AGE_S:
-            return Verdict(
-                row.row_id, row.name, row.state, STALE,
+            return _verdict(
+                row, STALE,
                 f"{row.state} {int(facts_age_s // 3600)}h old, past the "
                 f"{int(WAKE_MAX_AGE_S // 3600)}h wake ceiling, needs a human",
                 "report",
@@ -800,14 +809,14 @@ def _verdict_one(
         and facts.last_event_epoch is not None
     ):
         if in_quorum_breaker:
-            return Verdict(
-                row.row_id, row.name, row.state, REROUTE,
+            return _verdict(
+                row, REROUTE,
                 "429 terminal for this session; provider quorum already "
                 "confirmed by a separate breaker row",
                 "redispatch",
             )
-        return Verdict(
-            row.row_id, row.name, row.state, LEAVE,
+        return _verdict(
+            row, LEAVE,
             "429 terminal for this session; waiting for positive provider quorum",
             "none",
         )
@@ -819,28 +828,28 @@ def _verdict_one(
     # is an absence and never a wake reason.
     if row.state in _WAKE_STATES and facts is not None:
         if facts.last_event_epoch is None:
-            return Verdict(row.row_id, row.name, row.state, LEAVE,
-                           "no parseable transcript evidence, not wakeable",
-                           "none")
+            return _verdict(row, LEAVE,
+                            "no parseable transcript evidence, not wakeable",
+                            "none")
         if window == "unknown":
-            return Verdict(row.row_id, row.name, row.state, LEAVE,
-                           f"429 present, reset window unknown "
-                           f"({stamp or 'no stamp'})", "none")
+            return _verdict(row, LEAVE,
+                            f"429 present, reset window unknown "
+                            f"({stamp or 'no stamp'})", "none")
         if window == "live" and reset_epoch is not None:
             reset_utc = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
-            return Verdict(row.row_id, row.name, row.state, LEAVE,
-                           f"429 resets {reset_utc.strftime('%H:%M:%SZ')}, "
-                           f"window not open", "none")
+            return _verdict(row, LEAVE,
+                            f"429 resets {reset_utc.strftime('%H:%M:%SZ')}, "
+                            f"window not open", "none")
         truth = classify_tail(facts.last_role, facts.last_text, facts_age_s)
         if truth != "stalled":
-            return Verdict(row.row_id, row.name, row.state, LEAVE,
-                           f"tail reads {truth}, session does not owe a move",
-                           "none")
+            return _verdict(row, LEAVE,
+                            f"tail reads {truth}, session does not owe a move",
+                            "none")
         clause = ("last 429 window passed" if window == "passed"
                   else "silent, no 429 in tail")
-        return Verdict(row.row_id, row.name, row.state, WAKE,
-                       f"{row.state} {_mins(now_s, facts.last_event_epoch)}m "
-                       f"silent, {clause}", "resume")
+        return _verdict(row, WAKE,
+                        f"{row.state} {_mins(now_s, facts.last_event_epoch)}m "
+                        f"silent, {clause}", "resume")
 
     # leave: everything else, including every healthy injectable row - the
     # watchdog never competes with the normal inject path. Never
@@ -853,7 +862,7 @@ def _verdict_one(
         if facts is not None
         else f"no transcript, state {row.state}"
     )
-    return Verdict(row.row_id, row.name, row.state, LEAVE, basis, "none")
+    return _verdict(row, LEAVE, basis, "none")
 
 
 def _unclaimed_node_basis(
@@ -1261,6 +1270,9 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
                 state=str(getattr(entry, "status", "unknown")),
                 node=getattr(entry, "node", None),
                 cwd=str(getattr(entry, "cwd", "") or ""),
+                # The loop exists only because this entry is NOT claude; the
+                # harness it filtered on is the one the row must carry.
+                agent=str(getattr(entry, "harness", "") or "claude"),
             )
         )
         seen_row_ids.add(row_id)

@@ -715,7 +715,21 @@ def test_fleet_rows_includes_live_nonclaude_registry_rows(monkeypatch, tmp_path)
     rows, warnings = watchdog.fleet_rows()
 
     assert warnings == []
-    assert rows == [Row("thread-535c", "codex-thread", "live", "x-535c", str(tmp_path))]
+    assert rows == [
+        Row("thread-535c", "codex-thread", "live", "x-535c", str(tmp_path), "codex")
+    ]
+
+
+def test_verdict_carries_the_rows_harness():
+    """The apply lanes re-read the transcript through the verdict, so the
+    verdict carries the same agent the row resolved its own read with."""
+    row = Row("thread-535c", "codex-thread", "working", None, "/tmp/w1", "codex")
+    [v] = _run([row], {})
+    assert v.verdict == GHOST
+    assert v.agent == "codex"
+    claude_row = Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")
+    [cv] = _run([claude_row], {})
+    assert cv.agent == "claude"
 
 
 def test_fleet_rows_skips_a_name_only_nonclaude_row_loudly(monkeypatch, tmp_path):
