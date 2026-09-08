@@ -107,6 +107,14 @@ pub(crate) struct GraphRead {
     /// planning lane reads this to recognize a planner row (blueprint/think)
     /// that a node's reverse join alone cannot.
     pub phases: HashMap<String, Vec<String>>,
+    /// Node id -> stored `status` (x-5a62). The cascade's confirm reads it;
+    /// its key set is the id set the name and transcript routes resolve
+    /// against, so no second id read exists.
+    pub statuses: HashMap<String, String>,
+    /// Node id -> (merge_status, additional_prs length) (x-5a62). The
+    /// confirm step reads positive PR-state evidence from it; a missing
+    /// merge_status is recorded as unrecorded, never asserted unmerged.
+    pub pr_state: HashMap<String, (Option<String>, usize)>,
 }
 
 /// One row the pass decided to retire, with everything the write tail needs.
@@ -158,10 +166,34 @@ pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let index = graph_store::sessions_index(&entries);
     let mut open_do: HashMap<String, Vec<String>> = HashMap::new();
     let mut phases: HashMap<String, Vec<String>> = HashMap::new();
+    let mut statuses: HashMap<String, String> = HashMap::new();
+    let mut pr_state: HashMap<String, (Option<String>, usize)> = HashMap::new();
     for entry in &entries {
         let Some(node_id) = graph_store::entry_id(entry) else {
             continue;
         };
+        statuses.insert(
+            node_id.to_string(),
+            entry
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        );
+        pr_state.insert(
+            node_id.to_string(),
+            (
+                entry
+                    .get("merge_status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                entry
+                    .get("additional_prs")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0),
+            ),
+        );
         let Some(rows) = entry.get("sessions").and_then(Value::as_array) else {
             continue;
         };
@@ -193,6 +225,8 @@ pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
         index,
         open_do,
         phases,
+        statuses,
+        pr_state,
     })
 }
 

@@ -33,11 +33,16 @@ pub(super) fn quiet_transcript(
 fn graph_read(named: &[(&str, &str, &str)], open_do: &[(&str, &str)]) -> Option<GraphRead> {
     let mut index: std::collections::HashMap<String, Vec<(String, String)>> =
         std::collections::HashMap::new();
+    let mut statuses: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut pr_state: std::collections::HashMap<String, (Option<String>, usize)> =
+        std::collections::HashMap::new();
     for (sid, node, status) in named {
         index
             .entry(sid.to_ascii_lowercase())
             .or_default()
             .push((node.to_string(), status.to_string()));
+        statuses.insert(node.to_string(), status.to_string());
+        pr_state.insert(node.to_string(), (None, 0));
     }
     let mut open: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for (sid, node) in open_do {
@@ -49,6 +54,8 @@ fn graph_read(named: &[(&str, &str, &str)], open_do: &[(&str, &str)]) -> Option<
         index,
         open_do: open,
         phases: std::collections::HashMap::new(),
+        statuses,
+        pr_state,
     })
 }
 

@@ -956,6 +956,8 @@ mod tests {
             index,
             open_do: HashMap::new(),
             phases: HashMap::new(),
+            statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
+            pr_state: HashMap::from([("N1".to_string(), (None, 0))]),
         }));
         let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
         let stopped = Arc::new(AtomicBool::new(false));
@@ -1048,6 +1050,8 @@ mod tests {
             index,
             open_do: HashMap::new(),
             phases: HashMap::new(),
+            statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
+            pr_state: HashMap::from([("N1".to_string(), (None, 0))]),
         }));
         let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
         let stopped = Arc::new(AtomicBool::new(false));

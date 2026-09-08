@@ -1318,7 +1318,7 @@ pub enum WorkState {
 
 /// Normalize one session id for identity comparison, `session_identity_key`'s
 /// rule: uuid-family ids are case-insensitive, opencode's `ses_` ids are not.
-fn work_state_key(session_id: &str) -> String {
+pub(crate) fn work_state_key(session_id: &str) -> String {
     if session_id.starts_with("ses_") {
         session_id.to_string()
     } else {
