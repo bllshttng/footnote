@@ -2144,7 +2144,8 @@ mod tests {
             f,
             r#"{{"type":"user","message":{{"role":"user","content":"{}\nhi\n</fno_mail>"}}}}"#,
             escaped_marker(&marker_b)
-        );
+        )
+        .unwrap();
         assert!(
             !confirm_content_after(&path, &marker_a, baseline).unwrap(),
             "b's landing must not confirm a: the shared prefix is not identity"
