@@ -22,11 +22,12 @@ PARENT = ("parent-session-abc123", "claude", "/parent/working/dir")
 
 @pytest.fixture
 def graph(monkeypatch):
-    """A one-node in-memory graph, mutated through the real mutator.
+    """A one-node in-memory graph, read and mutated through the real code.
 
-    ``_stamp_launch_edge`` imports ``locked_mutate_graph`` lazily, so patching
-    the store module is enough. The keeper subprocess a real write would need
-    buys nothing here: the assertion is what the mutator does to the row.
+    ``_stamp_launch_edge`` imports both store functions lazily, so patching the
+    store module is enough. The keeper subprocess a real write would need buys
+    nothing here: the assertions are the skip decision and what the mutator
+    does to the row.
     """
     import fno.graph.store as store
 
@@ -37,6 +38,7 @@ def graph(monkeypatch):
         calls.append(1)
         return mutator(entries)
 
+    monkeypatch.setattr(store, "read_graph", lambda *a, **k: entries)
     monkeypatch.setattr(store, "locked_mutate_graph", fake_mutate)
     return entries, calls
 
@@ -88,9 +90,10 @@ def test_ac3_edge_unproven_parent_writes_nothing(graph, monkeypatch):
     assert "spawned_by_session" not in entries[0]
 
 
-def test_ac4_edge_existing_edge_is_never_overwritten(graph, parent):
-    """AC4-EDGE: a second worker on the node does not rewrite who started it."""
-    entries, _calls = graph
+def test_ac4_edge_existing_edge_is_never_overwritten(graph, parent, capsys):
+    """AC4-EDGE: a second worker on the node does not rewrite who started it,
+    and does not pay a locked write to discover that."""
+    entries, calls = graph
     entries[0].update(
         spawned_by_session="the-first-launcher",
         spawned_by_harness="codex",
@@ -99,46 +102,54 @@ def test_ac4_edge_existing_edge_is_never_overwritten(graph, parent):
 
     _stamp_launch_edge("x-1234")
 
+    assert calls == [], "a settled edge must not pay a locked write"
     assert entries[0]["spawned_by_session"] == "the-first-launcher"
     assert entries[0]["spawned_by_harness"] == "codex"
     assert entries[0]["spawned_by_cwd"] == "/first/cwd"
+    assert "already names the-first-launcher; kept" in capsys.readouterr().err
+
+
+def test_a_racing_first_launch_still_wins_under_the_lock(graph, parent):
+    """The pre-read is a snapshot. A launch that lands between the read and the
+    commit is the first launch, and the mutator re-checks rather than clobber."""
+    entries, _calls = graph
+    import fno.graph.store as store
+
+    def racing_mutate(path, mutator):
+        entries[0]["spawned_by_session"] = "the-racing-launcher"
+        return mutator(entries)
+
+    store.locked_mutate_graph = racing_mutate
+
+    _stamp_launch_edge("x-1234")
+
+    assert entries[0]["spawned_by_session"] == "the-racing-launcher"
+
+
+def test_a_node_the_graph_does_not_hold_says_so(graph, parent, capsys):
+    """A stamp that writes nothing must SAY so.
+
+    resolve_provenance keeps a well-formed id it could not resolve, so without
+    this the spawn would fall silent and a reader could not tell a missing node
+    from a spawn that had no parent.
+    """
+    _entries, calls = graph
+
+    _stamp_launch_edge("x-9999")
+
+    assert calls == [], "an unknown node must not pay a locked write"
+    assert "not recorded on x-9999 (node not in graph)" in capsys.readouterr().err
 
 
 def test_a_graph_failure_never_fails_the_spawn(monkeypatch, parent, capsys):
     """The stamp is provenance, and provenance never costs a worker."""
     import fno.graph.store as store
 
-    def boom(path, mutator):
+    def boom(*a, **k):
         raise RuntimeError("graph keeper is wedged")
 
-    monkeypatch.setattr(store, "locked_mutate_graph", boom)
+    monkeypatch.setattr(store, "read_graph", boom)
 
     _stamp_launch_edge("x-1234")
 
     assert "launch edge not recorded on x-1234" in capsys.readouterr().err
-
-
-def test_a_node_the_graph_does_not_hold_says_so(monkeypatch, parent, capsys):
-    """A write that matched nothing must SAY so.
-
-    resolve_provenance keeps a well-formed id it could not resolve, so a graph
-    missing the node commits an unchanged snapshot and exits 0. Silence there is
-    the same absence this stamp exists to end.
-    """
-    import fno.graph.store as store
-
-    monkeypatch.setattr(store, "locked_mutate_graph", lambda path, mutator: mutator([]))
-
-    _stamp_launch_edge("x-9999")
-
-    assert "not recorded on x-9999 (node not in graph)" in capsys.readouterr().err
-
-
-def test_a_kept_existing_edge_says_whose_it_is(graph, parent, capsys):
-    """AC4-EDGE, read half: the operator hears which launch was kept."""
-    entries, _calls = graph
-    entries[0]["spawned_by_session"] = "the-first-launcher"
-
-    _stamp_launch_edge("x-1234")
-
-    assert "already names the-first-launcher; kept" in capsys.readouterr().err

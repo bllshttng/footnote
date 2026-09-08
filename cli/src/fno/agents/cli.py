@@ -1171,44 +1171,48 @@ def _stamp_launch_edge(node: "str | None") -> None:
     if not session_id:
         return
 
-    # A write that matched nothing must SAY so. resolve_provenance keeps a
-    # well-formed id it could not resolve, so a graph missing the node commits
-    # an unchanged snapshot and exits 0. Silence there is the absence this whole
-    # stamp exists to end: the reader could not tell a missing node from a spawn
-    # that had no parent. The sibling stamp above names the same case.
-    seen: list[str] = []
-
-    def mutator(entries: "list[dict]") -> "list[dict]":
-        for row in entries:
-            if row.get("id") != node:
-                continue
-            seen.append(row.get("spawned_by_session") or "")
-            if row.get("spawned_by_session"):
-                continue
-            row["spawned_by_session"] = session_id
-            row["spawned_by_harness"] = harness
-            row["spawned_by_cwd"] = parent_cwd
-        return entries
-
+    # Decide on the cheap read before paying the locked write. The sibling
+    # stamp above already spends one full keeper cycle on this node, and a
+    # second one that changes nothing is pure cost on every re-spawn.
+    #
+    # It also has to SAY when it writes nothing. resolve_provenance keeps a
+    # well-formed id it could not resolve, so a graph missing the node would
+    # otherwise commit an unchanged snapshot and exit 0. Silence there is the
+    # absence this stamp exists to end, one layer down.
     try:
-        from fno.graph.store import locked_mutate_graph
+        from fno.graph.store import locked_mutate_graph, read_graph
         from fno.paths import graph_json
+
+        existing = next((r for r in read_graph() if r.get("id") == node), None)
+        if existing is None:
+            print(
+                f"spawn: launch edge not recorded on {node} (node not in graph); "
+                f"the edge was not written. Skipped.",
+                file=sys.stderr,
+            )
+            return
+        if existing.get("spawned_by_session"):
+            print(
+                f"spawn: launch edge on {node} already names "
+                f"{existing['spawned_by_session']}; kept.",
+                file=sys.stderr,
+            )
+            return
+
+        def mutator(entries: "list[dict]") -> "list[dict]":
+            for row in entries:
+                # Re-check under the lock: the read above is a snapshot, and a
+                # racing spawn may have landed the first launch since.
+                if row.get("id") != node or row.get("spawned_by_session"):
+                    continue
+                row["spawned_by_session"] = session_id
+                row["spawned_by_harness"] = harness
+                row["spawned_by_cwd"] = parent_cwd
+            return entries
 
         locked_mutate_graph(graph_json(), mutator)
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
         print(f"spawn: launch edge not recorded on {node}: {exc}", file=sys.stderr)
-        return
-    if not seen:
-        print(
-            f"spawn: launch edge not recorded on {node} (node not in graph); "
-            f"the edge was not written. Skipped.",
-            file=sys.stderr,
-        )
-    elif seen[0]:
-        print(
-            f"spawn: launch edge on {node} already names {seen[0]}; kept.",
-            file=sys.stderr,
-        )
 
 
 @agents_app.command("spawn")
