@@ -69,6 +69,8 @@ The recovery and the cleanup failure ride separate fields. A recovery that worke
 
 Python reaches it through `fno.rust_binary.verb_call("authorized-merge", payload)`, the single door. An unreachable binary answers `unknown`, never a clear merge. A merge whose authorization nobody read is not an authorized merge.
 
+That includes a binary too OLD to know the verb. A deployed `fno-agents` from before this landed answers `unknown`, so `fno do pr merge` holds at exit 2 rather than merging unauthorized. The remedy is `fno doctor update --rust`, and `fno doctor` reports the lag. Hold, never break, was the point of routing the door through one named refusal.
+
 ## After a queue-armed merge
 
 When the queue lands a merge later, no fno process is in the loop. The remote ref used to stay behind forever, because the merge verb's cleanup step never runs on that path.
