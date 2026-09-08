@@ -416,6 +416,18 @@ What settled it was neither grep. It was a count of the 499 receipt files on dis
 
 *Graduates to:* a review habit, not a gate. When you check a claim about where something does not happen, measure at a different layer than the claimant did. A filesystem count, a direct function call, or a runtime probe all beat a second grep.
 
+## I recommended a mechanism that never runs
+
+**Answer.** Measure that a mechanism fires before you build on it. A doc saying a thing exists is not evidence it happens. Get its event count over the window you care about. Prove the reader works with a control that returns a non-zero number from the same journal.
+
+**Specimen.** On 2026-09-08 a king proposed hanging this list's upkeep on the post-merge ritual. That ritual's own design doc says its merge trigger is deferred and was never built. Measured only after the operator asked: at least 99 merged PRs in two days and 0 ritual events. The control in that same journal returned 171 check-ins. The first attempt at that count read the wrong journal, where the control also returned 0.
+
+The same session had verified six claims that arrived from other people that day, from a worker, a reviewer and two peers. It verified none of its own proposals. A second unverified one sits in this file's history. It told readers to trust a route-inspection flag as a liveness reader. A reviewer caught that one too.
+
+**The discriminator.** A claim that arrives gets a control. A claim you make gets none, until somebody asks. Verification that only fires on defense is a habit, not a discipline.
+
+*Graduates to:* a review question asking, of any proposed hook, how many times it fired last week. Until a proposal has to carry that number, this stays a habit.
+
 ## Retired
 
 Closed gaps, newest first. Each line names the PR that closed it, so a reader can see the machinery absorb the list.
