@@ -11,7 +11,13 @@ use crate::paths::AgentsHome;
 /// context on disk; this prints them (never launching), so the same native
 /// session stays reachable without any active fno row. `Some(())` = a
 /// receipt matched and was printed.
-pub(crate) fn print_resume_receipt_hint(home: &AgentsHome, name: &str) -> Option<()> {
+/// True when a receipt matched and was printed. Kept tiny at the call site:
+/// this file is over the shrink-only budget, and its caller needs one bool.
+pub(crate) fn maybe_hint_preserved_session(home: &AgentsHome, name: &str) -> bool {
+    print_resume_receipt_hint(home, name).is_some()
+}
+
+fn print_resume_receipt_hint(home: &AgentsHome, name: &str) -> Option<()> {
     let dir = home.root().join("reap-receipts");
     let entries = std::fs::read_dir(&dir).ok()?;
     let needle = name.trim().to_ascii_lowercase();
