@@ -10,8 +10,9 @@ import re
 import sys
 from pathlib import Path
 
-_REPO_DOC = Path(__file__).resolve().parents[4] / "docs" / "state-root-inventory.md"
-DEFAULT_DOC = _REPO_DOC if _REPO_DOC.is_file() else Path("docs/state-root-inventory.md")
+# The caller's repo owns the doc: nearest docs/ upward from the cwd.
+_doc_name = "docs/state-root-inventory.md"
+DEFAULT_DOC = next((p / _doc_name for p in [Path.cwd(), *Path.cwd().parents] if (p / _doc_name).is_file()), Path(_doc_name))
 
 _BACKTICK = re.compile(r"`([^`]+)`")
 _PLACEHOLDER = re.compile(r"<[^>]*>")
