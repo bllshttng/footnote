@@ -16,9 +16,7 @@ import typer
 
 
 def _graph_path():
-    """Resolve through fno.graph.cli at call time, so these verbs read the
-    same graph-path resolution (including test monkeypatching) as when they
-    lived in that module."""
+    """Resolve through fno.graph.cli at call time (same seam as tests patch)."""
     from fno.graph.cli import _graph_path as _resolve
 
     return _resolve()
