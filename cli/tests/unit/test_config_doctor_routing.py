@@ -259,7 +259,7 @@ def test_doctor_accepts_every_claude_help_value(monkeypatch):
     """claude --help lists six permission modes; each must read as a claude
     answer and print nothing, including the two easy to forget."""
     from fno.config_cli import _report_harness_overlays
-    from fno.agents.cli import CLAUDE_PERMISSION_MODES
+    from fno.agents.harness_map import CLAUDE_PERMISSION_MODES
 
     assert CLAUDE_PERMISSION_MODES == {
         "default", "acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions",

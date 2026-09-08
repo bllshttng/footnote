@@ -18,7 +18,7 @@ from typing import Any, Optional
 import typer
 
 from fno.agents import launch_provenance
-from fno.agents.harness_map import CLAUDE_PERMISSION_MODES
+from fno.agents.harness_map import CLAUDE_PERMISSION_HELP
 from fno.agents.rust_runtime import make_agents_group_cls
 
 agents_app = typer.Typer(
@@ -1363,8 +1363,7 @@ def cmd_spawn(
         "--permission-mode",
         help=(
             "Permission/approval mode forwarded to the provider (x-dfa4). "
-            "Provider-native values, fail-closed: claude "
-            f"{'|'.join(sorted(CLAUDE_PERMISSION_MODES))} (exact passthrough); "
+            f"Provider-native values, fail-closed: {CLAUDE_PERMISSION_HELP}; "
             "gemini --approval-mode "
             "(or 'yolo'); codex a shortcut (full-auto|yolo) or <sandbox>:"
             "<approval> (e.g. workspace-write:on-request); opencode 'auto'; agy "

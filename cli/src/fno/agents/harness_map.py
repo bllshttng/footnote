@@ -1128,6 +1128,12 @@ CLAUDE_PERMISSION_MODES = frozenset(
     {"default", "acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"}
 )
 
+#: The help fragment naming that vocabulary, so the CLI help and the doctor
+#: readout spell it from one place.
+CLAUDE_PERMISSION_HELP = (
+    "claude " + "|".join(sorted(CLAUDE_PERMISSION_MODES)) + " (exact passthrough)"
+)
+
 
 _VALID_SUBSTRATES = ("thread", "headless", "pane")
 _LEGACY_SUBSTRATE_ALIASES = {"bg": "thread"}
