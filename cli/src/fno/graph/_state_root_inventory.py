@@ -1,7 +1,6 @@
 """Diff a directory against docs/state-root-inventory.md, the drift gate.
 
-CLI: python3 -m fno.graph._state_root_inventory --report ~/.fno
-Exit 0 fully documented, 1 drift (each name printed), 2 unreadable inputs.
+CLI: python3 -m fno.graph._state_root_inventory --report ~/.fno; exit 0 clean, 1 drift, 2 unreadable.
 """
 from __future__ import annotations
 
@@ -78,8 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     if not missing:
         print(f"state-root-inventory: {args.report} fully documented by {args.doc}")
         return 0
-    for name in missing:
-        print(name)
+    print("\n".join(missing))
     print(f"state-root-inventory: {len(missing)} undocumented top-level entr(y|ies) in {args.report}", file=sys.stderr)
     return 1
 
