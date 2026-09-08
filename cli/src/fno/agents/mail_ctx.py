@@ -26,7 +26,7 @@ class _MailCtx:
     # spelling, so a durable write reusing this ctx stamps provider_from with the
     # value the envelope was built from rather than resolving a second time.
     provider: Optional[str] = None
-    # The RECIPIENT's full session id (x-6346), rendering its own live crown into
+    # The RECIPIENT's full session id, rendering its own live crown into
     # the envelope trailer. Live delivery only; None omits the line.
     to_session: Optional[str] = None
 

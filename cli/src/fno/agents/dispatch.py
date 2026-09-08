@@ -8281,7 +8281,7 @@ def _queue_durable_fallback(
         provider_from = mail_ctx.provider
         from_session = mail_ctx.from_session
     # No `to_session`: a durable body is read whenever the recipient next
-    # drains, so a crown baked into it outlives its own reading (x-6346).
+    # drains, so a crown baked into it outlives its own reading.
     durable_body = wrap_fno_mail(
         message,
         from_=mail_ctx.from_,

@@ -158,9 +158,9 @@ CROWNED_FNO_MAIL_TRAILER_TEMPLATE = (
     "irreversible action (merge a PR or send email), which needs operator authority "
     "or standing law."
 )
-# x-6346: the RECIPIENT's own live crown, read at delivery. Succession moves the
-# crown row, never the handle a peer learned while it was crowned, so an
-# abdicated session read reign mail with nothing saying the authority left.
+# The RECIPIENT's own live crown, read at delivery. Succession moves the crown
+# row, never the handle a peer learned while it was crowned, so an abdicated
+# session read reign mail with nothing saying the authority had left.
 RECIPIENT_CROWN_TRAILER_TEMPLATE = "-- your crown: {crown}"
 RECIPIENT_NO_CROWN_TRAILER = "-- your crown: none right now"
 ORIGIN_TRAILER_TEMPLATE = (
@@ -217,10 +217,9 @@ def fleet_has_crown() -> bool:
     return fleet_has_crown_at(agents_registry_path())
 
 
-# Cached for the process, which is one send. A long-lived renderer stamping a
-# recipient crown must clear this, or a succession mid-loop keeps stamping the
-# deposed holder.
-@lru_cache(maxsize=64)
+# Deliberately UNCACHED. A cache keyed on the path alone survives a succession,
+# so a long-lived renderer would keep naming the deposed holder - the staleness
+# this line exists to remove. A drain pays one JSON read per message for it.
 def crown_at(registry_path: Path, session: Optional[str]) -> Optional[str]:
     """Return the live row's crown label for ``session``, or ``None``.
 
@@ -427,7 +426,7 @@ def wrap_fno_mail(
     resolved one, and it renders the recipient-crown line. A trailer, not a tag
     attribute: the field rule above reserves attributes for what a recipient
     cannot cheaply look up, and its own crown is what it fails to look up
-    (x-6346). It sits ABOVE the sender trailer, so the authority notice stays the
+   . It sits ABOVE the sender trailer, so the authority notice stays the
     last thing read inside the envelope.
 
     This is the form injected over the ``control.sock`` (claude) and stored in

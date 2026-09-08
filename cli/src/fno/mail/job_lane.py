@@ -91,7 +91,7 @@ def job_lane_send(
         )
 
     # Only the live envelope names a crown: a job address outlives its holder,
-    # so a queued body can be drained by a successor (x-6346).
+    # so a queued body can be drained by a successor.
     wrapped = _envelope(session_id)
 
     provider = job.harness or "claude"

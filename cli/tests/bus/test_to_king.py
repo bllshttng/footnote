@@ -170,7 +170,6 @@ def test_durable_floor_carries_no_recipient_crown(env, tmp_path, monkeypatch):
 
     _register("king-fno", scope="fno", level=1, session="session-king")
     envelope.fleet_has_crown_at.cache_clear()
-    envelope.crown_at.cache_clear()
     monkeypatch.setattr(dispatch, "_deliver_live", lambda *a, **k: False)
     monkeypatch.setattr(
         dispatch, "_registered_family1_state", lambda _entry: "working"

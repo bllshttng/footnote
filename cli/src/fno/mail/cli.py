@@ -2187,7 +2187,7 @@ def _name_lane_send(
 
     self_send = False
     # The recipient's full session id when a lane resolved one; it stamps that
-    # session's own crown into the live envelope (x-6346).
+    # session's own crown into the live envelope.
     recipient_session: Optional[str] = None
     if resolved is not None:
         recipient_session = resolved.session_id
@@ -2299,7 +2299,7 @@ def _name_lane_send(
         )
 
     # Live carries the recipient's crown; the durable floor below carries none,
-    # being read whenever the recipient drains (x-6346).
+    # being read whenever the recipient drains.
     wrapped = _envelope(recipient_session)
 
     # --force (node x-3a64): change the TRANSPORT, keep every mail semantic. The
@@ -3526,7 +3526,7 @@ def _resolve_to_king_address(
         raise typer.Exit(2)
     try:
         holders = resolve_to_king(scope)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:  # RegistryVersionError
         print(f"error: --to-king {scope!r}: registry unreadable: {exc}", file=sys.stderr)
         raise typer.Exit(12) from exc
     if not holders:
@@ -3762,7 +3762,7 @@ def cmd_send(
 
     # --to-king addresses a ROLE, resolved HERE at send time and handed to the
     # ordinary name lane. Any second address would decide the destination, and
-    # the crown deciding it is the point (x-6346).
+    # the crown deciding it is the point.
     if to_king is not None:
         name, message = _resolve_to_king_address(
             to_king, name, message,

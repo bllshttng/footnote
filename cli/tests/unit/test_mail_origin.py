@@ -496,7 +496,6 @@ def test_abdicated_recipient_reads_its_own_lost_crown_in_the_envelope(
     )
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry_path)
     envelope.fleet_has_crown_at.cache_clear()
-    envelope.crown_at.cache_clear()
 
     abdicated = envelope.wrap_fno_mail(
         "rule on this",
@@ -569,7 +568,6 @@ def test_crownless_fleet_envelope_is_byte_unchanged(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry_path)
     envelope.fleet_has_crown_at.cache_clear()
-    envelope.crown_at.cache_clear()
 
     rendered = envelope.wrap_fno_mail(
         "hi", from_="peer", harness="codex", model="m", to_session="session-w"

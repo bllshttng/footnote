@@ -592,7 +592,7 @@ def resolve_to_king(scope: str, *, registry_path=None) -> list[str]:
 
     Read at send time, never off a handle a peer learned while that handle was
     crowned; a pointer written at abdication goes stale the second time the crown
-    moves (x-6346). Empty is vacant, one is the holder, more is the split crown
+    moves. Empty is vacant, one is the holder, more is the split crown
     ``fno agents court`` already reports."""
     from fno.agents.registry import TERMINAL_STATUSES, load_registry
 
