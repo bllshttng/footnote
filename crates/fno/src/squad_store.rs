@@ -351,6 +351,15 @@ pub struct Loaded {
     pub notice: Option<String>,
 }
 
+pub struct SquadSnapshot {
+    pub name: String,
+    pub key: String,
+    pub origins: Vec<String>,
+    pub members: Vec<StoredMember>,
+    pub tab_trees: Vec<StoredTabTree>,
+    pub active_tab: Option<usize>,
+}
+
 /// The store file: a sibling of the registry under `FNO_AGENTS_HOME`, else
 /// the mux's resolved state root (`squads.json`), so a pinned `FNO_CONFIG`
 /// isolates the squad store with the sockets and view prefs - a demo server
@@ -764,68 +773,52 @@ pub fn set_tab_trees(
     })
 }
 
-/// Atomically replace one squad's membership and topology, returning its generation.
-pub fn set_snapshot(
-    name: &str,
-    key: &str,
-    origins: &[String],
-    members: &[StoredMember],
-    tab_trees: &[StoredTabTree],
-    active_tab: Option<usize>,
-) -> io::Result<u64> {
-    set_snapshot_inner(None, name, key, origins, members, tab_trees, active_tab)
+/// Atomically replace one squad's membership and topology.
+pub fn set_snapshot(snapshot: &SquadSnapshot) -> io::Result<u64> {
+    set_snapshots_inner(None, std::slice::from_ref(snapshot))
         .map(|generation| generation.expect("unconditional snapshot write"))
 }
 
-/// Replace one snapshot only if no squad writer advanced the expected generation.
-pub fn set_snapshot_if_generation(
+/// Replace every supplied snapshot in one write if the generation is current.
+pub fn set_snapshots_if_generation(
     expected: u64,
-    name: &str,
-    key: &str,
-    origins: &[String],
-    members: &[StoredMember],
-    tab_trees: &[StoredTabTree],
-    active_tab: Option<usize>,
+    snapshots: &[SquadSnapshot],
 ) -> io::Result<Option<u64>> {
-    set_snapshot_inner(
-        Some(expected),
-        name,
-        key,
-        origins,
-        members,
-        tab_trees,
-        active_tab,
-    )
+    set_snapshots_inner(Some(expected), snapshots)
 }
 
-fn set_snapshot_inner(
+fn set_snapshots_inner(
     expected: Option<u64>,
-    name: &str,
-    key: &str,
-    origins: &[String],
-    members: &[StoredMember],
-    tab_trees: &[StoredTabTree],
-    active_tab: Option<usize>,
+    snapshots: &[SquadSnapshot],
 ) -> io::Result<Option<u64>> {
-    let key = if name.is_empty() { key } else { "" };
     mutate_file_if_generation(expected, true, |file| {
-        let existing = file.squads.iter().find(|s| same_squad(s, name, key));
-        let created_at = existing
-            .map(|s| s.created_at.clone())
-            .filter(|stamp| !stamp.is_empty())
-            .unwrap_or_else(now_iso);
-        let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
-        file.squads.retain(|s| !same_squad(s, name, key));
-        file.squads.push(StoredSquad {
-            name: name.to_string(),
-            key: key.to_string(),
-            origins: origins.to_vec(),
-            members: members.to_vec(),
-            created_at,
-            tab_specs,
-            tab_trees: tab_trees.to_vec(),
-            active_tab,
-        });
+        for snapshot in snapshots {
+            let key = if snapshot.name.is_empty() {
+                snapshot.key.as_str()
+            } else {
+                ""
+            };
+            let existing = file
+                .squads
+                .iter()
+                .find(|s| same_squad(s, &snapshot.name, key));
+            let created_at = existing
+                .map(|s| s.created_at.clone())
+                .filter(|stamp| !stamp.is_empty())
+                .unwrap_or_else(now_iso);
+            let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
+            file.squads.retain(|s| !same_squad(s, &snapshot.name, key));
+            file.squads.push(StoredSquad {
+                name: snapshot.name.clone(),
+                key: key.to_string(),
+                origins: snapshot.origins.clone(),
+                members: snapshot.members.clone(),
+                created_at,
+                tab_specs,
+                tab_trees: snapshot.tab_trees.clone(),
+                active_tab: snapshot.active_tab,
+            });
+        }
     })
     .map(|result| result.map(|(_, generation)| generation))
 }

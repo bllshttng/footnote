@@ -1,14 +1,5 @@
 use super::*;
 
-pub(super) struct SquadSnapshot {
-    pub(super) name: String,
-    pub(super) key: String,
-    pub(super) origins: Vec<String>,
-    pub(super) members: Vec<crate::squad_store::StoredMember>,
-    pub(super) tab_trees: Vec<StoredTabTree>,
-    pub(super) active_tab: usize,
-}
-
 impl Core {
     /// Capture live topology at teardown, even when the dirty flag is clear.
     pub(super) fn capture_topology_now(&mut self) -> bool {
@@ -29,32 +20,23 @@ impl Core {
             return false;
         };
         let sids: Vec<u64> = self.session.squads.iter().map(|s| s.id).collect();
-        for sid in sids {
-            let Some(snapshot) = self.snapshot_squad(sid) else {
-                continue;
-            };
-            match crate::squad_store::set_snapshot_if_generation(
-                generation,
-                &snapshot.name,
-                &snapshot.key,
-                &snapshot.origins,
-                &snapshot.members,
-                &snapshot.tab_trees,
-                Some(snapshot.active_tab),
-            ) {
-                Ok(Some(next)) => generation = next,
-                Ok(None) => {
-                    eprintln!(
-                        "fno mux: squads.json changed after this session's last write; stale shutdown capture skipped"
-                    );
-                    return false;
-                }
-                Err(e) => {
-                    self.persist_degraded(&e);
-                    return false;
-                }
+        let snapshots: Vec<_> = sids
+            .into_iter()
+            .filter_map(|sid| self.snapshot_squad(sid))
+            .collect();
+        generation = match crate::squad_store::set_snapshots_if_generation(generation, &snapshots) {
+            Ok(Some(next)) => next,
+            Ok(None) => {
+                eprintln!(
+                    "fno mux: squads.json changed after this session's last write; stale shutdown capture skipped"
+                );
+                return false;
             }
-        }
+            Err(e) => {
+                self.persist_degraded(&e);
+                return false;
+            }
+        };
         self.store_generation = Some(generation);
         self.last_topology_flush = Some(Instant::now());
         true

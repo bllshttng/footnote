@@ -57,7 +57,7 @@ use crate::spawn_journal::{
     HeldWorker, ReentrySpawnRequest, ReentryVerdict, SpawnJournal,
 };
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
-use crate::squad_store::StoredTabTree;
+use crate::squad_store::{SquadSnapshot, StoredTabTree};
 use crate::thread_viewer::Portal;
 use crate::tree::{self, Axis, Dir, Node, Rect, Tab, TabId};
 use crate::vt::BlockJumpOutcome;
@@ -74,7 +74,6 @@ mod shutdown_capture;
 mod squad_sync;
 
 use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
-use self::shutdown_capture::SquadSnapshot;
 
 /// A control connection's reply channel: exactly one [`ServerMsg`], then close.
 type ControlReply = oneshot::Sender<ServerMsg>;
@@ -7188,7 +7187,7 @@ impl Core {
             origins,
             members,
             tab_trees,
-            active_tab,
+            active_tab: Some(active_tab),
         })
     }
 
@@ -7197,14 +7196,7 @@ impl Core {
         let Some(snapshot) = self.snapshot_squad(sid) else {
             return;
         };
-        match crate::squad_store::set_snapshot(
-            &snapshot.name,
-            &snapshot.key,
-            &snapshot.origins,
-            &snapshot.members,
-            &snapshot.tab_trees,
-            Some(snapshot.active_tab),
-        ) {
+        match crate::squad_store::set_snapshot(&snapshot) {
             Ok(generation) => self.store_generation = Some(generation),
             Err(e) => self.persist_degraded(&e),
         }

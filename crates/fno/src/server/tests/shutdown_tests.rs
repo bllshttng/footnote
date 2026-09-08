@@ -106,3 +106,24 @@ fn completed_batch_restore_clears_the_pending_guard() {
     });
     assert!(!core.restore_pending);
 }
+
+#[test]
+fn clean_shutdown_batches_multiple_squads_into_one_generation() {
+    let _scratch = StoreScratch::new("shutdown-capture-batch");
+    let (mut core, pane) = template_core();
+    core.session
+        .add_squad(2, vec!["/b".into()], Some("sq2".into()), leaf_tab(6, pane));
+    core.squad_members.insert(2, Vec::new());
+    core.restored = true;
+    core.topology_dirty = true;
+    core.flush_topology();
+    let before = core.store_generation.expect("baseline generation");
+
+    assert!(core.capture_topology_now());
+
+    assert_eq!(
+        core.store_generation,
+        Some(before + 1),
+        "all shutdown snapshots commit in one store generation"
+    );
+}
