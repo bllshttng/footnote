@@ -180,7 +180,10 @@ fn ac4_hp_three_row_marker_retires_prunes_and_names_every_keep() {
 
     assert_eq!(
         summary.retired,
-        vec![("rowa".to_string(), "every named node done: N1 (via sessions; merge_status: N1:unrecorded)".to_string())],
+        vec![(
+            "rowa".to_string(),
+            "every named node done: N1 (via sessions; merge_status: N1:unrecorded)".to_string()
+        )],
         "{:?}",
         summary.retired
     );
@@ -402,7 +405,10 @@ fn a_done_node_with_a_closed_do_row_retires_by_name() {
     );
     assert_eq!(
         summary.retired,
-        vec![("rowd".to_string(), "every named node done: N1 (via sessions; merge_status: N1:unrecorded)".to_string())]
+        vec![(
+            "rowd".to_string(),
+            "every named node done: N1 (via sessions; merge_status: N1:unrecorded)".to_string()
+        )]
     );
     assert!(summary.kept_open_do_row.is_empty());
     let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -509,15 +515,28 @@ fn the_truth_batch_includes_unstamped_rows() {
         e.claude_session_uuid = Some("unstamped-uuid".into());
         e
     };
-    let bare = ask_row("bare", None); // no uuid: must not reach the probe
+    let bare = ask_row("bare", None); // no uuid: the harness session id is the handle
     let mut handles = crate::daemon::row_truth_handles(&[stamped, unstamped]);
     handles.sort();
     assert_eq!(
         handles,
         vec!["stamped-uuid".to_string(), "unstamped-uuid".to_string()]
     );
+    // A null claude uuid must not darken the batch: the harness session id
+    // (present on every claude row; measured: null on 35 of 35) keys the
+    // same reads. A row with NO identity at all is the only silent one.
+    assert_eq!(
+        crate::daemon::row_truth_handles(&[bare]),
+        vec!["bare-sess".to_string()],
+        "the session id carries the batch when the uuid is null"
+    );
+    let identity_less = {
+        let mut e = ask_row("ghost", None);
+        e.harness_session_id = None;
+        e
+    };
     assert!(
-        crate::daemon::row_truth_handles(&[bare]).is_empty(),
+        crate::daemon::row_truth_handles(&[identity_less]).is_empty(),
         "an empty candidate set spends nothing"
     );
 }
@@ -2614,7 +2633,10 @@ fn a_settled_nodes_open_do_row_is_filled_and_kept() {
     );
     assert_eq!(
         summary.retired,
-        vec![("row-a".to_string(), "every named node done: N1 (via sessions; merge_status: N1:merged)".to_string())]
+        vec![(
+            "row-a".to_string(),
+            "every named node done: N1 (via sessions; merge_status: N1:merged)".to_string()
+        )]
     );
     // THE assertion: the file still holds the row, now closed, never removed.
     let raw: Value =

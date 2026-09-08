@@ -1016,7 +1016,21 @@ pub(crate) fn cascade_harness_session_result_with(
 }
 
 pub(crate) fn run_claude_rm(short_id: &str) -> Result<(), String> {
-    let mut child = std::process::Command::new("claude")
+    run_claude_rm_in(None, short_id)
+}
+
+/// `claude rm` against ONE account root. `None` is the ambient root; the
+/// dir pins `CLAUDE_CONFIG_DIR` so an isolated account's row is removed in
+/// the store that actually holds it.
+pub(crate) fn run_claude_rm_in(
+    config_dir: Option<&std::path::Path>,
+    short_id: &str,
+) -> Result<(), String> {
+    let mut command = std::process::Command::new("claude");
+    if let Some(dir) = config_dir {
+        command.env("CLAUDE_CONFIG_DIR", dir);
+    }
+    let mut child = command
         .args(["rm", short_id])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1425,7 +1439,7 @@ impl RemovalAuditContext {
 
 /// Wall-clock epoch seconds, for GC grace math. Degrades to 0 (a pre-1970 clock
 /// makes every stamped row look in-grace -> nothing reaped, the safe direction).
-pub(crate) fn now_epoch_secs() -> i64 {
+pub fn now_epoch_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1597,16 +1611,27 @@ pub(crate) fn fold_positive_death(
 /// pid-less, unstamped claude row can carry - permanently silent for that
 /// vote. An empty candidate set spends nothing.
 pub(crate) fn row_truth_handles(entries: &[state::RegistryEntry]) -> Vec<String> {
-    entries
-        .iter()
-        .filter_map(|e| {
-            e.claude_session_uuid
+    entries.iter().filter_map(row_truth_handle).collect()
+}
+
+/// The identity one row's truth reads key on: the dedicated claude uuid
+/// when the row carries one, else the harness session id. Measured 2026-09-08:
+/// 35 of 35 claude rows had a null uuid, which left this handle empty and
+/// darkened the truth batch, the ladder's truth rung and the title detector
+/// in one stroke - the fallback is the field every claude row carries.
+pub(crate) fn row_truth_handle(e: &state::RegistryEntry) -> Option<String> {
+    e.claude_session_uuid
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            e.harness_session_id
                 .as_deref()
                 .map(str::trim)
-                .filter(|u| !u.is_empty())
+                .filter(|s| !s.is_empty())
                 .map(String::from)
         })
-        .collect()
 }
 
 /// The batch over [`row_truth_handles`] as the reconcile sweep runs it,
@@ -1642,9 +1667,9 @@ pub(crate) fn title_changes(
     entries
         .iter()
         .filter_map(|e| {
-            let uuid = e.claude_session_uuid.as_deref()?;
+            let handle = row_truth_handle(e)?;
             let sid = e.harness_session_id.clone().filter(|s| !s.is_empty())?;
-            let new_title = titles.get(uuid)?.clone()?;
+            let new_title = titles.get(&handle)?.clone()?;
             let from = e.harness_title.clone();
             if from.as_deref() == Some(new_title.as_str()) {
                 return None;
@@ -1671,7 +1696,7 @@ pub(crate) fn apply_title_changes(
         };
         let Some(e0) = entries
             .iter()
-            .find(|e| e.claude_session_uuid.as_deref() == Some(uuid.as_str()))
+            .find(|e| row_truth_handle(e).as_deref() == Some(uuid.as_str()))
         else {
             continue;
         };
@@ -1689,6 +1714,25 @@ pub(crate) fn apply_title_changes(
     }
 }
 
+/// A liveness word this binary measures is served only while it is fresh:
+/// two sweep budgets old (the window the mux-side `served_liveness` gates
+/// by, mirrored here because the crates share the FILE, not types) it no
+/// longer answers "is this row alive NOW", and republishing it as the
+/// served word made a 24-hour-old `dead` read as current. Past the window
+/// the word is withheld (the reader falls back to the status ladder); the
+/// stamp is served unchanged so the age stays honest.
+pub(crate) fn served_fresh_liveness<'a>(
+    word: Option<&'a str>,
+    measured_at: Option<&str>,
+) -> Option<&'a str> {
+    const SERVED_LIVENESS_MAX_AGE_SECS: i64 = 2 * 5; // 2 x RECONCILE_SWEEP_BUDGET (5s)
+    let stamp = measured_at.and_then(crate::state::rfc3339_like_to_secs)? as i64;
+    crate::daemon::now_epoch_secs()
+        .checked_sub(stamp)
+        .filter(|age| (0..=SERVED_LIVENESS_MAX_AGE_SECS).contains(age))?;
+    word
+}
+
 /// The shared liveness ladder as production runs it (x-5d96): the reader
 /// extracted from `claude_resume_argv_with_truth`, now called by the reaper
 /// instead of a per-caller derivation. The sessions-dir index and the truth
@@ -1698,31 +1742,17 @@ pub(crate) fn apply_title_changes(
 /// lives in the developer's real `~/.claude`.
 pub(crate) fn live_liveness_prober(
     truth: std::collections::HashMap<String, String>,
+    sockets: std::collections::HashMap<String, String>,
+    codex_index: Option<Vec<(String, u64)>>,
 ) -> impl Fn(&state::RegistryEntry) -> crate::client_verbs::RowLiveness {
-    let home = crate::claude_ask::ClaudeHome::from_env();
-    let index: std::cell::RefCell<Option<std::collections::HashMap<String, String>>> =
-        std::cell::RefCell::new(None);
-    let codex: std::cell::RefCell<Option<Option<Vec<(String, u64)>>>> =
-        std::cell::RefCell::new(None);
     move |e: &state::RegistryEntry| {
         if let Some(dead) = fold_positive_death(e) {
             return dead;
         }
-        let mut built = index.borrow_mut();
-        if built.is_none() {
-            *built = Some(crate::client_verbs::sessions_socket_index(&home));
-        }
-        let mut codex_built = codex.borrow_mut();
-        if codex_built.is_none() {
-            // ONE store walk per closure (one sweep), however many codex rows
-            // probe - the same once-per-sweep shape the socket index above
-            // keeps. `None` reads as the rung going silent (fail closed).
-            *codex_built = Some(crate::client_verbs::codex_rollout_index(None));
-        }
         crate::client_verbs::row_liveness_with_indexed(
             e,
-            built.as_ref().expect("just built"),
-            codex_built.as_ref().and_then(|c| c.as_deref()),
+            &sockets,
+            codex_index.as_deref(),
             |uuid: &str| truth.get(uuid).cloned(),
         )
     }
@@ -5916,9 +5946,15 @@ where
                     "last_message_at_basis": null,
                     "last_reconciled_at": e.last_reconciled_at,
                     // The SERVED liveness pair, written only by the
-                    // sweep: a reader trusts it while the stamp is young and
-                    // reads its age honestly when it is not.
-                    "liveness": e.liveness,
+                    // sweep: the word is served only while its stamp is
+                    // young (the same two-sweep-budget window the mux-side
+                    // reader applies); an older word is withheld rather
+                    // than republished as current, and the stamp stays so
+                    // every reader can show its age.
+                    "liveness": served_fresh_liveness(
+                        e.liveness.as_deref(),
+                        e.liveness_measured_at.as_deref(),
+                    ),
                     "liveness_measured_at": e.liveness_measured_at,
                     // The harness's own title for the session, served
                     // from the probe's fresh reading; a probe that ANSWERED
@@ -6961,7 +6997,7 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
     handle_rm_with(
         ctx,
         req,
-        &crate::claude_roster::read_all_agents,
+        &crate::claude_roster::read_all_agents_union,
         &run_claude_rm,
         &run_mux_pane_kill,
         &run_mux_pane_probe,
@@ -7458,7 +7494,8 @@ where
         // to persist anything and is Exited. Before the actor rewrite this arm
         // always returned None, so a permanently dead thread read Live forever.
         if is_codex_thread_entry(entry) {
-            let new_status = if thread_hosted(entry) {
+            let hosted = thread_hosted(entry);
+            let new_status = if hosted {
                 None
             } else if rollout_exists(entry) {
                 out.updated.push(entry.name.clone());
@@ -7470,12 +7507,17 @@ where
             changes.push(ReconcileChange {
                 name: entry.name.clone(),
                 new_status,
-                // Hosted = the actor answers for it: alive. A rollout means
-                // resumable, not running; nothing on disk is gone. `None`
-                // (hosted) keeps the previous measurement standing.
-                new_liveness: match new_status {
-                    Some(AgentStatus::Exited) | Some(AgentStatus::Orphaned) => Some("dead"),
-                    _ => None,
+                // Hosted = the actor answers for it: a positive running
+                // marker, so the measurement is served fresh instead of
+                // keeping a stale stored word standing. A rollout means
+                // resumable, not running; nothing on disk is gone.
+                new_liveness: if hosted {
+                    Some("alive")
+                } else {
+                    match new_status {
+                        Some(AgentStatus::Exited) | Some(AgentStatus::Orphaned) => Some("dead"),
+                        _ => None,
+                    }
                 },
             });
             continue;
@@ -7497,6 +7539,12 @@ where
         // against it. `bg_live` asks the roster before we declare death; a
         // genuinely finished ask is absent from it and still reaps to Exited.
         if entry.is_one_shot_ask() {
+            // Ask the ladder once, up front: an Alive answer is a positive
+            // running marker and is served as `alive` below. Behind the old
+            // Unknown-only orphan test the answer was discarded for every
+            // healthy row, so the served word kept a stale stored value
+            // standing forever (measured: 0 of 35 claude rows read alive).
+            let measured = liveness(entry);
             let new_status = if is_non_terminal(entry.status) && !bg_live(entry) {
                 out.updated.push(entry.name.clone());
                 Some(AgentStatus::Exited)
@@ -7505,7 +7553,7 @@ where
                 AgentStatus::Live | AgentStatus::Ready | AgentStatus::Idle | AgentStatus::Busy
             ) && roster_readable
                 && bg_live(entry)
-                && liveness(entry) == RowLiveness::Unknown
+                && measured == RowLiveness::Unknown
             {
                 // x-5d96: a roster entry used to hold a claude row `live`
                 // forever. Roster presence is weak evidence - a dead
@@ -7538,10 +7586,14 @@ where
                 // The ask arm's evidence, not a guess: a bg-live roster hit
                 // with a silent ladder never positively answers, so it reads
                 // unmeasured, never dead; a finished ask is gone.
-                new_liveness: match new_status {
-                    Some(AgentStatus::Exited) => Some("dead"),
-                    Some(AgentStatus::Orphaned) => Some("unmeasured"),
-                    _ => None,
+                new_liveness: if measured == RowLiveness::Alive {
+                    Some("alive")
+                } else {
+                    match new_status {
+                        Some(AgentStatus::Exited) => Some("dead"),
+                        Some(AgentStatus::Orphaned) => Some("unmeasured"),
+                        _ => None,
+                    }
                 },
             });
             continue;
@@ -8657,7 +8709,15 @@ fn run_reconcile_sweep(
     // the title is the harness's - and the emit rides the successful write,
     // so a failed write never announces a rename it did not persist.
     let renames = title_changes(&entries, &titles);
-    let prober = live_liveness_prober(truth);
+    // The shared reads are built HERE, before the clock: the socket index
+    // and the codex rollout index serve every probed row, and their lazy
+    // first build was charged to the sweep budget (measured: the sessions
+    // walk alone exceeded the whole 5s window, so every later row deferred).
+    let prober = live_liveness_prober(
+        truth,
+        crate::client_verbs::sessions_socket_index(&crate::claude_ask::ClaudeHome::from_env()),
+        crate::client_verbs::codex_rollout_index(None),
+    );
     // The sweep budget starts HERE, after the truth batch and the
     // roster load: those reads serve every verb, and charging them to the
     // probe loop's 5s window was why 79 rows went unprobed every sweep

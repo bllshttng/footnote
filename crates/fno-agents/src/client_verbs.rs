@@ -1940,6 +1940,13 @@ pub fn sessions_socket_index(
     let mut paths: Vec<std::path::PathBuf> = rd.flatten().map(|e| e.path()).collect();
     paths.sort();
     for path in paths {
+        // The dir holds the bg records this index wants plus the session
+        // transcript markdown (measured: 11k files, 99.6% of the walk's
+        // bytes in .md). The records are `.json`; skip everything else
+        // before reading.
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
         let Ok(raw) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -2091,14 +2098,9 @@ where
             return RowLiveness::Alive;
         }
     }
-    if let Some(uuid) = entry
-        .claude_session_uuid
-        .as_deref()
-        .map(str::trim)
-        .filter(|u| !u.is_empty())
-    {
+    if let Some(handle) = crate::daemon::row_truth_handle(entry) {
         if matches!(
-            truth_fn(uuid).as_deref(),
+            truth_fn(&handle).as_deref(),
             Some("working" | "watching" | "your-move")
         ) {
             return RowLiveness::Alive;
