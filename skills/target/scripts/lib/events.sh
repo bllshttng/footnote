@@ -99,13 +99,16 @@ _end_shell_event_append() {
 # relative pin is not a root, exactly as on the Python side.
 _shell_hermetic_roots() {
     local tmp="${TMPDIR:-/tmp}"
-    local real
     printf '%s\n' "${tmp%/}"
-    real=$(cd "$tmp" 2>/dev/null && pwd -P) && printf '%s\n' "$real"
+    printf '%s\n' "$(_shell_physical_dir "${tmp%/}")"
     if [[ "${FNO_EVENTS_PATH:-}" == /* ]]; then
         local pin_dir="${FNO_EVENTS_PATH%/*}"
         printf '%s\n' "$pin_dir"
-        real=$(cd "$pin_dir" 2>/dev/null && pwd -P) && printf '%s\n' "$real"
+        # Physical, not `cd`: the pin's own parent is often the directory the
+        # first append creates. Judging the write physically and the root
+        # lexically makes the two disagree, and the appender then refuses the
+        # very journal FNO_EVENTS_PATH names.
+        printf '%s\n' "$(_shell_physical_dir "$pin_dir")"
     fi
 }
 
@@ -172,7 +175,14 @@ _shell_events_may_create_parent() {
     local events_path="${1:?events path required}"
     local parent="${events_path%/*}"
     [[ -d "$parent" ]] && return 0
-    [[ "$parent" == "${HOME%/}/.fno" ]] && return 0
+    # FNO_HOME is the state-root override the rest of the hook tree reads as
+    # `${FNO_HOME:-$HOME/.fno}`. Compared physically as well as by spelling,
+    # so a symlinked $HOME does not make the same root pass one way and fail
+    # the other.
+    local state_root="${FNO_HOME:-${HOME%/}/.fno}"
+    state_root="${state_root%/}"
+    [[ "$parent" == "$state_root" ]] && return 0
+    [[ "$(_shell_physical_dir "$parent")" == "$(_shell_physical_dir "$state_root")" ]] && return 0
     [[ "${parent##*/}" == ".fno" ]] && return 1
     return 0
 }
@@ -288,6 +298,8 @@ emit_event_raw() {
 # rc=0  emitted (line appended to EVENTS_FILE)
 # rc=1  validation failure (missing required, unknown wait_kind, schema reject)
 # rc=2  substrate failure (jq/schema unavailable)
+# rc=3  skipped: the project journal's `.fno/` does not exist, so this repo
+#       never opted in. Nothing is wrong; nothing was written either.
 #
 # stderr explains the failure; stdout is empty on rc=0.
 emit_polling_external_review() {
@@ -378,7 +390,15 @@ emit_polling_external_review() {
     fi
 
     events_path="${EVENTS_FILE:-.fno/events.jsonl}"
-    if ! _append_bounded_event emit_polling_external_review "$event" "$events_path"; then
+    local append_rc=0
+    _append_bounded_event emit_polling_external_review "$event" "$events_path" || append_rc=$?
+    # A deliberate skip is not a broken substrate. Telling a caller its jq is
+    # missing when the repo simply never opted in sends it to fix the wrong
+    # thing.
+    if (( append_rc == 3 )); then
+        return 3
+    fi
+    if (( append_rc != 0 )); then
         printf 'emit_polling_external_review: append to %s failed\n' "$events_path" >&2
         return 2
     fi

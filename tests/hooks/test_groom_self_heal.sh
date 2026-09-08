@@ -153,6 +153,22 @@ pass "no fno on PATH degrades silently"
 
 
 
+# --- gate: a repo with no .fno/ is never probed and is NEVER given one --------
+# The "do not litter every folder" guard, the same one
+# tests/hooks/test_reconcile_session_start.sh asserts for its own hook. This
+# helper ran `mkdir -p .fno` before its probe, so every git repo a session
+# opened got a `.fno/` whether or not that project ever used footnote.
+proj="$WORK/virgin"
+rm -rf "$proj"; mkdir -p "$proj"      # deliberately NO .fno
+git init -q "$proj" 2>/dev/null
+: > "$FNO_CALL_LOG"
+( cd "$proj" && bash "$HELPER" ) || fail "gate: a virgin repo must exit 0"
+settle
+[[ ! -e "$proj/.fno" ]] || fail "gate: the helper created a .fno in a virgin repo"
+[[ ! -s "$FNO_CALL_LOG" ]] \
+    || fail "gate: the helper probed in a repo with no .fno (got: $(cat "$FNO_CALL_LOG"))"
+pass "gate: a virgin repo is left untouched, not even probed"
+
 # --- a non-repo cwd must not burn the day on a degraded pass ------------------
 proj="$(fresh_non_repo non-repo)"
 ( cd "$proj" && bash "$HELPER" ) || fail "a non-repo cwd must exit 0"

@@ -144,7 +144,9 @@ The shell appender carries the same fence. When `FNO_TEST_HERMETIC=1`, `_append_
 
 A project `.fno/` marks a project that opted in. `fno config setup wizard` and `fno do target init` create it.
 
-An event append never creates one. Before this rule, a session in any git repo with the plugin installed left a `.fno/` and an `events.jsonl` behind. The project did not have to use footnote at all. The directory came from the appender's own `mkdir -p`, so the litter followed the hook, not the user.
+An event append never creates one. Before this rule, a session in any git repo with the plugin installed left a `.fno/` and an `events.jsonl` behind. The project did not have to use footnote at all.
+
+The appender was not the only source, and guarding it alone changed nothing. `hooks/session-start.sh` ran `mkdir -p .fno` for its plan-reconcile watermark, and `hooks/groom-self-heal-session-start.sh` ran it for the daily grooming watermark. Both fired before the appender was reached, so the directory already existed by the time a guard saw the path. Both now carry the gate `hooks/reconcile-session-start.sh` already applied: no `.fno/` means no fire and no probe, and the directory is never created.
 
 The local journal itself stays. The loop gate, the review attestation reader and `fno backlog` all answer per-project questions from it. When the directory is absent the append is skipped and returns 3, never 0, so no caller reads a skip as a write.
 

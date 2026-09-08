@@ -150,6 +150,35 @@ rc=$(env -u EVENTS_FILE -u FNO_TEST_HERMETIC HOME="$home" bash -c '
     ' _ "$EVENTS_LIB" "$skipped" "$LINE")
 assert_eq "a skipped append returns 3, not 0" "3" "$rc"
 
+# FNO_HOME is the state-root override the rest of the hook tree reads. A guard
+# that only knows $HOME/.fno drops every global row on a machine that sets it.
+fno_home="$tmp/srv-state/.fno"
+rc=$(env -u EVENTS_FILE -u FNO_TEST_HERMETIC HOME="$home" FNO_HOME="$fno_home" bash -c '
+        source "$1" >/dev/null 2>&1 || exit 1
+        _append_bounded_event probe "$3" "$2" >/dev/null 2>&1
+        printf "%s" "$?"
+    ' _ "$EVENTS_LIB" "$fno_home/events.jsonl" "$LINE")
+assert_eq "an FNO_HOME state root is still creatable" "0" "$rc"
+assert_eq "and the global row lands there" "1" "$(count_marker "$fno_home/events.jsonl")"
+
+# The pin's own parent is often the directory the first append creates. Judging
+# the write physically and the root lexically makes the two disagree, and the
+# appender refuses the journal FNO_EVENTS_PATH names.
+#
+# The pin has to sit OUTSIDE TMPDIR for this to measure anything: with the pin
+# inside it, the TMPDIR root admits the write on its own and the pin's root
+# never has to resolve.
+mkdir -p "$tmp/tmpdir-only" "$tmp/pinreal"
+ln -sfn "$tmp/pinreal" "$tmp/pinlink"
+rc=$(env -u EVENTS_FILE HOME="$outside_home" TMPDIR="$tmp/tmpdir-only" \
+    FNO_TEST_HERMETIC=1 FNO_EVENTS_PATH="$tmp/pinlink/fresh/events.jsonl" bash -c '
+        source "$1" >/dev/null 2>&1 || exit 1
+        _append_bounded_event probe "$3" "$2" >/dev/null 2>&1
+        printf "%s" "$?"
+    ' _ "$EVENTS_LIB" "$tmp/pinlink/fresh/events.jsonl" "$LINE")
+assert_eq "the pinned journal is not refused by its own fence" "0" "$rc"
+assert_eq "and the pinned row lands" "1" "$(count_marker "$tmp/pinreal/fresh/events.jsonl")"
+
 if (( fail )); then
     echo "test-shell-append-guards: FAIL"
     exit 1
