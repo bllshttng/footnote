@@ -517,6 +517,11 @@ def check_config_files_read() -> list[str]:
     return problems
 
 
+# A leaf name shared by more sections than this is a common word, not a near
+# miss; naming every holder teaches nothing.
+_NEAR_MISS_CAP = 4
+
+
 def _near_miss_keys(unknown: str) -> list[str]:
     """Modeled keys sharing ``unknown``'s trailing leaf name, in schema order.
 
@@ -530,7 +535,10 @@ def _near_miss_keys(unknown: str) -> list[str]:
     except Exception:
         return []
     leaf = unknown.rsplit(".", 1)[-1]
-    return [key for key in FIELD_META if key != unknown and key.rsplit(".", 1)[-1] == leaf]
+    hits = [key for key in FIELD_META if key != unknown and key.rsplit(".", 1)[-1] == leaf]
+    # `enabled` alone lives under 25 sections. A hint listing all of them is
+    # not a remedy, it is the schema dumped into a doctor line.
+    return hits if len(hits) <= _NEAR_MISS_CAP else []
 
 
 def check_unknown_keys() -> list[str]:

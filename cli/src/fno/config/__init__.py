@@ -5154,6 +5154,41 @@ def loaded_from() -> Optional[Path]:
     return _loaded_from
 
 
+# An unknown table with more leaves than this reports as the table, not as a
+# line per leaf. Three keeps the typo'd-section case exact and bounds the rest.
+_UNKNOWN_LEAF_CAP = 3
+
+
+def _nested_model(annotation: object) -> "type[BaseModel] | None":
+    """The BaseModel a field annotation resolves to, unwrapping Optional."""
+    for arg in getattr(annotation, "__args__", ()):
+        if arg is not type(None) and isinstance(arg, type) and issubclass(arg, BaseModel):
+            return arg
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    return None
+
+
+def _mapping_value_model(annotation: object) -> "type[BaseModel] | None":
+    """The VALUE model of a ``dict[str, Model]`` field, else None.
+
+    ``Optional[dict[str, Model]]`` resolves the same way. A plain
+    ``dict[str, str]`` returns None: there is no schema below it to check.
+    """
+    import typing
+
+    candidates = [annotation]
+    if typing.get_origin(annotation) is typing.Union:
+        candidates = list(typing.get_args(annotation))
+    for candidate in candidates:
+        if typing.get_origin(candidate) is not dict:
+            continue
+        args = typing.get_args(candidate)
+        if len(args) == 2 and isinstance(args[1], type) and issubclass(args[1], BaseModel):
+            return args[1]
+    return None
+
+
 def _warn_unknown_keys(
     data: dict[str, object], model: type[BaseModel], prefix: str = ""
 ) -> list[str]:
@@ -5174,25 +5209,36 @@ def _warn_unknown_keys(
         qualified = f"{prefix}.{key}" if prefix else key
         if key not in known:
             value = data[key]
+            leaves: list[str] = []
             if isinstance(value, dict) and value:
-                unknown.extend(f"{qualified}.{leaf}" for leaf, _ in _flatten_leaf_paths(value))
-            else:
-                unknown.append(qualified)
+                leaves = [f"{qualified}.{leaf}" for leaf, _ in _flatten_leaf_paths(value)]
+            # Name the leaves of a small unknown table, so a typo'd `[reveiw]`
+            # reports reveiw.cross_model rather than a bare section the reader
+            # then has to open the file to interpret. A LARGE unknown table is
+            # one thing, not many: a foreign tool's block sharing the config
+            # file would otherwise print a line per key, forever.
+            unknown.extend(leaves if 0 < len(leaves) <= _UNKNOWN_LEAF_CAP else [qualified])
             continue
         # Recurse into nested dicts if the field is itself a BaseModel
         sub_value = data[key]
         field_info = model.model_fields[key]
         annotation = field_info.annotation
-        # For Optional[X] the annotation may be a Union; unwrap it
-        args = getattr(annotation, "__args__", ())
-        inner = None
-        for arg in args:
-            if arg is not type(None) and isinstance(arg, type) and issubclass(arg, BaseModel):
-                inner = arg
-                break
-        if inner is None and isinstance(annotation, type) and issubclass(annotation, BaseModel):
-            inner = annotation
-        if inner is not None and isinstance(sub_value, dict):
+        if not isinstance(sub_value, dict):
+            continue
+        mapped = _mapping_value_model(annotation)
+        if mapped is not None:
+            # A `dict[str, Model]` field: its KEYS are operator-chosen names
+            # (a profile verb, a workspace, a provider id), not field names.
+            # Walking them against Model's field set called every real entry
+            # unknown - `agents.profiles.think` read as a typo for a field.
+            for name, entry in sub_value.items():
+                if isinstance(entry, dict):
+                    unknown.extend(
+                        _warn_unknown_keys(entry, mapped, prefix=f"{qualified}.{name}")
+                    )
+            continue
+        inner = _nested_model(annotation)
+        if inner is not None:
             unknown.extend(_warn_unknown_keys(sub_value, inner, prefix=qualified))
     if debug:
         for qualified in unknown:

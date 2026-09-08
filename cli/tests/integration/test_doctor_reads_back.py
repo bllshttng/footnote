@@ -276,3 +276,61 @@ def test_wip_caps_in_config_toml_can_be_clean(
     toml = _write(tmp_path / "config.toml", "[kanban.wip_caps]\nnow = 20\n")
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(toml.with_name("settings.yaml")))
     assert check_wip_caps() == []
+
+
+# --- the report stays readable on a real machine ---------------------------
+
+
+def test_a_dict_keyed_block_is_not_read_as_a_typo(tmp_path: Path) -> None:
+    """`agents.profiles.<verb>` keys are operator-chosen names, not field names.
+
+    The walker resolved `dict[str, SpawnProfileBlock]` to its VALUE model and
+    then checked the map's own keys against that model's fields, so every real
+    profile read as an unknown key. Measured on one machine's live config: 31
+    reported keys, 19 of them entries in a `dict[str, Model]` block.
+    """
+    f = _write(
+        tmp_path / "config.toml",
+        'schema_version = 1\nstate_dir = "%s"\n'
+        '[agents.profiles.blueprint]\nmodel = "opus"\n'
+        "[work.workspaces.main]\nprojects = []\n" % (tmp_path / ".fno"),
+    )
+    result = _doctor(f)
+    assert result.exit_code == 0, result.output
+    unknown = [ln for ln in result.output.splitlines() if "not a modeled config key" in ln]
+    assert unknown == [], unknown
+
+
+def test_a_typod_leaf_inside_a_dict_keyed_block_is_still_caught(tmp_path: Path) -> None:
+    """Negative control on the same walk: the VALUE model is still checked."""
+    f = _write(
+        tmp_path / "config.toml",
+        "schema_version = 1\n[agents.profiles.blueprint]\nmodle = \"opus\"\n",
+    )
+    result = _doctor(f)
+    assert result.exit_code == 1, result.output
+    assert "agents.profiles.blueprint.modle" in result.output
+
+
+def test_a_large_unknown_table_reports_once(tmp_path: Path) -> None:
+    """A foreign tool's block sharing the config file is one finding, not many."""
+    f = _write(
+        tmp_path / "config.toml",
+        "schema_version = 1\n[companions.rtk]\n"
+        'status = "ok"\nversion = "1"\nchecked_at = "now"\nnote = "x"\n',
+    )
+    result = _doctor(f)
+    assert result.exit_code == 1, result.output
+    unknown = [ln for ln in result.output.splitlines() if "companions" in ln]
+    assert len(unknown) == 1, unknown
+    assert "companions (set in" in unknown[0]
+
+
+def test_a_leaf_name_shared_by_many_sections_gets_no_hint(tmp_path: Path) -> None:
+    """`enabled` lives under 25 sections; listing all of them is not a remedy."""
+    from fno.setup.doctor import _near_miss_keys
+
+    assert _near_miss_keys("nosuchsection.enabled") == []
+    # Positive control on the lookup itself, so an empty list above cannot be
+    # a broken FIELD_META read.
+    assert _near_miss_keys("agents.max_lanes") == ["parallel.max_lanes"]
