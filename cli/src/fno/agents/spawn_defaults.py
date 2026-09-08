@@ -870,28 +870,6 @@ def _overlay_payload(obj: object) -> dict:
     return out
 
 
-def effective_field(
-    defaults: object,
-    profile: Optional[object],
-    profile_verb: Optional[str],
-    name: str,
-) -> Tuple[str, Optional[str]]:
-    """The two scalar rungs: profile > defaults. The harness-keyed rungs above
-    them resolve in the spawn-overlay verb; this harness-blind read stays in
-    Python for the axis-occupancy reads and overlay-free spawns, where an
-    empty harness table makes the two answers identical."""
-    if profile is not None:
-        pv = (getattr(profile, name, "") or "").strip()
-        if pv:
-            return pv, f"agents.profiles.{profile_verb}"
-    dv = (getattr(defaults, name, "") or "").strip()
-    if dv:
-        return dv, "agents.defaults"
-    return "", None
-
-
-
-
 # A model string's implied vendor, by prefix or tier word. A pure string
 # opinion and never a routing input: the warning it drives is advisory, because
 # the pairing is legal and --model is deliberate passthrough (cli.py).
@@ -1248,20 +1226,23 @@ def inject_spawn_defaults(
     _LANE_EXCLUSIVE = ("route", "model")
 
     def field(name: str) -> Tuple[str, Optional[str]]:
-        """Effective value + source rung: lane > profile > defaults.
-
-        ``route`` and ``model`` stop at the lane when one was selected; see
-        ``_LANE_EXCLUSIVE`` above. The harness-keyed rungs join only in the
-        spawn-overlay verb's answer; this read is harness-blind, which is
-        exact whenever no overlay table exists (_overlays_present gates the
-        verb path on one)."""
+        """Effective value + source rung: lane > profile > defaults, harness-
+        blind (the two harness rungs live in the verb's answer; this read is
+        exact whenever no overlay table exists, which gates the verb path)."""
         if lane is not None and lane_index is not None:
             lv = _lane_value(lane, name)
             if lv:
                 return lv, f"agents.profiles.{profile_verb}.lanes[{lane_index}]"
             if name in _LANE_EXCLUSIVE:
                 return "", None
-        return effective_field(defaults, profile, profile_verb, name)
+        if profile is not None:
+            pv = (getattr(profile, name, "") or "").strip()
+            if pv:
+                return pv, f"agents.profiles.{profile_verb}"
+        dv = (getattr(defaults, name, "") or "").strip()
+        if dv:
+            return dv, "agents.defaults"
+        return "", None
 
     cfg_harness, provider_rung = field("provider")
     cfg_model, model_rung = field("model")
@@ -1535,10 +1516,9 @@ def inject_spawn_defaults(
                 )
 
     # The spawn-overlay verb owns the harness-keyed rungs (x-8975): one
-    # round-trip answers effort/substrate/permission for the resolved harness,
-    # resolves the ONE bundle, and refuses an unknown harness key or a ranking
-    # field inside an overlay. Gated on an overlay table (or lane args) being
-    # present, so the common overlay-free spawn pays zero subprocesses and the
+    # round-trip answers effort/substrate/permission plus the ONE bundle and
+    # refuses a bad overlay. Gated on an overlay table (or lane args) being
+    # present, so an overlay-free spawn pays zero subprocesses and the
     # harness-blind field() reads below answer it exactly.
     _overlay_answer: Optional[dict] = None
     if _overlays_present(defaults, profile, lane):
