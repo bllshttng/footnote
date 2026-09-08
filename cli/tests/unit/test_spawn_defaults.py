@@ -25,7 +25,8 @@ from fno.agents.spawn_defaults import inject_spawn_defaults, resolve_lane_vendor
 class _Defaults:
     def __init__(self, provider="", model="", effort="", substrate="", permission_mode="",
                  route="", account="", pane_group="", lanes=None, on_exhausted="",
-                 by_difficulty=None, on_low="prefer_healthy", on_unknown="allow"):
+                 by_difficulty=None, on_low="prefer_healthy", on_unknown="allow",
+                 harness=None, **extra):
         self.provider = provider
         self.model = model
         self.effort = effort
@@ -34,6 +35,12 @@ class _Defaults:
         self.route = route
         self.account = account
         self.pane_group = pane_group
+        self.harness = harness
+        # Lane dicts are raw (the schema keeps `lanes: Any`), so a lane-only
+        # field like args rides through as an attribute, mirroring the seam's
+        # getattr read.
+        for k, v in extra.items():
+            setattr(self, k, v)
         self.lanes = [
             _Defaults(**lane) if isinstance(lane, dict) else lane
             for lane in (lanes or [])
@@ -2682,3 +2689,176 @@ def test_explicit_model_pin_overrides_the_lanes(monkeypatch):
     assert "slot=model-pin-override" in err.getvalue()
     applied = err.getvalue()
     assert "applied slot=" not in applied or "model-pin-override" in applied
+
+
+# ---------------------------------------------------------------------------
+# Harness-keyed spawn defaults (x-8975): the overlay rungs
+# ---------------------------------------------------------------------------
+
+
+_PROFILE_OVERLAY = {
+    "target": {
+        "permission_mode": "yolo",
+        "effort": "high",
+        "harness": {
+            "claude": {"permission_mode": "bypassPermissions"},
+            "codex": {"effort": "xhigh"},
+        },
+    },
+}
+
+
+def test_profile_harness_overlay_answers_claude_scalar_answers_codex():
+    """AC2-HP: the same verb carries two harnesses' answers to one question.
+
+    -H claude reads profiles.target.harness.claude; -H codex falls through to
+    the profiles.target scalar, which is a codex spelling."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-H", "claude", "--name", "w", "/target x"],
+        err=err,
+        profiles=_PROFILE_OVERLAY,
+    )
+    assert out[out.index("--permission-mode") + 1] == "bypassPermissions"
+    assert "agents.profiles.target.harness.claude.permission_mode" in err.getvalue()
+
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-H", "codex", "--name", "w", "/target x"],
+        err=err,
+        profiles=_PROFILE_OVERLAY,
+    )
+    assert out[out.index("--permission-mode") + 1] == "yolo"
+    assert "agents.profiles.target.permission_mode" in err.getvalue()
+
+
+def test_effort_overlay_read_happens_after_harness_resolution():
+    """AC2-EDGE: no -H on the argv; the profile's own provider=codex resolves
+    the harness, and the effort read through THAT harness picks xhigh."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/target x"],
+        err=err,
+        profiles={
+            "target": {
+                "provider": "codex",
+                "effort": "high",
+                "harness": {"codex": {"effort": "xhigh"}},
+            },
+        },
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert out[out.index("--effort") + 1] == "xhigh"
+    assert "agents.profiles.target.harness.codex.effort" in err.getvalue()
+
+
+def test_defaults_harness_overlay_answers_when_profile_is_silent():
+    """The defaults rung keeps its own harness table: a codex answer there
+    wins on -H codex over the defaults scalar, with no profile in play."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-H", "codex", "--name", "w", "hi"],
+        err=err,
+        permission_mode="bypassPermissions",
+        harness={"codex": {"permission_mode": "yolo"}},
+    )
+    assert out[out.index("--permission-mode") + 1] == "yolo"
+    assert "agents.defaults.harness.codex.permission_mode" in err.getvalue()
+
+
+def test_explicit_flag_still_beats_every_overlay_rung():
+    """Precedence head: an explicit --permission-mode wins over lane, overlay
+    and scalar alike."""
+    out = _inject(
+        ["spawn", "-H", "claude", "--permission-mode", "plan", "--name", "w", "/target x"],
+        profiles=_PROFILE_OVERLAY,
+    )
+    assert out[out.index("--permission-mode") + 1] == "plan"
+    assert out.count("--permission-mode") == 1
+
+
+def test_harness_args_appended_behind_tail_fence():
+    """The overlay bundle rides the -- passthrough fence at the argv TAIL, so
+    the caller's own pre-fence tokens stay pre-fence."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-H", "codex", "--name", "w", "hi"],
+        err=err,
+        harness={"codex": {"args": ["--profile", "fno"]}},
+    )
+    i = out.index("--")
+    assert out[i + 1 : i + 3] == ["--profile", "fno"]
+    assert "agents.defaults.harness.codex.args" in err.getvalue()
+    assert "unverified" in err.getvalue()
+
+
+def test_harness_args_skipped_when_argv_already_fenced():
+    """AC2-ERR: the caller's fence selects their complete bundle; the
+    configured one is displaced by name, and no second fence is added."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-H", "codex", "--name", "w", "hi", "--", "--profile", "other"],
+        err=err,
+        harness={"codex": {"args": ["--profile", "fno"]}},
+    )
+    assert out.count("--") == 1
+    assert "harness args skipped" in err.getvalue()
+    assert "agents.defaults.harness.codex.args" in err.getvalue()
+
+
+def test_lane_args_win_over_overlay_bundle():
+    """The lane rung sits above the overlays for args too, and bundles are
+    never concatenated."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/target x"],
+        err=err,
+        profiles={
+            "target": {
+                "lanes": [_lane("codex", effort="high", args=["--profile", "lane"])],
+                "harness": {"codex": {"args": ["--profile", "overlay"]}},
+            },
+        },
+    )
+    i = out.index("--")
+    assert out[i + 1 : i + 3] == ["--profile", "lane"]
+    assert "overlay" not in out
+    assert ".lanes[0].args" in err.getvalue()
+
+
+def test_unknown_overlay_harness_name_refuses():
+    """AC1-ERR sibling: a typo'd harness key refuses at the seam by name."""
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "-H", "claude", "--name", "w", "/target x"],
+            err=err,
+            profiles={"target": {"harness": {"codx": {"effort": "high"}}}},
+        )
+    assert exc.value.code == 2
+    assert "agents.profiles.target.harness.codx" in err.getvalue()
+
+
+def test_lane_field_inside_overlay_refuses():
+    """AC1-ERR: a ranking field in an overlay is a lane field, refused by
+    name; nothing launches."""
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "-H", "claude", "--name", "w", "hi"],
+            err=err,
+            harness={"codex": {"model": "opus"}},
+        )
+    assert exc.value.code == 2
+    assert "agents.defaults.harness.codex.model" in err.getvalue()
+    assert "lane field" in err.getvalue()
+
+
+def test_overlay_scoped_to_this_verbs_profile():
+    """A typo in an unrelated verb's overlay must not block this dispatch."""
+    out = _inject(
+        ["spawn", "--name", "w", "/target x"],
+        harness={"claude": {"effort": "high"}},
+        profiles={"review": {"harness": {"codx": {"effort": "high"}}}},
+    )
+    assert "--effort" in out

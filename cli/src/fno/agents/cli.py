@@ -89,6 +89,14 @@ def _remedy_for(key: str) -> str:
 #: outliving its own exit because it takes no node claim to replace it.
 _SPAWN_CLI_HOLDER_PREFIX = "spawn-cli:"
 
+#: claude's own --permission-mode vocabulary, its --help being the authority.
+#: Spelled ONCE here: the --permission-mode help text interpolates it, and the
+#: doctor overlay readout checks claude's exact-passthrough values against it
+#: (x-8975) instead of keeping a second copy.
+CLAUDE_PERMISSION_MODES = frozenset(
+    {"default", "acceptEdits", "plan", "bypassPermissions"}
+)
+
 #: Buckets where force-release advice is HONEST: recovery ran, nobody was found
 #: on the node, and the claim is still there. Every other bucket is either a
 #: measured live holder or an unmeasured one, and telling an operator to clear
@@ -1362,8 +1370,9 @@ def cmd_spawn(
         "--permission-mode",
         help=(
             "Permission/approval mode forwarded to the provider (x-dfa4). "
-            "Provider-native values, fail-closed: claude default|acceptEdits|"
-            "plan|bypassPermissions (exact passthrough); gemini --approval-mode "
+            "Provider-native values, fail-closed: claude "
+            f"{'|'.join(sorted(CLAUDE_PERMISSION_MODES))} (exact passthrough); "
+            "gemini --approval-mode "
             "(or 'yolo'); codex a shortcut (full-auto|yolo) or <sandbox>:"
             "<approval> (e.g. workspace-write:on-request); opencode 'auto'; agy "
             "'skip'; cursor-agent 'force' or 'yolo'. An unmappable value errors "
