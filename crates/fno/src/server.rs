@@ -6851,8 +6851,33 @@ impl Core {
             *name_counts.entry(name.clone()).or_default() += 1;
         }
         let dims = (crate::vt::DEFAULT_ROWS, crate::vt::DEFAULT_COLS);
+        // A reap receipt is the session's death record: a membership row the
+        // sweep's squad wiring has not yet tombstoned must not read as a live
+        // restore candidate, or restore resurrects a session the fleet
+        // deliberately retired.
+        let retired_receipts =
+            crate::squad_store::retired_receipt_session_ids().unwrap_or_default();
         let mut rows = Vec::with_capacity(candidates.len());
         for (name, member) in candidates {
+            if member
+                .harness_session_id
+                .as_deref()
+                .is_some_and(|sid| retired_receipts.contains(sid))
+            {
+                rows.push(RestoreRow {
+                    member: name,
+                    harness: member.harness.clone(),
+                    squad: 0,
+                    outcome: "refused".into(),
+                    pane: None,
+                    tab: None,
+                    reason: Some(
+                        "retired: a reap receipt preserves this session; it is no longer a restore candidate".into(),
+                    ),
+                    notice: None,
+                });
+                continue;
+            }
             if name_counts.get(name.as_str()).copied().unwrap_or(0) > 1 {
                 rows.push(RestoreRow {
                     member: name,

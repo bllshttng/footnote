@@ -970,9 +970,16 @@ pub(crate) fn cascade_harness_session_result_with(
             let Some(sid) = e.harness_session_id.as_deref() else {
                 return CascadeOutcome::NotApplicable;
             };
-            let index = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                .join(".codex")
-                .join("session_index.jsonl");
+            // Resolve the codex home the way codex itself does: a CODEX_HOME
+            // redirect must move this removal, or the default index reads
+            // absent, absence reads as a confirmed effect, and the REAL index
+            // keeps the session alive after the row is dropped.
+            let Some(codex_dir) = crate::client_verbs::codex_home() else {
+                return CascadeOutcome::Failed(
+                    "no codex home: CODEX_HOME and HOME are both unset".into(),
+                );
+            };
+            let index = codex_dir.join("session_index.jsonl");
             match cascade_codex_index(&index, sid, &row_id) {
                 Ok(true) => CascadeOutcome::Removed,
                 Ok(false) => CascadeOutcome::AlreadyAbsent("codex index row already absent".into()),
