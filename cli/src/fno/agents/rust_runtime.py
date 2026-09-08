@@ -833,6 +833,23 @@ def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     return _has_flag(args, "-P", ("--route", "--provider"))
 
 
+def _with_seam_marker(args: "list[str]", verb: str) -> "list[str]":
+    """Assert the Python seam crossed, and carry its enforcement verdict.
+
+    The binary reads no config, so ``--defaults-applied=<state>`` straight
+    after the verb is the only record it sees of the seam's decision; without
+    it the binary sends the spawn back to the front door. The token is
+    inserted, never appended: everything after ``--`` is the worker's seed,
+    and an appended marker would corrupt the prompt. Spawn-only: no other
+    verb crosses this fork.
+    """
+    if verb != "spawn" or not args or args[0] != "spawn":
+        return args
+    from fno.agents.spawn_defaults import routing_enforcement_state
+
+    return [args[0], f"--defaults-applied={routing_enforcement_state()}", *args[1:]]
+
+
 #: Flags that compose a COMPLETE route (endpoint + auth + model) before any
 #: worker is born, so an inherited tier remap is no longer ambiguous.
 #: ``-P``/``--provider``/``--route`` are fail-CLOSED at the CLI (an unresolvable
@@ -1474,7 +1491,7 @@ def make_agents_group_cls() -> type:
                 if mode == "rust" and not py_spawn:
                     _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                     _scrub_ambient_identity_at_exec(verb)
-                    route_to_rust(list(args))  # execs; does not return
+                    route_to_rust(_with_seam_marker(list(args), verb))  # execs; does not return
                 elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not py_spawn:
                     # Since ab-73da4ac2 this includes ``ask`` for every provider
                     # (the unconditional flip): the Rust client owns the full
@@ -1485,7 +1502,7 @@ def make_agents_group_cls() -> type:
                     if binary is not None:
                         _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                         _scrub_ambient_identity_at_exec(verb)
-                        route_to_rust(list(args), binary=binary)  # execs
+                        route_to_rust(_with_seam_marker(list(args), verb), binary=binary)  # execs
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.
             return super().make_context(info_name, args, parent=parent, **extra)

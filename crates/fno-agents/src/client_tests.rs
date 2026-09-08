@@ -2308,3 +2308,114 @@ fn render_reconcile_json_shape_matches_python_contract() {
     }
     assert_eq!(parsed["scanned"], 3);
 }
+
+// -----------------------------------------------------------------------
+// x-f1ab / x-90a9 task 0.1: the spawn seam gate (spawn_needs_python_seam)
+// -----------------------------------------------------------------------
+
+#[test]
+fn spawn_seam_gate_sends_unmarked_direct_spawns_back() {
+    // AC22 (positive gate marker): an argv that never crossed the Python seam
+    // parses with no defaults_applied param, and the gate is true.
+    let (_m, params) = build_request(
+        "spawn",
+        &[
+            "--name".into(),
+            "w".into(),
+            "--harness".into(),
+            "claude".into(),
+            "--substrate".into(),
+            "thread".into(),
+            "/target x-90a9".into(),
+        ],
+    )
+    .expect("plain spawn parses");
+    assert!(params.get("defaults_applied").is_none());
+    assert!(spawn_needs_python_seam(&params));
+}
+
+#[test]
+fn spawn_seam_gate_passes_marked_spawns_through_in_both_value_forms() {
+    // AC23/AC27 (positive dispatch markers): both spellings parse, the gate
+    // is false, and the marker token is consumed - it never reaches the seed.
+    for token in ["--defaults-applied", "--defaults-applied=enforced"] {
+        let (_m, params) = build_request(
+            "spawn",
+            &[
+                token.into(),
+                "--name".into(),
+                "w".into(),
+                "--harness".into(),
+                "codex".into(),
+                "--substrate".into(),
+                "thread".into(),
+                "--".into(),
+                "/target x-90a9".into(),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("{token} parses: {e}"));
+        assert!(!spawn_needs_python_seam(&params), "{token} gates");
+        let message = params["message"].as_str().unwrap_or("");
+        assert_eq!(message, "/target x-90a9", "{token} must not touch the seed");
+        assert!(!message.contains("defaults-applied"), "{token} leaks");
+    }
+    let (_m, params) = build_request(
+        "spawn",
+        &[
+            "--defaults-applied=unenforced".into(),
+            "--name".into(),
+            "w".into(),
+            "--substrate".into(),
+            "headless".into(),
+            "seed".into(),
+        ],
+    )
+    .expect("unenforced marker parses");
+    assert_eq!(params["defaults_applied"], "unenforced");
+    assert!(!spawn_needs_python_seam(&params));
+}
+
+#[test]
+fn spawn_seam_bridge_shaped_argv_parses_once_and_stays_clean() {
+    // AC24 (bridge case): the exact argv shape rust_spawn.py builds - marker
+    // straight after the verb, seed behind the fence. One parse, gate false,
+    // message intact: no re-entry recursion and no prompt contamination.
+    let (_m, params) = build_request(
+        "spawn",
+        &[
+            "--defaults-applied=unenforced".into(),
+            "--name".into(),
+            "probe-w".into(),
+            "--harness".into(),
+            "codex".into(),
+            "--substrate".into(),
+            "thread".into(),
+            "--cwd".into(),
+            "/tmp".into(),
+            "--node".into(),
+            "x-90a9".into(),
+            "--".into(),
+            "/target x-90a9".into(),
+        ],
+    )
+    .expect("bridge argv parses");
+    assert!(!spawn_needs_python_seam(&params));
+    assert_eq!(params["message"], "/target x-90a9");
+    assert_eq!(params["node"], "x-90a9");
+}
+
+#[test]
+fn spawn_seam_marker_rejects_an_unknown_verdict() {
+    // A typo'd marker must refuse loudly, not degrade to unenforced: the
+    // value is the binary's only record of the seam's policy decision.
+    let err = build_request(
+        "spawn",
+        &[
+            "--defaults-applied=bogus".into(),
+            "--name".into(),
+            "w".into(),
+        ],
+    )
+    .expect_err("bogus verdict refuses");
+    assert!(err.contains("--defaults-applied"), "{err}");
+}

@@ -1108,6 +1108,10 @@ def inject_spawn_defaults(
         or _above_defaults(_scalar_rung("route"))
     )
     slot_receipt: List[Tuple[str, str, str]] = []
+    # (axis, value, rung, reason): a config-resolved axis this spawn did NOT
+    # get. Route is the axis that bills, so an omission there must name itself
+    # (x-f1ab: the four-way silent drop); the others already print.
+    suppressed: List[Tuple[str, str, str, str]] = []
     if lanes_present or not model_occupied:
         if not model_occupied:
             grid_node_entry = _grid_node(out[1:], env)
@@ -1173,6 +1177,7 @@ def inject_spawn_defaults(
         for _line in slot_chain:
             if _line.startswith(("slot skip", "slot note", "slot demote")):
                 print(f"fno agents spawn: {_line}", file=err)
+                suppressed.append(("slot", "", "", _line))
 
         def _refuse(msg: str) -> None:
             print(msg, file=err)
@@ -1297,6 +1302,14 @@ def inject_spawn_defaults(
     ) and grid_candidate is None and not from_config:
         # No config field resolved at all, so any --model here was typed.
         _check_model_vendor_mismatch(out, err, env)
+        _emit_defaults_applied(
+            out, profile_verb, seed, _resolved_axes_view(
+                cfg_harness, provider_rung, cfg_model, model_rung, cfg_effort,
+                effort_rung, cfg_substrate, substrate_rung, cfg_permission,
+                permission_rung, cfg_route, route_rung, cfg_account, account_rung,
+                cfg_pane_group, pane_group_rung,
+            ), from_config, suppressed,
+        )
         return out
 
     # A spawn carrying --role whose lane resolves to a real route is billed on
@@ -1423,6 +1436,32 @@ def inject_spawn_defaults(
         inject += ["--route", cfg_route]
         route_injected = True
         from_config.append(("route", cfg_route, f"{route_rung}.route"))  # type: ignore[arg-type]
+    elif cfg_route:
+        # AC9-UI: config-sourced routing is never invisible. The account
+        # branch below already says this; the route axis is the one that
+        # bills, so a dropped route names which condition fired.
+        if explicit_route:
+            why = "the caller passed --route"
+        elif explicit_vendor_present:
+            why = f"the caller passed --provider {explicit_vendor!r}"
+        elif grid_candidate is not None:
+            # The grid branch above sets has_model, so the grid case must be
+            # named before any --model read: a grid candidate excludes an
+            # explicit -m anyway (model_occupied would have stood it down).
+            why = (
+                "the capacity grid chose a lane ("
+                + ("; ".join(slot_chain) or "no reason recorded") + ")"
+            )
+        elif explicit_model_present:
+            why = "the caller passed --model"
+        else:
+            why = "no suppression reason recorded"
+        print(
+            f"fno agents spawn: route skipped ({why}); {route_rung}.route "
+            f"{cfg_route!r} NOT applied - this worker bills at the caller default",
+            file=err,
+        )
+        suppressed.append(("route", cfg_route, route_rung or "", why))
     # route_present covers BOTH ways --route ends up in the final argv: injected
     # from config just above, or already explicit on the caller's argv. Gating
     # the model-suppression below on route_injected alone missed the explicit
@@ -1451,6 +1490,10 @@ def inject_spawn_defaults(
                 f"{cfg_account!r} ignored",
                 file=err,
             )
+            suppressed.append(
+                ("account", cfg_account, account_rung or "",
+                 f"accounts are claude-only; resolved provider {prov!r}")
+            )
 
     if cfg_model and not has_model:
         # The config model is suppressed when something else already owns the
@@ -1464,6 +1507,7 @@ def inject_spawn_defaults(
                 f"{model_rung}.model {cfg_model!r}",
                 file=err,
             )
+            suppressed.append(("model", cfg_model, model_rung or "", "--route owns the model"))
         elif explicit_vendor_present:
             # A bare explicit -P/--provider (vendor, no -m) already names the
             # vendor half of a route; cmd_spawn pairs it with whatever --model
@@ -1479,6 +1523,10 @@ def inject_spawn_defaults(
                 "(add --model yourself to complete the route)",
                 file=err,
             )
+            suppressed.append(
+                ("model", cfg_model, model_rung or "",
+                 f"--provider {explicit_vendor!r} names a vendor")
+            )
         elif role and _role_resolves(role, settings, env):
             # resolve_route is fail-SAFE: a protected role, a disabled block, an
             # unconfigured lane, or a missing key all return None (spawn falls
@@ -1489,6 +1537,10 @@ def inject_spawn_defaults(
                 f"model to the route (not injecting {model_rung}.model "
                 f"{cfg_model!r})",
                 file=err,
+            )
+            suppressed.append(
+                ("model", cfg_model, model_rung or "",
+                 f"--role {role!r} resolves to a route")
             )
         else:
             # A provider-less config model is scoped to the harness it was written
@@ -1519,6 +1571,9 @@ def inject_spawn_defaults(
                     "leaving model to the harness",
                     file=err,
                 )
+                suppressed.append(
+                    ("model", cfg_model, model_rung or "", "harness resolution failed")
+                )
                 target = None
             if target and target == home:
                 inject += ["--model", cfg_model]
@@ -1529,6 +1584,10 @@ def inject_spawn_defaults(
                     f"{home}; spawn resolves {target}, leaving model to the harness "
                     f"(bind {model_rung}.provider to apply it cross-harness)",
                     file=err,
+                )
+                suppressed.append(
+                    ("model", cfg_model, model_rung or "",
+                     f"scoped to {home}; spawn resolves {target}")
                 )
 
     if cfg_effort and not has_effort:
@@ -1564,6 +1623,7 @@ def inject_spawn_defaults(
                 f"{effort_rung}.effort = {cfg_effort!r} ignored",
                 file=err,
             )
+            suppressed.append(("effort", cfg_effort, effort_rung or "", reason))
 
     # Substrate (x-3d5b): inject when no explicit substrate is pinned (flag,
     # positional token, --headless/-o, or resume-implied bg - all post-normalize).
@@ -1594,6 +1654,7 @@ def inject_spawn_defaults(
                 f"{substrate_rung}.substrate = {cfg_substrate!r} ignored",
                 file=err,
             )
+            suppressed.append(("substrate", cfg_substrate, substrate_rung or "", reason))
 
     # Permission mode (x-3d5b): same shape as substrate, but the compatibility
     # check depends on the EFFECTIVE substrate (explicit pin > this-run injection >
@@ -1621,6 +1682,9 @@ def inject_spawn_defaults(
                 f"fno agents spawn: permission-mode skipped ({reason}); "
                 f"{permission_rung}.permission_mode = {cfg_permission!r} ignored",
                 file=err,
+            )
+            suppressed.append(
+                ("permission_mode", cfg_permission, permission_rung or "", reason)
             )
 
     # _flag_present, not _flag_value: a valueless trailing `--tab` reads as
@@ -1677,12 +1741,20 @@ def inject_spawn_defaults(
                 f"{pane_group_rung}.pane_group = {cfg_pane_group!r} ignored",
                 file=err,
             )
+            suppressed.append(
+                ("pane_group", cfg_pane_group, pane_group_rung or "",
+                 f"resolved substrate {eff_substrate!r} has no pane geometry")
+            )
         elif conflicting:
             print(
                 f"fno agents spawn: pane group skipped ({conflicting} places this "
                 f"pane in a tab it does not own, which a group cannot move); "
                 f"{pane_group_rung}.pane_group = {cfg_pane_group!r} ignored",
                 file=err,
+            )
+            suppressed.append(
+                ("pane_group", cfg_pane_group, pane_group_rung or "",
+                 f"{conflicting} places this pane in a tab it does not own")
             )
         else:
             inject += ["--tab", cfg_pane_group]
@@ -1713,7 +1785,95 @@ def inject_spawn_defaults(
         (source for axis, _value, source in from_config if axis == "model"), None
     )
     _check_model_vendor_mismatch(out, err, env, model_source=model_source)
+    _emit_defaults_applied(
+        out, profile_verb, seed, _resolved_axes_view(
+            cfg_harness, provider_rung, cfg_model, model_rung, cfg_effort,
+            effort_rung, cfg_substrate, substrate_rung, cfg_permission,
+            permission_rung, cfg_route, route_rung, cfg_account, account_rung,
+            cfg_pane_group, pane_group_rung,
+        ), from_config, suppressed,
+    )
     return out
+
+
+def _resolved_axes_view(
+    cfg_harness: Optional[str], provider_rung: Optional[str],
+    cfg_model: Optional[str], model_rung: Optional[str],
+    cfg_effort: Optional[str], effort_rung: Optional[str],
+    cfg_substrate: Optional[str], substrate_rung: Optional[str],
+    cfg_permission: Optional[str], permission_rung: Optional[str],
+    cfg_route: Optional[str], route_rung: Optional[str],
+    cfg_account: Optional[str], account_rung: Optional[str],
+    cfg_pane_group: Optional[str], pane_group_rung: Optional[str],
+) -> dict:
+    """Every config-resolved spawn axis as ``(value, rung)``, empties included.
+
+    "The config read as empty here" and "the value was suppressed" are
+    different facts; the event must tell them apart (x-f1ab).
+    """
+    return {
+        "provider": (cfg_harness or "", provider_rung),
+        "model": (cfg_model or "", model_rung),
+        "effort": (cfg_effort or "", effort_rung),
+        "substrate": (cfg_substrate or "", substrate_rung),
+        "permission_mode": (cfg_permission or "", permission_rung),
+        "route": (cfg_route or "", route_rung),
+        "account": (cfg_account or "", account_rung),
+        "pane_group": (cfg_pane_group or "", pane_group_rung),
+    }
+
+
+def _emit_defaults_applied(
+    out: Sequence[str],
+    verb: Optional[str],
+    seed: Optional[str],
+    resolved: dict,
+    applied: Sequence[Tuple[str, str, str]],
+    suppressed: Sequence[Tuple[str, str, str, str]],
+) -> None:
+    """Journal one spawn_defaults_applied decision for this spawn.
+
+    Exactly one event per completed seam resolution: the applied axes with
+    their rungs, the suppressed ones with their reasons. The emit must not
+    be able to raise - an unwritable journal (or a raising
+    ``paths.state_dir()`` under the hermetic guard) can never turn an
+    already-valid launch into a crash. Diagnostic failure also never waives
+    strict qualification; that decision lives upstream of this call.
+    """
+    try:
+        from fno.agents.events import emit
+
+        emit(
+            "spawn_defaults_applied",
+            name=_flag_value(out[1:], "--name"),
+            verb=verb,
+            seed=seed,
+            resolved={axis: {"value": v, "rung": r} for axis, (v, r) in resolved.items()},
+            applied=[list(entry) for entry in applied],
+            suppressed=[list(entry) for entry in suppressed],
+        )
+    except Exception:  # noqa: BLE001 - a dead journal never bricks a spawn
+        pass
+
+
+def routing_enforcement_state(settings: object = None) -> str:
+    """The enforcement verdict the spawn marker carries to the Rust client.
+
+    The binary reads no config, so ``--defaults-applied=<state>`` is the
+    only record it sees of the seam's decision: bare-or-unenforced means
+    legacy permissive, ``enforced`` means strict routing. Any read failure
+    degrades open: the seam itself is the enforcement decision maker and a
+    strict seam refuses upstream, before this value ever matters.
+    """
+    try:
+        if settings is None:
+            from fno.config import load_settings
+
+            settings = load_settings()
+        routing = getattr(settings, "routing", None)
+        return "enforced" if getattr(routing, "enforce_inventory", False) else "unenforced"
+    except Exception:  # noqa: BLE001 - unknown reads as legacy, never as strict
+        return "unenforced"
 
 
 # ---------------------------------------------------------------------------

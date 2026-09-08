@@ -7,6 +7,7 @@ the test process is never replaced.
 """
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -939,15 +940,18 @@ def test_plain_spawn_stays_python_bg_spawn_auto_routes(monkeypatch, tmp_path) ->
     CliRunner().invoke(app, ["agents", "spawn", "--name", "worker", "--harness", "claude"])
     assert captured == [], "a pane-substrate spawn must not route to the binary"
 
-    # bg substrate: still the binary's lane.
+    # bg substrate: still the binary's lane. The seam marker rides straight
+    # after the verb (x-90a9 task 0.1): it asserts the crossing upstream.
     result = CliRunner().invoke(
         app,
         ["agents", "spawn", "--name", "worker", "--harness", "claude", "--substrate", "bg"],
     )
     assert result.exit_code == 99
-    assert captured == [
-        ["spawn", "--name", "worker", "--harness", "claude", "--substrate", "bg"]
-    ]
+    assert len(captured) == 1
+    argv = captured[0]
+    assert argv[0] == "spawn"
+    assert argv[1].startswith("--defaults-applied=")
+    assert argv[2:] == ["--name", "worker", "--harness", "claude", "--substrate", "bg"]
 
 
 def test_is_role_bearing_spawn_predicate() -> None:
@@ -1123,3 +1127,109 @@ def test_identity_scrub_at_exec_is_worker_verbs_only(monkeypatch) -> None:
     assert os.environ["CODEX_THREAD_ID"] == "live-thread"
     rr._scrub_ambient_identity_at_exec("spawn")
     assert "CODEX_THREAD_ID" not in os.environ
+
+
+# --------------------------------------------------------------------------- #
+# The seam marker (x-90a9 task 0.1): insertion point and bridge carriage
+# --------------------------------------------------------------------------- #
+
+def test_seam_marker_sits_straight_after_the_spawn_verb() -> None:
+    out = rr._with_seam_marker(["spawn", "--name", "p", "/target x"], "spawn")
+    assert out[0] == "spawn"
+    assert out[1].startswith("--defaults-applied=")
+    assert out[1].split("=", 1)[1] in ("enforced", "unenforced")
+    assert "--name" in out
+
+
+def test_seam_marker_skips_non_spawn_verbs_and_empty_argv() -> None:
+    argv = ["resume", "abc"]
+    assert rr._with_seam_marker(list(argv), "resume") == argv
+    assert rr._with_seam_marker([], "spawn") == []
+
+
+def test_seam_marker_carries_enforcement_state(monkeypatch) -> None:
+    """The marker value is the binary's only record of the seam's verdict."""
+    import fno.agents.spawn_defaults as sd
+
+    monkeypatch.setattr(sd, "routing_enforcement_state", lambda settings=None: "enforced")
+    out = rr._with_seam_marker(["spawn", "seed"], "spawn")
+    assert out[1] == "--defaults-applied=enforced"
+
+
+class _BridgeProc:
+    returncode = 0
+    stdout = json.dumps({"short_id": "s-1", "harness_session_id": "full-uuid"})
+    stderr = ""
+
+
+def _capture_bridge_run(captured: dict, monkeypatch) -> None:
+    import fno.agents.rust_spawn as rust_spawn
+
+    def _run(argv, **kw):
+        captured["argv"] = [str(a) for a in argv]
+        captured["env"] = kw.get("env")
+        return _BridgeProc()
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/bin/true"))
+    monkeypatch.setattr(rust_spawn.subprocess, "run", _run)
+
+
+def test_codex_bridge_carries_marker_before_the_message_fence(monkeypatch) -> None:
+    import fno.agents.rust_spawn as rust_spawn
+
+    captured: dict = {}
+    _capture_bridge_run(captured, monkeypatch)
+    rust_spawn._codex_thread_spawn(
+        "w",
+        "/target x-90a9",
+        Path("/tmp"),
+        "k",
+        "glm-5.3-flash[1m]",
+        False,
+        node="x-90a9",
+    )
+    argv = captured["argv"]
+    assert argv[1] == "spawn"
+    assert argv[2].startswith("--defaults-applied=")
+    assert argv.index(argv[2]) < argv.index("--")
+    tail = argv[argv.index("--") + 1 :]
+    assert tail == ["/target x-90a9"]
+    assert all(not t.startswith("--defaults-applied") for t in tail)
+
+
+def test_opencode_bridge_carries_marker_before_the_message_fence(monkeypatch) -> None:
+    import fno.agents.rust_spawn as rust_spawn
+
+    captured: dict = {}
+    _capture_bridge_run(captured, monkeypatch)
+    rust_spawn._opencode_serve_spawn(
+        name="w",
+        message="/target x-90a9",
+        cwd=Path("/tmp"),
+        from_name="k",
+        model="m1",
+        node="x-90a9",
+    )
+    argv = captured["argv"]
+    assert argv[1] == "spawn"
+    assert argv[2].startswith("--defaults-applied=")
+    tail = argv[argv.index("--") + 1 :]
+    assert tail == ["/target x-90a9"]
+
+
+def test_codex_bridge_account_env_overlay_still_applies(monkeypatch) -> None:
+    """Positive control: the marker did not disturb the env overlay path."""
+    import fno.agents.rust_spawn as rust_spawn
+
+    captured: dict = {}
+    _capture_bridge_run(captured, monkeypatch)
+    rust_spawn._codex_thread_spawn(
+        "w",
+        "hello",
+        Path("/tmp"),
+        "k",
+        None,
+        False,
+        account_env={"CLAUDE_CONFIG_DIR": "/x"},
+    )
+    assert captured["env"].get("CLAUDE_CONFIG_DIR") == "/x"

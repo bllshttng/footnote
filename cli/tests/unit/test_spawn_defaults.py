@@ -1824,7 +1824,10 @@ def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
     # `model_source` and `outcome` ride the event because the measurement is
     # useless without them: a warned typed pairing and a refused injected one
     # are different facts, and the old payload rendered them identically.
-    assert emitted == [
+    # The seam's own spawn_defaults_applied decision event (task 0.1) rides
+    # the same emit; it carries no mismatch fields, so filter on kinds.
+    mismatch = [e for e in emitted if e[0] == "model_vendor_mismatch"]
+    assert mismatch == [
         (
             "model_vendor_mismatch",
             {
@@ -1836,6 +1839,8 @@ def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
             },
         )
     ]
+    kinds = [k for k, _ in emitted]
+    assert kinds.count("spawn_defaults_applied") == 1
 
 
 def test_refused_mismatch_event_names_the_config_key_that_supplied_the_model(
