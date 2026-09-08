@@ -34,7 +34,7 @@ Three verbs, and they are not interchangeable.
 - **`fno agents resume <name>`** re-enters a session that is idle, in its recorded cwd, through the provider's own resume path. It accepts a short id or the name. Add `--print-command` to see the resolved command without firing it, which is also the cheapest liveness probe you have.
 - **`fno agents spawn`** is the last resort. A cold worker relearns everything the idle one already knows.
 
-Prefer resume over spawn when the old worker holds context you must otherwise pay to rebuild. A worker five hours into a port is worth more than a fresh one, even a stronger fresh one.
+When the old worker holds context you must otherwise pay to rebuild, prefer resume over spawn. A worker five hours into a port is worth more than a fresh one, even a stronger fresh one.
 
 **A caution on `resume -m`.** Resume takes `-m/--message` to hand the revived session an instruction. Once observed, `resume -m` against a session already in a terminal state printed `Done -> Done` and the message never reached the transcript. If you need an instruction to land, send it with `fno agents mail send` and verify it arrived rather than assuming the resume carried it.
 
