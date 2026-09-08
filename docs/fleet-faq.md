@@ -334,7 +334,7 @@ Two kings acted on the false half within an hour. One warned the other that PR n
 
 **Specimen.** `fno agents registry-json` returned `provider` as null for all 26 live rows, which reads as 26 rows with no provider stamp. `fno agents list --json` returned a provider for 42 rows and none for 7. A king acted on the first read and named the wrong cause for a dispatch outage.
 
-*Graduates to:* a projection that omits the key when it omits the field, so a null can only ever mean no value.
+*Graduates to:* a projection that drops the key for any field it does not select, so a null can only ever mean no value.
 
 ## Do the loop and the monitors survive a compact?
 
