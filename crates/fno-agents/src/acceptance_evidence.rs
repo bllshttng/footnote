@@ -835,8 +835,39 @@ pub(crate) fn parse_acceptance_evidence(content: &str) -> EvidenceDecl {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
+        // YAML comment semantics: ` #` (whitespace then hash) starts a
+        // comment, so the template's inline annotations parse exactly as a
+        // YAML reader would read them. A `#` glued to the scalar stays part
+        // of it.
+        let content = match trimmed.find(" #") {
+            Some(i) => trimmed[..i].trim_end(),
+            None => trimmed,
+        };
+        // The two sub-keys are matched BEFORE the bindings-entry branch so
+        // their order inside the mapping is free, exactly as a YAML parser
+        // would read them. Neither prefix can be an AC binding: a binding
+        // entry's key is the criterion id, never `required` or `bindings`.
+        if let Some(rest) = content.strip_prefix("required:") {
+            if required.is_some() {
+                return EvidenceDecl::Unparseable;
+            }
+            match rest.trim() {
+                "true" => required = Some(true),
+                "false" => required = Some(false),
+                _ => return EvidenceDecl::Unparseable,
+            }
+            continue;
+        }
+        if let Some(rest) = content.strip_prefix("bindings:") {
+            match rest.trim() {
+                "" => in_bindings = true,
+                "{}" | "[]" => {}
+                _ => return EvidenceDecl::Unparseable,
+            }
+            continue;
+        }
         if in_bindings {
-            let Some((ac, probe_ref)) = trimmed.split_once(':') else {
+            let Some((ac, probe_ref)) = content.split_once(':') else {
                 return EvidenceDecl::Unparseable;
             };
             let ac = ac.trim();
@@ -851,25 +882,6 @@ pub(crate) fn parse_acceptance_evidence(content: &str) -> EvidenceDecl {
                 key,
                 index,
             });
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("bindings:") {
-            match rest.trim() {
-                "" => in_bindings = true,
-                "{}" | "[]" => {}
-                _ => return EvidenceDecl::Unparseable,
-            }
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("required:") {
-            if required.is_some() {
-                return EvidenceDecl::Unparseable;
-            }
-            match rest.trim() {
-                "true" => required = Some(true),
-                "false" => required = Some(false),
-                _ => return EvidenceDecl::Unparseable,
-            }
             continue;
         }
         return EvidenceDecl::Unparseable;
@@ -1027,20 +1039,24 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
 
     let probes = match parse_probes_for(&content, &key) {
         ProbeDecl::None => {
-            // A required plan with no probe list under `key` is unarmed at
-            // this terminal and must not read as a pass. A plan with no
-            // declaration at all keeps today's behavior byte for byte.
-            if let EvidenceDecl::Evidence { required: true, .. } =
-                parse_acceptance_evidence(&content)
-            {
-                return probe_run_payload(
-                    1,
-                    &key,
-                    false,
-                    vec![],
-                    "acceptance_evidence: the plan asserts runnable acceptance evidence is required, but no probe under this key is bound to a criterion (unarmed)",
-                    Vec::new(),
-                );
+            // A required plan with no done_probes list is unarmed at the
+            // session terminal and must not read as a pass. The close
+            // terminal is NOT gated on requiredness: required evidence is a
+            // session-terminal assertion, and a close list the plan never
+            // declared must close exactly as it does without a declaration.
+            if key == "done_probes" {
+                if let EvidenceDecl::Evidence { required: true, .. } =
+                    parse_acceptance_evidence(&content)
+                {
+                    return probe_run_payload(
+                        1,
+                        &key,
+                        false,
+                        vec![],
+                        "acceptance_evidence: the plan asserts runnable acceptance evidence is required, but no probe under this key is bound to a criterion (unarmed)",
+                        Vec::new(),
+                    );
+                }
             }
             return probe_run_payload(0, &key, false, vec![], "no probes declared", Vec::new());
         }
@@ -1187,7 +1203,10 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
             break;
         }
     }
-    if required && !coverage.iter().any(|r| r["status"] == "satisfied") {
+    // Requiredness gates the SESSION terminal only: an unbound close entry
+    // must still let the node close (required evidence was enforced when the
+    // session stopped; the close gate governs whatever the plan bound to it).
+    if required && key == "done_probes" && !coverage.iter().any(|r| r["status"] == "satisfied") {
         if failed_reason.is_none() {
             failed_reason = Some(
                 "acceptance_evidence: the plan asserts runnable acceptance evidence is required, but no probe under this key satisfied a bound criterion"
@@ -2201,7 +2220,7 @@ mod acceptance_evidence_tests {
     }
 
     #[test]
-    fn required_unarmed_close_evidence_cannot_read_as_a_pass() {
+    fn required_unarmed_done_terminal_still_refuses() {
         let tmp = tempfile::tempdir().unwrap();
         let plan = tmp.path().join("plan.md");
         std::fs::write(&plan, fm("acceptance_evidence:\n  required: true")).unwrap();
@@ -2209,11 +2228,66 @@ mod acceptance_evidence_tests {
             "--plan".into(),
             plan.to_string_lossy().into(),
             "--key".into(),
+            "done_probes".into(),
+            "--json".into(),
+        ]);
+        assert_eq!(code, 1, "unarmed required must refuse at the session key");
+        assert!(json.contains("unarmed"), "{json}");
+    }
+
+    #[test]
+    fn an_unbound_close_entry_still_closes_a_required_plan() {
+        // Requiredness is a session-terminal assertion: a close list the plan
+        // declared but bound nothing to must let the node close when its own
+        // probes pass, or a required plan could never finish a multi-ship.
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("plan.md");
+        std::fs::write(
+            &plan,
+            fm("done_probes:\n  - \"echo done-marker\"\nclose_probes:\n  - \"echo close-marker\"\nacceptance_evidence:\n  required: true\n  bindings:\n    AC1-HP: done_probes[0]"),
+        )
+        .unwrap();
+        let (code, _json) = decide_probe_run(&[
+            "--plan".into(),
+            plan.to_string_lossy().into(),
+            "--key".into(),
             "close_probes".into(),
             "--json".into(),
         ]);
-        assert_eq!(code, 1, "unarmed required must refuse, not exit 0");
-        assert!(json.contains("unarmed"), "{json}");
+        assert_eq!(code, 0, "an unbound close entry must not block closure");
+    }
+
+    #[test]
+    fn template_stanza_parses_verbatim_with_inline_comments() {
+        // The quick-template block, copied byte for byte: inline `#` comments
+        // and required-before-bindings must parse exactly as YAML would read
+        // them, or the documented example refuses at probe-run while passing
+        // finalize.
+        let doc = fm(
+            "acceptance_evidence:\n  required: true\n  bindings:\n    AC1-HP: done_probes[0]   # session terminal\n    AC2-HP: close_probes[0]  # node-closure terminal",
+        );
+        match decl_of(&doc) {
+            EvidenceDecl::Evidence { required, bindings } => {
+                assert!(required);
+                assert_eq!(bindings.len(), 2);
+                assert_eq!(bindings[0].key, "done_probes");
+                assert_eq!(bindings[1].key, "close_probes");
+            }
+            other => panic!("the documented example must parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn required_after_bindings_parses() {
+        let doc =
+            fm("acceptance_evidence:\n  bindings:\n    AC1-HP: done_probes[0]\n  required: true");
+        match decl_of(&doc) {
+            EvidenceDecl::Evidence { required, bindings } => {
+                assert!(required);
+                assert_eq!(bindings.len(), 1);
+            }
+            other => panic!("mapping order is free in YAML, got {other:?}"),
+        }
     }
 
     #[test]
