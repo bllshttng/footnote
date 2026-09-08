@@ -12,7 +12,7 @@ Nothing here counts a round or gates a merge on origin (laws d-0fa92eb9,
 d-777e7d1f). A hold says a review is RUNNING, and that is all.
 """
 
-import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -148,3 +148,52 @@ def test_the_python_attest_path_releases_the_hold_after_the_row_lands(
 
     assert verdict == "pass"
     assert calls == ["append", "release:feature/x-5ca3"]
+
+
+def test_the_post_push_form_holds_the_pr_head_ref_without_breaking_the_payload(
+    monkeypatch, capsys
+) -> None:
+    """The hold key and the payload target are two different things.
+
+    Reusing one variable for both broke the post-push form outright: the
+    renderer refuses `pr_number` and `branch` together, that ValueError was
+    caught as a refusal, and every `request-self-review --pr <n>` exited 2. The
+    hold still has to key on the PR's own head ref, because the merge guard
+    resolves the branch from GitHub and looks up that key.
+    """
+    rendered: dict = {}
+    held: list[dict] = []
+
+    def _render(**kwargs):
+        if kwargs.get("branch") is not None and kwargs.get("pr_number") is not None:
+            raise ValueError("explicit self-review target takes pr_number or branch, not both")
+        rendered.update(kwargs)
+        return "/review high --comment"
+
+    monkeypatch.setattr("fno.review_capability.render_self_review_invocation", _render)
+    monkeypatch.setattr(target_cli, "_git_out", lambda cwd, *args: "deadbeef" * 5)
+    monkeypatch.setattr(
+        target_cli,
+        "_read_pr_metadata",
+        lambda pr, cwd: {
+            "number": pr,
+            "headRefOid": "deadbeef" * 5,
+            "headRefName": "feature/pr-head",
+            "baseRefName": "main",
+        },
+    )
+    monkeypatch.setattr(target_cli, "_resolve_self_review_identity", lambda: ("claude", "sess-1"))
+    monkeypatch.setattr(
+        target_cli, "_send_self_review_payload", lambda **kw: {"outcome": "queued"}
+    )
+    monkeypatch.setattr(
+        target_cli, "_hold_branch_under_review", lambda cwd, **kw: held.append(kw)
+    )
+
+    target_cli.request_self_review_cmd(pr_number=1584)
+
+    receipt = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert receipt["outcome"] == "queued"
+    assert rendered["pr_number"] == 1584
+    assert rendered["branch"] is None
+    assert held[0]["branch"] == "feature/pr-head"

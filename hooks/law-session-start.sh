@@ -221,18 +221,20 @@ if settled_order:
     spent = 0
     for key in settled_order[:SETTLED_SUBJECT_CAP]:
         line = f"- {key}: " + " ".join(settled[key])
-        if spent + len(line) > SETTLED_BLOCK_BYTES:
+        # The first line always renders, however long. A cap that can empty
+        # this block turns a settled ruling into silence, which is the exact
+        # failure the block exists to end.
+        if lines and spent + len(line) > SETTLED_BLOCK_BYTES:
             break
         lines.append(line)
         spent += len(line)
     dropped = len(settled_order) - len(lines)
-    if lines:
-        print()
-        print("Settled, do not re-derive:")
-        for line in lines:
-            print(line)
-        if dropped > 0:
-            print(f"- and {dropped} more settled ruling(s): `fno backlog decisions --lane law`")
+    print()
+    print("Settled, do not re-derive:")
+    for line in lines:
+        print(line)
+    if dropped > 0:
+        print(f"- and {dropped} more settled ruling(s): `fno backlog decisions --lane law`")
 if damaged:
     print()
     print(

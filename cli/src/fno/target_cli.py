@@ -1152,6 +1152,7 @@ def request_self_review_cmd(
     head_sha = _git_out(cwd, "rev-parse", "HEAD") or ""
     base_branch = ""
     branch = ""
+    hold_branch = ""  # empty: the helper reads the local branch for itself
     metadata: dict[str, Any] = {}
     try:
         if not head_sha:
@@ -1182,9 +1183,11 @@ def request_self_review_cmd(
             metadata = _read_pr_metadata(pr_number, cwd)
             pr_head = str(metadata.get("headRefOid") or "").strip()
             base_branch = str(metadata.get("baseRefName") or "").strip()
-            # The hold keys on the PR's OWN head ref: a local alias with a
-            # matching sha keys one the merge guard never looks up.
-            branch = str(metadata.get("headRefName") or "").strip()
+            # The hold keys on the PR's OWN head ref, since a local alias with
+            # a matching sha keys one the merge guard never looks up. Apart
+            # from `branch`, the payload target the renderer refuses beside a
+            # pr_number.
+            hold_branch = str(metadata.get("headRefName") or "").strip()
             if not pr_head:
                 raise RuntimeError("PR has no headRefOid")
             if head_sha.lower() != pr_head.lower():
@@ -1207,7 +1210,7 @@ def request_self_review_cmd(
             payload=payload, harness=harness, session_id=session_id
         )
         _hold_branch_under_review(
-            cwd, head_sha=head_sha, session_id=session_id, receipt=receipt, branch=branch
+            cwd, head_sha=head_sha, session_id=session_id, receipt=receipt, branch=hold_branch
         )
     except (RuntimeError, ValueError) as exc:
         receipt = _self_review_refusal(
