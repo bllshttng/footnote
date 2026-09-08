@@ -1249,7 +1249,6 @@ def _emit_human_touch_merge(pr_number: int) -> None:
     except Exception:
         node_id = None
     try:
-        from pathlib import Path
 
         from fno.events import _build, append_event
 
