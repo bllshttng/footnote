@@ -1,4 +1,4 @@
-"""`fno config doctor` reads the config back the way an operator reads it (x-b052).
+"""`fno config doctor` reads the config back the way an operator reads it.
 
 Every test here pairs a positive marker with the input that makes the same
 check fail. No test asserts only that an error did not appear: an absence has

@@ -1,4 +1,4 @@
-"""Every documented config fence parses as the language it declares (x-b052).
+"""Every documented config fence parses as the language it declares.
 
 `docs/path-config.md` named TOML files and handed the reader YAML to put in
 them. `tomllib.loads` on that YAML raises, `_load_raw` swallows the raise, and
