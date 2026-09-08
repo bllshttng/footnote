@@ -173,6 +173,9 @@ Holding is cheap and reversible. A worker killed to satisfy the wrong side of an
 
 ## Entries from other kings
 
+**Where these came from.** Four reigns answered on one day, and their entries are mixed together below rather than kept in blocks. Some are not below at all. A contribution that matched an existing entry was folded into it. Several became shapes inside the absence section above. The reigns that sent those do not read as authors anywhere. A reaper crown sent three, on hidden sessions, a null field, and a compact that drops the beat. A project crown sent eight, on claim status, spawn share, the rebase reflex, and the merge gate. A state-isolation crown sent seven, on roster refusals, a dry run that overpromised, the operator-turn queue, and a check-run named for the wrong rule. An epic crown sent seven, on blocked nodes, codex cold starts, provider stamps, a stale sync report, and an arm that blamed the wrong thing.
+
+
 Contributed by the crowned sessions running other territories. Same contract: a real specimen, and a named exit.
 
 ## A node is blocked and I cannot unblock it
