@@ -4252,29 +4252,78 @@ def dispatch_spawn_pane(
         if tab_id or enforce_tab_capacity:
             expected_tab_id = int(tab_id[3:]) if tab_id else None
             try:
-                listed = _strict_json_list(
-                    ["mux", "pane", "ls", "--session", session, "--json"],
-                    runner,
-                    noun="pane listing",
-                )
-                if expected_tab_id is None:
+                # One listing read must not condemn the pane (x-18c4): a fresh
+                # pane can be missing from a listing (read-after-write), and an
+                # EMPTY listing is also what a refused/absent mux socket prints
+                # (mux_cli.rs `is_ls && no_server` prints `[]` exit 0). Re-list
+                # once before judging, then name the specific cause instead of
+                # folding four different failures into one "wrong tab".
+                spawned_row: Optional[dict] = None
+                listed: list[dict] = []
+                for attempt in range(2):
+                    listed = _strict_json_list(
+                        ["mux", "pane", "ls", "--session", session, "--json"],
+                        runner,
+                        noun="pane listing",
+                    )
                     spawned_row = next(
                         (item for item in listed if item.get("pane_id") == pane_id), None
                     )
-                    expected_tab_id = (
-                        spawned_row.get("tab_id") if isinstance(spawned_row, dict) else None
+                    if spawned_row is not None or attempt == 1:
+                        break
+                    time.sleep(0.25)
+                if spawned_row is None:
+                    if listed:
+                        raise DispatchAskError(
+                            f"bounded placement verification failed: pane {pane_id} "
+                            f"absent from a {len(listed)}-pane listing",
+                            exit_code=1,
+                        )
+                    raise DispatchAskError(
+                        "bounded placement verification failed: pane listing was "
+                        "empty, which a refused or absent mux socket also prints; "
+                        f"placement of pane {pane_id} unverified",
+                        exit_code=1,
+                    )
+                landed_tab_id = spawned_row.get("tab_id")
+                if landed_tab_id is None:
+                    raise DispatchAskError(
+                        f"bounded placement verification failed: pane {pane_id} "
+                        "row carries no tab_id",
+                        exit_code=1,
+                    )
+                if expected_tab_id is None:
+                    expected_tab_id = landed_tab_id
+                elif landed_tab_id != expected_tab_id:
+                    landed_name = spawned_row.get("tab_name")
+                    landed_label = (
+                        f"{landed_tab_id} ({landed_name})"
+                        if landed_name
+                        else str(landed_tab_id)
+                    )
+                    redirected = ""
+                    if (
+                        isinstance(placement_receipt, dict)
+                        and placement_receipt.get("tab") is not None
+                    ):
+                        redirected = (
+                            "; the server receipt reports it landed in tab "
+                            f"{placement_receipt.get('tab')}"
+                        )
+                    raise DispatchAskError(
+                        f"bounded placement verification failed: pane {pane_id} "
+                        f"landed in tab {landed_label}, expected tab "
+                        f"{expected_tab_id}{redirected}",
+                        exit_code=1,
                     )
                 in_tab = [
                     item for item in listed
                     if isinstance(item, dict) and item.get("tab_id") == expected_tab_id
                 ]
-                placed = expected_tab_id is not None and any(
-                    item.get("pane_id") == pane_id for item in in_tab
-                )
-                if not placed or len(in_tab) > 4:
-                    reason = "wrong tab" if not placed else "fifth pane"
+                if len(in_tab) > 4:
                     raise DispatchAskError(
-                        f"bounded placement verification failed: {reason}", exit_code=1
+                        "bounded placement verification failed: fifth pane",
+                        exit_code=1,
                     )
             except DispatchAskError as exc:
                 reaped, detail = _reap_spawned_pane(session, pane_id, runner)
