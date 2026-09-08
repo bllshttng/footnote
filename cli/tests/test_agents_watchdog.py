@@ -716,8 +716,37 @@ def test_fleet_rows_includes_live_nonclaude_registry_rows(monkeypatch, tmp_path)
 
     assert warnings == []
     assert rows == [
-        Row("thread-535c", "codex-thread", "live", "x-535c", str(tmp_path), "codex")
+        Row("thread-535c", "codex-thread", "working", "x-535c", str(tmp_path), "codex")
     ]
+
+
+def test_registry_live_row_reaches_the_wake_lane(monkeypatch, tmp_path):
+    """A registry status folds through the shared mapper, so a live codex
+    worker with a stalled tail is WAKE material, never a silent LEAVE."""
+    from fno.agents import registry as registry_mod
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.registry import AgentEntry
+
+    row = AgentEntry(
+        name="codex-thread",
+        harness="codex",
+        harness_session_id="thread-535c",
+        cwd=str(tmp_path),
+        log_path="",
+        status="live",
+        origin="spawn",
+        node="x-535c",
+    )
+    monkeypatch.setattr(registry_mod, "load_registry", lambda: [row])
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **_k: ([], []))
+
+    rows, _warnings = watchdog.fleet_rows()
+    assert [r.state for r in rows] == ["working"]
+
+    # 130m: past classify_tail's 2h window, so the tail reads stalled - the
+    # same shape the stopped-row wake test pins.
+    [v] = _run(rows, {"thread-535c": _facts("mid task", age_min=130)})
+    assert v.verdict == WAKE
 
 
 def test_verdict_carries_the_rows_harness():

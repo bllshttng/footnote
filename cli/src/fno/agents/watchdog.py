@@ -1300,11 +1300,18 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
         if str(row_id) in seen_row_ids:
             continue
         row_id = str(row_id)
+        # Registry statuses fold through the SAME mapper the claude roster
+        # uses, so lane predicates never gate on a vocabulary only one
+        # producer speaks. An unmapped spelling is carried loudly, never
+        # silently dropped out of every lane set.
+        state, state_warning = _row_state({"status": str(getattr(entry, "status", "") or "")})
+        if state_warning:
+            unmapped_states.add(state_warning)
         out.append(
             Row(
                 row_id=row_id,
                 name=str(getattr(entry, "name", None) or row_id),
-                state=str(getattr(entry, "status", "unknown")),
+                state=state,
                 node=getattr(entry, "node", None),
                 cwd=str(getattr(entry, "cwd", "") or ""),
                 # The loop exists only because this entry is NOT claude; the
