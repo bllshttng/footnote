@@ -291,8 +291,12 @@ if [[ "$HANDOFF_MODE" -eq 0 ]]; then
       _substrate_value="${_rest%%[[:space:]]*}"
       _substrate_tail="${_rest#"$_substrate_value"}"
       _substrate_tail="${_substrate_tail#"${_substrate_tail%%[![:space:]]*}"}"  # trim
-      if [[ "$_substrate_tail" == /* ]]; then
-        emit_error "posture words are trailing, not leading: write the dispatch first then the substrate, e.g. 'spawn ${_substrate_tail} substrate ${_substrate_value}'. (A leading 'substrate' would otherwise bury the '${_substrate_tail%%[[:space:]]*}' command inside a verbatim seed instead of dispatching it.)"
+      if [[ "$_substrate_value" == /* || "$_substrate_tail" == /* ]]; then
+        _substrate_command="$_substrate_tail"
+        [[ "$_substrate_value" == /* ]] && _substrate_command="$_rest"
+        _substrate_hint="$_substrate_value"
+        [[ "$_substrate_value" == /* ]] && _substrate_hint='<value>'
+        emit_error "posture words are trailing, not leading: write the dispatch first then the substrate, e.g. 'spawn ${_substrate_command} substrate ${_substrate_hint}'. (A leading 'substrate' would otherwise bury the '${_substrate_command%%[[:space:]]*}' command inside a verbatim seed instead of dispatching it.)"
       fi
       ;;
   esac

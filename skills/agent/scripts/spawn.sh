@@ -528,6 +528,7 @@ if [[ "$REPLY" -eq 1 ]]; then
 else
   short_id="$(printf '%s' "$spawn_out" | jq -r '.short_id // empty' 2>/dev/null)"
   session_id="$(printf '%s' "$spawn_out" | jq -r '.session_id // empty' 2>/dev/null)"
+  harness_session_id="$(printf '%s' "$spawn_out" | jq -r '.harness_session_id // empty' 2>/dev/null)"
   PANE_SESSION=""; PANE_ID=""; PANE_STATUS=""
   # Set below only for a matched Python mux-pane receipt.
   # Python-authored pane rows have no worker socket, so their genuine receipt
@@ -580,23 +581,32 @@ else
   # anchors `^...$` to the whole string, so any embedded newline or stray byte
   # fails (parity with the one-shot path's single-line requirement). bash 3.2 safe.
   #
-  # The valid SHAPE depends on the substrate (x-61b7). Only `thread`/`headless`
-  # (and the one-release `bg` alias) return
-  # a real 8-hex session-id prefix (client-side `claude --bg` / one-shot). The
+  # The valid SHAPE depends on the substrate (x-61b7). Claude thread/headless
+  # receipts return a real 8-hex session-id prefix (client-side `claude --bg` /
+  # one-shot), while a Codex thread receipt has no short_id and must use its
+  # full harness session identity. The
   # default/`pane` owned-PTY lane is addressed by an identifier-shaped registry
   # handle: Rust derives a non-empty name-slug short_id; Python supplies the
   # verified receipt name above because mux panes own no worker socket. The
   # 8-hex rule wrongly rejects both shapes, so accept a single-line identifier
   # there (empty/torn receipts still fail - the cardinal guard remains intact).
   case "$SUBSTRATE" in
-    thread|bg|headless) short_id_shape='^[0-9a-f]{8}$' ;;
+    thread|bg)
+      if [[ "$PROVIDER" == "codex" ]]; then
+        short_id="${harness_session_id:-$session_id}"
+        short_id_shape='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      else
+        short_id_shape='^[0-9a-f]{8}$'
+      fi
+      ;;
+    headless) short_id_shape='^[0-9a-f]{8}$' ;;
     # 64, not 40: the pane handle is the derived agent name (<verb>-<node-id>-<slug>),
     # which normalize builds up to ~50 chars (verb + id + a 32-char slug). A 40-cap
     # rejected a real long-slug codex pane launch as FAILED (name 43 > 40).
     *)           short_id_shape='^[A-Za-z0-9_-]{1,64}$' ;;
   esac
   if [[ ! "$short_id" =~ $short_id_shape ]]; then
-    fail "no valid short-id receipt ($VERB JSON .short_id empty/malformed for substrate '${SUBSTRATE:-pane}'): $(sanitize "${spawn_out:-$spawn_err}")"
+    fail "no valid receipt ($VERB JSON identity empty/malformed for substrate '${SUBSTRATE:-pane}'): $(sanitize "${spawn_out:-$spawn_err}")"
   fi
 fi
 

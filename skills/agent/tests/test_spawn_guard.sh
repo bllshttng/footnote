@@ -55,6 +55,10 @@ case "$1 $2" in
     if [[ "${STUB_MUX:-0}" == "1" ]]; then
       echo "{\"name\":\"${STUB_MUX_NAME-x}\",\"short_id\":\"${STUB_MUX_SHORT_ID-}\",\"session_id\":\"${STUB_MUX_SESSION_ID-}\",\"harness\":\"${STUB_MUX_PROVIDER-claude}\",\"status\":\"${STUB_MUX_STATUS-live}\",\"mux_session\":\"${STUB_MUX_SESSION-main}\",\"pane_id\":${STUB_PANE_ID-1}}"; exit 0
     fi
+    if [[ "${STUB_CODEX_THREAD:-0}" == "1" ]]; then
+      thread_session="${STUB_THREAD_SESSION_ID-019f0000-0000-7000-8000-000000000001}"
+      echo "{\"name\":\"codex-thread\",\"short_id\":\"\",\"session_id\":\"$thread_session\",\"harness_session_id\":\"$thread_session\",\"harness\":\"codex\",\"status\":\"live\"}"; exit 0
+    fi
     echo "{\"name\":\"x\",\"short_id\":\"${STUB_SHORT_ID-deadbeef}\",\"harness\":\"claude\",\"status\":\"live\"}"; exit 0 ;;
   "claim release")
     exit 0 ;;
@@ -260,6 +264,15 @@ ok 'thread 8-hex -> launched'      "$(field "$out")" 'launched'
 out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='spawngoa' \
   run --name spawn-thread2 --provider claude --message '/target x' --node "$NODE" --substrate thread)"
 ok 'thread slug -> failed'          "$(field "$out")" 'failed'
+
+# AC2-THREAD: Codex thread receipts have no short_id; the full session identity
+# is the receipt handle and must be surfaced for logs/registry lookup.
+CODEX_THREAD_SESSION='019f0000-0000-7000-8000-000000000001'
+out="$(STUB_VERDICT="$DISP" STUB_CODEX_THREAD=1 STUB_THREAD_SESSION_ID="$CODEX_THREAD_SESSION" \
+  run --name codex-thread --provider codex --yolo --message 'Implement x' --substrate thread)"
+ok   'codex thread full session -> launched' "$(field "$out")" 'launched'
+has  'codex thread full session surfaced'     "$out" "short_id=$CODEX_THREAD_SESSION"
+has  'codex thread logs use full session'    "$out" "fno agents logs $CODEX_THREAD_SESSION"
 
 # --- pane worker observability hint (PR #341 delta) --------------------------
 # A matched mux-pane receipt launches (main's verified-identity path), but a pane

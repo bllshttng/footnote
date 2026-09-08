@@ -83,7 +83,7 @@ fno agents spawn --name king-<epic> "<brief>" --effort high --model <your fronti
 `--substrate pane` is explicit here rather than assumed. `pane` is the built-in default, but `config.agents.defaults.substrate` sits above it and is injected whenever the flag is absent, so an operator who set `thread` there turns this command into a placement flag on a non-pane substrate, which exits 2 - the crowning fails on config you did not write and cannot see from here.
 
 What `pane` buys here is the COURT, not the crown.
-The crown itself rides `--substrate thread` equally: a thread worker is persistent, attachable and resumable, and only the `headless` one-shot is refused, since it exits before it can reign. The deprecated `bg` alias canonicalizes to `thread`.
+The crown itself rides `--substrate thread` for Claude: a Claude thread worker is persistent, attachable and resumable. Non-Claude thread spawns reject `--crown` because crown support is Claude-only. For Claude, only the `headless` one-shot is refused, since it exits before it can reign. The deprecated `bg` alias canonicalizes to `thread`.
 What a thread king loses is placement.
 The placement flags are mux geometry and refuse outside a pane, and the exact anchor resolves from `FNO_PANE`, which a thread session does not have.
 So a thread king seats teammates in fresh tabs instead of beside itself, and the court stops cohering around one screen.

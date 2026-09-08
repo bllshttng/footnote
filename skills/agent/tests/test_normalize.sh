@@ -155,6 +155,10 @@ out="$(run_nofno 'substrate thread /goal x-1234')"
 check_eq       'x-61df leading substrate pair refuses' "$(field "$out" status)" 'error'
 check_contains 'x-61df leading substrate pair hint' "$(field "$out" error)" '/goal x-1234 substrate thread'
 check_eq       'x-61df leading substrate pair no message' "$(field "$out" message)" ''
+out="$(run_nofno 'substrate /goal x-1234')"
+check_eq       'x-61df missing substrate value refuses' "$(field "$out" status)" 'error'
+check_contains 'x-61df missing substrate value keeps command visible' "$(field "$out" error)" '/goal x-1234'
+check_eq       'x-61df missing substrate value no message' "$(field "$out" message)" ''
 out="$(run_nofno 'fix the thing substrate nonsense')"
 check_eq       'x-61df bad substrate refuses' "$(field "$out" status)" 'error'
 check_contains 'x-61df bad substrate names values' "$(field "$out" error)" 'pane, thread, bg, headless'
