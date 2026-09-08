@@ -48,6 +48,10 @@ pub struct RosterJudgement {
 #[derive(Debug, Default)]
 pub struct RosterReapSummary {
     pub visited: usize,
+    /// Duplicate listing rows collapsed before judging: one session can be
+    /// minted more than once into a listing, and judging each copy is how
+    /// one removal becomes three.
+    pub deduped: usize,
     /// Rows the fno registry still names: the registry sweep's business.
     pub kept_owned: usize,
     pub kept: Vec<RosterJudgement>,
@@ -92,6 +96,7 @@ pub fn render(summary: &RosterReapSummary, json_out: bool, dry_run: bool) -> Str
             "{}\n",
             serde_json::json!({
                 "visited": summary.visited,
+                "deduped": summary.deduped,
                 "kept_owned": summary.kept_owned,
                 "kept": rows(&summary.kept),
                 "retired": rows(&summary.retired),
@@ -110,6 +115,12 @@ pub fn render(summary: &RosterReapSummary, json_out: bool, dry_run: bool) -> Str
         summary.retired.len(),
         summary.visited
     );
+    if summary.deduped > 0 {
+        out.push_str(&format!(
+            "  deduped {} duplicate listing row(s)\n",
+            summary.deduped
+        ));
+    }
     for j in &summary.retired {
         let node = j.node.as_deref().unwrap_or("-");
         out.push_str(&format!("  {verb} {} ({}: {node})\n", j.short_id, j.reason));
@@ -154,6 +165,25 @@ pub fn run(
         }
     };
     summary.visited = rows.len();
+    // One session can be minted more than once into a listing (measured:
+    // three listing rows for one operator session). Judge each SESSION
+    // once: the full harness session id is the identity, the short id the
+    // fallback for a listing that omits it. First copy wins; the duplicates
+    // are counted, never judged.
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut unique: Vec<ClaudeAgentRow> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let key = match row.session_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(sid) => sid.to_string(),
+            None => row.short_id.clone(),
+        };
+        if !seen.insert(key) {
+            summary.deduped += 1;
+            continue;
+        }
+        unique.push(row);
+    }
+    let rows: Vec<ClaudeAgentRow> = unique;
     let graph = read_graph();
     let owned: BTreeSet<String> = registry
         .iter()
@@ -309,7 +339,7 @@ pub fn roster_reap(
     grace_secs: i64,
     dry_run: bool,
 ) -> RosterReapSummary {
-    let roster = crate::claude_roster::read_all_agents();
+    let roster = crate::claude_roster::read_all_agents_union();
     let registry = crate::state::load_registry(&home.registry_json()).unwrap_or_default();
     let store = std::cell::RefCell::new(crate::gc_inventory::HarnessStoreIndex::default());
     run(
@@ -338,6 +368,7 @@ mod tests {
             session_id: session_id.map(str::to_string),
             name: name.map(str::to_string),
             cwd: Some("/work".into()),
+            account: None,
         }
     }
 
@@ -548,6 +579,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(json_out.trim()).unwrap();
         for key in [
             "visited",
+            "deduped",
             "kept_owned",
             "kept",
             "retired",
@@ -556,5 +588,31 @@ mod tests {
         ] {
             assert!(v.get(key).is_some(), "bucket {key} missing: {json_out}");
         }
+    }
+
+    // One session listed twice is judged once: the duplicate is counted in
+    // `deduped`, never judged, never removed twice.
+    #[test]
+    fn duplicate_visit_never_judged_twice() {
+        let dir = tmpdir("dedupe");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![
+            row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker")),
+            row("ef56ab78", Some("sid-1"), Some("target-x-aaaa-copy")),
+        ];
+        let summary = run(
+            &no_home(),
+            900,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(graph_done("x-aaaa")),
+            &|_e| Some(vec![transcript.clone()]),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(summary.retired.len(), 1);
+        assert_eq!(summary.deduped, 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
