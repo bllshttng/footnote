@@ -11280,6 +11280,9 @@ async fn attach_and_run(
         // a swallowed mouse-up is worse than under the old single-snap drag.
         // Give it the same backstop seam/pane drags already have.
         let sideline_drag_deadline = view.sideline_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
+        // (x-f089) The feed-border drag latches continuous resize the same way,
+        // so it gets the same stuck-drag backstop.
+        let feed_drag_deadline = view.feed_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
         // (x-d6a8 AC1-FR) The tab-cell and sideline-row drags share the same
         // dead-drag reaper: a mouse-up that never arrives must not latch the
         // gesture. Only one of the three is ever live, so one deadline over both
@@ -11723,6 +11726,11 @@ async fn attach_and_run(
                                 f.items = items;
                                 f.sel = 0;
                                 f.error = None;
+                                // A fresh fold is a fresh view: the scroll
+                                // window reopens on the newest row, so a
+                                // shorter result can never leave the window
+                                // parked past the last item (a blank panel).
+                                view.feed_offset = 0;
                             }
                             // Keep prior rows visible; render the typed reason.
                             Err(e) => f.error = Some(e),
@@ -11989,6 +11997,21 @@ async fn attach_and_run(
                 // so refresh hover at the border's current column.
                 let col = view.panel_w().saturating_sub(1);
                 view.end_sideline_drag(TAB_BAR_ROWS, col);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            _ = async {
+                match feed_drag_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if feed_drag_deadline.is_some() => {
+                // (x-f089) The feed drag's own reaper, same "keep the reached
+                // width" reasoning: end it exactly as a release would (and
+                // persist), refreshing hover at the border's current column.
+                let col = view.term.1 - view.feed_panel_w();
+                view.end_feed_drag(TAB_BAR_ROWS, col);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -13103,12 +13126,13 @@ async fn dispatch_event(
             } else {
                 None
             };
-            if view.feed.is_some() {
-                let (r, c) = view.content_dims();
-                write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
-                    .await
-                    .map_err(|e| format!("resize send failed: {e}"))?;
-            }
+            // Both transitions change the content width (unless the terminal
+            // hid the panel), so rects must refill either way - a close that
+            // sent no Resize would leave the panes narrowed for good.
+            let (r, c) = view.content_dims();
+            write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                .await
+                .map_err(|e| format!("resize send failed: {e}"))?;
         }
         Event::OpenCourt => view.court.toggle(),
         Event::TogglePanel => {
