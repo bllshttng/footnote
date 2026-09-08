@@ -5175,10 +5175,14 @@ def _mapping_value_model(annotation: object) -> "type[BaseModel] | None":
     ``Optional[dict[str, Model]]`` resolves the same way. A plain
     ``dict[str, str]`` returns None: there is no schema below it to check.
     """
+    import types
     import typing
 
     candidates = [annotation]
-    if typing.get_origin(annotation) is typing.Union:
+    # Both union spellings: `Optional[dict[...]]` and `dict[...] | None` have
+    # different origins, and a model that switches spelling must not silently
+    # fall back to walking the map's keys as field names.
+    if typing.get_origin(annotation) in (typing.Union, types.UnionType):
         candidates = list(typing.get_args(annotation))
     for candidate in candidates:
         if typing.get_origin(candidate) is not dict:

@@ -334,3 +334,26 @@ def test_a_leaf_name_shared_by_many_sections_gets_no_hint(tmp_path: Path) -> Non
     # Positive control on the lookup itself, so an empty list above cannot be
     # a broken FIELD_META read.
     assert _near_miss_keys("agents.max_lanes") == ["parallel.max_lanes"]
+
+
+def test_both_optional_spellings_of_a_dict_block_resolve(tmp_path: Path) -> None:
+    """`Optional[dict[str, M]]` and `dict[str, M] | None` must resolve alike.
+
+    The model uses neither spelling today. A future field that does would
+    otherwise regress silently to walking the map's keys as field names, which
+    is the defect this pins.
+    """
+    from typing import Optional
+
+    from pydantic import BaseModel
+
+    from fno.config import _mapping_value_model
+
+    class Row(BaseModel):
+        name: str = ""
+
+    assert _mapping_value_model(dict[str, Row]) is Row
+    assert _mapping_value_model(Optional[dict[str, Row]]) is Row
+    assert _mapping_value_model(dict[str, Row] | None) is Row
+    # Positive control on the negative case: a plain map has no schema below it.
+    assert _mapping_value_model(dict[str, str]) is None
