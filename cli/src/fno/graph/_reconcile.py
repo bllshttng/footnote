@@ -1033,14 +1033,29 @@ def resolve_promise_evidence(
                 # unconfirmed in BOTH directions. Closing here stamped a
                 # declared multi-ship node done on the strength of an outage.
                 # The node stays open and the sweep retries when gh answers.
+                #
+                # The remedy names the verb that can actually recover, which is
+                # NOT always reconcile. When `extra_refs` carried an explicit
+                # ship the close verb had not yet persisted, the refusal exits
+                # before the write, so reconcile cannot see that ref at all: it
+                # would re-count the STORED refs, find no failure, and answer
+                # the permanent policy refusal (exit 6, "promised N; only M
+                # merged") about a ship that is merged. Re-running the same
+                # command is the path that both records the ref and closes.
+                retry = (
+                    "Re-run the same close command once GitHub answers; it "
+                    "records the explicit --pr ref, which this refusal exited "
+                    "before writing."
+                    if extra_refs
+                    else f"Retry with `fno backlog reconcile --node {node_id}` "
+                    f"once GitHub answers."
+                )
                 return PromiseVerdict(
                     outcome="promise_unknown",
                     reason=(
                         f"Unknown: {node_id} could not confirm {expected} ships "
                         f"({merged} confirmed MERGED): {failure}\n"
-                        f"  The read failed retryably; the node stays open. "
-                        f"Retry with `fno backlog reconcile --node {node_id}` "
-                        f"once GitHub answers."
+                        f"  The read failed retryably; the node stays open. {retry}"
                     ),
                 )
             if failure:

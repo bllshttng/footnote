@@ -387,6 +387,38 @@ def test_condition_c_gh_outage_is_unknown_not_ok(tmp_path: Path):
     assert "timed out" in (v.reason or "")
 
 
+def test_unknown_remedy_names_the_verb_that_can_recover(tmp_path: Path):
+    """The refusal exits BEFORE the close verb persists an explicit --pr ref,
+    so `reconcile --node` cannot see that ship: it would re-count the stored
+    refs, find no failure, and answer the PERMANENT policy refusal about a PR
+    that is merged. With extra_refs the remedy must name the same command."""
+    from fno.graph._reconcile import PrMergeState, ReconcileError, resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md", expected_url_count=2)
+    node = {
+        "id": "x-rem",
+        "plan_path": str(plan),
+        "pr_number": 1,
+        "pr_url": "https://github.com/o/r/pull/1",
+    }
+
+    def _down(n, **kw):
+        if n == 2:
+            return PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
+        raise ReconcileError("gh pr view timed out")
+
+    with_extra = resolve_promise_evidence(
+        node, query=_down, extra_refs=[(2, "https://github.com/o/r/pull/2")]
+    )
+    assert with_extra.outcome == "promise_unknown"
+    assert "Re-run the same close command" in (with_extra.reason or "")
+    assert "reconcile --node" not in (with_extra.reason or "")
+
+    without_extra = resolve_promise_evidence(node, query=_down)
+    assert without_extra.outcome == "promise_unknown"
+    assert "fno backlog reconcile --node x-rem" in (without_extra.reason or "")
+
+
 def test_repeated_ref_never_satisfies_two_ships(tmp_path: Path):
     """AC1-EDGE. One PR listed twice is one ship. The dedup lives in
     node_pr_refs; this pins it against the promise gate so a duplicate
