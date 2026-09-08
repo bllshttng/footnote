@@ -172,6 +172,45 @@ def _manifest_only_crowns(held: list[str]) -> tuple[list[dict[str, Any]], bool]:
     return entries, True
 
 
+def find_presiding_crown(
+    scope: str,
+    level: Optional[int],
+    crowns: list[dict[str, Any]],
+    by_id: Optional[dict[str, dict]],
+) -> Optional[dict[str, Any]]:
+    """The live crown one rung ABOVE ``scope``/``level`` whose territory
+    contains it, or ``None`` when nothing outranks it: level 0 already tops
+    the ladder, the graph is unreadable, or the members span more than one
+    containing project.
+
+    Directive points 3/4 (x-3ecf): a disagreement climbs to the crown that
+    presides over both, never straight to the operator. A ``manifest-only``
+    row (:func:`_manifest_only_crowns`) is excluded - a message can never
+    reach a crown with no live worker behind it.
+    """
+    if level is None or level <= 0:
+        return None
+    live = [c for c in crowns if c.get("status") != "manifest-only"]
+    if level == 2:
+        if by_id is None:
+            return None
+        projects = {by_id.get(m, {}).get("project") for m in split_scope(scope)}
+        projects.discard(None)
+        if len(projects) != 1:
+            return None
+        (target_project,) = projects
+        return next(
+            (c for c in live if c.get("level") == 1 and c.get("scope") == target_project),
+            None,
+        )
+    if level == 1:
+        return next(
+            (c for c in live if c.get("level") == 0 and scope in split_scope(c.get("scope"))),
+            None,
+        )
+    return None
+
+
 def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     """The whole court: every crown, its verdict, and any territorial conflict.
 
