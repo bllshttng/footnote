@@ -57,9 +57,9 @@ One file per install. These belong at the root.
 | `installed-rev`, `installed-rust-rev`, `source-path` | `update.py`, `doctor.py` | permanent |
 | `my-priorities.md` | the operator, by hand or with their own `~/.fno/board.py` scratch script (not a repo file, and not `cli/src/fno/king/board.py`); read via `paths.operator_lane()` | permanent |
 | `plugin-root` | `hooks/session-start.sh` | permanent |
-| `pr-watcher-state.json` | `pr_watch/_state.py` | permanent |
+| `pr-watcher-state.json`, `pr-watcher-state.lock` | `pr_watch/_state.py` | permanent |
 | `pr-watcher-state-delivery.json` | `pr_watch/_dispatch.py` via `_delivery_state_path()` | permanent file, transient entries |
-| `fleet-sweep-state.json` | `fleet_state.py`, written by the pr-watch tick's fleet leg | permanent file, transient entries |
+| `fleet-sweep-state.json`, `.lock` | `fleet_state.py`, written by the pr-watch tick's fleet leg | permanent file, transient entries |
 
 `paths.locks_dir()` hardcodes `Path.home() / ".fno" / "locks"` on purpose, and a `config.state_dir` override deliberately does not move it. The config-free plan-stamp path and the config-loading append path have to agree on one directory, and moving it desyncs them. Its docstring says so. Do not "fix" it to match the rest of this page.
 
@@ -71,7 +71,7 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 |---|---|---|
 | `approvals.db` | `cli/src/fno/approvals/store.py` via `paths.state_dir()` | permanent SQLite store for approvals and effect attempts |
 | `attest/` | `hooks/attest-model.sh`, `hooks/review-hold.sh` | one attestation sidecar per reviewed session |
-| `backups/` | `crates/fno-agents/src/graph_store.rs::create_backup` (rotation, pruned to `GRAPH_BACKUP_KEEP`), the corrupt-read `.json.bak` sibling, and `cli/src/fno/setup/migrate_paths.py` (`settings.yaml.bak.<ts>`) | graph rotation prunes itself; migration backups are one-shot per install. Builds older than this row still write the family at the root until redeployed. |
+| `backups/`, `graph.json.bak` | `crates/fno-agents/src/graph_store.rs::create_backup` (rotation, pruned to `GRAPH_BACKUP_KEEP`), the corrupt-read `.json.bak` copy, and `cli/src/fno/setup/migrate_paths.py` (`settings.yaml.bak.<ts>`) | graph rotation prunes itself; migration backups are one-shot per install. `graph.json.bak` is the pre-relocation sibling only builds older than this row write. |
 | `briefs/` | `paths.briefs_dir()` | permanent sidecar discovery briefs |
 | `bus/` | `paths.bus_dir()`, written by `cli/src/fno/bus/` (`messages.jsonl`, `cursors/`) | append-only mail log; each consumer's cursor is overwritten |
 | `cache/` | `cli/src/fno/pr/_cache.py` (`cache/pr-status`) | regenerated PR-status cache |
@@ -81,6 +81,7 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | `graph.json.fts5` | `cli/src/fno/graph/fts.py` | derived full-text index beside the graph; regenerated, safe to delete |
 | `graph.json.store.sock`, `graph-archive.json.store.sock` | `crates/fno-agents/src/graph_keeper.rs::store_socket_for` | server-managed IPC socket per store; unlinked by the keeper on exit and by the daemon's `store_socket_sweep` |
 | `handoffs/` | `paths.handoffs_dir()` | handoff payloads; `scripts/handoffs-migrate-to-vault.sh` moves aged ones to the vault |
+| `inbox/` | `paths.inbox_agents_root()` (`cli/src/fno/paths.py`), the mail bus's fallback root: one mailbox per agent handle under `agents/` | mail drains per handle; a drained envelope is acked away |
 | `.interrupted-writes/` | `crates/fno-agents/src/daemon.rs` (quarantine) | writes caught mid-flight; released after the write settles |
 | `lesson-candidates.jsonl` | `cli/src/fno/think_inspect.py`, `scripts/memory/append-lesson-candidate.sh` | append-only staging for the AGENTS.md pitfalls corpus; consumed by the monthly review |
 | `logs/` | `cli/src/fno/agents/mux_spawn.py` | unrotated spawn logs |

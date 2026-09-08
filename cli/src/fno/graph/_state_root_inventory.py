@@ -11,21 +11,24 @@ import re
 import sys
 from pathlib import Path
 
-DEFAULT_DOC = Path("docs/state-root-inventory.md")
+_REPO_DOC = Path(__file__).resolve().parents[4] / "docs" / "state-root-inventory.md"
+DEFAULT_DOC = _REPO_DOC if _REPO_DOC.is_file() else Path("docs/state-root-inventory.md")
 
 _BACKTICK = re.compile(r"`([^`]+)`")
 _PLACEHOLDER = re.compile(r"<[^>]*>")
 
 
 def top_level_patterns(doc_path: Path) -> list[str]:
-    """Patterns that can name one top-level entry, parsed per table cell.
+    """Patterns that can name one top-level entry, from each row's Entry cell.
 
-    A bare name matches itself. A subfolder row (``agents/reap-receipts/...``)
-    documents its first segment, the directory the doc owns. An extension span
-    (``.lock``) covers the suffix sidecars of a plain base in the same cell;
-    extensions inside a subfolder cell (the mux row's ``.log``) never reach the
-    root. A ``<ts>`` placeholder becomes ``*``. A pattern reduced to ``*`` is
-    dropped: it would whitelist the entire root and blind the gate.
+    Writer and lifetime columns never whitelist: a ``doctor.py`` in a Writer
+    cell must not admit a root file of that name. Within the Entry cell, a
+    bare name matches itself; a subfolder row (``agents/reap-receipts/...``)
+    documents its first segment, the directory the doc owns; an extension span
+    (``.lock``) covers only the named bases it sits beside (``graph.json``,
+    ``.lock`` means ``graph.json.lock``, never every lock file). A ``<ts>``
+    placeholder becomes ``*``. A pattern reduced to ``*`` is dropped: it would
+    whitelist the entire root and blind the gate.
     """
     seen, out = set(), []
 
@@ -37,19 +40,21 @@ def top_level_patterns(doc_path: Path) -> list[str]:
     for line in doc_path.read_text(encoding="utf-8").splitlines():
         if not line.lstrip().startswith("|"):
             continue
-        for cell in line.split("|"):
-            spans = [_PLACEHOLDER.sub("*", s.strip()) for s in _BACKTICK.findall(cell)]
-            spans = [s for s in spans if s]
-            slashed = any("/" in s for s in spans)
-            bases = [s for s in spans if "/" not in s and "*" not in s and not s.startswith(".")]
-            for span in spans:
-                if "/" in span:
-                    add(span.split("/", 1)[0])
-                elif not slashed:
-                    add(span)
-                    if span.startswith(".") and len(span) > 1 and "*" not in span:
-                        for base in bases:
-                            add(f"*{span}")
+        cells = line.split("|")
+        if len(cells) < 2:
+            continue
+        spans = [_PLACEHOLDER.sub("*", s.strip()) for s in _BACKTICK.findall(cells[1])]
+        spans = [s for s in spans if s]
+        slashed = any("/" in s for s in spans)
+        bases = [s for s in spans if "/" not in s and "*" not in s and not s.startswith(".")]
+        for span in spans:
+            if "/" in span:
+                add(span.split("/", 1)[0])
+            elif not slashed:
+                add(span)
+                if span.startswith(".") and len(span) > 1 and "*" not in span:
+                    for base in bases:
+                        add(base + span)
     return out
 
 
