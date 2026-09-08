@@ -3809,7 +3809,16 @@ async fn spawn_codex_thread_lane(
             return Response::err(req.id, ErrorCode::SpawnFailed, error.to_string());
         }
     };
-    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort, yolo, node);
+    let entry = build_codex_thread_entry(
+        name,
+        cwd,
+        &driver,
+        model,
+        effort,
+        yolo,
+        node,
+        req.params.get("account").and_then(Value::as_str),
+    );
     let session_id = entry.harness_session_id.clone().unwrap_or_default();
     let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
         if registry

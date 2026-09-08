@@ -17,17 +17,26 @@ pub(crate) fn build_codex_thread_entry(
     effort: Option<&str>,
     yolo: bool,
     node: Option<&str>,
+    account: Option<&str>,
 ) -> RegistryEntry {
     let cwd_s = cwd.to_string_lossy().into_owned();
     let session_id = driver.thread_id().to_string();
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     RegistryEntry {
         node: node.filter(|node| !node.is_empty()).map(str::to_string),
-        // v25: the route axes this lane actually used. Codex's ambient auth
-        // is the account it positively pinned nothing past, so "default".
+        // v25: the route axes this lane actually used. When the spawn request
+        // pinned an account record id, the row stamps it verbatim (requested
+        // provenance - the observed-model comparator owns verification);
+        // unpinned requests keep the ambient-auth "default".
         route_provider_id: Some("openai".into()),
         model_name: model.filter(|m| !m.is_empty()).map(str::to_string),
-        account_record_id: Some("default".into()),
+        account_record_id: Some(
+            account
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .unwrap_or("default")
+                .to_string(),
+        ),
         // The daemon-hosted codex app-server thread lane.
         substrate: Some("thread".into()),
         name: name.into(),

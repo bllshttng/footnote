@@ -12,6 +12,7 @@
 //! attribution owners); this module never reads state files or the network.
 
 use serde_json::{json, Map, Value};
+use std::path::Path;
 
 const SLOT_LANE_FIELDS: [&str; 9] = [
     "provider",
@@ -709,7 +710,7 @@ fn states_leg(payload: &Value) -> Value {
     let on_unknown = policy_raw("on_unknown", "allow");
     // The lane a spawn would take right now: the same walk a dispatch runs,
     // node-less, so the preview can never disagree with the gate.
-    let walk_verdict = |payload: &Value| -> (Value, &'static str) {
+    let walk_verdict = |payload: &Value| -> (Value, &'static str, Value) {
         let mut slot_payload = payload.clone();
         if let Some(obj) = slot_payload.as_object_mut() {
             obj.remove("mode");
@@ -720,23 +721,100 @@ fn states_leg(payload: &Value) -> Value {
             .and_then(|c| c.get("lane_rung"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        if !lane_rung.is_empty() {
+        // The verdict names WHY nothing is placed: a policy refusal is a
+        // hold, never "exhausted", and capacity is held, not broken.
+        let routing = if !lane_rung.is_empty() {
+            "armed"
+        } else {
+            match slot_out.get("reason_kind").and_then(Value::as_str) {
+                Some("policy-refusal") => "policy-held",
+                Some("capacity-queue") | Some("capacity-exhausted") => "capacity-held",
+                _ => "unarmed",
+            }
+        };
+        let mut facts = json!({});
+        if let Some(obj) = facts.as_object_mut() {
+            let pol = candidate.and_then(|c| c.get("policy"));
+            let get = |k: &str| {
+                pol.and_then(|p| p.get(k))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let (wk, oa, src) = (get("work_kind"), get("operator_access"), get("source"));
+            // On a hold the decision carries no candidate policy: surface the
+            // access filter from the payload's own policy block instead, so a
+            // held readout still names the access that held it.
+            let (oa, src) = if oa.is_empty() {
+                (
+                    payload
+                        .get("policy")
+                        .and_then(|p| p.get("operator_access"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    if payload
+                        .get("policy")
+                        .and_then(|p| p.get("enforce_inventory"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        "config routing.enforce_inventory".to_string()
+                    } else {
+                        String::new()
+                    },
+                )
+            } else {
+                (oa, src)
+            };
+            if !wk.is_empty() {
+                obj.insert("work_kind".into(), json!(wk));
+            }
+            if !oa.is_empty() {
+                obj.insert("operator_access".into(), json!(oa));
+                if !src.is_empty() {
+                    obj.insert("policy_source".into(), json!(src));
+                }
+            }
+            let skips: Vec<Value> = slot_out
+                .get("chain")
+                .and_then(Value::as_array)
+                .map(|c| {
+                    c.iter()
+                        .filter(|l| l.as_str().map_or(false, |s| s.starts_with("slot skip ")))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !skips.is_empty() {
+                obj.insert("skipped".into(), Value::Array(skips));
+            }
+        }
+        let would_take = if !lane_rung.is_empty() {
             let lane = candidate
                 .and_then(|c| c.get("lane"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            (json!(format!("{lane_rung} {lane}")), "armed")
+            json!(format!("{lane_rung} {lane}"))
         } else {
-            let terminal = slot_out
+            slot_out
                 .get("chain")
                 .and_then(Value::as_array)
                 .and_then(|c| c.last())
                 .cloned()
-                .unwrap_or(json!(""));
-            (terminal, "unarmed")
-        }
+                .unwrap_or(json!(""))
+        };
+        (would_take, routing, facts)
     };
-    let (would_take, routing) = walk_verdict(payload);
+    let (would_take, routing, facts) = walk_verdict(payload);
+    let with_facts = |mut out: Value| -> Value {
+        if let (Some(obj), Some(f)) = (out.as_object_mut(), facts.as_object()) {
+            for (k, v) in f {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        out
+    };
     if let Some(bd) = profile
         .get("by_difficulty")
         .and_then(Value::as_object)
@@ -756,12 +834,12 @@ fn states_leg(payload: &Value) -> Value {
                     chain.push(json!(format!(
                         "slot=config {rung_base}.by_difficulty.{diff_key} has unknown field {key:?}"
                     )));
-                    return json!({
+                    return with_facts(json!({
                         "status": "states", "lane_states": [], "chain": chain,
                         "on_exhausted": on_exhausted, "on_low": on_low,
                         "on_unknown": on_unknown,
                         "would_take": would_take, "routing": routing,
-                    });
+                    }));
                 }
             }
             if let Some(ovl_lanes) = ovl.get("lanes") {
@@ -771,12 +849,13 @@ fn states_leg(payload: &Value) -> Value {
                         chain.push(json!(format!(
                             "slot=config {rung_base}.by_difficulty.{diff_key}.lanes must be a non-empty list when declared"
                         )));
-                        return json!({
-                            "status": "states", "lane_states": [], "chain": chain,
+                        return with_facts(json!({
+                            "status": "states", "lane_states": [],
+                            "chain": chain,
                             "on_exhausted": on_exhausted, "on_low": on_low,
                             "on_unknown": on_unknown,
                             "would_take": would_take, "routing": routing,
-                        });
+                        }));
                     }
                 }
             }
@@ -801,10 +880,10 @@ fn states_leg(payload: &Value) -> Value {
         } else {
             json!("no lanes; no inventory; harness default")
         };
-        return json!({
+        return with_facts(json!({
             "status": "states", "lane_states": [], "chain": chain,
-            "would_take": would_take, "routing": "unarmed",
-        });
+            "would_take": would_take, "routing": routing,
+        }));
     }
     if let Some(reason) = diff_note {
         prefix.push(json!(format!("slot note {rung_base} {reason}")));
@@ -818,12 +897,12 @@ fn states_leg(payload: &Value) -> Value {
         Ok(f) => f,
         Err(line) => {
             chain.push(json!(line));
-            return json!({
+            return with_facts(json!({
                 "status": "states", "lane_states": [], "chain": chain,
                 "on_exhausted": on_exhausted, "on_low": on_low,
                 "on_unknown": on_unknown,
                 "would_take": would_take, "routing": routing,
-            });
+            }));
         }
     };
     let mut lane_states = Vec::new();
@@ -872,7 +951,7 @@ fn states_leg(payload: &Value) -> Value {
         lane_states.push(entry);
     }
     chain.extend(prefix);
-    json!({
+    with_facts(json!({
         "status": "states",
         "lane_states": lane_states,
         "chain": chain,
@@ -881,7 +960,7 @@ fn states_leg(payload: &Value) -> Value {
         "on_unknown": on_unknown,
         "would_take": would_take,
         "routing": routing,
-    })
+    }))
 }
 
 /// The resolver core: payload in, `{status, candidate, chain}` out.
@@ -897,7 +976,8 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
     let rung_base = payload
         .get("rung_base")
         .and_then(Value::as_str)
-        .unwrap_or("agents.profiles");
+        .unwrap_or("agents.profiles")
+        .to_string();
     let profile = payload.get("profile").cloned().unwrap_or(Value::Null);
     let capacity = payload.get("capacity").cloned().unwrap_or(json!({}));
     let gate_bypassed = payload
@@ -916,7 +996,77 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
         .filter(|s| !s.trim().is_empty());
     let thread_seatable = payload.get("thread_seatable").cloned().unwrap_or(json!({}));
 
-    let lanes_raw_value = payload.get("lanes_raw").cloned().unwrap_or(json!([]));
+    // --- strict inventory policy ---------------------------------------------
+    // When routing.enforce_inventory is set, the effective work kind picks
+    // WHICH declared slot this dispatch walks, and only that slot's
+    // CONFIG-declared lanes can answer. The grid, the built-in fallback and
+    // the harness default are all out of the decision path; a request the
+    // slot cannot answer is a named refusal, never an ambient default.
+    let strict_policy = payload.get("policy").cloned().unwrap_or(json!({}));
+    let enforce = strict_policy
+        .get("enforce_inventory")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut strict_ctx: Option<(String, String)> = None; // (operator_access, slot verb)
+    let mut rung_base = rung_base;
+    let mut profile = profile;
+    let mut lanes_raw_value = payload.get("lanes_raw").cloned().unwrap_or(json!([]));
+    if enforce {
+        let operator_access = strict_policy
+            .get("operator_access")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+        if !["local", "remote", "unknown"].contains(&operator_access.as_str()) {
+            chain.push(json!(format!(
+                "slot=config routing.operator_access {operator_access:?} is not local|remote|unknown"
+            )));
+            return refused_decision(
+                chain,
+                "policy-config-invalid",
+                "routing.operator_access is not local|remote|unknown",
+            );
+        }
+        let work_verb = payload
+            .get("work_verb")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| rung_base.trim_start_matches("agents.profiles.").to_string());
+        let plan_path = payload
+            .get("node")
+            .and_then(|n| n.get("plan_path"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let (slot_verb, note) = effective_work_kind(&work_verb, !plan_path.trim().is_empty());
+        if let Some(note) = note {
+            chain.push(json!(note));
+        }
+        let slot = payload
+            .get("slot_by_verb")
+            .and_then(Value::as_object)
+            .and_then(|s| s.get(slot_verb.as_str()));
+        match slot {
+            Some(s) => {
+                rung_base = s
+                    .get("rung_base")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or(&format!("agents.profiles.{slot_verb}"))
+                    .to_string();
+                profile = s.get("profile").cloned().unwrap_or(json!({}));
+                lanes_raw_value = s.get("lanes_raw").cloned().unwrap_or(json!([]));
+            }
+            None => {
+                rung_base = format!("agents.profiles.{slot_verb}");
+                profile = json!({});
+                lanes_raw_value = json!([]);
+            }
+        }
+        strict_ctx = Some((operator_access, slot_verb));
+    }
     let by_difficulty = profile.get("by_difficulty").cloned().unwrap_or(json!({}));
     let by_difficulty_obj = by_difficulty.as_object();
 
@@ -990,7 +1140,18 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
     if lanes_arr.is_empty() {
         // A lane-less verb grids instead: the model axis reads occupied there
         // and the grid stands down; an explicit model pin never reaches the
-        // lanes here, so the grid's own occupied flag governs.
+        // lanes here, so the grid's own occupied flag governs. Strict routing
+        // has no grid: an empty effective slot is the named refusal.
+        if strict_ctx.is_some() {
+            chain.push(json!(format!(
+                "slot=strict-refusal slot {rung_base} declares no lanes; strict routing refuses the harness default"
+            )));
+            return refused_decision(
+                chain,
+                "policy-no-declared-slot",
+                "the effective work-kind slot declares no lanes",
+            );
+        }
         chain.push(json!(format!(
             "slot {rung_base} has no lanes; grid over inventory"
         )));
@@ -1002,16 +1163,18 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
             chain.push(json!("grid=model-axis-occupied"));
             return none(chain);
         }
-        return grid_leg(&payload, rung_base, &mut chain);
+        return grid_leg(&payload, &rung_base, &mut chain);
     }
 
     // An explicit model pin outranks the lanes (operator authority); it never
     // borrows a lane's harness or capacity. Config defaults do NOT outrank
-    // lanes; only a typed flag does.
-    if payload
-        .get("explicit_model")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    // lanes; only a typed flag does. Strict routing instead qualifies the
+    // explicit coordinate against the effective slot's membership.
+    if strict_ctx.is_none()
+        && payload
+            .get("explicit_model")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     {
         chain.push(json!(
             "slot=model-pin-override (an explicit model outranks the lanes)"
@@ -1062,7 +1225,7 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let (plan, rows, fields_by_rung) = match fold(rung_base, &lanes_arr, &declared_rows) {
+    let (plan, rows, fields_by_rung) = match fold(&rung_base, &lanes_arr, &declared_rows) {
         Ok(f) => f,
         Err(line) => {
             chain.push(json!(line));
@@ -1091,8 +1254,70 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
         .cloned()
         .unwrap_or_default();
 
+    // Strict: an explicit coordinate is a CONSTRAINT on the slot's membership,
+    // never a bypass. The walk keeps only the lanes naming that exact
+    // coordinate; a coordinate no row names is the named refusal.
+    let mut plan = plan;
+    if strict_ctx.is_some() {
+        let explicit_model_name = payload
+            .get("explicit_model_value")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let explicit_route_name = payload
+            .get("explicit_route_value")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(m) = &explicit_model_name {
+            let member = plan.iter().any(|(_, rn)| {
+                rows.get(rn).map(|r| row_value(r, "model")).as_deref() == Some(m.as_str())
+            });
+            if !member {
+                chain.push(json!(format!(
+                    "slot=strict-refusal explicit model {m:?} is not in slot {rung_base}'s declared lanes"
+                )));
+                return refused_decision(
+                    chain,
+                    "policy-coordinate-not-in-slot",
+                    "the explicit model is not in the effective slot's declared lanes",
+                );
+            }
+        }
+        if let Some(rt) = &explicit_route_name {
+            let member = plan.iter().any(|(_, rn)| {
+                rows.get(rn).map(|r| row_value(r, "route")).as_deref() == Some(rt.as_str())
+            });
+            if !member {
+                chain.push(json!(format!(
+                    "slot=strict-refusal explicit route {rt:?} is not in slot {rung_base}'s declared lanes"
+                )));
+                return refused_decision(
+                    chain,
+                    "policy-coordinate-not-in-slot",
+                    "the explicit route is not in the effective slot's declared lanes",
+                );
+            }
+        }
+        if explicit_model_name.is_some() || explicit_route_name.is_some() {
+            plan.retain(|(_, rn)| {
+                let r = rows.get(rn);
+                let model_ok = explicit_model_name
+                    .as_ref()
+                    .map(|m| r.map(|row| row_value(row, "model")).as_deref() == Some(m.as_str()));
+                let route_ok = explicit_route_name
+                    .as_ref()
+                    .map(|rt| r.map(|row| row_value(row, "route")).as_deref() == Some(rt.as_str()));
+                model_ok.unwrap_or(true) && route_ok.unwrap_or(true)
+            });
+        }
+    }
+
     let mut demoted: Vec<(usize, String, String, String)> = Vec::new();
     let mut identity_skips: Vec<String> = Vec::new();
+    let mut policy_skips: usize = 0;
     let mut resets_seen: Vec<f64> = Vec::new();
 
     for (index, (rung, row_name)) in plan.iter().enumerate() {
@@ -1122,6 +1347,49 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
         }
         let route = row_value(&row, "route");
         let account = row_value(&row, "account");
+        // Strict: native view qualification. Under remote or unknown, only a
+        // row whose operator_view names the harness's native view qualifies; a
+        // label that contradicts the row's own coordinate refuses outright.
+        if let Some((access, _slot_v)) = &strict_ctx {
+            let view = row_value(&row, "operator_view");
+            let native = native_view_for(&harness);
+            // A native view label must name the harness's native view AND a
+            // row with no vendor route: a vendor lane is by definition not the
+            // native coordinate, so the label contradicts the row itself.
+            let contradictory =
+                !view.is_empty() && (native != Some(view.as_str()) || !route.is_empty());
+            if contradictory {
+                chain.push(json!(format!(
+                    "slot=config {rung} row '{row_name}' labels operator_view={view:?} but its coordinate (harness {harness:?}, route {route:?}) is not that native view"
+                )));
+                return refused_decision(
+                    chain,
+                    "policy-view-contradiction",
+                    "an operator_view label contradicts the row's own harness/route coordinate",
+                );
+            }
+            if access != "local" {
+                match native {
+                    None => {
+                        chain.push(json!(format!(
+                            "slot skip {} no native view kind for harness {harness:?} (operator_access={access})",
+                            lane_label(rung, row_name),
+                        )));
+                        policy_skips += 1;
+                        continue;
+                    }
+                    Some(nv) if view != nv => {
+                        chain.push(json!(format!(
+                            "slot skip {} no verified native view (operator_access={access})",
+                            lane_label(rung, row_name),
+                        )));
+                        policy_skips += 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+        }
         let vendor = route
             .split(',')
             .next()
@@ -1283,6 +1551,7 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
             &state,
             &window,
             "",
+            strict_ctx.as_ref(),
         );
     }
 
@@ -1298,7 +1567,25 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
             "low",
             &window,
             "no healthy lane; on_low=prefer_healthy",
+            strict_ctx.as_ref(),
         );
+    }
+
+    // Strict: every lane in the effective slot was refused on policy alone
+    // (no verified native view, or a harness with no native view kind). That
+    // is a refusal naming its boundary, not a capacity queue with a fake
+    // reset time.
+    if let Some((access, _slot_v)) = &strict_ctx {
+        if policy_skips > 0 && policy_skips == plan.len() {
+            chain.push(json!(format!(
+                "slot=strict-refusal every lane in {rung_base} lacked the required operator view (operator_access={access})"
+            )));
+            return refused_decision(
+                chain,
+                "policy-no-qualified-lane",
+                "the operator_access filter left no lane in the effective slot",
+            );
+        }
     }
 
     if explicit_lane || gate_bypassed {
@@ -1330,10 +1617,10 @@ pub fn resolve_slot_payload(payload: &Value) -> Value {
             .map(|r| format!(" retry_at={}", r as i64))
             .unwrap_or_default();
         chain.push(json!(format!("slot=exhausted queue{retry}")));
-        return none(chain);
+        return queue_decision(chain);
     }
     chain.push(json!(format!("slot=exhausted {on_exhausted}")));
-    none(chain)
+    exhausted_decision(chain)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1348,6 +1635,7 @@ fn pick(
     state: &str,
     window: &str,
     note: &str,
+    strict: Option<&(String, String)>,
 ) -> Value {
     let mut line = format!("slot {} capacity={state}", lane_label(rung, row_name),);
     if !window.is_empty() {
@@ -1386,6 +1674,16 @@ fn pick(
     candidate.insert("lane_rung".into(), json!(rung));
     candidate.insert("lane_index".into(), json!(index));
     candidate.insert("lane_fields".into(), Value::Object(lane_fields));
+    if let Some((access, slot_v)) = strict {
+        candidate.insert(
+            "policy".into(),
+            json!({
+                "source": "config routing.enforce_inventory",
+                "work_kind": slot_v,
+                "operator_access": access,
+            }),
+        );
+    }
     if !effort.is_empty() {
         candidate.insert("effort".into(), json!(effort));
     }
@@ -1414,6 +1712,58 @@ fn none(chain: Vec<Value>) -> Value {
     json!({"status": "none", "candidate": Value::Null, "chain": chain})
 }
 
+/// Capacity terminals keep the receipt vocabulary verbatim while naming their
+/// kind for machine consumers.
+fn queue_decision(chain: Vec<Value>) -> Value {
+    json!({"status": "none", "candidate": Value::Null, "reason_kind": "capacity-queue", "chain": chain})
+}
+
+fn exhausted_decision(chain: Vec<Value>) -> Value {
+    json!({"status": "none", "candidate": Value::Null, "reason_kind": "capacity-exhausted", "chain": chain})
+}
+
+/// A strict-policy refusal: the decision path is named, the candidate is
+/// Null, and `reason_kind` tells machine consumers this apart from a
+/// capacity queue or an unarmed legacy no-candidate.
+fn refused_decision(chain: Vec<Value>, kind: &str, reason: &str) -> Value {
+    json!({
+        "status": "none",
+        "candidate": Value::Null,
+        "reason_kind": "policy-refusal",
+        "refusal": kind,
+        "reason": reason,
+        "chain": chain,
+    })
+}
+
+/// The native operator view a harness can show, if the harness has one on
+/// this machine. Any other harness has no native view kind, so its rows can
+/// never qualify while the operator is remote or unknown.
+fn native_view_for(harness: &str) -> Option<&'static str> {
+    match harness {
+        "claude" => Some("claude-native"),
+        "codex" => Some("codex-native"),
+        _ => None,
+    }
+}
+
+/// Rust owns the work-kind ruling: a planless target
+/// performs planning and qualifies against the blueprint slot, while the
+/// command stays target. A planned target, think, blueprint, review, crown
+/// and every ops stage qualify against their own slots.
+fn effective_work_kind(work_verb: &str, plan_present: bool) -> (String, Option<String>) {
+    let verb = work_verb.trim().to_lowercase();
+    match verb.as_str() {
+        "target" if !plan_present => (
+            "blueprint".to_string(),
+            Some(format!(
+                "slot note agents.profiles.target planless target -> blueprint eligibility (command stays target)"
+            )),
+        ),
+        other => (other.to_string(), None),
+    }
+}
+
 /// Print stdout/stderr and return the exit code. Used by `bin/client.rs`.
 pub fn run_route_slot(args: &[String]) -> i32 {
     let (code, stdout, stderr) = run_route_slot_capture(args);
@@ -1428,6 +1778,9 @@ pub fn run_route_slot(args: &[String]) -> i32 {
 
 /// Test-friendly variant: returns (exit_code, stdout, stderr) without printing.
 pub fn run_route_slot_capture(args: &[String]) -> (i32, String, String) {
+    if args.first().map(String::as_str) == Some("audit") {
+        return run_route_slot_audit(&args[1..]);
+    }
     let payload: Value = if let Some(path) = args.first() {
         match std::fs::read_to_string(path) {
             Ok(text) => match serde_json::from_str(&text) {
@@ -1466,6 +1819,522 @@ pub fn run_route_slot_capture(args: &[String]) -> (i32, String, String) {
     };
     let out = resolve_slot_payload(&payload);
     (0, format!("{out}\n"), String::new())
+}
+
+/// `route-slot audit`: read-only completion evidence for the routing policy
+/// (x-90a9). The snapshot loader is Python (`fno config route
+/// audit-snapshot`), which reads config, registry, journal and decision
+/// records through their established readers; the VERDICT is made here, the
+/// same owner that qualifies every launch, and repeats read exactly.
+///
+/// Exit 0 prints ROUTING_POLICY_VERIFIED and names each verified session.
+/// Anything missing, stale, contradictory or merely simulated exits 1 and
+/// names the boundary that stopped it.
+pub fn run_route_slot_audit(args: &[String]) -> (i32, String, String) {
+    let mut project = String::new();
+    let mut node = String::new();
+    let mut since = String::from("30m");
+    let mut json_out = false;
+    let mut snapshot_path: Option<&str> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--project" => project = it.next().cloned().unwrap_or_default(),
+            "--node" => node = it.next().cloned().unwrap_or_default(),
+            "--since" => since = it.next().cloned().unwrap_or_else(|| "30m".into()),
+            "--json" => json_out = true,
+            "--snapshot" => snapshot_path = it.next().map(String::as_str),
+            other => {
+                return (
+                    2,
+                    String::new(),
+                    format!("route-slot audit: unknown argument {other:?}\n"),
+                )
+            }
+        }
+    }
+    let snapshot_text = match snapshot_path {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => {
+                return (
+                    1,
+                    String::new(),
+                    format!("route-slot audit: cannot read snapshot {path}: {e}\n"),
+                )
+            }
+        },
+        None => {
+            // No snapshot handed in: load it natively. Config facts ride the
+            // public inventory surface (the fingerprint algorithm belongs to
+            // the Python config reader); sessions come from the machine
+            // stores this binary already owns.
+            match load_audit_snapshot(&project, &node, &since) {
+                Ok(v) => serde_json::to_string(&v).unwrap_or_default(),
+                Err(e) => return (1, String::new(), format!("route-slot audit: {e}\n")),
+            }
+        }
+    };
+    let snapshot: Value = match serde_json::from_str(&snapshot_text) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                1,
+                String::new(),
+                format!("route-slot audit: bad snapshot: {e}\n"),
+            )
+        }
+    };
+    let (report, code) = audit_verify(&snapshot);
+    if json_out {
+        (code, format!("{report}\n"), String::new())
+    } else {
+        let verdict = report["verdict"].as_str().unwrap_or("UNKNOWN");
+        let mut text = String::new();
+        if code == 0 {
+            text.push_str("ROUTING_POLICY_VERIFIED\n");
+        }
+        text.push_str(&format!("verdict: {verdict}\n"));
+        if let Some(sessions) = report["sessions"].as_array() {
+            for s in sessions {
+                text.push_str(&format!(
+                    "  session {} {} account={} model={:?} basis={:?}\n",
+                    s["session_id"].as_str().unwrap_or("-"),
+                    s["harness"].as_str().unwrap_or("-"),
+                    s["account"].as_str().unwrap_or("-"),
+                    s["model"].as_str().unwrap_or(""),
+                    s["model_basis"].as_str().unwrap_or(""),
+                ));
+            }
+        }
+        if let Some(b) = report["boundaries"].as_array() {
+            for line in b {
+                text.push_str(&format!(
+                    "  boundary {}: {}\n",
+                    line["boundary"].as_str().unwrap_or("-"),
+                    line["detail"].as_str().unwrap_or(""),
+                ));
+            }
+        }
+        (code, text, String::new())
+    }
+}
+
+/// The pure verdict over one bounded snapshot. No I/O: the same snapshot in,
+/// the same verdict out. Every boundary names the missing evidence class from
+/// the plan, so a negative audit is diagnostic, not just non-zero.
+pub fn audit_verify(snapshot: &Value) -> (Value, i32) {
+    let mut boundaries: Vec<Value> = Vec::new();
+    let policy = snapshot.get("policy").cloned().unwrap_or(json!({}));
+    let enforced = policy
+        .get("enforce_inventory")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let fingerprint = snapshot
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if !enforced {
+        boundaries.push(json!({
+            "boundary": "routing-not-enforced",
+            "detail": "config routing.enforce_inventory is off; no armed policy to verify",
+        }));
+    }
+    let sessions = snapshot
+        .get("sessions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if sessions.is_empty() {
+        boundaries.push(json!({
+            "boundary": "no-launch",
+            "detail": "no session for this node inside the window; a preview alone verifies nothing",
+        }));
+    }
+    let mut verified: Vec<Value> = Vec::new();
+    for s in &sessions {
+        let sid = s.get("session_id").and_then(Value::as_str).unwrap_or("");
+        if sid.is_empty() {
+            boundaries.push(json!({
+                "boundary": "missing-session-id",
+                "detail": s.get("name").and_then(Value::as_str).unwrap_or("?"),
+            }));
+            continue;
+        }
+        let account = s.get("account").and_then(Value::as_str).unwrap_or("");
+        if account.is_empty() {
+            boundaries.push(json!({
+                "boundary": "missing-account-identity",
+                "detail": format!("session {sid} names no account record"),
+            }));
+            continue;
+        }
+        let receipt_fp = s
+            .get("receipt_fingerprint")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if receipt_fp.is_empty() {
+            boundaries.push(json!({
+                "boundary": "no-receipt",
+                "detail": format!("session {sid} has no spawn decision receipt in the journal"),
+            }));
+            continue;
+        }
+        if receipt_fp != fingerprint {
+            boundaries.push(json!({
+                "boundary": "stale-receipt",
+                "detail": format!(
+                    "session {sid} launched on fingerprint {receipt_fp}, config is now {fingerprint}"
+                ),
+            }));
+            continue;
+        }
+        let model = s.get("model").and_then(Value::as_str).unwrap_or("");
+        let basis = s.get("model_basis").and_then(Value::as_str).unwrap_or("");
+        if model.is_empty() || basis != "verified" {
+            boundaries.push(json!({
+                "boundary": "unobserved-requested-model",
+                "detail": format!(
+                    "session {sid} model {model:?} carries basis {basis:?}; a requested label is not an observation"
+                ),
+            }));
+            continue;
+        }
+        match view_evidence(s, sid, &fingerprint) {
+            Ok(()) => verified.push(json!({
+                "session_id": sid,
+                "harness": s.get("harness").and_then(Value::as_str).unwrap_or(""),
+                "account": account,
+                "model": model,
+                "model_basis": basis,
+            })),
+            Err(boundary) => boundaries.push(boundary),
+        }
+    }
+    if verified.is_empty() && !boundaries.is_empty() {
+        let report = json!({"verdict": "ROUTING_POLICY_INCOMPLETE", "boundaries": boundaries});
+        return (report, 1);
+    }
+    if boundaries.is_empty() {
+        let report = json!({"verdict": "ROUTING_POLICY_VERIFIED", "sessions": verified});
+        return (report, 0);
+    }
+    // Some sessions verified, some did not: the incomplete ones keep the
+    // audit from a clean pass, and their boundaries are the answer.
+    let report = json!({
+        "verdict": "ROUTING_POLICY_INCOMPLETE",
+        "sessions": verified,
+        "boundaries": boundaries,
+    });
+    (report, 1)
+}
+
+/// The operator-view record for one session: an existing live decision under
+/// subject `routing-view:<session-id>` whose decision text is JSON carrying
+/// the view, the config fingerprint it was confirmed under, and the session
+/// it names. A worker or peer assertion is not operator confirmation; this
+/// record exists only because the operator recorded it.
+fn view_evidence(session: &Value, sid: &str, fingerprint: &str) -> Result<(), Value> {
+    let records = session
+        .get("view_records")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let wanted_subject = format!("routing-view:{sid}");
+    let record = records
+        .iter()
+        .find(|r| r.get("subject").and_then(Value::as_str) == Some(wanted_subject.as_str()));
+    let record = match record {
+        None => {
+            return Err(json!({
+                "boundary": "missing-operator-view",
+                "detail": format!(
+                    "no decision record under routing-view:{sid}; \
+                     the operator must confirm that exact session in the named view"
+                ),
+            }))
+        }
+        Some(r) => r,
+    };
+    let lifecycle = record
+        .get("lifecycle")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if lifecycle != "live" {
+        return Err(json!({
+            "boundary": "view-record-not-live",
+            "detail": format!("routing-view:{sid} is {lifecycle:?}; a retracted or superseded confirmation verifies nothing"),
+        }));
+    }
+    let text = record.get("decision").and_then(Value::as_str).unwrap_or("");
+    let body: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(json!({
+                "boundary": "view-record-unparseable",
+                "detail": format!("routing-view:{sid} decision text is not the JSON evidence shape"),
+            }))
+        }
+    };
+    let view = body.get("view").and_then(Value::as_str).unwrap_or("");
+    if view != "claude-native" && view != "codex-native" {
+        return Err(json!({
+            "boundary": "view-record-bad-view",
+            "detail": format!("routing-view:{sid} names view {view:?}; expected claude-native or codex-native"),
+        }));
+    }
+    if body.get("fingerprint").and_then(Value::as_str) != Some(fingerprint) {
+        return Err(json!({
+            "boundary": "view-fingerprint-mismatch",
+            "detail": format!(
+                "routing-view:{sid} was confirmed under a different configuration fingerprint than the current one"
+            ),
+        }));
+    }
+    let recorded_sid = body.get("session_id").and_then(Value::as_str).unwrap_or("");
+    if recorded_sid != sid {
+        return Err(json!({
+            "boundary": "view-session-mismatch",
+            "detail": format!("routing-view record names session {recorded_sid:?}, not {sid:?}"),
+        }));
+    }
+    Ok(())
+}
+
+/// Config facts (fingerprint, policy) come from the public inventory surface;
+/// everything else loads from the machine stores. A missing front door is an
+/// incomplete terminal, never a pass.
+fn load_audit_snapshot(project: &str, node: &str, since: &str) -> Result<Value, String> {
+    let inv = std::process::Command::new("fno")
+        .args(["config", "route", "inventory", "--json"])
+        .output()
+        .map_err(|e| format!("no fno front door for config facts: {e}"))?;
+    if !inv.status.success() {
+        return Err("inventory read failed for config facts".to_string());
+    }
+    let facts: Value =
+        serde_json::from_slice(&inv.stdout).map_err(|e| format!("bad inventory json: {e}"))?;
+    let since_seconds = parse_since_seconds(since)?;
+    let home = crate::paths::AgentsHome::from_env();
+    let state_root = home
+        .root()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| home.root().to_path_buf());
+    audit_load_snapshot(
+        &facts,
+        &state_root,
+        &home.registry_json(),
+        project,
+        node,
+        since_seconds,
+    )
+}
+
+/// The evidence window: `30m`, `2h`, `7d`, or bare seconds.
+fn parse_since_seconds(text: &str) -> Result<i64, String> {
+    let text = text.trim();
+    let units: [(&str, i64); 4] = [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)];
+    for (suffix, seconds) in units {
+        if let Some(value) = text
+            .strip_suffix(suffix)
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            if text.len() > suffix.len() {
+                return Ok(value * seconds);
+            }
+        }
+    }
+    text.parse::<i64>()
+        .map_err(|_| format!("--since must look like 30m, 2h or 7d: {text:?}"))
+}
+
+/// The native snapshot loader. Config facts arrive in `config_facts` (the
+/// caller execs the public inventory surface for them: the fingerprint's
+/// algorithm belongs to the Python config reader, and duplicating it here
+/// would fork the one answer the receipts carry). Sessions, receipts and
+/// view records load from the machine stores this binary already reads.
+///
+/// Pure over its inputs: the same files and facts in, the same snapshot out.
+pub(crate) fn audit_load_snapshot(
+    config_facts: &Value,
+    state_root: &Path,
+    registry_path: &Path,
+    project: &str,
+    node: &str,
+    since_seconds: i64,
+) -> Result<Value, String> {
+    use std::collections::BTreeMap;
+
+    let fingerprint = config_facts
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let policy = config_facts.get("policy").cloned().unwrap_or(json!({}));
+    let cutoff = chrono::Utc::now() - chrono::Duration::seconds(since_seconds);
+    let within = |ts: &str| -> bool {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .map(|t| t.with_timezone(&chrono::Utc) >= cutoff)
+            .unwrap_or(false)
+    };
+
+    // Spawn decision receipts: the newest fingerprint per spawn name inside
+    // the window.
+    let mut receipts: BTreeMap<String, String> = BTreeMap::new();
+    match std::fs::read_to_string(state_root.join("events.jsonl")) {
+        Ok(text) => {
+            for line in text.lines() {
+                let Ok(row) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                if row.get("kind").and_then(Value::as_str) != Some("spawn_defaults_applied") {
+                    continue;
+                }
+                if !within(row.get("ts").and_then(Value::as_str).unwrap_or("")) {
+                    continue;
+                }
+                let name = row.get("name").and_then(Value::as_str).unwrap_or("");
+                let fp = row.get("fingerprint").and_then(Value::as_str).unwrap_or("");
+                if !name.is_empty() && !fp.is_empty() {
+                    receipts.insert(name.to_string(), fp.to_string());
+                }
+            }
+        }
+        Err(_) => {} // no journal: no receipts, the verifier names the boundary
+    }
+
+    // View records: one row per subject prefix routing-view:. Retirement
+    // (retraction or a superseding ruling) is resolved in a second pass over
+    // the collected rows, so row order can never leave a withdrawn
+    // confirmation reading as live. The Python decisions reader stays the
+    // format owner; this is a consumer-side consistency read.
+    let mut view_rows: BTreeMap<String, (String, String, String)> = BTreeMap::new(); // subject -> (decision, ts, decision_id)
+    let mut retired: BTreeMap<String, ()> = BTreeMap::new();
+    let mut candidates: Vec<(String, String, String, String)> = Vec::new(); // subject, decision, ts, decision_id
+    match std::fs::read_to_string(state_root.join("decisions.jsonl")) {
+        Ok(text) => {
+            for line in text.lines() {
+                let Ok(row) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
+                let data = row.get("data").cloned().unwrap_or(json!({}));
+                if kind == "decision_retracted" {
+                    if let Some(target) = data.get("target_decision_id").and_then(Value::as_str) {
+                        if !target.is_empty() {
+                            retired.insert(target.to_string(), ());
+                        }
+                    }
+                    continue;
+                }
+                let subject = data.get("subject").and_then(Value::as_str).unwrap_or("");
+                if !subject.starts_with("routing-view:") {
+                    continue;
+                }
+                // A ruling naming another in `supersedes` retires it, the
+                // same derivation the Python decisions reader applies.
+                if let Some(superseded) = data.get("supersedes").and_then(Value::as_str) {
+                    if !superseded.is_empty() {
+                        retired.insert(superseded.to_string(), ());
+                    }
+                }
+                candidates.push((
+                    subject.to_string(),
+                    data.get("decision")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    row.get("ts")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    data.get("decision_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                ));
+            }
+        }
+        Err(_) => {} // no index: no view records, the verifier names the boundary
+    }
+    for (subject, decision, ts, did) in candidates {
+        if retired.contains_key(did.as_str()) {
+            continue;
+        }
+        view_rows.insert(subject, (decision, ts, did));
+    }
+
+    // Sessions: registry rows naming the node inside the window.
+    let mut sessions: Vec<Value> = Vec::new();
+    if node.is_empty() {
+        return Ok(json!({}));
+    }
+    match crate::state::load_registry(registry_path) {
+        Ok(registry) => {
+            for entry in &registry.entries {
+                if entry.node.as_deref() != Some(node) {
+                    continue;
+                }
+                let root = if entry.project_root.is_empty() {
+                    entry.cwd.as_str()
+                } else {
+                    entry.project_root.as_str()
+                };
+                if !project.is_empty() && !root.starts_with(project) {
+                    continue;
+                }
+                if !within(&entry.created_at) {
+                    continue;
+                }
+                let sid = entry
+                    .harness_session_id
+                    .clone()
+                    .or_else(|| entry.fno_id.clone())
+                    .unwrap_or_default();
+                let name = entry.name.clone();
+                let view_records: Vec<Value> = view_rows
+                    .iter()
+                    .filter(|(subject, _)| subject.as_str() == &format!("routing-view:{sid}"))
+                    .filter(|(_, (decision, _, did))| {
+                        // A retracted or superseded confirmation verifies
+                        // nothing; the Python reader owns the full lifecycle.
+                        !retired.contains_key(did.as_str()) && !decision.is_empty()
+                    })
+                    .map(|(subject, (decision, ts, did))| {
+                        json!({
+                            "subject": subject,
+                            "decision": decision,
+                            "ts": ts,
+                            "decision_id": did.to_string(),
+                            "lifecycle": "live",
+                        })
+                    })
+                    .collect();
+                sessions.push(json!({
+                    "session_id": sid,
+                    "name": name,
+                    "harness": entry.harness.clone(),
+                    "model": entry.model.clone().unwrap_or_default(),
+                    "model_basis": entry.model_basis.clone().unwrap_or_default(),
+                    "requested_model": entry.requested_model.clone().unwrap_or_default(),
+                    "account": entry.account_record_id.clone().unwrap_or_default(),
+                    "created_at": entry.created_at,
+                    "receipt_fingerprint": receipts.get(&name).cloned().unwrap_or_default(),
+                    "view_records": view_records,
+                }));
+            }
+        }
+        Err(e) => return Err(format!("registry unreadable: {e}")),
+    }
+    Ok(json!({
+        "project": project,
+        "node": node,
+        "fingerprint": fingerprint,
+        "policy": policy,
+        "sessions": sessions,
+    }))
 }
 
 #[cfg(test)]
@@ -1637,7 +2506,7 @@ mod tests {
     }
 
     #[test]
-    fn states_all_lanes_exhausted_reads_unarmed_with_the_terminal() {
+    fn states_all_lanes_exhausted_reads_capacity_held_with_the_terminal() {
         let out = resolve_slot_payload(&json!({
             "mode": "states",
             "rung_base": "agents.profiles.target",
@@ -1648,8 +2517,35 @@ mod tests {
                                     "accounts": {"zai-main": "exhausted"}}},
             "profile": {"on_exhausted": "queue"},
         }));
-        assert_eq!(out["routing"], "unarmed");
+        assert_eq!(out["routing"], "capacity-held");
         assert!(out["would_take"].as_str().unwrap().contains("exhausted"));
+    }
+
+    #[test]
+    fn states_policy_refusal_reads_policy_held_with_the_reasons() {
+        // A remote operator with only unverified views: every lane is skipped
+        // by the operator_access filter. The readout must say policy-held,
+        // never "exhausted", and carry the per-lane skip reasons.
+        let out = resolve_slot_payload(&json!({
+            "mode": "states",
+            "rung_base": "agents.profiles.target",
+            "lanes_raw": ["glm-x"],
+            "declared_rows": {"glm-x": {"name": "glm-x", "harness": "claude",
+                                        "model": "glm", "route": "zai,glm"}},
+            "slot_by_verb": {"blueprint": {"rung_base": "agents.profiles.blueprint",
+                                           "lanes_raw": ["glm-x"]}},
+            "policy": {"enforce_inventory": true, "operator_access": "remote"},
+            "capacity": {"claude": {"state": "ok", "accounts": {}}},
+        }));
+        assert_eq!(out["routing"], "policy-held");
+        assert_eq!(out["operator_access"], "remote");
+        assert_eq!(out["policy_source"], "config routing.enforce_inventory");
+        let skipped = out["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0]
+            .as_str()
+            .unwrap()
+            .contains("operator_access=remote"));
     }
 
     #[test]
@@ -1867,5 +2763,431 @@ mod tests {
         assert_eq!(out["status"], "pick");
         let chain = chain_of(&out);
         assert!(chain.iter().any(|l| l.contains("provider zai at 2 of 2")));
+    }
+
+    // -------------------------------------------------------------------
+    // The strict inventory policy leg
+    // -------------------------------------------------------------------
+
+    fn strict_payload(overrides: Value) -> Value {
+        let mut base = payload(json!({
+            "policy": {"enforce_inventory": true, "operator_access": "unknown"},
+            "work_verb": "target",
+            "node": {"difficulty": "high", "priority": "p1", "plan_path": ""},
+            "slot_by_verb": {
+                "blueprint": {
+                    "rung_base": "agents.profiles.blueprint",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["opus-x"],
+                },
+                "target": {
+                    "rung_base": "agents.profiles.target",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["flash-x"],
+                },
+            },
+        }));
+        if let (Some(base_obj), Some(ovr)) = (base.as_object_mut(), overrides.as_object()) {
+            for (k, v) in ovr {
+                base_obj.insert(k.clone(), v.clone());
+            }
+        }
+        base
+    }
+
+    #[test]
+    fn strict_planless_target_rides_the_blueprint_slot_and_names_the_work_kind() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                           "operator_view": "claude-native"},
+                "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
+                            "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+            },
+            "capacity": {"claude": {"state": "ok", "window": "w",
+                                    "accounts": {"zai-main": "ok"}, "evidence": {}, "resets": {}}},
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["model"], "claude-opus-5");
+        assert_eq!(out["candidate"]["policy"]["work_kind"], "blueprint");
+        assert_eq!(out["candidate"]["policy"]["operator_access"], "unknown");
+        assert!(
+            chain_of(&out)
+                .iter()
+                .any(|l| l
+                    .contains("planless target -> blueprint eligibility (command stays target)"))
+        );
+    }
+
+    #[test]
+    fn strict_explicit_glm_on_blueprint_work_refuses_by_name() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                           "operator_view": "claude-native"},
+            },
+            "explicit_model_value": "glm",
+        })));
+        assert_eq!(out["status"], "none");
+        assert_eq!(out["refusal"], "policy-coordinate-not-in-slot");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("slot=strict-refusal explicit model \"glm\"")));
+    }
+
+    #[test]
+    fn strict_remote_filter_skips_rows_without_a_verified_native_view() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "policy": {"enforce_inventory": true, "operator_access": "remote"},
+            "node": {"difficulty": "high", "priority": "p1", "plan_path": "/plans/p.md"},
+            "slot_by_verb": {
+                "target": {
+                    "rung_base": "agents.profiles.target",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["flash-x", "opus-x"],
+                },
+            },
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                           "operator_view": "claude-native"},
+                "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
+                            "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+            },
+            "capacity": {"claude": {"state": "ok", "window": "w",
+                                    "accounts": {"zai-main": "ok"}, "evidence": {}, "resets": {}}},
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["model"], "claude-opus-5");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("no verified native view (operator_access=remote)")));
+    }
+
+    #[test]
+    fn strict_local_admits_the_zai_lane() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "policy": {"enforce_inventory": true, "operator_access": "local"},
+            "node": {"difficulty": "high", "priority": "p1", "plan_path": "/plans/p.md"},
+            "slot_by_verb": {
+                "target": {
+                    "rung_base": "agents.profiles.target",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["flash-x"],
+                },
+            },
+            "declared_rows": {
+                "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
+                            "route": "zai/glm-5.3-flash[1m]", "account": "zai-main"},
+            },
+            "capacity": {"claude": {"state": "ok", "window": "w",
+                                    "accounts": {"zai-main": "ok"}, "evidence": {}, "resets": {}}},
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["model"], "glm");
+    }
+
+    #[test]
+    fn strict_mislabeled_native_view_refuses() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "slot_by_verb": {
+                "blueprint": {
+                    "rung_base": "agents.profiles.blueprint",
+                    "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["bad-row"],
+                },
+            },
+            "declared_rows": {
+                "bad-row": {"name": "bad-row", "harness": "claude", "model": "glm",
+                            "route": "zai/glm", "operator_view": "claude-native"},
+            },
+        })));
+        assert_eq!(out["status"], "none");
+        assert_eq!(out["refusal"], "policy-view-contradiction");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("operator_view=\"claude-native\"")));
+    }
+
+    #[test]
+    fn strict_no_declared_slot_refuses_rather_than_defaulting() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "slot_by_verb": {},
+        })));
+        assert_eq!(out["status"], "none");
+        assert_eq!(out["refusal"], "policy-no-declared-slot");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.contains("strict routing refuses the harness default")));
+    }
+
+    #[test]
+    fn strict_capacity_terminal_keeps_the_queue_vocabulary_and_kind() {
+        let out = resolve_slot_payload(&strict_payload(json!({
+            "declared_rows": {
+                "opus-x": {"name": "opus-x", "harness": "claude", "model": "claude-opus-5",
+                           "operator_view": "claude-native"},
+            },
+            "capacity": {"claude": {"state": "exhausted", "window": "lock",
+                                    "accounts": {}, "evidence": {},
+                                    "resets": {"opus": 1900000000.0}}},
+            "slot_by_verb": {
+                "blueprint": {
+                    "rung_base": "agents.profiles.blueprint",
+                    "profile": {"on_exhausted": "queue", "on_low": "prefer_healthy", "on_unknown": "allow"},
+                    "lanes_raw": ["opus-x"],
+                },
+            },
+        })));
+        assert_eq!(out["status"], "none");
+        assert_eq!(out["reason_kind"], "capacity-queue");
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l.starts_with("slot=exhausted queue")));
+    }
+
+    #[test]
+    fn audit_verifies_a_fresh_fully_evidenced_session() {
+        let snapshot = json!({
+            "fingerprint": "fp1",
+            "policy": {"enforce_inventory": true, "operator_access": "local"},
+            "sessions": [{
+                "session_id": "s1", "name": "w1", "harness": "claude",
+                "model": "glm", "model_basis": "verified",
+                "account": "zai-main",
+                "receipt_fingerprint": "fp1",
+                "view_records": [{
+                    "subject": "routing-view:s1", "lifecycle": "live",
+                    "decision": "{\"view\": \"claude-native\", \"fingerprint\": \"fp1\", \"session_id\": \"s1\"}",
+                }],
+            }],
+        });
+        let (report, code) = audit_verify(&snapshot);
+        assert_eq!(code, 0);
+        assert_eq!(report["verdict"], "ROUTING_POLICY_VERIFIED");
+        assert_eq!(report["sessions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn audit_names_the_boundary_when_only_a_preview_exists() {
+        let snapshot = json!({
+            "fingerprint": "fp1",
+            "policy": {"enforce_inventory": true, "operator_access": "local"},
+            "sessions": [],
+        });
+        let (report, code) = audit_verify(&snapshot);
+        assert_eq!(code, 1);
+        assert_eq!(report["verdict"], "ROUTING_POLICY_INCOMPLETE");
+        let names: Vec<&str> = report["boundaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["boundary"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"no-launch"));
+    }
+
+    #[test]
+    fn audit_refuses_when_the_policy_is_not_armed() {
+        let snapshot = json!({
+            "fingerprint": "fp1",
+            "policy": {"enforce_inventory": false, "operator_access": "local"},
+            "sessions": [],
+        });
+        let (report, code) = audit_verify(&snapshot);
+        assert_eq!(code, 1);
+        let names: Vec<&str> = report["boundaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["boundary"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"routing-not-enforced"));
+    }
+
+    #[test]
+    fn audit_names_each_missing_evidence_boundary() {
+        let session = |extra: Value| {
+            let mut s = json!({
+                "session_id": "s1", "name": "w1", "harness": "claude",
+                "model": "glm", "model_basis": "verified",
+                "account": "zai-main",
+                "receipt_fingerprint": "fp1",
+                "view_records": [{
+                    "subject": "routing-view:s1", "lifecycle": "live",
+                    "decision": "{\"view\": \"claude-native\", \"fingerprint\": \"fp1\", \"session_id\": \"s1\"}",
+                }],
+            });
+            if let (Some(obj), Some(e)) = (s.as_object_mut(), extra.as_object()) {
+                for (k, v) in e {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+            s
+        };
+        let snap = |sessions: Value| {
+            json!({
+                "fingerprint": "fp1",
+                "policy": {"enforce_inventory": true, "operator_access": "local"},
+                "sessions": sessions,
+            })
+        };
+        let boundaries = |report: &Value| -> Vec<String> {
+            report["boundaries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["boundary"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let mut s = session(json!({}));
+        s["account"] = json!("");
+        let (report, code) = audit_verify(&snap(json!([s])));
+        assert_eq!(code, 1);
+        assert!(boundaries(&report).contains(&"missing-account-identity".to_string()));
+
+        let mut s = session(json!({}));
+        s["receipt_fingerprint"] = json!("old");
+        let (report, code) = audit_verify(&snap(json!([s])));
+        assert_eq!(code, 1);
+        assert!(boundaries(&report).contains(&"stale-receipt".to_string()));
+
+        let mut s = session(json!({}));
+        s["model_basis"] = json!("requested");
+        let (report, code) = audit_verify(&snap(json!([s])));
+        assert_eq!(code, 1);
+        assert!(boundaries(&report).contains(&"unobserved-requested-model".to_string()));
+
+        let mut s = session(json!({}));
+        s["view_records"] = json!([]);
+        let (report, code) = audit_verify(&snap(json!([s])));
+        assert_eq!(code, 1);
+        assert!(boundaries(&report).contains(&"missing-operator-view".to_string()));
+
+        let mut s = session(json!({}));
+        s["view_records"][0]["decision"] = json!(
+            "{\"view\": \"claude-native\", \"fingerprint\": \"old\", \"session_id\": \"s1\"}"
+        );
+        let (report, code) = audit_verify(&snap(json!([s])));
+        assert_eq!(code, 1);
+        assert!(boundaries(&report).contains(&"view-fingerprint-mismatch".to_string()));
+    }
+
+    #[test]
+    fn audit_reads_a_snapshot_file_and_prints_the_marker() {
+        let snapshot = concat!(
+            r#"{"fingerprint": "fp1","#,
+            r#" "policy": {"enforce_inventory": true, "operator_access": "local"},"#,
+            r#" "sessions": [{"session_id": "s1", "name": "w1", "harness": "claude","#,
+            r#" "model": "glm", "model_basis": "verified", "account": "zai-main","#,
+            r#" "receipt_fingerprint": "fp1", "view_records": [{"subject": "routing-view:s1","#,
+            r#" "lifecycle": "live", "decision": "{\"view\": \"claude-native\", \"fingerprint\": \"fp1\", \"session_id\": \"s1\"}"}]}]}"#,
+        );
+        let dir = std::env::temp_dir().join(format!("fno-audit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("snapshot.json");
+        std::fs::write(&path, snapshot).unwrap();
+        let args: Vec<String> = vec![
+            "audit".into(),
+            "--project".into(),
+            "/tmp/proj".into(),
+            "--node".into(),
+            "x-test".into(),
+            "--json".into(),
+            "--snapshot".into(),
+            path.to_string_lossy().into_owned(),
+        ];
+        let (code, stdout, stderr) = run_route_slot_capture(&args);
+        assert_eq!(stderr, "");
+        assert_eq!(code, 0);
+        assert!(stdout.contains("ROUTING_POLICY_VERIFIED"));
+        let report: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(report["verdict"], "ROUTING_POLICY_VERIFIED");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn since_parser_reads_units_and_bare_seconds() {
+        assert_eq!(parse_since_seconds("30m").unwrap(), 1800);
+        assert_eq!(parse_since_seconds("2h").unwrap(), 7200);
+        assert_eq!(parse_since_seconds("7d").unwrap(), 604800);
+        assert_eq!(parse_since_seconds("90").unwrap(), 90);
+        assert!(parse_since_seconds("abc").is_err());
+    }
+
+    #[test]
+    fn loader_builds_sessions_from_the_machine_stores() {
+        use crate::state::{Lineage, RegistryEntry};
+
+        let dir = std::env::temp_dir().join(format!("fno-auditld-{}", std::process::id()));
+        let agents_root = dir.join("agents");
+        std::fs::create_dir_all(&agents_root).unwrap();
+        let state_root = dir.clone();
+
+        let fresh = chrono::Utc::now().to_rfc3339();
+        let stale = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        let entry = |sid: &str, created: String, node_v: &str| RegistryEntry {
+            node: Some(node_v.to_string()),
+            name: "worker-1".into(),
+            harness: Some("claude".into()),
+            cwd: "/tmp/proj".into(),
+            project_root: "/tmp/proj".into(),
+            created_at: created,
+            model: Some("glm".into()),
+            model_basis: Some("verified".into()),
+            requested_model: Some("glm".into()),
+            account_record_id: Some("zai-main".into()),
+            harness_session_id: Some(sid.to_string()),
+            fno_id: Some(sid.to_string()),
+            ..RegistryEntry::new(Some(sid.to_string()), Lineage::captured((None, None, None)))
+        };
+        let registry = crate::state::Registry {
+            entries: vec![
+                entry("sid-1", fresh.clone(), "x-90a9"),
+                entry("sid-old", stale, "x-90a9"),
+            ],
+            ..crate::state::Registry::default()
+        };
+        std::fs::write(
+            &agents_root.join("registry.json"),
+            serde_json::to_vec(&registry).unwrap(),
+        )
+        .unwrap();
+
+        std::fs::write(
+            state_root.join("events.jsonl"),
+            format!(
+                "{{\"kind\":\"spawn_defaults_applied\",\"name\":\"worker-1\",\"fingerprint\":\"fp1\",\"ts\":\"{fresh}\"}}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            state_root.join("decisions.jsonl"),
+            format!(
+                "{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view1\",\"subject\":\"routing-view:sid-1\",\"decision\":\"{{\\\"view\\\": \\\"claude-native\\\", \\\"fingerprint\\\": \\\"fp1\\\", \\\"session_id\\\": \\\"sid-1\\\"}}\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view2\",\"subject\":\"routing-view:sid-other\",\"decision\":\"x\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"decision_retracted\",\"data\":{{\"target_decision_id\":\"d-view2\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view3\",\"subject\":\"routing-view:sid-1\",\"decision\":\"older record\",\"supersedes\":\"d-view1\"}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let facts = json!({
+            "fingerprint": "fp1",
+            "policy": {"enforce_inventory": true, "operator_access": "local"},
+        });
+        let snap = audit_load_snapshot(
+            &facts,
+            &state_root,
+            &agents_root.join("registry.json"),
+            "/tmp/proj",
+            "x-90a9",
+            1800,
+        )
+        .unwrap();
+        assert_eq!(snap["fingerprint"], "fp1");
+        let sessions = snap["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 1, "{sessions:?}");
+        assert_eq!(sessions[0]["session_id"], "sid-1");
+        assert_eq!(sessions[0]["account"], "zai-main");
+        assert_eq!(sessions[0]["receipt_fingerprint"], "fp1");
+        assert_eq!(sessions[0]["view_records"].as_array().unwrap().len(), 1);
     }
 }

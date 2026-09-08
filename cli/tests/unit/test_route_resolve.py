@@ -610,3 +610,78 @@ def test_the_fallback_emits_one_row_per_model():
     on. A duplicate would reintroduce exactly the ordering bug above."""
     names = [r["name"] for r in rr._builtin_rows()]
     assert len(names) == len(set(names)), f"duplicate fallback rows: {names}"
+
+
+def test_declared_rows_reads_a_real_typed_config_row(tmp_path, monkeypatch):
+    """AC1-HP (x-90a9). The 2026-09-07 defect: the real schema produces
+    RoutingModelBlock objects, the old Mapping-only filter dropped every
+    typed row, and a dictionary fixture could not see the gap. This loads a
+    real TOML through the actual loader, with the dictionary spelling as the
+    positive control."""
+    import json as _json
+    import os
+
+    import fno.config as config_mod
+
+    toml_text = """
+[routing]
+objective = "cheapest-that-clears"
+
+[[routing.models]]
+name = "declared-opus"
+harness = "claude"
+model = "claude-opus-5"
+account = ""
+band = "high"
+operator_view = "claude-native"
+"""
+    f = tmp_path / "settings.toml"
+    f.write_text(toml_text, encoding="utf-8")
+    monkeypatch.setenv("FNO_CONFIG", str(f))
+
+    settings = config_mod.load_settings()
+    rows = rr._declared_rows(settings)
+    assert "declared-opus" in rows, sorted(rows)
+    row = rows["declared-opus"]
+    assert row["harness"] == "claude"
+    assert row["model"] == "claude-opus-5"
+    assert row["operator_view"] == "claude-native"
+
+    # Control: the same row spelled as a plain mapping reads identically.
+    from types import SimpleNamespace
+
+    dict_settings = SimpleNamespace(
+        routing=SimpleNamespace(models=[
+            {"name": "declared-opus", "harness": "claude",
+             "model": "claude-opus-5", "band": "high",
+             "operator_view": "claude-native"}
+        ])
+    )
+    rows_dict = rr._declared_rows(dict_settings)
+    assert rows_dict["declared-opus"]["model"] == "claude-opus-5"
+    assert _json.dumps(rows, sort_keys=True) == _json.dumps(rows_dict, sort_keys=True)
+
+
+def test_routing_policy_payload_reads_the_opt_in_fields(tmp_path, monkeypatch):
+    """The strict flag and the operator posture travel to the owner verbatim;
+    an unset posture reads unknown, the conservative default."""
+    import fno.config as config_mod
+
+    f = tmp_path / "settings.toml"
+    f.write_text(
+        "[routing]\nenforce_inventory = true\noperator_access = \"remote\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(f))
+    settings = config_mod.load_settings()
+    assert rr._routing_policy_payload(settings) == {
+        "enforce_inventory": True,
+        "operator_access": "remote",
+    }
+
+    f2 = tmp_path / "unset.toml"
+    f2.write_text("", encoding="utf-8")
+    monkeypatch.setenv("FNO_CONFIG", str(f2))
+    settings2 = config_mod.load_settings()
+    assert rr._routing_policy_payload(settings2)["operator_access"] == "unknown"
+    assert rr._routing_policy_payload(settings2)["enforce_inventory"] is False

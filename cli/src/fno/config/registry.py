@@ -556,6 +556,12 @@ FIELD_META: dict[str, Meta] = {
     "routing.prefer_harness": Meta(
         "advanced", "The harness the prefer-harness objective favors. A tiebreaker WITHIN a band, never a reason to lower one.",
     ),
+    "routing.enforce_inventory": Meta(
+        "never", "Opt-in strict inventory policy. When true, a spawn qualifies against its effective work-kind slot's CONFIG-declared lanes only: explicit flags constrain the choice, never bypass it, and an unresolvable request is a named refusal instead of the harness default. Default off, so other installs keep every documented default.",
+    ),
+    "routing.operator_access": Meta(
+        "never", "The operator's access posture: local (attending, a native view is not required), remote (only rows carrying a verified native-view label qualify), or unknown (the default; filters like remote and is labeled unknown in every receipt). Never inferred from presence, mail, or a king's opinion.",
+    ),
     # --- config.sideline.colors (x-1b35, the mux sideline lane color) ---
     # Four axis tables, every key naming its axis. A bare key under
     # [sideline.colors] is REFUSED (extra=forbid): it is ambiguous between

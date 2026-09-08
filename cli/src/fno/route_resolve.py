@@ -11,6 +11,7 @@ docs/architecture/role-based-model-routing.md.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from typing import Any, Mapping, Optional, Sequence
 
 from fno.adapters.providers import benchmarks as bm
@@ -245,7 +246,7 @@ def resolve_inventory(
 
 
 #: The verbs fno dispatches, and therefore the slots an operator fills.
-SLOT_VERBS = ("think", "blueprint", "target", "review", "crown")
+SLOT_VERBS = ("think", "blueprint", "target", "review", "crown", "pr-create")
 
 
 def slot_verbs(settings: object = None, inventory: Optional[Inventory] = None) -> list[str]:
@@ -279,17 +280,22 @@ def resolve_slot(
     model_occupied: bool = False,
     explicit_model: bool = False,
     explicit_lane: bool = False,
+    work_verb: Optional[str] = None,
+    explicit_model_value: Optional[str] = None,
+    explicit_route_value: Optional[str] = None,
 ) -> tuple[Optional[dict[str, Any]], list[str]]:
     """Which lane does this dispatch ride right now: the ONE slot resolver.
     Selection is Rust (``fno-agents route-slot``); chain strings come back
-    verbatim, and a missing or failing binary is a named refusal."""
+    verbatim, and a missing or failing binary is a named refusal. ``work_verb``
+    is the ORIGINAL dispatch command (a planless target plans: the command
+    stays target while the slot is blueprint); it defaults to ``verb``."""
     import os
 
     settings, profile, lanes = _slot_entry(settings, verb)
     rung_base = f"agents.profiles.{verb}" if verb else "agents.profiles"
     by_diff = getattr(profile, "by_difficulty", None)
     has_overlay = isinstance(by_diff, Mapping) and bool(by_diff)
-    if not lanes and not has_overlay and node is None:
+    if not lanes and not has_overlay and node is None and not _routing_enforced(settings):
         return None, []
 
     gate_bypassed = os.environ.get("FNO_SPAWN_GATE") == "0"
@@ -304,9 +310,39 @@ def resolve_slot(
             explicit_model=explicit_model, gate_bypassed=gate_bypassed,
             role=role, protected_role=protected_role,
             model_occupied=model_occupied,
+            work_verb=work_verb or verb,
+            explicit_model_value=explicit_model_value,
+            explicit_route_value=explicit_route_value,
         )), "candidate")
     except RouteSlotUnavailable as exc:
         return None, [f"slot=route-slot-unavailable ({exc})"]
+
+
+def _routing_enforced(settings: object) -> bool:
+    try:
+        return bool(getattr(getattr(settings, "routing", None), "enforce_inventory", False))
+    except Exception:  # noqa: BLE001 - an unreadable flag reads as off
+        return False
+
+
+def routing_fingerprint(settings: object = None) -> str:
+    """A short fingerprint of the routing-relevant NONSECRET config inputs.
+
+    The receipt answer to "was the config that decided this the config that
+    launched": declared rows, policy fields and the slot table, with no
+    credential values. A changed fingerprint says the next launch re-selects;
+    it is never an ownership token.
+    """
+    try:
+        payload = {
+            "rows": sorted(_declared_rows(settings).items()),
+            "policy": _routing_policy_payload(settings),
+            "slots": _slot_profiles_table(settings),
+        }
+        text = repr(payload)
+        return hashlib.sha256(text.encode()).hexdigest()[:12]
+    except Exception:  # noqa: BLE001 - an unreadable config carries no fingerprint
+        return ""
 
 
 
@@ -315,6 +351,23 @@ def resolve_slot(
 def _answer(out: dict[str, Any], key: str) -> tuple[Any, list[str]]:
     """The verb's named field plus its chain, lines coerced verbatim."""
     return out.get(key), [str(line) for line in (out.get("chain") or [])]
+
+
+def slot_verdict(candidate: Any, chain: list[str]) -> str:
+    """The readout verdict, read from the same terminal the seam refuses on.
+
+    One classifier for every consumer: explain renders it, the spawn seam
+    refuses on it, and the inventory preview echoes it. A policy refusal is
+    held, capacity is held, and neither is "exhausted dispatch".
+    """
+    if candidate:
+        return "armed"
+    terminal = chain[-1] if chain else ""
+    if "slot=strict-refusal" in terminal or terminal.startswith("slot=config "):
+        return "policy-held"
+    if terminal.startswith("slot=exhausted"):
+        return "capacity-held"
+    return "unarmed"
 
 
 def _profile_fields(profile: Optional[object]) -> dict[str, Any]:
@@ -326,21 +379,32 @@ def _profile_fields(profile: Optional[object]) -> dict[str, Any]:
     }
 
 
-_DECLARED_FIELDS = ("harness", "model", "route", "account", "band", "effort")
+_DECLARED_FIELDS = ("harness", "model", "route", "account", "band", "effort", "operator_view")
 
 
 def _declared_rows(settings: object) -> dict[str, Any]:
-    """The CONFIG-declared rows exactly (never the built-in fallback)."""
+    """The CONFIG-declared rows exactly (never the built-in fallback).
+
+    The real schema produces ``RoutingModelBlock`` objects, so a Mapping-only
+    filter dropped every typed row while a dictionary fixture passed - the
+    2026-09-07 empty-inventory defect. One boundary reads both spellings.
+    """
     try:
         models = getattr(getattr(settings, "routing", None), "models", None) or []
-        rows = [r for r in models if isinstance(r, Mapping)]
+        rows = [r for r in models if isinstance(r, Mapping) or hasattr(r, "name")]
     except Exception:  # noqa: BLE001 - an unreadable config reads as empty
         return {}
-    return {
-        name: {"name": name, **{f: str(r.get(f, "") or "").strip() for f in _DECLARED_FIELDS}}
-        for r in rows
-        if (name := str(r.get("name", "") or "").strip())
-    }
+    out: dict[str, Any] = {}
+    for r in rows:
+        get = r.get if isinstance(r, Mapping) else (lambda k, _d=None: getattr(r, k, None))
+        name = str(get("name") or "").strip()
+        if not name:
+            continue
+        out[name] = {
+            "name": name,
+            **{f: str(get(f) or "").strip() for f in _DECLARED_FIELDS},
+        }
+    return out
 
 
 def _lanes_payload(lanes: Any) -> list[Any]:
@@ -457,6 +521,38 @@ def _account_record_vendors(settings: object) -> dict[str, str]:
         return {}
 
 
+def _slot_profiles_table(settings: object) -> dict[str, Any]:
+    """Every dispatched verb's slot as JSON: the strict owner picks the
+    EFFECTIVE work kind's slot from this table, so the request's own verb
+    never has to match it (a planless target rides the blueprint slot)."""
+    out: dict[str, Any] = {}
+    try:
+        for verb in SLOT_VERBS:
+            _s, prof, lns = _slot_entry(settings, verb)
+            if prof is None and not lns:
+                continue
+            by_diff = getattr(prof, "by_difficulty", None)
+            out[verb] = {
+                "rung_base": f"agents.profiles.{verb}",
+                "profile": _profile_fields(prof),
+                "lanes_raw": _lanes_payload(lns) if isinstance(lns, (list, tuple)) else [],
+                "has_overlay": isinstance(by_diff, Mapping) and bool(by_diff),
+            }
+    except Exception:  # noqa: BLE001 - an unreadable table leaves slots unnamed
+        return {}
+    return out
+
+
+def _routing_policy_payload(settings: object) -> dict[str, Any]:
+    routing = getattr(settings, "routing", None)
+    return {
+        "enforce_inventory": bool(getattr(routing, "enforce_inventory", False)),
+        "operator_access": str(
+            getattr(routing, "operator_access", "") or "unknown"
+        ).strip().lower(),
+    }
+
+
 def _slot_payload(
     *, rung_base: str, profile: Optional[object], lanes: Any, node: Optional[Mapping],
     capacity: Optional[Mapping[str, object]], inventory: Optional[Any], settings: object,
@@ -464,19 +560,30 @@ def _slot_payload(
     explicit_lane: bool, explicit_model: bool, gate_bypassed: bool,
     role: Optional[str] = None, protected_role: Optional[str] = None,
     model_occupied: bool = False,
+    work_verb: Optional[str] = None,
+    explicit_model_value: Optional[str] = None,
+    explicit_route_value: Optional[str] = None,
 ) -> dict[str, Any]:
     """The slot/grid payload: both legs' inputs plus the gather the verb cannot do."""
     rows = _declared_rows(settings)
     lanes_payload = _lanes_payload(lanes) if isinstance(lanes, (list, tuple)) else lanes
     inventory_payload = _inventory_payload(inventory)
     inv_rows = inventory_payload.get("rows", [])
+    node_payload = None
+    if node:
+        node_payload = {
+            "difficulty": node.get("difficulty"),
+            "priority": node.get("priority"),
+            # Plan-presence evidence: the work-kind owner reads presence, never
+            # plan quality, and needs it even when the model axis is occupied.
+            "plan_path": str(node.get("plan_path") or ""),
+        }
     payload: dict[str, Any] = {
         "rung_base": rung_base,
         "lanes_raw": lanes_payload,
         "declared_rows": rows,
         "profile": _profile_fields(profile),
-        "node": {"difficulty": (node or {}).get("difficulty"),
-                 "priority": (node or {}).get("priority")} if node else None,
+        "node": node_payload,
         "capacity": dict(capacity or {}),
         "substrate": substrate,
         "permission_mode": permission_mode,
@@ -495,6 +602,11 @@ def _slot_payload(
         "protected_role": protected_role,
         "model_occupied": model_occupied,
         "inventory": inventory_payload,
+        "work_verb": work_verb,
+        "policy": _routing_policy_payload(settings),
+        "slot_by_verb": _slot_profiles_table(settings),
+        "explicit_model_value": explicit_model_value,
+        "explicit_route_value": explicit_route_value,
     }
     try:
         payload["effort_ok"] = _effort_ok_table(inv_rows)
@@ -570,7 +682,10 @@ def slot_states(
         states = route_slot_call(payload)
     except Exception as exc:  # noqa: BLE001 - a missing verb degrades the readout
         states = {"would_take": f"slot=route-slot-unavailable ({exc})"}
-    for key in ("on_exhausted", "on_low", "on_unknown", "would_take", "routing"):
+    for key in (
+        "on_exhausted", "on_low", "on_unknown", "would_take", "routing",
+        "work_kind", "operator_access", "policy_source", "skipped",
+    ):
         if key in states:
             out[key] = states[key]
     # The difficulty note is the verb's vocabulary: take it back verbatim.

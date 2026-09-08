@@ -431,3 +431,5 @@ def test_routing_init_appends_the_sample_commented(tmp_path, monkeypatch) -> Non
     res = runner.invoke(route_app, ["init"])
     assert res.exit_code == 0
     assert "already present" in res.output
+
+

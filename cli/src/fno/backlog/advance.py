@@ -1688,14 +1688,11 @@ def _grid_lane_for(
     terminal = str(chain[-1]) if chain else "grid=no-reason-recorded"
     if candidate is None:
         return None, None, terminal
-    # Placement commits a harness-keyed worktree, which unknown capacity must
-    # not buy: the grid's unknown-permitted posture is right for injection
-    # (defaults still compose the argv), wrong for a lane decision with no
-    # data at all. Fall back to the caller's defaults there.
-    state = capacity.get(candidate["harness"])
-    verdict = state.get("state", "unknown") if isinstance(state, dict) else state
-    if str(verdict).lower() not in ("ok", "low", "available"):
-        return None, None, f"grid=capacity-{str(verdict).lower()}"
+    # Placement retains the resolver's complete decision: the candidate
+    # carries the capacity verdict that selected it, and the resolver already
+    # skipped exhausted lanes. A second, harness-wide capacity re-check here
+    # would discard the selected coordinate and re-price it independently -
+    # the exact dual-decision this change deletes.
     return candidate["harness"], candidate["model"], None
 
 

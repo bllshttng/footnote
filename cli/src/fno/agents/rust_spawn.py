@@ -15,6 +15,15 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 
+def _defaults_applied_marker() -> str:
+    """The seam marker both bridges carry; it keeps the binary's seam
+    gate from bouncing an already-configured spawn back to the front door.
+    """
+    from fno.agents.spawn_defaults import routing_enforcement_state
+
+    return f"--defaults-applied={routing_enforcement_state()}"
+
+
 def _opencode_serve_spawn(
     *,
     name: str,
@@ -46,6 +55,8 @@ def _opencode_serve_spawn(
     argv = [
         str(binary),
         "spawn",
+        # Straight after the verb so it never lands inside the fence below.
+        _defaults_applied_marker(),
         "--name",
         name,
         "--harness",
@@ -130,6 +141,8 @@ def _codex_thread_spawn(
     argv = [
         str(binary),
         "spawn",
+        # Straight after the verb so it never lands inside the fence below.
+        _defaults_applied_marker(),
         "--name",
         name,
         "--harness",

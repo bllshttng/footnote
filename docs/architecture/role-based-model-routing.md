@@ -46,6 +46,12 @@ cmd_spawn --role  ->  dispatch_spawn  ->  _claude_create_path  ->  bg_create(rol
 
 **Fail safe, not fail closed.** If no key is configured for the role's provider (the named env var / `.env` file has none), the role falls back to the primary Anthropic model with a one-line stderr notice, and the spawn still succeeds. `resolve_route` never raises.
 
+## The spawn seam: every launch crosses it
+
+Every `fno agents spawn` crosses the Python seam (`inject_spawn_defaults`). The binary enforces this: a direct `fno-agents spawn` without the `--defaults-applied` marker is sent back to the front door once, and a marked spawn dispatches natively. The marker carries the seam's enforcement verdict (`enforced` or `unenforced`). It records a decision the seam already made. It never grants one.
+
+A configured axis that was not applied says so. stderr names the dropped value, the config rung it came from, and the reason. One `spawn_defaults_applied` journal event per spawn records every resolved, applied, and suppressed axis, with empty values included. A new config-sourced spawn axis needs nothing else: route the value through the seam, and let the seam name what it did not apply.
+
 ## What the guard does and does not cover
 
 The guard covers two role *names*. It does not cover the two things a reader reasonably assumes it covers.
@@ -200,7 +206,17 @@ A small built-in table sits under this key as a **fallback**, never the authorit
 
 The fallback keeps a tier request answerable where nothing is declared. Review level names a model for every level. Answering nothing drops `/code-review` to the provider default everywhere. The grid is unaffected and stays config-first. A virgin install records `grid=no-inventory-declared` and injects nothing. The grid asks whether config declared a row, not whether any row exists.
 
-`cli/src/fno/routing_sample.toml` ships as a labelled sample inside the package, so an installed wheel finds it too. No routing code path reads it. `fno config routing init` appends it to your config commented out. `fno doctor route` lists every declared row with its resolved band and reachability verdict. A row on an uninstalled harness refuses BY NAME on stderr.
+`cli/src/fno/routing_sample.toml` ships as a labelled sample inside the package, so an installed wheel finds it too. No routing code path reads it. `fno config route init` appends it to your config commented out. `fno doctor route` lists every declared row with its resolved band and reachability verdict. A row on an uninstalled harness refuses BY NAME on stderr.
+
+## The strict inventory policy
+
+`routing.enforce_inventory` (default off) turns the declared inventory from a preference into a boundary. Under it, every spawn qualifies against the declared slots only. An explicit `--model`, `-P` or `--route` no slot declares is refused by name, and so is an unqualified lane. The harness default and the built-in fallback sit out of the decision path entirely. `routing.operator_access` (default `unknown`) says where the operator watches from: `local`, `remote`, or `unknown`, and unknown filters like remote.
+
+A row can carry `operator_view`: `claude-native` or `codex-native`, matching its harness. A row with a vendor `route` cannot: that coordinate is not native, and labeling it so is a named refusal. Under `remote` or `unknown`, only labeled rows qualify. The point is observability: a launch must land in a view the operator can actually see. Under `local` every declared lane qualifies.
+
+The work kind picks the slot. Rust owns the ruling: a planless `/target` does planning work and walks the blueprint slot while its command stays target. A planned target, think, blueprint, review, and crown walk their own slots. The qualification owner is one Rust verb, `fno-agents route-slot`. The spawn seam, `fno backlog explain`, and `fno config route inventory` all read the same decision, and the readouts carry its verdict: `routing=armed|unarmed|policy-held|capacity-held`. A policy hold is never described as a spent quota, and a held capacity never as a broken dispatch.
+
+Completion evidence is a read-only audit: `fno-agents route-slot audit --project <root> --node <node> --since 30m --json`. A bounded snapshot (config fingerprint, spawn receipts, registry rows, decision records) is loaded through the established readers and a pure verifier answers. Exit 0 prints `ROUTING_POLICY_VERIFIED` per session and names the account, vendor/model and observed model. The operator view evidence is a live decision record under subject `routing-view:<session-id>`. Record it with `fno inbox decide` only after the operator confirms that exact session in the named view. A worker or peer assertion is not operator confirmation. Anything missing, stale, contradictory, or merely simulated exits nonzero naming its boundary.
 
 Cost belongs to the ACCESS PATH, not the model. The same model reached two ways is two rows with two cost profiles. One vendor prices a pair 3x cheaper on subscription credits and 18x cheaper on API dollars. The rows are never averaged. Cheap is never read as a proxy for weak: the cheaper row can also carry more context, more throughput, and less latency.
 

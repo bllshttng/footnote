@@ -362,6 +362,8 @@ def inventory_cmd(
             "prefer_harness": inv.prefer_harness,
             "models": rows,
             "slots": slots,
+            "fingerprint": _routing_fingerprint_safe(),
+            "policy": _routing_policy_safe(),
         }, indent=2))
     else:
         typer.echo(f"objective={inv.objective}"
@@ -383,6 +385,28 @@ def inventory_cmd(
         typer.echo(f"refused: {line}", err=True)
 
 
+def _routing_fingerprint_safe() -> str:
+    from fno.route_resolve import routing_fingerprint
+
+    try:
+        return routing_fingerprint()
+    except Exception:  # noqa: BLE001 - an unreadable config carries no fingerprint
+        return ""
+
+
+def _routing_policy_safe() -> dict:
+    from fno.config import load_settings
+
+    try:
+        routing = getattr(load_settings(), "routing", None)
+        return {
+            "enforce_inventory": bool(getattr(routing, "enforce_inventory", False)),
+            "operator_access": getattr(routing, "operator_access", "unknown"),
+        }
+    except Exception:  # noqa: BLE001 - an unreadable config answers unknown
+        return {"enforce_inventory": False, "operator_access": "unknown"}
+
+
 def _echo_slots(slots: list[dict]) -> None:
     """Print the per-verb slot readout under the row table."""
     typer.echo("slots: preview (simulated; no launch)")
@@ -400,7 +424,14 @@ def _echo_slots(slots: list[dict]) -> None:
             line += f"; on_exhausted={slot['on_exhausted']}"
         line += f"; would take {slot['would_take']}"
         line += f"; routing={slot.get('routing', 'unarmed')}"
+        if slot.get("work_kind"):
+            line += f"; work={slot['work_kind']}"
+        if slot.get("operator_access"):
+            line += f"; access={slot['operator_access']}"
         typer.echo(line)
+        for reason in slot.get("skipped") or []:
+            typer.echo(f"    {reason}")
+
 
 
 @route_app.command("env")

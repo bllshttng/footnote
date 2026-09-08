@@ -43,6 +43,8 @@ before `dispatch_env()` returns a usable env dict.
 or `{"HOME": ...}`) that, when merged into a subprocess's env, points the CLI
 at the correct credentials directory.
 
+**Routing row's account axis** - A `[[routing.models]]` row's `account` names one record `id` here, and its `route` names the vendor whose quota a launch spends. The pair makes the ACCESS PATH the priced unit. The same model over a subscription record and over per-token API dollars is two rows with two cost profiles, never one averaged number. Under the strict inventory policy (`routing.enforce_inventory`), capacity is observed per named account, so one locked-out record skips its own lane without walling the harness. The routing audit (`fno-agents route-slot audit`) names the selected record per verified session. See [role-based-model-routing.md](architecture/role-based-model-routing.md).
+
 ---
 
 ## Schema reference
