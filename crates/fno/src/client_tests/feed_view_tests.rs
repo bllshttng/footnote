@@ -7,7 +7,7 @@
 
 use super::tests::{two_pane_view, view_with_agents};
 use super::*;
-use crate::client::feed_view::FeedOverlay;
+use crate::client::feed_view::{feed_hit, feed_panel_lines, feed_row_item, FeedOverlay};
 use crate::proto::Reach;
 
 const W: usize = 40;
