@@ -1465,7 +1465,7 @@ fn probe_pid(pid: i32) -> PidProbe {
     let Some(after) = stat.rsplit_once(')').map(|(_, tail)| tail) else {
         return PidProbe::Absent;
     };
-    let Ok(starttime) = after.split_whitespace().nth(19).map(|v| v.parse::<i64>()) else {
+    let Some(Ok(starttime)) = after.split_whitespace().nth(19).map(|v| v.parse::<i64>()) else {
         return PidProbe::Absent;
     };
     static BTIME: std::sync::OnceLock<Option<i64>> = std::sync::OnceLock::new();
