@@ -5154,15 +5154,6 @@ def loaded_from() -> Optional[Path]:
     return _loaded_from
 
 
-def _warn_unknown_keys(
-    data: dict[str, object], model: type[BaseModel], prefix: str = ""
-) -> list[str]:
-    """Deprecated spelling of :func:`fno.config.readback.warn_unknown_keys`."""
-    from fno.config.readback import warn_unknown_keys
-
-    return warn_unknown_keys(data, model, prefix)
-
-
 def _flatten_leaf_paths(
     data: dict[str, object], prefix: str = ""
 ) -> list[tuple[str, object]]:

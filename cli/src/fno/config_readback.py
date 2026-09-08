@@ -7,12 +7,13 @@ behind both caps: docs/architecture/config-readback.md.
 from __future__ import annotations
 
 import difflib
+import importlib
 import logging
 import os
 import types
 import typing
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel
 
@@ -22,6 +23,19 @@ _UNKNOWN_LEAF_CAP = 3
 _NEAR_MISS_CAP = 4
 
 _LOG = logging.getLogger("fno.config")
+
+
+def _cfg() -> Any:
+    """``fno.config``, loaded so the edge stays out of mypy's import graph.
+
+    A static import from here puts ``fno.config`` in an SCC where
+    ``graph._constants``' lazy ``__getattr__`` re-exports degrade to
+    ``Optional[Path]``, failing two unrelated modules. Measured: three errors
+    with the plain import, none with this. It is the same reason
+    ``fno.config._revoke_unbacked_optouts`` loads its own dependency this way.
+    """
+    return importlib.import_module("fno.config")
+
 
 
 def _field_models(
@@ -54,7 +68,7 @@ def warn_unknown_keys(
     A ``dict[str, Model]`` field's keys are operator-chosen names, so each
     VALUE is walked with the map key in the prefix.
     """
-    from fno.config import _flatten_leaf_paths
+    _flatten_leaf_paths = _cfg()._flatten_leaf_paths
 
     unknown: list[str] = []
     known = set(model.model_fields.keys())
@@ -92,10 +106,8 @@ def warn_unknown_keys(
 
 def source_note(key: str, root: Optional[Path] = None) -> Optional[str]:
     """``"set in <file>"`` when a config file decides ``key``, else None."""
-    from fno.config import resolve_source
-
     try:
-        decided = resolve_source(key, root)
+        decided = _cfg().resolve_source(key, root)
     except Exception:  # noqa: BLE001 - a receipt, not the loader
         return None
     return f"set in {decided[0]}" if decided is not None else None
@@ -104,12 +116,13 @@ def source_note(key: str, root: Optional[Path] = None) -> Optional[str]:
 def check_config_files_read() -> list[str]:
     """Settings files the loader could not read back. An EMPTY table is legal."""
     try:
-        from fno.config import _candidate_paths
         from fno.config_io import _parse_settings
+
+        candidates = _cfg()._candidate_paths()
 
         seen: set[Path] = set()
         errors = []
-        for path in _candidate_paths():
+        for path in candidates:
             if path.is_file() and path.resolve() not in seen:
                 seen.add(path.resolve())
                 errors.append(_parse_settings(path)[1])
@@ -151,8 +164,9 @@ def check_unknown_keys() -> list[str]:
     spelling is never reported as a typo and each message names one file.
     """
     try:
-        from fno.config import SettingsModel
         from fno.config_io import _unwrap_config_dict
+
+        model = _cfg().SettingsModel
     except Exception:  # noqa: BLE001 - a report, not the loader
         return []
 
@@ -161,7 +175,7 @@ def check_unknown_keys() -> list[str]:
         try:
             flat = _unwrap_config_dict(parsed)
             unknown = warn_unknown_keys(
-                {k: v for k, v in flat.items() if k not in _UNMODELED_BLOCKS}, SettingsModel
+                {k: v for k, v in flat.items() if k not in _UNMODELED_BLOCKS}, model
             )
         except Exception:  # noqa: BLE001
             continue
@@ -175,10 +189,9 @@ def check_unknown_keys() -> list[str]:
 def check_enabled_with_empty_population() -> list[str]:
     """A switch on with nothing that can satisfy it. Read the consumer first."""
     try:
-        from fno.config import load_settings
         from fno.review.provider_resolution import available_provider_kinds
 
-        if not bool(load_settings().review.cross_model.enabled):
+        if not bool(_cfg().load_settings().review.cross_model.enabled):
             return []
         kinds = [str(k).strip().lower() for k in available_provider_kinds()]
     except Exception:  # noqa: BLE001 - a report, not the loader
@@ -201,8 +214,7 @@ def contributing_files() -> list[str]:
 def _layers() -> list[tuple[Path, dict[str, object]]]:
     """The loader's own per-file collector, or empty when it cannot run."""
     try:
-        from fno.config import _aliased_layers, _candidate_paths
-
-        return list(_aliased_layers(tuple(_candidate_paths())))
+        cfg = _cfg()
+        return list(cfg._aliased_layers(tuple(cfg._candidate_paths())))
     except Exception:  # noqa: BLE001 - a receipt, not the loader
         return []

@@ -4,7 +4,7 @@ An operator edits a config file and wants one answer. Did the edit take effect?
 
 `fno config get <leaf>` answers it one leaf at a time. Its `source:` line names the deciding file and the files it overrode, and that line is the only place precedence is visible. It requires already knowing which leaf to ask about.
 
-`fno config doctor` is the verb an operator reaches for instead. Its verdict used to be computed from a config it never proved it read. The checks in `cli/src/fno/config/readback.py` close that gap. `cli/src/fno/setup/doctor.py` only prints them.
+`fno config doctor` is the verb an operator reaches for instead. Its verdict used to be computed from a config it never proved it read. The checks in `cli/src/fno/config_readback.py` close that gap. `cli/src/fno/setup/doctor.py` only prints them.
 
 ## The parse the doctor can see
 

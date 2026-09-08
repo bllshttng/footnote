@@ -323,7 +323,7 @@ def test_a_typod_per_project_key_is_flagged(
     compare by edit distance. check_unknown_keys walks the same list-of-models
     from the schema, so the typo is caught without a second copy of the keys.
     """
-    from fno.config.readback import check_unknown_keys
+    from fno.config_readback import check_unknown_keys
 
     f = tmp_path / "config.toml"
     f.write_text(
@@ -338,7 +338,7 @@ def test_a_correct_per_project_key_is_clean(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Positive control on the same walk: the right spelling reports nothing."""
-    from fno.config.readback import check_unknown_keys
+    from fno.config_readback import check_unknown_keys
 
     f = tmp_path / "config.toml"
     f.write_text(

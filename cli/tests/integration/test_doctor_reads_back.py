@@ -142,7 +142,7 @@ def test_the_right_section_resolves_and_is_clean(tmp_path: Path) -> None:
 def test_cross_model_enabled_with_no_dispatchable_peer_is_named(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from fno.setup import doctor as doctor_mod
+    from fno import config_readback as doctor_mod
 
     f = _write(tmp_path / "config.toml", "schema_version = 1\n[review.cross_model]\nenabled = true\n")
     monkeypatch.setenv("FNO_CONFIG", str(f))
@@ -165,7 +165,7 @@ def test_cross_model_with_a_real_peer_is_clean(
     reason.
     """
     from fno.review import provider_resolution as pr
-    from fno.setup import doctor as doctor_mod
+    from fno import config_readback as doctor_mod
 
     f = _write(tmp_path / "config.toml", "schema_version = 1\n[review.cross_model]\nenabled = true\n")
     monkeypatch.setenv("FNO_CONFIG", str(f))
@@ -175,7 +175,7 @@ def test_cross_model_with_a_real_peer_is_clean(
 
 
 def test_cross_model_disabled_is_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from fno.setup import doctor as doctor_mod
+    from fno import config_readback as doctor_mod
 
     f = _write(tmp_path / "config.toml", "schema_version = 1\n")
     monkeypatch.setenv("FNO_CONFIG", str(f))
@@ -328,7 +328,7 @@ def test_a_large_unknown_table_reports_once(tmp_path: Path) -> None:
 
 def test_a_leaf_name_shared_by_many_sections_gets_no_hint(tmp_path: Path) -> None:
     """`enabled` lives under 25 sections; listing all of them is not a remedy."""
-    from fno.config.readback import _near_miss_keys
+    from fno.config_readback import _near_miss_keys
 
     assert _near_miss_keys("nosuchsection.enabled") == []
     # Positive control on the lookup itself, so an empty list above cannot be
@@ -347,7 +347,7 @@ def test_both_optional_spellings_of_a_dict_block_resolve(tmp_path: Path) -> None
 
     from pydantic import BaseModel
 
-    from fno.config.readback import _field_models
+    from fno.config_readback import _field_models
 
     class Row(BaseModel):
         name: str = ""

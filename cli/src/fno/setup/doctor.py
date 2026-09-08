@@ -377,21 +377,24 @@ def check_accounts() -> list[str]:
     return list(dict.fromkeys(problems))
 
 
-from fno.config.readback import (  # noqa: E402  - re-export, not a cycle
-    check_config_files_read,
-    check_enabled_with_empty_population,
-    check_unknown_keys,
-    contributing_files,
-    source_note,
-)
-
-
 def run_doctor() -> int:
     """Run the doctor diagnostic. Returns 0 if clean, non-zero on errors or suspicious paths."""
     import os
 
     from fno import paths
     from fno.config import _candidate_paths, load_settings, loaded_from
+
+    # Imported HERE, never at module level: a static fno.config edge from this
+    # module forms a mypy SCC in which graph._constants' lazy __getattr__
+    # re-exports degrade to Optional[Path] and fail unrelated modules. The same
+    # edge fno.config._revoke_unbacked_optouts keeps out of the import graph.
+    from fno.config_readback import (
+        check_config_files_read,
+        check_enabled_with_empty_population,
+        check_unknown_keys,
+        contributing_files,
+        source_note,
+    )
 
     test_mode = os.environ.get("FNO_TEST_MODE") == "1"
 

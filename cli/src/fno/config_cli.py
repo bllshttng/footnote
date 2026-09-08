@@ -613,7 +613,7 @@ def _state_root_selector(row: "StateFile") -> str:
     WHICH file set it, so the receipt cannot drift from the loader's own merge
     semantics - it is reading the loader's answer rather than re-deriving one.
     """
-    from fno.config.readback import source_note
+    from fno.config_readback import source_note
 
     for token in row.selector.split(","):
         key = token.strip().removeprefix("else ").strip()
