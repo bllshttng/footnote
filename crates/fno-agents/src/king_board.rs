@@ -53,10 +53,12 @@ pub(crate) use budget::{fno_py_cmd, now_secs_board, run_json, Budget, HAND_RUN_B
 pub(crate) use claims::read_claims;
 pub(crate) use classify::read_claimed_nodes;
 pub(crate) use prs::read_prs;
-pub(crate) use queues::{build_board, parse_lane, queue_json, BoardInputs, Queue};
+pub(crate) use queues::{
+    build_board, parse_lane, queue_json, read_blocked_rows, BoardInputs, Queue,
+};
 pub(crate) use scope::{
-    autonomous_merge_enabled, compile_scope_ids, graph_json_path, operator_lane_path,
-    parse_manifest, project_map,
+    autonomous_merge_enabled, blocked_child_grace_minutes, compile_scope_ids, graph_json_path,
+    operator_lane_path, parse_manifest, project_map,
 };
 
 /// Priorities a king treats as its own work. Lower bands are the operator's.
@@ -80,6 +82,8 @@ pub(crate) const SRC_PRS: &str =
 pub(crate) const SRC_PR_NODES: &str = "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url + fno backlog get <id>";
 pub(crate) const SRC_QUESTIONS: &str = "fno inbox outstanding --json";
 pub(crate) const SRC_NEEDS: &str = "fno agents needs --json";
+pub(crate) const SRC_DISTRESS: &str =
+    "~/.fno/events.jsonl (blocked rows) + fno agents distress-answered";
 
 // ---------------------------------------------------------------------------
 // SourceRead: one source's answer, or the reason there is no answer
@@ -644,6 +648,92 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         }
     }
 
+    // Blocked child: read the global distress journal and resolve every
+    // candidate's answered/unanswered state HERE, where claims, the graph,
+    // and the mail-check subprocess already live - build_board only
+    // scope-filters and renders what this collects (x-3ecf). Wrapped in
+    // catch_unwind for the same reason the needs thread's `.join()` is:
+    // `AgentsHome::from_env()` panics under a test process with no
+    // declared hermetic root (paths.rs), and this function's own contract
+    // is "never panics on a source" (see doc comment above).
+    let blocked_child_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let home = crate::paths::AgentsHome::from_env();
+        let journal = crate::daemon::global_events_path(&home);
+        match read_blocked_rows(&journal) {
+            Err(e) => SourceRead::err(e),
+            Ok(rows) => {
+                let claim_rows = claims.rows();
+                let claim_state_by_node: HashMap<String, String> = claim_rows
+                    .iter()
+                    .filter_map(|row| {
+                        let node = s_str(row, "key")?.strip_prefix("node:")?;
+                        Some((
+                            node.to_string(),
+                            s_str(row, "state").unwrap_or("").to_string(),
+                        ))
+                    })
+                    .collect();
+                let status_by_node: HashMap<String, String> = entries
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|n| {
+                        Some((
+                            s_str(n, "id")?.to_string(),
+                            s_str(n, "status").unwrap_or("").to_string(),
+                        ))
+                    })
+                    .collect();
+                let candidates = queues::resolve_blocked_child_candidates(
+                    rows,
+                    &claim_state_by_node,
+                    &status_by_node,
+                    blocked_child_grace_minutes(&cwd),
+                    now_secs_board() as i64,
+                );
+                if candidates.is_empty() {
+                    SourceRead::ok(Value::Array(Vec::new()))
+                } else {
+                    let pairs: Vec<Value> = candidates
+                        .iter()
+                        .map(|(row, _)| json!({"session": row.session, "after": row.ts}))
+                        .collect();
+                    let mut cmd = fno_py_cmd();
+                    cmd.extend([
+                        "agents".to_string(),
+                        "distress-answered".to_string(),
+                        "--pairs".to_string(),
+                        serde_json::to_string(&pairs).unwrap_or_else(|_| "[]".to_string()),
+                    ]);
+                    let answered_payload = run_json(
+                        cmd,
+                        &cwd,
+                        std::time::Duration::from_millis(HAND_RUN_BUDGET_MS),
+                    );
+                    let answered: HashMap<String, bool> = candidates
+                        .iter()
+                        .map(|(row, _)| {
+                            let ok = answered_payload
+                                .payload
+                                .as_ref()
+                                .and_then(|p| p.get(&row.session))
+                                .and_then(|v| v.get("answered"))
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            (row.session.clone(), ok)
+                        })
+                        .collect();
+                    SourceRead::ok(Value::Array(queues::filter_unanswered_by_mail(
+                        candidates, &answered,
+                    )))
+                }
+            }
+        }
+    }));
+    let blocked_child =
+        blocked_child_result.unwrap_or_else(|_| SourceRead::err("blocked_child: reader panicked"));
+    mark(&mut sources, "blocked_child", &blocked_child, false);
+
     let inputs = BoardInputs {
         ready,
         claims,
@@ -655,6 +745,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         needs,
         lane,
         undispatched,
+        blocked_child,
         entries,
         warnings,
         autonomous_merge: autonomous_merge_enabled(&cwd),
@@ -703,6 +794,7 @@ mod tests {
             pr_nodes: ok_read(Value::Array(Vec::new())),
             outstanding: ok_read(json!({})),
             needs: ok_read(Value::Array(Vec::new())),
+            blocked_child: ok_read(Value::Array(Vec::new())),
             lane: ok_read(Value::Array(Vec::new())),
             undispatched: ok_read(Value::Array(Vec::new())),
             entries: None,
@@ -879,6 +971,63 @@ mod tests {
         assert_eq!(numbers, vec![99], "{mergeable}");
     }
 
+    #[test]
+    fn ac1_blocked_child_names_the_node_session_reason_and_age() {
+        // AC1-HP: an in-scope unanswered blocked row names node, session,
+        // reason, and age when the board runs from the crowned session.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.blocked_child = ok_read(json!([{
+            "id": "x-eb79",
+            "session": "cx-run-1",
+            "reason": "worktree-init-blocked",
+            "evidence": "Operation not permitted",
+            "age_minutes": 45,
+        }]));
+        inputs.scope_ids = Some(["x-eb79"].into_iter().map(str::to_string).collect());
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let blocked = queues
+            .iter()
+            .find(|q| q["name"] == "blocked_child")
+            .unwrap();
+        let rows = blocked["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{blocked}");
+        assert_eq!(rows[0]["id"], "x-eb79");
+        assert_eq!(rows[0]["session"], "cx-run-1");
+        assert_eq!(rows[0]["reason"], "worktree-init-blocked");
+        assert_eq!(rows[0]["age_minutes"], 45);
+    }
+
+    #[test]
+    fn ac2_blocked_child_row_outside_scope_is_absent_and_counted_out_of_scope() {
+        // AC2-EDGE: the converse of AC1, exactly like every sibling queue.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.blocked_child = ok_read(json!([{
+            "id": "x-foreign",
+            "session": "cx-run-2",
+            "reason": "missing dependency",
+            "evidence": null,
+            "age_minutes": 60,
+        }]));
+        inputs.scope_ids = Some(["x-in-scope"].into_iter().map(str::to_string).collect());
+        inputs.crown_scope = Some("x-crown".to_string());
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let blocked = queues
+            .iter()
+            .find(|q| q["name"] == "blocked_child")
+            .unwrap();
+        assert_eq!(blocked["rows"].as_array().unwrap().len(), 0, "{blocked}");
+        let out_of_scope = queues.iter().find(|q| q["name"] == "out_of_scope").unwrap();
+        let ids: Vec<&str> = out_of_scope["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["x-foreign"], "{out_of_scope}");
+    }
+
     /// Serializes the tests that point process-global HOME at a temp dir:
     /// every other test in this binary reads HOME, so a concurrent reader can
     /// catch it mid-flip (the same ENV_LOCK shape client_tests uses).
@@ -887,17 +1036,24 @@ mod tests {
     #[test]
     fn the_board_answers_inside_a_tight_budget_with_every_queue_present() {
         // An isolated HOME + cwd: no graph, no claims, no lane - the degraded
-        // machine. The board must still answer with all eleven queues (plus
-        // nothing else), the unreadable actionable ones counted, and exit 1.
+        // machine. The board must still answer with all thirteen queues
+        // (plus nothing else), the unreadable actionable ones counted, and
+        // exit 1.
+        // A declared hermetic root: blocked_child's collection resolves
+        // ~/.fno/agents via AgentsHome, which panics under test with no
+        // declared root (paths.rs) - this test already pins HOME, so it also
+        // pins FNO_AGENTS_HOME under the same tempdir to declare one.
         let _guard = HOME_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", dir.path());
+        std::env::set_var("FNO_AGENTS_HOME", dir.path().join(".fno").join("agents"));
         let payload = read_board(&BoardOpts {
             budget_ms: 20_000,
             ..Default::default()
         });
+        std::env::remove_var("FNO_AGENTS_HOME");
         let queues = payload.get("queues").and_then(Value::as_array).unwrap();
-        assert_eq!(queues.len(), 12, "{payload}");
+        assert_eq!(queues.len(), 13, "{payload}");
         assert_eq!(payload["exit_code"], 1, "{payload}");
         assert!(payload["unreadable"].as_i64().unwrap() > 0);
         let names: Vec<&str> = queues
@@ -912,6 +1068,7 @@ mod tests {
                 "unplanned",
                 "stalled_holder",
                 "unheld_progress",
+                "blocked_child",
                 "undriven_pr",
                 "mergeable_pr",
                 "stale_claim",
