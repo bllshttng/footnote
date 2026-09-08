@@ -113,7 +113,7 @@ Not written by anything in this repo. Named so the gate can tell known junk from
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `.DS_Store`, `.metadata_never_index` | macOS Finder and Spotlight | regenerates on view; safe to delete |
-| `.claude`, `.fno`, `.abilities`, `.impeccable` | foreign plugins and nested workspaces whose cwd was the state root | leave in place, per the foreign-debris section below |
+| `.claude`, `.fno`, `.abilities`, `.impeccable` | foreign plugins and nested workspaces whose cwd was the state root | leave in place, per the foreign-debris section below | <!-- fno-rename-keep: historical pre-rename name, documented for forensic purposes -->
 
 ## Unclassified (follow-up filed)
 
