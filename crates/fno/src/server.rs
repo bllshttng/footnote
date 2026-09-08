@@ -47,7 +47,8 @@ use crate::proto::{
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::restore_liveness::{
-    no_resume_form_reason, restore_worker_refusal_reason, worker_registry_match,
+    classify_member, no_resume_form_reason, restore_worker_refusal_reason, worker_registry_match,
+    MemberVerdict,
 };
 #[cfg(test)]
 use crate::spawn_journal::parse_spawn_receipts;
@@ -6742,17 +6743,25 @@ impl Core {
     /// (x-7b5e) The live, non-tombstoned worker members a restore acts on,
     /// as (worker name, member) pairs in stored order. `harness` narrows the
     /// run to one harness's members. A member with no worker name records no
-    /// resumable identity, so it is never a candidate.
+    /// resumable identity, so it is never a candidate. (x-b64e) The same
+    /// classifier the startup loop answers to drops the Gone members here,
+    /// so the verb and the startup path can never disagree about who is a
+    /// corpse.
     fn restore_candidates(
         &self,
         harness: Option<&str>,
     ) -> Vec<(String, crate::squad_store::StoredMember)> {
+        let known_workers = self.known_worker_names();
+        let receipts = crate::spawn_journal::scan_spawn_journal().receipts;
         self.squad_members
             .values()
             .flatten()
             .filter(|m| !m.tombstone)
             .filter(|m| m.worker.as_deref().is_some_and(|w| !w.trim().is_empty()))
             .filter(|m| harness.is_none_or(|h| m.harness.as_deref() == Some(h)))
+            .filter(|m| {
+                classify_member(m, known_workers.as_ref(), &receipts) != MemberVerdict::Gone
+            })
             .map(|m| (m.worker.clone().expect("checked above"), m.clone()))
             .collect()
     }
@@ -8400,6 +8409,21 @@ impl Core {
                         member_panes.push((binding, pid, m.tab_name.clone()));
                         continue;
                     }
+                    // (x-b64e) Classify BEFORE the policy branch so the
+                    // default `hold` policy reaches the retirement. A member
+                    // the registry forgot and the journal never received is
+                    // Gone: mint no pane, keep no member row on the persist,
+                    // and put its binding in done_bindings so the tree lane
+                    // skips its tab instead of shell-substituting it.
+                    if classify_member(m, known_workers.as_ref(), &spawn_receipts)
+                        == MemberVerdict::Gone
+                    {
+                        pruned_workers += 1;
+                        done_bindings.insert(
+                            worker_binding_key(m).unwrap_or_else(|| worker_name.to_string()),
+                        );
+                        continue;
+                    }
                     if hold_workers {
                         // (x-9052) Doneness gate: a worker whose node is done
                         // (status done / merge_status merged / completed_at
@@ -8501,21 +8525,13 @@ impl Core {
                         }
                         continue;
                     }
-                    match &known_workers {
-                        // An unreadable registry prunes NOTHING - keeping a
-                        // ghost idle row costs nothing, deleting every worker
-                        // member on a transient IO error costs the record.
-                        None => members.push(m.clone()),
-                        Some(known) => {
-                            let listed = m.worker.as_deref().is_some_and(|w| known.contains(w));
-                            if listed {
-                                members.push(m.clone());
-                                idle_workers += 1;
-                            } else {
-                                pruned_workers += 1;
-                            }
-                        }
-                    }
+                    // (x-b64e) Only the idle/resume policies reach here: the
+                    // classifier above already retired every Gone member, so
+                    // the old known_workers arm is gone with it. A kept
+                    // member restores as an idle row; nothing respawns
+                    // silently.
+                    members.push(m.clone());
+                    idle_workers += 1;
                     continue;
                 }
                 if !live.contains(&m.attach_id) {
@@ -8904,7 +8920,7 @@ impl Core {
         }
         if pruned_workers > 0 {
             self.notice_all(format!(
-                "restore: pruned {pruned_workers} worker member(s) whose registry row is gone"
+                "restore: retired {pruned_workers} worker member(s) whose registry row is gone"
             ));
         }
         if done_workers_total > 0 || skipped_done_tabs > 0 {
@@ -21425,10 +21441,11 @@ mod tests {
 
     #[test]
     fn restore_prunes_worker_members_whose_registry_row_is_gone() {
-        // x-5f7f: a worker member whose name no longer exists in the registry
-        // can never resume, so restore drops it and says so - otherwise every
-        // restart counts a ghost idle row forever (a reaped worker, an `fno
-        // agents rm`). A name that still exists stays, exited or not.
+        // x-5f7f, x-b64e: a worker member whose name no longer exists in the
+        // registry and which no spawn receipt vouches for can never resume,
+        // so restore retires it and says so - otherwise every restart holds
+        // a corpse (a reaped worker, an `fno agents rm`). A name that still
+        // exists stays, exited or not.
         let s = StoreScratch::new("restore-prune");
         let origin = s.dir.join("repo");
         std::fs::create_dir_all(&origin).unwrap();
@@ -21485,14 +21502,14 @@ mod tests {
         );
         let notices = drain_notices(&mut rx).join("\n");
         assert!(
-            notices.contains("pruned 1 worker member(s) whose registry row is gone"),
-            "the prune is named, never silent: {notices}"
+            notices.contains("retired 1 worker member(s) whose registry row is gone"),
+            "the retirement is named, never silent: {notices}"
         );
         assert!(
             notices.contains("1 worker row(s) idle"),
             "the survivor still counts as idle: {notices}"
         );
-        // The prune is persisted, not just in-memory: the next load sees one.
+        // The retirement is persisted, not just in-memory: the next load sees one.
         let stored = crate::squad_store::load();
         let all: Vec<&str> = stored
             .squads
@@ -21500,6 +21517,84 @@ mod tests {
             .flat_map(|sq| sq.members.iter().filter_map(|m| m.worker.as_deref()))
             .collect();
         assert_eq!(all, vec!["t-codex-live"], "the prune reaches the store");
+    }
+
+    #[test]
+    fn restore_retires_a_gone_worker_before_the_hold_branch_and_skips_its_tab() {
+        // (x-b64e) The default hold policy used to hold every corpse: the
+        // member_resume_facts fallback made a registry-forgotten, receipt-less
+        // member resumable forever. The classifier runs before the policy
+        // branch, so a Gone member earns no pane, leaves the store, and its
+        // tab is skipped whole instead of shell-substituted.
+        let s = StoreScratch::new("restore-gone-hold");
+        let origin = s.dir.join("repo");
+        std::fs::create_dir_all(&origin).unwrap();
+        let origin_str = origin.to_string_lossy().into_owned();
+        crate::squad_store::upsert(
+            "",
+            &crate::squad_store::origin_key(&[origin_str.clone()]),
+            &[origin_str.clone()],
+            &[crate::squad_store::StoredMember {
+                attach_id: String::new(),
+                tombstone: false,
+                detached: false,
+                tab_name: None,
+                cwd: None,
+                worker: Some("t-corpse".into()),
+                harness: Some("codex".into()),
+                harness_session_id: Some("corpse-session".into()),
+            }],
+        )
+        .unwrap();
+        crate::squad_store::set_tab_trees(
+            "",
+            &crate::squad_store::origin_key(&[origin_str.clone()]),
+            &[],
+            &[crate::squad_store::StoredTabTree {
+                tab_name: None,
+                tree: crate::proto::LayoutTreeSpec::Slot("s0".into()),
+                slots: vec![crate::proto::LayoutSlot::new(
+                    "s0".into(),
+                    LayoutBinding::Fno("worker:codex:corpse-session".into()),
+                )],
+                focus: None,
+            }],
+            None,
+        )
+        .unwrap();
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let _known = KnownWorkersGuard;
+        set_known_workers(&[]);
+        set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Hold);
+        let _pol = RestorePolicyGuard;
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.restore_squads(24, 80, 999);
+        assert!(
+            core.held_workers.is_empty(),
+            "a corpse is held nowhere: {:?}",
+            core.held_workers
+        );
+        let stored = crate::squad_store::load();
+        let workers: Vec<&str> = stored
+            .squads
+            .iter()
+            .flat_map(|sq| sq.members.iter().filter_map(|m| m.worker.as_deref()))
+            .collect();
+        assert!(
+            workers.is_empty(),
+            "the Gone member left the store: {workers:?}"
+        );
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(
+            notices.contains("retired 1 worker member(s) whose registry row is gone"),
+            "the retirement is named, never silent: {notices}"
+        );
+        assert!(
+            notices.contains("1 done tab(s)"),
+            "the tab is skipped whole, never shell-substituted: {notices}"
+        );
     }
 
     #[test]
@@ -24671,6 +24766,10 @@ mod tests {
         // session was never restored.
         let _guard = ResumeProgramGuard;
         set_resume_program(&["/bin/cat"]);
+        // (x-b64e) The verb classifies candidates like the startup path, so
+        // the test pins the registry seam its members must survive.
+        let _known = KnownWorkersGuard;
+        set_known_workers(&["twin"]);
         let mut core = empty_core();
         core.shells = vec!["/bin/cat".into()];
         let cwd = std::env::temp_dir().join("fno-ws-restore-dup");
@@ -24723,6 +24822,10 @@ mod tests {
         // candidates.
         let _guard = ResumeProgramGuard;
         set_resume_program(&["/bin/cat"]);
+        // (x-b64e) The verb classifies candidates like the startup path, so
+        // the test pins the registry seam its members must survive.
+        let _known = KnownWorkersGuard;
+        set_known_workers(&["t-codex-one"]);
         let mut core = empty_core();
         core.shells = vec!["/bin/cat".into()];
         let cwd = std::env::temp_dir().join("fno-ws-restore");
@@ -24820,6 +24923,8 @@ mod tests {
         // processes start. Every gate runs; nothing does.
         let _guard = ResumeProgramGuard;
         set_resume_program(&["/bin/cat"]);
+        let _known = KnownWorkersGuard;
+        set_known_workers(&["t-codex-one"]);
         let mut core = empty_core();
         core.shells = vec!["/bin/cat".into()];
         let cwd = std::env::temp_dir().join("fno-ws-restore-dry");
@@ -24878,6 +24983,10 @@ mod tests {
         // to "the code never ran".
         let _guard = ResumeProgramGuard;
         set_resume_program(&["/bin/cat"]);
+        // (x-b64e) The verb classifies candidates like the startup path, so
+        // the test pins the registry seam its members must survive.
+        let _known = KnownWorkersGuard;
+        set_known_workers(&["t-codex-one", "mystery", "routed-glm"]);
         let mut core = empty_core();
         core.shells = vec!["/bin/cat".into()];
         let cwd = std::env::temp_dir().join("fno-ws-restore-refused");

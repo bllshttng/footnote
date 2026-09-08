@@ -12,6 +12,8 @@ The verb enumerates every live, non-tombstoned worker member in the squad store.
 
 Every member that cannot come back is named, with the reason. The reasons include: no registry row, no session id, a harness the table gives no resume form, an ambiguous name, a failed spawn. Silence is never an outcome. A run that resumes two and refuses one prints all three.
 
+A member the registry forgot and the spawn journal never received does not come back. Restore retires it from the store: no pane, no dim card, no member row on the next persist. The restore receipt names the count. Nothing that does not belong returns.
+
 Two preconditions are refusals, not empty results. The verb refuses before the session's first real attach. At that point startup restore has not run and the persisted squads were never read. Answering "nothing to restore" there is a lie. It also reads the registry file itself before classifying. The off-loop registry reader ticks independently, and a headless restore can otherwise refuse every member with "no such agent" while its row sits on disk.
 
 The server's member list is authoritative while the server runs. The squad store file is that list's persist target, not its source. Every pane event re-writes the file from memory. So any write to `squads.json` from outside a live server, such as `fno mux workspace prune`, must be followed by the `SquadReload` control verb to every answering session. Without the reload, the next pane event writes the old members back over the pruned file. Restore then reads memory-shaped rows, not the file a prune just shrank.
