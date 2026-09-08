@@ -128,6 +128,28 @@ def _repo_state_dir(cwd: str) -> str:
     return os.path.join(root, ".fno")
 
 
+def _manifest_file(cwd: str) -> str:
+    """This run's session manifest: the space slice, falling back to the
+    checkout's ``.fno/``.
+
+    ``_repo_state_dir`` still answers where the merge's SENTINELS and journal
+    live (beside the checkout), but the manifest itself moved to the space, so
+    the two are no longer the same directory. Every followup that read
+    ``<state_dir>/target-state.md`` was reading a path init stopped writing.
+    """
+    legacy = os.path.join(_repo_state_dir(cwd), "target-state.md")
+    try:
+        from pathlib import Path
+
+        from fno.paths import target_state_path_or_legacy
+
+        # The space slice is named after the WORKTREE ROOT, so resolve from the
+        # toplevel `_repo_state_dir` already found, never from a nested cwd.
+        return str(target_state_path_or_legacy(Path(legacy).parent.parent))
+    except Exception:  # noqa: BLE001 - a resolver failure degrades to the legacy path
+        return legacy
+
+
 def _closes_quoted_scalar(raw: str) -> bool:
     """Whether the text after ``key:`` ends its quoted scalar on this line.
 
@@ -554,7 +576,7 @@ def _manifest_harness(repo: str) -> Optional[str]:
     from pathlib import Path
 
     try:
-        manifest = Path(_repo_state_dir(repo)) / "target-state.md"
+        manifest = Path(_manifest_file(repo))
     except Exception:  # noqa: BLE001 - an unreadable manifest is no attribution
         return None
     value = _read_state_field(str(manifest), "harness").strip()
@@ -1137,21 +1159,47 @@ def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
     )
 
 
-def _emit_session_satisfied(pr_url: str, state_dir: str) -> None:
-    """Emit a session_satisfied{source:pr_merge} event (best-effort)."""
-    state_file = os.path.join(state_dir, "target-state.md")
-    if not os.path.isfile(state_file):
-        return
+# The sentinel a degraded merge row carries in place of a manifest field it
+# could not read. Never a real session id or a real md5, so the auto-complete
+# matcher (which requires BOTH to equal the live session's) can never adopt a
+# degraded row.
+_MERGE_ROW_UNKNOWN = "unknown"
+
+
+def _emit_session_satisfied(pr_url: str, state_dir: str, state_file: str) -> None:
+    """Emit a ``session_satisfied{source:pr_merge}`` row for EVERY merge.
+
+    Unconditional on purpose. Three silent early returns used to guard this
+    (absent manifest, absent session_id, unreadable manifest bytes) and between
+    them they produced ZERO rows in a 21605-event journal - not zero for one PR,
+    zero for every merge this repo has ever taken. The first guard was the one
+    that fired: the manifest moved to the space and this path still looked for
+    it beside the checkout.
+
+    This row is the only record that distinguishes a merge which consulted the
+    review-hold gate from one which did not, and a guard whose use leaves no
+    trace cannot be audited. It also cannot change a merge outcome, so a
+    missing input degrades to a NAMED sentinel with a diagnostic rather than
+    deleting the row.
+    """
     sid = _read_state_field(state_file, "session_id")
     if not sid or sid == "null":
-        return
+        sys.stderr.write(
+            f"pr-merge: no session_id on {state_file}; recording the merge row "
+            f"as {_MERGE_ROW_UNKNOWN}\n"
+        )
+        sid = _MERGE_ROW_UNKNOWN
     try:
         with open(state_file, "rb") as fh:
             gate_hash = hashlib.md5(fh.read()).hexdigest()
-    except OSError:
-        return
+    except OSError as exc:
+        sys.stderr.write(
+            f"pr-merge: manifest {state_file} unreadable ({exc}); recording the "
+            f"merge row as {_MERGE_ROW_UNKNOWN}\n"
+        )
+        gate_hash = _MERGE_ROW_UNKNOWN
     if not gate_hash:
-        return
+        gate_hash = _MERGE_ROW_UNKNOWN
     try:
         from pathlib import Path
 
@@ -1290,7 +1338,7 @@ def _run_post_merge_followups(
     pr_number: int, strategy: str, cwd: str, bound_node_ids: Optional[List[str]] = None
 ) -> None:
     state_dir = _repo_state_dir(cwd)
-    state_file = os.path.join(state_dir, "target-state.md")
+    state_file = _manifest_file(cwd)
 
     # Merge-minted cleanup request, FIRST: the grace clock starts at the merge.
     try:
@@ -1330,15 +1378,19 @@ def _run_post_merge_followups(
     except Exception:
         pass
 
-    # Auto-complete signal.
+    # Auto-complete signal, and the merge's own audit row. Not swallowed: the
+    # `except: pass` here was the fourth silence stacked on the three inside the
+    # emitter, so even a raising emit left no trace of the merge.
     try:
         pr_url = ""
         res = _gh(["pr", "view", str(pr_number), "--json", "url", "-q", ".url"], cwd)
         if res.ok:
             pr_url = res.stdout.strip()
-        _emit_session_satisfied(pr_url, state_dir)
-    except Exception:
-        pass
+        _emit_session_satisfied(pr_url, state_dir, state_file)
+    except Exception as exc:  # noqa: BLE001 - telemetry, merge outcome unaffected
+        sys.stderr.write(
+            f"pr-merge: merge audit row not written ({exc}); merge outcome unaffected\n"
+        )
 
     # W4 touch telemetry: a manual (tty) merge is a human steering action.
     try:
@@ -1824,7 +1876,7 @@ def run_merge(
     # refusal that closes a door without pointing at the key is the one that
     # had two workers improvising config mutations inside sixty seconds.
     auto_merge = _load_auto_merge()
-    state_file = os.path.join(_repo_state_dir(repo), "target-state.md")
+    state_file = _manifest_file(repo)
     approved = _read_state_field(state_file, "auto_merge_approved")
     if authority == "durable_grant":
         # The watcher's authority arm: the parked worker's
