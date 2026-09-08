@@ -61,7 +61,7 @@ case "$1 $2" in
     fi
     if [[ "${STUB_KEEPER_THREAD:-0}" == "1" ]]; then
       thread_session="${STUB_THREAD_SESSION_ID-019f0000-0000-7000-8000-000000000002}"
-      echo "{\"name\":\"agy-thread\",\"short_id\":\"$thread_session\",\"session_id\":\"$thread_session\",\"harness\":\"agy\",\"status\":\"live\"}"; exit 0
+      echo "{\"name\":\"agy-thread\",\"short_id\":\"$thread_session\",\"harness\":\"agy\",\"status\":\"live\"}"; exit 0
     fi
     echo "{\"name\":\"x\",\"short_id\":\"${STUB_SHORT_ID-deadbeef}\",\"harness\":\"claude\",\"status\":\"live\"}"; exit 0 ;;
   "claim release")
