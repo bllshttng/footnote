@@ -24,6 +24,11 @@ the row is worse than showing it with its provenance.
 Nothing in this module writes. `demand` never touches `rank` and never consults
 `_kanban_column` as an input, because the board is the work order and a signal
 that reorders it on its own removes the judgement this feature exists to inform.
+
+`importance_score` is where the read reaches selection, and it is deliberately
+the weakest term there: `make_selection_sort_key` places it after priority and
+fan-out, so it only ever reorders rows the decision terms have already tied, and
+an operator's pin outranks it entirely.
 """
 from __future__ import annotations
 

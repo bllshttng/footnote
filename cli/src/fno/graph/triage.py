@@ -1147,7 +1147,10 @@ def cmd_rank(
     candidate PAIRS with the LLM (comparative judgment beats one-shot
     absolute scoring), then this verb aggregates those verdicts into a single
     consistent order, tolerating the occasional contradictory/cyclic verdict.
-    Apply the resulting order with ``fno backlog rank --top/--after``.
+    Apply the resulting order as priority proposals (``fno backlog update <id>
+    --priority p0..p3``). Not through ``rank``: that is the operator's pin, it
+    refuses an agent session, and serialising a careful comparative judgement
+    through min-minus-one writes turned it into arrival order.
 
     Participants are the verdict ids that exist in the graph (unknown ids are
     dropped, mirroring validate). Output is JSON:

@@ -21,13 +21,13 @@ That placement is load-bearing: **a renderer exception must never abort a backlo
 `_intake.make_selection_sort_key` returns this logical key for unranked work:
 
 ```
-[project lane] -> rank band -> live-epic child tier -> in-progress live epic -> live epic priority -> epic created_at -> child priority -> orphan-last -> created_at
+[project lane] -> rank band -> live-epic child tier -> in-progress live epic -> live epic priority -> epic created_at -> child priority -> fan-out -> importance -> orphan-last -> created_at
 ```
 
 For a live-epic child the leading rank band is the **epic's own** band. The child's rank band sits between the epic `created_at` term and child priority:
 
 ```
-[project lane] -> epic rank band -> child tier -> in-progress live epic -> live epic priority -> epic created_at -> child rank band -> child priority -> orphan-last -> created_at
+[project lane] -> epic rank band -> child tier -> in-progress live epic -> live epic priority -> epic created_at -> child rank band -> child priority -> fan-out -> importance -> orphan-last -> created_at
 ```
 
 The optional project-lane prefix is present only when `swimlane=True`.
@@ -57,8 +57,11 @@ Default `fno backlog next` is project-scoped, so its order matches that project'
 
 Consequences:
 
+- **`rank` is the operator's pin, and only the operator writes it.** `fno backlog rank` refuses a session carrying a harness stamp and names the two votes an agent has instead: `fno backlog encounter <id> --evidence` and `fno backlog update <id> --priority`. `--operator` is the escape hatch for an operator working from inside an agent shell. The fence exists because `--top` writes `min(rank) - 1`: every writer undercut the last, so with four callers pushing the same lever the order was arrival order, and importance was never computed at all.
 - **`rank` changes the order, not what dispatches.** `fno backlog rank <id> --top` floats a card to the top of its swimlane on the board. A walker or daemon that drains an active mission scope then picks it first. Rank alone never dispatches the node: a top-ranked node outside every active mission scope stays undispatched. An explicit rank on a loose node overrides the epics-first heuristic. A ranked loose node beats an in-progress epic's children. A rank on a live-epic child is parent-scoped. It reorders the child inside its epic group only. The epic's own position decides the group's turn. Inside the group, the drain takes the children in the curated order.
-- **Priority still leads unranked work.** Among unranked nodes, the shared suffix keeps the epics-first and priority terms. Live-epic priority and child priority follow, then orphan-last and creation-time. `fno backlog reprioritize <id> p0` remains the way to promote an unranked node. Reprioritizing a live epic can promote its lower-priority children into the same board column without rewriting those children.
+- **`--top` means top of its scope, and the receipt says which.** A pinned child is not the project's next node. Measured 2026-09-07: `fno backlog rank x-8739 --top` wrote `-169.0`, the minimum among its epic's children, and the node stood eighth across the project behind six pins at `-186` to `-177`. `fno backlog next --project fno` returned a different node. The receipt now reads `--top of epic <id>` or `--top of lane <col>/<project>` and says what the pin orders, so a reader cannot take a group-local pin for a fleet-wide one.
+- **Priority still leads unranked work.** Among unranked nodes, the shared suffix keeps the epics-first and priority terms. Live-epic priority and child priority follow, then fan-out, importance, orphan-last, and creation-time. `fno backlog reprioritize <id> p0` remains the way to promote an unranked node. Reprioritizing a live epic can promote its lower-priority children into the same board column without rewriting those children.
+- **Importance is a projection, below every decision term.** `demand.importance_score` weighs a node's encounters against the priority it was filed at and adds a capped age term. It is computed at sort time, never stored, and it is zero for a node nobody voted on, so a graph with no encounters sorts exactly as it did before the term existed. It sits after priority and fan-out on purpose: a measurement must not outrank a judgement, and an operator's pin outranks both.
 - **Rank is per-`(column, project)` lane.** Selection is project-scoped by default (`fno backlog next [--project P]`), so rank orders within the project's ready set and matches the board's swimlane rank.
   It never reorders across projects, and `fno backlog update` does not clear `rank`.
   A moved node keeps its rank in the new lane's ranked band; run `fno backlog rank <id> --clear` to rejoin the unranked flow.
@@ -81,6 +84,7 @@ Mirrors `reprioritize`; writes through `locked_mutate_graph`. Exactly one of:
 - `--top` / `--bottom`: below / above the scope's ranked band. When the scope has no ranked cards yet, the band starts at `0.0`.
 - `--before <anchor>` / `--after <anchor>`: float midpoint next to a **ranked** anchor in the same scope. The anchor must already be ranked, because the band model puts all ranked cards ahead of all unranked. Position it relative to other ranked cards. Seed the first with `--top`.
 - `--clear`: `rank = null`.
+- `--operator`: write the pin from a session that carries a harness stamp. Without it, every write action above is refused for such a session, `--clear` included.
 
 When the node has a live epic parent, the scope is that epic. Peers and anchors are the epic's children across the whole graph. The `--within-epic` flag is the explicit spelling. Otherwise the scope is the `(column, project)` lane. The verb resolves the target id through `_find_node`, which fuzzy-resolves partial ids. It compares on the **resolved** id for both peer-exclusion and the self-anchor guard. Rejections all print to stderr and exit non-zero. They cover a cross-scope anchor (both scopes named), an unranked anchor (actionable hint), a self-anchor, a non-existent node, and a wrong flag count. An explicit `--within-epic` without a live epic parent is also refused. The mutator raises *before* the locked write, so no partial rank is ever persisted.
 
