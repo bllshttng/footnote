@@ -592,9 +592,9 @@ else
   # there (empty/torn receipts still fail - the cardinal guard remains intact).
   case "$SUBSTRATE" in
     thread|bg)
-      if [[ "$PROVIDER" == "codex" ]]; then
+      if [[ "$PROVIDER" != "claude" ]]; then
         short_id="${harness_session_id:-$session_id}"
-        short_id_shape='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        short_id_shape='^([0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
       else
         short_id_shape='^[0-9a-f]{8}$'
       fi

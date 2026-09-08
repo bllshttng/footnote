@@ -59,6 +59,10 @@ case "$1 $2" in
       thread_session="${STUB_THREAD_SESSION_ID-019f0000-0000-7000-8000-000000000001}"
       echo "{\"name\":\"codex-thread\",\"short_id\":\"\",\"session_id\":\"$thread_session\",\"harness_session_id\":\"$thread_session\",\"harness\":\"codex\",\"status\":\"live\"}"; exit 0
     fi
+    if [[ "${STUB_KEEPER_THREAD:-0}" == "1" ]]; then
+      thread_session="${STUB_THREAD_SESSION_ID-019f0000-0000-7000-8000-000000000002}"
+      echo "{\"name\":\"agy-thread\",\"short_id\":\"$thread_session\",\"session_id\":\"$thread_session\",\"harness\":\"agy\",\"status\":\"live\"}"; exit 0
+    fi
     echo "{\"name\":\"x\",\"short_id\":\"${STUB_SHORT_ID-deadbeef}\",\"harness\":\"claude\",\"status\":\"live\"}"; exit 0 ;;
   "claim release")
     exit 0 ;;
@@ -273,6 +277,12 @@ out="$(STUB_VERDICT="$DISP" STUB_CODEX_THREAD=1 STUB_THREAD_SESSION_ID="$CODEX_T
 ok   'codex thread full session -> launched' "$(field "$out")" 'launched'
 has  'codex thread full session surfaced'     "$out" "short_id=$CODEX_THREAD_SESSION"
 has  'codex thread logs use full session'    "$out" "fno agents logs $CODEX_THREAD_SESSION"
+
+KEEPER_THREAD_SESSION='019f0000-0000-7000-8000-000000000002'
+out="$(STUB_VERDICT="$DISP" STUB_KEEPER_THREAD=1 STUB_THREAD_SESSION_ID="$KEEPER_THREAD_SESSION" \
+  run --name agy-thread --provider agy --message 'Implement x' --substrate thread)"
+ok   'agy keeper full session -> launched' "$(field "$out")" 'launched'
+has  'agy keeper full session surfaced'    "$out" "short_id=$KEEPER_THREAD_SESSION"
 
 # --- pane worker observability hint (PR #341 delta) --------------------------
 # A matched mux-pane receipt launches (main's verified-identity path), but a pane
