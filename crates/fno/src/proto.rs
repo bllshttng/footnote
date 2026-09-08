@@ -4056,7 +4056,8 @@ mod tests {
         // edit; they now assert only their own wire shapes. Per-bump history
         // lives on the PROTO_VERSION const; v74 (x-b5d1) took 74 so the
         // version never moves backwards whichever branch lands first.
-        assert_eq!(PROTO_VERSION, 74);
+        // v75 (x-7649) took 75; floor stays 58.
+        assert_eq!(PROTO_VERSION, 75);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
