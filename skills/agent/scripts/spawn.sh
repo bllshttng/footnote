@@ -639,7 +639,7 @@ else
       valid_receipt_identity "$short_id" || fail "no valid receipt ($VERB JSON canonical identity empty/malformed for substrate '${SUBSTRATE:-pane}'): $(sanitize "${spawn_out:-$spawn_err}")"
       ;;
     headless) : ;;
-    *) valid_pane_identity "$short_id" || fail "no valid receipt ($VERB JSON pane identity empty/malformed for substrate '${SUBSTRATE:-pane}'): $(sanitize "${spawn_out:-$spawn_err}")" ;;
+    *) valid_pane_identity "$short_id" || fail "no valid short-id receipt ($VERB JSON .short_id empty/malformed for substrate '${SUBSTRATE:-pane}'): $(sanitize "${spawn_out:-$spawn_err}")" ;;
   esac
 fi
 
