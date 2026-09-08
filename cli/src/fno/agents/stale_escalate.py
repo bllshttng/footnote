@@ -106,15 +106,9 @@ def answered_question(root: Path, key: str, *, marker: str = MARKER) -> "str | N
     from fno.outstanding.core import read_answered_questions, read_question_events
 
     needle = f"[{marker}:{key}]"
-    hit = next(
-        (
-            question
-            for question in read_answered_questions()
-            if needle in question.get("question", "")
-            and question.get("closed_by") not in _MECHANICAL_CLOSERS
-        ),
-        None,
-    )
+    hit = next((q for q in read_answered_questions()
+                if needle in q.get("question", "")
+                and q.get("closed_by") not in _MECHANICAL_CLOSERS), None)
     if hit is None:
         return None
     events = read_question_events()
@@ -136,11 +130,8 @@ def reset_answered(root: Path, *, marker: str) -> None:
     from fno.outstanding.core import append_question_event, read_answered_questions, read_question_events
 
     events = read_question_events()
-    answered_ids = {
-        question["id"]
-        for question in read_answered_questions()
-        if f"[{marker}:" in question.get("question", "")
-    }
+    answered_ids = {q["id"] for q in read_answered_questions()
+                    if f"[{marker}:" in q.get("question", "")}
     last = max(
         (i for i, rec in enumerate(events) if _is_answer_close(rec, answered_ids)),
         default=-1,

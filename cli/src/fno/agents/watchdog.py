@@ -822,11 +822,9 @@ def _verdict_one(
         facts_age_s = max(0.0, now_s - facts.last_event_epoch)
     if row.state in _WAKE_STATES and facts_age_s is not None:
         if facts_age_s > WAKE_MAX_AGE_S:
-            spent_basis = _spent_basis(
-                row, facts, facts_age_s, node_state_for=node_state_for,
-            )
-            if spent_basis is not None:
-                return _verdict(row, SPENT, spent_basis, "none")
+            spent = _spent_basis(row, facts, facts_age_s, node_state_for=node_state_for)
+            if spent is not None:
+                return _verdict(row, SPENT, spent, "none")
             return _verdict(
                 row, STALE,
                 f"{row.state} {int(facts_age_s // 3600)}h old, past the "
