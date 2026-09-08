@@ -335,6 +335,8 @@ Two kings acted on the false half within an hour. One warned the other that PR n
 
 A citation has siblings. Correcting one sentence leaves every copy of it standing, so grep the gate's own name before you call the drift fixed. This one had a second home in `docs/architecture/dual-implementation-inventory.md`, found by a review of the PR that corrected the first.
 
+Grep the name and you can still miss one. A third copy lived in `scripts/ci/check-parity-test-provenance.sh`, where the script name is wrapped across two comment lines. A line-oriented search cannot match a name broken by a newline. Search a distinctive fragment that survives wrapping, and read every hit.
+
 *Graduates to:* a citation that names what the gate matches, or a gate that matches what the rule says. Both sentences are corrected, and the gate is unchanged.
 
 ## `claude agents --json` shows fewer sessions than the agent view
