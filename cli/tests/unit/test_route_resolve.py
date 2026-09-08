@@ -674,7 +674,8 @@ def test_declared_rows_survive_the_real_loader(tmp_path):
     spawns were refused with 'declared rows: (none)'. Drives the REAL loader
     (settings_from_files: the same parse + validate path as production) and
     asserts the named row survives - a nonzero count alone cannot tell a right
-    answer from a silent empty.
+    answer from a silent empty. operator_view rides every declared row: the
+    qualification field the strict inventory reads (x-90a9).
     """
     from fno.config import settings_from_files
 
@@ -685,6 +686,7 @@ def test_declared_rows_survive_the_real_loader(tmp_path):
         'harness = "claude"\n'
         'model = "claude-opus-5"\n'
         'band = "high"\n'
+        'operator_view = "claude-native"\n'
         "\n"
         "[[routing.models]]\n"
         'name = "zai-flash"\n'
@@ -704,6 +706,7 @@ def test_declared_rows_survive_the_real_loader(tmp_path):
     assert "claude-canonical-opus" in rows
     assert rows["claude-canonical-opus"]["model"] == "claude-opus-5"
     assert rows["claude-canonical-opus"]["harness"] == "claude"
+    assert rows["claude-canonical-opus"]["operator_view"] == "claude-native"
     assert rows["zai-flash"]["band"] == "low"
 
 
@@ -737,3 +740,28 @@ def test_repeated_declared_name_folds_per_field(tmp_path):
     assert row["harness"] == "claude"  # unnamed fields keep the base row's value
     assert row["route"] == "zai/glm-5.3-flash[1m]"
     assert row["band"] == "low"
+
+
+def test_routing_policy_payload_reads_the_opt_in_fields(tmp_path, monkeypatch):
+    """The strict flag and the operator posture travel to the owner verbatim;
+    an unset posture reads unknown, the conservative default."""
+    import fno.config as config_mod
+
+    f = tmp_path / "settings.toml"
+    f.write_text(
+        "[routing]\nenforce_inventory = true\noperator_access = \"remote\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(f))
+    settings = config_mod.load_settings()
+    assert rr._routing_policy_payload(settings) == {
+        "enforce_inventory": True,
+        "operator_access": "remote",
+    }
+
+    f2 = tmp_path / "unset.toml"
+    f2.write_text("", encoding="utf-8")
+    monkeypatch.setenv("FNO_CONFIG", str(f2))
+    settings2 = config_mod.load_settings()
+    assert rr._routing_policy_payload(settings2)["operator_access"] == "unknown"
+    assert rr._routing_policy_payload(settings2)["enforce_inventory"] is False
