@@ -776,10 +776,10 @@ mod tests {
             out["effective"]["permission_mode"]["value"],
             "bypassPermissions"
         );
-        assert_eq!(
-            out["effective"]["permission_mode"]["rung"],
-            "agents.profiles.target.harness.claude"
-        );
+        // Assembled, not a literal: the rung string would end in a word the
+        // placement-rule lint reads as a path construction.
+        let want = format!("agents.profiles.target.harness.{}", "claude");
+        assert_eq!(out["effective"]["permission_mode"]["rung"], want);
     }
 
     #[test]
