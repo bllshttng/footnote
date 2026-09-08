@@ -30,6 +30,12 @@ const AGENTS_LIST_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct ClaudeAgentRow {
     pub short_id: String,
     pub state: Option<String>,
+    /// Full harness session id, name and cwd, when the listing carries them
+    /// (x-aad0): the roster-side sweep needs the identity a registry row
+    /// would have had, and the registry-side surfaces ignore them.
+    pub session_id: Option<String>,
+    pub name: Option<String>,
+    pub cwd: Option<String>,
 }
 
 impl ClaudeAgentRow {
@@ -37,6 +43,9 @@ impl ClaudeAgentRow {
         Self {
             short_id: short_id.to_string(),
             state: state.map(|value| value.to_ascii_lowercase()),
+            session_id: None,
+            name: None,
+            cwd: None,
         }
     }
 }
@@ -168,7 +177,23 @@ fn parse_all_agents(stdout: &[u8]) -> ClaudeAgentsSnapshot {
         let state = ["state", "status"]
             .into_iter()
             .find_map(|key| object.get(key).and_then(|value| value.as_str()));
-        parsed_rows.push(ClaudeAgentRow::new(short_id, state));
+        let mut row = ClaudeAgentRow::new(short_id, state);
+        row.session_id = ["session_id", "sessionId"]
+            .into_iter()
+            .find_map(|key| object.get(key).and_then(|value| value.as_str()))
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        row.name = ["name"]
+            .into_iter()
+            .find_map(|key| object.get(key).and_then(|value| value.as_str()))
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        row.cwd = ["cwd"]
+            .into_iter()
+            .find_map(|key| object.get(key).and_then(|value| value.as_str()))
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        parsed_rows.push(row);
     }
     if !warnings.is_empty() {
         if agent_rows > 0 && parsed_rows.is_empty() {

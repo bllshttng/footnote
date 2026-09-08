@@ -564,6 +564,87 @@ pub(crate) fn production_tree_probe(e: &state::RegistryEntry) -> (Option<bool>, 
     (clean, crate::daemon::branch_merged(&e.cwd))
 }
 
+/// The one provenance verdict (x-5a62): the reverse join stays first and
+/// unchanged (x-c672); only a NoProvenance verdict reaches the cascade,
+/// which tries the registry field, the row name, and the transcript,
+/// records which source answered, and holds the row when two witnesses
+/// disagree. The confirm step reads positive PR-state evidence on every
+/// retire-eligible row whichever source answered: an open additional PR
+/// holds, a RECORDED merge_status that is not `merged` holds, an ABSENT
+/// merge_status does not hold - its absence rides the basis as unrecorded,
+/// visible for audit. The registry sweep and the roster-side sweep share
+/// this spelling; a second implementation would let the two sweeps
+/// disagree about which rows are dead.
+pub(crate) struct ProvenanceVerdict {
+    pub work: WorkState,
+    pub route: node_route::NodeRoute,
+    pub hold: Option<KeepReason>,
+    pub merge_note: Vec<String>,
+}
+
+pub(crate) fn provenance_verdict(
+    e: &state::RegistryEntry,
+    sid: &str,
+    graph: &GraphRead,
+    transcripts: Option<&[std::path::PathBuf]>,
+) -> ProvenanceVerdict {
+    let mut work = graph_store::work_state(&graph.index, sid);
+    let mut route = node_route::NodeRoute::default();
+    // The sessions answer is the route even when it answers alone: the
+    // basis and the roster judgement name the node, not a dash.
+    if let Some((node, _)) = graph
+        .index
+        .get(&graph_store::work_state_key(sid))
+        .and_then(|rows| rows.first())
+    {
+        route.node = Some(node.clone());
+        route.source = Some(node_route::NodeSource::Sessions);
+    }
+    if matches!(work, WorkState::NoProvenance) {
+        route = node_route::resolve(e, sid, graph, transcripts);
+        if route.conflict.is_none() {
+            work = route.work_state(&graph.statuses);
+        }
+    }
+    let mut hold = route
+        .conflict
+        .clone()
+        .map(|(src, node)| KeepReason::NodeConflict {
+            a: src.as_str().to_string(),
+            b: node,
+        });
+    let mut merge_note: Vec<String> = Vec::new();
+    if let WorkState::AllDone { nodes } = &work {
+        for node in nodes {
+            let (merge_status, extra) = graph.pr_state.get(node).cloned().unwrap_or((None, 0));
+            if extra > 0 {
+                hold = Some(KeepReason::PrStateContradicts {
+                    node: node.clone(),
+                    detail: format!("additional_prs: {extra}"),
+                });
+                break;
+            }
+            match &merge_status {
+                Some(m) if m != "merged" => {
+                    hold = Some(KeepReason::PrStateContradicts {
+                        node: node.clone(),
+                        detail: format!("merge_status: {m}"),
+                    });
+                    break;
+                }
+                Some(m) => merge_note.push(format!("{node}:{m}")),
+                None => merge_note.push(format!("{node}:unrecorded")),
+            }
+        }
+    }
+    ProvenanceVerdict {
+        work,
+        route,
+        hold,
+        merge_note,
+    }
+}
+
 /// The one retirement pass. Every I/O seam (`read_graph`, `store_matches`,
 /// `stop_confirmed`, `tree_probe`, `prune_tree`) is injected so a test
 /// stages the world; production wiring is [`crate::gc::gc_sweep`] /
@@ -632,18 +713,8 @@ pub(crate) fn run(
             continue;
         };
         let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
-        // The reverse join stays first and unchanged (x-c672). Only a
-        // NoProvenance verdict reaches the cascade (x-5a62), which tries the
-        // registry field, the row name, and the transcript, records which
-        // source answered, and holds the row when two witnesses disagree.
-        let mut work = graph_store::work_state(&graph.index, sid);
-        let mut route = node_route::NodeRoute::default();
-        if matches!(work, WorkState::NoProvenance) {
-            route = node_route::resolve(e, sid, graph, store_matches(e).as_deref());
-            if route.conflict.is_none() {
-                work = route.work_state(&graph.statuses);
-            }
-        }
+        let verdict = provenance_verdict(e, sid, graph, store_matches(e).as_deref());
+        let work = verdict.work;
         // Locked Decision 1: every named node done but one still carries an
         // OPEN do row for this session -> the row stays and the node is
         // named. The retirement never settles graph rows itself.
@@ -654,43 +725,8 @@ pub(crate) fn run(
                 continue;
             }
         }
-        // The confirm step (x-5a62): positive PR-state evidence in both
-        // directions, on every retire-eligible row whichever source
-        // answered. An open additional PR holds the row (the graph records
-        // no per-entry merge state for one); a RECORDED merge_status that is
-        // not `merged` holds; an ABSENT merge_status does not hold - its
-        // absence rides the basis as unrecorded, visible for audit.
-        let mut confirm_hold = route
-            .conflict
-            .clone()
-            .map(|(src, node)| KeepReason::NodeConflict {
-                a: src.as_str().to_string(),
-                b: node,
-            });
-        let mut merge_note: Vec<String> = Vec::new();
-        if let WorkState::AllDone { nodes } = &work {
-            for node in nodes {
-                let (merge_status, extra) = graph.pr_state.get(node).cloned().unwrap_or((None, 0));
-                if extra > 0 {
-                    confirm_hold = Some(KeepReason::PrStateContradicts {
-                        node: node.clone(),
-                        detail: format!("additional_prs: {extra}"),
-                    });
-                    break;
-                }
-                match &merge_status {
-                    Some(m) if m != "merged" => {
-                        confirm_hold = Some(KeepReason::PrStateContradicts {
-                            node: node.clone(),
-                            detail: format!("merge_status: {m}"),
-                        });
-                        break;
-                    }
-                    Some(m) => merge_note.push(format!("{node}:{m}")),
-                    None => merge_note.push(format!("{node}:unrecorded")),
-                }
-            }
-        }
+        let confirm_hold = verdict.hold;
+        let merge_note = verdict.merge_note;
         let age = transcript_age_s(store_matches(e).as_deref(), now);
         let owns_worktree = !e.is_one_shot_ask() && crate::daemon::is_linked_worktree(&e.cwd);
         // The planning lane (x-70e1 task 2): a blueprint/think row's OWN job
@@ -826,13 +862,17 @@ pub(crate) fn run(
         // audit is the failure this string prevents. Every AllDone row gets
         // the audit line - the sessions route included - so one policy has
         // one spelling.
-        let via = route.source.unwrap_or(node_route::NodeSource::Sessions);
+        let via = verdict
+            .route
+            .source
+            .unwrap_or(node_route::NodeSource::Sessions);
         let basis = match &probed.work {
             WorkState::AllDone { nodes } => {
                 let named = format!("every named node done: {}", nodes.join(", "));
                 let mut note = format!("via {}", via.as_str());
-                if !route.agreeing.is_empty() {
-                    let names: Vec<&str> = route
+                if !verdict.route.agreeing.is_empty() {
+                    let names: Vec<&str> = verdict
+                        .route
                         .agreeing
                         .iter()
                         .map(node_route::NodeSource::as_str)

@@ -60,6 +60,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "probe-run",
     "promote",
     "reap",
+    "roster-reap",
     "reconcile",
     "recover",
     "reentry-plan",
@@ -521,6 +522,13 @@ async fn run(args: Vec<String>) -> i32 {
     // build_request.
     if verb == "reap" {
         return run_reap(&args[1..]);
+    }
+
+    // The roster-side sweep (x-aad0 gap one): claude rows no fno row names.
+    // Like `reap`, it operates directly on live surfaces so it needs no
+    // running daemon. Dry-run by default; `--apply` executes.
+    if verb == "roster-reap" {
+        return run_roster_reap(&args[1..]);
     }
 
     // Capture the verb name so format_success can use it at the print site
@@ -2211,6 +2219,34 @@ fn run_reap(rest: &[String]) -> i32 {
             json_out,
             dry_run
         )
+    );
+    0
+}
+
+/// `fno-agents roster-reap`: the roster-side sweep (x-aad0 gap one). Dry-run
+/// by default; `--apply` executes. Takes only --json/--apply.
+fn run_roster_reap(rest: &[String]) -> i32 {
+    let json_out = rest.iter().any(|a| a == "--json" || a == "-J");
+    let dry_run = !rest.iter().any(|a| a == "--apply");
+    let extras: Vec<&str> = rest
+        .iter()
+        .map(String::as_str)
+        .filter(|a| *a != "--json" && *a != "-J" && *a != "--apply")
+        .collect();
+    if !extras.is_empty() {
+        eprintln!(
+            "fno-agents: roster-reap takes no arguments other than --json/--apply (got: {})",
+            extras.join(" ")
+        );
+        return 2;
+    }
+    let home = AgentsHome::from_env();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
+    let summary = fno_agents::roster_reap::roster_reap(&home, grace_secs, dry_run);
+    print!(
+        "{}",
+        fno_agents::roster_reap::render(&summary, json_out, dry_run)
     );
     0
 }
