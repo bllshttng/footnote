@@ -346,6 +346,7 @@ pub fn gc_sweep(
         &|e| store.borrow_mut().matches(e),
         &|e| gc_sweep::stop_row_process(home, e),
         &crate::gc_native::apply_active_surface_removal,
+        &crate::claude_roster::read_all_agents,
         &gc_sweep::production_tree_probe,
         &crate::daemon::rm_take_worktree,
     );
@@ -381,6 +382,7 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
         &|e| store.borrow_mut().matches(e),
         &|e| gc_sweep::stop_row_process(home, e),
         &crate::gc_native::apply_active_surface_removal,
+        &crate::claude_roster::read_all_agents,
         &gc_sweep::production_tree_probe,
         &crate::daemon::rm_take_worktree,
     );
@@ -630,6 +632,10 @@ pub fn unowned_sweeps(home: &AgentsHome, emitter: &EventEmitter, cwd: &std::path
 
 #[cfg(test)]
 mod tests {
+    fn no_agents() -> crate::claude_roster::ClaudeAgentsSnapshot {
+        crate::claude_roster::ClaudeAgentsSnapshot::unknown("test: no snapshot staged")
+    }
+
     use super::*;
 
     // --- the orphan process sweep ---
@@ -1094,6 +1100,7 @@ mod tests {
                 true
             },
             &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+            &no_agents,
             &|_e| (None, None),
             &|_e| None,
         );
@@ -1212,6 +1219,7 @@ mod tests {
                 true
             },
             &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+            &no_agents,
             &|_e| (None, None),
             &|_e| None,
         );
@@ -1272,6 +1280,7 @@ mod tests {
             &|_| None,
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
+            &no_agents,
             &|_| (None, None),
             &|_| None,
         );

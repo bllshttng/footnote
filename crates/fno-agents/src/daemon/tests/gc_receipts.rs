@@ -63,6 +63,11 @@ fn graph_read(named: &[(&str, &str, &str)], open_do: &[(&str, &str)]) -> Option<
 /// A retirement-shaped sweep for the dispatch-accounting tests: every row
 /// named on a done node, its staged transcript quiet (grace 0), stop
 /// confirmed, no tree.
+
+fn no_agents() -> crate::claude_roster::ClaudeAgentsSnapshot {
+    crate::claude_roster::ClaudeAgentsSnapshot::unknown("test: no snapshot staged")
+}
+
 fn retire_sweep(
     home: &AgentsHome,
     emitter: &EventEmitter,
@@ -80,6 +85,7 @@ fn retire_sweep(
         transcripts,
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         &|_| (None, None),
         &|_| None,
     )
@@ -105,6 +111,7 @@ fn staged_sweep(
         transcripts,
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         &|e| trees(&e.name),
         &|e| Some(crate::daemon::PruneOutcome::Removed(e.cwd.clone())),
     )
@@ -547,6 +554,7 @@ fn ac4_err_graph_unreadable_and_stop_refusal_keep_every_row() {
         &|_| None,
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -573,6 +581,7 @@ fn ac4_err_graph_unreadable_and_stop_refusal_keep_every_row() {
         &move |_| Some(vec![quiet.clone()]),
         &|e| e.name != "row-a",
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -617,6 +626,7 @@ fn an_open_do_row_on_a_done_node_holds_the_retirement() {
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -661,6 +671,7 @@ fn a_done_node_with_a_closed_do_row_retires_by_name() {
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -731,6 +742,7 @@ fn operator_and_crowned_rows_never_retire_and_tree_buckets_only_keep_trees() {
         },
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         // row-t's tree: dirty. The row retires; the tree stays and is named.
         &|e| {
             if e.name == "row-t" {
@@ -835,6 +847,7 @@ fn reap_receipt_built_from_the_row_when_the_ledger_has_no_entry() {
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -905,6 +918,7 @@ fn a_row_whose_receipt_cannot_be_built_is_never_reaped() {
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -1101,6 +1115,7 @@ fn a_failed_surface_removal_holds_the_row_and_a_confirmation_is_recorded() {
         &move |_| Some(vec![q1.clone()]),
         &|_| true,
         &refusing,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -1141,6 +1156,7 @@ fn a_failed_surface_removal_holds_the_row_and_a_confirmation_is_recorded() {
         &move |_| Some(vec![quiet2.clone()]),
         &|_| true,
         &confirming,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -1232,6 +1248,7 @@ fn the_receipt_is_on_disk_before_the_effects_fire() {
         &move |_| Some(vec![q1.clone()]),
         &|_| true,
         &probing_surface,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -1285,6 +1302,7 @@ fn a_row_without_a_buildable_receipt_refuses_before_any_effect() {
             surface_for_seam.set(surface_for_seam.get() + 1);
             CascadeOutcome::Removed
         },
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -1353,6 +1371,7 @@ fn a_row_without_a_located_transcript_records_failed_resume_evidence() {
         &move |_| Some(vec![q1.clone()]),
         &|_| true,
         &confirming,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -1440,6 +1459,7 @@ fn a_planner_retires_only_on_its_own_closed_assignment() {
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
         &|_| CascadeOutcome::Removed,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -1605,6 +1625,7 @@ fn a_row_reaps_only_after_its_receipt_is_durable() {
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
         &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -3103,6 +3124,7 @@ fn settle_then_run(
     emitter: &EventEmitter,
     dry_run: bool,
     transcripts: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
+    agents: crate::claude_roster::ClaudeAgentsSnapshot,
 ) -> GcSummary {
     if dry_run {
         let planned = gc_sweep::plan_stale_do_rows(home);
@@ -3116,6 +3138,7 @@ fn settle_then_run(
             transcripts,
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
+            &move || agents.clone(),
             &|_| (None, None),
             &|_| None,
         );
@@ -3136,6 +3159,7 @@ fn settle_then_run(
             transcripts,
             &|_| true,
             &|_| crate::daemon::CascadeOutcome::NotApplicable,
+            &move || agents.clone(),
             &|_| (None, None),
             &|_| None,
         );
@@ -3181,7 +3205,13 @@ fn a_settled_nodes_open_do_row_is_filled_and_kept() {
     })
     .unwrap();
 
-    let summary = settle_then_run(&home, &emitter, false, &move |_| Some(vec![quiet.clone()]));
+    let summary = settle_then_run(
+        &home,
+        &emitter,
+        false,
+        &move |_| Some(vec![quiet.clone()]),
+        no_agents(),
+    );
 
     assert_eq!(
         summary.settled_do_rows,
@@ -3244,7 +3274,13 @@ fn a_done_but_unmerged_node_still_holds_its_row() {
     })
     .unwrap();
 
-    let summary = settle_then_run(&home, &emitter, false, &move |_| Some(vec![quiet.clone()]));
+    let summary = settle_then_run(
+        &home,
+        &emitter,
+        false,
+        &move |_| Some(vec![quiet.clone()]),
+        no_agents(),
+    );
 
     assert!(summary.settled_do_rows.is_empty());
     assert!(summary.retired.is_empty());
@@ -3285,7 +3321,13 @@ fn an_open_additional_pr_still_holds_its_row() {
     })
     .unwrap();
 
-    let summary = settle_then_run(&home, &emitter, false, &move |_| Some(vec![quiet.clone()]));
+    let summary = settle_then_run(
+        &home,
+        &emitter,
+        false,
+        &move |_| Some(vec![quiet.clone()]),
+        no_agents(),
+    );
 
     assert!(summary.settled_do_rows.is_empty());
     assert!(summary.retired.is_empty());
@@ -3355,13 +3397,19 @@ fn the_live_eighteen_split_fifteen_and_three() {
     })
     .unwrap();
 
-    let summary = settle_then_run(&home, &emitter, false, &move |e| {
-        Some(vec![quiet_transcript(
-            transcripts.path(),
-            &format!("{}.jsonl", e.harness_session_id.as_deref().unwrap_or("x")),
-            2 * 3600,
-        )])
-    });
+    let summary = settle_then_run(
+        &home,
+        &emitter,
+        false,
+        &move |e| {
+            Some(vec![quiet_transcript(
+                transcripts.path(),
+                &format!("{}.jsonl", e.harness_session_id.as_deref().unwrap_or("x")),
+                2 * 3600,
+            )])
+        },
+        no_agents(),
+    );
 
     assert_eq!(
         summary.settled_do_rows.len(),
@@ -3418,7 +3466,15 @@ fn a_dry_run_settles_nothing_on_disk() {
     .unwrap();
     let before = std::fs::read(dir.path().join("graph.json")).unwrap();
 
-    let summary = settle_then_run(&home, &emitter, true, &move |_| Some(vec![quiet.clone()]));
+    let summary = settle_then_run(
+        &home,
+        &emitter,
+        true,
+        &move |_| Some(vec![quiet.clone()]),
+        crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+            crate::claude_roster::ClaudeAgentRow::new("sess-d", Some("done")),
+        ]),
+    );
 
     assert_eq!(
         summary.settled_do_rows,
@@ -3575,6 +3631,7 @@ fn a_graph_obligation_opened_after_the_decision_holds_before_the_effects() {
             surface_for_seam.set(surface_for_seam.get() + 1);
             CascadeOutcome::Removed
         },
+        &no_agents,
         &|_| (Some(true), Some(true)),
         &|_| None,
     );
@@ -3743,4 +3800,213 @@ fn the_archived_session_record_survives_cwd_deletion_and_resolves() {
     );
     assert!(report.passes(), "{:?}", report.problems);
     assert!(report.missing.is_empty());
+}
+
+// ── positive death evidence in the reaper ─────────────────────────────────
+
+/// A sweep with the agents snapshot and stop seam staged separately, so a
+/// test can prove WHICH evidence confirmed (or refused) the stop.
+#[allow(clippy::too_many_arguments)]
+fn evidence_sweep(
+    sweep_home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace_secs: i64,
+    dry_run: bool,
+    graph: Option<GraphRead>,
+    transcripts: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
+    agents: crate::claude_roster::ClaudeAgentsSnapshot,
+    stop: &dyn Fn(&state::RegistryEntry) -> bool,
+) -> GcSummary {
+    gc_sweep::run(
+        sweep_home,
+        emitter,
+        grace_secs,
+        dry_run,
+        7,
+        &move |_| graph.clone(),
+        transcripts,
+        stop,
+        &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+        &move || agents.clone(),
+        &|_| (None, None),
+        &|_| {},
+    )
+}
+
+fn claude_worker_row(name: &str, short: &str) -> state::RegistryEntry {
+    let mut row = ask_row(name, None);
+    row.short_id = short.into();
+    row.harness = Some("claude".into());
+    row.harness_session_id = Some(format!("{short}-1111-2222-3333-444444444444"));
+    row.origin = Some("spawn".into());
+    row
+}
+
+#[test]
+fn terminal_roster_state_retires_without_a_stop() {
+    let home = tmp_home("gc-evidence-done");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "a.jsonl", 7200);
+    state::update_registry(&home.registry_json(), |registry| {
+        registry
+            .entries
+            .push(claude_worker_row("row-done", "cccc3333"));
+    })
+    .unwrap();
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("cccc3333", Some("done")),
+    ]);
+    let stops = std::cell::RefCell::new(0usize);
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        0,
+        false,
+        graph_read(
+            &[("cccc3333-1111-2222-3333-444444444444", "N1", "done")],
+            &[],
+        ),
+        &|_| Some(vec![quiet.clone()]),
+        agents,
+        &|_| {
+            *stops.borrow_mut() += 1;
+            true
+        },
+    );
+    assert_eq!(summary.retired.len(), 1);
+    assert_eq!(*stops.borrow(), 0, "no stop may run on evidence alone");
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[test]
+fn dead_pid_proves_the_stop() {
+    let home = tmp_home("gc-evidence-pid");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "a.jsonl", 7200);
+    state::update_registry(&home.registry_json(), |registry| {
+        registry
+            .entries
+            .push(claude_worker_row("row-pid", "dddd4444"));
+    })
+    .unwrap();
+    // u32::MAX cannot name a live process on any supported platform, so the
+    // probe must answer "gone".
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("dddd4444", Some("working"))
+            .with_pid(Some(u32::MAX)),
+    ]);
+    let stops = std::cell::RefCell::new(0usize);
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        0,
+        false,
+        graph_read(
+            &[("dddd4444-1111-2222-3333-444444444444", "N1", "done")],
+            &[],
+        ),
+        &|_| Some(vec![quiet.clone()]),
+        agents,
+        &|_| {
+            *stops.borrow_mut() += 1;
+            true
+        },
+    );
+    assert_eq!(summary.retired.len(), 1);
+    assert_eq!(*stops.borrow(), 0, "a dead pid needs no stop subprocess");
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[test]
+fn blocked_roster_state_is_not_death_evidence() {
+    let home = tmp_home("gc-evidence-blocked");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "a.jsonl", 7200);
+    state::update_registry(&home.registry_json(), |registry| {
+        registry
+            .entries
+            .push(claude_worker_row("row-blocked", "eeee5555"));
+    })
+    .unwrap();
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("eeee5555", Some("blocked")),
+    ]);
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        0,
+        false,
+        graph_read(
+            &[("eeee5555-1111-2222-3333-444444444444", "N1", "done")],
+            &[],
+        ),
+        &|_| Some(vec![quiet.clone()]),
+        agents,
+        &|_| false,
+    );
+    assert!(summary.retired.is_empty());
+    assert!(summary
+        .stop_refused
+        .iter()
+        .any(|(id, why)| id == "eeee5555" && why.contains("no death evidence")));
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[test]
+fn dry_run_promises_only_provable_rows() {
+    let home = tmp_home("gc-evidence-dry");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet_a = quiet_transcript(transcripts.path(), "a.jsonl", 7200);
+    let quiet_b = quiet_transcript(transcripts.path(), "b.jsonl", 7200);
+    state::update_registry(&home.registry_json(), |registry| {
+        registry
+            .entries
+            .push(claude_worker_row("row-done", "ffff6666"));
+        registry
+            .entries
+            .push(claude_worker_row("row-live", "aaaa7777"));
+    })
+    .unwrap();
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("ffff6666", Some("done")),
+        crate::claude_roster::ClaudeAgentRow::new("aaaa7777", Some("working")),
+    ]);
+    let stops = std::cell::RefCell::new(0usize);
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        0,
+        true,
+        graph_read(
+            &[
+                ("ffff6666-1111-2222-3333-444444444444", "N1", "done"),
+                ("aaaa7777-1111-2222-3333-444444444444", "N2", "done"),
+            ],
+            &[],
+        ),
+        &|e| match e.harness_session_id.as_deref() {
+            Some("ffff6666-1111-2222-3333-444444444444") => Some(vec![quiet_a.clone()]),
+            Some("aaaa7777-1111-2222-3333-444444444444") => Some(vec![quiet_b.clone()]),
+            _ => None,
+        },
+        agents,
+        &|_| {
+            *stops.borrow_mut() += 1;
+            true
+        },
+    );
+    let retired: Vec<&str> = summary.retired.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(retired, vec!["ffff6666"]);
+    let waiting: Vec<&str> = summary
+        .needs_live_stop
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect();
+    assert_eq!(waiting, vec!["aaaa7777"]);
+    assert_eq!(*stops.borrow(), 0, "dry run never stops anything");
+    std::fs::remove_dir_all(home.root()).ok();
 }

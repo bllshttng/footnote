@@ -209,6 +209,14 @@ fn stop_harness_confirmed(
     if entry.mux.is_some() {
         return Ok(String::new());
     }
+    // Positive death evidence first: a finished claude agent never leaves the
+    // roster, so its stop can never be confirmed by absence. One snapshot
+    // read per merge cleanup - the request names a handful of rows at most.
+    if crate::gc_sweep::claude_death_reason(entry, &crate::claude_roster::read_all_agents())
+        .is_some()
+    {
+        return Ok(row_stop_short(entry).unwrap_or_default());
+    }
     match crate::gc_sweep::stop_row_process(home, entry) {
         true => Ok(row_stop_short(entry).unwrap_or_default()),
         false => Err("stop_refused"),
