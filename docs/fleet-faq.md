@@ -126,7 +126,11 @@ The shapes, each measured:
 
 **A killed subprocess surfaces as a traceback.** `ClaimVerdictError: fno-agents claim sweep failed with exit -9: no diagnostic`. Exit -9 is SIGKILL, and a killed process writes no stderr, which is why the message ends in `no diagnostic`. Run the sweep alone before accepting the traceback. It returned exit 0 and 5,610 bytes. The next run of the verb then gave the ordinary refusal the crash had hidden.
 
-**A peer's zero is still a zero.** A king proposed widening a lint's scope to the code tree, calling it free that day. The stated grounds were zero hits repo-wide, with controls passing. Measured before acting, the code tree held 12,831 node-id hits across 1,377 files. The three commonest are synthetic test fixtures, at 188, 181 and 115 occurrences, and real ids sit among them. Naming those fixtures here trips the gate too, which is the entry proving itself. The change turns 1,377 files red. A measurement arrives with the authority of the session that took it, and it inherits none of that session's care.
+**A peer's zero is still a zero, and a control can validate the wrong thing.** A king proposed widening a lint's scope to the code tree, calling it free that day. The stated grounds were zero hits repo-wide, with controls passing. Measured before acting, the code tree held thousands of hits across more than a thousand files. Most are synthetic test fixtures, and real ids sit among them. The change turns those files red.
+
+The cause is worth more than the correction. POSIX ERE has no `\b`, so a `git grep -nE` pattern written with word boundaries matches nothing and returns a confident zero. The probe, on one fixture token: without boundaries 181 hits, with them 0. Same tool, same tree, reproduced from a second session.
+
+The control did not catch it because the control ran somewhere else. In the king's own words: it validated the regex in BSD grep, then the search ran in `git grep`. **The control checked the tool, not the target.** That is the trap the AGENTS.md pitfalls corpus already names, and this is a fresh specimen of it: a green control aimed at the wrong engine still reads as proof.
 
 *Graduates to:* an assert helper that rejects absence-only success and zero-hit probes with no positive control, which the AGENTS.md pitfalls corpus already names. Then, per shape. A refusal that separates "unreadable" from "still present". One decision function shared by the dry run and the real run. A non-zero exit on a refusal. A killed subprocess reported as a kill, with its signal named.
 
