@@ -1,7 +1,7 @@
 # SAMPLE routing inventory. NO CODE PATH READS THIS FILE.
 # It documents the shape of the [routing] block in your config.toml.
 # Copy rows you want into ~/.fno/config.toml (or .fno/config.toml) and edit them.
-# `fno config routing init` appends this whole sample, commented out, to your global config.
+# `fno config route init` appends this whole sample, commented out, to your global config.
 #
 # Nothing is authoritative until YOU declare it: a fresh install with no [routing]
 # block routes nothing from the grid and records `grid=no-inventory-declared`.
@@ -25,6 +25,15 @@ objective = "cheapest-that-clears"
 # Only read by objective = "prefer-harness": rows on this harness are tried
 # first, and the band is never lowered to stay on it (tier wins, harness breaks ties).
 prefer_harness = "claude"
+# STRICT INVENTORY POLICY, off by default. enforce_inventory qualifies every
+# spawn against the declared slots only: an explicit model, vendor or route a
+# slot does not declare is refused by name, never silently redirected to the
+# harness default. operator_access says where the operator watches from
+# (local | remote | unknown, default unknown): under remote or unknown only
+# rows carrying their harness's native view label (operator_view on a row
+# below) qualify, so every launch is visible in the view you actually watch.
+# enforce_inventory = false
+# operator_access = "unknown"
 
 [agents.profiles.target]
 # The lane names, first-pass-wins. Each names a [[routing.models]] row below.
@@ -79,6 +88,13 @@ effort = "xhigh"
 name = "sonnet-thread"
 harness = "claude"
 model = "sonnet"
+# NATIVE VIEW LABEL. A row on the harness's own coordinate (no vendor route)
+# may carry it: claude-native | codex-native, harness-matched. Under
+# operator_access = remote or unknown only labeled rows qualify, so a launch
+# always lands in a view the operator can actually see. A vendor-route row
+# (route set, like lane 1) cannot claim a native view: its coordinate is
+# not native, and labeling it so is a named config refusal.
+# operator_view = "claude-native"
 
 [[routing.models]]
 # `name` is the key you and the resolver refer to the row by.
