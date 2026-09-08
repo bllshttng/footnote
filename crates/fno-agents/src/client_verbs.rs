@@ -2662,6 +2662,55 @@ fn should_delegate_claude_live_attach(
 /// inline and returns the exit code to propagate.
 use crate::resume_args::parse_resume_args;
 
+
+/// The preserved-record fallback (x-70e1 task 4): a session-shaped resume
+/// miss consults the reap-receipts store before refusing. A retirement that
+/// already removed the registry row keeps the resume tokens and the store
+/// context on disk; this prints them (never launching), so the same native
+/// session stays reachable without any active fno row. `Some(())` = a
+/// receipt matched and was printed.
+fn print_resume_receipt_hint(home: &AgentsHome, name: &str) -> Option<()> {
+    let dir = home.root().join("reap-receipts");
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let needle = name.trim().to_ascii_lowercase();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(receipt) = crate::receipt::read_reap_receipt(&path) else {
+            continue;
+        };
+        let matches = receipt.harness_session_id.to_ascii_lowercase() == needle
+            || receipt.short_id.to_ascii_lowercase() == needle
+            || receipt.row_name.to_ascii_lowercase() == needle;
+        if !matches {
+            continue;
+        }
+        eprintln!(
+            "fno agents resume: {name} has no registry row, but a retirement receipt preserves it."
+        );
+        eprintln!("  harness: {}", receipt.harness);
+        eprintln!("  session: {}", receipt.harness_session_id);
+        eprintln!("  original cwd: {}", receipt.cwd);
+        if !receipt.cwd.is_empty() && !Path::new(&receipt.cwd).exists() {
+            eprintln!(
+                "  note: the original cwd is gone; resume from a replacement checkout with the native command below."
+            );
+        }
+        eprintln!(
+            "  native resume: {}",
+            if receipt.resume_argv.is_empty() {
+                receipt.resume.clone()
+            } else {
+                receipt.resume_argv.join(" ")
+            }
+        );
+        return Some(());
+    }
+    None
+}
+
 pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     let (name, print_command, message, cross_project, cwd_override, account) =
         match parse_resume_args(rest) {
@@ -2712,6 +2761,14 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
                 // variant, unreachable through this call, kept here only for
                 // exhaustiveness over `AdoptError`.
                 Ok(None) | Err(AdoptError::NoEvidence) => {
+                    if is_session_shaped(&name) || name.contains('-') {
+                        // The preserved-record fallback: a retired session
+                        // keeps its resume tokens in the receipts store even
+                        // though its registry row is gone.
+                        if print_resume_receipt_hint(home, &name).is_some() {
+                            return 13;
+                        }
+                    }
                     eprintln!(
                         "fno agents resume: {}. Use `fno agents list` to see registered agents, or pass a full session id to resume an orphaned session.",
                         err.message()

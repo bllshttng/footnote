@@ -1,112 +1,111 @@
-"""The single owner of "has this worker's node already shipped" (x-1379).
+"""The forwarding shim over the Rust retirement verdict (x-1379, x-70e1).
 
-The join between a ``fno agents top`` worker row and the graph. Fail-closed
-on every read it cannot trust: an absence of reported doneness is not
-doneness, because a human decides whether to kill a session from this
-verdict. Doneness is node_is_done AND merged AND no additional_prs.
+The policy no longer lives here: one decision is computed in the Rust GC
+(``fno-agents reap --dry-run --json``), and this module only MAPS its
+buckets onto the ``Retirement`` verdicts ``fno agents top`` renders. A
+binary that is missing, slow or unreadable fails CLOSED - every row reads
+not-retirable with the reason named - never as a clean zero.
 """
 
 from __future__ import annotations
 
+import json
+import subprocess
 from typing import Iterable, NamedTuple, Optional
-
-from fno.graph.statuses import node_is_done
 
 
 class Retirement(NamedTuple):
     """The verdict for one worker row, with the basis it was resolved on."""
 
     node: Optional[str]  # the resolved node id, None when unresolvable
-    node_basis: Optional[str]  # "registry" | "name" | None
+    node_basis: Optional[str]  # "graph" | None (the Rust side owns the join)
     retire: bool
     reason: str  # why, in both directions
 
 
-def resolve_node(
-    name: str, node_field: Optional[str], ids: set
-) -> tuple[Optional[str], Optional[str]]:
-    """Registry ``node`` field first, then the worker name.
+def _default_runner() -> str:
+    """Shell the Rust dry run and return its stdout."""
+    from fno.rust_binary import resolve_binary
 
-    The field is authoritative but null on most live rows, so the fallback
-    reads ``<prefix>-<node_id>-<slug>``: tokens 1 and 2 only, ``tokens[1:3]``
-    joined against the full ids, then bare ``tokens[1]`` against a hex index
-    - a slug word like ``feed`` is never read as an id, and a bare hex
-    matching two graph ids resolves to nothing.
-    """
-    if node_field:
-        return node_field, "registry"
-    tokens = (name or "").split("-")
-    if len(tokens) < 2:
-        return None, None
-    joined = "-".join(tokens[1:3])
-    if joined in ids:
-        return joined, "name"
-    hex_index: dict[str, str] = {}
-    ambiguous: set[str] = set()
-    for id_ in ids:
-        hex_part = id_.rsplit("-", 1)[-1]
-        if hex_part in hex_index and hex_index[hex_part] != id_:
-            ambiguous.add(hex_part)
-        hex_index[hex_part] = id_
-    bare = tokens[1]
-    if bare in ambiguous:
-        return None, None
-    if bare in hex_index:
-        return hex_index[bare], "name"
-    return None, None
+    binary = resolve_binary()
+    if binary is None:
+        raise RuntimeError("no fno-agents binary installed")
+    proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [str(binary), "reap", "--dry-run", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"reap --dry-run exited {proc.returncode}: {proc.stderr.strip()}")
+    return proc.stdout
 
 
-def verdicts(rows: Iterable[tuple[str, Optional[str]]], entries=None) -> dict:
-    """``(name, node_field)`` roster -> ``{name: Retirement}``, one graph read.
+def _bucket_reasons(summary: dict) -> dict[str, Retirement]:
+    """Map one sweep summary onto per-row verdicts. Every bucket the Rust
+    renderer emits is named here, so a NEW bucket cannot silently read as
+    not-retirable - an unknown bucket raises and the caller fails closed."""
+    out: dict[str, Retirement] = {}
+    for row in summary.get("retired", []):
+        basis = row["basis"]
+        # "every named node done: N1, N2" - the first named node is the one
+        # the old graph join displayed; keep it in the NODE column.
+        node = None
+        if basis.startswith("every named node done:"):
+            names = basis.split(":", 1)[1].strip()
+            node = names.split(",")[0].strip() or None
+        out[row["id"]] = Retirement(node, "graph", True, basis)
+    for row in summary.get("kept_open_work", []):
+        out[row["id"]] = Retirement(
+            row["node"], "graph", False, f"status={row['status']}"
+        )
+    for row in summary.get("kept_open_do_row", []):
+        out[row["id"]] = Retirement(row["node"], "graph", False, "open do row")
+    for row in summary.get("kept_not_spawn", []):
+        origin = row.get("reason") or "unknown"
+        out[row["id"]] = Retirement(None, None, False, f"not a spawn row: origin {origin}")
+    for ident in summary.get("kept_operator", []):
+        out[ident] = Retirement(None, None, False, "operator row")
+    for ident in summary.get("kept_crowned", []):
+        out[ident] = Retirement(None, None, False, "crowned")
+    for ident in summary.get("kept_no_provenance", []):
+        out[ident] = Retirement(None, None, False, "no-node")
+    for row in summary.get("kept_active", []):
+        out[row["id"]] = Retirement(None, None, False, f"active: written {row['age_s']}s ago")
+    for ident in summary.get("kept_transcript_unresolved", []):
+        out[ident] = Retirement(None, None, False, "transcript unresolved")
+    for row in summary.get("stop_refused", []):
+        out[row["id"]] = Retirement(None, None, False, f"stop refused: {row['reason']}")
+    for row in summary.get("kept_no_receipt", []):
+        out[row["id"]] = Retirement(None, None, False, f"no receipt: {row['reason']}")
+    return out
 
-    ``entries`` is the injectable graph (the offline seam, as in
-    ``sweep_rows``). The rule, in order: unresolved node, unknown node, not
-    done, not merged, an open additional PR - only then retire. Rule 5 holds
-    on ANY non-empty ``additional_prs`` without asking GitHub: the graph
-    records no merge state for those PRs and a per-row network call is not
-    a debug view's to make; holding a merged extra PR costs one line.
+
+def verdicts(
+    rows: Iterable[tuple[str, Optional[str]]], runner=None
+) -> dict:
+    """``(name, node_field)`` roster -> ``{name: Retirement}``, one Rust read.
+
+    ``runner`` is the injectable seam (returns the ``--json`` stdout); the
+    default shells the installed binary. ANY failure is a named not-retirable
+    verdict for every row: a projection that cannot be read is never a clean
+    bill of health.
     """
     roster = list(rows)
-    if entries is None:
-        try:
-            from fno.graph.load import GRAPH_JSON, load_graph
-
-            if not GRAPH_JSON.exists():
-                raise FileNotFoundError(f"no graph at {GRAPH_JSON}")
-            entries = load_graph()
-        except Exception as exc:  # noqa: BLE001 - fail closed, never act
-            return {
-                name: Retirement(None, None, False, f"graph-unreadable: {exc}")
-                for name, _ in roster
-            }
-    by_id = {
-        e["id"]: e for e in entries if isinstance(e, dict) and e.get("id")
-    }
-    ids = set(by_id)
-    return {
-        name: _verdict(name, node_field, ids, by_id)
-        for name, node_field in roster
-    }
-
-
-def _verdict(name, node_field, ids, by_id) -> Retirement:
-    node, basis = resolve_node(name, node_field, ids)
-    if node is None:
-        return Retirement(None, None, False, "no-node")
-    entry = by_id.get(node)
-    if entry is None:
-        return Retirement(node, basis, False, "no-such-node")
-    if not node_is_done(entry):
-        return Retirement(node, basis, False, f"status={entry.get('status')}")
-    merge = entry.get("merge_status")
-    if merge != "merged":
-        return Retirement(node, basis, False, f"merge={merge}")
-    extra = entry.get("additional_prs") or []
-    if extra:
-        nums = ",".join(
-            str(p.get("number") if isinstance(p, dict) else p) for p in extra
-        )
-        return Retirement(node, basis, False, f"extra-pr:{nums}")
-    pr = entry.get("pr_number")
-    reason = f"done+merged PR {pr}" if pr else "done+merged"
-    return Retirement(node, basis, True, reason)
+    try:
+        raw = (runner or _default_runner)()
+        summary = json.loads(raw)
+        mapped = _bucket_reasons(summary)
+    except Exception as exc:  # noqa: BLE001 - fail closed, never act
+        reason = f"rust-reap-unreadable: {exc}"
+        return {name: Retirement(None, None, False, reason) for name, _ in roster}
+    out: dict[str, Retirement] = {}
+    for name, _node_field in roster:
+        if name in mapped:
+            out[name] = mapped[name]
+        else:
+            # The sweep never judged this row (an empty registry, a row
+            # added between reads): not judged is not retirable.
+            out[name] = Retirement(None, None, False, "not in sweep summary")
+    return out
