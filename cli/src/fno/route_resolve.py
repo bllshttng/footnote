@@ -284,12 +284,13 @@ def resolve_slot(
     explicit_model_value: Optional[str] = None,
     explicit_route_value: Optional[str] = None,
     explicit_vendor_value: Optional[str] = None,
-) -> tuple[Optional[dict[str, Any]], list[str]]:
+) -> tuple[Optional[dict[str, Any]], list[str], str]:
     """Which lane does this dispatch ride right now: the ONE slot resolver.
     Selection is Rust (``fno-agents route-slot``); chain strings come back
     verbatim, and a missing or failing binary is a named refusal. ``work_verb``
     is the ORIGINAL dispatch command (a planless target plans: the command
-    stays target while the slot is blueprint); it defaults to ``verb``."""
+    stays target while the slot is blueprint); it defaults to ``verb``. The
+    third element is the walk's own verdict word: armed, unarmed, or a hold."""
     import os
 
     settings, profile, lanes = _slot_entry(settings, verb)
