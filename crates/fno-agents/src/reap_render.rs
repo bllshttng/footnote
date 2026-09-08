@@ -175,7 +175,6 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     out
 }
 
-
 /// Render a sweep outcome plus, for the dry-run JSON read, the census the
 /// projection exists to expose (x-70e1 task 4): the complete per-session
 /// identity, its observed surfaces, and the source coverage that says how

@@ -978,7 +978,7 @@ def cmd_court(
 # verb: the x-4342 complaint shape is a review worker spawned with the node id
 # in its prompt. A do worker whose prompt mentions a SIBLING id must not get a
 # reviewer row stamped on that sibling, so prose and other verbs arm nothing.
-_REVIEW_VERB_PREFIXES = ("/code-review", "/review", "/fno:review")
+from fno.agents.spawn_phase import REVIEW_VERB_PREFIXES as _REVIEW_VERB_PREFIXES
 
 
 def _resolve_spawn_merge_grant(message: str) -> dict:
@@ -2176,20 +2176,9 @@ def cmd_spawn(
             raise typer.Exit(code=2)
         stamp_phase = session_phase
     else:
-        _verb = (message or "").lstrip().split(maxsplit=1)[0] if message else ""
-        _bare_verb = _verb.lstrip("/$")
-        if is_target_family(message):
-            stamp_phase = "do"
-        elif _verb.startswith(_REVIEW_VERB_PREFIXES):
-            stamp_phase = "review"
-        elif _bare_verb.startswith("fno:blueprint"):
-            stamp_phase = "blueprint"
-        elif _bare_verb.startswith("fno:think"):
-            stamp_phase = "think"
-        else:
-            # Prose or any other leading verb: unlabelable, the helper skips
-            # and says so.
-            stamp_phase = ""
+        from fno.agents.spawn_phase import infer_phase
+
+        stamp_phase = infer_phase(message)
     # A resume may restore a recorded route inside dispatch_spawn. Resolve its
     # separately stored provider axis before admission so the gate judges the
     # destination the revived worker will actually use.

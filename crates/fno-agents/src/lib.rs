@@ -139,6 +139,7 @@ pub mod receipt;
 pub mod reentry;
 pub mod rename;
 pub mod resume_args;
+pub mod resume_receipt;
 pub mod review_freshness;
 pub mod review_summary;
 pub mod roster_progress;

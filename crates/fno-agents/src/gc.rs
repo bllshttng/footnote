@@ -288,6 +288,7 @@ pub fn gc_sweep(
         &gc_sweep::read_graph_entries,
         &|e| store.borrow_mut().matches(e),
         &|e| gc_sweep::stop_row_process(home, e),
+        &crate::gc_native::apply_active_surface_removal,
         &gc_sweep::production_tree_probe,
         &|e| {
             crate::daemon::rm_take_worktree(e);
@@ -324,6 +325,7 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
         &read,
         &|e| store.borrow_mut().matches(e),
         &|e| gc_sweep::stop_row_process(home, e),
+        &crate::gc_native::apply_active_surface_removal,
         &gc_sweep::production_tree_probe,
         &|e| {
             crate::daemon::rm_take_worktree(e);
@@ -970,6 +972,7 @@ mod tests {
                 flag.store(true, Ordering::SeqCst);
                 true
             },
+            &|_e| crate::daemon::CascadeOutcome::NotApplicable,
             &|_e| (None, None),
             &|_e| {},
         );
@@ -1084,6 +1087,7 @@ mod tests {
                 flag.store(true, Ordering::SeqCst);
                 true
             },
+            &|_e| crate::daemon::CascadeOutcome::NotApplicable,
             &|_e| (None, None),
             &|_e| {},
         );
@@ -1143,6 +1147,7 @@ mod tests {
             &|_| None,
             &|_| None,
             &|_| true,
+            &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|_| (None, None),
             &|_| {},
         );
