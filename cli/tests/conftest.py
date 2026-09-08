@@ -393,20 +393,33 @@ def _hermetic_merge_hold_gate(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _hermetic_in_flight_review_gate(monkeypatch):
-    """Default the in-flight-review merge gate to "nothing running".
+def _hermetic_authorized_merge(monkeypatch):
+    """Default the authorized-merge owner to "authorized, then merged".
 
-    Same ambient-state class as ``_hermetic_merge_hold_gate`` above, with two
-    live reads instead of one: the gate resolves the PR's head branch over REST
-    (no working ``gh`` on the CI runner, so it fails closed and every merge test
-    reads ``held``), and its worktree layer shells ``git`` against whatever
-    checkout the suite happens to be running in - which, inside an active
-    /target worktree with edits in progress, is legitimately dirty. Closed at
-    the reader; the tests that exercise it override this.
+    Same ambient-state class as ``_hermetic_merge_hold_gate`` above. The owner
+    lives in the fno-agents binary, which is absent on a CI runner and answers
+    ``unknown`` there, so every merge test would read ``held``; and its probes
+    are live reads - the PR over REST, the review hold's worktree layer shelling
+    ``git`` against whatever checkout the suite runs in, which inside an active
+    /target worktree is legitimately dirty.
+
+    Cleared at the reader. The decision itself is under test in
+    ``crates/fno-agents/src/authorized_merge.rs``; the tests that exercise this
+    seam override the fixture with the receipt they want rendered.
     """
     import fno.pr._merge as merge
 
-    monkeypatch.setattr(merge, "_in_flight_review_refusal", lambda pr_number, repo: None)
+    def _authorized(pr_number, repo, *, effect, approved, source, **kwargs):
+        head = kwargs.get("covered_head") or "deadbee"
+        if kwargs.get("decide_only"):
+            return {"outcome": "authorized", "detail": head, "head": head}
+        return {
+            "outcome": "armed" if effect == "arm" else "merged",
+            "detail": head,
+            "head": head,
+        }
+
+    monkeypatch.setattr(merge, "_authorized_merge", _authorized)
 
 
 # ---------------------------------------------------------------------------

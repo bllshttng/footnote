@@ -51,6 +51,11 @@ impl Effect {
 pub enum Outcome {
     Merged {
         head: String,
+        /// Set when the merge landed but something around it did not: a local
+        /// post-merge step that failed after the server-side merge, or the
+        /// REST recovery for a worktree-held branch. The caller renders it as
+        /// a partial outcome rather than losing it behind a bare success.
+        note: Option<String>,
     },
     Armed {
         head: String,
@@ -99,9 +104,8 @@ impl Outcome {
     /// The reason line, or the head for the arms that carry one.
     pub fn detail(&self) -> String {
         match self {
-            Outcome::Merged { head } | Outcome::Armed { head } | Outcome::Authorized { head } => {
-                head.clone()
-            }
+            Outcome::Merged { head, .. } => head.clone(),
+            Outcome::Armed { head } | Outcome::Authorized { head } => head.clone(),
             Outcome::Held { reason }
             | Outcome::Refused { reason }
             | Outcome::Unknown { reason }
@@ -120,9 +124,13 @@ impl Outcome {
     pub fn to_json(&self) -> Value {
         let mut out = json!({ "outcome": self.word(), "detail": self.detail() });
         match self {
-            Outcome::Merged { head } | Outcome::Armed { head } | Outcome::Authorized { head } => {
-                out["head"] = json!(head)
+            Outcome::Merged { head, note } => {
+                out["head"] = json!(head);
+                if let Some(note) = note {
+                    out["note"] = json!(note);
+                }
             }
+            Outcome::Armed { head } | Outcome::Authorized { head } => out["head"] = json!(head),
             Outcome::HeadChanged { expected, actual } => {
                 out["expected_head"] = json!(expected);
                 out["actual_head"] = json!(actual);
@@ -413,6 +421,7 @@ fn effect<P: Probes>(probes: &P, request: &Request, authorized: &Authorized) -> 
             },
             Effect::Merge => Outcome::Merged {
                 head: authorized.head.clone(),
+                note: None,
             },
         };
     }
@@ -423,6 +432,11 @@ fn effect<P: Probes>(probes: &P, request: &Request, authorized: &Authorized) -> 
     match probes.pr_facts(cwd, Some(number)) {
         Ok(after) if after.state == "MERGED" => Outcome::Merged {
             head: authorized.head.clone(),
+            note: Some(format!(
+                "merged server-side, but the gh {} exited non-zero afterwards: {}",
+                request.effect.word(),
+                first_line(&output)
+            )),
         },
         Ok(after) if after.head_sha != authorized.head => Outcome::HeadChanged {
             expected: authorized.head.clone(),
@@ -448,6 +462,7 @@ fn effect<P: Probes>(probes: &P, request: &Request, authorized: &Authorized) -> 
                 if let Ok((true, _)) = probes.run_gh(cwd, &api) {
                     return Outcome::Merged {
                         head: authorized.head.clone(),
+                        note: Some("merged server-side (worktree fallback)".to_string()),
                     };
                 }
             }
@@ -472,11 +487,16 @@ fn checkout_refused(output: &str) -> bool {
     lower.contains("is already used by worktree") || lower.contains("already checked out")
 }
 
-fn classify_failure(effect: Effect, strategy: &str, output: &str) -> Outcome {
-    let first = output
+/// The first non-blank line of a command's output, capped for a receipt.
+fn first_line(output: &str) -> String {
+    let line = output
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("no error output");
+    line[..line.len().min(200)].to_string()
+}
+
+fn classify_failure(effect: Effect, strategy: &str, output: &str) -> Outcome {
     let lower = output.to_lowercase();
     let reason = if lower.contains("not mergeable") {
         "not mergeable (conflicts or base changed)".to_string()
@@ -488,7 +508,7 @@ fn classify_failure(effect: Effect, strategy: &str, output: &str) -> Outcome {
         format!(
             "gh {} with --{strategy} failed (check the repo allows that merge method): {}",
             effect.word(),
-            &first[..first.len().min(200)]
+            first_line(output)
         )
     };
     Outcome::Failed { reason }
@@ -770,16 +790,12 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         Ok(request) => request,
         Err(message) => return (2, String::new(), format!("authorized-merge: {message}\n")),
     };
+    // The receipt is the verdict, so the exit code answers only whether the verb
+    // RAN: 0 with a receipt on stdout, 2 when the payload was unusable. A code
+    // that also encoded refusal would make a held merge indistinguishable from a
+    // binary that could not start, and the caller reads the receipt either way.
     let outcome = run(&RealProbes, &request);
-    // 0 only when the effect happened, or when a decide-only pass cleared.
-    // Every refusal, hold and unknown is 2, the established retry-or-escalate
-    // code; the receipt carries which it was.
-    let code = if outcome.effected() || matches!(outcome, Outcome::Authorized { .. }) {
-        0
-    } else {
-        2
-    };
-    (code, format!("{}\n", outcome.to_json()), String::new())
+    (0, format!("{}\n", outcome.to_json()), String::new())
 }
 
 fn read_payload(args: &[String]) -> Result<Value, String> {
@@ -1078,7 +1094,8 @@ mod tests {
         assert_eq!(
             outcome,
             Outcome::Merged {
-                head: "abc123".to_string()
+                head: "abc123".to_string(),
+                note: None,
             }
         );
         let calls = fake.gh_calls.borrow();
@@ -1169,12 +1186,14 @@ mod tests {
             strategy: "squash".to_string(),
         };
         let outcome = effect(&fake, &request(Effect::Merge), &authorized);
-        assert_eq!(
-            outcome,
-            Outcome::Merged {
-                head: "abc123".to_string()
-            }
-        );
+        assert_eq!(outcome.word(), "merged");
+        // The cleanup failure survives as a note; a bare success would lose it.
+        let Outcome::Merged { note, .. } = outcome else {
+            unreachable!()
+        };
+        assert!(note
+            .expect("a note")
+            .contains("failed to delete local branch"));
     }
 
     #[test]

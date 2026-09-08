@@ -40,7 +40,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, List, Literal, Optional, Sequence, Tuple
 
-from fno.pr._proc import ToolMissing, run
+from fno.pr._proc import run
 
 _PR_RE = re.compile(r"^[1-9][0-9]*$")
 
@@ -283,38 +283,6 @@ def _pr_head_ref_and_oid(pr_number: int, repo: str) -> Optional[Tuple[str, str, 
     if not branch or not sha:
         return None
     return branch, sha, str(info.get("state") or "").upper()
-
-
-def _in_flight_review_refusal(pr_number: int, repo: str) -> Optional[str]:
-    """The merge-side spelling of "a review is still running", or None.
-
-    Fail-closed in both directions a read can go wrong. A PR whose branch and
-    head cannot be resolved cannot be probed at all, and an unprobed PR is not a
-    clear one: the whole defect is a merge taken while something unseen was
-    still writing. A raise inside the probe refuses for the same reason the
-    plan-hold read does, and says so in the same words.
-    """
-    from fno.pr._review_hold import review_hold_refusal
-
-    try:
-        refs = _pr_head_ref_and_oid(pr_number, repo)
-        if refs is None:
-            return (
-                "review-activity-unreadable: could not resolve the PR's head branch "
-                "and sha, so no in-flight review could be ruled out; "
-                "refusing to assume none is running"
-            )
-        branch, head, state = refs
-        # The same terminal exemption `fno do pr status` takes: this guard
-        # protects what WOULD merge, and a merged or closed PR has no
-        # would-merge left. Without it, a merge that LANDED and then failed
-        # during cleanup is retried, held at exit 2 by a worktree that is
-        # legitimately dirty, and never reaches the already-merged answer.
-        if state in ("MERGED", "CLOSED"):
-            return None
-        return review_hold_refusal(branch, pr_head=head, repo=repo)
-    except Exception as exc:  # noqa: BLE001 - matches the plan-hold polarity
-        return f"review-activity-unreadable: {exc}; refusing to assume no review is running"
 
 
 _REPO_FROM_URL = re.compile(r"github\.com/([^/]+/[^/]+?)(?:\.git)?/pull/")
@@ -1745,34 +1713,11 @@ def run_merge(
         return 1
     pr_number = int(pr_raw)
 
-    # (-2) Plan-level hold. This is before every other merge gate and shares
-    # the same plan reader autonomous and named dispatch use. Unreadable state
-    # refuses rather than defaulting to unheld.
-    from fno.pr._hold import merge_hold_reason
-
-    hold_reason = merge_hold_reason(pr_number, repo)
-    if hold_reason:
-        _emit(pr_number, "held", hold_reason, "none", err=False)
-        return 2
-
-    # (-1.5) In-flight review (x-a089). A review that is RUNNING is invisible to
-    # every gate below: coverage answers what verdicts EXIST for this head, and
-    # a review still writing its fixes has produced none yet. Three PRs on
-    # 2026-08-22 were green, settled and mergeable while their reviews were
-    # mid-flight, one of them with five counted findings under repair.
-    #
-    # Sited HERE, beside the plan hold and BEFORE the auto_merge gate below, for
-    # the reason that comment already gives: the auto-merge lane is not a
-    # separate caller, it is this function with `auto_merge.enabled`, and it is
-    # the caller with no human judgment to fall back on. A guard placed after
-    # that gate would be decorative for exactly the path that needs it most.
-    #
-    # No self-exemption: an author who merges over its own uncommitted fixes
-    # loses them as surely as a stranger does.
-    review_refusal = _in_flight_review_refusal(pr_number, repo)
-    if review_refusal:
-        _emit(pr_number, "held", review_refusal, "none", err=False)
-        return 2
+    # The plan-level hold and the in-flight review hold used to be asked here,
+    # ahead of every other gate. Both now belong to the authorized-merge owner,
+    # which the terminal's auto-merge arm consults too - the arm never asked
+    # either of them, so a queue armed at the terminal could ship the code a
+    # review was still fixing. Asked once, by one owner, for both paths.
 
     # (-1) Incarnation fence (x-eea5 1.3): a losing incarnation - a forked or
     # supervisor-restarted session whose session:<uuid> single-writer claim
@@ -1894,94 +1839,32 @@ def run_merge(
                 err=(word == "blocked"),
             )
             return 2
-    elif approved and not _approved_true(approved):
-        # Name WHICH input set the posture (x-9d11): the operator's first
-        # question on this refusal is "what layer said no". A pre-provenance
-        # manifest carries no source; that reads as unknown, never a guess.
-        # The override names levers that exist for the source it names: a
-        # flag-no-merge run was refused by its dispatcher (the `/target bg`
-        # default), not by anything typed by hand, so "without --no-merge"
-        # alone would point at a door that is not there.
-        source = (
-            _read_state_field(state_file, "auto_merge_source") or ""
-        ).strip() or "unknown (pre-provenance manifest)"
-        _emit(
-            pr_number,
-            "skipped",
-            f"per-run no-merge (manifest auto_merge_approved is not true; "
-            f"auto_merge_source: {source}); sanctioned override: an "
-            "out-of-band merge by the operator (any such merge satisfies "
-            "done()), or re-arm the run's dispatch (attended and without "
-            "--no-merge, or auto_merge.grant = dispatch); on a repo whose "
-            "standing switch is off, that alone is not enough - arm "
-            "auto_merge.enabled or spawn with TARGET_AUTO_MERGE=1 (the "
-            "config refusal names those levers)",
-            "none",
-            err=False,
-        )
-        return 2
-    if not auto_merge.enabled and not (
-        _approved_true(approved)
-        and (_read_state_field(state_file, "auto_merge_source") or "").strip()
-        == "env-target-auto-merge"
-    ):
-        # "resolves enabled=false", not "is set false": the same refusal fires
-        # on a stock install with no key and on a malformed block degraded to
-        # defaults, and prescribing `config set true` against a parse error
-        # masks it. The named levers are the OPERATOR's; a worker reading this
-        # escalates rather than pulling either one (skills/pr hard rule).
-        _emit(
-            pr_number,
-            "skipped",
-            "auto_merge disabled (live config resolves auto_merge.enabled="
-            "false); sanctioned override (operator levers): `fno config set "
-            "auto_merge.enabled true`, or start the run with "
-            "TARGET_AUTO_MERGE=1 from the operator's shell. The env grant "
-            "is folded into the manifest at init - mesh-spawned and "
-            "unattended runs scrub it, it is never a merge-time variable, "
-            "and never a synthesized config",
-            "none",
-            err=False,
-        )
-        return 2
-
-    # (1b) The posture floor: every merge GRANT above (standing or per-run)
-    # may arm only at rung 3 or better. The durable arm already holds via the
-    # resolver's own floor check; this step covers the manifest arm, so no
-    # granted path merges a repo whose resolved posture is no_review or
-    # tests_pass. The refusal is the shared floor wording (one wording, every
-    # arming surface) and names the config remedy.
-    from pathlib import Path
-
-    from fno.config import load_settings_for_repo, resolve_review_posture
-    from fno.review_capability import automerge_floor_refusal
-
-    try:
-        floor_refusal = automerge_floor_refusal(
-            resolve_review_posture(load_settings_for_repo(Path(repo)).review)
-        )
-    except Exception as exc:  # noqa: BLE001 - a floor verdict fails closed
-        _emit(
-            pr_number,
-            "blocked",
-            f"merge floor unverifiable ({type(exc).__name__}: {exc}); refusing "
-            "to merge against an unreadable review posture. Remedy: repair the "
-            "config (`fno config doctor`) and re-run",
-            "none",
-            err=True,
-        )
-        return 2
-    if floor_refusal:
-        _emit(pr_number, "skipped", floor_refusal, "none", err=False)
-        return 2
+    # The manifest posture, the standing switch and the automerge floor are the
+    # authorized-merge owner's to fold, so this verb and the terminal arm cannot
+    # disagree about who may merge. What is resolved here is only WHICH posture
+    # to hand it: the durable arm above replaces the manifest for a parked
+    # worker, and everything else rides the manifest fields as written.
+    posture_source = (_read_state_field(state_file, "auto_merge_source") or "").strip()
+    if authority == "durable_grant":
+        # The resolver already said eligible and re-checked the standing config
+        # itself. Naming its own source keeps it out of the env-grant arm, so
+        # the owner still holds it to the live switch and the floor.
+        posture_approved: Optional[bool] = True
+        posture_source = "durable-grant"
+    elif not approved:
+        # No manifest, or a manifest predating the field: the live config decides
+        # on its own. A manual merge outside a target session is legitimate.
+        posture_approved = None
+    else:
+        posture_approved = _approved_true(approved)
 
     # (2) gh must be installed.
     if shutil.which("gh") is None:
         _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
         return 127
 
-    # (2a-pre) Terminal exemption, the same one the in-flight review guard at
-    # _in_flight_review_refusal takes: this gate protects what WOULD merge, and
+    # (2a-pre) Terminal exemption, the same one the authorized-merge owner
+    # takes on a MERGED or CLOSED PR: this gate protects what WOULD merge, and
     # a merged or closed PR has no would-merge left. Without it, retrying
     # `fno do pr merge` on a PR that already landed answers `unreviewed merge
     # refused` instead of `already merged` - a receipt that sent a competent
@@ -2175,74 +2058,87 @@ def run_merge(
                 "merging without the lineage guard\n"
             )
         return _do_merge(
-            pr_number, auto_merge, repo, covered_head, (state, refusal, covered_head, note)
+            pr_number,
+            auto_merge,
+            repo,
+            covered_head,
+            (state, refusal, covered_head, note),
+            approved=posture_approved,
+            auto_merge_source=posture_source,
         )
 
 
-def _checks_verdict(
+def _authorized_merge(
     pr_number: int,
     repo: str,
-    ignore_contexts: Sequence[str] = (),
-) -> tuple[str, dict, str]:
-    """CI verdict for the PR plus the head it describes.
+    *,
+    effect: str,
+    approved: Optional[bool],
+    source: str,
+    require_checks: bool = False,
+    covered_head: str = "",
+    decide_only: bool = False,
+) -> dict:
+    """Ask the one authorized-merge operation, in fno-agents.
 
-    Borrows `verdict_for` rather than hand-rolling a statusCheckRollup read: a
-    second opinion on what "green" means is how two surfaces drift apart. The
-    fetch goes through this module's own `_gh` so it sits on the same process
-    seam as every other call here. An unreadable rollup is ``unknown``, which
-    the caller treats as not-green (fail closed).
+    The decision - posture fold, standing switch, automerge floor, dispatch
+    hold, in-flight review hold, head pin, base lineage - lives in
+    ``crates/fno-agents/src/authorized_merge.rs`` so this verb and the terminal
+    arm cannot answer it differently. Python is the transport and the renderer.
 
-    ``headRefOid`` rides along because a verdict is only meaningful for the SHA
-    it was computed on: the caller pins the merge to that SHA so a push landing
-    between this read and the merge cannot slip an unverified head through.
+    An unavailable binary is reported as ``unknown``, never as a clear answer: a
+    merge whose authorization could not be read has not been authorized.
     """
-    from fno.pr._status import verdict_for
+    from fno.rust_binary import VerbUnavailable, verb_call
 
-    def _miss(why: str) -> tuple[str, dict, str]:
-        # Named, like _behind_by's own miss path: "checks are unknown" alone
-        # cannot tell a broken gh from a PR that simply has no checks, and the
-        # operator only ever sees the emitted reason.
-        return ("unknown", {"why": why}, "")
-
-    # ToolMissing is deliberately NOT caught: the module contract reserves 127
-    # for a missing gh, and both sibling handlers emit it. Swallowing it here
-    # would demote that to a generic exit-1 "checks are unknown".
-    from fno.pr._rest import fetch_pr_rest
-
-    data, reason = fetch_pr_rest(str(pr_number), cwd=repo, runner=run)
-    if data is None:
-        return _miss(reason or "REST checks read failed")
-    rollup = data.get("statusCheckRollup") or []
-    ignored = set(ignore_contexts)
-    if ignored:
-        # The shared filter, parameterized on the ignore set - one spelling of
-        # the both-keys drop (StatusContexts use `context`, CheckRuns use
-        # `name`, and an internal-gh rollup spells a status row's name as its
-        # context), never a second inline copy that drifts from every other
-        # surface's generic-CI read.
-        from fno.pr._status import without_coverage_statuses
-
-        rollup = without_coverage_statuses(rollup, contexts=ignored)
-    # Whole-rollup semantics: with require_checks_pass, every check must pass.
-    # A required-vs-optional split would need branch-protection context that
-    # `gh pr view` does not expose - its statusCheckRollup entries carry no
-    # isRequired key (live-probed on gh 2.95.0, export_pr.go emits none), so a
-    # filter keyed on that annotation can never fire. Held is the fail-safe
-    # verdict for an optional check that never settles.
-    verdict, _exit, counts = verdict_for(rollup)
-    return (verdict, counts, (data.get("headRefOid") or "").strip())
+    payload = {
+        "cwd": repo,
+        "pr": int(pr_number),
+        "effect": effect,
+        "auto_merge_source": source,
+        "require_checks": bool(require_checks),
+        "decide_only": bool(decide_only),
+    }
+    if approved is not None:
+        payload["approved"] = bool(approved)
+    if covered_head:
+        payload["covered_head"] = covered_head
+    try:
+        return verb_call("authorized-merge", payload)
+    except VerbUnavailable as exc:
+        return {
+            "outcome": "unknown",
+            "detail": (
+                f"the authorized-merge owner could not be reached ({exc}); "
+                "refusing to merge on an unread authorization"
+            ),
+        }
 
 
-def _already_armed(pr_number: int, repo: str) -> bool:
-    """True when GitHub's native auto-merge queue owns this PR (finalize armed
-    it). ONE probe argv shared by every executor that must stand down (x-9d11
-    AC5-CON), so a probe-shape change cannot drift between merge paths."""
-    res = _gh(
-        ["pr", "view", str(pr_number), "--json", "autoMergeRequest",
-         "-q", ".autoMergeRequest.enabled"],
-        repo,
-    )
-    return res.ok and res.stdout.strip() == "true"
+#: Receipt word -> (emit word, exit code, stderr?). ``failed`` is the only arm
+#: that spends the failure budget; every other refusal is the retry-or-escalate
+#: 2 the merge lane already speaks.
+_OUTCOME_EMIT = {
+    "merged": ("merged", 0, False),
+    "armed": ("skipped", 2, False),
+    "authorized": ("skipped", 2, False),
+    "held": ("held", 2, False),
+    "refused": ("skipped", 2, False),
+    "head_changed": ("held", 2, False),
+    "unknown": ("held", 2, False),
+    "failed": ("failed", 1, True),
+}
+
+
+def _emit_authorized_outcome(pr_number: int, receipt: dict, strategy: str) -> int:
+    """Render one authorized-merge receipt onto this verb's surface."""
+    outcome = str(receipt.get("outcome") or "unknown")
+    word, code, err = _OUTCOME_EMIT.get(outcome, ("held", 2, False))
+    detail = str(receipt.get("detail") or "no detail")
+    _emit(pr_number, word, f"{outcome}: {detail}", strategy, err=err)
+    if code == 1:
+        _sync_graph_merge_status("failed", pr_number)
+    return code
 
 
 def _do_merge(
@@ -2251,127 +2147,40 @@ def _do_merge(
     repo: str,
     covered_head: str = "",
     gate_verdict: Optional[tuple] = None,
+    approved: Optional[bool] = None,
+    auto_merge_source: str = "",
 ) -> int:
-    """Steps (3)-(4): build + run the gh merge and classify the outcome."""
-    # AC5-CON (x-9d11): exactly one arming path. finalize.rs owns GitHub's
-    # auto-merge queue; if the PR is already armed there, merging here would
-    # race the queue. Say so and stand down - the queue merges it when checks
-    # pass, so the merge is not being lost, just not duplicated.
-    try:
-        armed = _already_armed(pr_number, repo)
-    except ToolMissing:
-        # _already_armed calls _gh, which can raise ToolMissing same as the
-        # sibling checks/merge calls below - it owes the same handler (review
-        # round 12).
-        _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
-        return 127
-    if armed:
-        _emit(
-            pr_number,
-            "skipped",
-            "PR already armed in GitHub's auto-merge queue (armed by fno-agents "
-            "finalize at the terminal); the queue merges it when checks pass",
-            auto_merge.merge_strategy,
-            err=False,
-        )
-        return 2
+    """Steps (3)-(4): authorize through the one owner, then run the effect.
 
-    # (3) Build command.
+    Nothing about "may this head merge?" is decided here any more. The argv, the
+    head pin, the already-armed stand-down, the checks verdict and the
+    worktree-held recovery all live in the Rust owner, which the terminal's
+    auto-merge arm calls too. What stays on this side is the coverage receipt
+    (a projection of this verb's own gate) and the post-merge follow-ups.
+    """
     strategy = auto_merge.merge_strategy
-    cmd: List[str] = ["pr", "merge", str(pr_number), f"--{strategy}"]
-    # Deliberately NO --delete-branch (x-9d11): it makes gh delete the LOCAL
-    # branch too, which fails "is already used by worktree" from inside the
-    # worktree and can make a landed merge report failed. Remote cleanup runs
-    # post-merge via _post_merge_remote_delete; the local branch/worktree is
-    # archive-worktree.sh's lifecycle.
-    # Deliberately NO --auto either (x-9d11): `--auto` was the second arming
-    # path (finalize.rs arms GitHub's queue at the terminal; this verb queued
-    # its own), and a repo without the auto-merge feature rejected the flag
-    # outright. One arming path: this verb EXECUTES. require_checks_pass is
-    # enforced here, before the merge call, instead of delegated to the queue
-    # (x-8543: an already-green PR merges without the repo having the feature).
-    # Set when THIS process is the one vouching for the checks; the worktree
-    # recovery path reads it so its server-side merge is pinned to the same
-    # SHA the verdict came from.
-    verified_head = ""
-    if auto_merge.require_checks_pass:
-        try:
-            ignore_contexts: Sequence[str] = ()
-            if gate_verdict is not None:
-                from fno.pr import _coverage_gate, _reviews
+    ask = {
+        "effect": "merge",
+        "approved": approved,
+        "source": auto_merge_source,
+        "require_checks": auto_merge.require_checks_pass,
+        "covered_head": covered_head,
+    }
 
-                if gate_verdict[0] == _coverage_gate.COVERED:
-                    # Both coverage contexts are THIS merge's own projections,
-                    # not generic CI: the required context (covered verdict)
-                    # and the diagnostic (an unknown-read stamp that says
-                    # "retry the review verb", not "wait"). Ignoring only the
-                    # required one let a pending diagnostic hold a covered,
-                    # CI-green merge, and the clearing publish runs after this
-                    # verdict, so a bare retry held again. One shared
-                    # collection, not a third spelling of the filter.
-                    ignore_contexts = tuple(_reviews.COVERAGE_STATUS_CONTEXTS)
-            verdict, counts, head_read = _checks_verdict(
-                pr_number, repo, ignore_contexts=ignore_contexts
-            )
-        except ToolMissing:
-            _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
-            return 127
-        verified_head = head_read
-        if verdict != "green":
-            # pending = wait for required checks (retry when green). unknown =
-            # no rollup at all (gh failure, or a repo with no CI): retry-later,
-            # never a failed-ship stamp - a PR with no checks configured needs
-            # require_checks_pass=false, not a red graph status (round 7).
-            _emit(
-                pr_number,
-                "held" if verdict in ("pending", "unknown") else "failed",
-                f"checks are {verdict} ({counts}); "
-                f"require_checks_pass forbids merging without green",
-                strategy,
-                err=verdict not in ("pending", "unknown"),
-            )
-            if verdict not in ("pending", "unknown"):
-                # Match the pre-existing failure path: a node left reading
-                # `queued` from an earlier attempt would otherwise stay queued
-                # after a red refusal, and the scoreboard consumes that field.
-                _sync_graph_merge_status("failed", pr_number)
-            return 2 if verdict in ("pending", "unknown") else 1
-        if not verified_head:
-            _emit(
-                pr_number,
-                "failed",
-                "checks read green but the PR head SHA was unreadable; refusing "
-                "to merge a head the verdict cannot be pinned to",
-                strategy,
-                err=True,
-            )
-            _sync_graph_merge_status("failed", pr_number)
-            return 1
-        # A verdict belongs to the SHA it was computed on. Between that read and
-        # this merge, another actor can push, and nothing upstream re-checks on
-        # our behalf. Pin the merge to the verified head so a racing push makes
-        # gh refuse instead of merging an unverified (and possibly red) commit.
-        # Server-side required-check rules would cover this too, but
-        # require_checks_pass exists precisely for repos without them.
-    # x-0eaf: pin the merge to the covered head so a racing push cannot land an
-    # unreviewed commit. gh refuses if the head moved.
-    if covered_head:
-        cmd += ["--match-head-commit", covered_head]
-    elif verified_head:
-        cmd += ["--match-head-commit", verified_head]
+    # Authorize BEFORE publishing anything. The coverage status greens the head
+    # for the web button, which enforces only the coverage context, so stamping
+    # it ahead of a refusal would open the door this verb is about to close.
+    decision = _authorized_merge(pr_number, repo, decide_only=True, **ask)
+    if decision.get("outcome") != "authorized":
+        return _emit_authorized_outcome(pr_number, decision, strategy)
 
-    # Server-visible receipt of the verdict the gate acted on: the commit
-    # status the repo ruleset requires is written from the SAME answer that
-    # satisfied the gate here (gate_verdict, threaded down), never a fresh
-    # read - the label or the row can change while this merge waits on the
+    # Server-visible receipt of the verdict the gate acted on, written from the
+    # SAME answer that satisfied the gate here (gate_verdict, threaded down)
+    # rather than a fresh read: the row can change while this merge waits on the
     # lock, and a receipt that flips to failure on a head the merge then lands
-    # leaves a false-red status on a merge that passed the gate. Posted only now,
-    # after every local refusal - armed-check, checks verdict, unreadable
-    # head - has said yes: a success status stamped before a later refusal
-    # would green the head for the web button - which enforces only the
-    # coverage context - against exactly what this verb just refused.
-    # Best-effort and reported, never blocking: the gate lives on the GitHub
-    # side, where a missing status already reads as not-passing (fail-closed).
+    # leaves a false-red status on a merge that passed the gate. Best-effort and
+    # reported, never blocking: on the GitHub side a missing status already
+    # reads as not-passing.
     try:
         from fno.pr._reviews import publish_coverage_status
 
@@ -2387,124 +2196,24 @@ def _do_merge(
     except Exception as exc:  # noqa: BLE001 - a receipt must never block the merge
         sys.stderr.write(f"pr-merge: coverage status publish failed: {exc}\n")
 
-    # (4) Run + classify.
-    try:
-        res = _gh(cmd, repo)
-    except ToolMissing:
-        _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
-        return 127
-
-    output = (res.stdout or "") + (res.stderr or "")
-    if res.ok:
+    # The effect re-runs the whole decision, so the window the receipt opened is
+    # closed again by the same guards, and the merge stays pinned to the head
+    # those guards read.
+    receipt = _authorized_merge(pr_number, repo, **ask)
+    if receipt.get("outcome") == "merged":
+        # A note means the merge LANDED and something around it did not - a
+        # local post-merge step, or the worktree-held REST recovery. It rides
+        # into the partial outcome so a landed merge is never reported failed
+        # and the cleanup trouble is never lost behind a bare success.
+        note = str(receipt.get("note") or "")
+        if note:
+            _git(["fetch", "origin"], repo)
         return _finish_confirmed_merge(
             pr_number,
             strategy,
             repo,
             auto_merge,
-            "merged immediately",
+            note or "merged immediately",
+            prior_cleanup_failure=(f"failed: {note}" if note else ""),
         )
-
-    # Failure path. A worktree-local post-merge step can fail even though the
-    # SERVER-SIDE merge already landed (recurring PR #393/#395 bite).
-    first_line = output.splitlines()[0][:200] if output.strip() else ""
-    # ALWAYS re-read the merge state before reporting failure. `gh pr merge
-    # --delete-branch` exits non-zero whenever a POST-merge step fails after a
-    # successful server-side merge - the local branch delete (worktree-held), the
-    # base-branch checkout (main held by the canonical worktree in a worktree-first
-    # repo), a remote delete, a sync - and the error phrasing varies across git
-    # versions and failure points. Matching phrasings ages badly; the durable
-    # signal is the PR's merged state. If it landed, report merged with the
-    # cleanup failure in its own field - never failed. An autonomous caller keying
-    # off `outcome` then gets merge truth regardless of what post-merge cleanup did.
-    view = _gh(["pr", "view", str(pr_number), "--json", "mergedAt", "-q", ".mergedAt"], repo)
-    if view.ok:
-        landed = view.stdout.strip()
-        if landed and landed != "null":
-            _git(["fetch", "origin"], repo)
-            return _finish_confirmed_merge(
-                pr_number,
-                strategy,
-                repo,
-                auto_merge,
-                "merged server-side",
-                prior_cleanup_failure=(
-                    "failed: gh merge command after server-side merge: "
-                    f"{first_line or 'no error output'}"
-                ),
-            )
-
-    # The merge did NOT land. gh can refuse before merging when the branch is
-    # checked out in another worktree (the checkout-refused phrasing "is already
-    # used by worktree" / "already checked out"); recover via the server-side API
-    # so a worktree-held branch still merges. Landed cases already returned above,
-    # so reaching here means not-merged - this is the API fallback, not a recovery
-    # for a post-merge cleanup failure.
-    if re.search(r"is already used by worktree|already checked out", output, re.IGNORECASE):
-        # Carry the head pin when we have one. Reaching here from the no-auto
-        # fallback means THIS process vouched for the checks at a specific SHA,
-        # and this API call would otherwise merge whatever the head is now -
-        # silently undoing the pin on the `--match-head-commit` retry, in the
-        # very path a worktree run takes. `sha` is the endpoint's equivalent
-        # guard: the merge is refused unless the head still matches.
-        api_args = [
-            "api",
-            "--method",
-            "PUT",
-            f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/merge",
-            "-f",
-            f"merge_method={strategy}",
-        ]
-        # covered_head first: the review lane sets it when require_checks_pass
-        # is off, leaving verified_head empty - dropping it here (round 7)
-        # reopened the x-0eaf TOCTOU on exactly the worktree path every run
-        # takes.
-        _pinned_head = covered_head or verified_head
-        if _pinned_head:
-            api_args += ["-f", f"sha={_pinned_head}"]
-        api = _gh(api_args, repo)
-        if api.ok:
-            _git(["fetch", "origin"], repo)
-            return _finish_confirmed_merge(
-                pr_number,
-                strategy,
-                repo,
-                auto_merge,
-                "merged server-side (worktree fallback)",
-            )
-
-    # Merge state never became readable: `gh pr view` itself failed, so we cannot
-    # tell a landed merge from a failed one. Reporting `failed` here would assert
-    # merge truth we do not have - the same defect as the phrasing match this
-    # guard replaced, one level up - and an autonomous caller keying on `outcome`
-    # would retry a merge that may already have landed. Report `held` (exit 2,
-    # the established retry-later signal) so the uncertainty stays IN the receipt
-    # instead of being flattened into a false negative. A retry whose view read
-    # succeeds then reports the truth either way.
-    if not view.ok:
-        _emit(
-            pr_number,
-            "held",
-            "merge state unreadable (gh pr view failed: "
-            f"{(view.stderr or '').splitlines()[0][:120] if view.stderr.strip() else 'no error output'}); "
-            "cannot confirm whether the merge landed - retry",
-            strategy,
-            err=False,
-        )
-        return 2
-
-    # Unrecovered failure: classify and report.
-    reason = first_line
-    if "fno/review-coverage" in output:
-        reason = (
-            "fno/review-coverage is still required after its success status was "
-            "published; GitHub may not have observed the update yet - retry the merge"
-        )
-    elif re.search(r"protected", output, re.IGNORECASE):
-        reason = "branch protected"
-    elif re.search(r"not mergeable", output, re.IGNORECASE):
-        reason = "not mergeable (conflicts or base changed)"
-    elif re.search(r"required review", output, re.IGNORECASE):
-        reason = "required review pending"
-    _emit(pr_number, "failed", reason, strategy, err=True)
-    _sync_graph_merge_status("failed", pr_number)
-    return 1
+    return _emit_authorized_outcome(pr_number, receipt, strategy)
