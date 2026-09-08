@@ -87,7 +87,9 @@ def warn_unknown_keys(
                     unknown.extend(warn_unknown_keys(entry, mapped, prefix=f"{qualified}.{name}"))
         elif nested is not None:
             unknown.extend(warn_unknown_keys(value, nested, prefix=qualified))
-    if os.environ.get("FNO_DEBUG"):
+    # Only the outermost call logs: a recursive call hands its keys up, so
+    # logging at every level repeats a nested key once per level above it.
+    if not prefix and os.environ.get("FNO_DEBUG"):
         for qualified in unknown:
             _LOG.warning("settings: unknown key %r (ignored for forward compatibility)", qualified)
     return unknown

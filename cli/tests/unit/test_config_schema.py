@@ -597,6 +597,30 @@ def test_unknown_key_not_emitted_twice(
     )
 
 
+def test_a_nested_unknown_key_is_not_emitted_once_per_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The walker recurses, and the outer call carries what the inner returned.
+
+    A top-level key never recurses, so the sibling test above stayed green
+    while a key one level down was logged twice.
+    """
+    monkeypatch.delenv("FNO_CONFIG", raising=False)
+    monkeypatch.setenv("FNO_DEBUG", "1")
+    settings_file = _write_settings(
+        tmp_path, "schema_version: 1\nconfig:\n  target:\n    future_leaf: true\n"
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
+
+    with caplog.at_level(logging.WARNING, logger="fno.config"):
+        from fno.config import load_settings
+
+        load_settings()
+
+    nested = [r for r in caplog.records if "target.future_leaf" in r.message]
+    assert len(nested) == 1, [r.message for r in nested]
+
+
 # ---------------------------------------------------------------------------
 # config.blueprint.max_prs_per_epic (ab-e9c81ed3, C1)
 # ---------------------------------------------------------------------------
