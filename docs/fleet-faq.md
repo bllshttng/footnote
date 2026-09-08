@@ -344,6 +344,14 @@ Two kings acted on the false half within an hour. One warned the other that PR n
 
 *Graduates to:* the sentence stating what actually survives, and a recovery step that tests each arm and reports each result.
 
+## The same gate passes locally and fails in CI
+
+**Answer.** Read what the gate skips on a shallow clone. A check that reads repository history needs a fallback for a one-commit history. The fallback is often a different rule, not a refusal.
+
+**Specimen.** `check-pitfalls.sh` guards its first-appearance query on `rev-parse --is-shallow-repository` reading false. The workflow uses `actions/checkout@v4` with no `fetch-depth`, so CI clones one commit deep and that query never runs. Locally the history date decides staleness and the oldest entry expires 2026-10-09. In CI the prose `added:` date decides and the same entry expires 2026-09-25. Two kings each measured one side, and each told the other they had it wrong.
+
+*Graduates to:* the gate naming which date source it used, so the two runs are told apart from their output alone.
+
 ## Related
 
 - [troubleshooting.md](troubleshooting.md) for run-level failures
