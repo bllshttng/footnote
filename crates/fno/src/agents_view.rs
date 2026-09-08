@@ -1409,57 +1409,9 @@ fn hostname() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
-/// Process create time in epoch ms, or None if the pid is gone/uninspectable
-/// (permission denied counts as dead). Focused copy of
-/// `claims.rs::process_create_time_ms`.
-#[cfg(target_os = "macos")]
-fn process_create_time_ms(pid: i32) -> Option<i64> {
-    use std::mem;
-    if pid <= 0 {
-        return None;
-    }
-    let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
-    let size = mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    let written = unsafe {
-        libc::proc_pidinfo(
-            pid as libc::c_int,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            &mut info as *mut _ as *mut libc::c_void,
-            size,
-        )
-    };
-    if written != size {
-        return None;
-    }
-    Some((info.pbi_start_tvsec as i64) * 1000 + (info.pbi_start_tvusec as i64) / 1000)
-}
+mod pid_probe;
 
-#[cfg(target_os = "linux")]
-fn process_create_time_ms(pid: i32) -> Option<i64> {
-    if pid <= 0 {
-        return None;
-    }
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after = stat.rsplit_once(')')?.1;
-    let starttime: i64 = after.split_whitespace().nth(19)?.parse().ok()?;
-    static BTIME: std::sync::OnceLock<Option<i64>> = std::sync::OnceLock::new();
-    let btime = (*BTIME.get_or_init(|| {
-        let stat = std::fs::read_to_string("/proc/stat").ok()?;
-        stat.lines()
-            .find_map(|l| l.strip_prefix("btime ").and_then(|r| r.trim().parse().ok()))
-    }))?;
-    let tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if tck <= 0 {
-        return None;
-    }
-    Some(btime * 1000 + starttime * 1000 / tck as i64)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn process_create_time_ms(_pid: i32) -> Option<i64> {
-    None
-}
+use pid_probe::{probe_is_live, probe_pid};
 
 /// macOS IOPlatformUUID (mirror of `claims.rs::platform_machine_id`).
 #[cfg(target_os = "macos")]
@@ -1545,7 +1497,7 @@ fn holder_is_live(host: &str, machine: Option<&str>, pid: i32, acquired_at: i64)
     if !is_same_machine(host, machine) {
         return false;
     }
-    matches!(process_create_time_ms(pid), Some(create_ms) if create_ms <= acquired_at)
+    probe_is_live(probe_pid(pid), acquired_at)
 }
 
 /// The session id of a live `node:<id>` claim, or None (missing / unparseable /
@@ -1706,7 +1658,7 @@ pub fn overlay_truth_badges(rows: &mut [RegistryAgent], truth: &TruthBadges) {
 
 /// Process start time in the REGISTRY'S own units (x-caef): macOS folds
 /// `proc_bsdinfo` to microseconds, Linux keeps the raw `/proc/<pid>/stat`
-/// starttime ticks. Deliberately NOT `process_create_time_ms`: the registry's
+/// starttime ticks. Deliberately NOT `probe_pid`: the registry's
 /// `pid_start_time` is a per-host, per-boot quantity compared only for
 /// equality against a value captured for the SAME pid, so it must be read
 /// with the same units `fno-agents`' registry writer used (daemon.rs
