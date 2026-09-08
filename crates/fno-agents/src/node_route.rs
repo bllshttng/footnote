@@ -183,7 +183,7 @@ fn name_route(name: &str, ids: &HashSet<String>) -> Option<String> {
     if tokens.len() < 2 {
         return None;
     }
-    let joined = tokens[1..3].join("-");
+    let joined = tokens[1..tokens.len().min(3)].join("-");
     if ids.contains(&joined) {
         return Some(joined);
     }

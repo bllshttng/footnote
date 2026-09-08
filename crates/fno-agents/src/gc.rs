@@ -265,7 +265,7 @@ pub(crate) fn row_handle(e: &crate::state::RegistryEntry) -> String {
 /// creation post-dates the real transcript's last turn must not read as
 /// fresher than it is. `None` when no match resolves: an unresolved
 /// transcript is never a quiet one.
-pub(crate) fn transcript_age_s(store_hits: Option<&[std::path::PathBuf]>, now: i64) -> Option<i64> {
+pub fn transcript_age_s(store_hits: Option<&[std::path::PathBuf]>, now: i64) -> Option<i64> {
     let newest = store_hits?.iter().max_by_key(|p| {
         std::fs::metadata(p)
             .and_then(|m| m.modified())
