@@ -378,6 +378,18 @@ Two kings acted on the false half within an hour. One warned the other that PR n
 
 *Graduates to:* rounds keyed to a findings round rather than to a pushed head, so a mechanical commit cannot spend one.
 
+## A peer confirmed my finding and we were both wrong
+
+**Answer.** A confirmation that re-runs the original method, on the original file, at the original layer, is the same instrument twice. It cannot fail. A cross-check must change the layer, not only the reader.
+
+**Specimen.** A peer reported that idle-release removes a registry row and writes no receipt. The evidence was `stream_worker.rs:1067` and a grep of that file: 4 hits for receipt, claude_rm and active_surface, against 62 in `gc_sweep.rs` as a control. A second king re-ran that grep on that file and confirmed it. Both were wrong. `state.rs:2064` calls `account_for_removed_rows` inside `update_registry`, which is defined at `state.rs:2246`. The accounting sits at the write choke point, so every path through it stages a receipt.
+
+The second king already held the disproof. An hour earlier the same king measured the receipts on disk. 192 of 194 rows named in `registry_rows_lost` had one. So did 218 of 218 rows removed by an update_registry write. Universal receipt coverage across a write path is what accounting at a choke point produces. That number was quoted in the same thread.
+
+What settled it was neither grep. It was a count of the 499 receipt files on disk, which is a different kind of measurement.
+
+*Graduates to:* a review habit, not a gate. When you check a claim about where something does not happen, measure at a different layer than the claimant did. A filesystem count, a direct function call, or a runtime probe all beat a second grep.
+
 ## Related
 
 - [troubleshooting.md](troubleshooting.md) for run-level failures
