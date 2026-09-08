@@ -1045,7 +1045,10 @@ def _roster_verdict_line(info: dict) -> str:
                 f"{scanned}; {len(candidates)} unresolved row's worktree names this node: "
                 f"{names}. Confirm with: fno agents peek {candidates[0]}"
             )
-        return scanned
+        # Degraded, not complete: the reader must be able to tell "nobody
+        # holds this and the roster was patchy" from "nobody holds this and
+        # the roster was complete", which both used to render as plain free.
+        return f"{scanned}; roster coverage degraded"
     scanned = f"{state}, no live worker found (roster scanned: {info['roster_rows_scanned']} rows)"
     if workers:
         rendered = ", ".join(w["name"] for w in workers)
@@ -1093,12 +1096,17 @@ def status(
     crosschecked = roster and bool(node_id) and info.get("state") in _UNHELD_STATES
     if crosschecked:
         info.update(_roster_crosscheck(node_id))
-        if info.get("roster_rows_unresolved", 0):
-            # A scanned row with no node join is an unanswered ownership read,
-            # not proof that this claim is free. Keep the raw claim fields, but
-            # make the composite verdict fail closed for dispatch consumers.
+        unresolved = info.get("roster_rows_unresolved", 0)
+        if info.get("roster_unresolved_candidates"):
+            # An unresolved row whose worktree names THIS node is an
+            # unanswered ownership read, so the composite verdict fails
+            # closed for dispatch consumers. A patchy roster that names
+            # nobody here used to fail closed fleet-wide: one unresolved row
+            # anywhere read every node in the fleet as unknown.
             info["state"] = "unknown"
             info["basis"] = "unresolved-roster-row"
+        elif unresolved:
+            info["roster_coverage"] = "degraded"
     if json_output:
         typer.echo(json.dumps(info))
         return
