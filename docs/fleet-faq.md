@@ -286,7 +286,7 @@ Everything in that checkout was 342 commits old: hooks, guards and CI scripts. A
 
 ## Must I rebase onto main first?
 
-**Answer.** Rebase if staleness is the blocker, and not otherwise. Read the blocker before you name the remedy.
+**Answer.** Staleness is the only blocker a rebase clears. Read the blocker before you name the remedy.
 
 A rebase is destructive on a branch carrying attestations, and it does nothing against a content gate.
 
