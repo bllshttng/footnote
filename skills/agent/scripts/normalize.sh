@@ -63,8 +63,8 @@ EFFORT_SET=0       # 1 = explicit --effort was passed, including an empty value.
 ALLOW_MERGE=""
 YES=0              # 1 = -y/--yes: skip the confirm (consumed by the SKILL policy)
 MODE="exec"        # exec | interactive  (-i routes codex/gemini -> host)
-SUBSTRATE=""       # x-2c27: ""|bg|headless trailing-posture word (the spawn
-                   # substrate axis). Empty = the default `pane` (owned-PTY).
+SUBSTRATE=""       # x-61df: ""|pane|thread|headless; `bg` is a deprecated
+                   # alias for `thread`. Empty = the default `pane` (owned-PTY).
 YOLO=0             # 1 = full-auto (codex/gemini bypass); sandboxed default
 HANDOFF_MODE=0     # 1 = `handoff` verb: payload is a doc path -> continuation seed
 PROJECT=""         # cross-project target: a registry project name/short_name to
@@ -83,6 +83,18 @@ TOOLS=""           # x-b6e2: allowed-tools list; forwarded to spawn.sh --tools
 DENY_TOOLS=""      # x-b6e2: disallowed-tools list; forwarded to spawn.sh --deny-tools
 
 emit_error() { printf 'status=error\nerror=%s\n' "$1"; exit 0; }
+
+set_substrate() {
+  local _substrate="$1"
+  case "$_substrate" in
+    pane|thread|headless) SUBSTRATE="$_substrate" ;;
+    bg)
+      SUBSTRATE="thread"
+      printf "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release\n" >&2
+      ;;
+    *) emit_error "invalid substrate '$_substrate'; valid: pane, thread, bg, headless" ;;
+  esac
+}
 
 # iOS smart punctuation rewrites a typed `--` into an em-dash (U+2014) or, on
 # some keyboards, an en-dash (U+2013) - the same failure class as the smart
@@ -164,7 +176,8 @@ msg="${msg%"${msg##*[![:space:]]}"}"
 # idempotent with it (AC4-FR), so the NL parse and this parse agree (Concurrency
 # invariant). handoff (a doc path) is a verbatim continuation seed, so it skips
 # this scan entirely - a node-shaped or posture-shaped token in the doc path
-# must never be consumed as posture. A free-text seed still runs the scan: the
+# must never be consumed as posture, except for an exact three-token
+# `path substrate <value>` selection. A free-text seed still runs the scan: the
 # posture words (provider/substrate/name/...) are session-launch axes orthogonal
 # to whether the payload builds or seeds, so `spawn "talk it over" codex` still
 # routes the seed to codex.
@@ -206,6 +219,11 @@ if [[ "$HANDOFF_MODE" -eq 0 ]]; then
       _end=$(( _i - 1 ))
       continue
     fi
+    if (( _i >= 1 )) && [[ "$(printf '%s' "${_toks[$((_i-1))]}" | tr '[:upper:]' '[:lower:]')" == "substrate" ]]; then
+      [[ -z "$SUBSTRATE" ]] && set_substrate "$(printf '%s' "$_t" | tr '[:upper:]' '[:lower:]')"
+      _end=$(( _i - 1 ))
+      continue
+    fi
     _lt=$(printf '%s' "$_t" | tr '[:upper:]' '[:lower:]')
     # -Y matches the RAW token: lowercased it would collide with -y (--yes),
     # which must keep refusing loud via the flag-lookalike guard below.
@@ -223,10 +241,11 @@ if [[ "$HANDOFF_MODE" -eq 0 ]]; then
       yolo|auto)           YOLO=1; _end=$_i ;;
       merge)               ALLOW_MERGE=1; _end=$_i ;;
       interactive|drive)   [[ "$MODE" == "exec" ]] && MODE="interactive"; _end=$_i ;;
-      bg|headless)         [[ -z "$SUBSTRATE" ]] && SUBSTRATE="$_lt"; _end=$_i ;;
+      bg|headless)         [[ -z "$SUBSTRATE" ]] && set_substrate "$_lt"; _end=$_i ;;
       as)                  emit_error "'as' is a name keyword with no name after it; write 'as <name>' or drop it" ;;
       model)               emit_error "'model' is a keyword with no name after it; write 'model <name>' or drop it" ;;
       effort)              emit_error "'effort' is a keyword with no value after it; write 'effort <value>' or drop it" ;;
+      substrate)           emit_error "'substrate' is a keyword with no value after it; write 'substrate <value>' or drop it" ;;
       *)                   break ;;  # task-text boundary (the run ends here)
     esac
   done
@@ -245,7 +264,7 @@ if [[ "$HANDOFF_MODE" -eq 0 ]]; then
   # The trailing run may have consumed the whole payload (`codex yolo merge`
   # with no task) -> refuse with no spawn (Boundaries: empty task fails loud).
   [[ -z "$msg" ]] && emit_error "empty task: only posture modifiers, nothing to dispatch"
-  # Leading posture-word guard (x-ffc3): the posture vocabulary (bg|headless) is
+  # Leading posture-word guard (x-ffc3): bare posture words (bg|headless) are
   # TRAILING only (consumed right-anchored above). A LEADING posture word whose
   # remainder is a /command passthrough (e.g. `bg /goal ...`) is the user meaning
   # the substrate but mis-ordering it; left alone it is not consumed, the payload
@@ -258,13 +277,22 @@ if [[ "$HANDOFF_MODE" -eq 0 ]]; then
   #   - Exact-token, case-insensitive (matches the trailing parser's tr at l.150,
   #     so a mobile-auto-capitalized `BG` is caught; `bgcolor`/`background` are not).
   #   - Inside the HANDOFF==0 block, so a verbatim handoff doc path beginning with
-  #     the literal word "bg" is exempt (its posture words are never parsed).
+  #     a posture word is exempt (its posture words are never parsed).
   _first_lc="$(printf '%s' "${msg%%[[:space:]]*}" | tr '[:upper:]' '[:lower:]')"
   case "$_first_lc" in
     bg|headless)
       _rest="${msg#"${msg%%[[:space:]]*}"}"; _rest="${_rest#"${_rest%%[![:space:]]*}"}"  # trim
       if [[ "$_rest" == /* ]]; then
         emit_error "posture words are trailing, not leading: write the dispatch first then the substrate, e.g. 'spawn ${_rest} ${_first_lc}'. (A leading '${_first_lc}' would otherwise bury the '${_rest%%[[:space:]]*}' command inside a verbatim seed instead of dispatching it.)"
+      fi
+      ;;
+    substrate)
+      _rest="${msg#"${msg%%[[:space:]]*}"}"; _rest="${_rest#"${_rest%%[![:space:]]*}"}"  # trim
+      _substrate_value="${_rest%%[[:space:]]*}"
+      _substrate_tail="${_rest#"$_substrate_value"}"
+      _substrate_tail="${_substrate_tail#"${_substrate_tail%%[![:space:]]*}"}"  # trim
+      if [[ "$_substrate_tail" == /* ]]; then
+        emit_error "posture words are trailing, not leading: write the dispatch first then the substrate, e.g. 'spawn ${_substrate_tail} substrate ${_substrate_value}'. (A leading 'substrate' would otherwise bury the '${_substrate_tail%%[[:space:]]*}' command inside a verbatim seed instead of dispatching it.)"
       fi
       ;;
   esac
@@ -302,7 +330,7 @@ if [[ "$HANDOFF_MODE" -eq 0 ]] && { [[ "$msg" == /* ]] || printf '%s' "$_scan_ft
     esac
     case "$scan_cano" in
       -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|-Y|--yolo|--provider|-P|--model|--effort|-C|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
-        emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the payload. Through a slash command the trailing grammar is dashless: write 'model opus', 'bg', 'yolo', 'merge', or 'as <name>' rather than a flag glued into the text. Calling the CLI directly, pass it as a real flag (-y / -m / -n N) separate from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash). If the token is genuinely part of the task text, quote or rephrase it."
+        emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the payload. Through a slash command the trailing grammar is dashless: write 'model opus', 'substrate thread', 'yolo', 'merge', or 'as <name>' rather than a flag glued into the text. Calling the CLI directly, pass it as a real flag (-y / -m / -n N) separate from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash). If the token is genuinely part of the task text, quote or rephrase it."
         ;;
     esac
   done
@@ -365,11 +393,24 @@ NODE_BARE=0
 NODE_QUERY=""
 SPAWN_NEXT=0
 NEXT_SCOPE=""
+if [[ "$HANDOFF_MODE" -eq 1 ]]; then
+  # Handoff keeps doc paths verbatim, with one narrow opt-in for the exact
+  # three-token form `path substrate <value>`. A path containing spaces is not
+  # peeled, so a four-token input remains a single handoff payload.
+  set -f
+  IFS=$' \t\n' read -r -d '' -a _handoff_toks <<< "$msg" || :
+  set +f
+  if (( ${#_handoff_toks[@]} == 3 )) && [[ "${_handoff_toks[1]}" == "substrate" ]]; then
+    set_substrate "$(printf '%s' "${_handoff_toks[2]}" | tr '[:upper:]' '[:lower:]')"
+    msg="${_handoff_toks[0]}"
+  fi
+fi
 first_tok="${msg%%[[:space:]]*}"
 msg_lc="$(printf '%s' "$msg" | tr '[:upper:]' '[:lower:]')"
 if [[ "$HANDOFF_MODE" -eq 1 ]]; then
   :   # handoff (a doc path) carries no node id; a node-shaped token in the doc
-      # path must NOT be resolved as a node.
+      # path must NOT be resolved as a node. The exact substrate pair was peeled
+      # above, after which the remaining path is still treated verbatim.
 elif [[ "$msg_lc" == "next" || "$msg_lc" == "next all" ]]; then
   SPAWN_NEXT=1
   [[ "$msg_lc" == "next all" ]] && NEXT_SCOPE="all" || NEXT_SCOPE="project"
@@ -732,7 +773,7 @@ fi
 # agents spawn`/`host`), so YOLO stays 1 for them. claude has NO --yolo flag; its
 # "full auto, no gates" equivalent is --permission-mode bypassPermissions (x-dfa4:
 # default|acceptEdits|plan|bypassPermissions). Map it there rather than dropping
-# it, so a yolo'd claude bg worker actually runs gate-free instead of stalling on
+# it, so a yolo'd claude thread worker actually runs gate-free instead of stalling on
 # a permission prompt. An explicit --permission-mode the user passed WINS (never
 # clobber it); then clear YOLO so the claude spawn is never handed an unknown
 # --yolo flag. Forwarded via permission_mode= (the x-019d plumbing).
@@ -777,7 +818,7 @@ fi
 # Command surface (slash|codex-skill|prose) from the harness-map normalizer
 # (fno.agents.harness_map), the single source both dispatch surfaces route
 # through - so /agent spawn never re-encodes the per-harness spelling and can't
-# drift from `/target bg`. `fno agents dispatch resolve` is authoritative; a static
+# drift from the `/target` dispatch surface. `fno agents dispatch resolve` is authoritative; a static
 # fallback keeps a spawn working if fno is unreachable (mirrors resolve_project).
 resolve_command_surface() {
   local _prov="$1" _line
@@ -922,8 +963,9 @@ printf 'fresh=%s\n' "$FRESH"
 printf 'here=%s\n' "$HERE"
 printf 'effort=%s\n' "$EFFORT"
 printf 'mode=%s\n' "$MODE"
-# x-2c27: the spawn substrate (empty=pane default). The SKILL forwards a
-# non-empty value to `spawn.sh --substrate`; bg -> claude --bg thread,
+# x-61df: the spawn substrate (empty=pane default). The SKILL forwards a
+# non-empty value to `spawn.sh --substrate`; thread -> persistent thread,
+# bg -> deprecated alias for thread,
 # headless -> one-shot (claude -p / codex --exec / agy -p).
 printf 'substrate=%s\n' "$SUBSTRATE"
 printf 'yolo=%s\n' "$YOLO"

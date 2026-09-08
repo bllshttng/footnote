@@ -45,14 +45,14 @@ SELF=""                # caller's own claim holder (target_claim_holder). Lets
 # Routing inputs (codex/gemini first-class dispatch, ab-417ab20f). Defaults keep
 # the legacy claude path equivalent: exec + build -> claude resolves to `spawn`
 # (Group 1 ab-8b3e4fe0: ask never creates), so an old caller that passes none
-# of these still launches a persistent claude bg peer.
+# of these still launches a persistent claude thread peer.
 MODE="exec"            # exec | interactive  (-i routes codex/gemini -> host)
 MODEL=""               # exact model name, forwarded as `spawn --model` (each
                        # provider's own --model). Empty = provider default.
 EFFORT=""              # reasoning effort forwarded as `spawn --effort`.
 PAYLOAD_MODE="build"   # build (node-id /target) | seed | handoff | passthrough
-SUBSTRATE=""           # x-2c27: ""|pane|bg|headless. bg -> claude --bg thread
-                       # (JSON receipt); headless -> one-shot (reply receipt).
+SUBSTRATE=""           # x-61df: ""|pane|thread|headless. bg is a deprecated
+                       # alias for thread; headless -> one-shot (reply receipt).
 YOLO=0                 # 1 appends --yolo to the spawn/host argv
 PERMISSION_MODE=""     # x-dfa4: forwarded as --permission-mode to the spawn verb
 ROLE=""                # x-d2fe: forwarded as --role to the spawn verb (model routing)
@@ -133,8 +133,9 @@ else
   VERB="spawn"
 fi
 
-# x-2c27: an explicit --substrate (bg|headless) always selects the spawn verb
-# (never host). `headless` yields a one-shot reply receipt; `bg` (and pane/
+# x-61df: an explicit --substrate (thread|headless; bg alias) always selects
+# the spawn verb (never host). `headless` yields a one-shot reply receipt; `thread`
+# (and pane/default) yields the JSON short-id receipt. `bg` (and pane/
 # default) yield the JSON short-id receipt. REPLY drives the receipt-family
 # branch below.
 REPLY=0
@@ -215,7 +216,7 @@ if [[ -n "$NODE" ]]; then
         # release the claim here. A node claim can be released ONLY by the two
         # sanctioned sites (handoff.sh / `fno backlog unclaim`, holder-verified);
         # a helper subprocess release is a locked-down authority violation
-        # (ab-588326a7). And a bg spawn cannot emit the `delegated` event a clean
+        # (ab-588326a7). And a thread spawn cannot emit the `delegated` event a clean
         # takeover needs (it does not control the successor's session id), so
         # merely proceeding would spawn a worker that is born contested while the
         # caller still holds a live claim. The honest move is to route the caller
@@ -291,9 +292,9 @@ case "$existing_status" in
 esac
 
 # ---- Auto-worktree for code-implementing payloads (x-9c4c) --------------
-# A bg /target|/execute|/fix launched into a repo's MAIN checkout lands on the
+# A thread /target|/execute|/fix launched into a repo's MAIN checkout lands on the
 # canonical (often protected) branch and relies on the soft skill instruction
-# "a bg /target self-creates its worktree before building." Do it
+# "a thread /target self-creates its worktree before building." Do it
 # deterministically here instead: `fno agents workspace worktree ensure` (policy-resolved base,
 # see the call below) on a fresh feature branch, launching THERE so it is born isolated
 # (location verdict ok from line one) regardless of whether the cwd came from
@@ -412,7 +413,7 @@ maybe_auto_worktree   # self-gating: no-op unless code payload + main checkout
 # `spawn`/`host` are daemon-managed PTY workers (Locked Decision 1) and
 # `spawn --once` is the ephemeral one-shot. Name is POSITIONAL (Locked
 # Decision 8). Never default to claude `-p`/`--bare` (x-2c27, amended from
-# "never -p"): `pane`/`bg` use owned-PTY / `claude --bg`, never `-p`; `-p` is
+# "never -p"): `pane`/`thread` use owned-PTY / `claude --bg`, never `-p`; `-p` is
 # reachable only via the explicit `--substrate headless` verb (which the Rust
 # client, not this script, translates to `claude -p`). --yolo is appended only
 # when the user explicitly passed it (normalize.sh strips it for claude). A bare interactive
@@ -443,7 +444,7 @@ cmd=(agents "$VERB" --harness "$PROVIDER")
 [[ -n "$SUBSTRATE" ]] && cmd+=(--substrate "$SUBSTRATE")
 # x-84a8: forward the node so a node-driven pane spawn exports FNO_NODE/SLUG/PLAN
 # provenance (the verb resolves slug/plan from the graph). Ad-hoc spawns have no
-# --node and export nothing new. Harmless on bg/headless (the verb ignores it).
+# --node and export nothing new. Harmless on thread/headless (the verb ignores it).
 [[ -n "$NODE" ]] && cmd+=(--node "$NODE")
 cmd+=(--name "$NAME")
 [[ -n "$MESSAGE" ]] && cmd+=("$MESSAGE")
@@ -579,7 +580,8 @@ else
   # anchors `^...$` to the whole string, so any embedded newline or stray byte
   # fails (parity with the one-shot path's single-line requirement). bash 3.2 safe.
   #
-  # The valid SHAPE depends on the substrate (x-61b7). Only `bg`/`headless` return
+  # The valid SHAPE depends on the substrate (x-61b7). Only `thread`/`headless`
+  # (and the one-release `bg` alias) return
   # a real 8-hex session-id prefix (client-side `claude --bg` / one-shot). The
   # default/`pane` owned-PTY lane is addressed by an identifier-shaped registry
   # handle: Rust derives a non-empty name-slug short_id; Python supplies the
@@ -587,7 +589,7 @@ else
   # 8-hex rule wrongly rejects both shapes, so accept a single-line identifier
   # there (empty/torn receipts still fail - the cardinal guard remains intact).
   case "$SUBSTRATE" in
-    bg|headless) short_id_shape='^[0-9a-f]{8}$' ;;
+    thread|bg|headless) short_id_shape='^[0-9a-f]{8}$' ;;
     # 64, not 40: the pane handle is the derived agent name (<verb>-<node-id>-<slug>),
     # which normalize builds up to ~50 chars (verb + id + a 32-char slug). A 40-cap
     # rejected a real long-slug codex pane launch as FAILED (name 43 > 40).
@@ -623,7 +625,7 @@ else
     printf 'result=%s short_id=%s name=%s mode=%s%s pane="%s:%s" hint="fno mux attach %s"\n' \
       "$pane_result" "$short_id" "$NAME" "$report_mode" "$wt_field" "$PANE_SESSION" "$PANE_ID" "$(printf '%q' "$PANE_SESSION")"
   else
-    # Address the hint by short_id on bg/headless, where it is the session-id
+    # Address the hint by short_id on thread/headless, where it is the session-id
     # prefix: registration can silently fail (the receipt only validates the
     # short_id's shape, never that a row landed), and a session-shaped token
     # heals from the harness store on a registry miss while a bare name never
@@ -631,7 +633,7 @@ else
     # trade one refusal for another. Other substrates keep the name: their
     # short_id is a name-slug, not session-shaped, so it gains nothing.
     hint_token="$NAME"
-    case "$SUBSTRATE" in bg|headless) hint_token="$short_id" ;; esac
+    case "$SUBSTRATE" in thread|bg|headless) hint_token="$short_id" ;; esac
     printf 'result=launched short_id=%s name=%s mode=%s%s hint="fno agents logs %s" trace="fno agents trace %s"\n' \
       "$short_id" "$NAME" "$report_mode" "$wt_field" "$hint_token" "$NAME"
   fi
