@@ -1786,6 +1786,9 @@ def inject_spawn_defaults(
 #: Sizes that resolve to their own chain. Anything else reads `default`.
 _CHAIN_SIZES = ("S", "M", "L")
 
+#: Harnesses a chain link may name (spawn_overlay.rs CHAIN_HARNESSES).
+_CHAIN_HARNESSES = ("claude", "codex", "agy", "opencode")
+
 
 class FallbackConfigError(ValueError):
     """A fallback chain that cannot be trusted to name a vendor."""
@@ -1841,7 +1844,17 @@ def validate_fallback(table: object) -> dict:
     try:
         answer = spawn_overlay_call({"kind": "fallback", "table": wire})
     except SpawnOverlayUnavailable as exc:
-        raise FallbackConfigError(str(exc)) from exc
+        # No (or stale) binary: rebuild locally the way the verb canonicalizes
+        # (config `harness` -> axis `provider`, name-checked); the shape guards
+        # above still refuse.
+        print(f"fno agents spawn: fallback table rebuilt locally ({exc})", file=sys.stderr)
+        return {
+            size: [
+                link if isinstance(link, SpawnDefaultsBlock) else _local_link(link)
+                for link in table[size]
+            ]
+            for size in table
+        }
     if answer.get("error"):
         raise FallbackConfigError(answer["error"])
     for size, links in answer["links"].items():
@@ -1856,34 +1869,84 @@ def link_id(link) -> str:
     return link_meta([link])["ids"][0]
 
 
+def _link_wire_dict(link) -> dict:
+    """One chain link as the verb's wire view: non-empty axis fields only."""
+    return {
+        k: v
+        for k in (
+            "provider", "model", "route", "account",
+            "effort", "permission_mode", "substrate",
+        )
+        if (v := str(getattr(link, k, "") or "").strip())
+    }
+
+
+def _local_link(link: dict):
+    """One raw config link as a block, the way the verb canonicalizes it:
+    config ``harness`` becomes the axis ``provider`` and is name-checked."""
+    from fno.config import SpawnDefaultsBlock
+
+    harness = str(link.get("harness", "") or "").strip()
+    if harness and harness not in _CHAIN_HARNESSES:
+        raise FallbackConfigError(
+            f"harness={harness!r} is not a known harness "
+            f"({'|'.join(_CHAIN_HARNESSES)})"
+        )
+    fields = {k: v for k, v in link.items() if k != "harness"}
+    if harness:
+        fields["provider"] = harness
+    return SpawnDefaultsBlock(**fields)
+
+
+def _local_link_meta(link) -> tuple:
+    """One link's ``(id, flags)`` in the verb's exact spelling, for the
+    binary-less degrade. Mirrors spawn_overlay.rs link-meta."""
+    def field(k: str) -> str:
+        return str(getattr(link, k, "") or "").strip()
+
+    harness, account = field("provider"), field("account")
+    model, route = field("model"), field("route")
+    base = f"{harness or '?'}/{model or route or 'default'}"
+    flags: List[str] = []
+    if harness:
+        flags += ["-H", harness]
+    for flag, key in (
+        ("-m", "model"),
+        ("--effort", "effort"),
+        ("--permission-mode", "permission_mode"),
+        ("--route", "route"),
+        ("--account", "account"),
+    ):
+        if field(key):
+            flags += [flag, field(key)]
+    substrate = field("substrate") or ("bg" if harness == "claude" else "pane")
+    flags += ["--substrate", substrate]
+    return (f"{base}@{account}" if account else base, flags)
+
+
 def link_meta(links: list) -> dict:
     """Chain-link ids and spawn flags, one verb call for the batch."""
-    from fno.agents.spawn_overlay_client import spawn_overlay_call
-
-    return spawn_overlay_call(
-        {
-            "kind": "link-meta",
-            "links": [
-                {
-                    k: v
-                    for k in (
-                        "provider", "model", "route", "account",
-                        "effort", "permission_mode", "substrate",
-                    )
-                    if (v := str(getattr(link, k, "") or "").strip())
-                }
-                for link in links
-            ],
-        }
+    from fno.agents.spawn_overlay_client import (
+        SpawnOverlayUnavailable,
+        spawn_overlay_call,
     )
 
+    try:
+        return spawn_overlay_call(
+            {"kind": "link-meta", "links": [_link_wire_dict(link) for link in links]}
+        )
+    except SpawnOverlayUnavailable as exc:
+        print(f"fno agents spawn: link meta computed locally ({exc})", file=sys.stderr)
+        rows = [_local_link_meta(link) for link in links]
+        return {"ids": [r[0] for r in rows], "flags": [r[1] for r in rows]}
 
-def _harness_records(harness: str, repo_root=None):
-    """Account records whose harness is ``harness``, or [] when unreadable.
 
-    Rooted at ``repo_root`` because the recovery roster is global and a
-    candidate can belong to another project. A same-id record in the
-    dispatcher's own project must never answer for a foreign worker.
+def _accounts_map(repo_root=None) -> dict:
+    """Harness -> account ids, for every harness with a provider record.
+
+    Rooted at ``repo_root`` because the recovery roster is global: a foreign
+    worker resolving the dispatcher's chain must not see its own accounts as
+    answers for a different project's.
     """
     try:
         from fno.adapters.providers.loader import load_providers
@@ -1891,42 +1954,40 @@ def _harness_records(harness: str, repo_root=None):
         from pathlib import Path as _Path
 
         cfg = load_providers(repo_root=_Path(repo_root) if repo_root else None)
-        return [r for r in cfg.records if r.harness == harness]
-    except Exception:  # noqa: BLE001 - an unreadable config means UNKNOWN, not exhausted
-        return []
+        out: dict = {}
+        for r in cfg.records:
+            out.setdefault(r.harness, []).append(r.id)
+        return out
+    except Exception:  # noqa: BLE001 - an unreadable config reads as no accounts
+        return {}
 
 
 def link_is_exhausted(link, *, now: Optional[float] = None, repo_root=None) -> bool:
     """True only when every account this link can land on is KNOWN exhausted.
 
-    This is the check task 1.2 made real. Before the harvested reset, a claude
-    record's lock expired seconds after the cap and a z.ai record had no probe
-    at all, so every link looked eligible and the chain routed straight back
-    into the provider that had just refused.
+    UNKNOWN stays eligible, matching the invariant `rotation.py` enforces:
+    unknown is not exhausted - an unreadable config, no matching record, or
+    any error on the way included. The state read and the verdict live in the
+    fallback-chain verb; this shim serializes one link."""
+    from fno.rust_binary import VerbUnavailable, verb_call
 
-    UNKNOWN stays eligible, matching the invariant `rotation.py` already
-    enforces: unknown is not exhausted. So does an unreadable config, no
-    matching record, and any error on the way - the failure mode of guessing
-    "exhausted" is holding a node that could have run.
-    """
-    from fno.adapters.providers.runtime_state import HeadroomState, headroom
-
-    account = (getattr(link, "account", "") or "").strip()
-    harness = (getattr(link, "provider", "") or "").strip()
-    ids = (
-        [account] if account
-        else [r.id for r in _harness_records(harness, repo_root)]
-    )
-    if not ids:
-        return False
     try:
-        from pathlib import Path as _Path
-
-        root = _Path(repo_root) if repo_root else None
-        verdicts = [headroom(pid, now=now, repo_root=root) for pid in ids]
-    except Exception:  # noqa: BLE001 - a failed read is UNKNOWN, never exhausted
+        answer = verb_call(
+            "fallback-chain",
+            {
+                "links": [_link_wire_dict(link)],
+                "exclude": [],
+                "accounts": _accounts_map(repo_root),
+                **({"now": now} if now is not None else {}),
+            },
+        )
+    except VerbUnavailable as exc:
+        # No (or stale) binary: UNKNOWN stays eligible, the function's own
+        # invariant for an unreadable state.
+        print(f"fno agents spawn: exhaustion check skipped ({exc})", file=sys.stderr)
         return False
-    return all(v.state is HeadroomState.EXHAUSTED for v in verdicts)
+    return answer.get("eligible") != [0]
+
 
 
 def resolve_fallback_chain(
@@ -1968,17 +2029,45 @@ def resolve_fallback_chain(
             from fno.config import load_settings
 
             settings = load_settings()
-    table = validate_fallback(
-        getattr(settings.agents, "fallback", None) or {}  # type: ignore[attr-defined]
-    )
+    raw = getattr(settings.agents, "fallback", None) or {}  # type: ignore[attr-defined]
+    if not raw:
+        # An empty table needs no verb and no validation: no chain configured
+        # is the pre-existing spawn-nothing answer.
+        return []
+    table = validate_fallback(raw)
     key = size if size in _CHAIN_SIZES else "default"
     chain = table.get(key) or table.get("default") or []
-    spent = set(exclude)
-    return [
-        link for link in chain
-        if link_id(link) not in spent
-        and not link_is_exhausted(link, now=now, repo_root=repo_root)
-    ]
+    if not chain:
+        return []
+    # The walk rides the fallback-chain verb (crates/fno-agents/src/
+    # fallback_chain.rs): Python resolves config, the accounts map and the
+    # state path; Rust owns the runtime-state read and the headroom verdict.
+    import os
+
+    from fno.paths import runtime_state_json
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    state_path = os.environ.get("FNO_RUNTIME_STATE_PATH") or str(runtime_state_json())
+    try:
+        answer = verb_call(
+            "fallback-chain",
+            {
+                "links": [_link_wire_dict(link) for link in chain],
+                "exclude": list(exclude),
+                "accounts": _accounts_map(repo_root),
+                "state_path": state_path,
+                **({"now": now} if now is not None else {}),
+            },
+        )
+    except VerbUnavailable as exc:
+        # No (or stale) binary: every verdict reads UNKNOWN and UNKNOWN stays
+        # eligible - the same open posture an unreadable state file had before
+        # the port. A KNOWN cap is invisible only while the state read is
+        # impossible anyway.
+        print(f"fno agents spawn: chain walk degraded open ({exc})", file=sys.stderr)
+        spent = set(exclude)
+        return [link for link in chain if link_id(link) not in spent]
+    return [chain[i] for i in answer.get("eligible", [])]
 
 
 def link_to_spawn_flags(link) -> List[str]:

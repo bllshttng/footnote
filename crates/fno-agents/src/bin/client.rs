@@ -75,6 +75,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "session-start-bytes",
     "spawn",
     "spawn-overlay",
+    "fallback-chain",
     "state",
     "status",
     "stop",
@@ -304,6 +305,14 @@ async fn run(args: Vec<String>) -> i32 {
     // and read the answer back.
     if verb == "spawn-overlay" {
         return fno_agents::spawn_overlay::run_spawn_overlay(&args[1..]);
+    }
+
+    // `fallback-chain`: the failover chain walk (see fallback_chain.rs doc).
+    // Python resolves config and paths and serializes the candidate links;
+    // this verb reads the provider runtime-state file, derives headroom
+    // verdicts, and answers the eligible link indices.
+    if verb == "fallback-chain" {
+        return fno_agents::fallback_chain::run_fallback_chain(&args[1..]);
     }
 
     // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see

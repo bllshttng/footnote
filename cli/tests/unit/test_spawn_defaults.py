@@ -1469,24 +1469,44 @@ class TestResolveFallbackChain:
 
         assert sd.resolve_fallback_chain("L", settings=_chain_settings({})) == []
 
-    def test_ac5_edge_an_exhausted_link_is_skipped(self, monkeypatch) -> None:
+    def test_ac5_edge_an_exhausted_link_is_skipped(self, monkeypatch, tmp_path) -> None:
         from fno.agents import spawn_defaults as sd
 
-        monkeypatch.setattr(
-            sd, "link_is_exhausted",
-            lambda link, now=None, repo_root=None: sd.link_id(link) == "codex/gpt-5.6-sol",
+        # The exhaustion judgment lives in the fallback-chain verb; drive it
+        # through a real state file so the contract, not a mock, is pinned.
+        state = tmp_path / "state.json"
+        state.write_text(
+            '{"usage": {"acct-zai": {"probed_at": 9999999999.0, "windows": ['
+            '{"label": "5h", "used_pct": 100.0, "resets_at": null}]}}}'
         )
-        chain = sd.resolve_fallback_chain("L", settings=_chain_settings(_OPERATOR_RULE))
+        monkeypatch.setattr(
+            sd, "_accounts_map", lambda repo_root=None: {"codex": ["acct-zai"]}
+        )
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(state))
+        chain = sd.resolve_fallback_chain(
+            "L", settings=_chain_settings(_OPERATOR_RULE), now=1000000000.0
+        )
         assert [sd.link_id(x) for x in chain] == ["claude/sonnet"]
 
-    def test_ac5_edge_an_all_exhausted_chain_returns_empty(self, monkeypatch) -> None:
+    def test_ac5_edge_an_all_exhausted_chain_returns_empty(self, monkeypatch, tmp_path) -> None:
         # NOT link zero. Routing into a known-capped provider is worse than
         # holding, and holding is what an empty chain makes the caller do.
         from fno.agents import spawn_defaults as sd
 
-        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: True)
+        state = tmp_path / "state.json"
+        state.write_text(
+            '{"usage": {"acct-a": {"probed_at": 9999999999.0, "windows": ['
+            '{"label": "5h", "used_pct": 100.0, "resets_at": null}]},'
+            '"acct-b": {"probed_at": 9999999999.0, "windows": ['
+            '{"label": "5h", "used_pct": 100.0, "resets_at": null}]}}}'
+        )
+        monkeypatch.setattr(
+            sd, "_accounts_map",
+            lambda repo_root=None: {"codex": ["acct-a"], "claude": ["acct-b"]},
+        )
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(state))
         assert sd.resolve_fallback_chain(
-            "L", settings=_chain_settings(_OPERATOR_RULE)
+            "L", settings=_chain_settings(_OPERATOR_RULE), now=1000000000.0
         ) == []
 
     def test_an_already_spent_link_is_not_offered_again(self, monkeypatch) -> None:
@@ -1498,6 +1518,51 @@ class TestResolveFallbackChain:
             settings=_chain_settings(_OPERATOR_RULE),
         )
         assert [sd.link_id(x) for x in chain] == ["claude/sonnet"]
+
+
+class TestChainVerbsUnavailable:
+    """Binary-less installs keep the walk: every seam degrades open with a
+    named stderr line, in the verb's exact spelling. Not requires_rust - this
+    is the shape the binary-less CI shard runs."""
+
+    def test_an_empty_table_returns_without_the_verb(self) -> None:
+        from fno.agents import spawn_defaults as sd
+
+        assert sd.resolve_fallback_chain("L", settings=_chain_settings({})) == []
+
+    def test_the_walk_degrades_open_when_the_verbs_are_unavailable(self, monkeypatch) -> None:
+        import contextlib
+        import io
+        from unittest import mock
+
+        from fno.agents import spawn_defaults as sd
+        from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable
+        from fno.rust_binary import VerbUnavailable
+
+        st = _chain_settings(_OPERATOR_RULE)
+        err = io.StringIO()
+        overlay_boom = mock.patch(
+            "fno.agents.spawn_overlay_client.spawn_overlay_call",
+            lambda payload: (_ for _ in ()).throw(SpawnOverlayUnavailable("gone")),
+        )
+        chain_boom = mock.patch(
+            "fno.rust_binary.verb_call",
+            lambda verb, payload, unavailable=None: (
+                _ for _ in ()
+            ).throw(VerbUnavailable("gone")),
+        )
+        with contextlib.redirect_stderr(err), overlay_boom, chain_boom:
+            chain = sd.resolve_fallback_chain("L", settings=st)
+            ids = [sd.link_id(x) for x in chain]
+            flags = sd.link_to_spawn_flags(chain[0])
+            assert sd.link_is_exhausted({"provider": "codex", "model": "m"}) is False
+        lines = err.getvalue()
+        assert ids[0] == "codex/gpt-5.6-sol" and "claude/sonnet" in ids
+        assert flags[:2] == ["-H", "codex"] and "--substrate" in flags
+        assert "fallback table rebuilt locally" in lines
+        assert "chain walk degraded open" in lines
+        assert "link meta computed locally" in lines
+        assert "exhaustion check skipped" in lines
 
 
 @requires_rust
@@ -1666,24 +1731,16 @@ class TestForeignProjectRooting:
     def test_headroom_is_read_from_the_candidates_repo(self, monkeypatch, tmp_path):
         from fno.agents import spawn_defaults as sd
 
+        # The accounts map is the repo-rooted half of the walk: the candidate's
+        # project, not the daemon's, names the accounts the chain may spend.
         seen = {}
 
-        class _V:
-            state = object()
-
-        monkeypatch.setattr(
-            sd, "_harness_records",
-            lambda harness, repo_root=None: [type("R", (), {"id": "acct"})()],
-            raising=True,
-        )
-
-        def _headroom(pid, now=None, repo_root=None):
+        def _accounts(repo_root=None):
             seen["root"] = repo_root
-            return _V()
+            return {"codex": ["acct"]}
 
-        monkeypatch.setattr(
-            "fno.adapters.providers.runtime_state.headroom", _headroom, raising=True
-        )
+        monkeypatch.setattr(sd, "_accounts_map", _accounts, raising=True)
+        monkeypatch.delenv("FNO_RUNTIME_STATE_PATH", raising=False)
         link = sd.validate_fallback({"L": [{"harness": "codex", "model": "m"}]})["L"][0]
         sd.link_is_exhausted(link, repo_root=str(tmp_path))
         assert str(seen["root"]) == str(tmp_path)

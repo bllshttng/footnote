@@ -276,6 +276,9 @@ RUST_CLIENT_VERBS = frozenset(
         # The harness-keyed spawn-defaults resolver (x-8975): payload JSON in,
         # the answer out; Python calls it via fno.agents.spawn_overlay_client.
         "spawn-overlay",
+        # The failover chain walk (x-8975 budget port): payload JSON in, the
+        # {eligible} answer out; Python calls it via fno.rust_binary.verb_call.
+        "fallback-chain",
     }
 )
 
@@ -482,6 +485,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "court-orphans": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents court`, not `fno agents` routing.",
     "route-slot": "Delivery-slot resolver: JSON payload on stdin, the {candidate, chain} answer on stdout; invoked by fno.route_slot_client, not `fno agents` routing.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
+    "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} link-index answer on stdout; invoked by fno.agents.spawn_defaults, not `fno agents` routing.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other
