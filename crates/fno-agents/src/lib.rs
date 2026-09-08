@@ -69,6 +69,7 @@ pub mod codex_ask;
 #[doc(hidden)]
 pub mod codex_fake_daemon;
 pub mod codex_inject;
+pub mod codex_store;
 pub mod codex_thread;
 mod codex_thread_entry;
 mod completion_output;
