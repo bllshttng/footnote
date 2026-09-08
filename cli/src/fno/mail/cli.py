@@ -2155,12 +2155,12 @@ def _name_lane_send(
 
     - ``resolved`` (a live ``DiscoveredSession``): live-inject first, mux pane
       next, durable floor on miss, addressed to its canonical handle.
-    - ``token`` (discovery MISSED, which a liveness-gated listing makes no
-      verdict on reachability): the full ladder -- inject-as-probe, asleep
-      resolution, wake-and-deliver, then a durable demotion naming each failed
-      lane. Raises ``UnreachableTokenError`` when no store knows the token, so
-      the caller exits 16 having queued nothing, and ``AmbiguousTokenError``
-      rather than guessing between two sessions.
+    - ``token`` (discovery MISSED, which is no verdict on reachability): the
+      full ladder -- inject-as-probe, asleep resolution, wake-and-deliver, then
+      a durable demotion naming each failed lane. Raises
+      ``UnreachableTokenError`` when no store knows the token, so the caller
+      exits 16 having queued nothing, and ``AmbiguousTokenError`` rather than
+      guessing between two sessions.
     - neither: durable-only, addressed to ``recipient``.
 
     ``reply_to`` stamps BOTH the wire attr and the bus ``in_reply_to`` from ONE
@@ -2187,7 +2187,7 @@ def _name_lane_send(
 
     self_send = False
     # The recipient's full session id when a lane resolved one; it stamps that
-    # session's own live crown into the live envelope (x-6346).
+    # session's own crown into the live envelope (x-6346).
     recipient_session: Optional[str] = None
     if resolved is not None:
         recipient_session = resolved.session_id
@@ -2250,12 +2250,8 @@ def _name_lane_send(
                 recipient_session = forced_session
             else:
                 recipient = token
-        if recipient_session is None:
-            recipient_session = (
-                token_reachable.session_id
-                if token_reachable is not None
-                else (session_identity_key(token) if is_full_session_id(token) else None)
-            )
+        if recipient_session is None and token_reachable is not None:
+            recipient_session = token_reachable.session_id
         provider = (
             token_reachable.agent if token_reachable is not None else provider
         ) or "claude"
@@ -2286,10 +2282,9 @@ def _name_lane_send(
     sender_session = _reply_session_for(from_name)
     def _envelope(to_session: Optional[str] = None) -> str:
         # Through harness_for_provider like every other send path: the wire
-        # vocabulary is claude-code, and stamping a raw "claude" here made the
-        # name lane the one producer disagreeing with dispatch, the relay, and
-        # the Rust contract. "cli" survives as the honest no-harness value: the
-        # mapper renders a MISSING provider as "unknown", never a vendor guess.
+        # vocabulary is claude-code, and a raw "claude" here made the name lane
+        # the one producer disagreeing with dispatch, the relay, and the Rust
+        # contract. "cli" is the honest no-harness value.
         return wrap_fno_mail(
             message,
             from_=sender,
@@ -2304,7 +2299,7 @@ def _name_lane_send(
         )
 
     # Live carries the recipient's crown; the durable floor below carries none,
-    # being read whenever the recipient next drains (x-6346).
+    # being read whenever the recipient drains (x-6346).
     wrapped = _envelope(recipient_session)
 
     # --force (node x-3a64): change the TRANSPORT, keep every mail semantic. The
@@ -3522,18 +3517,18 @@ def _resolve_to_king_address(
         clash = conflict or "a second positional (the message is the only one)"
         print(
             f"error: --to-king and {clash} are mutually exclusive. Run "
-            f"`fno agents court` and address that handle to use the other lane.",
+            f"`fno agents court` and address that handle for the other lane.",
             file=sys.stderr,
         )
-        raise typer.Exit(code=2)
+        raise typer.Exit(2)
     if not name:
         print("usage: fno agents mail send --to-king <scope> <message>", file=sys.stderr)
-        raise typer.Exit(code=2)
+        raise typer.Exit(2)
     try:
         holders = resolve_to_king(scope)
     except (OSError, ValueError) as exc:
         print(f"error: --to-king {scope!r}: registry unreadable: {exc}", file=sys.stderr)
-        raise typer.Exit(code=12) from exc
+        raise typer.Exit(12) from exc
     if not holders:
         print(
             f"--to-king {scope!r} refused: no live row holds this crown right "
@@ -3541,7 +3536,7 @@ def _resolve_to_king_address(
             f"does, or address a specific handle.",
             file=sys.stderr,
         )
-        raise typer.Exit(code=16)
+        raise typer.Exit(16)
     if len(holders) > 1:
         print(
             f"--to-king {scope!r} is a split crown: {len(holders)} live rows "
@@ -3549,7 +3544,7 @@ def _resolve_to_king_address(
             f"`fno agents court` and resolve it, or address one by name.",
             file=sys.stderr,
         )
-        raise typer.Exit(code=17)
+        raise typer.Exit(17)
     print(f"--to-king {scope}: resolved to {holders[0]}", file=sys.stderr)
     return holders[0], name
 
@@ -3624,8 +3619,8 @@ def cmd_send(
         None, "--to-king",
         help=(
             "Anycast over the crown: deliver to whoever holds this crown scope "
-            "RIGHT NOW, resolved at send time. Refuses and queues nothing when "
-            "no live row holds it. Use instead of <name> for the role."
+            "RIGHT NOW, resolved at send time. Refuses and queues nothing when no "
+            "live row holds it. Use instead of <name> for the role."
         ),
     ),
     any_live: bool = typer.Option(
@@ -3766,8 +3761,8 @@ def cmd_send(
     refuse_retired_provider(_provider_tombstone)
 
     # --to-king addresses a ROLE, resolved HERE at send time and handed to the
-    # ordinary name lane. A second address decides where the message lands, and
-    # the crown deciding that is the point (x-6346).
+    # ordinary name lane. Any second address would decide the destination, and
+    # the crown deciding it is the point (x-6346).
     if to_king is not None:
         name, message = _resolve_to_king_address(
             to_king, name, message,
@@ -3778,6 +3773,7 @@ def cmd_send(
                 else "--raw" if raw
                 else "--force" if force
                 else "--any" if any_live
+                else "--ruling" if ruling is not None
                 else None
             ),
         )
@@ -3870,11 +3866,11 @@ def cmd_send(
         message = name
         name = canonical_handle(ident.session_id)
 
-    # The codex head-8 refusal sits ABOVE every lane that returns on its own,
-    # and never on --to-self (which derived this handle twelve lines up) or on
-    # the option-addressed lanes, where the positional holds the BODY. Why each
-    # exclusion exists: docs/architecture/cross-agent-bus-log.md
-    # #name-lane-address-resolution.
+    # The codex head-8 refusal sits ABOVE every lane that returns on its own.
+    # --to-project holds the BODY in the positional, so it has no address to
+    # check. --to-self and --to-king DERIVED theirs, which names one row by
+    # construction, so the ambiguity the rule guards cannot arise. Details:
+    # docs/architecture/cross-agent-bus-log.md#name-lane-address-resolution.
     if not to_project and not to_king:
         _refuse_unsafe_short_address(name, self_addressed=to_self)
 

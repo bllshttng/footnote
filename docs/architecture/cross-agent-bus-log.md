@@ -96,7 +96,7 @@ The rule:
 - none: refuse, exit 16, queue nothing. A project queue has a future drain that reads it as that project. A vacant crown has no such reader. Queueing strands the message at the address.
 - more than one: refuse, naming both holders. That is the split crown `fno agents court` already reports. It is not a multiplicity to pick between, so there is no `--any` tie-break here.
 
-`KingResolution` enforces exactly-one-outcome at construction, the same guard `ProjectResolution` carries.
+`resolve_to_king` returns the holder names as a plain list. A list has no illegal state to guard, so unlike `ProjectResolution` there is no construction-time check. The one caller reads the three outcomes off the length.
 
 `--to-king` is exclusive with every other addressing mode: `--to-project`, `--to-self`, `--kind`, `--raw`, `--force`, `--any`, and a second positional. A second address decides where the message lands. The crown deciding that is the point.
 

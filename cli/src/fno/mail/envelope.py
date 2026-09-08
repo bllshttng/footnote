@@ -160,7 +160,7 @@ CROWNED_FNO_MAIL_TRAILER_TEMPLATE = (
 )
 # x-6346: the RECIPIENT's own live crown, read at delivery. Succession moves the
 # crown row, never the handle a peer learned while it was crowned, so an
-# abdicated session reads reign mail with nothing saying the authority left.
+# abdicated session read reign mail with nothing saying the authority left.
 RECIPIENT_CROWN_TRAILER_TEMPLATE = "-- your crown: {crown}"
 RECIPIENT_NO_CROWN_TRAILER = "-- your crown: none right now"
 ORIGIN_TRAILER_TEMPLATE = (
@@ -217,15 +217,17 @@ def fleet_has_crown() -> bool:
     return fleet_has_crown_at(agents_registry_path())
 
 
+# Cached for the process, which is one send. A long-lived renderer stamping a
+# recipient crown must clear this, or a succession mid-loop keeps stamping the
+# deposed holder.
 @lru_cache(maxsize=64)
 def crown_at(registry_path: Path, session: Optional[str]) -> Optional[str]:
     """Return the live row's crown label for ``session``, or ``None``.
 
     One read, both directions: the sender's standing trailer and the recipient's
     own crown line ask one registry one question, so they cannot drift into two
-    rules. Path and session id are cache keys. Any read failure returns no crown,
-    because unreadable state must never manufacture standing.
-    """
+    rules. Path and session id are cache keys. A read failure returns no crown,
+    because unreadable state must never manufacture standing."""
     if not session:
         return None
     try:
@@ -250,14 +252,21 @@ sender_crown_at = crown_at  #: the sender-side spelling of the same read
 def recipient_crown_trailer(to_session: Optional[str]) -> Optional[str]:
     """The recipient's own crown line, or ``None`` when nothing honest can be
     said. Gated on ``to_session`` FIRST: ``none right now`` is a positive claim
-    about the reader's authority, and an address nobody resolved is an absence
-    rather than a reading."""
+    about the reader's authority, and an unresolved address is an absence rather
+    than a reading. An unreadable registry is that same absence and needs its own
+    probe, because ``fleet_has_crown`` fails OPEN while ``crown_at`` fails CLOSED
+    and the two alone would tell a live king it had been deposed."""
     if not to_session or not fleet_has_crown():
         return None
-    crown = crown_at(agents_registry_path(), to_session)
-    if crown is None:
-        return RECIPIENT_NO_CROWN_TRAILER
-    return RECIPIENT_CROWN_TRAILER_TEMPLATE.format(crown=crown)
+    path = agents_registry_path()
+    crown = crown_at(path, to_session)
+    if crown is not None:
+        return RECIPIENT_CROWN_TRAILER_TEMPLATE.format(crown=crown)
+    try:
+        load_registry(path=path)
+    except Exception:  # noqa: BLE001 - an unread registry is not a reading
+        return None
+    return RECIPIENT_NO_CROWN_TRAILER
 
 
 def _crowned_trailer(crown: str) -> str:
@@ -418,8 +427,8 @@ def wrap_fno_mail(
     resolved one, and it renders the recipient-crown line. A trailer, not a tag
     attribute: the field rule above reserves attributes for what a recipient
     cannot cheaply look up, and its own crown is what it fails to look up
-    (x-6346). It sits ABOVE the sender trailer, so the authority notice stays
-    the last thing read inside the envelope.
+    (x-6346). It sits ABOVE the sender trailer, so the authority notice stays the
+    last thing read inside the envelope.
 
     This is the form injected over the ``control.sock`` (claude) and stored in
     the durable bus body, so a delivered message is self-recording -- ``grep

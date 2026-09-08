@@ -519,6 +519,30 @@ def test_abdicated_recipient_reads_its_own_lost_crown_in_the_envelope(
     assert "-- your crown: L1 fno" in crowned
 
 
+def test_unreadable_registry_never_tells_a_king_it_was_deposed(monkeypatch):
+    """`fleet_has_crown` fails OPEN and `crown_at` fails CLOSED, so an
+    unreadable registry made the two agree on a sentence neither measured:
+    "none right now" is a positive claim that the reader lost its crown."""
+    import fno.mail.envelope as envelope
+
+    def _unreadable(**_kwargs):
+        raise OSError("registry mid-write")
+
+    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
+    monkeypatch.setattr(envelope, "crown_at", lambda _path, _session: None)
+    monkeypatch.setattr(envelope, "load_registry", _unreadable)
+
+    assert envelope.recipient_crown_trailer("session-king") is None
+
+    # Positive control: the same call with a readable registry DOES render the
+    # line, so the None above is the read failing and not the gate being dead.
+    monkeypatch.setattr(envelope, "load_registry", lambda **_kwargs: [])
+    assert (
+        envelope.recipient_crown_trailer("session-king")
+        == envelope.RECIPIENT_NO_CROWN_TRAILER
+    )
+
+
 def test_unresolved_recipient_gets_no_crown_line(monkeypatch):
     """An address no lane resolved is an ABSENCE, not a reading: claiming
     "none right now" there would be a positive statement about authority made

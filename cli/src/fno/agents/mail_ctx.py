@@ -26,8 +26,8 @@ class _MailCtx:
     # spelling, so a durable write reusing this ctx stamps provider_from with the
     # value the envelope was built from rather than resolving a second time.
     provider: Optional[str] = None
-    # The RECIPIENT's full session id (x-6346), which renders its own live crown
-    # into the envelope trailer. Live delivery only; None omits the line.
+    # The RECIPIENT's full session id (x-6346), rendering its own live crown into
+    # the envelope trailer. Live delivery only; None omits the line.
     to_session: Optional[str] = None
 
 
@@ -48,7 +48,7 @@ def _build_mail_ctx(
     the sender's canonical session handle, or the bare ``from_name`` when the
     caller is unregistered. ``model`` is the invoking session's real model, from
     its own transcript store; an unresolvable one floors to ``"unknown"`` and is
-    never fabricated. ``to`` and ``node`` are optional and omitted when None;
+    never fabricated. ``to`` and ``node`` are optional and omitted when None, and
     ``node`` stays None because dispatch has no truthful source for it today."""
     from fno.agents.self_stamp import resolve_self_model
     from fno.harness_identity import canonical_handle

@@ -42,8 +42,7 @@ def job_lane_send(
 
     job = resolve_job_address(token)
     if job is None:
-        # Not a job address -- should not reach here (cmd_send gates on the
-        # prefix), but fail closed rather than misaddress.
+        # cmd_send gates on the prefix, so this is unreachable; fail closed.
         print(f"error: not a job address: {token!r}", file=sys.stderr)
         raise typer.Exit(code=2)
 
@@ -62,8 +61,7 @@ def job_lane_send(
     assert session_id is not None  # has_holder is True iff session_id is set
 
     msg_id = generate_msg_id()
-    # The durable recipient is the JOB, never the holder's handle: that is what
-    # makes the address outlive the session.
+    # The durable recipient is the JOB, which is what outlives the session.
     recipient = job.address
     sender = stamp_from(from_name)
     _reservation, authored_words = _reserve_budget(
@@ -75,8 +73,8 @@ def job_lane_send(
     )
     sender_harness = infer_invoking_harness()
     sender_model = resolve_self_model()
-    # The collision-safe reply address the name lane also carries; both durable
-    # records below read it, and a reply consults THOSE, not the envelope.
+    # The collision-safe reply address; a reply consults the durable records
+    # below, not the envelope.
     sender_session = _reply_session_for(from_name)
     def _envelope(to_session: Optional[str] = None) -> str:
         return wrap_fno_mail(
@@ -92,8 +90,8 @@ def job_lane_send(
             to_session=to_session,
         )
 
-    # A job address outlives its holder, so only the live envelope names a
-    # crown; a queued body can be drained by a successor (x-6346).
+    # Only the live envelope names a crown: a job address outlives its holder,
+    # so a queued body can be drained by a successor (x-6346).
     wrapped = _envelope(session_id)
 
     provider = job.harness or "claude"
