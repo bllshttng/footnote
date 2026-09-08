@@ -46,6 +46,9 @@ use crate::proto::{
     MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
+use crate::restore_liveness::{
+    no_resume_form_reason, restore_worker_refusal_reason, worker_registry_match,
+};
 #[cfg(test)]
 use crate::spawn_journal::parse_spawn_receipts;
 use crate::spawn_journal::{
@@ -2732,56 +2735,6 @@ pub(crate) fn restore_member_cwd(
     }
 }
 
-fn restore_worker_refusal_reason(
-    member: &crate::squad_store::StoredMember,
-    row: Option<&RegistryAgent>,
-    receipt_store_error: Option<&str>,
-    receipts: &HashMap<(String, String), HeldWorker>,
-    never_bound: &HashMap<String, String>,
-) -> String {
-    if let Some(reason) = row
-        .and_then(Core::row_no_pane_reason)
-        .map(Core::no_pane_reason_text)
-    {
-        return reason.to_string();
-    }
-    let Some(session_id) = member.harness_session_id.as_deref() else {
-        // (x-6b0b) No session id and no harness is the never-bound shape; when
-        // the journal carries the name's removal marker, say why the member
-        // can never bind instead of only that it did not.
-        if member.harness.is_none() {
-            if let Some(reason) = member.worker.as_deref().and_then(|w| never_bound.get(w)) {
-                return format!("never bound: {reason}");
-            }
-        }
-        return "session id is missing".into();
-    };
-    if let Some(error) = receipt_store_error {
-        return error.to_string();
-    }
-    if let Some(receipt) = receipt_for_member(receipts, member) {
-        let harness = member
-            .harness
-            .as_deref()
-            .unwrap_or(receipt.harness.as_str());
-        return format!("{harness} session {session_id} is not resumable");
-    }
-    let Some(harness) = member.harness.as_deref() else {
-        return "harness is unknown".into();
-    };
-    if !Core::resume_form(harness) {
-        return no_resume_form_reason(harness, session_id);
-    }
-    format!("spawn receipt is missing for {harness} session {session_id}")
-}
-
-/// (x-7b5e) The one no-form refusal string, shared by the held-worker
-/// restore reason and the bulk driver's report so the two surfaces cannot
-/// teach different vocabularies for the same structural gap.
-fn no_resume_form_reason(harness: &str, session_id: &str) -> String {
-    format!("{harness} has no resume form; session {session_id} is not resumable")
-}
-
 // The registry rows the restore verb classifies against, read fresh from
 // the registry file at verb time. In tests, `RESTORE_REGISTRY_ROWS`
 // overrides the file (a unit test cannot populate the real registry, and
@@ -2849,23 +2802,6 @@ pub(crate) fn agent_harness_session_id(agent: &RegistryAgent) -> Option<&str> {
         .harness_session_id
         .as_deref()
         .or(agent.claude_session_uuid.as_deref())
-}
-
-fn worker_registry_match(
-    member: &crate::squad_store::StoredMember,
-    agent: &RegistryAgent,
-    worker_name: &str,
-) -> bool {
-    match (
-        member.harness.as_deref(),
-        member.harness_session_id.as_deref(),
-    ) {
-        (Some(harness), Some(session_id)) => {
-            agent.harness.as_deref() == Some(harness)
-                && agent_harness_session_id(agent) == Some(session_id)
-        }
-        _ => agent.name == worker_name,
-    }
 }
 
 /// The set of attach-ids live NOW, from the raw registry + roster contents
@@ -6318,7 +6254,7 @@ impl Core {
     /// itself is built later by [`resume_argv_for`] from the same declared
     /// form, so adding a harness to
     /// `cli/src/fno/agents/harness_capabilities.toml` is the whole change.
-    fn resume_form(harness: &str) -> bool {
+    pub(crate) fn resume_form(harness: &str) -> bool {
         declared_resume_form(harness).is_some()
     }
 
@@ -6426,7 +6362,7 @@ impl Core {
     /// A live attachable row has a higher-priority client action, so it carries
     /// no registry refusal reason. Every other registry-backed paneless row can
     /// expose the classification that explains its branch-four notice.
-    fn row_no_pane_reason(a: &RegistryAgent) -> Option<AgentNoPaneReason> {
+    pub(crate) fn row_no_pane_reason(a: &RegistryAgent) -> Option<AgentNoPaneReason> {
         if a.attach_id.is_some() && !a.exited {
             return None;
         }
@@ -6436,7 +6372,7 @@ impl Core {
         }
     }
 
-    fn no_pane_reason_text(reason: AgentNoPaneReason) -> &'static str {
+    pub(crate) fn no_pane_reason_text(reason: AgentNoPaneReason) -> &'static str {
         match reason {
             AgentNoPaneReason::LivePaneless => "session is live elsewhere",
             AgentNoPaneReason::MissingHarness => "harness is missing",
