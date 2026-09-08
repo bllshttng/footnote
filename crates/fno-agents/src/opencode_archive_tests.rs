@@ -260,6 +260,26 @@ fn a_row_without_a_session_id_skips_without_touching_the_serve() {
 }
 
 #[test]
+fn an_id_of_another_harnesss_shape_never_reaches_the_serve() {
+    use crate::gc_native::opencode_archive_outcome;
+    let serve = Some(("http://127.0.0.1:1".to_string(), "tok".to_string()));
+    // A claude row's uuid on an opencode row would 404 and read as a measured
+    // absence for a session this code never addressed.
+    for wrong in [
+        "e02e0353-2c4a-4aee-246a-b52fedd1ef73",
+        "ses_",
+        "ses_has spaces",
+        "01998f0c-codex-rollout",
+    ] {
+        assert_eq!(
+            opencode_archive_outcome(Some(wrong), serve.clone(), &never_called),
+            crate::daemon::CascadeOutcome::NotApplicable,
+            "{wrong} is not an opencode session id"
+        );
+    }
+}
+
+#[test]
 fn no_archive_capable_serve_skips_and_still_satisfies_the_applied_gate() {
     use crate::gc_native::opencode_archive_outcome;
     let outcome = opencode_archive_outcome(Some("ses_probe"), None, &never_called);

@@ -116,12 +116,17 @@ fn apply_opencode_archive(e: &RegistryEntry) -> CascadeOutcome {
 /// A transport error is `Unverified` (the row comes back next sweep). A write
 /// the server accepted and did not store is `Failed` - the same shape as a
 /// claude row surviving a successful `claude rm`.
+///
+/// The id must be shape-valid before any request carries it, the same gate the
+/// reachability probe applies before it reaches SQL. An id of another harness's
+/// shape would 404 and read as `confirmed-already-absent`: a receipt claiming a
+/// measured absence for a session this code never addressed.
 pub(crate) fn opencode_archive_outcome(
     session_id: Option<&str>,
     serve: Option<(String, String)>,
     archive: &dyn Fn(&str, &str, &str) -> Result<ArchiveOutcome, String>,
 ) -> CascadeOutcome {
-    let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
+    let Some(sid) = session_id.filter(|s| crate::provider::is_opencode_session_id(s)) else {
         return CascadeOutcome::NotApplicable;
     };
     let Some((base_url, token)) = serve else {
