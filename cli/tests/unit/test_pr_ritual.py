@@ -28,12 +28,14 @@ class FakeRunner:
                  spawn_rc=0, agent_rows=None, branch="feat/x", state="MERGED",
                  reconcile_held=None, reconcile_candidates=None,
                  reconcile_contained=None, reconcile_errors=(),
-                 reconcile_sync_outcome=None, reconcile_closure_refused=None):
+                 reconcile_sync_outcome=None, reconcile_closure_refused=None,
+                 reconcile_unknown=None):
         self.calls: list[list[str]] = []
         self._diff = (diff_files, additions, deletions)
         self._deferred = deferred or []
         self._closed = reconcile_closed or []
         self._held = reconcile_held or []
+        self._unknown = reconcile_unknown or []
         self._candidates = reconcile_candidates
         self._contained = reconcile_contained or ()
         self._errors = reconcile_errors
@@ -68,6 +70,7 @@ class FakeRunner:
             if self._candidates is not None:
                 payload["candidates"] = [{"node_id": n} for n in self._candidates]
             payload["promise_unmet"] = [{"node_id": n} for n in self._held]
+            payload["promise_unknown"] = [{"node_id": n} for n in self._unknown]
             if self._contained:
                 payload["contained_closed"] = list(self._contained)
             if self._errors:
@@ -277,7 +280,29 @@ def test_reconcile_held_open_reads_deferred_never_ok(tmp_path, capsys):
     r.leg_stamp()
     out = capsys.readouterr().out
     assert "step=reconcile status=deferred" in out
-    assert "held_open=2: x-ffc9, x-6c67" in out
+    assert "held_open=2 (unmet=2 unknown=0): x-ffc9, x-6c67" in out
+    assert "step=reconcile status=ok" not in out
+
+
+def test_reconcile_receipt_counts_unknown_apart_from_unmet(tmp_path, capsys):
+    """An unmet promise owes the operator work; a retryable read outage clears
+    itself on a later sweep. One merged held_open count reads the second as the
+    first, so the receipt names both."""
+    r = _bare(tmp_path, FakeRunner(reconcile_held=["x-ffc9"], reconcile_unknown=["x-uu1"]))
+    r.leg_stamp()
+    out = capsys.readouterr().out
+    assert "step=reconcile status=deferred" in out
+    assert "held_open=2 (unmet=1 unknown=1): x-ffc9, x-uu1" in out
+
+
+def test_reconcile_unknown_alone_still_reads_deferred(tmp_path, capsys):
+    """The bucket the ritual could not see at all before: a sweep that held
+    nodes only on unreadable ship counts must not read as a clean run."""
+    r = _bare(tmp_path, FakeRunner(reconcile_unknown=["x-uu1", "x-uu2"]))
+    r.leg_stamp()
+    out = capsys.readouterr().out
+    assert "step=reconcile status=deferred" in out
+    assert "held_open=2 (unmet=0 unknown=2): x-uu1, x-uu2" in out
     assert "step=reconcile status=ok" not in out
 
 

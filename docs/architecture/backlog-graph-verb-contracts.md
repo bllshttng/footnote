@@ -385,13 +385,27 @@ Decide whether a node's plan promised work that has not all shipped.
          ``done_probes``); a declared gate that cannot be evaluated fails closed.
       C. Ship count. ``expected_url_count: N`` (N >= 2) and fewer than N of the
          node's PR refs are MERGED. The right check for multi-repo / split
-         deliveries.
+         deliveries. Refs are de-duplicated by PR number, so one PR listed
+         twice is one ship and can never satisfy two.
 
     A gate that only fires on an explicit promise cannot false-positive, which
     is the reason the count is written at blueprint time rather than inferred
     afterward. Fails open on an absent/unreadable plan or unparseable
     frontmatter: a stale ``plan_path`` must not wedge a close, but the warning
     names the unreadable path so the gap is visible, not silent.
+
+    Three outcomes, not two. ``ok`` is POSITIVE evidence and is the only one
+    that closes; every close boundary reads ``verdict.satisfied``, never a
+    negative test against one refusal name. ``promise_unmet`` is a policy
+    refusal the operator resolves (exit 6). ``promise_unknown`` is a retryable
+    read outage under condition C: a declared count with some refs unreadable
+    is unconfirmed in BOTH directions, so the node stays open and the next
+    sweep retries (exit 4, the merge gate's own outage code). Reading that
+    outage as ``ok`` is what closed declared multi-ship nodes on the strength
+    of a gh timeout. A NON-retryable read failure stays ``promise_unmet``: it
+    is a policy problem (bad credentials, a stale ref) that retrying will not
+    fix. A plan with no declaration never reaches condition C, so legacy
+    behavior is unchanged.
 
 ## emit_session_satisfied_for_record
 
