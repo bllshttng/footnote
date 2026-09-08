@@ -353,6 +353,23 @@ def _answer(out: dict[str, Any], key: str) -> tuple[Any, list[str]]:
     return out.get(key), [str(line) for line in (out.get("chain") or [])]
 
 
+def slot_verdict(candidate: Any, chain: list[str]) -> str:
+    """The readout verdict, read from the same terminal the seam refuses on.
+
+    One classifier for every consumer: explain renders it, the spawn seam
+    refuses on it, and the inventory preview echoes it. A policy refusal is
+    held, capacity is held, and neither is "exhausted dispatch".
+    """
+    if candidate:
+        return "armed"
+    terminal = chain[-1] if chain else ""
+    if "slot=strict-refusal" in terminal or terminal.startswith("slot=config "):
+        return "policy-held"
+    if terminal.startswith("slot=exhausted"):
+        return "capacity-held"
+    return "unarmed"
+
+
 def _profile_fields(profile: Optional[object]) -> dict[str, Any]:
     by_diff = getattr(profile, "by_difficulty", None)
     return {
