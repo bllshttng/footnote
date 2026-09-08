@@ -14374,13 +14374,10 @@ impl Core {
         }
     }
 
-    /// Kill every pane child EXCEPT keeper-hosted ones. Called from serve's
-    /// shutdown choke point (every exit path funnels there) and from
-    /// `CoreMsg::Kill`'s handler; the two layers keep their own call because
-    /// `handle()` must stay correct for callers outside serve. PtyShell has
-    /// no Drop that kills its child, so an exit path that skips this leaves
-    /// pane children to whatever SIGHUP the closing pty master happens to
-    /// deliver; a worker that ignores SIGHUP keeps running.
+    /// Kill every pane child EXCEPT keeper-hosted ones. Serve's shared
+    /// shutdown choke point owns this call so every graceful exit captures
+    /// first. PtyShell has no Drop that kills its child, so skipping this
+    /// leaves pane children to SIGHUP; a worker that ignores it keeps running.
     ///
     /// The keeper carve-out is the load-bearing line: a keeper-hosted pane's
     /// child outlives this server BY DESIGN, and a shutdown sweep that kills
