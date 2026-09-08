@@ -564,3 +564,43 @@ def test_predicate_mention_after_review_qualifies_even_past_24h():
 def test_predicate_non_author_reply_does_not_qualify():
     comments = [{"login": "someone", "created_at": "2026-06-13T01:00:00Z", "body": "@bot"}]
     assert not _verify._has_qualifying_reply(comments, "bot", "2026-06-13T00:00:00Z", "me")
+
+
+def test_the_gate_head_reaches_the_owner_as_the_pin(tmp_path, monkeypatch):
+    """The head THIS verb's coverage gate verified, not the local checkout's.
+    The owner's journal fallback filters on `git rev-parse HEAD`, so a run from
+    any other directory reported unknown for a PR it had just covered.
+    """
+    seen: dict = {}
+
+    def _authorized(pr_number, repo, *, effect, approved, source, **kwargs):
+        seen.update(kwargs)
+        return {"outcome": "held", "detail": "held for the test"}
+
+    monkeypatch.setattr(_merge, "_authorized_merge", _authorized)
+    monkeypatch.setattr(
+        _merge, "_pr_head_ref_and_oid", lambda pr, repo: ("feature/x", "fallback", "OPEN")
+    )
+    _verify._bounded_remediation(
+        "42", _state_file(tmp_path), str(tmp_path), str(tmp_path), lambda s: None, "gatehead"
+    )
+    assert seen["covered_head"] == "gatehead"
+
+
+def test_a_no_lane_verify_still_carries_a_pin(tmp_path, monkeypatch):
+    """No review lane leaves the gate head empty, and the shared rule fills it
+    from the PR rather than letting the owner refuse an unpinned merge."""
+    seen: dict = {}
+
+    def _authorized(pr_number, repo, *, effect, approved, source, **kwargs):
+        seen.update(kwargs)
+        return {"outcome": "held", "detail": "held for the test"}
+
+    monkeypatch.setattr(_merge, "_authorized_merge", _authorized)
+    monkeypatch.setattr(
+        _merge, "_pr_head_ref_and_oid", lambda pr, repo: ("feature/x", "prhead", "OPEN")
+    )
+    _verify._bounded_remediation(
+        "42", _state_file(tmp_path), str(tmp_path), str(tmp_path), lambda s: None, ""
+    )
+    assert seen["covered_head"] == "prhead"

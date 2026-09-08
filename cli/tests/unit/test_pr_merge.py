@@ -2882,3 +2882,35 @@ def test_posture_refusal_refuses_a_fresh_row_that_names_no_rung():
     assert refusal is not None
     assert "unknown" in refusal
     assert "fno doctor update" in refusal
+
+
+# ---- the COVERED pin (external review round, P1) ----
+
+
+def test_a_no_lane_gate_pins_to_the_prs_own_head(monkeypatch):
+    """The stock-install opt-out. No review lane means the gate answers COVERED
+    with no head, and the owner refuses an unpinned effect outright - so
+    without this the repos that opted out of review could never merge at all.
+    """
+    monkeypatch.setattr(
+        _merge, "_pr_head_ref_and_oid", lambda pr, repo: ("feature/x", "beef123", "OPEN")
+    )
+    assert _merge.covered_pin(42, "/repo", "") == "beef123"
+
+
+def test_an_unreadable_pr_head_leaves_the_pin_empty(monkeypatch):
+    """Fail-closed. An empty pin is what the owner reads as unknown, and a
+    merge whose head cannot be read is exactly the one that must not run."""
+    monkeypatch.setattr(_merge, "_pr_head_ref_and_oid", lambda pr, repo: None)
+    assert _merge.covered_pin(42, "/repo", "") == ""
+
+
+def test_a_reviewed_head_is_never_replaced(monkeypatch):
+    """A head the review actually covered outranks the PR's current head, and
+    costs no probe."""
+
+    def _never(pr, repo):
+        raise AssertionError("the reviewed head needs no fetch")
+
+    monkeypatch.setattr(_merge, "_pr_head_ref_and_oid", _never)
+    assert _merge.covered_pin(42, "/repo", "abc123") == "abc123"

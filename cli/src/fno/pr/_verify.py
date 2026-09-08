@@ -409,7 +409,7 @@ def run_verify_merged(
     # reads COVERED inside the gate itself.
     from fno.pr import _coverage_gate
 
-    gate_state, gate_refusal, _gate_head, gate_note = _coverage_gate.coverage_verdict(
+    gate_state, gate_refusal, gate_head, gate_note = _coverage_gate.coverage_verdict(
         int(pr_number), repo, recompute=True
     )
     if gate_state != _coverage_gate.COVERED:
@@ -439,7 +439,9 @@ def run_verify_merged(
         )
         return 1
 
-    return _bounded_remediation(pr_number, state_file, repo, repo_root, sleep_fn)
+    return _bounded_remediation(
+        pr_number, state_file, repo, repo_root, sleep_fn, gate_head
+    )
 
 
 def _failing_required(rollup: Sequence[dict]) -> List[str]:
@@ -480,7 +482,12 @@ def _remote_delete_cleanup(pr_number: str, cwd: str, auto_merge) -> None:
 
 
 def _bounded_remediation(
-    pr_number: str, state_file: str, cwd: str, repo_root: str, sleep_fn
+    pr_number: str,
+    state_file: str,
+    cwd: str,
+    repo_root: str,
+    sleep_fn,
+    gate_head: str = "",
 ) -> int:
     """Single gh pr merge attempt + single 30s poll (anti-thrash; x-9d11: the
     verb executes - no --auto, no --delete-branch)."""
@@ -491,7 +498,7 @@ def _bounded_remediation(
     # checks verdict, head pin and gh argv, so a merge `fno do pr merge` refused
     # could still land from here. It asks the same owner now, and the answers
     # below are rendering: the audit vocabulary this verb's callers read.
-    from fno.pr._merge import _authorized_merge
+    from fno.pr._merge import _authorized_merge, covered_pin
 
     receipt = _authorized_merge(
         int(pr_number),
@@ -502,6 +509,12 @@ def _bounded_remediation(
         approved=None,
         source="verify-remediation",
         require_checks=auto_merge.require_checks_pass,
+        # The head THIS verb's gate covered, never whatever the local
+        # checkout points at. Without it the owner falls back to the
+        # journal, which filters on the checkout's own HEAD, so a run
+        # from any other directory reported unknown for a PR whose
+        # coverage it had just verified.
+        covered_head=covered_pin(int(pr_number), cwd, gate_head),
     )
     outcome = str(receipt.get("outcome") or "unknown")
     detail = str(receipt.get("detail") or "no detail")

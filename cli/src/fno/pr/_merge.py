@@ -2068,6 +2068,26 @@ def run_merge(
         )
 
 
+def covered_pin(pr_number: int, repo: str, covered_head: str) -> str:
+    """The head a COVERED gate pins its merge to.
+
+    A gate answers COVERED with NO head in one case: no review lane is
+    configured, the stock-install opt-out. There is no reviewed head to pin
+    then, but there is still a head worth pinning, and it is the PR's own. The
+    owner refuses an unpinned effect outright, so without this a repo that
+    opted out of review could never merge at all.
+
+    An unreadable head stays empty on purpose. The owner reads that as unknown
+    and holds, which is the same fail-closed answer every other unpinnable
+    merge gets. Shared by the merge verb and the verify remediation, because a
+    second copy of this rule is a second chance for the two to disagree.
+    """
+    if covered_head:
+        return covered_head
+    refs = _pr_head_ref_and_oid(pr_number, repo)
+    return refs[1] if refs else ""
+
+
 def _authorized_merge(
     pr_number: int,
     repo: str,
@@ -2164,7 +2184,7 @@ def _do_merge(
         "approved": approved,
         "source": auto_merge_source,
         "require_checks": auto_merge.require_checks_pass,
-        "covered_head": covered_head,
+        "covered_head": covered_pin(pr_number, repo, covered_head),
     }
 
     # Authorize BEFORE publishing anything. The coverage status greens the head
