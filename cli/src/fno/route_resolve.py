@@ -352,7 +352,7 @@ def _lanes_payload(lanes: Any) -> list[Any]:
         if isinstance(lane, Mapping):
             out.append(dict(lane))
         elif hasattr(lane, "provider") or hasattr(lane, "model"):
-            payload = {k: str(getattr(lane, k, "") or "") for k in fields}
+            payload: dict[str, Any] = {k: str(getattr(lane, k, "") or "") for k in fields}
             # args is the lane's native-bundle vector (x-8975): opaque, passed
             # through verbatim, never one of the ranked fields.
             args = getattr(lane, "args", None)

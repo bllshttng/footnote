@@ -857,7 +857,7 @@ def _overlay_scalar(overlay: object, name: str) -> str:
 def effective_field(
     defaults: object,
     profile: Optional[object],
-    profile_verb: str,
+    profile_verb: Optional[str],
     name: str,
     harness: Optional[str] = None,
 ) -> Tuple[str, Optional[str]]:
@@ -1664,7 +1664,7 @@ def inject_spawn_defaults(
 
             reason = None
             try:
-                effort_tokens(resolved_harness(), cfg_effort)
+                effort_tokens(resolved_harness() or "", cfg_effort)
             except Exception as exc:
                 reason = str(exc)
             else:
