@@ -2485,10 +2485,7 @@ def _reachable_from_harness_stores(token: str) -> tuple[_Hits, bool]:
 
 def _report_ambiguity(token: str, found: dict[tuple[str, str], ReachableSession]) -> None:
     """Name each ambiguous candidate and the store that first supplied it."""
-    named = ", ".join(
-        f"{f.session_id} (source={f.source}, agent={f.agent})"
-        for f in sorted(found.values(), key=lambda f: f.session_id)
-    )
+    named = ", ".join(f"{f.session_id} (source={f.source}, agent={f.agent})" for f in found.values())
     print(f"resolve_reachable: token {token!r} is ambiguous: {named}", file=sys.stderr)
 
 

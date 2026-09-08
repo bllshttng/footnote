@@ -42,8 +42,7 @@ def top_level_patterns(doc_path: Path) -> list[str]:
         cells = line.split("|")
         if len(cells) < 2:
             continue
-        spans = [_PLACEHOLDER.sub("*", s.strip()) for s in _BACKTICK.findall(cells[1])]
-        spans = [s for s in spans if s]
+        spans = [s for s in (_PLACEHOLDER.sub("*", t.strip()) for t in _BACKTICK.findall(cells[1])) if s]
         slashed = any("/" in s for s in spans)
         bases = [s for s in spans if "/" not in s and "*" not in s and not s.startswith(".")]
         for span in spans:
