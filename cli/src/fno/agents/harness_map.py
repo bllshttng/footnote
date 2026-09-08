@@ -1121,15 +1121,11 @@ def effort_values(harness: str) -> list[str]:
 
 
 #: claude's own --permission-mode vocabulary, its --help being the authority
-#: (x-8975). The spawn CLI's --permission-mode help interpolates it, and the
-#: doctor overlay readout checks claude's exact-passthrough values against it
-#: instead of keeping a second copy.
+#: (x-8975); the CLI help and the doctor readout spell it from here.
 CLAUDE_PERMISSION_MODES = frozenset(
     {"default", "acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"}
 )
 
-#: The help fragment naming that vocabulary, so the CLI help and the doctor
-#: readout spell it from one place.
 CLAUDE_PERMISSION_HELP = (
     "claude " + "|".join(sorted(CLAUDE_PERMISSION_MODES)) + " (exact passthrough)"
 )

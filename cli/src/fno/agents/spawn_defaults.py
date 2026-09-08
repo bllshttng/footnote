@@ -1,15 +1,11 @@
 """Config-sourced spawn defaults, injected argv-level at the dispatch seam.
 
 Every `fno agents spawn` passes this seam before the Rust/Python routing
-fork, so config injection covers pane, bg, headless and the Rust route with
-zero Rust changes (Locked Decision 9). Per field: explicit CLI flag >
-`agents.profiles.<verb>` > `agents.defaults` > built-in; the profile layer
-(x-3d5b) keys on the seed's leading slash-verb and reaches autonomous
-dispatch the same way. The one field-wise exception: a bare scalar `model` is
-scoped to the harness it was written for (the config `provider`, else
-claude), never the ambient harness, and an explicit `-m/--model` always wins.
-A `--role` whose lane resolves owns the model, so a stage table never
-reroutes a field the dispatch pinned.
+fork (Locked Decision 9). Per field: explicit CLI flag > lane >
+`agents.profiles.<verb>` (per-harness overlays inside) > `agents.defaults` >
+built-in. A bare scalar `model` is scoped to the config `provider`'s harness,
+never the ambient one; an explicit `-m/--model` always wins; a resolved
+`--role` lane owns the model.
 """
 from __future__ import annotations
 

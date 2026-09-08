@@ -872,12 +872,10 @@ def _report_band_routing() -> None:
 def _report_harness_overlays() -> None:
     """Name the (config rung, harness) pairs a scalar cannot serve (x-8975).
 
-    The spawn seam degrades open on config values by design - a bad config
-    never bricks spawning - so the READOUT is where an operator hears that a
-    configured value will be skipped on some harness. Resolution goes through
-    the spawn-overlay verb, the same rungs the spawn seam uses (one precedence
-    implementation), and each value is checked with the per-harness mapper
-    that would carry it. Silent when every pair maps.
+    The spawn seam degrades open on config values by design, so this readout
+    is where an operator hears a value will be skipped on some harness.
+    Resolution rides the spawn-overlay verb (the spawn seam's own rungs);
+    silent when every pair maps.
     """
     from fno.agents.harnesses import READABLE_PROVIDERS
     from fno.agents.mux_spawn import effort_tokens, permission_pane_tokens
@@ -933,9 +931,8 @@ def _report_harness_overlays() -> None:
                     continue
                 seen.add(key)
                 if harness == "claude" and name == "permission_mode":
-                    # claude is exact passthrough, so the mapper alone cannot
-                    # catch a codex spelling: check the value against the
-                    # vocabulary claude's --help lists.
+                    # Exact passthrough: the mapper cannot catch another
+                    # harness's spelling, so check claude's own vocabulary.
                     if value in CLAUDE_PERMISSION_MODES:
                         continue
                     typer.echo(

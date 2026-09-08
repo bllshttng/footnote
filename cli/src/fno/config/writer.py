@@ -128,9 +128,8 @@ def _resolve_parent_block(
         return None
     cls: type[BaseModel] = SettingsModel
     # One dict[str, model] hop is writable (`...harness.codex.permission_mode`):
-    # the segment after a map-typed block is a KEY into that map, and the map's
-    # value model names every field after it. A second hop (model in model in
-    # map) is not supported and reads as unknown.
+    # a segment after a map-typed block is a KEY into it. A second hop is not
+    # supported and reads as unknown.
     map_model: Optional[type[BaseModel]] = None
     for part in parts[:-1]:
         if map_model is not None:
