@@ -142,4 +142,5 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         assert_eq!(git_grant_for_cwd(outside.path()), None);
     }
+
 }
