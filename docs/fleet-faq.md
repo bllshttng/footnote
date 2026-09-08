@@ -304,6 +304,16 @@ So by default the gate rewards the author's own lane and discards the more indep
 
 *Graduates to:* a default posture that counts an external review. The fix has a node and an open PR, which the file-budget gate is currently blocking. The gate blocks the fix for the gate.
 
+## A rule cites a gate that does not enforce it
+
+**Answer.** Read the gate, not the sentence that names it. A citation is a claim about behavior, and it drifts from behavior for free.
+
+**Specimen.** Principle 6 in AGENTS.md read "Never ticket/PR/node IDs (`scripts/ci/check-no-internal-refs.sh` fails on them)". That script carries two patterns: `NODE_ID_RE` for `x-` plus four hex or `ab-` plus eight, and `SESSION_URL_RE` for a session link. It has no ticket pattern and no PR pattern. Its own help also says the code tree is not scanned, and principle 6 governs code comments. So the rule named a gate that catches one of its three targets, in the one place the rule does not apply.
+
+Two kings acted on the false half within an hour. One warned the other that PR numbers fail the gate. The other stripped real PR numbers out of quoted specimens on that warning, then had to be told to keep them.
+
+*Graduates to:* a citation that names what the gate matches, or a gate that matches what the rule says. This entry corrects the sentence, and the gate is unchanged.
+
 ## Related
 
 - [troubleshooting.md](troubleshooting.md) for run-level failures
