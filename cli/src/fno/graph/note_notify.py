@@ -125,6 +125,7 @@ def notify_note(
     text: str,
     *,
     graph_path: Path,
+    entries: Optional[list[dict]] = None,
     sender: Optional[Callable[[str, str], str]] = None,
     claim_reader: Optional[Callable[[str], dict]] = None,
     king_resolver: Optional[Callable[[str], Iterable[str]]] = None,
@@ -140,7 +141,10 @@ def notify_note(
     from fno.graph.store import read_graph
 
     try:
-        entries = read_graph(graph_path)
+        # The note write already read the graph; reuse that snapshot rather than
+        # paying a second full read, which measured 19.2s on a contended keeper.
+        if entries is None:
+            entries = read_graph(graph_path)
         entry = _find_node(entries, node_id)
     except Exception as exc:  # noqa: BLE001 - the note is already written
         return [f"notify FAILED {node_id} (graph unreadable): {exc}"]

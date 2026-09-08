@@ -340,3 +340,38 @@ def test_a_contained_node_looks_one_level_further_out_for_the_crown() -> None:
     )
     assert scopes == ["x-16b7"]
     assert got == [("king-of-the-epic", "king of x-16b7")]
+
+
+def test_a_supplied_snapshot_is_used_instead_of_a_second_graph_read(tmp_path, monkeypatch) -> None:
+    """The note write already read the graph; the delivery must not read it again."""
+    from fno.graph import store
+
+    def explode(*a, **k):
+        raise AssertionError("read_graph must not run when entries are supplied")
+
+    monkeypatch.setattr(store, "read_graph", explode)
+    receipts = notify_note(
+        "x-0d08",
+        "the finding",
+        graph_path=tmp_path / "absent.json",
+        entries=[{"id": "x-0d08"}],
+        sender=lambda address, body: "hosted msg-1",
+        claim_reader=_claims(**{"node:x-0d08": _live("sess-worker")}),
+        king_resolver=lambda scope: [],
+        self_session="sess-me",
+    )
+    assert receipts == ["notified sess-worker (holder of x-0d08): hosted msg-1"]
+
+
+def test_the_store_hands_back_the_snapshot_it_read(tmp_path) -> None:
+    """entries_out is what lets the note verb skip the second read."""
+    import json as _json
+
+    from fno.graph.store import append_progress_note
+
+    graph = tmp_path / "graph.json"
+    graph.write_text(_json.dumps({"entries": [{"id": "x-0d08", "parent": "x-16b7"}]}), encoding="utf-8")
+    seen: list[dict] = []
+    found, _plan = append_progress_note(graph, "x-0d08", {"ts": "T1", "text": "hi"}, entries_out=seen)
+    assert found
+    assert [e.get("id") for e in seen] == ["x-0d08"]

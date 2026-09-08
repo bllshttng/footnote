@@ -2973,7 +2973,8 @@ def cmd_note(
         note["source_session_id"] = identity.session_id
     if identity is not None and identity.harness:
         note["source_harness"] = identity.harness
-    found, _ = append_progress_note(_graph_path(), task_id, note)
+    entries: list[dict] = []
+    found, _ = append_progress_note(_graph_path(), task_id, note, entries_out=entries)
     if not found:
         typer.echo(f"Error: no node resolves to '{task_id}'", err=True)
         raise typer.Exit(code=1)
@@ -2983,10 +2984,16 @@ def cmd_note(
     else:
         typer.echo(f"noted {task_id}: {text}")
     if not quiet:
-        _deliver_note(task_id, text, to_stderr=json_output)
+        _deliver_note(task_id, text, entries=entries, to_stderr=json_output)
 
 
-def _deliver_note(task_id: str, text: str, *, to_stderr: bool = False) -> None:
+def _deliver_note(
+    task_id: str,
+    text: str,
+    *,
+    entries: "list | None" = None,
+    to_stderr: bool = False,
+) -> None:
     """Mail the note's readers and print what happened. Never raises.
 
     Every outcome is printed, including "nobody to reach". Silence here would be
@@ -2998,7 +3005,9 @@ def _deliver_note(task_id: str, text: str, *, to_stderr: bool = False) -> None:
     try:
         from fno.graph.note_notify import notify_note
 
-        receipts = notify_note(task_id, text, graph_path=_graph_path())
+        receipts = notify_note(
+            task_id, text, graph_path=_graph_path(), entries=entries or None
+        )
     except Exception as exc:  # noqa: BLE001 - the note is written; delivery is best-effort
         typer.echo(f"notify FAILED {task_id}: {exc}", err=True)
         return
