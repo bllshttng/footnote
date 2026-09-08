@@ -314,47 +314,38 @@ def test_check_worktree_policy_flags_out_of_enum(
     assert len(problems) == 1 and "conductor" in problems[0]
 
 
-def test_check_worktree_policy_flags_typo_key(
+def test_a_typod_per_project_key_is_flagged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A per-project key one edit from 'worktree' is flagged as the silent typo
-    trap (extra='ignore' drops it, so the project gets the default policy)."""
-    from fno.setup.doctor import check_worktree_policy
-    f = tmp_path / "global.yaml"
+    """extra='ignore' drops it, so the project silently gets the default policy.
+
+    The leg moved: check_worktree_policy used to hand-list the project keys and
+    compare by edit distance. check_unknown_keys walks the same list-of-models
+    from the schema, so the typo is caught without a second copy of the keys.
+    """
+    from fno.config_readback import check_unknown_keys
+
+    f = tmp_path / "config.toml"
     f.write_text(
-        "work:\n  workspaces:\n    default:\n      projects:\n"
-        "        - name: vault\n          worktre: never\n"  # typo
+        '[[work.workspaces.default.projects]]\nname = "vault"\nworktre = "never"\n'
     )
-    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(f))
-    problems = check_worktree_policy()
-    assert len(problems) == 1 and "worktre" in problems[0] and "vault" in problems[0]
+    monkeypatch.setenv("FNO_CONFIG", str(f))
+    problems = check_unknown_keys()
+    assert any("projects[0].worktre" in p and str(f) in p for p in problems), problems
 
 
-def test_check_worktree_policy_scans_repo_local(
+def test_a_correct_per_project_key_is_clean(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A typo'd per-project key in the REPO-LOCAL .fno/config.toml is surfaced
-    (the override, and its typo, can live there, not only in global config)."""
-    import fno.paths as _paths
-    from fno.setup.doctor import check_worktree_policy
+    """Positive control on the same walk: the right spelling reports nothing."""
+    from fno.config_readback import check_unknown_keys
 
-    g = tmp_path / "global.yaml"
-    g.write_text("config:\n  obsidian:\n    enabled: false\n")  # clean global
-    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(g))
-
-    repo = tmp_path / "repo"
-    (repo / ".fno").mkdir(parents=True)
-    (repo / ".fno" / "config.toml").write_text(
-        "[[work.workspaces.default.projects]]\nname = \"repo\"\nworktre = \"never\"\n"
+    f = tmp_path / "config.toml"
+    f.write_text(
+        '[[work.workspaces.default.projects]]\nname = "vault"\nworktree = "never"\n'
     )
-
-    # Stub resolve_repo_root to point at our fake repo.
-    def _stub_repo_root() -> Path:
-        return repo
-
-    monkeypatch.setattr(_paths, "resolve_repo_root", _stub_repo_root)
-    problems = check_worktree_policy()
-    assert len(problems) == 1 and "worktre" in problems[0]
+    monkeypatch.setenv("FNO_CONFIG", str(f))
+    assert check_unknown_keys() == []
 
 
 def test_check_wip_caps_non_mapping_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

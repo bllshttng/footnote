@@ -138,13 +138,6 @@ model = "opus"
 lanes = ["flash-zai", "luna-codex"]
 on_exhausted = "queue"
 
-# An inline lane table is the other spelling: it folds as its own row, so
-# both shapes reach the same resolver and the inline form is sugar.
-[[agents.profiles.target.lanes]]
-provider = "claude"
-route = "zai/glm-5.3[1m]"
-substrate = "bg"
-
 [[routing.models]]
 name = "flash-zai"
 harness = "claude"

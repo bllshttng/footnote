@@ -172,7 +172,7 @@ the relevant section is reached, saving tokens.
 
 When a skill is renamed, create a thin shim that redirects to the canonical name:
 
-```yaml
+```markdown
 ---
 name: operator
 description: "Compatibility alias for fno:operator. Use fno:operator for new sessions."

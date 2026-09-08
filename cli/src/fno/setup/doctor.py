@@ -9,7 +9,7 @@ or settings could not be loaded.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # Patterns that indicate misconfigured paths.
 # Each entry is (path_prefix, human_reason).
@@ -39,41 +39,39 @@ _ACCESSOR_NAMES = (
 )
 
 
-def check_wip_caps() -> list[str]:
-    """Report malformed ``config.kanban.wip_caps`` entries (ab-554d37ef).
+def _settings_candidates_for(path: Path) -> list[Path]:
+    """The ``config.toml``-first pair at one settings location.
 
-    The board renderer (``render_html._load_wip_caps``) silently drops a
-    malformed cap so a config typo never crashes a backlog mutation - a
-    deliberate "never raise" contract on the render path. The cost is zero
-    feedback: a quoted, negative, or mistyped cap just stops working. This
-    surfaces those drops as advisory messages at ``fno config doctor`` time,
-    reading the same GLOBAL settings file the renderer reads. Returns a
-    (possibly empty) list of human-readable reasons.
+    A check reading only ``settings.yaml`` stopped running at the migration.
     """
-    try:
-        import yaml
+    return [path.with_name("config.toml"), path]
 
-        from fno.config import _global_settings_path
-    except Exception:
-        return []
 
-    path = _global_settings_path()
-    if not path.is_file():
-        return []
-    try:
-        with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except Exception:
-        return []
+def _scan_config_files(paths: list[Path], probe: "Callable[[object], list[str]]") -> list[str]:
+    """Run ``probe`` over the MERGED config the runtime resolves from ``paths``.
 
-    # A YAML doc that parses to a non-mapping (list/scalar) would make the
-    # data.get(...) below raise AttributeError and crash `doctor`. Degrade to
-    # "nothing to check" instead - matching render_html._load_wip_caps, which
-    # wraps the same access in a blanket try/except.
+    ``paths`` is highest precedence first. Probing each layer alone made a
+    stale value in an overridden layer a finding nothing reads.
+    """
+    from fno.config_io import _deep_merge, _load_raw, _unwrap_config_dict
+
+    merged: dict[str, object] = {}
+    seen: set[Path] = set()
+    for path in reversed(paths):
+        if not path.is_file() or path.resolve() in seen:
+            continue
+        seen.add(path.resolve())
+        parsed, ok = _load_raw(path)
+        if ok:
+            merged = _deep_merge(merged, _unwrap_config_dict(parsed))
+    return list(dict.fromkeys(probe(merged)))
+
+
+def _wip_cap_problems_in(data: object) -> list[str]:
+    """Malformed ``kanban.wip_caps`` entries in one FLAT config dict."""
     if not isinstance(data, dict):
         return []
-
-    kanban = (data.get("config") or {}).get("kanban")
+    kanban = data.get("kanban")
     if not isinstance(kanban, dict) or "wip_caps" not in kanban:
         return []
     raw = kanban.get("wip_caps")
@@ -100,134 +98,69 @@ def check_wip_caps() -> list[str]:
     return problems
 
 
-_VALID_WORKTREE_POLICIES = ("never", "harness-native", "external")
-_KNOWN_PROJECT_KEYS = frozenset(
-    {"name", "path", "type", "stack", "package_manager", "worktree"}
-)
+def check_wip_caps() -> list[str]:
+    """Report malformed ``config.kanban.wip_caps`` entries.
 
-
-def _edit_distance_le_1(a: str, b: str) -> bool:
-    """True if ``a`` and ``b`` differ by at most one insert/delete/substitute."""
-    if a == b:
-        return True
-    la, lb = len(a), len(b)
-    if abs(la - lb) > 1:
-        return False
-    if la == lb:  # one substitution
-        return sum(1 for x, y in zip(a, b) if x != y) == 1
-    # one insert/delete: the shorter must be a subsequence missing one char
-    short, long = (a, b) if la < lb else (b, a)
-    i = j = edits = 0
-    while i < len(short) and j < len(long):
-        if short[i] == long[j]:
-            i += 1
-        else:
-            edits += 1
-            if edits > 1:
-                return False
-        j += 1
-    return True
-
-
-def _worktree_policy_problems_in(data: object) -> list[str]:
-    """Out-of-enum policy + typo'd per-project keys in one flat config dict."""
-    if not isinstance(data, dict):
-        return []
-    problems: list[str] = []
-    wt = data.get("worktree")
-    policy = wt.get("policy") if isinstance(wt, dict) else None
-    if policy is not None and policy not in _VALID_WORKTREE_POLICIES:
-        problems.append(
-            f"config.worktree.policy = {policy!r} is not one of "
-            f"{' | '.join(_VALID_WORKTREE_POLICIES)}; worktree creation will refuse"
-        )
-    work = data.get("work")
-    workspaces = work.get("workspaces") if isinstance(work, dict) else None
-    if isinstance(workspaces, dict):
-        for ws in workspaces.values():
-            projects = ws.get("projects") if isinstance(ws, dict) else None
-            if not isinstance(projects, list):
-                continue
-            for entry in projects:
-                if not isinstance(entry, dict):
-                    continue
-                name = entry.get("name") or entry.get("path") or "?"
-                for key in entry:
-                    if (
-                        key not in _KNOWN_PROJECT_KEYS
-                        and _edit_distance_le_1(str(key), "worktree")
-                    ):
-                        problems.append(
-                            f"project {name!r} has key {key!r}, likely a typo for "
-                            "'worktree'; it is IGNORED, so the project silently gets "
-                            "the default policy"
-                        )
-    return problems
-
-
-def check_worktree_policy() -> list[str]:
-    """Report a bad ``config.worktree.policy`` or a typo'd per-project key (x-168b).
-
-    Two silent footguns: an out-of-enum policy value refuses worktree creation
-    (fail-closed is correct, but the operator gets no doctor-time hint), and a
-    per-project key mistyped within one edit of ``worktree`` (e.g. ``worktre``)
-    is dropped by ``extra="ignore"`` -- the project silently gets the DEFAULT
-    policy when it wanted ``never``. Scans BOTH the global config AND the
-    invoking repo's ``.fno/config.toml`` (a per-project override, and its typo,
-    can live in either), deduping identical messages. Returns human-readable
-    reasons.
+    The board renderer drops a malformed cap so a typo never crashes a backlog
+    mutation. The cost is zero feedback, which this check pays back at doctor
+    time from the same global location the renderer reads.
     """
     try:
         from fno.config import _global_settings_path
-        from fno.config_io import _load_raw, _unwrap_config_dict
+
+        paths = _settings_candidates_for(_global_settings_path())
     except Exception:
         return []
+    return _scan_config_files(paths, _wip_cap_problems_in)
 
-    yaml_path = _global_settings_path()
-    paths: list[Path] = [yaml_path.with_name("config.toml"), yaml_path]
+
+_VALID_WORKTREE_POLICIES = ("never", "harness-native", "external")
+
+
+def _worktree_policy_problems_in(data: object) -> list[str]:
+    """An out-of-enum ``worktree.policy`` in one flat config dict."""
+    if not isinstance(data, dict):
+        return []
+    wt = data.get("worktree")
+    policy = wt.get("policy") if isinstance(wt, dict) else None
+    if policy is None or policy in _VALID_WORKTREE_POLICIES:
+        return []
+    return [
+        f"config.worktree.policy = {policy!r} is not one of "
+        f"{' | '.join(_VALID_WORKTREE_POLICIES)}; worktree creation will refuse"
+    ]
+
+
+def check_worktree_policy() -> list[str]:
+    """Report an out-of-enum ``config.worktree.policy``.
+
+    The bad value refuses worktree creation, and fail-closed is correct, but
+    the operator gets no doctor-time hint. Scans the global config and the
+    invoking repo's own, because a per-project override lives in either.
+    """
+    try:
+        from fno.config import _global_settings_path
+
+        paths: list[Path] = _settings_candidates_for(_global_settings_path())
+    except Exception:
+        return []
     try:
         from fno.paths import resolve_repo_root
 
         repo_fno = Path(resolve_repo_root()) / ".fno"
-        paths[:0] = [repo_fno / "config.toml", repo_fno / "settings.yaml"]
+        paths[:0] = _settings_candidates_for(repo_fno / "settings.yaml")
     except Exception:
         pass
-
-    problems: list[str] = []
-    seen_files: set[Path] = set()
-    for path in paths:
-        if not path.is_file():
-            continue
-        resolved = path.resolve()
-        if resolved in seen_files:
-            continue
-        seen_files.add(resolved)
-        parsed, ok = _load_raw(path)
-        if not ok:
-            problems.append(f"{path} failed to parse; worktree policy cannot be validated")
-            continue
-        for msg in _worktree_policy_problems_in(_unwrap_config_dict(parsed)):
-            if msg not in problems:
-                problems.append(msg)
-    return problems
+    # An unreadable file is check_config_files_read's finding, not this one's.
+    return _scan_config_files(paths, _worktree_policy_problems_in)
 
 
 def _detected_harness() -> str:
     """Best-effort name of the harness running this shell, for the remedy line.
 
-    Delegates to the canonical tables in :mod:`fno.harness_identity` rather than
-    listing markers here. A second copy drifted immediately: the first version of
-    this function checked ``CLAUDE_SESSION_ID``, which is the LEGACY marker, and
-    never ``CLAUDE_CODE_SESSION_ID``, which is what a live claude session
-    actually sets. A real claude session therefore fell through to the ambient
-    tier, where a ``CODEX_HOME`` exported in the shell profile - ordinary on a
-    machine that runs both - answered "codex" and pointed the remedy at the wrong
-    settings file.
-
-    Session-scoped markers are consulted first, then the legacy spellings, then
-    ambient vars that merely survive a fork. Only the ambient tier is local: it
-    is a remedy-line nicety, not an identity decision, so it does not belong in
-    the resolver's own precedence.
+    Delegates to the tables in :mod:`fno.harness_identity`; a second copy
+    drifted immediately. Only the ambient tier is local, because it is a
+    remedy-line nicety and not an identity decision.
     """
     import os
 
@@ -237,12 +170,8 @@ def _detected_harness() -> str:
         SELF_SET_HARNESS_MARKERS,
     )
 
-    # CLAUDECODE used to be a literal here. It is a marker the claude binary
-    # writes about itself, so it belongs in the shared table with the rest of
-    # the identity mapping; a second copy of that fact is what let the crown
-    # grantor resolve identity differently from whoami. What stays local is
-    # genuinely local: CLAUDE_CONFIG_DIR and CODEX_HOME name where config lives,
-    # not which binary is running.
+    # CLAUDE_CONFIG_DIR and CODEX_HOME name where config lives, not which
+    # binary is running, so they stay out of the shared identity table.
     ambient = (
         ("CLAUDE_CONFIG_DIR", "claude"),
         ("CODEX_HOME", "codex"),
@@ -362,17 +291,19 @@ def check_agent_profiles(settings: object) -> list[str]:
     return problems
 
 
-_KNOWN_ACCOUNTS_KEYS = frozenset(
-    {"active", "auto_switch", "active_combo", "records", "combos", "quota", "failover"}
-)
-_KNOWN_QUOTA_KEYS = frozenset(
-    {"defer_dispatch", "defer_threshold_pct", "probe_ttl_seconds", "defer_horizon_minutes", "pick_on_launch"}
-)
-_KNOWN_FAILOVER_KEYS = frozenset({"max_swaps_per_phase"})
-_KNOWN_COMBO_KEYS = frozenset({"strategy", "sticky_limit", "providers"})
-
-
 def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list[str]:
+    """Blocks under accounts/providers that are not tables.
+
+    Unknown KEYS here are `check_unknown_keys`'s job: it derives the same
+    report from SettingsModel per file, so the four frozensets that used to
+    live here were a hand-copied schema with nothing forcing them to agree.
+    A non-table is different: load_providers coerces it to defaults rather
+    than refusing, so nothing else says so.
+
+    Record ENTRIES are deliberately not scanned. ProviderRecord is
+    extra="allow", so unknown record metadata round-trips by design;
+    structural record errors surface through load_providers().
+    """
     problems: list[str] = []
     raw_config = raw_data.get("config")
     config = raw_config if isinstance(raw_config, dict) else {}
@@ -381,49 +312,13 @@ def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list
             block = scope.get(block_key)
             if not isinstance(block, dict):
                 continue
-            for k in block:
-                if k not in _KNOWN_ACCOUNTS_KEYS:
+            for sub in ("quota", "failover"):
+                value = block.get(sub)
+                if value is not None and not isinstance(value, dict):
                     problems.append(
-                        f"{source_label}: {prefix} has unknown key {k!r}; it will be ignored"
+                        f"{source_label}: {prefix}.{sub} is not a table "
+                        f"(got {type(value).__name__}); it will be coerced to defaults"
                     )
-            quota = block.get("quota")
-            if isinstance(quota, dict):
-                for k in quota:
-                    if k not in _KNOWN_QUOTA_KEYS:
-                        problems.append(
-                            f"{source_label}: {prefix}.quota has unknown key {k!r}; it will be ignored"
-                        )
-            elif quota is not None:
-                problems.append(
-                    f"{source_label}: {prefix}.quota is not a table "
-                    f"(got {type(quota).__name__}); it will be coerced to defaults"
-                )
-            failover = block.get("failover")
-            if isinstance(failover, dict):
-                for k in failover:
-                    if k not in _KNOWN_FAILOVER_KEYS:
-                        problems.append(
-                            f"{source_label}: {prefix}.failover has unknown key {k!r}; it will be ignored"
-                        )
-            elif failover is not None:
-                problems.append(
-                    f"{source_label}: {prefix}.failover is not a table "
-                    f"(got {type(failover).__name__}); it will be ignored"
-                )
-            combos = block.get("combos")
-            if isinstance(combos, dict):
-                for combo_name, combo_val in combos.items():
-                    if isinstance(combo_val, dict):
-                        for k in combo_val:
-                            if k not in _KNOWN_COMBO_KEYS:
-                                problems.append(
-                                    f"{source_label}: {prefix}.combos.{combo_name} has unknown key {k!r}; it will be ignored"
-                                )
-            # Record ENTRIES are deliberately not key-scanned:
-            # ProviderRecord is extra="allow", so unknown record metadata is
-            # retained and round-trips by design; flagging it made doctor
-            # exit 1 on legal config. Structural record errors surface
-            # through the load_providers() call in check_accounts.
     return problems
 
 
@@ -474,6 +369,18 @@ def run_doctor() -> int:
     from fno import paths
     from fno.config import _candidate_paths, load_settings, loaded_from
 
+    # Imported HERE, never at module level: a static fno.config edge from this
+    # module forms a mypy SCC in which graph._constants' lazy __getattr__
+    # re-exports degrade to Optional[Path] and fail unrelated modules. The same
+    # edge fno.config._revoke_unbacked_optouts keeps out of the import graph.
+    from fno.config_readback import (
+        check_config_files_read,
+        check_enabled_with_empty_population,
+        check_unknown_keys,
+        contributing_files,
+        source_note,
+    )
+
     test_mode = os.environ.get("FNO_TEST_MODE") == "1"
 
     # Determine which settings file was (or would be) loaded.
@@ -509,7 +416,10 @@ def run_doctor() -> int:
     # file) may not match what was actually parsed.
     settings_path = loaded_from() or found_path
 
-    print(f"[doctor] settings source: {settings_path}")
+    # Contributors, not presences: the old line named the highest-priority file
+    # PRESENT, so an unreadable project config was printed as the source of
+    # values the global file decided.
+    print(f"[doctor] settings source: {', '.join(contributing_files()) or settings_path}")
     print(f"[doctor] schema_version: {s.schema_version}")
 
     # A key that degraded to its default rather than raising. The degrade keeps
@@ -528,6 +438,12 @@ def run_doctor() -> int:
 
     issues: list[tuple[str, str, str]] = []
     errors: list[tuple[str, str]] = []
+    # FNO_TEST_MODE skips the /tmp/ patterns: pytest's tmp_path is under /tmp/
+    # on Linux runners, where they are false positives.
+    suspicious = [
+        (pat, reason) for pat, reason in SUSPICIOUS_PATHS
+        if not (test_mode and pat in ("/tmp/", "/var/tmp/", "/private/tmp/"))
+    ]
 
     for accessor_name in _ACCESSOR_NAMES:
         accessor = getattr(paths, accessor_name, None)
@@ -541,12 +457,9 @@ def run_doctor() -> int:
             continue
 
         resolved_str = str(resolved)
-        # Skip /tmp/ suspicious checks in test mode (FNO_TEST_MODE=1) to avoid
-        # false positives when pytest's tmp_path is under /tmp/ on Linux runners.
-        suspicious = [
-            (pat, reason) for pat, reason in SUSPICIOUS_PATHS
-            if not (test_mode and pat in ("/tmp/", "/var/tmp/", "/private/tmp/"))
-        ]
+        key = accessor_name if accessor_name == "state_dir" else f"paths.{accessor_name}"
+        note = source_note(key) or "default"
+        print(f"[doctor]   {accessor_name}: {resolved_str}  (config.{key} {note})")
         for sus_pattern, reason in suspicious:
             try:
                 expanded = str(Path(sus_pattern).expanduser().resolve())
@@ -562,45 +475,63 @@ def run_doctor() -> int:
             print(f"  - {name} = {path_str}: {reason}")
         print("\nRun 'fno config setup migrate-paths --force' to regenerate paths.")
 
-    cap_problems = check_wip_caps()
-    if cap_problems:
-        print(f"\n[doctor] {len(cap_problems)} malformed config.kanban.wip_caps entr(ies):")
-        for reason in cap_problems:
+    # One shape, eight checks: heading, the reasons, the remedy line.
+    reports: tuple[tuple[str, list[str], str], ...] = (
+        (
+            "unreadable settings file(s)",
+            check_config_files_read(),
+            "A file that does not parse contributes NOTHING; every key in it is "
+            "silently at its default. config.toml is TOML, settings.yaml is YAML.",
+        ),
+        (
+            "unknown config key(s)",
+            check_unknown_keys(),
+            "An unknown key is ignored for forward compatibility, so it sets nothing.",
+        ),
+        (
+            "switch(es) enabled with an empty population",
+            check_enabled_with_empty_population(),
+            "",
+        ),
+        (
+            "malformed config.kanban.wip_caps entr(ies)",
+            check_wip_caps(),
+            "Each column expects a positive integer (e.g. `now = 20`).",
+        ),
+        (
+            "worktree-policy issue(s)",
+            check_worktree_policy(),
+            "Valid policy values: never | harness-native | external.",
+        ),
+        (
+            "agent-profile issue(s)",
+            check_agent_profiles(s),
+            "Set a substrate each lane's resolved provider can actually launch.",
+        ),
+        (
+            "state-root write issue(s)",
+            check_state_root_writable(),
+            "fno prints this line and never edits a harness settings file; the "
+            "grant is yours to make.",
+        ),
+        (
+            "account / provider issue(s)",
+            check_accounts(),
+            "Fix the accounts or combos configuration in config.toml.",
+        ),
+    )
+    reported = False
+    for heading, problems, remedy in reports:
+        if not problems:
+            continue
+        reported = True
+        print(f"\n[doctor] {len(problems)} {heading}:")
+        for reason in problems:
             print(f"  - {reason}")
-        print("\nEach column expects a positive integer (e.g. `now: 20`).")
+        if remedy:
+            print(f"\n{remedy}")
 
-    wt_problems = check_worktree_policy()
-    if wt_problems:
-        print(f"\n[doctor] {len(wt_problems)} worktree-policy issue(s):")
-        for reason in wt_problems:
-            print(f"  - {reason}")
-        print("\nValid policy values: never | harness-native | external.")
-
-    profile_problems = check_agent_profiles(s)
-    if profile_problems:
-        print(f"\n[doctor] {len(profile_problems)} agent-profile issue(s):")
-        for reason in profile_problems:
-            print(f"  - {reason}")
-        print("\nSet a substrate each lane's resolved provider can actually launch.")
-
-    store_problems = check_state_root_writable()
-    if store_problems:
-        print(f"\n[doctor] {len(store_problems)} state-root write issue(s):")
-        for reason in store_problems:
-            print(f"  - {reason}")
-        print(
-            "\nfno prints this line and never edits a harness settings file; the "
-            "grant is yours to make."
-        )
-
-    account_problems = check_accounts()
-    if account_problems:
-        print(f"\n[doctor] {len(account_problems)} account / provider issue(s):")
-        for reason in account_problems:
-            print(f"  - {reason}")
-        print("\nFix the accounts or combos configuration in config.toml.")
-
-    if errors or issues or cap_problems or wt_problems or profile_problems or store_problems or account_problems:
+    if errors or issues or reported:
         return 1
 
     print("\n[doctor] OK; no suspicious paths detected.")

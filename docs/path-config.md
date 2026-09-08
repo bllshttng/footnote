@@ -42,51 +42,52 @@ This matches the shell reader (`scripts/lib/config.sh`, which already does per-k
 
 ## Full schema
 
-```yaml
-schema_version: 1   # required; currently only 1 is valid
+```toml
+schema_version = 1   # required; currently only 1 is valid
 
-config:
-  # Root directory for all global state. Every paths.* below
-  # derives from this when not set explicitly.
-  state_dir: ~/.fno/
+# Root directory for all global state. Every paths.* below
+# derives from this when not set explicitly.
+state_dir = "~/.fno/"
 
-  # Per-project plans directory. Relative paths are anchored to the
-  # git repo root (or cwd if not in a git repo).
-  plans_dir: .fno/plans/     # the legacy default; unset it resolves to <space>/plans/
+# Per-project plans directory. Relative paths are anchored to the
+# git repo root (or cwd if not in a git repo).
+plans_dir = ".fno/plans/"   # the legacy default; unset it resolves to <space>/plans/
 
-  # Per-resource overrides. Omit a key to derive from state_dir.
-  paths:
-    graph_json: null         # default: <state_dir>/graph.json
-    ledger_json: null        # default: <state_dir>/ledger.json
-    briefs_dir: null         # default: <state_dir>/briefs/
-    fleet_dir: null          # default: <state_dir>/fleet/
-    postmortems_dir: null    # default: <state_dir>/postmortems/
-    worktrees_base: null     # default: <state_dir>/worktrees/
-    memory_dir: null         # default: <state_dir>/memory/
-    hook_logs_dir: null      # default: <state_dir>/hook-logs/
-    inbox_dir: null          # default: <space>/inbox/
-    handoffs_dir: null       # default: <vault>/internal/{project}/handoffs/ when obsidian.enabled,
-                             # else <state_dir>/handoffs/<project>/
-    spaces_dir: null         # default: <state_dir>/spaces/
+# Per-resource overrides. TOML has no null: OMIT a key to derive it from
+# state_dir. Each line below names the default an omitted key resolves to.
+[paths]
+# graph_json      = ...   # default: <state_dir>/graph.json
+# ledger_json     = ...   # default: <state_dir>/ledger.json
+# briefs_dir      = ...   # default: <state_dir>/briefs/
+# fleet_dir       = ...   # default: <state_dir>/fleet/
+# postmortems_dir = ...   # default: <state_dir>/postmortems/
+# worktrees_base  = ...   # default: <state_dir>/worktrees/
+# memory_dir      = ...   # default: <state_dir>/memory/
+# hook_logs_dir   = ...   # default: <state_dir>/hook-logs/
+# inbox_dir       = ...   # default: <space>/inbox/
+# handoffs_dir    = ...   # default: <vault>/internal/{project}/handoffs/ when
+#                         # obsidian.enabled, else <state_dir>/handoffs/<project>/
+# spaces_dir      = ...   # default: <state_dir>/spaces/
 
-  obsidian:
-    enabled: false  # set true to use {vault} template variable
-    vault: null     # absolute path to your Obsidian vault root
+[obsidian]
+enabled = false   # set true to use the {vault} template variable
+# vault = "/absolute/path/to/your/vault"
 
-  project:
-    id: null  # used by {project} template variable; falls back to git repo name
+[project]
+# id = "my-project"   # used by the {project} template variable;
+                      # falls back to the git repo name
 
-  backlog:
-    # Node-ID minting scheme. New backlog node IDs are minted as
-    # <id_prefix><hex> (e.g. fno-a3f9). Resolution is format-agnostic, so any
-    # node ID resolves regardless of the prefix/width it was minted under.
-    id_prefix: null     # e.g. fno-, xy-; lowercase, <=7 chars, not cv-/fu-/tgt-.
-                        # Set at `fno config setup`. null falls back to the ab- prefix.
-    id_hex_width: 8     # hex chars in a minted id, 4-8. The setup wizard offers 4;
-                        # an absent key resolves to 8.
+[backlog]
+# Node-ID minting scheme. New backlog node IDs are minted as
+# <id_prefix><hex> (e.g. fno-a3f9). Resolution is format-agnostic, so any
+# node ID resolves regardless of the prefix/width it was minted under.
+# id_prefix = "fno-"   # e.g. fno-, xy-; lowercase, <=7 chars, not cv-/fu-/tgt-.
+                       # Set at `fno config setup`. An absent key falls back to ab-.
+id_hex_width = 8       # hex chars in a minted id, 4-8. The setup wizard offers 4;
+                       # an absent key resolves to 8.
 ```
 
-Unknown keys are silently ignored for forward compatibility. Glob characters (`*`, `?`, `[`) and paths longer than 4096 bytes are rejected at load time.
+Unknown keys are ignored for forward compatibility, so a typo'd section or leaf sets nothing. `fno config doctor` names every unknown key it finds and the file that holds it. Glob characters (`*`, `?`, `[`) and paths longer than 4096 bytes are rejected at load time.
 
 ## Environment variables
 
@@ -113,28 +114,29 @@ Template variables are processed after `$VAR` shell expansion and before `~` exp
 
 ### Vault user example
 
-```yaml
-schema_version: 1
-config:
-  plans_dir: "{vault}/fno/{project}/plans/"
-  obsidian:
-    enabled: true
-    vault: ~/Documents/my-vault
-  project:
-    id: my-project
+```toml
+schema_version = 1
+plans_dir = "{vault}/fno/{project}/plans/"
+
+[obsidian]
+enabled = true
+vault = "~/Documents/my-vault"
+
+[project]
+id = "my-project"
 ```
 
 `plans_dir` resolves to `~/Documents/my-vault/footnote/my-project/plans/`.
 
 ### Fresh-install example (no Obsidian)
 
-```yaml
-schema_version: 1
-config:
-  state_dir: ~/.fno/
-  plans_dir: .fno/plans/
-  obsidian:
-    enabled: false
+```toml
+schema_version = 1
+state_dir = "~/.fno/"
+plans_dir = ".fno/plans/"
+
+[obsidian]
+enabled = false
 ```
 
 All paths derive from `~/.fno/`. This is also what `fno config setup migrate-paths` writes on first run.

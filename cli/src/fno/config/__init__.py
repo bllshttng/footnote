@@ -5154,41 +5154,6 @@ def loaded_from() -> Optional[Path]:
     return _loaded_from
 
 
-def _warn_unknown_keys(data: dict[str, object], model: type[BaseModel], prefix: str = "") -> None:
-    """Emit a DEBUG-level WARNING for keys not in the model's field set.
-
-    Only emits when the FNO_DEBUG environment variable is set (any non-empty
-    value).  This keeps the default UX quiet while still letting power users
-    see the detail with ``FNO_DEBUG=1 fno ...``.
-    """
-    if not os.environ.get("FNO_DEBUG"):
-        return
-    known = set(model.model_fields.keys())
-    for key in data:
-        qualified = f"{prefix}.{key}" if prefix else key
-        if key not in known:
-            _LOG.warning(
-                "settings.yaml: unknown key %r (ignored for forward compatibility)",
-                qualified,
-            )
-        else:
-            # Recurse into nested dicts if the field is itself a BaseModel
-            sub_value = data[key]
-            field_info = model.model_fields[key]
-            annotation = field_info.annotation
-            # For Optional[X] the annotation may be a Union; unwrap it
-            args = getattr(annotation, "__args__", ())
-            inner = None
-            for arg in args:
-                if arg is not type(None) and isinstance(arg, type) and issubclass(arg, BaseModel):
-                    inner = arg
-                    break
-            if inner is None and isinstance(annotation, type) and issubclass(annotation, BaseModel):
-                inner = annotation
-            if inner is not None and isinstance(sub_value, dict):
-                _warn_unknown_keys(sub_value, inner, prefix=qualified)
-
-
 def _flatten_leaf_paths(
     data: dict[str, object], prefix: str = ""
 ) -> list[tuple[str, object]]:

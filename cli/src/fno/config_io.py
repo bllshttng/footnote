@@ -113,42 +113,46 @@ def _prefer_toml(paths: list[Path]) -> list[Path]:
     return _apply_search_ceiling(out)
 
 
-def _load_raw(path: Path) -> tuple[dict[str, object], bool]:
-    """Load a settings file and return (data, parse_succeeded).
-
-    Parses TOML for a ``.toml`` suffix (config.toml), YAML otherwise
-    (settings.yaml). Returns ({}, False) on any OS or parse error so callers
-    can fall through to the next candidate. Logs a cause-specific WARNING so a
-    missing file, an unreadable file, and malformed content never share one
-    diagnosis.
-
-    Returns (data, True) when the file parsed successfully (even if the dict
-    is empty, i.e. the file was blank).
-    """
+def _read_settings_doc(path: Path) -> tuple[object, str | None]:
+    """The ONE parser: ``(document, error or None)``. TOML by suffix, else YAML."""
     try:
         text = path.read_text(encoding="utf-8")
         if path.suffix == ".toml":
-            data = tomllib.loads(text)
-        else:
-            data = yaml.safe_load(text)
-        return (data if isinstance(data, dict) else {}, True)
+            return (tomllib.loads(text), None)
+        return (yaml.safe_load(text), None)
     except FileNotFoundError:
-        _LOG.warning("config file at %s is missing; using defaults", path)
-        return ({}, False)
+        return (None, f"config file at {path} is missing")
     except OSError as exc:
-        _LOG.warning(
-            "config file at %s could not be read: %s; using defaults",
-            path,
-            exc,
-        )
-        return ({}, False)
+        return (None, f"config file at {path} could not be read: {exc}")
     except (UnicodeDecodeError, yaml.YAMLError, tomllib.TOMLDecodeError) as exc:
-        _LOG.warning(
-            "config file at %s failed to parse: %s; using defaults",
-            path,
-            exc,
-        )
+        return (None, f"config file at {path} failed to parse: {exc}")
+
+
+def _parse_settings(path: Path) -> tuple[dict[str, object], str | None]:
+    """Operator-facing read: ``(mapping, human error or None)``.
+
+    Both ways a file fails to contribute: unreadable, or not a table. An empty
+    file is legal. See docs/architecture/config-readback.md.
+    """
+    doc, error = _read_settings_doc(path)
+    if error is not None:
+        return ({}, error)
+    if doc is None or isinstance(doc, dict):
+        return (doc or {}, None)
+    return ({}, f"config file at {path} parsed to a {type(doc).__name__}, not a table")
+
+
+def _load_raw(path: Path) -> tuple[dict[str, object], bool]:
+    """Load a settings file: ``(data, parse_succeeded)``.
+
+    ``({}, False)`` on any OS or parse error so callers fall through, with a
+    cause-specific WARNING. A parsed non-mapping contributes ``{}``, parsed.
+    """
+    doc, error = _read_settings_doc(path)
+    if error is not None:
+        _LOG.warning("%s; using defaults", error)
         return ({}, False)
+    return (doc if isinstance(doc, dict) else {}, True)
 
 
 def _unwrap_config_dict(raw: dict[str, object]) -> dict[str, object]:
