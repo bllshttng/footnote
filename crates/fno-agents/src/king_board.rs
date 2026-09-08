@@ -9,16 +9,19 @@
 //!
 //! The speed win is in-process reads. One graph read (the same
 //! `read_defaulted_opts(path, false, false)` the keeper's `read_strict` runs)
-//! feeds undispatched, claimed-node lookups, PR binding, and crown scope. The
-//! claims merge is a directory scan. `needs` folds in-process over the same
-//! sources `fno agents needs` reads. Three source reads stay subprocesses: `gh
-//! pr list` (a real network boundary), `fno backlog ready` (its selection
-//! logic lives inline in the typer command with no function behind it;
-//! re-typing the filter chain here would drift from `next`'s), and `fno inbox
-//! outstanding` (measured 2026-09-04: 1.12s wall at load 52, far under its
-//! 10s bar - the plan's change 2 keeps it and records the measurement). The
-//! batched truth probe is a fourth spawn: one interpreter per holder it
-//! measures, when any holder exists.
+//! feeds claimed-node lookups, PR binding, and crown scope. The claims merge
+//! is a directory scan. `needs` folds in-process over the same sources `fno
+//! agents needs` reads. Four source reads stay subprocesses: `gh pr list` (a
+//! real network boundary), `fno backlog ready` (its selection logic lives
+//! inline in the typer command with no function behind it; re-typing the
+//! filter chain here would drift from `next`'s), `fno inbox outstanding`
+//! (measured 2026-09-04: 1.12s wall at load 52, far under its 10s bar - the
+//! plan's change 2 keeps it and records the measurement), and `fno backlog
+//! undispatched`, which used to classify the graph in-process here. That copy
+//! ordered the board differently from the Python selection key, so the two
+//! named different next nodes on one graph. One implementation costs one
+//! spawn. The batched truth probe is a fifth spawn: one interpreter per holder
+//! it measures, when any holder exists.
 //!
 //! Output keeps the Python JSON shape: `actionable`, `unreadable`, `queues`
 //! (same names, same order, same row dicts), `warnings`, `exit_code` - plus a
@@ -28,7 +31,7 @@
 //!
 //! Module layout: `budget` (the one whole-board budget + bounded
 //! subprocess runner), `claims` (the merged lock scan), `classify`
-//! (undispatched/holder/driver selection), `prs` (one listing, binding,
+//! (holder/driver selection), `prs` (one listing, binding,
 //! mergeable filter), `scope` (config paths + crown scope), `queues`
 //! (the lane parser + the eleven-queue build). This parent holds the
 //! shared value vocabulary, the options, the collection orchestration,
