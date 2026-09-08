@@ -180,7 +180,7 @@ fn ac4_hp_three_row_marker_retires_prunes_and_names_every_keep() {
 
     assert_eq!(
         summary.retired,
-        vec![("rowa".to_string(), "every named node done: N1".to_string())],
+        vec![("rowa".to_string(), "every named node done: N1 (via sessions; merge_status: N1:unrecorded)".to_string())],
         "{:?}",
         summary.retired
     );
@@ -402,7 +402,7 @@ fn a_done_node_with_a_closed_do_row_retires_by_name() {
     );
     assert_eq!(
         summary.retired,
-        vec![("rowd".to_string(), "every named node done: N1".to_string())]
+        vec![("rowd".to_string(), "every named node done: N1 (via sessions; merge_status: N1:unrecorded)".to_string())]
     );
     assert!(summary.kept_open_do_row.is_empty());
     let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -2614,7 +2614,7 @@ fn a_settled_nodes_open_do_row_is_filled_and_kept() {
     );
     assert_eq!(
         summary.retired,
-        vec![("row-a".to_string(), "every named node done: N1".to_string())]
+        vec![("row-a".to_string(), "every named node done: N1 (via sessions; merge_status: N1:merged)".to_string())]
     );
     // THE assertion: the file still holds the row, now closed, never removed.
     let raw: Value =

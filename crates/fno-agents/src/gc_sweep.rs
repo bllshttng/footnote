@@ -32,6 +32,7 @@ use crate::gc::{
     gc_decide, row_handle, transcript_age_s, tree_action, GcAction, GcRow, KeepReason, TreeAction,
 };
 use crate::graph_store::{self, WorkState};
+use crate::node_route;
 use crate::paths::AgentsHome;
 use crate::receipt::{
     build_reap_receipt, expire_receipt_details, write_reap_receipt, EffectRecord, ReapReceipt,
@@ -58,6 +59,13 @@ pub struct GcSummary {
     pub kept_not_spawn: Vec<(String, String)>,
     /// Named in no node's `sessions[]`: no provenance, no work-done verdict.
     pub kept_no_provenance: Vec<String>,
+    /// `(id, a, b)` (x-5a62): two provenance sources resolved different
+    /// nodes, so the row is held rather than retired on a guess.
+    pub kept_node_conflict: Vec<(String, String, String)>,
+    /// `(id, node, detail)` (x-5a62): the node reads done but its PR state
+    /// contradicts - an open additional PR, or a recorded merge_status that
+    /// is not `merged`.
+    pub kept_pr_contradicts: Vec<(String, String, String)>,
     /// `(id, node, status)`: a named node is not done; the first open one.
     pub kept_open_work: Vec<(String, String, String)>,
     /// `(id, age_s)`: the transcript was written inside the grace window.
@@ -624,7 +632,18 @@ pub(crate) fn run(
             continue;
         };
         let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
-        let work = graph_store::work_state(&graph.index, sid);
+        // The reverse join stays first and unchanged (x-c672). Only a
+        // NoProvenance verdict reaches the cascade (x-5a62), which tries the
+        // registry field, the row name, and the transcript, records which
+        // source answered, and holds the row when two witnesses disagree.
+        let mut work = graph_store::work_state(&graph.index, sid);
+        let mut route = node_route::NodeRoute::default();
+        if matches!(work, WorkState::NoProvenance) {
+            route = node_route::resolve(e, sid, graph, store_matches(e).as_deref());
+            if route.conflict.is_none() {
+                work = route.work_state(&graph.statuses);
+            }
+        }
         // Locked Decision 1: every named node done but one still carries an
         // OPEN do row for this session -> the row stays and the node is
         // named. The retirement never settles graph rows itself.
@@ -633,6 +652,43 @@ pub(crate) fn run(
                 let node = nodes.first().cloned().unwrap_or_default();
                 summary.kept_open_do_row.push((id, node));
                 continue;
+            }
+        }
+        // The confirm step (x-5a62): positive PR-state evidence in both
+        // directions, on every retire-eligible row whichever source
+        // answered. An open additional PR holds the row (the graph records
+        // no per-entry merge state for one); a RECORDED merge_status that is
+        // not `merged` holds; an ABSENT merge_status does not hold - its
+        // absence rides the basis as unrecorded, visible for audit.
+        let mut confirm_hold = route
+            .conflict
+            .clone()
+            .map(|(src, node)| KeepReason::NodeConflict {
+                a: src.as_str().to_string(),
+                b: node,
+            });
+        let mut merge_note: Vec<String> = Vec::new();
+        if let WorkState::AllDone { nodes } = &work {
+            for node in nodes {
+                let (merge_status, extra) = graph.pr_state.get(node).cloned().unwrap_or((None, 0));
+                if extra > 0 {
+                    confirm_hold = Some(KeepReason::PrStateContradicts {
+                        node: node.clone(),
+                        detail: format!("additional_prs: {extra}"),
+                    });
+                    break;
+                }
+                match &merge_status {
+                    Some(m) if m != "merged" => {
+                        confirm_hold = Some(KeepReason::PrStateContradicts {
+                            node: node.clone(),
+                            detail: format!("merge_status: {m}"),
+                        });
+                        break;
+                    }
+                    Some(m) => merge_note.push(format!("{node}:{m}")),
+                    None => merge_note.push(format!("{node}:unrecorded")),
+                }
             }
         }
         let age = transcript_age_s(store_matches(e).as_deref(), now);
@@ -672,6 +728,7 @@ pub(crate) fn run(
             worktree_clean: None,
             branch_merged: None,
             planning,
+            confirm_hold,
         };
         let (action, reason) = gc_decide(&row, grace_secs);
         if action == GcAction::Keep {
@@ -686,6 +743,12 @@ pub(crate) fn run(
                 Some(KeepReason::Active { age_s }) => summary.kept_active.push((id, age_s)),
                 Some(KeepReason::TranscriptUnresolved) => {
                     summary.kept_transcript_unresolved.push(id)
+                }
+                Some(KeepReason::NodeConflict { a, b }) => {
+                    summary.kept_node_conflict.push((id, a, b))
+                }
+                Some(KeepReason::PrStateContradicts { node, detail }) => {
+                    summary.kept_pr_contradicts.push((id, node, detail))
                 }
                 // GraphUnreadable / OpenDoRow are decided above, before the
                 // policy ran; they cannot arrive here.
@@ -759,9 +822,25 @@ pub(crate) fn run(
             probed.branch_merged = merged;
         }
         let tree = tree_action(&probed);
+        // The retire basis names the route (x-5a62): a retirement nobody can
+        // audit is the failure this string prevents. Every AllDone row gets
+        // the audit line - the sessions route included - so one policy has
+        // one spelling.
+        let via = route.source.unwrap_or(node_route::NodeSource::Sessions);
         let basis = match &probed.work {
             WorkState::AllDone { nodes } => {
-                format!("every named node done: {}", nodes.join(", "))
+                let named = format!("every named node done: {}", nodes.join(", "));
+                let mut note = format!("via {}", via.as_str());
+                if !route.agreeing.is_empty() {
+                    let names: Vec<&str> = route
+                        .agreeing
+                        .iter()
+                        .map(node_route::NodeSource::as_str)
+                        .collect();
+                    note.push_str(&format!(", agreeing: {}", names.join(", ")));
+                }
+                note.push_str(&format!("; merge_status: {}", merge_note.join(", ")));
+                format!("{named} ({note})")
             }
             _ => "done".to_string(), // unreachable: only AllDone retires
         };
