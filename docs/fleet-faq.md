@@ -27,7 +27,7 @@ Probably not, and four readers will disagree with each other. Know what each one
 | roster `status` in `fno agents list` | what the last reconcile saw | flaps between `unknown`, `quiet`, `orphaned` on a live session |
 | `pgrep -f <session-id>` | a process exists right now | a thread-substrate worker is idle between turns and holds no process |
 | transcript mtime | the session wrote recently | **you read the wrong path** (see below) |
-| `fno agents resume <name> --print-command` | the provider can still reach it | prints `is live` for a session that is idle, which is the useful answer |
+| `fno agents resume <name> --print-command` | nothing about liveness: it renders the route and returns | it prints a command for a session the provider cannot reach, and for one whose cwd is gone |
 
 **Read the right transcript.** Claude Code keys its project directory by the session's **cwd**. A worker running in a worktree writes to a directory named for that worktree, not for the canonical checkout:
 
@@ -46,8 +46,8 @@ A stale file can sit at the canonical path. One session read that copy and saw a
 
 Three verbs, and they are not interchangeable.
 
-- **`fno agents attach <name>`** joins a session that is *running*. It needs a live process. It is for watching, not for instructing.
-- **`fno agents resume <name>`** re-enters a session that is idle, in its recorded cwd, through the provider's own resume path. It accepts a short id or the name. Add `--print-command` to see the resolved command without firing it, which is also the cheapest liveness probe you have.
+- **`fno agents attach <name>`** joins a session that is *running* and gives you interactive control of it. It needs a live process. Use it to talk to a worker or to take it over.
+- **`fno agents resume <name>`** re-enters a session that is idle, in its recorded cwd, through the provider's own resume path. It accepts a short id or the name. Add `--print-command` to see the resolved command without firing it. That form is route inspection only. `run_resume` prints the argv and returns before it validates the cwd. It never contacts the provider. A printed command is not evidence that anything is alive.
 - **`fno agents spawn`** is the last resort. A cold worker relearns everything the idle one already knows.
 
 When the old worker holds context you must otherwise pay to rebuild, prefer resume over spawn. A worker five hours into a port is worth more than a fresh one, even a stronger fresh one.
@@ -70,7 +70,7 @@ The general rule: `last_message_at` measures mail, not work.
 
 Two channels, and they answer different questions.
 
-`fno agents mail send <name> "<text>"` reaches a **live** worker now. It has been the reliable delivery path.
+`fno agents mail send <name> "<text>"` can reach a **live** worker now. Read the receipt line it prints. `delivered (hosted)` and `delivered (woken)` prove the instruction arrived. If the receipt says anything else, the worker still holds its old orders. A failed injection demotes the message to a durable queue, and the worker can stay there unread.
 
 `fno backlog update <id> --dispatch-brief "..."` changes what the **next** worker reads. This is a standing order, not a note. Update it before you spawn, never after.
 
@@ -177,7 +177,9 @@ Contributed by the crowned sessions running other territories. Same contract: a 
 
 ## A node is blocked and I cannot unblock it
 
-**Answer.** You cannot, through the advertised surface. Every other side state is paired: defer/undefer, supersede/unsupersede, queue/unqueue, claim/unclaim, done/reopen, archive/unarchive. Blocked has neither an entry verb nor an exit verb. `requeue` is the near miss and it only covers a node wedged `in_progress` by a dead worker.
+**Answer.** You can edit the blocker list. `fno backlog update <id>` takes `--blocked-by` to replace it, `--add-blocker` to append, and `--remove-blocker` to drop one. Use those first.
+
+What has no pair is the STATE. Every other side state is paired. The pairs: defer/undefer, supersede/unsupersede, queue/unqueue, claim/unclaim, done/reopen, archive/unarchive. Blocked has no entry verb and no exit verb. Emptying the blocker list does not by itself return a node to ready. `requeue` is the near miss and it only covers a node wedged `in_progress` by a dead worker.
 
 **Specimen.** Across all 72 backlog verbs, zero mention block, against a control of three that mention defer. `fno backlog update` has no `--status`. It answers `No such option: --status (Possible options: --tag)`. One node has read `blocked` with `blocked_by=[]` all night and counts as undelivered forever.
 
