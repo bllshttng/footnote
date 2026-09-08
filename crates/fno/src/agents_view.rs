@@ -1866,17 +1866,29 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .get("liveness_measured_at")
             .and_then(|v| v.as_str())
             .and_then(rfc3339_like_to_secs);
-        let liveness = served_liveness(
-            row.get("liveness").and_then(|v| v.as_str()),
-            measured_at,
-            now_secs,
-        )
-        .unwrap_or_else(|| {
-            derive_liveness(
-                status,
-                row.get("pid").and_then(|v| v.as_u64()),
-                row.get("short_id").and_then(|v| v.as_str()).unwrap_or(""),
-            )
+        let served_word = row.get("liveness").and_then(|v| v.as_str());
+        let pid = row.get("pid").and_then(|v| v.as_u64());
+        let ladder = derive_liveness(
+            status,
+            pid,
+            row.get("short_id").and_then(|v| v.as_str()).unwrap_or(""),
+        );
+        let liveness = served_liveness(served_word, measured_at, now_secs).unwrap_or_else(|| {
+            // (x-688b) A stale served "dead" on a TERMINAL, pid-less row still
+            // corroborates the terminal status: the daemon stamped it from an
+            // observed exit, and with no pid recorded there is no reused-pid
+            // contradiction to wait for - the stamp is the only evidence
+            // either side has, and age must not erase it. Any other stale
+            // reading keeps the ladder's verdict.
+            if exited
+                && pid.is_none()
+                && served_word == Some("dead")
+                && ladder == Liveness::Unmeasured
+            {
+                Liveness::Dead
+            } else {
+                ladder
+            }
         });
         let liveness_age_s = measured_at.and_then(|t| now_secs.checked_sub(t));
         let harness_title = row
@@ -3863,6 +3875,52 @@ unheard_of_field = true
         let rows = derive_rows(&raw, NOW).unwrap();
         let row = rows.iter().find(|r| r.name == "cx-gone").unwrap();
         assert_eq!(row.liveness, Liveness::Dead);
+    }
+
+    #[test]
+    fn a_stale_served_dead_still_corroborates_a_pid_less_terminal_row() {
+        // (x-688b) The t-f90d shape: status exited, NO pid, a short_id, and a
+        // served "dead" the daemon stamped from an observed exit days ago.
+        // The age gate demotes the served reading to the ladder, and the
+        // ladder has no pid to check - without this rule the row reads
+        // Unmeasured forever and its squad member strands (one reaped-row
+        // member per such worker). A live pid still wins (reused-pid guard),
+        // and a stale non-dead served word keeps the ladder's verdict.
+        let raw = reg(
+            r#"{"name":"cx-stamp","cwd":"/w","status":"exited","harness":"claude",
+                "short_id":"a3946018","liveness":"dead",
+                "liveness_measured_at":"2027-01-10T00:00:00Z"}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let row = rows.iter().find(|r| r.name == "cx-stamp").unwrap();
+        assert_eq!(row.liveness, Liveness::Dead);
+
+        let me = std::process::id();
+        let raw = reg(&format!(
+            r#"{{"name":"cx-livepid","cwd":"/w","status":"exited","harness":"claude",
+                "pid":{me},"short_id":"bb77","liveness":"dead",
+                "liveness_measured_at":"2027-01-10T00:00:00Z"}}"#
+        ));
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let row = rows.iter().find(|r| r.name == "cx-livepid").unwrap();
+        assert_eq!(
+            row.liveness,
+            Liveness::Unmeasured,
+            "a live pid still contradicts"
+        );
+
+        let raw = reg(
+            r#"{"name":"cx-freshless","cwd":"/w","status":"exited","harness":"claude",
+                "short_id":"cc88","liveness":"unmeasured",
+                "liveness_measured_at":"2027-01-10T00:00:00Z"}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let row = rows.iter().find(|r| r.name == "cx-freshless").unwrap();
+        assert_eq!(
+            row.liveness,
+            Liveness::Unmeasured,
+            "only the word dead corroborates"
+        );
     }
 
     #[test]
