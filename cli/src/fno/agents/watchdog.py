@@ -807,7 +807,7 @@ def _sandbox_blocked_verdict(
     claim_for: Callable[[str], dict],
 ) -> Optional[Verdict]:
     """Classify a Codex Git denial only when both reaping guards are clear."""
-    if row.harness != "codex":
+    if row.agent != "codex":
         return None
     evidence = _sandbox_denial_text(facts)
     if evidence is None:
