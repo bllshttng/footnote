@@ -13946,16 +13946,22 @@ impl Core {
                 let cols = cols.unwrap_or(vt::DEFAULT_COLS);
                 // Capture the exact-placement intent before `placement` moves
                 // into run_pane, so the receipt can echo the committed context.
-                let exact =
-                    placement.at.is_some() && placement.fallback == PlacementFallback::Refuse;
-                let (anchor, direction) = (placement.at, placement.split);
+                // (x-18c4) ANY selector placement (tab or anchor) now gets the
+                // receipt, not just `--at current`: the bounded pane lane
+                // verifies placement by re-reading `pane ls`, and this receipt
+                // is the only record of where the server actually committed
+                // the pane. Wire shape is unchanged (`placement` was already
+                // `Option<ResolvedPlacement>`).
+                let wants_receipt = placement.tab.is_some() || placement.at.is_some();
+                let (anchor, direction, fallback_policy) =
+                    (placement.at, placement.split, placement.fallback);
                 let msg = match self
                     .run_pane(squad_key, cwd, argv, rows, cols, claim, placement, worker)
                 {
                     Ok(pane_id) => {
-                        let resolved = if exact {
-                            // The new pane now sits beside the anchor in the
-                            // anchor's squad+tab; read its real location back.
+                        let resolved = if wants_receipt {
+                            // The new pane now sits in its committed squad+tab;
+                            // read its real location back.
                             let (sid, tid, tab_name, tab_ordinal) = self
                                 .session
                                 .find_pane(pane_id)
@@ -13967,9 +13973,9 @@ impl Core {
                                 })
                                 .unwrap_or((0, 0, None, None));
                             Some(ResolvedPlacement {
-                                anchor: anchor.unwrap(),
+                                anchor: anchor.unwrap_or(0),
                                 direction: direction.unwrap_or(Dir::Down),
-                                fallback: PlacementFallback::Refuse,
+                                fallback: fallback_policy,
                                 squad: sid,
                                 tab: tid,
                                 tab_name,
@@ -18821,80 +18827,11 @@ mod tests {
         core.reap_pane(new_pid);
     }
 
-    #[test]
-    fn run_pane_places_at_named_tab_and_anchor() {
-        // AC2-HP: --tab <id> --at <pane> --split down lands below the anchor in
-        // that exact tab; a bad anchor is BAD_REQUEST with no orphan pane.
-        let mut core = two_tab_core();
-        core.shells = vec!["/bin/cat".into()];
-        let before_panes = core.panes.len();
-        let pid = core
-            .run_pane(
-                "/a".into(),
-                "/a".into(),
-                vec!["/bin/cat".into()],
-                24,
-                80,
-                false,
-                PanePlacement {
-                    portal_new: false,
-                    portal: None,
-                    target: PaneTarget::SquadId(1),
-                    split: Some(Dir::Down),
-                    here: false,
-                    tab: Some(TabSel::Id(10)),
-                    at: Some(2),
-                    fallback: PlacementFallback::NewTab,
-                    max_panes: None,
-                    thread_pane: false,
-                },
-                None,
-            )
-            .unwrap();
-        let tab = core
-            .session
-            .squad(1)
-            .unwrap()
-            .tabs
-            .iter()
-            .find(|t| t.id == 10)
-            .unwrap();
-        assert!(tree::leaves(&tab.root).contains(&pid), "landed in tab 10");
-        core.reap_pane(pid);
-
-        // Bad anchor: pane 999 is not in tab 10 -> BAD_REQUEST, no orphan pane.
-        let panes_now = core.panes.len();
-        let err = core
-            .run_pane(
-                "/a".into(),
-                "/a".into(),
-                vec!["/bin/cat".into()],
-                24,
-                80,
-                false,
-                PanePlacement {
-                    portal_new: false,
-                    portal: None,
-                    target: PaneTarget::SquadId(1),
-                    split: Some(Dir::Down),
-                    here: false,
-                    tab: Some(TabSel::Id(10)),
-                    at: Some(999),
-                    fallback: PlacementFallback::NewTab,
-                    max_panes: None,
-                    thread_pane: false,
-                },
-                None,
-            )
-            .unwrap_err();
-        assert_eq!(err.0, err_code::BAD_REQUEST);
-        assert_eq!(
-            core.panes.len(),
-            panes_now,
-            "a bad anchor reaps the pre-spawned pane (no orphan)"
-        );
-        let _ = before_panes;
-    }
+    // The pane-run placement family (x-18c4 receipt plus the named-tab/anchor
+    // placement test) moved verbatim into its own module: this file is over
+    // the shrink-only line, and test motion is the sanctioned shrink.
+    #[path = "pane_run_receipt_tests.rs"]
+    mod pane_run_receipt_tests;
 
     #[test]
     fn exact_current_refuses_conflicting_tab_selector() {

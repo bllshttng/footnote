@@ -2515,7 +2515,7 @@ def test_bounded_placement_lease_loser_spawns_nothing(tmp_path: Path, monkeypatc
 @pytest.mark.parametrize(
     ("listing", "reason"),
     [
-        ([{"pane_id": 7, "squad_id": 1, "tab_id": 13}], "wrong tab"),
+        ([{"pane_id": 7, "squad_id": 1, "tab_id": 13}], "landed in tab 13, expected tab 12"),
         ([{"pane_id": pane, "squad_id": 1, "tab_id": 12} for pane in range(3, 8)], "fifth pane"),
     ],
 )
