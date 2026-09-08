@@ -50,7 +50,7 @@ cmd_spawn --role  ->  dispatch_spawn  ->  _claude_create_path  ->  bg_create(rol
 
 Every `fno agents spawn` crosses the Python seam (`inject_spawn_defaults`). The binary enforces this: a direct `fno-agents spawn` without the `--defaults-applied` marker is sent back to the front door once, and a marked spawn dispatches natively. The marker carries the seam's enforcement verdict (`enforced` or `unenforced`). It records a decision the seam already made. It never grants one.
 
-A configured axis that was not applied says so. stderr names the dropped value, the config rung it came from, and the reason. One `spawn_defaults_applied` journal event per spawn records every resolved, applied, and suppressed axis, with empty values included. A new config-sourced spawn axis is covered by these two invariants: route the value through the seam, and let the seam name whatever it did not apply.
+A configured axis that was not applied says so. stderr names the dropped value, the config rung it came from, and the reason. One `spawn_defaults_applied` journal event per spawn records every resolved, applied, and suppressed axis, with empty values included. A new config-sourced spawn axis needs nothing else: route the value through the seam, and let the seam name what it did not apply.
 
 ## What the guard does and does not cover
 
