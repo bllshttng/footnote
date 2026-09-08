@@ -156,6 +156,10 @@ A fleet-watching agent was proposed and refused. The proposal's load-bearing arg
 
 ## One retirement owner (x-70e1)
 
-Row retirement is the daemon GC sweep, not the watchdog: the classifier is `gc.rs` (work-done through the reverse join, or the planning lane, plus quiet past grace), the lifecycle is `gc_sweep.rs` (stop, active-surface removal, registry drop, tree prune), and the native effects are `gc_native.rs` (the same cascade `fno agents rm` walks, typed per effect). A retirement is applied only when every applicable native effect confirms; a failed or unverified effect holds the row for retry. The receipts store (`<agents home>/reap-receipts/`) keeps the recovery mapping: identity, native locator, resume argv, and the per-effect outcome records. Retention strips the expendable detail and keeps the identity core. `fno agents reap --verify --since 24h --json` audits the store against the CURRENT build and refuses an empty window, a stale build, or a partial effect set - a green CI is not applied evidence.
+Row retirement is the daemon GC sweep, not the watchdog. The classifier is `gc.rs`: work-done through the reverse join, or the planning lane, plus quiet past grace. The lifecycle is `gc_sweep.rs`: stop, active-surface removal, registry drop, tree prune. The native effects are `gc_native.rs`: the same cascade `fno agents rm` walks, typed per effect.
 
-The watchdog retirement lane is gone: a classifier that only reported and never executed was the measured zero this document once described. Do not restore it.
+Only confirmed native effects let a retirement apply. Every applicable effect must confirm, and a failed or unverified one holds the row for retry.
+
+The receipts store (`<agents home>/reap-receipts/`) keeps the recovery mapping: identity, native locator, resume argv, and the per-effect outcome records. Retention strips the expendable detail and keeps the identity core. `fno agents reap --verify --since 24h --json` audits the store against the CURRENT build. It refuses an empty window, a stale build, or a partial effect set, because a green CI is not applied evidence.
+
+The watchdog retirement lane is gone. A classifier that only reported and never executed was the measured zero this document once described. Do not restore it.
