@@ -164,7 +164,7 @@ def test_advance_writes_one_control_plane_tick_row(iso, monkeypatch):
 
 @requires_rust
 def test_skip_tick_carries_detail(iso, monkeypatch):
-    """x-b9f9c: a skip whose reason carries a detail lands it in the tick row,
+    """A skip whose reason carries a detail lands it in the tick row,
     truncated the way failed() truncates - a claim-error tick is diagnosable."""
     monkeypatch.setenv("FNO_AUTO_CONTINUE", "1")
 
@@ -187,7 +187,7 @@ def test_skip_tick_carries_detail(iso, monkeypatch):
 
 @requires_rust
 def test_skip_tick_without_detail_is_byte_identical(iso, monkeypatch):
-    """x-b9f9c: a detail-less skip keeps today's exact tick detail string."""
+    """A detail-less skip keeps today's exact tick detail string."""
     monkeypatch.setenv("FNO_AUTO_CONTINUE", "0")
     monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: "x")
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
