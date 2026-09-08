@@ -1,11 +1,9 @@
 """Blueprint session lifecycle verbs: stamp, close, reap.
 
-The one place that answers "what did a session do to this node, and what
-does the next session inherit". Extracted from cli.py under the file-budget
-ratchet (a file over budget is shrink-only, and code a change touches moves
-out with it). The close here releases the spawn-handover claim it was
-launched under and repoints the node's dispatch_verb at the launch verb, so
-a finished blueprint stops holding its node and names the verb that runs next.
+What a session did to this node, and what the next session inherits. The
+close releases the spawn-handover claim it was launched under and repoints
+dispatch_verb at the launch verb, so a finished blueprint stops holding
+its node and names the verb that runs next.
 """
 
 from __future__ import annotations
