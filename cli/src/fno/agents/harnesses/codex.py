@@ -1008,14 +1008,17 @@ def capture_session_index_entries(
     must leave every store unchanged, so the caller snapshots the exact
     lines the rewrite will drop BEFORE tearing down, and re-appends them
     when the registry write later declines. Same parse discipline as the
-    removal: matching on the parsed ``id`` field, never substring.
+    removal: matching on the parsed ``id`` field, never substring. A
+    missing index is nothing to snapshot; an unreadable one raises, so
+    the caller refuses before touching any store rather than silently
+    losing the ability to roll back.
     """
     if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
         return []
     path = session_index_path or default_session_index_path()
     try:
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    except OSError:
+    except FileNotFoundError:
         return []
     out = []
     for line in lines:

@@ -85,17 +85,27 @@ fn newest<'a>(paths: &'a [PathBuf]) -> Option<&'a Path> {
 const BOUND_BYTES: u64 = 256 * 1024;
 
 fn bound_lines(path: &Path, from_head: bool) -> Vec<String> {
-    let Ok(raw) = std::fs::read(path) else {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
         return Vec::new();
     };
-    let (chunk, dropped_first) = if from_head {
-        let end = raw.len().min(BOUND_BYTES as usize);
-        (raw[..end].to_vec(), false)
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = if from_head {
+        0
     } else {
-        let start = raw.len().saturating_sub(BOUND_BYTES as usize);
-        (raw[start..].to_vec(), start > 0)
+        len.saturating_sub(BOUND_BYTES)
     };
-    let text = String::from_utf8_lossy(&chunk);
+    if start > 0 {
+        let Ok(_) = file.seek(SeekFrom::Start(start)) else {
+            return Vec::new();
+        };
+    }
+    let mut raw: Vec<u8> = Vec::with_capacity(BOUND_BYTES as usize);
+    if file.take(BOUND_BYTES).read_to_end(&mut raw).is_err() {
+        return Vec::new();
+    }
+    let dropped_first = !from_head && start > 0;
+    let text = String::from_utf8_lossy(&raw);
     let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
     if dropped_first && !lines.is_empty() {
         lines.remove(0); // a partial leading line is not a message

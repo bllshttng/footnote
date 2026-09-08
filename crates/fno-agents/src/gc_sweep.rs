@@ -589,22 +589,18 @@ pub fn provenance_verdict(
     transcripts: Option<&[std::path::PathBuf]>,
 ) -> ProvenanceVerdict {
     let mut work = graph_store::work_state(&graph.index, sid);
-    let mut route = node_route::NodeRoute::default();
-    // The sessions answer is the route even when it answers alone: the
-    // basis and the roster judgement name the node, not a dash.
-    if let Some((node, _)) = graph
-        .index
-        .get(&graph_store::work_state_key(sid))
-        .and_then(|rows| rows.first())
-    {
-        route.node = Some(node.clone());
-        route.source = Some(node_route::NodeSource::Sessions);
-    }
-    if matches!(work, WorkState::NoProvenance) {
-        route = node_route::resolve(e, sid, graph, transcripts);
-        if route.conflict.is_none() {
-            work = route.work_state(&graph.statuses);
-        }
+    // The full cascade runs EVEN WHEN the reverse join answers: the later
+    // sources are witnesses, not substitutes, so a source naming a
+    // DIFFERENT node holds the row instead of the answer riding on the
+    // first witness alone. When the join answers, the work verdict stays
+    // the join's own multi-row read (every node the session names must be
+    // done); only a NoProvenance route re-derives work from the resolved
+    // node's stored status.
+    let mut route = node_route::resolve(e, sid, graph, transcripts);
+    if route.conflict.is_some() {
+        work = WorkState::NoProvenance;
+    } else if !matches!(route.source, Some(node_route::NodeSource::Sessions)) {
+        work = route.work_state(&graph.statuses);
     }
     let mut hold = route
         .conflict

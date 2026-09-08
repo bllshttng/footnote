@@ -4460,9 +4460,19 @@ def rm_agent(
                 if existing.harness == "codex" and existing.harness_session_id:
                     from fno.agents.harnesses import codex as codex_capture
 
-                    captured_index_lines = codex_capture.capture_session_index_entries(
-                        existing.harness_session_id
-                    )
+                    try:
+                        captured_index_lines = codex_capture.capture_session_index_entries(
+                            existing.harness_session_id
+                        )
+                    except OSError as exc:
+                        # Refuse BEFORE any store is touched: a snapshot the
+                        # reaper cannot read is a rollback it cannot promise,
+                        # and the invariant dies quietly exactly there.
+                        raise DispatchAskError(
+                            f"could not snapshot the codex session index for "
+                            f"rollback: {exc}",
+                            exit_code=1,
+                        ) from exc
                 teardown_error = _teardown_harness_session(
                     existing,
                     name=name,
