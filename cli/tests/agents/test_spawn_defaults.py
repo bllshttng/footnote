@@ -59,8 +59,15 @@ class _Defaults:
         self.on_unknown = on_unknown
 
 
+class _Routing:
+    def __init__(self, enforce_inventory=False, operator_access="unknown", models=None):
+        self.enforce_inventory = enforce_inventory
+        self.operator_access = operator_access
+        self.models = models or []
+
+
 class _Settings:
-    def __init__(self, profiles=None, model_routing=None, max_lanes=None, **kw):
+    def __init__(self, profiles=None, model_routing=None, max_lanes=None, routing=None, **kw):
         prof = {k: _Defaults(**v) for k, v in (profiles or {}).items()}
         self.agents = type(
             "A",
@@ -72,6 +79,7 @@ class _Settings:
             },
         )()
         self.model_routing = model_routing
+        self.routing = routing
 
 
 @pytest.fixture
@@ -289,3 +297,156 @@ def test_emit_failure_never_breaks_the_spawn(
         profiles={"target": {"route": "zai,glm"}},
     )
     assert out2[0] == "spawn"
+
+
+# ---------------------------------------------------------------------------
+# x-90a9 task 2.1: strict qualification runs on every spawn, pins included
+# ---------------------------------------------------------------------------
+
+
+def _stub_route_slot(monkeypatch: pytest.MonkeyPatch, decision: dict) -> list[dict]:
+    """Stub the native transport, capturing every payload it was handed."""
+    import fno.route_slot_client as rsc
+
+    seen: list[dict] = []
+
+    def _call(payload: dict) -> dict:
+        seen.append(payload)
+        return decision
+
+    monkeypatch.setattr(rsc, "route_slot_call", _call)
+    return seen
+
+
+def test_strict_seam_refuses_when_the_decision_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC25. No complete decision in strict mode: named refusal, no spawn."""
+
+    import fno.route_slot_client as rsc
+
+    def _unavailable(payload: dict) -> dict:
+        raise rsc.RouteSlotUnavailable("binary missing")
+
+    monkeypatch.setattr(rsc, "route_slot_call", _unavailable)
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "--name", "p", "/target x"],
+            err=err,
+            routing=_Routing(enforce_inventory=True),
+        )
+    assert exc.value.code == 2
+    assert "route-slot-unavailable" in err.getvalue()
+    assert "strict routing" in err.getvalue()
+    assert "refusing; no worker launched" in err.getvalue()
+
+
+def test_strict_seam_refuses_a_disallowed_explicit_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC4. GLM on blueprint-eligible work: the refusal names the coordinate."""
+    _stub_route_slot(
+        monkeypatch,
+        {
+            "status": "none",
+            "candidate": None,
+            "refusal": "policy-coordinate-not-in-slot",
+            "chain": [
+                "slot note agents.profiles.target planless target -> blueprint eligibility (command stays target)",
+                "slot=strict-refusal explicit model 'glm' is not in slot agents.profiles.blueprint's declared lanes",
+            ],
+        },
+    )
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "--name", "p", "-m", "glm", "/target x"],
+            err=err,
+            routing=_Routing(enforce_inventory=True),
+        )
+    assert exc.value.code == 2
+    text = err.getvalue()
+    assert "strict-refusal" in text or "strict routing" in text
+    assert "glm" in text
+
+
+def test_strict_seam_qualifies_explicit_pins_and_preserves_the_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC3/AC4 control. An allowed pin reaches the spawn primitive with the
+    original command intact; the owner saw the work-kind evidence."""
+    seen = _stub_route_slot(
+        monkeypatch,
+        {
+            "status": "pick",
+            "candidate": {
+                "harness": "claude",
+                "model": "glm",
+                "lane": "flash-x",
+                "lane_rung": "agents.profiles.target.lanes[0]",
+                "lane_index": 0,
+                "lane_fields": {"route": "zai,glm"},
+                "evidence": {"capacity": "ok"},
+            },
+            "chain": ["slot agents.profiles.target lanes walked in declared order"],
+        },
+    )
+    import fno.agents.spawn_defaults as sd
+
+    monkeypatch.setattr(
+        sd, "_grid_node", lambda toks, env=None: {"id": "x-90a9", "plan_path": ""}
+    )
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "p", "--node", "x-90a9", "-m", "glm", "/target x"],
+        err=err,
+        routing=_Routing(enforce_inventory=True),
+        env={"FNO_NODE": "x-90a9"},
+    )
+    assert out[0] == "spawn"
+    assert "-m" in out and out[out.index("-m") + 1] == "glm"
+    assert out[-1] == "/target x"
+    payload = seen[0]
+    assert payload["work_verb"] == "target"
+    assert payload["explicit_model_value"] == "glm"
+
+
+def test_strict_seam_forwards_the_verb_on_every_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC3. The owner sees the work verb on every strict spawn, pin or not."""
+    seen = _stub_route_slot(
+        monkeypatch,
+        {
+            "status": "pick",
+            "candidate": {
+                "harness": "claude",
+                "model": "m",
+                "lane": "r",
+                "lane_rung": "agents.profiles.target.lanes[0]",
+                "lane_index": 0,
+                "lane_fields": {},
+                "evidence": {"capacity": "ok"},
+            },
+            "chain": ["slot agents.profiles.target lanes walked in declared order"],
+        },
+    )
+    import fno.agents.spawn_defaults as sd
+
+    monkeypatch.setattr(
+        sd, "_grid_node", lambda toks, env=None: {"id": "x-1", "plan_path": ""}
+    )
+    _inject(
+        ["spawn", "--name", "p", "--node", "x-1", "/target x"],
+        err=io.StringIO(),
+        routing=_Routing(enforce_inventory=True),
+        env={"FNO_NODE": "x-1"},
+    )
+    _inject(
+        ["spawn", "--name", "p", "/target x"],
+        err=io.StringIO(),
+        routing=_Routing(enforce_inventory=True),
+    )
+    assert len(seen) == 2, seen
+    assert all(p["work_verb"] == "target" for p in seen)

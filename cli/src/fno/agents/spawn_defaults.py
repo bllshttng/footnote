@@ -1112,12 +1112,18 @@ def inject_spawn_defaults(
     # get. Route is the axis that bills, so an omission there must name itself
     # (x-f1ab: the four-way silent drop); the others already print.
     suppressed: List[Tuple[str, str, str, str]] = []
-    if lanes_present or not model_occupied:
-        if not model_occupied:
+    # Strict inventory policy: the resolver runs on EVERY spawn, even one
+    # whose model axis is occupied - an explicit pin is a constraint the
+    # slot qualifies, never a bypass (x-90a9 task 2.1).
+    enforced = bool(
+        getattr(getattr(settings, "routing", None), "enforce_inventory", False)
+    )
+    if lanes_present or not model_occupied or enforced:
+        if not model_occupied or enforced:
             grid_node_entry = _grid_node(out[1:], env)
         capacity: Optional[dict[str, object]] = None
         _slot_inventory = None
-        if lanes_present or grid_node_entry:
+        if lanes_present or grid_node_entry or enforced:
             try:
                 from fno import route_resolve as _rr
 
@@ -1169,8 +1175,24 @@ def inject_spawn_defaults(
                     model_occupied=model_occupied,
                     explicit_model=has_model,
                     explicit_lane=_explicit_lane,
+                    work_verb=verb,
+                    explicit_model_value=(
+                        _flag_value(out[1:], "--model", "-m") if has_model else None
+                    ),
+                    explicit_route_value=(
+                        _flag_value(out[1:], "--route") if explicit_route else None
+                    ),
                 )
-            except Exception:  # noqa: BLE001 - a routing fault never breaks a spawn
+            except Exception as _exc:  # noqa: BLE001 - legacy degrades; strict refuses
+                if enforced:
+                    print(
+                        "fno agents spawn: routing decision unavailable "
+                        f"({_exc}); strict routing refuses without a "
+                        "complete decision",
+                        file=err,
+                    )
+                    print("fno agents spawn: refusing; no worker launched", file=err)
+                    raise SystemExit(2)
                 slot_candidate = None
                 slot_chain = []
         # Receipt + refusal seam: the chain's last element is the terminal.
@@ -1197,7 +1219,19 @@ def inject_spawn_defaults(
                     f" for {_detail}"
                 )
             if _terminal.startswith("slot=route-slot-unavailable"):
-                _refuse(f"fno agents spawn: {_terminal[len('slot='):]};")
+                _refuse(
+                    f"fno agents spawn: {_terminal[len('slot='):]};"
+                    + (
+                        " (strict routing: config routing.enforce_inventory)"
+                        if enforced
+                        else ""
+                    )
+                )
+            if _terminal.startswith("slot=strict-refusal"):
+                _refuse(
+                    f"fno agents spawn: {_terminal[len('slot=strict-refusal '):]} "
+                    "(strict routing: config routing.enforce_inventory)"
+                )
             if _terminal == "slot=manual_account_switch_required":
                 _refuse(
                     "fno agents spawn: every lane needs a manual canonical "
@@ -1785,13 +1819,19 @@ def inject_spawn_defaults(
         (source for axis, _value, source in from_config if axis == "model"), None
     )
     _check_model_vendor_mismatch(out, err, env, model_source=model_source)
+    try:
+        from fno.route_resolve import routing_fingerprint
+
+        _fp = routing_fingerprint(settings)
+    except Exception:  # noqa: BLE001 - a fingerprint gap is a receipt gap, never a crash
+        _fp = ""
     _emit_defaults_applied(
         out, profile_verb, seed, _resolved_axes_view(
             cfg_harness, provider_rung, cfg_model, model_rung, cfg_effort,
             effort_rung, cfg_substrate, substrate_rung, cfg_permission,
             permission_rung, cfg_route, route_rung, cfg_account, account_rung,
             cfg_pane_group, pane_group_rung,
-        ), from_config, suppressed,
+        ), from_config, suppressed, fingerprint=_fp,
     )
     return out
 
@@ -1830,15 +1870,17 @@ def _emit_defaults_applied(
     resolved: dict,
     applied: Sequence[Tuple[str, str, str]],
     suppressed: Sequence[Tuple[str, str, str, str]],
+    fingerprint: str = "",
 ) -> None:
-    """Journal one spawn_defaults_applied decision for this spawn.
+    """Journal one spawn_defaults_applied decision receipt for this spawn.
 
     Exactly one event per completed seam resolution: the applied axes with
-    their rungs, the suppressed ones with their reasons. The emit must not
-    be able to raise - an unwritable journal (or a raising
-    ``paths.state_dir()`` under the hermetic guard) can never turn an
-    already-valid launch into a crash. Diagnostic failure also never waives
-    strict qualification; that decision lives upstream of this call.
+    their rungs, the suppressed ones with their reasons, and the routing
+    config fingerprint the decision rode on. The emit must not be able to
+    raise - an unwritable journal (or a raising ``paths.state_dir()`` under
+    the hermetic guard) can never turn an already-valid launch into a crash.
+    Diagnostic failure also never waives strict qualification; that decision
+    lives upstream of this call.
     """
     try:
         from fno.agents.events import emit
@@ -1848,6 +1890,7 @@ def _emit_defaults_applied(
             name=_flag_value(out[1:], "--name"),
             verb=verb,
             seed=seed,
+            fingerprint=fingerprint,
             resolved={axis: {"value": v, "rung": r} for axis, (v, r) in resolved.items()},
             applied=[list(entry) for entry in applied],
             suppressed=[list(entry) for entry in suppressed],

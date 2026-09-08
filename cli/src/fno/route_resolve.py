@@ -11,6 +11,7 @@ docs/architecture/role-based-model-routing.md.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from typing import Any, Mapping, Optional, Sequence
 
 from fno.adapters.providers import benchmarks as bm
@@ -322,6 +323,26 @@ def _routing_enforced(settings: object) -> bool:
         return bool(getattr(getattr(settings, "routing", None), "enforce_inventory", False))
     except Exception:  # noqa: BLE001 - an unreadable flag reads as off
         return False
+
+
+def routing_fingerprint(settings: object = None) -> str:
+    """A short fingerprint of the routing-relevant NONSECRET config inputs.
+
+    The receipt answer to "was the config that decided this the config that
+    launched": declared rows, policy fields and the slot table, with no
+    credential values. A changed fingerprint says the next launch re-selects;
+    it is never an ownership token.
+    """
+    try:
+        payload = {
+            "rows": sorted(_declared_rows(settings).items()),
+            "policy": _routing_policy_payload(settings),
+            "slots": _slot_profiles_table(settings),
+        }
+        text = repr(payload)
+        return hashlib.sha256(text.encode()).hexdigest()[:12]
+    except Exception:  # noqa: BLE001 - an unreadable config carries no fingerprint
+        return ""
 
 
 
