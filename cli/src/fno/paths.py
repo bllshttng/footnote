@@ -1294,16 +1294,6 @@ def briefs_dir() -> Path:
 
 
 def king_faqs_dir() -> Path:
-    """Return the king FAQ directory, beside the briefs directory.
-
-    ``config.paths.king_faqs_dir`` overrides; otherwise it defaults to
-    ``briefs_dir()/king-faqs`` so a fresh install writes to the same place
-    the hand-written convention already used.
-    """
-    settings = _settings()
-    override = settings.paths.king_faqs_dir
-    if override is not None:
-        return _guard_state_path(_resolve(override))
     return briefs_dir() / "king-faqs"
 
 

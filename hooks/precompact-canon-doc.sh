@@ -126,6 +126,31 @@ if command -v fno >/dev/null 2>&1; then
   PR_RAW="$(fno do pr list --state open 2>/dev/null || true)"
 fi
 
+# Crowned-ness, computed once from the already-fetched REG_ROWS and handed
+# into the heredoc below via env: the heredoc's stdout carries ONLY the auto
+# block text, matching every other fact in this script. An earlier version
+# smuggled this boolean out as a synthetic first stdout line for bash to
+# split off by position - fragile, since any reordering of the heredoc's own
+# output silently corrupts the auto block with no error (the whole heredoc is
+# wrapped in `|| true`).
+IS_CROWNED="$(SID="$SID" REG_ROWS="$REG_ROWS" python3 -c '
+import json, os
+sid = os.environ.get("SID", "")
+try:
+    data = json.loads(os.environ.get("REG_ROWS") or "[]")
+except Exception:
+    data = []
+if isinstance(data, dict):
+    data = data.get("agents") or data.get("rows") or []
+rows = data if isinstance(data, list) else []
+mine = [r for r in rows if r.get("session_id") == sid or r.get("harness_session_id") == sid]
+r = mine[0] if mine else {}
+lvl = r.get("crown_level")
+scp = r.get("crown_scope")
+print("1" if (mine and (lvl is not None or scp is not None)) else "0")
+' 2>/dev/null || true)"
+[[ "$IS_CROWNED" == "1" ]] || IS_CROWNED=0
+
 # ---------------------------------------------------------------------------
 # Build the auto block. One python heredoc (quoted delimiter => no shell
 # escaping) reads the facts from env and emits the mechanical sections. JSON
@@ -135,8 +160,8 @@ fi
 # comment/string as an unterminated quote, and the script fails `bash -n`
 # with an EOF error that names an unrelated later line.
 # ---------------------------------------------------------------------------
-AUTO_BLOCK_RAW="$(SID="$SID" SHORT="$SHORT" NODE="$NODE" PLAN="$PLAN" \
-             REG_ROWS="$REG_ROWS" PR_RAW="$PR_RAW" python3 <<'PY' 2>/dev/null || true
+AUTO_BLOCK="$(SID="$SID" SHORT="$SHORT" NODE="$NODE" PLAN="$PLAN" \
+             REG_ROWS="$REG_ROWS" PR_RAW="$PR_RAW" IS_CROWNED="$IS_CROWNED" python3 <<'PY' 2>/dev/null || true
 import json
 import os
 import subprocess
@@ -162,7 +187,7 @@ r = mine[0] if mine else {}
 
 lvl = r.get("crown_level")
 scp = r.get("crown_scope")
-crowned = bool(mine) and (lvl is not None or scp is not None)
+crowned = os.environ.get("IS_CROWNED") == "1"
 if not mine:
     crown = "none (no registry row for this session)"
 elif not crowned:
@@ -209,28 +234,47 @@ if pr_rows:
             for x in pr_rows]
 
 
-def nodes_under_purview(scope):
-    """The crown scope children, id plus status, via the existing epic status
-    read. Bounded (5s) and degrade-only: a scope that is not a queryable epic
-    (a level-1 whole-project crown, an unreadable graph) yields None, never a
-    raised exception - this whole block is skipped rather than a doc that
-    fails to write."""
-    if not scope:
-        return None
+def _epic_children(epic_id):
+    """One epic's children via `epic status`, or None on any failure."""
     try:
         proc = subprocess.run(
-            ["fno", "backlog", "epic", "status", scope, "--json"],
+            ["fno", "backlog", "epic", "status", epic_id, "--json"],
             capture_output=True, text=True, timeout=5, check=False,
         )
         data = json.loads(proc.stdout or "")
     except Exception:
         return None
     children = data.get("children")
-    if not isinstance(children, list) or not children:
+    return children if isinstance(children, list) else None
+
+
+def nodes_under_purview(scope):
+    """The crown scope's children, id plus status, via the existing epic
+    status read. A portfolio crown stores its scope as a comma-joined set of
+    epics (fno.agents.crown.canonical_scope) - query each member and merge,
+    so a level-2 king over more than one epic sees every member's children,
+    not just the first. Bounded (5s per member) and degrade-only: a member
+    that is not a queryable epic (a level-1 whole-project crown, an
+    unreadable graph) contributes nothing rather than failing the whole
+    read; this whole block is skipped only when EVERY member yields nothing."""
+    if not scope:
+        return None
+    rows = []
+    seen_ids = set()
+    for member in (part.strip() for part in scope.split(",")):
+        if not member:
+            continue
+        for c in _epic_children(member) or []:
+            node_id = c.get("id")
+            if node_id in seen_ids:
+                continue
+            seen_ids.add(node_id)
+            rows.append(c)
+    if not rows:
         return None
     return "\n".join(
         "- %s [%s] %s" % (c.get("id", "-"), c.get("status", "-"), c.get("slug", ""))
-        for c in children
+        for c in rows
     )
 
 
@@ -250,14 +294,9 @@ if crowned:
         workers,
     ]
 
-print("CROWNED=%s" % ("1" if crowned else "0"))
 print("\n".join(out))
 PY
 )"
-CROWNED="$(printf '%s\n' "$AUTO_BLOCK_RAW" | sed -n '1p')"
-AUTO_BLOCK="$(printf '%s\n' "$AUTO_BLOCK_RAW" | tail -n +2)"
-IS_CROWNED=0
-[[ "$CROWNED" == "CROWNED=1" ]] && IS_CROWNED=1
 
 # ---------------------------------------------------------------------------
 # Preserve any judgment the session already wrote under the two session markers.

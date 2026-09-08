@@ -9,12 +9,14 @@ never collapses, matching the real CLI surface.
 """
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from fno.king.cli import agents_king_app
-from fno.king.king_faq import add_cmd, faq_app, write_faq_entry
+from fno.king.king_faq import add_cmd, entries_for_scope, faq_app, write_faq_entry
 
 
 def test_write_faq_entry_creates_file_with_expected_frontmatter(tmp_path):
@@ -94,9 +96,33 @@ def test_add_cmd_defaults_scope_from_current_crown(monkeypatch, tmp_path):
     assert "session: session-abc123" in text
 
 
-def test_faq_app_is_reachable_from_agents_king_app():
-    from fno.king.cli import king_app
+def test_entries_for_scope_orders_by_mtime_not_filename(tmp_path):
+    # The filename's variable part is a random hex token, not a timestamp, so
+    # an alphabetical sort would not reflect write order. Name the older entry
+    # so it alphabetically SORTS LAST, proving the ordering comes from mtime.
+    older = write_faq_entry(
+        question="older", answer="a", specimen="s", exit_="e",
+        scope="x-6cac", king="k", session="sess", faqs_dir=tmp_path,
+    )
+    older = older.rename(tmp_path / "king-x-6cac-zzzzzzzz.md")
+    time.sleep(0.01)
+    newer = write_faq_entry(
+        question="newer", answer="a", specimen="s", exit_="e",
+        scope="x-6cac", king="k", session="sess", faqs_dir=tmp_path,
+    )
+    newer = newer.rename(tmp_path / "king-x-6cac-00000000.md")
+    now = time.time()
+    os.utime(older, (now - 100, now - 100))
+    os.utime(newer, (now, now))
 
-    assert any(g.typer_instance is faq_app for g in king_app.registered_groups)
+    entries = entries_for_scope("x-6cac", faqs_dir=tmp_path)
+    assert len(entries) == 2
+    assert "# older" in entries[0]
+    assert "# newer" in entries[1]
+
+
+def test_faq_app_is_reachable_from_agents_king_app():
+    # Not registered on bare king_app: the plan's usage is `fno agents king
+    # faq add` only, and king_app's advertised surface is menu-capped.
     assert any(g.typer_instance is faq_app for g in agents_king_app.registered_groups)
     assert add_cmd is not None

@@ -122,7 +122,9 @@ def test_map_covers_current_surface_once():
     # open around (hidden verbs): 578 -> 580. The one-authorized-merge branch
     # allocates `agents authorized-merge`, the merge/arm decision every merge
     # path asks through the single Python door (hidden verb): 580 -> 581.
-    assert len(mapped) == 581, (
+    # x-9e1e allocates `agents king faq add` and `agents king faq list`, the
+    # king FAQ recipe-becomes-verb: 581 -> 583.
+    assert len(mapped) == 583, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -213,7 +215,8 @@ def test_live_baseline_matches_the_projected_allocation():
     # +1 for `law set`, the direct operator writer baselined in this PR.
     # +1 for `inbox law set`, the mounted spelling present on current main.
     # Bumped to the live count at rebase time, not a round number.
-    assert len(leaves) <= 129
+    # +2 for `king faq add` and `king faq list` (x-9e1e), the king FAQ verb.
+    assert len(leaves) <= 131
     assert "fno-agents" in leaves
 
 

@@ -127,7 +127,6 @@ class PathsBlock(BaseModel):
     ledger_json: Optional[str] = None
     evals_history: Optional[str] = None
     briefs_dir: Optional[str] = None
-    king_faqs_dir: Optional[str] = None
     fleet_dir: Optional[str] = None
     postmortems_dir: Optional[str] = None
     worktrees_base: Optional[str] = None
@@ -150,7 +149,6 @@ class PathsBlock(BaseModel):
         "ledger_json",
         "evals_history",
         "briefs_dir",
-        "king_faqs_dir",
         "fleet_dir",
         "postmortems_dir",
         "worktrees_base",

@@ -279,6 +279,44 @@ else
   fail "crowned doc missing the new session headings"
 fi
 
+# ---------------------------------------------------------------------------
+# 9. AC1-HP portfolio case: a level-2 crown over TWO epics (a comma-joined
+# scope, fno.agents.crown.canonical_scope's stored shape) sees BOTH epics'
+# children, not just the first.
+# ---------------------------------------------------------------------------
+PORTFOLIO_BIN="$(mktemp -d -t canon-fake-fno-portfolio-XXXXXX)"
+cat > "$PORTFOLIO_BIN/fno" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+  *"agents registry-json"*)
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-epic-a,x-epic-b","name":"king-fixture"}]'
+    ;;
+  *"backlog epic status x-epic-a"*)
+    echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"}]}'
+    ;;
+  *"backlog epic status x-epic-b"*)
+    echo '{"children":[{"id":"x-bbbb","status":"in_progress","slug":"b"}]}'
+    ;;
+  *"do pr list"*)
+    echo '[]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+chmod +x "$PORTFOLIO_BIN/fno"
+trap 'rm -rf "$TMP" "$FAKE_BIN" "$PORTFOLIO_BIN"' EXIT
+
+PORTFOLIO_DOC="$TMP/portfolio-canon.md"
+printf '{"trigger":"manual","custom_instructions":"%s"}' "$PORTFOLIO_DOC" \
+  | env PATH="$PORTFOLIO_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1
+if grep -q "x-aaaa \[ready\] a" "$PORTFOLIO_DOC" && grep -q "x-bbbb \[in_progress\] b" "$PORTFOLIO_DOC"; then
+  pass "portfolio crown (comma-joined scope): both epics' children appear"
+else
+  fail "portfolio crown: missing children from one or both epics"
+fi
+
 echo
 echo "results: PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" == 0 ]]

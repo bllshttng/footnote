@@ -15,7 +15,6 @@ king_app = typer.Typer(
     help="The king's board: what still needs doing, and the session manifest for its loop.",
     no_args_is_help=True,
 )
-king_app.add_typer(faq_app, name="faq")
 
 
 #: Per-queue render cap for the human board view (was board.DEFAULT_MAX_ROWS;
