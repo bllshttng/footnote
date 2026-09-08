@@ -24,7 +24,7 @@ Every entry names the change that retires it. That line is a contract, not a wis
 
 Run the `/simple-english` skill over your entry before you send it. That is ASD-STE100, and `fno doctor lint style --surface markdown --files docs/fleet-faq.md` is the same standard mechanically. Pass the surface. The default is `mail`, whose 80-word cap refuses this whole file under a rule it cannot satisfy.
 
-**Retiring one.** The PR that satisfies a `Graduates to:` line moves that entry to Retired at the bottom, in that same PR. Name the PR number. Never name a node id, because this file is public and a gate rejects node ids under `docs/`.
+**Retiring one.** The PR that satisfies a `Graduates to:` line replaces that entry with one Retired line, in that same PR. Name the PR number. Never name a node id, because this file is public and a gate rejects node ids under `docs/`.
 
 **Checking.** A reigning king checks at its own check-in beat, which is the only hook measured to run. The check-in body in [../skills/reign/SKILL.md](../skills/reign/SKILL.md) names this file, so the read is encoded rather than asserted here. Over one two-day window this repo took at least 99 merges and fired zero post-merge rituals, against 171 check-ins. Do not hang this list on the ritual until a merge actually triggers one. That is the one moment somebody knows a gap closed.
 
@@ -51,6 +51,8 @@ Probably not, and four readers will disagree with each other. Know what each one
 A stale file can sit at the canonical path. One session read that copy and saw an mtime five and a half hours old. It called the worker dead and paid for a cold replacement that had to relearn the task. The live transcript had been written twenty minutes earlier under the worktree path.
 
 `fno agents resume <name> --print-command` prints the resolved cwd on its first line. Treat that line as the authority on where to look.
+
+Resolving the directory is only half of it. One worktree directory held four session transcripts. A recency sort picked a file written two days earlier by a different session, and it read as a worker long dead. Pick the file by session id, at `~/.claude/projects/<cwd-key>/<session-id>.jsonl`.
 
 *Graduates to:* one liveness verb with a decisive answer, so four readers stop disagreeing, and a transcript path resolver every caller shares.
 
@@ -321,16 +323,6 @@ A rebase is destructive on a branch carrying attestations, and it does nothing a
 
 *Graduates to:* nothing. This entry is documentation, and it stays until the reflex does.
 
-## The merge gate refuses a real cross-model review
-
-**Answer.** With no review configuration, the posture resolves to `self_review`, whose only component matches a local attestation. A GitHub App review satisfies nothing.
-
-**Specimen.** A PR was green, at rounds 2 of 2, coverage covered. A second model reviewed it and found three real P2 findings. The merge refused. `posture_verdict` in `crates/fno-agents/src/loopcheck.rs` matches `"self"` against `CoverageProducer::LocalAttestation` only. `github_apps`, `required_bots`, `peers` and `reviewers` are all unset, and `self_review_required` is true. So `resolve_posture_config` finds no signal and falls to its final `else`. It returns `self_review`, components `["self"]`, source `default`.
-
-So by default the gate rewards the author's own lane and discards the more independent review.
-
-*Graduates to:* a default posture that counts an external review. The fix has a node and an open PR, which the file-budget gate is currently blocking. The gate blocks the fix for the gate.
-
 ## A rule cites a gate that does not enforce it
 
 **Answer.** Read the gate, not the sentence that names it. A citation is a claim about behavior, and it drifts from behavior for free.
@@ -391,18 +383,6 @@ A citation has siblings. Correcting one sentence leaves every copy of it standin
 
 *Graduates to:* the warning reporting the unlinked live count beside the linked list, so a silent zero and an unreadable one are told apart.
 
-## My PR reads rounds 5 of 2
-
-**Answer.** A clean pass re-emitted per pushed head counts as a round. An attestation keys to the head, so every mechanical commit invites a fresh one. Attest only after a real findings round. A scoped fix and its verify is not a round.
-
-**Specimen.** On 2026-09-05 one PR reached 5 of 2 this way and its merge hold refused. On 2026-09-08 another reached the same count, burned across a revival fix, a collection fix, an import fix, and a merge of main. Coverage still read covered at the final head, so the extra rounds bought nothing. Two reviews complete a review, so rounds three through five were spent on commits that changed no finding.
-
-Carry-forward already exists, and knowing that is the practical remedy. A verdict carries across a docs-only interdiff on its own, reported as `freshness: carried_docs_only`, and it spends no round. The standing law is wider than the code: it says a rebase or a fix commit under 100 lines of interdiff carries too. The implementation carries docs only, so a small code fix demands a fresh verdict and spends a round.
-
-Watch for a second reading on the same payload. One live PR reported `reviewed_count` 1 beside `rounds_used` 5. A law already names that pair a defect rather than a distinction.
-
-*Graduates to:* the carry widened to the interdiff the law names, so a mechanical commit cannot spend a round. Until then, do not hand-emit a verdict at a new head. Let the carry do it.
-
 ## A peer confirmed my finding and we were both wrong
 
 **Answer.** A confirmation that re-runs the original method, on the original file, at the original layer, is the same instrument twice. It cannot fail. A cross-check must change the layer, not only the reader.
@@ -439,19 +419,24 @@ The same session had verified six claims that arrived from other people that day
 
 ## Does my reign still have a beat?
 
-**Answer.** Check it, do not assume it. List the scheduled jobs and the tasks. An empty pair means the check-in loop and every monitor are gone, and the reign is now purely reactive. Re-arm before doing anything else. A king with no clock still answers messages, so it reads as active from the outside and from the inside.
+**Answer.** Check it, do not assume it. List the scheduled jobs. An empty list means the check-in loop is gone and the reign is now purely reactive. Re-arm before doing anything else. A king with no clock still answers messages, so it reads as active from the outside and from the inside.
 
-**Specimen.** On 2026-09-08 a crowned session was asked whether it still held its beat. Scheduled jobs returned none. Tasks returned none. Six monitors and the loop had died at a compact hours earlier. Every check-in it had journaled that day was typed by hand in reply to an operator message. The same session had merged an entry about this exact failure earlier the same day and never ran the two commands on itself.
+Do not check the monitors with a task reader. A task reader covers the planning task list and never sees a monitor.
+
+**Specimen.** On 2026-09-08 a crowned session was asked whether it still held its beat. The cron reader returned none, and the loop had died at a compact hours earlier. Every check-in it had journaled that day was typed by hand in reply to an operator message. The same session had merged an entry about this exact failure earlier the same day and never ran the command on itself.
+
+An earlier version of this entry cited a task reader here, and that citation was wrong. Measured the same day, a task list returned none while two monitors ran, named by their ids. A task get on one of those ids returned not found.
 
 **You cannot answer this for anyone else.** A check-in event carries a timestamp, a type, a source and a data blob. It names no session, no king and no crown scope. With no state file present, the source field defaults to `test`. A king session has none, so every reign check-in journals as a test event. A fleet-wide question about which kings still have a beat has no reader at all.
 
-*Graduates to:* a check-in verb that stamps source, crown scope and session. Add a pre-compact hook that re-arms the beat, or names every arm it lost.
+*Graduates to:* a check-in verb that stamps source, crown scope and session. Add a reader that lists this session's live monitors. Add a pre-compact hook that re-arms the beat, or names every arm it lost.
 
 ## Retired
 
 Closed gaps, newest first. Each line names the PR that closed it, so a reader can see the machinery absorb the list.
 
-Nothing yet.
+- **The merge gate refuses a real cross-model review.** PR 1595. The self lane counts any real review now, whatever produced it.
+- **My PR reads rounds 5 of 2.** PR 1426. A rebase or a fix under 100 interdiff lines carries its verdict now.
 
 ## Related
 
