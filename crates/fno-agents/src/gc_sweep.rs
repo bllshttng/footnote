@@ -108,7 +108,7 @@ pub struct GcSummary {
 /// archive), the reverse-join index over them, and the open-do map (`session
 /// -> nodes carrying an OPEN do row for it`).
 #[derive(Debug, Default, Clone)]
-pub(crate) struct GraphRead {
+pub struct GraphRead {
     pub index: HashMap<String, Vec<(String, String)>>,
     pub open_do: HashMap<String, Vec<String>>,
     /// Normalized session id -> the phases its sessions[] rows carry. The
@@ -169,7 +169,7 @@ pub(crate) fn read_graph_entries_raw(home: &AgentsHome) -> Option<Vec<Value>> {
 
 /// Read the working graph plus the archive and build the reverse-join index
 /// and the open-do map.
-pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
+pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let entries = read_graph_entries_raw(home)?;
     let index = graph_store::sessions_index(&entries);
     let mut open_do: HashMap<String, Vec<String>> = HashMap::new();
@@ -575,14 +575,14 @@ pub(crate) fn production_tree_probe(e: &state::RegistryEntry) -> (Option<bool>, 
 /// visible for audit. The registry sweep and the roster-side sweep share
 /// this spelling; a second implementation would let the two sweeps
 /// disagree about which rows are dead.
-pub(crate) struct ProvenanceVerdict {
+pub struct ProvenanceVerdict {
     pub work: WorkState,
     pub route: node_route::NodeRoute,
     pub hold: Option<KeepReason>,
     pub merge_note: Vec<String>,
 }
 
-pub(crate) fn provenance_verdict(
+pub fn provenance_verdict(
     e: &state::RegistryEntry,
     sid: &str,
     graph: &GraphRead,

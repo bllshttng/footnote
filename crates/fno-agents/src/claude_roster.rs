@@ -36,6 +36,11 @@ pub struct ClaudeAgentRow {
     pub session_id: Option<String>,
     pub name: Option<String>,
     pub cwd: Option<String>,
+    /// (x-c914 mirror) Which claude account root this row was read from:
+    /// `None` = the ambient `~/.claude`, `Some(id)` = an isolated account's
+    /// config dir from the fno accounts config. Set by the union reader,
+    /// never by `parse_all_agents` (the parse stays dir-blind).
+    pub account: Option<String>,
 }
 
 impl ClaudeAgentRow {
@@ -46,6 +51,7 @@ impl ClaudeAgentRow {
             session_id: None,
             name: None,
             cwd: None,
+            account: None,
         }
     }
 }
@@ -213,7 +219,22 @@ fn parse_all_agents(stdout: &[u8]) -> ClaudeAgentsSnapshot {
 }
 
 fn run_all_agents_command() -> Result<ClaudeCommandOutput, String> {
-    let mut child = std::process::Command::new("claude")
+    run_all_agents_command_in(None)
+}
+
+/// Run `claude agents --json --all` against ONE account root. `None` is the
+/// ambient root (whatever `CLAUDE_CONFIG_DIR` the process already carries);
+/// `Some(dir)` pins the dir, which is how an isolated account's rows become
+/// visible to a reader that would otherwise never see them.
+fn run_all_agents_command_in(
+    config_dir: Option<&std::path::Path>,
+) -> Result<ClaudeCommandOutput, String> {
+    let mut command = std::process::Command::new("claude");
+    if let Some(dir) = config_dir {
+        command.env("CLAUDE_CONFIG_DIR", dir);
+    }
+    let mut child = command
+        .args(["agents", "--json", "--all"])
         .args(["agents", "--json", "--all"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -262,6 +283,144 @@ fn run_all_agents_command() -> Result<ClaudeCommandOutput, String> {
         stdout,
         stderr,
     })
+}
+
+/// The isolated claude account roots, `(account_id, config_dir)`, mirrored
+/// from the accounts config the same way the mux's `agents_view` reads them
+/// (the crates share no types; the FILE is the contract). Managed accounts
+/// carry no `config_dir` and contribute nothing, so an all-managed config
+/// degrades to the single ambient read. Source precedence: project-local
+/// `.fno/config.toml`, then the `$FNO_GLOBAL_SETTINGS_PATH` sibling, then
+/// `~/.fno/config.toml`. Fail-open to empty: an unreadable config means no
+/// known isolated roots, and the union degrades to the ambient read.
+pub fn isolated_account_dirs() -> Vec<(String, std::path::PathBuf)> {
+    let mut sources: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        sources.push(cwd.join(".fno").join("config.toml"));
+    }
+    if let Ok(global) = std::env::var("FNO_GLOBAL_SETTINGS_PATH") {
+        if let Some(parent) = std::path::Path::new(&global).parent() {
+            sources.push(parent.join("config.toml"));
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        sources.push(
+            std::path::PathBuf::from(home)
+                .join(".fno")
+                .join("config.toml"),
+        );
+    }
+    for path in sources {
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let parsed = parse_isolated_config_dirs(&body, std::env::var_os("HOME").as_deref());
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+    Vec::new()
+}
+
+/// Parse `[[providers.records]]` / `[[accounts.records]]` entries carrying an
+/// isolated `config_dir`, as `(account_id, dir)` with `~/` expanded. Malformed
+/// records are skipped, never a panic.
+pub fn parse_isolated_config_dirs(
+    toml_body: &str,
+    home: Option<&std::ffi::OsStr>,
+) -> Vec<(String, std::path::PathBuf)> {
+    let Ok(table) = toml_body.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let records = table
+        .get("accounts")
+        .or_else(|| table.get("providers"))
+        .and_then(|section| section.get("records"))
+        .and_then(|records| records.as_array());
+    let mut out = Vec::new();
+    for record in records.into_iter().flatten() {
+        let (Some(id), Some(dir)) = (
+            record.get("id").and_then(|v| v.as_str()),
+            record.get("config_dir").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        if id.is_empty() || dir.trim().is_empty() {
+            continue;
+        }
+        let expanded = if let Some(rest) = dir.strip_prefix("~/") {
+            let Some(home) = home else {
+                continue;
+            };
+            std::path::PathBuf::from(home).join(rest)
+        } else {
+            std::path::PathBuf::from(dir)
+        };
+        out.push((id.to_string(), expanded));
+    }
+    out
+}
+
+/// The agent list across EVERY account root: the ambient read first, then
+/// one pinned read per isolated account. Rows carry the account they were
+/// read under, so a removal can be routed to the root that owns them.
+/// The snapshot reads `Known` only when EVERY root's read parsed - a root
+/// that failed leaves the whole union `Unknown`, because absence from a
+/// partial union is a WRONG-ROOT absence and must never read as removal
+/// evidence.
+pub fn read_all_agents_union() -> ClaudeAgentsSnapshot {
+    let mut rows: Vec<ClaudeAgentRow> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut all_known = true;
+    let ambient = read_all_agents();
+    match &ambient {
+        ClaudeAgentsSnapshot::Known { rows: parsed, .. } => rows.extend(parsed.iter().cloned()),
+        ClaudeAgentsSnapshot::Unknown {
+            rows: parsed,
+            warnings: w,
+        } => {
+            all_known = false;
+            warnings.extend(w.iter().cloned());
+            rows.extend(parsed.iter().cloned());
+        }
+    }
+    for (account, dir) in isolated_account_dirs() {
+        let output = run_all_agents_command_in(Some(&dir));
+        let snapshot = match output {
+            Ok(output) => parse_all_agents(&output.stdout),
+            Err(reason) => ClaudeAgentsSnapshot::unknown(&reason),
+        };
+        match snapshot {
+            ClaudeAgentsSnapshot::Known {
+                rows: parsed,
+                warnings: w,
+            } => {
+                for mut row in parsed {
+                    row.account = Some(account.clone());
+                    rows.push(row);
+                }
+                if !w.is_empty() {
+                    warnings.extend(w);
+                }
+            }
+            ClaudeAgentsSnapshot::Unknown {
+                rows: parsed,
+                warnings: w,
+            } => {
+                all_known = false;
+                warnings.extend(w.iter().cloned());
+                for mut row in parsed {
+                    row.account = Some(account.clone());
+                    rows.push(row);
+                }
+            }
+        }
+    }
+    if all_known {
+        ClaudeAgentsSnapshot::Known { rows, warnings }
+    } else {
+        ClaudeAgentsSnapshot::Unknown { rows, warnings }
+    }
 }
 
 /// Env override that redirects the whole Claude daemon dir (tests, and operators
