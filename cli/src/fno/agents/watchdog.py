@@ -712,19 +712,6 @@ def finished_with_the_tree(
     ) not in _ENGAGED_TAILS
 
 
-def _iso_epoch_s(stamp: Optional[str]) -> Optional[float]:
-    """Epoch seconds for an ISO stamp, or None when it will not read."""
-    if not stamp:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.timestamp()
-
-
 def _mins(now_s: float, epoch: Optional[float]) -> Optional[int]:
     if epoch is None:
         return None
