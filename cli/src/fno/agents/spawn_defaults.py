@@ -1683,6 +1683,9 @@ def inject_spawn_defaults(
                 f"fno agents spawn: harness-keyed defaults skipped ({exc})",
                 file=err,
             )
+        if _overlay_answer is not None and _overlay_answer.get("refusal"):
+            print(_overlay_answer["refusal"], file=err)
+            raise SystemExit(2)
 
     def _seamed(name: str) -> Tuple[str, Optional[str]]:
         """The post-resolution read for the three posture fields: the lane
@@ -1725,6 +1728,7 @@ def inject_spawn_defaults(
                     f"{effort_rung}.effort = {cfg_effort!r} ignored",
                     file=err,
                 )
+                suppressed.append(("effort", cfg_effort, effort_rung or "", reason))
 
     # Substrate (x-3d5b): inject when no explicit substrate is pinned (flag,
     # positional token, --headless/-o, or resume-implied bg - all post-normalize).
@@ -1759,7 +1763,7 @@ def inject_spawn_defaults(
                     f"{substrate_rung}.substrate = {cfg_substrate!r} ignored",
                     file=err,
                 )
-            suppressed.append(("substrate", cfg_substrate, substrate_rung or "", reason))
+                suppressed.append(("substrate", cfg_substrate, substrate_rung or "", reason))
 
     # Permission mode (x-3d5b): same shape as substrate, but the compatibility
     # check depends on the EFFECTIVE substrate (explicit pin > this-run injection >
