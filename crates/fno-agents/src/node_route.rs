@@ -80,42 +80,88 @@ fn newest<'a>(paths: &'a [PathBuf]) -> Option<&'a Path> {
         .map(|p| p.as_path())
 }
 
-/// Read the file as whole lines from one end, walking at most `limit`
-/// bytes. `from_head` walks forward from byte zero; otherwise it walks
-/// backward from EOF. A retask can name a different node ANYWHERE in a
-/// transcript (measured: 31% of files exceed a 256 KiB window), so a
-/// witness that read only one end is not a witness for the middle - the
-/// scan limit is the budget cap, not the evidence's reach.
 const SCAN_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
+const BACKWARD_CHUNK_BYTES: u64 = 1024 * 1024;
 
-fn bound_lines(path: &Path, from_head: bool, limit: u64) -> Vec<String> {
-    use std::io::{Read, Seek, SeekFrom};
+/// The first witness reads forward from the head: the dispatch brief lives
+/// in the first user message, so the walk stops at the first naming line
+/// and `limit` only bounds pathological files.
+fn head_lines(path: &Path, limit: u64) -> Vec<String> {
+    use std::io::Read;
     let Ok(mut file) = std::fs::File::open(path) else {
         return Vec::new();
     };
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let read_len = len.min(limit);
-    let start = if from_head {
-        0
-    } else {
-        len.saturating_sub(read_len)
-    };
-    if start > 0 {
-        let Ok(_) = file.seek(SeekFrom::Start(start)) else {
-            return Vec::new();
-        };
-    }
     let mut raw: Vec<u8> = Vec::with_capacity(read_len as usize);
     if file.take(read_len).read_to_end(&mut raw).is_err() {
         return Vec::new();
     }
-    let dropped_first = !from_head && start > 0;
-    let text = String::from_utf8_lossy(&raw);
-    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
-    if dropped_first && !lines.is_empty() {
-        lines.remove(0); // a partial leading line is not a message
+    String::from_utf8_lossy(&raw)
+        .split('\n')
+        .map(str::to_string)
+        .collect()
+}
+
+/// Walk a transcript's lines backward from EOF in chunks, newest first,
+/// handing each complete line to `hit` until it answers true. The chunk
+/// boundary never drops a line: the fragment straddling it is carried and
+/// reassembled with the next chunk's head, so the line a fixed window
+/// would discard still answers. The walk stops at the first `true`, at
+/// file start, or once `limit` bytes have passed without an answer - the
+/// cap is the valve for a transcript that names nothing, not a window
+/// over the evidence.
+fn walk_lines_backward(path: &Path, limit: u64, mut hit: impl FnMut(&str) -> bool) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut pos = len;
+    let mut scanned = 0u64;
+    let mut carry = String::new();
+    while pos > 0 {
+        if scanned >= limit {
+            return false;
+        }
+        let start = pos.saturating_sub(BACKWARD_CHUNK_BYTES);
+        let read_len = pos - start;
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            return false;
+        }
+        let mut raw = vec![0u8; read_len as usize];
+        if file.read_exact(&mut raw).is_err() {
+            return false;
+        }
+        scanned += read_len;
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let mut segments: Vec<&str> = text.split('\n').collect();
+        let head = segments.pop().unwrap_or_default();
+        if segments.is_empty() {
+            if start > 0 {
+                // one giant line spans the whole chunk: keep accumulating
+                carry = format!("{head}{carry}");
+                pos = start;
+                continue;
+            }
+            return hit(head);
+        }
+        let mut crossing = String::with_capacity(head.len() + carry.len());
+        crossing.push_str(head);
+        crossing.push_str(&carry);
+        if hit(&crossing) {
+            return true;
+        }
+        let complete = segments.split_off(if start > 0 { 1 } else { 0 });
+        for line in complete.iter().rev() {
+            if hit(line) {
+                return true;
+            }
+        }
+        carry = segments.into_iter().next().unwrap_or_default().to_string();
+        pos = start;
     }
-    lines
+    false
 }
 
 /// The first token shaped `[a-z][a-z0-9]*-[0-9a-f]{4,}` that names a graph
@@ -158,7 +204,7 @@ fn transcript_first(paths: Option<&[PathBuf]>, ids: &HashSet<String>) -> Option<
     // user message, and the scan stops at the first one carrying a node.
     // The 8 MiB cap bounds pathological files; short of those the witness
     // covers the whole transcript.
-    for line in bound_lines(path, true, SCAN_LIMIT_BYTES) {
+    for line in head_lines(path, SCAN_LIMIT_BYTES) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
@@ -175,25 +221,31 @@ fn transcript_first(paths: Option<&[PathBuf]>, ids: &HashSet<String>) -> Option<
 /// The last node-naming message, wherever it sits, is the second witness.
 /// A mid-transcript retask (head names a done node, middle names an open
 /// one, tail goes quiet) must answer from the retask, not the head, so
-/// this walks the FULL transcript backward and keeps the newest naming
-/// line it finds.
+/// this walks backward from EOF and stops at the first naming line. The
+/// 8 MiB cap is the valve for a transcript that names nothing, not a
+/// window over the evidence.
 fn transcript_last(paths: Option<&[PathBuf]>, ids: &HashSet<String>) -> Option<String> {
     let path = newest(paths?)?;
-    for line in bound_lines(path, false, SCAN_LIMIT_BYTES).into_iter().rev() {
+    let mut answer = None;
+    walk_lines_backward(path, SCAN_LIMIT_BYTES, |line| {
         if line.trim().is_empty() {
-            continue;
+            return false;
         }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
         };
         if value.get("message").is_none() {
-            continue;
+            return false;
         }
-        if let Some(node) = first_node_token(&line, ids) {
-            return Some(node);
+        match first_node_token(line, ids) {
+            Some(node) => {
+                answer = Some(node);
+                true
+            }
+            None => false,
         }
-    }
-    None
+    });
+    answer
 }
 
 /// x-1379's name route, ported verbatim from
@@ -398,7 +450,7 @@ mod tests {
     // disagrees and holds instead of retiring on the head.
     #[test]
     fn a_mid_transcript_retask_names_the_newer_node() {
-        let tmp = std::env::temp_dir().join(format!("node-route-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("node-route-retask-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let filler = "x".repeat(200);
         let path = write_transcript(
@@ -535,8 +587,7 @@ mod tests {
         assert_eq!(transcript_first(None, &ids), None);
     }
 
-    // The tail bound drops a partial leading line; a full line at the bound
-    // still resolves.
+    // The newest naming line wins over the older line near the head.
     #[test]
     fn transcript_last_scans_back_over_messages() {
         let tmp = std::env::temp_dir().join(format!("node-route-last-{}", std::process::id()));
@@ -553,6 +604,49 @@ mod tests {
             transcript_last(Some(&[path]), &ids).as_deref(),
             Some("x-bbbb")
         );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // A naming line longer than one chunk spans the backward walk's
+    // internal boundaries. The carried fragment must reassemble with the
+    // next chunk's head, or the newest answer is lost to the older line
+    // below it.
+    #[test]
+    fn a_line_spanning_chunks_still_answers() {
+        let tmp = std::env::temp_dir().join(format!("node-route-span-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let pad = "p".repeat(BACKWARD_CHUNK_BYTES as usize);
+        let big = String::from(r#"{"type":"assistant","message":{"content":"retasked to x-bbbb "#)
+            + &"q".repeat(BACKWARD_CHUNK_BYTES as usize * 3 / 2)
+            + r#""}}"#;
+        let path = write_transcript(
+            &tmp,
+            &[
+                r#"{"type":"user","message":{"content":"first x-aaaa"}}"#,
+                &pad,
+                &big,
+            ],
+        );
+        let ids = ids_of(&[("x-aaaa", "done"), ("x-bbbb", "done")]);
+        assert_eq!(
+            transcript_last(Some(&[path]), &ids).as_deref(),
+            Some("x-bbbb")
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // The cap is the valve for a transcript that names nothing: the walk
+    // stops at the bound instead of reading the whole file.
+    #[test]
+    fn the_valve_stops_a_transcript_that_names_nothing() {
+        let tmp = std::env::temp_dir().join(format!("node-route-valve-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let blank = "q".repeat(1024);
+        let lines: Vec<String> = vec![blank; SCAN_LIMIT_BYTES as usize / 1024 * 9 / 8];
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let path = write_transcript(&tmp, &refs);
+        let ids = ids_of(&[("x-aaaa", "done")]);
+        assert_eq!(transcript_last(Some(&[path]), &ids), None);
         std::fs::remove_dir_all(&tmp).ok();
     }
 }
