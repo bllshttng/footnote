@@ -1692,7 +1692,7 @@ def _grid_lane_for(
     # carries the capacity verdict that selected it, and the resolver already
     # skipped exhausted lanes. A second, harness-wide capacity re-check here
     # would discard the selected coordinate and re-price it independently -
-    # the exact dual-decision this node deletes (x-90a9 task 2.1).
+    # the exact dual-decision this change deletes.
     return candidate["harness"], candidate["model"], None
 
 

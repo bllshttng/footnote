@@ -1110,11 +1110,11 @@ def inject_spawn_defaults(
     slot_receipt: List[Tuple[str, str, str]] = []
     # (axis, value, rung, reason): a config-resolved axis this spawn did NOT
     # get. Route is the axis that bills, so an omission there must name itself
-    # (x-f1ab: the four-way silent drop); the others already print.
+    # (the four-way silent drop); the others already print.
     suppressed: List[Tuple[str, str, str, str]] = []
     # Strict inventory policy: the resolver runs on EVERY spawn, even one
     # whose model axis is occupied - an explicit pin is a constraint the
-    # slot qualifies, never a bypass (x-90a9 task 2.1).
+    # slot qualifies, never a bypass.
     enforced = bool(
         getattr(getattr(settings, "routing", None), "enforce_inventory", False)
     )
@@ -1849,7 +1849,7 @@ def _resolved_axes_view(
     """Every config-resolved spawn axis as ``(value, rung)``, empties included.
 
     "The config read as empty here" and "the value was suppressed" are
-    different facts; the event must tell them apart (x-f1ab).
+    different facts; the event must tell them apart.
     """
     return {
         "provider": (cfg_harness or "", provider_rung),
