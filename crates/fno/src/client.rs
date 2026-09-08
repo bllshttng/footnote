@@ -1067,11 +1067,14 @@ struct View {
     /// Pending escape bytes in answer-overlay mode (same split-arrow safety as
     /// [`View::sel_esc`]).
     ans_esc: Vec<u8>,
-    /// (x-4433) The activity feed overlay, prefix+e: the fold's rows newest
-    /// first, its cursor, and the needs-fold generation/single-flight
-    /// discipline. `None` closed.
+    /// (x-4433, x-f089) The activity feed panel on the right edge, `e`
+    /// toggle; the fold's rows newest first. `None` closed. The panel's
+    /// width/drag/hover state and behavior live in `feed_view`.
     feed: Option<feed_view::FeedOverlay>,
-    feed_esc: Vec<u8>,
+    feed_width: u16,
+    feed_offset: usize,
+    hover_feed_border: bool,
+    feed_drag: Option<SidelineDrag>,
     /// (x-feec) The event-derived needs-me leg: the last `fno-agents needs` fold
     /// result while the overlay is open (`None` = live-only, not yet fetched
     /// this open). Merged with the live badge leg by [`View::needs_queue`].
@@ -1516,7 +1519,6 @@ pub(crate) use confirm::{remove_dead, ConfirmAction, ConfirmKind, CLEAR_DEAD_MAX
 // reuses join_fold_row's join keys for its deep link (x-4433).
 mod feed_view;
 mod needs_view;
-use feed_view::{feed_hit, feed_overlay_lines, feed_selected_line, FeedOverlay};
 pub(crate) use needs_view::{needs_overlay_lines, NeedsProjection};
 
 /// The move-tab / move-pane destination picker's state (x-96e8, cursored by
@@ -2758,7 +2760,10 @@ impl View {
             answers: None,
             ans_esc: Vec::new(),
             feed: None,
-            feed_esc: Vec::new(),
+            feed_width: view_store::load_feed_width().unwrap_or(feed_view::FEED_DEFAULT_W),
+            feed_offset: 0,
+            hover_feed_border: false,
+            feed_drag: None,
             needs_fold: None,
             mine_fold: None,
             needs_fold_at: None,
@@ -4187,7 +4192,10 @@ impl View {
                 .0
                 .saturating_sub(TAB_BAR_ROWS + self.status_rows())
                 .max(1),
-            self.term.1.saturating_sub(self.panel_w()).max(1),
+            self.term
+                .1
+                .saturating_sub(self.panel_w() + self.feed_panel_w())
+                .max(1),
         )
     }
 
@@ -4354,6 +4362,7 @@ impl View {
     fn refresh_hover_affordances(&mut self, row: u16, col: u16) {
         self.hover_seam = self.seam_at(row, col);
         self.hover_sideline_border = self.on_sideline_border(row, col);
+        self.hover_feed_border = self.on_feed_border(row, col);
         self.hover_grip = self.grip_at(row, col);
     }
 
@@ -5044,6 +5053,9 @@ impl View {
     /// clicking anywhere off the panel still reaches the pane underneath.
     fn chrome_hit(&self, row: u16, col: u16) -> Option<ChromeHit> {
         let panel_w = self.panel_w();
+        if let Some(hit) = self.chrome_hit_feed(row, col) {
+            return Some(hit);
+        }
         // Tab strip (row 0, scoped to the content columns since x-cd67 US1): it
         // begins at `panel_w`, walking the same spans the renderer paints (with
         // the same origin). A row-0 click LEFT of the divider (`col < panel_w`)
@@ -5512,6 +5524,8 @@ impl View {
         // Accent whatever grabbable chrome sits under the pointer (independent
         // of the focus-follow off-switch below).
         self.refresh_hover_affordances(row, col);
+
+        self.hover_feed_marker(row, col);
 
         // (hover affordance) The link probe tracks the exact CELL, so every
         // crossed cell restarts its quiet period - unlike focus-follows below,
@@ -6543,6 +6557,8 @@ impl View {
         }
 
         self.draw_bottom_row(&mut cells, rows, cols);
+        // (x-f089) Chrome, not an overlay: after panes, before modals.
+        self.draw_feed_panel(&mut cells, rows, cols);
         let (overlay_origin, overlay_dims) = self.overlay_viewport();
         if let Some(lines) = &self.digest {
             // x-4e2d catch-up overlay: any key dismisses (handle_stdin, like the
@@ -6617,23 +6633,6 @@ impl View {
                 // the MINE/THEY NEED YOU heading + footer lines between the
                 // two lanes, which a flat `sel + 1` no longer can.
                 Some(projection.selected_line(sel)),
-            );
-        } else if let Some(f) = &self.feed {
-            // x-4433: the activity feed, newest first, cursor-followed. Same
-            // chrome + viewport as the needs overlay beside it.
-            let lines = feed_overlay_lines(f);
-            let chrome =
-                chrome::Chrome::new("activity feed", Anchor::Center).footer("⏎ goto · q close");
-            draw_lines_overlay(
-                &mut cells,
-                rows,
-                cols,
-                overlay_origin,
-                overlay_dims,
-                &chrome,
-                &lines,
-                &self.theme,
-                Some(feed_selected_line(f.sel)),
             );
         } else if let Some(yv) = &self.yard {
             // (x-b2bf) The yard: the fleet as f[no]nimals. The
@@ -10864,21 +10863,7 @@ async fn attach_and_run(
             });
         }
         // x-4433: kick a wanted feed fold off the UI loop, same discipline.
-        if let Some(f) = view.feed.as_mut() {
-            if f.want && !f.inflight {
-                f.want = false;
-                f.inflight = true;
-                let tx = feed_tx.clone();
-                let gen = f.gen;
-                let since = crate::digest_overlay::now_secs()
-                    .saturating_sub(NEEDS_WINDOW_SECS)
-                    .to_string();
-                tokio::spawn(async move {
-                    let result = crate::feed_overlay::feed_now(&since).await;
-                    let _ = tx.send((gen, result));
-                });
-            }
-        }
+        feed_view::maybe_kick(&mut view, &feed_tx);
         // x-f730 task 2.2: kick a queued MINE mutation off the UI loop.
         // `mine_acting` is already set by the stdin handler at enqueue time
         // (mirrors `Connections::acting`), so a second x/d/add press before
@@ -11001,6 +10986,7 @@ async fn attach_and_run(
         // a swallowed mouse-up is worse than under the old single-snap drag.
         // Give it the same backstop seam/pane drags already have.
         let sideline_drag_deadline = view.sideline_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
+        let feed_drag_deadline = view.feed_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
         // (x-d6a8 AC1-FR) The tab-cell and sideline-row drags share the same
         // dead-drag reaper: a mouse-up that never arrives must not latch the
         // gesture. Only one of the three is ever live, so one deadline over both
@@ -11434,24 +11420,11 @@ async fn attach_and_run(
             }
             Some((gen, outcome)) = feed_rx.recv() => {
                 // x-4433: a feed fold landed; apply only to the still-open,
-                // same-generation overlay - a result for a closed/superseded
-                // open is discarded (the needs arm's contract, one consumer).
-                if let Some(f) = view.feed.as_mut() {
-                    if gen == f.gen {
-                        f.inflight = false;
-                        match outcome {
-                            Ok(items) => {
-                                f.items = items;
-                                f.sel = 0;
-                                f.error = None;
-                            }
-                            // Keep prior rows visible; render the typed reason.
-                            Err(e) => f.error = Some(e),
-                        }
-                        if let Err(e) = compositor.draw(&view.compose()) {
-                            break Err(format!("draw: {e}"));
-                        }
-                    }
+                // same-generation panel (a result for a closed/superseded open
+                // is discarded, the needs arm's contract, one consumer).
+                feed_view::apply_fold(&mut view, gen, outcome);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
                 }
             }
             Some(result) = mine_act_rx.recv() => {
@@ -11710,6 +11683,21 @@ async fn attach_and_run(
                 // so refresh hover at the border's current column.
                 let col = view.panel_w().saturating_sub(1);
                 view.end_sideline_drag(TAB_BAR_ROWS, col);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            _ = async {
+                match feed_drag_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if feed_drag_deadline.is_some() => {
+                // (x-f089) The feed drag's own reaper, same "keep the reached
+                // width" reasoning: end it exactly as a release would (and
+                // persist), refreshing hover at the border's current column.
+                let col = view.term.1 - view.feed_panel_w();
+                view.end_feed_drag(TAB_BAR_ROWS, col);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -12298,6 +12286,9 @@ async fn handle_stdin(
                 _ => view.end_sideline_drag(rep.row, rep.col),
             }
         }
+        if feed_view::drag_mouse(view, rep.row, rep.col, rep.kind, sock_w).await? {
+            continue;
+        }
         // Name and confirmation overlays share the same framed layout and own
         // every pointer event, including clicks outside their block.
         if modal_mouse(view, rep) {
@@ -12367,6 +12358,9 @@ async fn handle_stdin(
                 });
                 continue;
             }
+            if view.begin_border_drag(rep.row, rep.col) {
+                continue;
+            }
         }
         // x-8ccf US2: right-click a sideline row opens its context menu (agent
         // rows) or is swallowed (non-agent chrome). A right-click on a PANE cell
@@ -12430,6 +12424,12 @@ async fn handle_stdin(
                 view.scroll_sideline(matches!(rep.kind, MouseKind::WheelDown));
                 continue;
             }
+            // The feed panel's columns: scroll its window, never a pane.
+            let feed_w = view.feed_panel_w();
+            if feed_w > 0 && rep.col >= view.term.1 - feed_w {
+                view.scroll_feed(matches!(rep.kind, MouseKind::WheelDown));
+                continue;
+            }
         }
         if let Some((pane, prow, pcol)) = view.hit_test(rep.row, rep.col) {
             write_msg(
@@ -12482,6 +12482,14 @@ async fn handle_stdin(
                 .await
                 .map_err(|e| format!("sideline revert resize send failed: {e}"))?;
         }
+        return Ok(StdinFlow::Continue);
+    }
+    // (x-f089) A bare Esc during a feed-border drag reverts the width to where
+    // the drag began, the sideline revert's mirror.
+    if view.feed_drag.is_some()
+        && passthrough == [0x1b]
+        && feed_view::esc_revert(view, sock_w).await?
+    {
         return Ok(StdinFlow::Continue);
     }
     // (x-d6a8 AC1-FR) A bare Esc cancels a tab-cell or sideline-row drag too. No
@@ -12566,9 +12574,7 @@ async fn handle_stdin(
     if view.yard.is_some() {
         return yard_keys(view, &passthrough, sock_w).await;
     }
-    if view.feed.is_some() {
-        return feed_view::feed_keys(view, &passthrough, sock_w).await;
-    }
+    // (x-f089) The feed panel is chrome and consumes no keys.
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
     }
@@ -12756,17 +12762,7 @@ async fn dispatch_event(
                 view.yard_want = true;
             }
         }
-        Event::OpenFeed => {
-            // x-4433: open the activity feed. Prior rows render instantly; a
-            // fresh fold is always armed and merges in when it lands - the
-            // overlay never blocks on it, and a failed fold degrades loudly.
-            let gen = view
-                .feed
-                .as_ref()
-                .map(|f| f.gen.wrapping_add(1))
-                .unwrap_or(0);
-            view.feed = Some(feed_view::open_overlay(view.feed.take(), gen));
-        }
+        Event::OpenFeed => feed_view::toggle(view, sock_w).await?,
         Event::OpenCourt => view.court.toggle(),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;

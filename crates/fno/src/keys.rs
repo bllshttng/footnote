@@ -388,10 +388,10 @@ pub enum Event {
     /// visible; this only expands or collapses it, and the client's view
     /// layer interprets that, not here.
     OpenCourt,
-    /// Open the activity feed overlay (prefix+e, x-4433): questions,
-    /// decisions and node lifecycle, newest first. Overlay-mode keys (j/k
-    /// move, Enter deep-links the row's session, q/Esc close) are
-    /// interpreted by the client's view layer, not here (like OpenAnswers).
+    /// Toggle the activity feed panel on the right edge (e, x-4433):
+    /// questions, decisions and node lifecycle, newest first. The panel is
+    /// chrome and consumes no keys; a click deep-links a row and the border
+    /// drags (interpreted by the client's view layer, like OpenAnswers).
     OpenFeed,
     /// Show/hide the sideline (prefix+b).
     TogglePanel,
