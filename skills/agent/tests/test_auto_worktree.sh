@@ -41,6 +41,8 @@ STUBDIR="$TMP/bin"; mkdir -p "$STUBDIR"
 cat > "$STUBDIR/fno" <<'STUB'
 #!/usr/bin/env bash
 case "$1 $2 $3" in
+  "agents dispatch capabilities"*)
+    printf '%s\n' '{"resume_strategy":{"forms":{"interactive_attach":{"tokens":["claude","attach","{short_id}"]}}}}'; exit 0 ;;
   "agents spawn-guard"*)  printf '{"verdict":"dispatchable"}\n'; exit 0 ;;
   "agents list "*)         printf '{"agents":[]}\n'; exit 0 ;;
   "agents spawn "*|"agents host "*)

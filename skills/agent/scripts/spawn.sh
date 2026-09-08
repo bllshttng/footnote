@@ -66,6 +66,29 @@ DENY_TOOLS=""          # x-b6e2: forwarded as --deny-tools to the spawn verb
 
 fail() { printf 'result=failed reason="%s"\n' "$1"; exit 1; }
 
+thread_receipt_field() {
+  local capabilities
+  capabilities="$(fno agents dispatch capabilities "$PROVIDER" --json 2>/dev/null)" || return 1
+  printf '%s' "$capabilities" | jq -r '
+    if .keeper? != null then "short_id"
+    elif ((.resume_strategy.forms.interactive_attach.tokens // []) | index("{short_id}")) != null then "short_id"
+    else "session_id"
+    end
+  ' 2>/dev/null
+}
+
+valid_receipt_identity() {
+  local identity="$1"
+  [[ -n "$identity" && ! "$identity" =~ [[:space:]] ]] || return 1
+  [[ "$identity" =~ ^[0-9a-f]{8}$ \
+     || "$identity" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ \
+     || "$identity" =~ ^ses_[A-Za-z0-9]+$ ]]
+}
+
+valid_pane_identity() {
+  [[ "$1" =~ ^[A-Za-z0-9_-]{1,64}$ ]]
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --name)         NAME="${2:-}"; shift 2 ;;
@@ -581,33 +604,23 @@ else
   # anchors `^...$` to the whole string, so any embedded newline or stray byte
   # fails (parity with the one-shot path's single-line requirement). bash 3.2 safe.
   #
-  # The valid SHAPE depends on the substrate (x-61b7). Claude thread/headless
-  # receipts return a real 8-hex session-id prefix (client-side `claude --bg` /
-  # one-shot), while a Codex thread receipt has no short_id and must use its
-  # full harness session identity. The
-  # default/`pane` owned-PTY lane is addressed by an identifier-shaped registry
-  # handle: Rust derives a non-empty name-slug short_id; Python supplies the
-  # verified receipt name above because mux panes own no worker socket. The
-  # 8-hex rule wrongly rejects both shapes, so accept a single-line identifier
-  # there (empty/torn receipts still fail - the cardinal guard remains intact).
+  # The harness capability map owns the canonical receipt field. Keeper lanes
+  # and Claude attach use `.short_id`; Codex/OpenCode attach lanes use the full
+  # session identity. Validate that selected identity generically, so a valid
+  # OpenCode `ses_*` id is accepted while a torn short-id-only receipt fails.
   case "$SUBSTRATE" in
     thread|bg)
-      if [[ "$PROVIDER" != "claude" ]]; then
-        short_id="${harness_session_id:-${session_id:-$short_id}}"
-        short_id_shape='^([0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
-      else
-        short_id_shape='^[0-9a-f]{8}$'
-      fi
+      receipt_field="$(thread_receipt_field)"
+      case "$receipt_field" in
+        short_id) short_id="$short_id" ;;
+        session_id) short_id="${harness_session_id:-$session_id}" ;;
+        *) fail "no receipt field in harness map for thread substrate '$PROVIDER'" ;;
+      esac
+      valid_receipt_identity "$short_id" || fail "no valid receipt ($VERB JSON canonical identity empty/malformed for substrate '${SUBSTRATE:-pane}'): $(sanitize "${spawn_out:-$spawn_err}")"
       ;;
-    headless) short_id_shape='^[0-9a-f]{8}$' ;;
-    # 64, not 40: the pane handle is the derived agent name (<verb>-<node-id>-<slug>),
-    # which normalize builds up to ~50 chars (verb + id + a 32-char slug). A 40-cap
-    # rejected a real long-slug codex pane launch as FAILED (name 43 > 40).
-    *)           short_id_shape='^[A-Za-z0-9_-]{1,64}$' ;;
+    headless) : ;;
+    *) valid_pane_identity "$short_id" || fail "no valid receipt ($VERB JSON pane identity empty/malformed for substrate '${SUBSTRATE:-pane}'): $(sanitize "${spawn_out:-$spawn_err}")" ;;
   esac
-  if [[ ! "$short_id" =~ $short_id_shape ]]; then
-    fail "no valid receipt ($VERB JSON identity empty/malformed for substrate '${SUBSTRATE:-pane}'): $(sanitize "${spawn_out:-$spawn_err}")"
-  fi
 fi
 
 # ---- Report (mode-aware) ------------------------------------------------

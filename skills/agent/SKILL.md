@@ -572,8 +572,9 @@ takes the JSON `.short_id` family below, not a bare 8-hex line):
 - **`spawn` / `host`**: stdout is JSON
   carrying `{"short_id",...}` (compact or pretty depending on runtime and
   substrate). `.short_id` is parsed with `jq`; `thread` uses a session-shaped
-  handle: Claude receipts use an 8-hex id, while Codex and keeper-lane receipts
-  use the full UUID session identity. The default/pane lane accepts the runtime's identifier-shaped
+  handle: Claude receipts use an 8-hex id, Codex receipts use a full UUID,
+  OpenCode receipts use `ses_*`, and keeper-lane receipts use their full session
+  identity. The default/pane lane accepts the runtime's identifier-shaped
   handle: Rust returns a name-slug `short_id`; Python pane receipts have an
   empty worker-socket id, so `spawn.sh` uses the receipt's registry `name` only
   after matching provider/status and requiring both mux session and pane id.

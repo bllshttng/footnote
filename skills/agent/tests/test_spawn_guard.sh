@@ -32,6 +32,15 @@ case "$1 $2" in
   "agents spawn-guard")
     [[ -n "${STUB_VERDICT:-}" ]] && printf '%s\n' "$STUB_VERDICT"
     exit "${STUB_VERDICT_RC:-0}" ;;
+  "agents dispatch")
+    case "${4:-}" in
+      claude) printf '%s\n' '{"resume_strategy":{"forms":{"interactive_attach":{"tokens":["claude","attach","{short_id}"]}}}}' ;;
+      codex) printf '%s\n' '{"resume_strategy":{"forms":{"interactive_attach":{"tokens":["codex","resume","{session_id}"]}}}}' ;;
+      agy) printf '%s\n' '{"keeper":{},"resume_strategy":{"forms":{"interactive_attach":{"tokens":[]}}}}' ;;
+      opencode) printf '%s\n' '{"resume_strategy":{"forms":{"interactive_attach":{"tokens":[]}}}}' ;;
+      *) exit 1 ;;
+    esac
+    exit 0 ;;
   "agents list")
     echo '{"agents":[]}'; exit 0 ;;
   "agents spawn"|"agents host")
@@ -62,6 +71,12 @@ case "$1 $2" in
     if [[ "${STUB_KEEPER_THREAD:-0}" == "1" ]]; then
       thread_session="${STUB_THREAD_SESSION_ID-019f0000-0000-7000-8000-000000000002}"
       echo "{\"name\":\"agy-thread\",\"short_id\":\"$thread_session\",\"harness\":\"agy\",\"status\":\"live\"}"; exit 0
+    fi
+    if [[ "${STUB_OPENCODE_THREAD:-0}" == "1" ]]; then
+      if [[ "${STUB_OPENCODE_TORN:-0}" == "1" ]]; then
+        echo '{"name":"opencode-thread","short_id":"deadbeef","harness":"opencode","status":"live"}'; exit 0
+      fi
+      echo '{"name":"opencode-thread","short_id":"ses_dispatchtest1","session_id":"ses_dispatchtest1","harness":"opencode","status":"live"}'; exit 0
     fi
     echo "{\"name\":\"x\",\"short_id\":\"${STUB_SHORT_ID-deadbeef}\",\"harness\":\"claude\",\"status\":\"live\"}"; exit 0 ;;
   "claim release")
@@ -283,6 +298,14 @@ out="$(STUB_VERDICT="$DISP" STUB_KEEPER_THREAD=1 STUB_THREAD_SESSION_ID="$KEEPER
   run --name agy-thread --provider agy --message 'Implement x' --substrate thread)"
 ok   'agy keeper full session -> launched' "$(field "$out")" 'launched'
 has  'agy keeper full session surfaced'    "$out" "short_id=$KEEPER_THREAD_SESSION"
+
+out="$(STUB_VERDICT="$DISP" STUB_OPENCODE_THREAD=1 \
+  run --name opencode-thread --provider opencode --message 'Implement x' --substrate thread)"
+ok   'opencode ses session -> launched' "$(field "$out")" 'launched'
+has  'opencode ses session surfaced'    "$out" 'short_id=ses_dispatchtest1'
+out="$(STUB_VERDICT="$DISP" STUB_OPENCODE_THREAD=1 STUB_OPENCODE_TORN=1 \
+  run --name opencode-thread-torn --provider opencode --message 'Implement x' --substrate thread)"
+ok   'opencode torn short_id -> failed'  "$(field "$out")" 'failed'
 
 # --- pane worker observability hint (PR #341 delta) --------------------------
 # A matched mux-pane receipt launches (main's verified-identity path), but a pane
