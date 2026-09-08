@@ -324,6 +324,24 @@ route = ""
 # Default claude account pin for bare spawns, forwarded as --account; an explicit --account wins, empty = unset.
 account = ""
 
+# Per-harness answers under the spawn defaults. The scalars above are the base
+# that works for most; an entry here re-answers one harness whose flag
+# vocabulary differs. Each entry may set permission_mode, effort, substrate, or
+# an opaque args list appended behind a -- passthrough fence (the harness's own
+# bundle). Precedence: explicit flag > lane > profiles.<verb>.harness.<h> >
+# profiles.<verb> > agents.defaults.harness.<h> > agents.defaults.
+# [agents.defaults.harness.codex]
+# permission_mode = "yolo"
+# args = ["--profile", "fno"]
+# [agents.defaults.harness.opencode]
+# permission_mode = "auto"
+
+# Per-verb profiles carry the same harness table, one rung above their scalars:
+# [agents.profiles.target]
+# effort = "high"
+# [agents.profiles.target.harness.codex]
+# effort = "xhigh"
+
 [agents.reap_receipts]
 # Days a reap receipt (the resume handle for a reaped row) stays before the GC sweep expires it (default 7). A receipt whose reaped_at cannot be read is kept and named, never deleted on a failed read.
 retain_days = 7

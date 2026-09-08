@@ -39,7 +39,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, Optional, cast
+from typing import Any, List, Literal, Mapping, Optional, cast
 
 import tomli_w
 import yaml
@@ -1995,6 +1995,34 @@ class AgentProviderBlock(BaseModel):
     headless_yolo: bool = False
 
 
+class HarnessOverlayBlock(BaseModel):
+    """One harness's answers under a spawn-defaults block.
+
+    The axis vocabulary rule applied to storage: a permission mode, effort or
+    substrate value is a flag spelling the HARNESS defines, not a fleet policy,
+    so the answer lives keyed by harness here instead of in one scalar that
+    every harness inherits. Precedence: explicit flag > lane >
+    ``profiles.<verb>.harness.<h>`` > ``profiles.<verb>`` >
+    ``defaults.harness.<h>`` > ``defaults``. Only fields whose vocabulary the
+    harness defines and fno forwards are legal here (``permission_mode``,
+    ``effort``, ``substrate``) plus ``args``: an opaque argv-vector appended
+    behind a ``--`` fence, referencing the harness's own bundle (``--profile``,
+    ``--settings``) through the passthrough fno already carries. Ranking
+    fields (``provider``, ``model``, ``route``, ``account``) are refused at
+    the spawn seam: they are lane fields, never per-harness answers.
+
+    ``extra="allow"`` is deliberate: a smuggled lane field must survive load
+    so the seam can name it in its refusal instead of the typo vanishing.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    permission_mode: str = ""
+    effort: str = ""
+    substrate: str = ""
+    args: List[str] = Field(default_factory=list)
+
+
 class SpawnDefaultsBlock(BaseModel):
     """Default spawn routing (nested under 'config.agents.defaults').
 
@@ -2025,6 +2053,21 @@ class SpawnDefaultsBlock(BaseModel):
     # reads them as bindings.
     route: str = ""
     account: str = ""
+    # Per-harness answers (x-8975): the scalar fields above are the base that
+    # works for most; an entry here re-answers one harness whose flag
+    # vocabulary differs. The spawn seam validates the harness NAME and
+    # refuses ranking fields here; config stays a leaf.
+    harness: dict[str, HarnessOverlayBlock] = Field(default_factory=dict)
+
+    @field_validator("harness", mode="before")
+    @classmethod
+    def _coerce_harness_overlays(cls, v: object) -> object:
+        """A non-mapping overlay table, or a non-mapping entry, degrades to
+        empty: one typo must never brick every command at load, mirroring
+        ``_coerce_profiles``."""
+        if not isinstance(v, dict):
+            return {}
+        return {k: val for k, val in v.items() if isinstance(val, dict)}
 
 
 class SpawnProfileBlock(SpawnDefaultsBlock):
