@@ -327,6 +327,20 @@ def size_of(marker):
     return int(tail) if tail.isdigit() else -1
 
 
+def rotated(name):
+    """Did `name` shrink because a rotator moved its body to a sibling?
+
+    `events.jsonl` is renamed to `events.jsonl.1` past 8 MB and a small active
+    file takes its place. That is an ordinary write, and it has a truncation's
+    exact size profile, so without this every rotation would fail a live root
+    on a guard that is supposed to leave ordinary churn alone.
+    """
+    sibling = f"{name}.1"
+    if sibling not in after:
+        return False
+    return sibling not in before or size_of(after[sibling]) > size_of(before[sibling])
+
+
 truncations = 0
 for name in sorted((set(before) & set(after)) - unreadable):
     if before[name] == after[name]:
@@ -335,25 +349,37 @@ for name in sorted((set(before) & set(after)) - unreadable):
     # A collapse, not a change. This is the 2026-09-06 specimen's shape, and it
     # gates even on a live root, where ordinary churn does not.
     if was > 0 and 0 <= now <= was // 10:
-        print(f"state-canary: TRUNCATED {name} ({was} -> {now} bytes)", file=sys.stderr)
-        truncations += 1
+        if rotated(name):
+            print(f"state-canary: ROTATED {name} ({was} -> {now} bytes)", file=sys.stderr)
+        else:
+            print(
+                f"state-canary: TRUNCATED {name} ({was} -> {now} bytes)", file=sys.stderr
+            )
+            truncations += 1
     else:
         print(f"state-canary: CHANGED {name}", file=sys.stderr)
     violations += 1
 
+# An unreadable REGULAR file is the instrument failing, not the root churning,
+# so it refuses wherever it happens. Advisory covers what cannot be attributed;
+# it must not also cover what was never measured.
+hard = truncations + len(unreadable)
+
 if violations:
     print(
         f"state-canary: {violations} path(s) under the operator state root "
-        f"changed during the run ({truncations} truncation(s))",
+        f"changed during the run ({truncations} truncation(s), "
+        f"{len(unreadable)} unreadable)",
         file=sys.stderr,
     )
     # On a live operator root the comparison cannot attribute a change to THIS
     # suite: measured on one box, 87 live sessions minted four 13.1 MB graph
     # backups inside a single 20-second window. Gating there would be
     # permanently red, which is how a guard gets disabled. So report every
-    # change and gate only on a truncation, whose shape no ordinary write has.
-    # A planted root is exclusively ours, so everything gates.
-    if watching and not truncations:
+    # change and gate only on what keeps its meaning without attribution: a
+    # truncation, whose shape no ordinary write has, and a file we could not
+    # read at all. A planted root is exclusively ours, so everything gates.
+    if watching and not hard:
         print(
             "state-canary: advisory only. This root is a live operator root, "
             "shared with other sessions, so a change here is not attributable "

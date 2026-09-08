@@ -149,7 +149,15 @@ if [[ "${FNO_TEST_HERMETIC:-}" == "1" ]]; then
     # exists to prevent, and a harness that copies only hooks/ into a sandbox
     # would silently reintroduce it while believing it was hermetic. A temp
     # dir loses the cache between runs, which costs a sweep and nothing else.
-    _STRANDED_DIR="${TMPDIR:-/tmp}/fno-stranded-$(id -u)"
+    #
+    # Keyed by the sandbox HOME, not by uid alone. A uid-only path is stable
+    # across every repository and every run for one user, so its cache and its
+    # 15-minute refresh stamp outlive the run that wrote them: one run then
+    # shows another repository's stranded rows, or suppresses its own refresh
+    # against a stamp it never wrote. Under this branch HOME is the sandbox,
+    # so its leaf name is per-run.
+    _STRANDED_KEY="${HOME##*/}"
+    _STRANDED_DIR="${TMPDIR:-/tmp}/fno-stranded-$(id -u)-${_STRANDED_KEY:-nohome}"
     echo "worktree-peers: $_PATHS_STUB is missing under FNO_TEST_HERMETIC=1; using $_STRANDED_DIR rather than the checkout state root" >&2
   fi
   mkdir -p "$_STRANDED_DIR" 2>/dev/null || true
