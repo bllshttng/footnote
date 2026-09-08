@@ -428,6 +428,16 @@ The same session had verified six claims that arrived from other people that day
 
 *Graduates to:* a review question asking, of any proposed hook, how many times it fired last week. Until a proposal has to carry that number, this stays a habit.
 
+## A claim reads unknown and my target refuses to start
+
+**Answer.** Read the same key again with `--no-roster`. That is the lock itself. The default read also consults the roster, and it returns `unknown` once it cannot resolve enough rows. Unknown blocks the start as firmly as held does. Repair the rows. Never bypass the claim.
+
+**Specimen.** On 2026-09-08 a codex worker sat blocked for twelve hours. It did everything right. It measured, refused to claim, emitted a help block, and mailed its parent king. Nobody came. The key read `unknown` roster-aware, basis `unresolved-roster-row`, with 64 of 129 rows unresolved. The same key with `--no-roster` read `free`. The lock was never held. Re-measured twelve hours later, unchanged.
+
+**The wider shape.** The rows that reader cannot resolve look like the rows two other readers cannot attribute. On the same day a stop hook linked no king to 12 live workers. The footprint reported 12 pidless rows as an attribution gap. Three symptoms, one unattributable-row family, worth one investigation rather than three.
+
+*Graduates to:* a claim reader that reports a degraded roster as its own condition, so `unknown` never blocks work the way `held` does.
+
 ## Retired
 
 Closed gaps, newest first. Each line names the PR that closed it, so a reader can see the machinery absorb the list.
