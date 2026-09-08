@@ -44,6 +44,7 @@
 // schemas/agents-list-row.json; the crate-level recursion_limit above covers
 // the macro expansion since `spawned_by_session` joined the contract.
 
+pub mod acceptance_evidence;
 pub mod active_backlog;
 mod agent_lock;
 pub mod agents_config;

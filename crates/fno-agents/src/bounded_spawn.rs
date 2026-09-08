@@ -70,6 +70,27 @@ pub(crate) fn spawn_bounded(
     }
 }
 
+/// SIGKILL a process group, ignoring "already gone".
+pub(crate) fn killpg(pgid: i32) {
+    if pgid <= 0 {
+        return;
+    }
+    // SAFETY: pgid is our own spawned group leader's pid; ESRCH is expected
+    // once every member has exited and is deliberately ignored.
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
+}
+
+/// SIGKILL the child's whole process group, then reap it. A probe pipeline's
+/// grandchildren hold the stderr pipe open; killing only the direct child would
+/// leave the drain thread blocked on a pipe that never reaches EOF.
+pub(crate) fn kill_process_group(child: &mut std::process::Child) {
+    killpg(child.id() as i32);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,29 +125,47 @@ mod tests {
     /// the crate's one direct spawn - detached with null stdio and non-fatal
     /// by design, so it cannot take the bounded transport's piped,
     /// owns-the-output contract, and its failures have no caller to retry to.
+    /// `run_probe` and its tests now live in acceptance_evidence.rs; the guard
+    /// scans both production halves.
     #[test]
     fn no_unretried_spawn_outside_the_bounded_spawner() {
-        let source = include_str!("loopcheck.rs");
-        let production = source
-            .split("\nmod tests {")
-            .next()
-            .expect("test module marker");
+        fn production(source: &'static str) -> &'static str {
+            source
+                .split("\nmod tests {")
+                .next()
+                .expect("test module marker")
+        }
+        let loopcheck = production(include_str!("loopcheck.rs"));
+        let acceptance = production(include_str!("acceptance_evidence.rs"));
         // Positive control first: a zero-hit scan of the wrong haystack reads
         // identical to a clean one, so prove the routed sites are in view
         // before trusting the count below.
         assert!(
-            production
+            loopcheck
                 .matches("crate::bounded_spawn::spawn_bounded(")
                 .count()
-                >= 2,
-            "run_bounded and run_probe must both route through the one spawner"
+                >= 1,
+            "run_bounded must route through the one spawner"
+        );
+        assert!(
+            acceptance
+                .matches("crate::bounded_spawn::spawn_bounded(")
+                .count()
+                >= 1,
+            "run_probe must route through the one spawner"
         );
         assert_eq!(
-            production.matches(".spawn()").count(),
+            loopcheck.matches(".spawn()").count(),
             0,
             "loopcheck spawns only through bounded_spawn; the crate's one \
              detached direct spawn lives in operator_notice, and a new direct \
              spawn here routes through spawn_bounded or amends this guard"
+        );
+        assert_eq!(
+            acceptance.matches(".spawn()").count(),
+            0,
+            "acceptance_evidence spawns only through bounded_spawn; a new \
+             direct spawn here routes through spawn_bounded or amends this guard"
         );
     }
 

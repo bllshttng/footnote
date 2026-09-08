@@ -236,4 +236,16 @@ A genuinely single-change plan emits one task and measures width 1. Join still r
 
 **Verification:** Every step must be concrete and runnable. Not "check that it works" but "run this command, expect this output."
 
+**Acceptance evidence (optional):** A criterion that a probe can measure can be BOUND to that probe, so the loop gates report it satisfied or failed instead of leaving it as prose:
+
+```yaml
+acceptance_evidence:
+  required: true
+  bindings:
+    AC1-HP: done_probes[0]   # session terminal
+    AC2-HP: close_probes[0]  # node-closure terminal
+```
+
+The bound probe must exist in the plan's own `done_probes`/`close_probes` list, and `required: true` needs at least one `done_probes` binding or the session terminal can never pass.
+
 **Self-contained:** A fresh-context agent should be able to implement this plan without reading the conversation that produced it.
