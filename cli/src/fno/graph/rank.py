@@ -9,11 +9,9 @@ import typer
 
 
 def _drain_receipt() -> list[dict]:
-    """The Rust drain receipt (active-backlog-receipt), parsed.
-
-    Raises on an unreadable source so the caller can answer `unknown` instead
-    of pretending no dispatcher is live. Test seam: monkeypatch this, not a
-    subprocess.
+    """The Rust drain receipt, parsed. Raises on an unreadable source so the
+    caller answers `unknown` instead of pretending no dispatcher is live.
+    Test seam: monkeypatch this, not a subprocess.
     """
     from fno.rust_binary import call_binary_json
 
