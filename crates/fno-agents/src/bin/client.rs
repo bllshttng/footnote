@@ -26,6 +26,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "adopt",
     "ask",
     "attach",
+    "authorized-merge",
     "bash-census",
     "board",
     "claim",
@@ -290,6 +291,14 @@ async fn run(args: Vec<String>) -> i32 {
     // kill_criteria.rs doc). Direct dispatch; no daemon RPC.
     if verb == "kill-check" {
         return fno_agents::kill_criteria::run_kill_check(&args[1..]);
+    }
+
+    // `authorized-merge`: the one merge/arm authorization (see
+    // authorized_merge.rs doc). Direct dispatch; no daemon RPC. `fno do pr
+    // merge` sends one JSON payload and reads one receipt back, so the merge
+    // verb and finalize cannot answer "may this head merge?" differently.
+    if verb == "authorized-merge" {
+        return fno_agents::authorized_merge::run_authorized_merge(&args[1..]);
     }
 
     // `route-slot`: the delivery-slot resolver (see route_slot.rs doc). Direct

@@ -416,6 +416,13 @@ def fetch_pr_info_rest(
     author = user.get("login") if isinstance(user, dict) else None
     if author is not None and not isinstance(author, str):
         return None, "gh api pulls/<n> carried malformed author login"
+    # Whether GitHub's auto-merge queue already owns this PR. It rides THIS
+    # payload rather than a second `gh pr view --json autoMergeRequest` probe:
+    # the armed flag and the head it was read against must come from one fetch,
+    # or a caller can stand down for a queue entry that describes another head.
+    auto_merge = pr_data.get("auto_merge")
+    if auto_merge is not None and not isinstance(auto_merge, dict):
+        return None, "gh api pulls/<n> carried a malformed auto_merge object"
     return (
         {
             "pr": int(pr),
@@ -428,6 +435,7 @@ def fetch_pr_info_rest(
             "merged_at": merged_at,
             "merge_sha": merge_sha,
             "author": author,
+            "auto_merge": auto_merge,
         },
         "",
     )
