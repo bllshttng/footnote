@@ -128,6 +128,38 @@ def _drop_cached_terminal(
         dropped.append({"key": key, "reason": current.lower(), "state": current})
 
 
+def _finish_queue_merge(repo_dir: Path, pr: int, emit: Callable) -> None:
+    """Finish a queue-armed merge through the existing post-merge cleanup owner.
+
+    ``finalize`` can hand a PR to GitHub's auto-merge queue, and when the queue
+    lands the merge later no fno process is in the loop: the remote ref stays
+    behind, because ``fno do pr merge``'s cleanup step never runs on that path.
+    This tick is the detector that sees the confirmed merge, so it pays the step
+    here rather than growing a second watcher or a second cleanup store.
+
+    The owner is the merge verb's own ``_post_merge_remote_delete``: idempotent
+    (an already-gone ref is the requested end state), fork-safe (it deletes only
+    from the PR's verified BASE repo, and only when the head repo is that same
+    repo), and gated on ``auto_merge.delete_branch_on_merge``. Local branches
+    and worktrees stay with their own lifecycle.
+
+    Reached only from the MERGED arm, so a pending or unreadable state never
+    gets here. Warn-only: cleanup must never fail the merge it follows.
+    """
+    try:
+        from fno.config import load_settings_for_repo
+        from fno.pr._merge import _post_merge_remote_delete
+
+        auto_merge = load_settings_for_repo(Path(repo_dir)).auto_merge
+        cleanup = _post_merge_remote_delete(pr, str(repo_dir), auto_merge)
+    except Exception as exc:  # noqa: BLE001 - cleanup never blocks the ritual
+        log.warning("pr-watch: queue-merge cleanup for PR #%d failed: %s", pr, exc)
+        return
+    if cleanup:
+        log.warning("pr-watch: PR #%d remote cleanup: %s", pr, cleanup)
+        emit("pr_watch_cleanup_failed", {"pr": pr, "cleanup": cleanup})
+
+
 def _receipt_detail_items(receipt: dict[str, Any]) -> list[dict[str, str]]:
     """Flatten an oversized receipt into exact, independently chunkable facts."""
     items: list[dict[str, str]] = []
@@ -898,6 +930,7 @@ def _run_tick(
                 dispatch_ok = False
                 dispatch_extra: dict[str, Any] = {}
                 if decision.kind == "merge":
+                    _finish_queue_merge(cand.repo_dir, pr, emit)
                     # Route through the shared post-merge dispatcher: warm
                     # inject first, this daemon's headless fire as the cold
                     # fallback, and the SAME per-merge-SHA marker reconcile

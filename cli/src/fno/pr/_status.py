@@ -211,8 +211,9 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
         # Known tradeoff, not footnote's own blast radius: a repo whose ONLY
         # real CI still rides the legacy commit-status API (no GitHub Actions,
         # no Checks-API app) would never clear this and would hold forever
-        # under `require_checks_pass` (unknown holds, never fails - see
-        # _merge.py's `_checks_verdict` caller). footnote's own workflows
+        # under `require_checks_pass` (unknown holds, never fails - see the
+        # checks arm of `crates/fno-agents/src/authorized_merge.rs`). footnote's
+        # own workflows
         # (guards.yml et al.) are all Actions/CheckRuns, so this repo never
         # hits it; a fork that genuinely needs status-only CI as its sole
         # signal should route around this via `require_checks_pass=false`.

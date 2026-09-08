@@ -120,7 +120,8 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
     let pr_info = cwd.join("pr-info.json");
     fs::write(
         &pr_info,
-        "{\"pr\": 358, \"url\": \"https://github.com/o/r/pull/358\", \"state\": \"OPEN\"}",
+        "{\"pr\": 358, \"url\": \"https://github.com/o/r/pull/358\", \"state\": \"OPEN\", \
+         \"head_sha\": \"abc\"}",
     )
     .unwrap();
 
@@ -1420,6 +1421,7 @@ fn finalize_arms_auto_merge_on_approved_green_terminal() {
     let env = setup("S-arm", false);
     set_posture(&env, "S-arm", true);
     write_auto_merge_config(&env, "[auto_merge]\nenabled = true\n");
+    write_covered_event(&env);
     let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
     assert!(
         out.status.success(),
@@ -1434,6 +1436,19 @@ fn finalize_arms_auto_merge_on_approved_green_terminal() {
         !c.contains("reviews,comments"),
         "empty optional_apps must add no evidence read: {c}"
     );
+}
+
+/// The covered `review_coverage` event the arm pins itself to. Without one the
+/// authorized-merge owner refuses rather than arming GitHub's queue on whatever
+/// head lands next, so every arming case writes it.
+fn write_covered_event(env: &Env) {
+    fs::write(
+        &env.events,
+        "{\"ts\":\"2026-08-05T12:00:00Z\",\"type\":\"review_coverage\",\
+\"source\":\"hook\",\"data\":{\"pr\":358,\"coverage\":\"covered\",\
+\"reviewed_count\":1,\"head_sha\":\"abc\"}}\n",
+    )
+    .unwrap();
 }
 
 /// Write a `config.auto_merge` block into the temp project. `run_finalize_shimmed`
@@ -1498,6 +1513,7 @@ fn finalize_arms_when_configured_optional_app_reviewed() {
     let env = setup("S-optional-reviewed", false);
     set_posture(&env, "S-optional-reviewed", true);
     configure_optional_codex(&env);
+    write_covered_event(&env);
     let out = run_finalize_shimmed(&env, "DonePRGreen", GH_OPTIONAL_REVIEWED);
     assert!(out.status.success());
     let c = calls(&env);
@@ -1596,6 +1612,7 @@ fn finalize_completed_review_wins_over_stale_usage_limit_comment() {
     let env = setup("S-optional-recovered", false);
     set_posture(&env, "S-optional-recovered", true);
     configure_optional_codex(&env);
+    write_covered_event(&env);
     let out = run_finalize_shimmed(&env, "DonePRGreen", GH_OPTIONAL_REVIEWED_AFTER_USAGE_LIMIT);
     assert!(out.status.success());
     assert!(calls(&env).contains("gh pr merge 358 --auto --merge"));
@@ -1609,6 +1626,7 @@ fn finalize_live_auto_merge_switch_vetoes_an_approved_run() {
     let env = setup("S-live-switch-off", false);
     set_posture(&env, "S-live-switch-off", true);
     write_auto_merge_config(&env, "[auto_merge]\nenabled = false\n");
+    write_covered_event(&env);
 
     let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
     assert!(out.status.success());
@@ -1664,6 +1682,7 @@ fn finalize_env_grant_arms_despite_live_switch_off() {
     let env = setup("S-env-grant", false);
     set_posture_source(&env, "S-env-grant", true, "env-target-auto-merge");
     write_auto_merge_config(&env, "[auto_merge]\nenabled = false\n");
+    write_covered_event(&env);
 
     let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
     assert!(
@@ -1742,6 +1761,7 @@ fn finalize_arms_when_optional_clean_pass_comment_pins_the_head() {
     let env = setup("S-optional-clean-pass", false);
     set_posture(&env, "S-optional-clean-pass", true);
     configure_optional_codex(&env);
+    write_covered_event(&env);
     let gh = "#!/bin/sh\n\
          echo \"gh $*\" >> calls.log\n\
          case \"$*\" in\n\
@@ -1773,6 +1793,7 @@ fn finalize_arms_with_the_configured_merge_strategy() {
             &env,
             &format!("[auto_merge]\nenabled = true\nmerge_strategy = \"{strategy}\"\n"),
         );
+        write_covered_event(&env);
         let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
         assert!(out.status.success());
         let c = calls(&env);
@@ -1797,6 +1818,7 @@ fn finalize_arms_with_merge_on_an_invalid_strategy() {
         &env,
         "[auto_merge]\nenabled = true\nmerge_strategy = \"octopus\"\n",
     );
+    write_covered_event(&env);
     let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
     assert!(out.status.success());
     let c = calls(&env);

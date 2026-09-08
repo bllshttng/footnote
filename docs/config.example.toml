@@ -431,7 +431,7 @@ enabled = false
 grant = "none"
 # Merge strategy: merge | squash | rebase.
 merge_strategy = "merge"
-# Delete the remote branch after a merge. Executor paths only (`fno do pr merge`, pr verify); GitHub's native auto-merge queue has no branch-delete hook.
+# Delete the remote branch after a merge. Honored on every path: the executor merges (`fno do pr merge`, pr verify) delete it inline, and a merge GitHub's own auto-merge queue lands later is cleaned up by the PR watcher when it observes the merge.
 delete_branch_on_merge = true
 # Require CI green before auto-merge.
 require_checks_pass = true

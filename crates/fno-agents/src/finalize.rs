@@ -884,39 +884,21 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // stamps above.
     let approved = m.auto_merge_approved.unwrap_or(false);
     let should_arm = should_arm_auto_merge(&reason, approved);
-    // The explicit per-run grant (x-01b9): `auto_merge_source:
-    // env-target-auto-merge` is TARGET_AUTO_MERGE=1 folded by init at spawn,
-    // and it satisfies the standing arm on its own - the path
-    // references/auto-merge.md promises and a config-only read made
-    // unreachable. Every other `true` merely mirrored config (source:
-    // config) and must not outlive the operator flipping the live switch off
-    // (x-2270: the manifest is a snapshot; the live switch wins a disarm).
-    // The source is init's fold, never re-read from the environment here: a
-    // worker cannot export the grant at finalize time to arm its own merge.
-    let env_grant = approved && m.auto_merge_source.as_deref() == Some("env-target-auto-merge");
+    // The posture fold, the standing switch and the automerge floor all live in
+    // `authorized_merge` now, so this arm and `fno do pr merge` cannot disagree
+    // about who may merge. What stays here is what only the terminal knows: the
+    // gating opt-out claim, and the optional-App review evidence.
+    //
+    // The manifest's `auto_merge_source` rides down rather than being re-read
+    // from the environment: a worker must not export the grant at finalize time
+    // to arm its own merge.
     let (auto_merge_armed, auto_merge_blocked_reason) = if should_arm {
         if let Some(blocked) = merge_gating_optout_block_reason() {
             eprintln!("finalize: native auto-merge withheld: {blocked}");
             (false, Some(blocked))
-        } else if !env_grant && !crate::agents_config::auto_merge_enabled(&cwd) {
-            let blocked = "live config resolves auto_merge.enabled=false; sanctioned \
-override (operator levers): arm the standing switch (`fno config set \
-auto_merge.enabled true`) or start the run with TARGET_AUTO_MERGE=1 from \
-the operator's shell"
-                .to_string();
-            eprintln!("finalize: native auto-merge withheld: {blocked}");
-            (false, Some(blocked))
-        } else if let Some(blocked) =
-            crate::agents_config::automerge_posture_floor_block_reason(&cwd)
-        {
-            // The arming-time automerge floor: the merge verb refuses a
-            // granted merge below the self_review rung, so arming GitHub to
-            // merge on green must refuse it too (one floor, every arm).
-            eprintln!("finalize: native auto-merge withheld: {blocked}");
-            (false, Some(blocked))
         } else {
             match optional_review_block_reason(&cwd) {
-                None => arm_auto_merge(&cwd),
+                None => arm_auto_merge(&cwd, approved, m.auto_merge_source.as_deref()),
                 Some(blocked) => {
                     eprintln!("finalize: native auto-merge withheld: {blocked}");
                     (false, Some(blocked))
@@ -2199,286 +2181,51 @@ fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
     }
 }
 
-/// Arm GitHub's native auto-merge for the branch's open PR. Returns whether it
-/// armed, for the terminal event's `auto_merge_armed` field.
+/// Arm GitHub's native auto-merge for the branch's open PR, through the one
+/// authorized merge operation. Returns whether it armed, for the terminal
+/// event's `auto_merge_armed` field, plus the refusal reason when it did not.
 ///
-/// Best-effort and log-only, the same fatality as `stamp_node_pr` and every
-/// other gh-dependent step here: it is deliberately NOT returned into `failed`.
-/// Failing to arm leaves a green, reviewed, mergeable PR for a human, which is
-/// the safe direction; holding `session_finalized` open to retry an arm would
-/// re-run the stamp/handoff steps for a merge GitHub may already have performed.
+/// The whole decision lives in [`crate::authorized_merge`]: the posture fold,
+/// the dispatch hold, the in-flight review hold, the head pin and the base
+/// lineage. This arm used to carry a shorter, different chain of its own, so a
+/// merge `fno do pr merge` refused could still reach GitHub's queue from here.
 ///
-/// Re-arming needs no per-head dedup: `--auto` sets a PR-level flag rather than
-/// appending anything, so a retried terminal fire is a no-op on GitHub's side.
-///
-/// `config.auto_merge.merge_strategy` and `.delete_branch_on_merge` shape the
-/// argv, matching `fno do pr merge`. The strategy used to be hardcoded `--merge`,
-/// carried over verbatim from the PR-creation call site this replaced, so a
-/// squash-only repo was armed with a merge method it forbids - and because
-/// arming is log-only, GitHub's rejection was one stderr line inside a stop
-/// hook. The symptom was not a wrong commit shape but auto-merge silently never
-/// working, indistinguishable from nobody having opted in.
-///
-/// `require_checks_pass` is deliberately NOT read. On `fno do pr merge` it decides
-/// whether `--auto` is passed at all (false meaning "merge now, do not wait");
-/// here `--auto` IS the operation and `loop-check` has already verified green,
-/// so honoring it would let a config value turn arming into a no-op.
-/// The head_sha from the latest covered review_coverage event (matching the
-/// current HEAD), or None. Used to pin the auto-merge arm. (x-0eaf)
-fn covered_head_from_event(cwd: &Path) -> Option<String> {
-    let path = crate::paths::events_path(cwd);
-    let content = fs::read_to_string(&path).ok()?;
-    let head = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(cwd)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    let mut latest: Option<String> = None;
-    for line in content.lines() {
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if val.get("type").and_then(|v| v.as_str()) != Some("review_coverage") {
-            continue;
-        }
-        if val.pointer("/data/coverage").and_then(|v| v.as_str()) != Some("covered") {
-            continue;
-        }
-        if val
-            .pointer("/data/reviewed_count")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0)
-            <= 0
-        {
-            continue;
-        }
-        let ev_head = val
-            .pointer("/data/head_sha")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !head.is_empty() && ev_head != head {
-            continue;
-        }
-        latest = Some(ev_head.to_string());
-    }
-    latest.filter(|s| !s.is_empty())
-}
+/// Best-effort and log-only, the same fatality as `stamp_node_pr`: it is
+/// deliberately NOT returned into `failed`. Failing to arm leaves a green,
+/// reviewed, mergeable PR for a human, which is the safe direction.
+fn arm_auto_merge(cwd: &Path, approved: bool, source: Option<&str>) -> (bool, Option<String>) {
+    use crate::authorized_merge::{Effect, Outcome, Request};
 
-/// One outcome vocabulary for every `arm_auto_merge` guard probe (round-12
-/// finding 4). The two probes previously embedded opposite failure
-/// philosophies with no shared shape - base-lineage-check armed on ANY non-3
-/// exit, dispatch_hold refused on ANY non-success - so a copy-pasted third
-/// probe inherited whichever accident it was pasted next to. Every probe
-/// classifies into this enum; each call site then states, in one named
-/// projection, what Inconclusive means for it.
-#[derive(Debug, Clone, PartialEq)]
-enum ProbeOutcome {
-    /// The probe ran and answered "do not arm". Carries the refusal reason.
-    Refused(String),
-    /// The probe ran and cleared.
-    Clear,
-    /// The probe could not evaluate (missing binary, timeout, signal death,
-    /// an exit outside the probe's vocabulary). Carries the diagnostic for
-    /// the log line. NEVER maps to Clear.
-    Inconclusive(String),
-}
-
-impl ProbeOutcome {
-    /// Fail-CLOSED projection: an unevaluated hold probe refuses to assume
-    /// unheld. This is the dispatch-hold arm's deliberate choice.
-    fn fail_closed(self) -> Option<String> {
-        match self {
-            ProbeOutcome::Refused(reason) | ProbeOutcome::Inconclusive(reason) => Some(reason),
-            ProbeOutcome::Clear => None,
-        }
-    }
-
-    /// Fail-OPEN projection: an unevaluated lineage probe arms anyway, with a
-    /// breadcrumb. Refusing on an unevaluated probe would turn a gh hiccup
-    /// into auto-merge silently never working, which reads exactly like
-    /// nobody having opted in. This is the base-lineage arm's deliberate
-    /// choice - the opposite of `fail_closed`, stated by name.
-    fn fail_open(self) -> Option<String> {
-        match self {
-            ProbeOutcome::Refused(reason) => Some(reason),
-            ProbeOutcome::Clear | ProbeOutcome::Inconclusive(_) => None,
-        }
-    }
-}
-
-fn classify_dispatch_hold_probe(success: bool, stdout: &[u8], stderr: &[u8]) -> ProbeOutcome {
-    if success {
-        return ProbeOutcome::Clear;
-    }
-    // A moved verb spelling prints one teaching line to stderr ("fno X is
-    // now fno Y"). It is not a refusal reason: kept, it would lead the
-    // operator message with noise and permanently mask the empty-output
-    // fallback below, because stderr would never be empty on this probe.
-    let stripped: String = String::from_utf8_lossy(stderr)
-        .lines()
-        .filter(|line| !(line.starts_with("fno ") && line.contains(" is now fno ")))
-        .collect::<Vec<&str>>()
-        .join("\n");
-    let detail = if stripped.trim().is_empty() {
-        stdout
-    } else {
-        stripped.as_bytes()
-    };
-    let message = String::from_utf8_lossy(detail).trim().to_string();
-    ProbeOutcome::Refused(if message.is_empty() {
-        "dispatch hold state unreadable; refusing to assume unheld".to_string()
-    } else {
-        message
-    })
-}
-
-fn dispatch_hold_refusal(cwd: &Path, number: u64) -> Option<String> {
-    match Command::new("fno")
-        .args(["do", "pr", "hold-check", number.to_string().as_str()])
-        .current_dir(cwd)
-        .output()
-    {
-        // fail_closed: the hold probe's deliberate Inconclusive policy -
-        // though this classifier only ever yields Clear or Refused, a spawn
-        // failure below is the inconclusive case, and it refuses too.
-        Ok(output) => {
-            classify_dispatch_hold_probe(output.status.success(), &output.stdout, &output.stderr)
-                .fail_closed()
-        }
-        Err(error) => Some(format!(
-            "dispatch hold check unavailable ({error}); refusing to assume unheld"
-        )),
-    }
-}
-
-fn arm_auto_merge(cwd: &Path) -> (bool, Option<String>) {
-    let Some((number, _url)) = gh_pr_ref(cwd) else {
-        eprintln!("finalize: no open PR found for branch; auto-merge not armed");
-        return (false, None);
-    };
-    if let Some(blocked) = dispatch_hold_refusal(cwd, number) {
-        eprintln!("finalize: auto-merge NOT armed for PR {number}: {blocked}");
-        return (false, Some(blocked));
-    }
-    // Stacked-base guard: a PR merged into a base branch that no longer leads to
-    // the default branch reports MERGED and ships nothing. This arm reaches
-    // `gh pr merge` without passing through `fno do pr merge`, so it calls the
-    // shared predicate itself - a guard on one of N reachable merge paths is
-    // decorative.
-    //
-    // The arm is also the one path where the check is a SNAPSHOT: `--auto` fires
-    // server-side later, so the base can die between here and the merge with no
-    // push to invalidate anything. `.github/workflows/stacked-base-guard.yml`
-    // re-stamps on push-to-main to cover that window.
-    //
-    // Exit 3 is a confirmed stale base and refuses the arm. Every other non-zero
-    // (4 unknown, 127 no gh, a spawn error) arms anyway with a breadcrumb:
-    // refusing on an unevaluated probe would turn a gh hiccup into auto-merge
-    // silently never working, which reads exactly like nobody having opted in.
-    let pr_arg = number.to_string();
-    // One exit-code read, three outcomes, rather than several field accesses:
-    // `check-plan-rung-authority.sh` ratchets a per-file identifier count over
-    // production Rust, so each extra access here fails CI with a message about
-    // plan frontmatter that has nothing to do with this code.
-    let lineage = match Command::new("fno")
-        .args(["do", "pr", "base-lineage-check", pr_arg.as_str()])
-        .current_dir(cwd)
-        .output()
-    {
-        Ok(o) => match o.status.code() {
-            // Includes None (killed by a signal): unevaluated.
-            Some(0) => ProbeOutcome::Clear,
-            Some(3) => ProbeOutcome::Refused(String::from_utf8_lossy(&o.stderr).trim().to_string()),
-            other => ProbeOutcome::Inconclusive(format!(
-                "exit {other:?}: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            )),
+    let outcome = crate::authorized_merge::run(
+        &crate::authorized_merge::RealProbes,
+        &Request {
+            cwd: cwd.to_path_buf(),
+            pr: None,
+            effect: Effect::Arm,
+            approved: Some(approved),
+            auto_merge_source: source.map(str::to_owned),
+            // `--auto` IS waiting for the checks, so the queue enforces them
+            // server-side. Reading `require_checks_pass` here would let a config
+            // value turn arming into a no-op.
+            require_checks: false,
+            // No caller-side gate here: the terminal reads the covered head from
+            // the same event journal the owner does.
+            covered_head: None,
+            decide_only: false,
         },
-        Err(e) => ProbeOutcome::Inconclusive(format!("spawn error: {e}")),
-    };
-    // fail_open: the lineage probe's deliberate Inconclusive policy, the
-    // named opposite of the hold probe's fail_closed above.
-    if let Some(reason) = lineage.clone().fail_open() {
-        eprintln!("finalize: auto-merge NOT armed for PR {number}: {reason}");
-        return (false, Some("stale base".to_string()));
-    }
-    if let ProbeOutcome::Inconclusive(diag) = &lineage {
-        eprintln!(
-            "finalize: stacked-base probe inconclusive for PR {number} ({diag}); arming anyway"
-        );
-    }
-    let strategy = crate::agents_config::auto_merge_strategy(cwd);
-    // No --delete-branch here (x-9d11): the flag's LOCAL delete attempt is the
-    // x-7267 false-failure shape. KNOWN GAP: nothing deletes the remote ref
-    // when the queue later lands the merge (the executor-side
-    // _post_merge_remote_delete never runs on that path). Repos wanting the
-    // ref gone should enable GitHub's own delete-head-branches setting.
-    let mut args = vec![
-        "pr".to_string(),
-        "merge".to_string(),
-        number.to_string(),
-        "--auto".to_string(),
-        format!("--{strategy}"),
-    ];
-    // x-0eaf P1 (codex round 3): pin the arm to the covered head so a racing
-    // remote push cannot land an unreviewed head via GitHub's --auto queue.
-    if let Some(sha) = covered_head_from_event(cwd) {
-        args.push("--match-head-commit".to_string());
-        args.push(sha);
-    }
-    // The strategy is named in every failure line below: a repo that forbids the
-    // configured merge method fails here exactly like stale auth or an
-    // unmergeable state would, and the config key is the only way to tell them
-    // apart from a log nobody is watching live.
-    match Command::new("gh").args(&args).current_dir(cwd).output() {
-        Ok(o) if o.status.success() => {
-            eprintln!("finalize: auto-merge armed for PR {number} with --{strategy}");
+    );
+    match outcome {
+        Outcome::Armed { head } => {
+            eprintln!("finalize: auto-merge armed for PR at {head}");
             (true, None)
         }
-        // Surface gh's own message so an operator can tell a repo with the
-        // auto-merge feature disabled from stale auth or an unmergeable state.
-        Ok(o) => {
-            // x-7267: gh exits nonzero on an ALREADY-MERGED PR ("was already
-            // merged") - a second path landed it between the terminal and this
-            // arm. That is success-shaped (the merge the arm existed to cause
-            // has happened), so name it as such instead of logging a false
-            // failure an operator would chase.
-            let merged = pr_info(cwd, Some(number))
-                .and_then(|payload| {
-                    payload
-                        .get("state")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .is_some_and(|state| state == "MERGED");
-            if merged {
-                eprintln!(
-                    "finalize: PR {number} already merged (another path landed it); \
-                     nothing to arm - auto-merge goal already met"
-                );
-                // No queue entry exists, so armed=false; the blocked_reason
-                // names the state so the event can neither claim a phantom arm
-                // (armed=true for an arm that never happened) nor read as an
-                // unexplained decline.
-                return (false, Some("already merged".to_string()));
-            }
+        other => {
+            let detail = other.detail();
             eprintln!(
-                "finalize: auto-merge arm failed for PR {number} with --{strategy} \
-                 (from config.auto_merge.merge_strategy; check the repo allows that \
-                 merge method) (non-fatal): {}",
-                String::from_utf8_lossy(&o.stderr).trim()
+                "finalize: auto-merge NOT armed ({}): {detail}",
+                other.word()
             );
-            (false, None)
-        }
-        Err(e) => {
-            eprintln!(
-                "finalize: auto-merge arm failed for PR {number} with --{strategy} \
-                 (from config.auto_merge.merge_strategy) (non-fatal): {e}"
-            );
-            (false, None)
+            (false, Some(detail))
         }
     }
 }
@@ -3598,74 +3345,6 @@ mod tests {
                 "{stuck} must never arm auto-merge"
             );
         }
-    }
-
-    #[test]
-    fn dispatch_hold_probe_fails_closed_on_every_non_success() {
-        assert_eq!(
-            classify_dispatch_hold_probe(true, b"unheld", b""),
-            ProbeOutcome::Clear
-        );
-        assert_eq!(
-            classify_dispatch_hold_probe(false, b"", b"dispatch-hold:x-owner"),
-            ProbeOutcome::Refused("dispatch-hold:x-owner".to_string())
-        );
-        assert_eq!(
-            classify_dispatch_hold_probe(false, b"", b""),
-            ProbeOutcome::Refused(
-                "dispatch hold state unreadable; refusing to assume unheld".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn dispatch_hold_probe_strips_the_move_teaching_line() {
-        // `fno pr hold-check` is a cold leaf of a moved spelling, so a failed
-        // probe carries the deprecation announce on stderr. The refusal
-        // reason must be the real error, and an announce-only stderr must
-        // fall back to the unreadable message rather than quote the announce.
-        assert_eq!(
-            classify_dispatch_hold_probe(
-                false,
-                b"",
-                b"fno pr hold-check is now fno do pr hold-check\ndispatch-hold:x-owner\n"
-            ),
-            ProbeOutcome::Refused("dispatch-hold:x-owner".to_string())
-        );
-        assert_eq!(
-            classify_dispatch_hold_probe(
-                false,
-                b"",
-                b"fno pr hold-check is now fno do pr hold-check\n"
-            ),
-            ProbeOutcome::Refused(
-                "dispatch hold state unreadable; refusing to assume unheld".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn probe_outcome_projections_state_their_inconclusive_policy() {
-        // Round-12 finding 4: the two guard probes disagree on failure
-        // philosophy BY NAME now, not by accident of which inline match was
-        // copy-pasted. Refused refuses under both; Clear clears under both;
-        // Inconclusive is the deliberate divergence under test.
-        let refused = ProbeOutcome::Refused("stale base".to_string());
-        assert_eq!(refused.clone().fail_closed().as_deref(), Some("stale base"));
-        assert_eq!(refused.fail_open().as_deref(), Some("stale base"));
-        assert_eq!(ProbeOutcome::Clear.fail_closed(), None);
-        assert_eq!(ProbeOutcome::Clear.fail_open(), None);
-        let inconclusive = ProbeOutcome::Inconclusive("exit 4: unknown".to_string());
-        assert_eq!(
-            inconclusive.clone().fail_closed().as_deref(),
-            Some("exit 4: unknown"),
-            "the hold probe refuses on an unevaluated read"
-        );
-        assert_eq!(
-            inconclusive.fail_open(),
-            None,
-            "the lineage probe arms on an unevaluated read"
-        );
     }
 
     #[test]

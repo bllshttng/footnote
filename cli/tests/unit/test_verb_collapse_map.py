@@ -119,8 +119,10 @@ def test_map_covers_current_surface_once():
     # the spawn seam's client invokes directly (hidden verb): 577 -> 578. The
     # harness-keyed-defaults branch allocates `agents spawn-overlay` and
     # `agents fallback-chain`, the two client verbs the spawn seam degrades
-    # open around (hidden verbs): 578 -> 580.
-    assert len(mapped) == 580, (
+    # open around (hidden verbs): 578 -> 580. The one-authorized-merge branch
+    # allocates `agents authorized-merge`, the merge/arm decision every merge
+    # path asks through the single Python door (hidden verb): 580 -> 581.
+    assert len(mapped) == 581, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

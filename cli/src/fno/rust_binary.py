@@ -175,11 +175,23 @@ class VerbUnavailable(RuntimeError):
     """The fno-agents binary is missing, failed, or answered malformed JSON."""
 
 
-def verb_call(verb: str, payload: dict, unavailable: type = VerbUnavailable) -> dict:
+def verb_call(
+    verb: str,
+    payload: dict,
+    unavailable: type = VerbUnavailable,
+    *,
+    timeout: float = 30,
+) -> dict:
     """One subprocess round-trip with the fno-agents binary: JSON payload in,
     parsed JSON answer out. The dev checkout's own build outranks any stale
     installed copy. Raises the caller's ``unavailable`` exception - a named
-    refusal, never a silent fallback."""
+    refusal, never a silent fallback.
+
+    ``timeout`` defaults to the 30s a pure local resolver needs. A verb that
+    makes its own network round trips must raise it, or the door reports the
+    owner unreachable for a decision that was merely still running - and an
+    unread authorization refuses the merge.
+    """
     import json
     import os
     import subprocess
@@ -196,7 +208,7 @@ def verb_call(verb: str, payload: dict, unavailable: type = VerbUnavailable) -> 
             input=json.dumps(payload),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise unavailable(f"fno-agents {verb} failed: {exc}") from exc

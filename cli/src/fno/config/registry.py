@@ -457,7 +457,7 @@ FIELD_META: dict[str, Meta] = {
         "unknown value degrades to 'none'.",
     ),
     "auto_merge.merge_strategy": Meta("advanced", "Merge strategy: merge | squash | rebase."),
-    "auto_merge.delete_branch_on_merge": Meta("advanced", "Delete the remote branch after a merge. Executor paths only (`fno do pr merge`, pr verify); GitHub's native auto-merge queue has no branch-delete hook."),
+    "auto_merge.delete_branch_on_merge": Meta("advanced", "Delete the remote branch after a merge. Honored on every path: the executor merges (`fno do pr merge`, pr verify) delete it inline, and a merge GitHub's own auto-merge queue lands later is cleaned up by the PR watcher when it observes the merge."),
     "auto_merge.require_checks_pass": Meta("advanced", "Require CI green before auto-merge."),
     "auto_merge.conflict_resolution": Meta("never", "Conflict-resolution agent for auto-merge rebases."),
     "auto_merge.remediation": Meta("never", "Post-failure remediation policy for auto-merge."),

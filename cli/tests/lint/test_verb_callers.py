@@ -157,10 +157,10 @@ def _broken_argv_sweep(tmp_path) -> Path:
     """A copy of the script whose argv-array pattern matches nothing."""
     broken = tmp_path / "verb-callers.py"
     text = SCRIPT.read_text()
-    needle = 're.compile(r"\\.args\\(\\s*&?\\s*\\[([^\\]]*)\\]", re.S)'
+    needle = 'r"(?:\\.args\\(|\\bfno\\()\\s*(?:[^()\\[\\]]*,\\s*)?&?\\s*\\[([^\\]]*)\\]"'
     assert needle in text, "the argv-array pattern moved; update this test"
     broken.write_text(
-        text.replace(needle, 're.compile(r"\\.NO_SUCH_CALL\\(\\[([^\\]]*)\\]", re.S)')
+        text.replace(needle, 'r"\\.NO_SUCH_CALL\\(\\[([^\\]]*)\\]"')
     )
     return broken
 
