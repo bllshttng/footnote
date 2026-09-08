@@ -1102,6 +1102,44 @@ def _self_review_refusal(
     }
 
 
+def _hold_branch_under_review(
+    cwd: Path, *, head_sha: str, session_id: str, receipt: dict[str, Any]
+) -> None:
+    """Register that a review of this branch at ``head_sha`` is RUNNING.
+
+    Merge readiness models a review as a recorded VERDICT, so a review still
+    reading produces nothing it can see: `fno do pr merge` is fail-closed
+    against the hold, and on PR 1575 the merge fired while the only non-author
+    review was mid-flight, discarding eight findings including a HIGH one. The
+    hold existed and worked; nothing took it unless the reviewer remembered.
+
+    This is the requester side, so it takes the hold for every pipeline review
+    without a reviewer doing anything. `hooks/review-hold.sh` still covers the
+    Skill-tool invocation, and re-taking a hold this session already owns is a
+    no-op. Best-effort in both directions: an unconfirmed send takes nothing,
+    and a lockfile failure never turns a sent review into a refusal.
+
+    Counts nothing and gates nothing. A hold says a review is running, never
+    that a round was spent (laws d-0fa92eb9, d-777e7d1f).
+    """
+    if str(receipt.get("outcome") or "") in {"refused", "unconfirmed"}:
+        return
+    try:
+        from fno.pr._review_hold import acquire_review_hold
+
+        branch = (_git_out(cwd, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
+        if not branch or branch == "HEAD":
+            return
+        acquire_review_hold(
+            branch,
+            head=head_sha,
+            holder=f"review-session:{session_id or 'unknown'}",
+            verb="/fno:review",
+        )
+    except Exception:  # noqa: BLE001 - see docstring
+        pass
+
+
 @target_app.command("request-self-review", hidden=True)
 def request_self_review_cmd(
     pr_number: Optional[int] = typer.Option(
@@ -1169,6 +1207,9 @@ def request_self_review_cmd(
         )
         receipt = _send_self_review_payload(
             payload=payload, harness=harness, session_id=session_id
+        )
+        _hold_branch_under_review(
+            cwd, head_sha=head_sha, session_id=session_id, receipt=receipt
         )
     except (RuntimeError, ValueError) as exc:
         receipt = _self_review_refusal(

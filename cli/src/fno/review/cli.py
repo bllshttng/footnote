@@ -345,6 +345,20 @@ def _attest_from_record(
     except Exception:  # noqa: BLE001 - the project append already stands
         pass
 
+    # Release the review hold: a verdict for this head now EXISTS, so merge
+    # readiness can see the review and the lane is no longer in flight. The
+    # shell producer (skills/review/scripts/emit-attestation.sh) has always
+    # released here; this Python producer emitted the same row and left the
+    # hold standing for its full TTL. Best-effort and holder-agnostic, the same
+    # posture release_review_hold documents for the shell side.
+    if branch:
+        try:
+            from fno.pr._review_hold import release_review_hold
+
+            release_review_hold(branch)
+        except Exception:  # noqa: BLE001 - a landed verdict is not undone by a lockfile
+            pass
+
     # The per-round comment is the row's human-visible index. Best-effort and
     # idempotent at (pr, head); a repo with no PR yet posts nothing.
     if record.get("dispositions"):
