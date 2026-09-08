@@ -886,15 +886,15 @@ def effective_field(
     return "", None
 
 
-def _argv_has_fence(toks: Sequence[str]) -> bool:
-    """True when the argv carries a bare ``--`` passthrough fence. The
-    ``--argv`` payload boundary is not one; anything after it is prompt."""
+def _passthrough_boundary(toks: Sequence[str]) -> Optional[str]:
+    """The token occupying the passthrough surface, or None. A bare ``--``
+    fence and the ``--argv`` payload boundary BOTH own everything after them
+    (the Rust parser reads past ``--argv`` as the provider command line), so a
+    configured bundle can never append behind either."""
     for t in toks:
-        if t == "--argv":
-            return False
-        if t == "--":
-            return True
-    return False
+        if t == "--argv" or t == "--":
+            return t
+    return None
 
 
 
@@ -1847,13 +1847,19 @@ def inject_spawn_defaults(
                     _bundle, _bundle_rung = [str(a) for a in av], _rung
                     break
         if _bundle:
-            if _argv_has_fence(out[1:]):
+            _boundary = _passthrough_boundary(out[1:])
+            if _boundary:
                 print(
                     "fno agents spawn: harness args skipped (argv already "
-                    f"carries a -- passthrough); {_bundle_rung} ignored",
+                    f"carries a {_boundary} passthrough); {_bundle_rung} ignored",
                     file=err,
                 )
             else:
+                # click fills positionals in order, so a spawn with no message
+                # would eat the bundle's first token as MESSAGE; an explicit
+                # empty keeps the slot reserved for the prompt.
+                if not _positional_indices(out[1:]):
+                    out = [*out, ""]
                 _bundle_inject = ["--", *_bundle]
                 from_config.append(("args", " ".join(_bundle), _bundle_rung))  # type: ignore[arg-type]
                 print(

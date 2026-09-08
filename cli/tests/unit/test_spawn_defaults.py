@@ -2806,6 +2806,32 @@ def test_harness_args_skipped_when_argv_already_fenced():
     assert "agents.defaults.harness.codex.args" in err.getvalue()
 
 
+def test_harness_args_skipped_behind_an_argv_payload():
+    """The --argv payload boundary owns everything after it too (the Rust
+    parser reads it as the provider command line), so it displaces the
+    configured bundle the same way a typed fence does."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-H", "claude", "--argv", "--", "claude", "--at", "3"],
+        err=err,
+        harness={"claude": {"args": ["--settings", "a.json"]}},
+    )
+    assert "--settings" not in out
+    assert "harness args skipped" in err.getvalue()
+    assert "--argv" in err.getvalue()
+
+
+def test_bundle_reserves_the_empty_message_slot():
+    """A pane spawn with no prompt keeps its message slot: click fills
+    positionals in order, so without the explicit empty the bundle's first
+    token becomes the worker seed."""
+    out = _inject(
+        ["spawn", "-H", "codex", "--name", "w"],
+        harness={"codex": {"args": ["--profile", "fno"]}},
+    )
+    assert out[-4:] == ["", "--", "--profile", "fno"]
+
+
 def test_lane_args_win_over_overlay_bundle():
     """The lane rung sits above the overlays for args too, and bundles are
     never concatenated."""
