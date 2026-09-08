@@ -7562,13 +7562,8 @@ def wake_and_deliver(
     revived_reservation = False
     if route_provider is not None:
         try:
-            # A revival re-occupies a live slot in its node's territory, so it
-            # re-runs the same gate a fresh spawn would, node included.
             gate = run_gate(
-                spawn_name,
-                "bg",
-                route_provider=route_provider,
-                node=getattr(entry, "node", None),
+                spawn_name, "bg", route_provider=route_provider, node=getattr(entry, "node", None)
             )
         except GateRefused as exc:
             return False, f"spawn-exit-{exc.code}"
