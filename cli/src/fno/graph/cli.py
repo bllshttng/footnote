@@ -6300,7 +6300,7 @@ def cmd_session_close(
 
     from fno.claims.self_identity import resolve_self_identity
     from fno.graph.fuzzy import resolve_node
-    from fno.graph.store import append_session_record, read_graph
+    from fno.graph.store import append_session_record, locked_mutate_graph, read_graph
 
     summary = summary.strip()
     launch = launch.strip()
@@ -6350,6 +6350,51 @@ def cmd_session_close(
         "ended_at": ended_at,
         "added": added,
     }
+    # A spawn dispatch acquires node:<id> under spawn-handover:<worker> and
+    # this close is the only terminal that lifecycle has. Release exactly OUR
+    # holder, never the key: a successor target session may already hold the
+    # claim under its own after rebinding it at init.
+    from fno.claims.core import release_claim
+    from fno.claims.io import claims_root_for
+
+    holder = (os.environ.get("FNO_NODE_CLAIM_HOLDER") or "").strip()
+    claim_key = f"node:{node_id}"
+    if holder.startswith("spawn-handover:"):
+        try:
+            released = release_claim(
+                claim_key, holder, strict=True, root=claims_root_for(claim_key)
+            )
+            receipt["claim_released"] = bool(released)
+            if released:
+                receipt["claim_holder"] = holder
+        except Exception as exc:  # noqa: BLE001 - a close never fails on its release
+            receipt["claim_released"] = False
+            typer.echo(
+                f"session close: {claim_key} not released: "
+                f"{type(exc).__name__}: {exc}. It stays held until its TTL expires.",
+                err=True,
+            )
+    else:
+        receipt["claim_released"] = False
+    # Name the next verb on the node so the next dispatcher resolves the
+    # target slot, not the blueprint one this close just ended.
+    launch_verb = launch.split()[0]
+    if launch_verb.startswith(("/fno:", "$fno:")):
+
+        def _write_dispatch_verb(entries):
+            for entry in entries:
+                if entry.get("id") == node_id and entry.get("dispatch_verb") != launch_verb:
+                    entry["dispatch_verb"] = launch_verb
+                    break
+            return entries
+
+        locked_mutate_graph(_graph_path(), _write_dispatch_verb)
+    else:
+        typer.echo(
+            f"session close: dispatch_verb not written: launch token "
+            f"{launch_verb!r} is not a plugin-qualified verb.",
+            err=True,
+        )
     if json_out:
         typer.echo(json.dumps(receipt))
     else:
