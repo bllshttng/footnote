@@ -103,7 +103,7 @@ The merge attempt yields one of these outcomes, written to the skill's state fil
 
 There is no `queued` outcome: `fno do pr merge` executes and enforces `require_checks_pass`. GitHub's native auto-merge queue is armed by `fno-agents finalize` alone, the one arming path.
 
-Both paths ask one owner whether this exact head may merge, so the queue arm cannot land what the merge verb would refuse, and neither ever emits an unpinned request. The decision, the receipt vocabulary, and what happens after the queue lands a merge later are in [authorized-merge](../../../docs/architecture/authorized-merge.md).
+One owner decides both paths. The queue arm cannot land what the merge verb refuses, and neither one emits an unpinned request. See [authorized-merge](../../../docs/architecture/authorized-merge.md).
 
 A `failed` outcome does NOT block the promise or mark the session as failed. The PR was
 created successfully; the merge failure is post-hoc. The user can merge manually.

@@ -142,7 +142,9 @@ Paths resolve via `fno.paths`; override under `config.paths.*`; check with `fno 
 
 ### Ship vocabulary
 
-`/ship` is the deliverable umbrella (`/ship pr` = `/pr`; `/ship doc` ships a research brief). The **ship phase** is the `/target` step that creates the PR; the **ship gate** stamps plan frontmatter. Loop finish lines: `DonePRGreen` (PR + CI + reviewed), `DoneUnreviewed` (green, unreviewed), `DoneAdvisory` (doc + eval-green), `DoneDelivery` (current evidence). `fno do pr merge` is the merge primitive. Every path that can land a PR - that verb, `pr verify`, and finalize's queue arm - asks one owner whether this exact head may merge: [authorized-merge](docs/architecture/authorized-merge.md). [skills/ship/SKILL.md](skills/ship/SKILL.md).
+`/ship` is the deliverable umbrella. `/ship pr` is `/pr`, and `/ship doc` ships a research brief. The **ship phase** is the `/target` step that creates the PR. The **ship gate** stamps plan frontmatter. Loop finish lines: `DonePRGreen` (PR + CI + reviewed), `DoneUnreviewed` (green, unreviewed), `DoneAdvisory` (doc + eval-green), `DoneDelivery` (current evidence). `fno do pr merge` is the merge primitive. [skills/ship/SKILL.md](skills/ship/SKILL.md).
+
+One owner decides every merge. That verb, `pr verify` and the finalize queue arm all ask it. See [authorized-merge](docs/architecture/authorized-merge.md).
 
 ### Plan completion stamp
 
