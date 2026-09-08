@@ -113,42 +113,67 @@ def _prefer_toml(paths: list[Path]) -> list[Path]:
     return _apply_search_ceiling(out)
 
 
-def _load_raw(path: Path) -> tuple[dict[str, object], bool]:
-    """Load a settings file and return (data, parse_succeeded).
+def _read_settings_doc(path: Path) -> tuple[object, str | None]:
+    """Read and parse one settings file: ``(parsed document, error or None)``.
 
-    Parses TOML for a ``.toml`` suffix (config.toml), YAML otherwise
-    (settings.yaml). Returns ({}, False) on any OS or parse error so callers
-    can fall through to the next candidate. Logs a cause-specific WARNING so a
-    missing file, an unreadable file, and malformed content never share one
-    diagnosis.
-
-    Returns (data, True) when the file parsed successfully (even if the dict
-    is empty, i.e. the file was blank).
+    The ONE parser. TOML for a ``.toml`` suffix (config.toml), YAML otherwise
+    (settings.yaml). The error is a human sentence naming the file and the
+    cause; it is None when the file was read and parsed, whatever shape the
+    document turned out to be. Shape is the caller's question.
     """
     try:
         text = path.read_text(encoding="utf-8")
         if path.suffix == ".toml":
-            data = tomllib.loads(text)
-        else:
-            data = yaml.safe_load(text)
-        return (data if isinstance(data, dict) else {}, True)
+            return (tomllib.loads(text), None)
+        return (yaml.safe_load(text), None)
     except FileNotFoundError:
-        _LOG.warning("config file at %s is missing; using defaults", path)
-        return ({}, False)
+        return (None, f"config file at {path} is missing")
     except OSError as exc:
-        _LOG.warning(
-            "config file at %s could not be read: %s; using defaults",
-            path,
-            exc,
-        )
-        return ({}, False)
+        return (None, f"config file at {path} could not be read: {exc}")
     except (UnicodeDecodeError, yaml.YAMLError, tomllib.TOMLDecodeError) as exc:
-        _LOG.warning(
-            "config file at %s failed to parse: %s; using defaults",
-            path,
-            exc,
-        )
+        return (None, f"config file at {path} failed to parse: {exc}")
+
+
+def _parse_settings(path: Path) -> tuple[dict[str, object], str | None]:
+    """Operator-facing read: ``(mapping, human error or None)``.
+
+    Reports both ways a settings file can fail to contribute: it could not be
+    read or parsed, or it parsed to something that is not a table. An empty
+    file and a comments-only file are legal and report no error.
+
+    ``fno config doctor`` reads through this so its verdict is computed from a
+    config it proved it read. :func:`_load_raw` is the loader's own view of the
+    same parse.
+    """
+    doc, error = _read_settings_doc(path)
+    if error is not None:
+        return ({}, error)
+    if doc is None:
+        return ({}, None)
+    if isinstance(doc, dict):
+        return (doc, None)
+    return (
+        {},
+        f"config file at {path} parsed to a {type(doc).__name__}, not a table",
+    )
+
+
+def _load_raw(path: Path) -> tuple[dict[str, object], bool]:
+    """Load a settings file and return (data, parse_succeeded).
+
+    Returns ({}, False) on any OS or parse error so callers can fall through to
+    the next candidate, logging a cause-specific WARNING so a missing file, an
+    unreadable file, and malformed content never share one diagnosis.
+
+    Returns (data, True) when the file parsed successfully (even if the dict is
+    empty, i.e. the file was blank, and even if the document was not a mapping,
+    in which case the layer contributes {}).
+    """
+    doc, error = _read_settings_doc(path)
+    if error is not None:
+        _LOG.warning("%s; using defaults", error)
         return ({}, False)
+    return (doc if isinstance(doc, dict) else {}, True)
 
 
 def _unwrap_config_dict(raw: dict[str, object]) -> dict[str, object]:
