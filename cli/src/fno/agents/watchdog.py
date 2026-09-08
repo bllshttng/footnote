@@ -750,7 +750,12 @@ def _verdict_one(
 
     # ghost: claims working/blocked, no transcript resolves for the id.
     if facts is None and row.state in _GHOST_STATES:
-        return _verdict(row, GHOST, f"no transcript for {row.row_id}", "report")
+        basis = (
+            f"no transcript for {row.row_id}"
+            if row.agent in {"claude", "codex"}
+            else f"harness {row.agent} keeps no per-session transcript, unmeasurable"
+        )
+        return _verdict(row, GHOST, basis, "report")
 
     # contended: below ghost (liveness outranks a tree fact), report-only.
     if peers:

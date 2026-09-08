@@ -817,6 +817,22 @@ def test_harness_for_session_survives_an_unreadable_registry(monkeypatch):
         wd._harness_by_session.cache_clear()
 
 
+def test_a_transcriptless_harness_ghost_names_the_harness():
+    """opencode/agy keep no per-session transcript, so their ghost is a fact
+    about the harness, not a fault in the row."""
+    row = Row("oc-1234", "oc-worker", "working", None, "/tmp/w1", "opencode")
+    [v] = _run([row], {})
+    assert v.verdict == GHOST
+    assert v.basis == "harness opencode keeps no per-session transcript, unmeasurable"
+
+
+def test_a_codex_row_with_a_genuinely_missing_transcript_still_ghosts_by_id():
+    row = Row("thread-535c", "codex-worker", "working", None, "/tmp/w1", "codex")
+    [v] = _run([row], {})
+    assert v.verdict == GHOST
+    assert v.basis == "no transcript for thread-535c"
+
+
 def test_fleet_rows_skips_a_name_only_nonclaude_row_loudly(monkeypatch, tmp_path):
     """A row carrying only a name cannot resolve a transcript or a claim, so a
     name-based row id is never minted for it: it would silently drop a live
