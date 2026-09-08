@@ -148,12 +148,10 @@ def classify_planned_unclaimed(
     # picked next. Reuse the shared key; never re-implement it.
     from fno.graph._intake import make_selection_sort_key
 
-    live_claimed = frozenset(
-        node_id for node_id, state in claimed.items() if state == "live"
-    )
+    live = frozenset(n for n, state in claimed.items() if state == "live")
     # The key sorts full entries; a row is a projection that already dropped
     # rank and created_at, so sort through `by_id` rather than through the row.
-    order = make_selection_sort_key(entries, live_claimed=live_claimed)
+    order = make_selection_sort_key(entries, live_claimed=live)
     rows.sort(key=lambda row: (order(by_id[row["id"]]), str(row["id"])))
     return {
         "source": OBSERVER_COMMAND,
