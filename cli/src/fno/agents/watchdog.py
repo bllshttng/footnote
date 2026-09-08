@@ -1032,10 +1032,12 @@ def tail_facts(
 
 
 @functools.lru_cache(maxsize=1)
-def _harness_by_session() -> dict[str, str]:
-    """Session id -> harness, from the registry. Cached for the life of the
-    process: every caller here is a one-shot CLI command, and the watchdog
-    daemon reads the harness off Row instead."""
+def _harness_by_session(registry_path: str) -> dict[str, str]:
+    """Session id -> harness, from the registry. Keyed on the declared
+    registry path (the state root this reader depends on), so a re-pointed
+    state root cannot read a stale map. Cached for the life of the process:
+    every caller here is a one-shot CLI command, and the watchdog daemon
+    reads the harness off Row instead."""
     from fno.agents.registry import load_registry
 
     try:
@@ -1055,7 +1057,13 @@ def harness_for_session(session_id: str) -> str:
     """The harness that owns this session, or claude when the registry does
     not know it. The ONE place that answers "which harness is this session"
     for a caller holding only an id."""
-    return _harness_by_session().get(session_id, "claude")
+    from fno.paths import agents_registry_path
+
+    try:
+        key = str(agents_registry_path())
+    except Exception:  # noqa: BLE001 - an unreadable state root answers claude
+        return "claude"
+    return _harness_by_session(key).get(session_id, "claude")
 
 
 def _record_text(e: dict) -> str:

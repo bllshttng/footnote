@@ -826,7 +826,9 @@ def test_a_transcript_read_without_an_agent_refuses():
 def test_harness_for_session_answers_from_the_registry(monkeypatch):
     import fno.agents.watchdog as wd
 
-    monkeypatch.setattr(wd, "_harness_by_session", lambda: {"thread-9": "codex"})
+    monkeypatch.setattr(
+        wd, "_harness_by_session", lambda registry_path: {"thread-9": "codex"}
+    )
     assert wd.harness_for_session("thread-9") == "codex"
     assert wd.harness_for_session("not-in-the-registry") == "claude"
 

@@ -161,7 +161,7 @@ def test_default_age_lookup_reads_a_codex_holders_transcript_as_codex(monkeypatc
         )
 
     monkeypatch.setattr(
-        watchdog_mod, "_harness_by_session", lambda: {"thread-9": "codex"}
+        watchdog_mod, "_harness_by_session", lambda registry_path: {"thread-9": "codex"}
     )
     monkeypatch.setattr(watchdog_mod, "tail_facts", fake_tail_facts)
 
