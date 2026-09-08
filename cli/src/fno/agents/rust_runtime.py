@@ -279,6 +279,11 @@ RUST_CLIENT_VERBS = frozenset(
         # The failover chain walk (x-8975 budget port): payload JSON in, the
         # {eligible} answer out; Python calls it via fno.rust_binary.verb_call.
         "fallback-chain",
+        # The one authorized merge operation: payload JSON in, one receipt out.
+        # `fno do pr merge`, `fno do pr verify --kind merged` and the finalize
+        # queue arm all ask it, so no two merge paths can answer "may this head
+        # merge?" differently. Python calls it via fno.rust_binary.verb_call.
+        "authorized-merge",
     }
 )
 
@@ -486,6 +491,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "route-slot": "Delivery-slot resolver: JSON payload on stdin, the {candidate, chain} answer on stdout; invoked by fno.route_slot_client, not `fno agents` routing.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
+    "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other
