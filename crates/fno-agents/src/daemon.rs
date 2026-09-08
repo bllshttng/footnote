@@ -31,6 +31,7 @@ use serde_json::{json, Map, Value};
 use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership check
 
 mod blocking_bound;
+mod rm_refusal_detail;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 mod list_rows;
@@ -6993,82 +6994,24 @@ async fn handle_rm_with(
             .clone()
             .unwrap_or_else(|| "(no harness row id)".into());
         let roster_known = claude_agents.as_ref().is_some_and(|snap| snap.is_known());
-        let detail = if entry.harness_name() != "claude" {
-            format!(
-                "agent {name} is still live. Stop it with `fno agents stop {name}`; rm \
-                 proceeds on its own once the row is gone. Forcing it through orphans a \
-                 live process and spends the row's resume handle. If stop answers no_op \
-                 (no addressable session behind the row), the row cannot prove liveness \
-                 either way; the override for that case is documented in `fno agents rm \
-                 --help`, not here."
-            )
-        } else if harness_row_id.is_none() {
-            // claude_row_provably_absent short-circuits to `false` (not
-            // provably gone) whenever the row id is None, independent of the
-            // roster -- so presence was never actually checked here, and the
-            // roster_known branch's "is present in" claim plus its runnable
-            // `claude stop <row>` commands would both be false (self-review
-            // finding).
-            format!(
-                "agent {name} is still live, but it has no resolvable harness row id, so \
-                 its presence in `claude agents --json --all` cannot be checked. Stop it \
-                 with `fno agents stop {name}`; rm proceeds on its own once the row is \
-                 gone. Forcing it through spends the resume handle the row still holds. \
-                 If stop refuses or no-ops because the row has no addressable session, \
-                 the row cannot prove liveness either way; the override for that case is \
-                 documented in `fno agents rm --help`, not here."
-            )
-        } else if roster_known {
-            let snapshot = claude_agents
+        let warnings = claude_agents
+            .as_ref()
+            .map(|snapshot| snapshot.warning_text())
+            .unwrap_or_default();
+        let row_present = harness_row_id.as_deref().is_some_and(|id| {
+            claude_agents
                 .as_ref()
-                .expect("roster_known implies a snapshot");
-            let warnings = snapshot.warning_text();
-            let present = harness_row_id
-                .as_deref()
-                .is_some_and(|id| snapshot.find(id).is_some());
-            if present {
-                // A Known list can still be partial (warnings). The row IS in
-                // what parsed, but the operator should know the list was not
-                // clean.
-                let mut message = format!(
-                    "agent {name} is still live. Its harness row {row} is present in \
-                     `claude agents --json --all`. Stop it with `fno agents stop {name}`; rm \
-                     proceeds on its own once that row is gone. Do not tear the row down by \
-                     hand: that spends the resume handle for nothing, and `fno agents rm` \
-                     makes the same call itself."
-                );
-                if !warnings.is_empty() {
-                    message.push_str(&format!(
-                        " (the roster read carried warnings, so the list is partial: {warnings})"
-                    ));
-                }
-                message
-            } else {
-                format!(
-                    "agent {name} is still live, and its harness row {row} was not in the \
-                     parsed rows, but the roster read carried warnings, so the list is \
-                     partial and absence is not proof: {warnings}. Retry once the roster \
-                     reads clean: rm re-reads it and proceeds on its own when the row is \
-                     provably gone. Forcing it through spends the resume handle on \
-                     unverified evidence."
-                )
-            }
-        } else {
-            // Name the read's own reason: "the roster read failed" without it
-            // sends callers to retry a timeout, which reproduces forever.
-            let reason = claude_agents
-                .as_ref()
-                .map(|snapshot| snapshot.warning_text())
-                .filter(|text| !text.is_empty())
-                .unwrap_or_else(|| "no reason recorded".into());
-            format!(
-                "agent {name} is still live, and its harness row {row}'s presence in \
-                 `claude agents --json --all` could not be confirmed (the roster read \
-                 failed: {reason}). Retry once that read succeeds: rm re-reads it and \
-                 proceeds on its own when the row is provably gone. Forcing it through \
-                 spends the resume handle on unverified evidence."
-            )
-        };
+                .is_some_and(|snap| snap.find(id).is_some())
+        });
+        let detail = rm_refusal_detail::live_row_refusal(
+            &name,
+            &row,
+            entry.harness_name(),
+            harness_row_id.is_none(),
+            roster_known,
+            row_present,
+            &warnings,
+        );
         return Response::err(req.id, ErrorCode::Busy, detail);
     }
     let harness_outcome = off_executor(|| {
@@ -10084,81 +10027,6 @@ mod tests {
         std::fs::remove_dir_all(home.root()).ok();
     }
 
-    /// The Unknown-roster refusal must name the read's own reason. A bare
-    /// "the roster read failed" sent the 2026-09-08 operator to retry a
-    /// 15s timeout, which reproduces forever.
-    #[tokio::test]
-    async fn rm_unknown_roster_refusal_names_the_reads_own_reason() {
-        let home = short_home("rmunknown");
-        let mut row = claude_rm_row(
-            "done-worker",
-            "aaabbb13",
-            "aaabbb13-1111-2222-3333-444444444444",
-        );
-        row.status = AgentStatus::Live;
-        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
-            .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let request = Request::new(1, "agent.rm", json!({"name": "done-worker"}));
-        let response = handle_rm_with(
-            &ctx,
-            &request,
-            &|| crate::claude_roster::ClaudeAgentsSnapshot::Unknown {
-                rows: Vec::new(),
-                warnings: vec!["claude agents --json --all timed out after 15s".into()],
-            },
-            &|_| Ok(()),
-            &|_, _| Ok(true),
-            &|_, _| PaneProbe::Unknown,
-        )
-        .await;
-
-        let message = &response.error().unwrap().message;
-        assert!(message.contains("the roster read failed:"));
-        assert!(message.contains("timed out after 15s"));
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
-    /// A partial list cannot prove absence: a row hidden among the skipped
-    /// rows would read as gone. The refusal names the warnings instead.
-    #[tokio::test]
-    async fn rm_absence_is_not_proof_on_a_warning_carrying_list() {
-        let home = short_home("rmpartialabsence");
-        let mut row = claude_rm_row(
-            "done-worker",
-            "aaabbb14",
-            "aaabbb14-1111-2222-3333-444444444444",
-        );
-        row.status = AgentStatus::Live;
-        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
-            .unwrap();
-        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let request = Request::new(1, "agent.rm", json!({"name": "done-worker"}));
-        let response = handle_rm_with(
-            &ctx,
-            &request,
-            &|| crate::claude_roster::ClaudeAgentsSnapshot::Known {
-                rows: Vec::new(),
-                warnings: vec!["one malformed row".into()],
-            },
-            &|_| Ok(()),
-            &|_, _| Ok(true),
-            &|_, _| PaneProbe::Unknown,
-        )
-        .await;
-
-        let message = &response.error().unwrap().message;
-        assert!(message.contains("absence is not proof"));
-        assert_eq!(
-            state::load_registry(&home.registry_json())
-                .unwrap()
-                .entries
-                .len(),
-            1
-        );
-        std::fs::remove_dir_all(home.root()).ok();
-    }
-
     #[tokio::test]
     async fn rm_mux_failure_names_the_claude_side_already_removed() {
         let home = short_home("rmpartial");
@@ -11707,6 +11575,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     // shrink).
     #[path = "gc_receipts.rs"]
     mod gc_receipts;
+    #[path = "rm_refusal.rs"]
+    mod rm_refusal;
 
     // The codex thread lane's spawn/registry/resume test family, moved
     // verbatim into its own module for the same reason as gc_receipts above:
