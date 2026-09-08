@@ -625,7 +625,15 @@ pub(crate) fn evaluate_done_probes(
         EvidenceDecl::None => (false, &[][..]),
         EvidenceDecl::Unparseable => unreachable!("plan_declared_probes refuses it"),
         EvidenceDecl::Evidence { required, bindings } => {
-            if let Err(why) = validate_bindings(bindings, plan_probes.len()) {
+            // Only THIS terminal's bindings are validated here, against this
+            // terminal's list: a close_probes index says nothing about the
+            // done_probes list length, and vice versa.
+            let own: Vec<AcceptanceBinding> = bindings
+                .iter()
+                .filter(|b| b.key == "done_probes")
+                .cloned()
+                .collect();
+            if let Err(why) = validate_bindings(&own, plan_probes.len()) {
                 return ProbeGate::Fail {
                     reason: why,
                     results: undeterminable_marker("invalid-acceptance-evidence"),
@@ -638,8 +646,9 @@ pub(crate) fn evaluate_done_probes(
     if project.is_empty() && plan_probes.is_empty() {
         // A required plan cannot pass on unarmed evidence: declaring `required`
         // with no done_probes binding means the session terminal has no rung to
-        // stand on. Finalize refuses it too; this is the runtime backstop.
-        if required && bindings.is_empty() {
+        // stand on, so close-scope-only bindings do not arm this terminal.
+        // Finalize refuses the declaration too; this is the runtime backstop.
+        if required && !bindings.iter().any(|b| b.key == "done_probes") {
             return ProbeGate::Fail {
                 reason: "acceptance_evidence: the plan asserts runnable acceptance evidence is required, but no done_probes probe is bound to a criterion (unarmed)"
                     .to_string(),
@@ -737,7 +746,7 @@ pub(crate) fn evaluate_done_probes(
 /// One binding: a compiled acceptance criterion wired to one probe by index.
 /// The terminal is the list the probe lives in; a binding's index is validated
 /// against that list at the terminal that evaluates it, never across both.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AcceptanceBinding {
     pub(crate) ac: String,
     pub(crate) key: &'static str,
@@ -1074,10 +1083,17 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
         }
         EvidenceDecl::None => None,
         EvidenceDecl::Evidence { required, bindings } => {
-            if let Err(why) = validate_bindings(&bindings, probes.len()) {
+            // Same per-terminal rule as the session gate: this terminal's
+            // bindings against this terminal's list only.
+            let own: Vec<AcceptanceBinding> = bindings
+                .iter()
+                .filter(|b| b.key == key)
+                .cloned()
+                .collect();
+            if let Err(why) = validate_bindings(&own, probes.len()) {
                 return probe_run_payload(2, &key, true, vec![], &why, Vec::new());
             }
-            Some((required, bindings))
+            Some((required, own))
         }
     };
     let (required, bindings) = match &decl {
@@ -2216,6 +2232,31 @@ mod acceptance_evidence_tests {
         ) {
             ProbeGate::Fail { reason, .. } => assert!(reason.contains("unarmed"), "{reason}"),
             other => panic!("unarmed required must refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn close_only_bindings_do_not_arm_a_required_session_terminal() {
+        // A close_probes binding is Pending at the session terminal, so it
+        // cannot be the satisfied evidence a required declaration promises.
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("plan.md");
+        std::fs::write(
+            &plan,
+            fm("close_probes:\n  - \"echo close-marker\"\nacceptance_evidence:\n  required: true\n  bindings:\n    AC1-HP: close_probes[0]"),
+        )
+        .unwrap();
+        let events = tmp.path().join("events.jsonl");
+        match evaluate_done_probes(
+            plan.to_str(),
+            None,
+            tmp.path(),
+            &events,
+            "s1",
+            Duration::from_secs(10),
+        ) {
+            ProbeGate::Fail { reason, .. } => assert!(reason.contains("unarmed"), "{reason}"),
+            other => panic!("close-only bindings must not arm the session, got {other:?}"),
         }
     }
 
