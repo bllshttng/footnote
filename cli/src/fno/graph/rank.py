@@ -26,8 +26,6 @@ def _drain_receipt() -> list[dict]:
 def _dispatch_note(task_id: str, graph_path) -> str | None:
     """Return a truthful dispatcher note for a successfully ranked node."""
     try:
-        import json as _json
-
         from fno.graph._intake import descendants_of
         from fno.graph.store import read_graph
 
