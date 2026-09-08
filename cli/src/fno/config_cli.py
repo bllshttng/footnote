@@ -892,7 +892,8 @@ def _report_harness_overlays() -> None:
     defaults = agents.defaults
     rows: list = [(f"agents.profiles.{v}", p, p, v) for v, p in (getattr(agents, "profiles", None) or {}).items()]
     rows.append(("agents.defaults", defaults, None, ""))
-    for label, _block, prof, verb in rows:
+    seen: set = set()
+    for _label, _block, prof, verb in rows:
         for harness in READABLE_PROVIDERS:
             for name, mapper in (
                 ("permission_mode", permission_pane_tokens),
@@ -901,6 +902,13 @@ def _report_harness_overlays() -> None:
                 value, rung = effective_field(defaults, prof, verb, name, harness)
                 if not value:
                     continue
+                # One line per unique (rung, field, harness, value): every
+                # verb resolves the same defaults scalar beneath it, and the
+                # defect is one, not four.
+                key = (rung, name, harness, value)
+                if key in seen:
+                    continue
+                seen.add(key)
                 if harness == "claude" and name == "permission_mode":
                     # claude is exact passthrough, so the mapper alone cannot
                     # catch a codex spelling: check the value against the
@@ -910,8 +918,7 @@ def _report_harness_overlays() -> None:
                     typer.echo(
                         f"config.{rung}.permission_mode = {value!r} is not a "
                         "claude permission mode; set claude's answer under "
-                        f"[{label}.harness.claude] or move the scalar to the "
-                        "harness that speaks it"
+                        f"[{rung}.harness.claude]"
                     )
                     continue
                 try:
@@ -920,7 +927,7 @@ def _report_harness_overlays() -> None:
                     typer.echo(
                         f"config.{rung}.{name} = {value!r} cannot map on "
                         f"{harness}: {exc}; set {harness}'s answer under "
-                        f"[{label}.harness.{harness}]"
+                        f"[{rung}.harness.{harness}]"
                     )
 
 
