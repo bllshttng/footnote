@@ -118,9 +118,10 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
             Ok(json!({"vendor": vendor}))
         }
         Some("link-meta") => resolve_link_meta(&payload),
+        Some("pane-group") => resolve_pane_group(&payload),
         Some("fallback") => resolve_fallback(&payload),
         other => Err(format!(
-            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|fallback"
+            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|pane-group|fallback"
         )),
     }
 }
@@ -596,6 +597,60 @@ fn resolve_link_meta(payload: &Value) -> Result<Value, String> {
         flag_rows.push(Value::Array(row));
     }
     Ok(json!({"ids": ids, "flags": flag_rows}))
+}
+
+/// Where a configured pane group may land. A group places the pane by moving
+/// its OWN tab, so it is skipped (never a failure: the value was injected, not
+/// typed) when the resolved substrate has no pane geometry, or when the
+/// caller's own argv already carries a placement flag. ``--once``/``-o``
+/// counts because a one-shot spawn has no pane geometry either. PRESENCE, not
+/// value: a valueless trailing ``--at`` still conflicts. The tokens arrive
+/// already fence- and value-filtered by the caller.
+fn resolve_pane_group(payload: &Value) -> Result<Value, String> {
+    let group = payload.get("group").and_then(Value::as_str).unwrap_or("");
+    let rung = payload.get("rung").and_then(Value::as_str).unwrap_or("");
+    let eff_substrate = payload
+        .get("eff_substrate")
+        .and_then(Value::as_str)
+        .unwrap_or("pane");
+    let toks: Vec<String> = payload
+        .get("argv_tail")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let placement = ["--split", "-x", "--at", "--once", "-o"];
+    let mut conflicting: Option<String> = None;
+    for t in &toks {
+        for f in placement {
+            let glued = f.len() == 2 && !f[1..].starts_with('-');
+            if t == f || t.starts_with(&format!("{f}=")) || (glued && t.starts_with(f) && t != f) {
+                conflicting = Some(f.to_string());
+                break;
+            }
+        }
+        if conflicting.is_some() {
+            break;
+        }
+    }
+    if eff_substrate != "pane" {
+        return Ok(json!({
+            "skipped": format!(
+                "fno agents spawn: pane group skipped (resolved substrate {eff_substrate:?} has no pane geometry); {rung} = {group:?} ignored"
+            )
+        }));
+    }
+    if let Some(c) = conflicting {
+        return Ok(json!({
+            "skipped": format!(
+                "fno agents spawn: pane group skipped ({c} places this pane in a tab it does not own, which a group cannot move); {rung} = {group:?} ignored"
+            )
+        }));
+    }
+    Ok(json!({"inject": ["--tab", group]}))
 }
 
 fn resolve_fallback(payload: &Value) -> Result<Value, String> {
