@@ -34,9 +34,18 @@ def _live_miss_age_suffix(recipient: str) -> str:
 # did not confirm (node x-1904). For these the durable preamble must NOT say
 # "is not live" -- the recipient was live, so that wording read as a liveness
 # lie and cost a wrong hypothesis on measured evidence. The receipt names the
-# real cause instead.
+# real cause instead. ``no-confirm-source`` joins that set (x-175a): the keeper
+# lane refuses it only AFTER the socket connect, so the recipient was reachable
+# and the honest receipt is "unconfirmed", not "is not live".
 _LIVE_LANE_FAILURE_REASONS = frozenset(
-    {"not-confirmed", "attach-failed", "io-error", "mux-send-failed", "unsafe-text"}
+    {
+        "not-confirmed",
+        "attach-failed",
+        "io-error",
+        "mux-send-failed",
+        "unsafe-text",
+        "no-confirm-source",
+    }
 )
 
 
