@@ -873,8 +873,11 @@ const CASCADE_TIMEOUT: Duration = Duration::from_secs(15);
 /// still sees the row or that list is unreadable. codex: drop the session's
 /// entry from `~/.codex/session_index.jsonl`
 /// (transcript files stay; this is the index record, matching the Python rm
-/// teardown arm). opencode/gemini: registry-only by contract - nothing to
-/// cascade.
+/// teardown arm). gemini: registry-only by contract - nothing to cascade.
+/// opencode is registry-only HERE and not everywhere: the retirement lane
+/// archives its session (`gc_native::apply_opencode_archive`), which this
+/// cascade must not do, because `rm` shares it and `rm`'s Python twin leaves
+/// an opencode record alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CascadeOutcome {
     Removed,

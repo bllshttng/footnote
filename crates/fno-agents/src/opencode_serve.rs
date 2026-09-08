@@ -1024,6 +1024,167 @@ pub fn delete_session(base_url: &str, token: &str, session_id: &str) -> Result<(
     }
 }
 
+// ===========================================================================
+// The archive op: a history-preserving active-surface removal
+// ===========================================================================
+
+/// The opencode version the archive op was measured against (v1.14.50,
+/// 2026-09-08). `PATCH /session/{id}` with `{"time":{"archived":<epoch_ms>}}`
+/// answers 200, a separate GET still returns the session with the field set
+/// and its messages intact, and `session.list` drops it from the active
+/// listing. Below this version the field is UNVERIFIED, not known-absent, so a
+/// caller skips instead of guessing: an older serve that ignored the field
+/// would turn a retirement that works today into one that holds its row
+/// forever.
+pub const ARCHIVE_MIN_VERSION: (u32, u32, u32) = (1, 14, 50);
+
+/// What one archive attempt measured. `Survived` is an outcome, not an error:
+/// the write was accepted and the stored record still carries no
+/// `time.archived`, which is a positive finding about the server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArchiveOutcome {
+    Archived,
+    AlreadyArchived,
+    Gone,
+    Survived,
+}
+
+/// Compare the leading three dotted integers of `reported` against `min`. An
+/// unparseable version answers false: a version nobody can read is not
+/// evidence of a supported one.
+pub(crate) fn version_at_least(reported: &str, min: (u32, u32, u32)) -> bool {
+    let nums: Vec<u32> = reported
+        .trim()
+        .trim_start_matches('v')
+        .split('.')
+        .take(3)
+        .map(|part| {
+            part.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+        })
+        .filter_map(|digits| digits.parse::<u32>().ok())
+        .collect();
+    nums.len() == 3 && (nums[0], nums[1], nums[2]) >= min
+}
+
+fn is_archived(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("time")
+                .and_then(|time| time.get("archived"))
+                .cloned()
+        })
+        .is_some_and(|value| !value.is_null())
+}
+
+/// The recorded serve, when it answers health AND reports a version carrying
+/// the archive op. Returns `None` for every other case, including a missing
+/// state file and an unreadable one.
+///
+/// It never boots a serve: a GC sweep must not start a server as a side
+/// effect. One health read answers both questions, because the health body
+/// carries the version, and one read is the right budget here - a false
+/// "unhealthy" only skips the archive, which is what the caller did before
+/// this op existed. The three-attempt [`serve_healthy`] belongs to the spawn
+/// path, where the unhealthy branch SIGTERMs the serve.
+pub fn archive_capable_serve(home: &AgentsHome) -> Option<ServeHandle> {
+    let raw = std::fs::read_to_string(serve_state_path(home)).ok()?;
+    let state: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let base_url = state.get("base_url")?.as_str()?.to_string();
+    let token = state.get("token")?.as_str()?.to_string();
+    if base_url.is_empty() || token.is_empty() {
+        return None;
+    }
+    let (status, body) = http_json(
+        &base_url,
+        "GET",
+        "/global/health",
+        None,
+        Some(&token),
+        HEALTH_TIMEOUT,
+    )
+    .ok()?;
+    if status != 200 {
+        return None;
+    }
+    let health: serde_json::Value = serde_json::from_str(&body).ok()?;
+    if health.get("healthy") != Some(&serde_json::Value::Bool(true)) {
+        return None;
+    }
+    if !version_at_least(health.get("version")?.as_str()?, ARCHIVE_MIN_VERSION) {
+        return None;
+    }
+    Some(ServeHandle {
+        base_url,
+        token,
+        pid: state.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        pid_start: state
+            .get("pid_start")
+            .and_then(|v| v.as_u64())
+            .filter(|start| *start > 0),
+    })
+}
+
+/// Archive one session: stamp `time.archived` and read the STORED record back.
+///
+/// The PATCH response body is the server's own projection of a write it has
+/// not necessarily persisted, so the second GET is the positive marker. An
+/// `Err` here means the attempt could not be judged; a write that was accepted
+/// and left the session unarchived answers [`ArchiveOutcome::Survived`].
+pub fn archive_session(
+    base_url: &str,
+    token: &str,
+    session_id: &str,
+) -> Result<ArchiveOutcome, String> {
+    let path = format!("/session/{session_id}");
+    let (status, body) = http_json(base_url, "GET", &path, None, Some(token), HTTP_CALL_TIMEOUT)?;
+    if status == 404 {
+        return Ok(ArchiveOutcome::Gone);
+    }
+    if status != 200 {
+        return Err(format!(
+            "GET session answered {status}: {}",
+            tail_reason(&body, status)
+        ));
+    }
+    if is_archived(&body) {
+        return Ok(ArchiveOutcome::AlreadyArchived);
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .map_err(|e| format!("clock before the epoch: {e}"))?;
+    let (status, body) = http_json(
+        base_url,
+        "PATCH",
+        &path,
+        Some(&serde_json::json!({"time": {"archived": now_ms}})),
+        Some(token),
+        HTTP_CALL_TIMEOUT,
+    )?;
+    if status != 200 && status != 204 {
+        return Err(format!(
+            "PATCH archive answered {status}: {}",
+            tail_reason(&body, status)
+        ));
+    }
+    let (status, body) = http_json(base_url, "GET", &path, None, Some(token), HTTP_CALL_TIMEOUT)?;
+    if status != 200 {
+        return Err(format!(
+            "archive readback answered {status}: {}",
+            tail_reason(&body, status)
+        ));
+    }
+    if is_archived(&body) {
+        Ok(ArchiveOutcome::Archived)
+    } else {
+        Ok(ArchiveOutcome::Survived)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1398,3 +1559,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "opencode_archive_tests.rs"]
+mod opencode_archive_tests;
