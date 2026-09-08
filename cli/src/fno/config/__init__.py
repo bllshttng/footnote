@@ -1998,9 +1998,9 @@ class AgentProviderBlock(BaseModel):
 # The spawn-defaults schema blocks live in spawn_blocks (the config hub is
 # over the file budget and shrink-only); re-exported for every reader.
 from fno.config.spawn_blocks import (  # noqa: E402
-    HarnessOverlayBlock,
-    SpawnDefaultsBlock,
-    SpawnProfileBlock,
+    HarnessOverlayBlock as HarnessOverlayBlock,
+    SpawnDefaultsBlock as SpawnDefaultsBlock,
+    SpawnProfileBlock as SpawnProfileBlock,
 )
 
 

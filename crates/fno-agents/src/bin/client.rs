@@ -74,6 +74,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "rm",
     "session-start-bytes",
     "spawn",
+    "spawn-overlay",
     "state",
     "status",
     "stop",
@@ -295,6 +296,14 @@ async fn run(args: Vec<String>) -> i32 {
     // send one JSON payload and read {status, candidate, chain} back.
     if verb == "route-slot" {
         return fno_agents::route_slot::run_route_slot(&args[1..]);
+    }
+
+    // `spawn-overlay`: the harness-keyed spawn-defaults resolver (see
+    // spawn_overlay.rs doc). Direct dispatch; no daemon RPC. Python's spawn
+    // seam, the doctor readout and the failover walker send one JSON payload
+    // and read the answer back.
+    if verb == "spawn-overlay" {
+        return fno_agents::spawn_overlay::run_spawn_overlay(&args[1..]);
     }
 
     // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see

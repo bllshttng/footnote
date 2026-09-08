@@ -875,13 +875,17 @@ def _report_harness_overlays() -> None:
     The spawn seam degrades open on config values by design - a bad config
     never bricks spawning - so the READOUT is where an operator hears that a
     configured value will be skipped on some harness. Resolution goes through
-    the same ``effective_field`` rungs the spawn seam uses (one precedence
+    the spawn-overlay verb, the same rungs the spawn seam uses (one precedence
     implementation), and each value is checked with the per-harness mapper
     that would carry it. Silent when every pair maps.
     """
     from fno.agents.harnesses import READABLE_PROVIDERS
     from fno.agents.mux_spawn import effort_tokens, permission_pane_tokens
-    from fno.agents.spawn_defaults import effective_field
+    from fno.agents.spawn_defaults import _overlay_payload
+    from fno.agents.spawn_overlay_client import (
+        SpawnOverlayUnavailable,
+        spawn_overlay_call,
+    )
     from fno.agents.harness_map import CLAUDE_PERMISSION_MODES
     from fno.config import load_settings
 
@@ -890,18 +894,37 @@ def _report_harness_overlays() -> None:
     except Exception:  # noqa: BLE001 - an unreadable config reads as absent
         return
     defaults = agents.defaults
-    rows: list = [(f"agents.profiles.{v}", p, p, v) for v, p in (getattr(agents, "profiles", None) or {}).items()]
-    rows.append(("agents.defaults", defaults, None, ""))
+    rows: list = [(v, p) for v, p in (getattr(agents, "profiles", None) or {}).items()]
+    rows.append(("", None))
     seen: set = set()
-    for _label, _block, prof, verb in rows:
+    for verb, prof in rows:
         for harness in READABLE_PROVIDERS:
+            try:
+                answer = spawn_overlay_call(
+                    {
+                        "kind": "overlay",
+                        "verb": verb,
+                        "harness": harness,
+                        "defaults": _overlay_payload(defaults),
+                        "profile": _overlay_payload(prof) if prof is not None else None,
+                    }
+                )
+            except SpawnOverlayUnavailable as exc:
+                typer.echo(f"config doctor: harness-overlay readout unavailable: {exc}")
+                return
+            if answer.get("refusal"):
+                # The verb's own guards refused the config (unknown harness
+                # key, a ranking field in an overlay); that IS the finding.
+                typer.echo(answer["refusal"])
+                return
             for name, mapper in (
                 ("permission_mode", permission_pane_tokens),
                 ("effort", effort_tokens),
             ):
-                value, rung = effective_field(defaults, prof, verb, name, harness)
-                if not value:
+                entry = (answer.get("effective") or {}).get(name)
+                if not entry:
                     continue
+                value, rung = entry["value"], entry["rung"]
                 # One line per unique (rung, field, harness, value): every
                 # verb resolves the same defaults scalar beneath it, and the
                 # defect is one, not four.

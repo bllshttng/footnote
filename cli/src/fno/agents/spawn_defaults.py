@@ -829,6 +829,47 @@ def _lane_value(lane: object, name: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _overlays_present(defaults: object, profile: object, lane: object = None) -> bool:
+    """A harness overlay table (or lane args) can carry the ONLY value this
+    spawn injects, so an empty harness-blind scalar read must not end
+    composition before the post-resolution reads run (x-8975)."""
+    for obj in (defaults, profile):
+        table = getattr(obj, "harness", None)
+        if isinstance(table, Mapping) and table:
+            return True
+    if lane is not None:
+        lv = (
+            lane.get("args")
+            if isinstance(lane, Mapping)
+            else getattr(lane, "args", None)
+        )
+        if lv:
+            return True
+    return False
+
+
+def _overlay_payload(obj: object) -> dict:
+    """One spawn-defaults block as the verb's JSON view. ``model_dump()`` is
+    the pydantic shape (extra=allow keeps smuggled keys visible); getattr is
+    the test-fixture shape."""
+    dump = getattr(obj, "model_dump", None)
+    if callable(dump):
+        return dump()
+    out: dict = {}
+    for k in (
+        "provider", "model", "effort", "substrate", "permission_mode",
+        "route", "account", "pane_group",
+    ):
+        out[k] = getattr(obj, k, "") or ""
+    harness = getattr(obj, "harness", None)
+    if isinstance(harness, Mapping):
+        out["harness"] = {
+            h: (b.model_dump() if callable(getattr(b, "model_dump", None)) else dict(b))
+            for h, b in harness.items()
+        }
+    return out
+
+
 #: Ranking fields are lane business: an overlay table re-answers a flag
 #: spelling for one harness, it never re-routes the spawn.
 _LANE_FIELD_NAMES = ("provider", "model", "route", "account")
@@ -837,64 +878,24 @@ _LANE_FIELD_NAMES = ("provider", "model", "route", "account")
 _OVERLAY_FIELDS = frozenset({"permission_mode", "effort", "substrate", "args"})
 
 
-def _overlay_of(obj: object, harness: Optional[str]) -> Optional[object]:
-    """The harness overlay block under a spawn-defaults object, or None."""
-    if not harness:
-        return None
-    table = getattr(obj, "harness", None)
-    if not isinstance(table, Mapping):
-        return None
-    return table.get(harness)
-
-
-def _overlay_scalar(overlay: object, name: str) -> str:
-    value = (
-        overlay.get(name, "") if isinstance(overlay, Mapping) else getattr(overlay, name, "")
-    )
-    return value.strip() if isinstance(value, str) else ""
-
-
 def effective_field(
     defaults: object,
     profile: Optional[object],
     profile_verb: Optional[str],
     name: str,
-    harness: Optional[str] = None,
 ) -> Tuple[str, Optional[str]]:
-    """Scalar rungs without the lane: profile harness overlay > profile scalar
-    > defaults harness overlay > defaults. Shared by the spawn seam's field()
-    and the config doctor readout so the precedence has ONE implementation.
-    ``harness=None`` reads exactly the two scalar rungs (the pre-overlay
-    shape), which the axis-occupancy reads keep."""
-    overlay = _overlay_of(profile, harness)
-    if overlay is not None:
-        v = _overlay_scalar(overlay, name)
-        if v:
-            return v, f"agents.profiles.{profile_verb}.harness.{harness}"
+    """The two scalar rungs: profile > defaults. The harness-keyed rungs above
+    them resolve in the spawn-overlay verb; this harness-blind read stays in
+    Python for the axis-occupancy reads and overlay-free spawns, where an
+    empty harness table makes the two answers identical."""
     if profile is not None:
         pv = (getattr(profile, name, "") or "").strip()
         if pv:
             return pv, f"agents.profiles.{profile_verb}"
-    overlay = _overlay_of(defaults, harness)
-    if overlay is not None:
-        v = _overlay_scalar(overlay, name)
-        if v:
-            return v, f"agents.defaults.harness.{harness}"
     dv = (getattr(defaults, name, "") or "").strip()
     if dv:
         return dv, "agents.defaults"
     return "", None
-
-
-def _passthrough_boundary(toks: Sequence[str]) -> Optional[str]:
-    """The token occupying the passthrough surface, or None. A bare ``--``
-    fence and the ``--argv`` payload boundary BOTH own everything after them
-    (the Rust parser reads past ``--argv`` as the provider command line), so a
-    configured bundle can never append behind either."""
-    for t in toks:
-        if t == "--argv" or t == "--":
-            return t
-    return None
 
 
 
@@ -977,85 +978,56 @@ def _check_model_vendor_mismatch(
     *,
     model_source: Optional[str] = None,
 ) -> None:
-    """Judge a model string whose implied vendor the resolved lane does not
-    match (a glm-* model with no zai route, a gpt-* under a claude harness).
+    """Judge a model whose implied vendor the resolved lane does not match.
 
     WHAT THE CALLER TYPED AND WHAT CONFIG SUPPLIED ARE DIFFERENT FACTS, and
-    ``model_source`` is the only thing that separates them. It carries the
-    config path when this model was INJECTED, and None when the caller named it.
-
-    A typed model still warns and proceeds, unchanged: that pairing is legal
-    and the passthrough is deliberate. An INJECTED model that cannot run on the
-    resolved lane REFUSES, because nobody chose that pairing. The worker it
-    would otherwise start accepts a seed, reports live, and dies on its first
-    inference, so the receipt reads healthy for a session that cannot work.
-
-    This ran on the FINAL argv alone for exactly the reason it could not tell
-    the two apart: by then an injected default and an explicit flag look the
-    same. Both messages name BOTH sides, because naming only the mismatch does
-    not tell the caller which half to change; the refusal also names the config
-    key, which is the half a caller who typed nothing has to edit.
-
-    An explicit --route suppresses both: the caller named the lane AND the
-    model, which is a deliberate override, not the misroute this catches.
+    ``model_source`` carries the config path when the model was INJECTED and
+    None when the caller named it: a typed mismatch warns and proceeds (the
+    passthrough is deliberate), an injected one REFUSES - nobody chose that
+    pairing, and the worker it would start dies on its first inference.
+    An explicit --route suppresses both. The judgment lives in the
+    spawn-overlay verb; this shim keeps the Python side effects (event,
+    stderr line, exit 2).
     """
-    toks = list(argv[1:])
-    model = _flag_value(toks, "--model", "-m")
-    implied = _implied_vendor(model)
-    if not implied:
-        return
-    if _flag_value(toks, "--route") is not None:
-        # Explicit route: a deliberate lane choice beside a deliberate model.
-        # (A config route is never injected beside an explicit model, so a
-        # --route in the final argv is always operator-typed.)
-        return
-    lane = resolve_lane_vendor(argv, env=env)
-    if not lane or lane == implied:
-        return
-    # One predicate, read once. Deriving the event's `outcome` separately
-    # from the branch below is how a measurement starts disagreeing with
-    # the thing it measures.
-    refusing = bool(model_source) and _flag_value(toks, "--account") is None
-    from fno.agents import events
+    toks = [str(t) for t in argv[1:]]
+    # The lane's harness, resolved in the verb's precedence order: an explicit
+    # -H flag wins, then dispatch inference from env. The verb maps harness >
+    # vendor and judges the model against it.
+    harness = _flag_value(toks, "--harness", "-H")
+    if not (harness and harness.strip()):
+        try:
+            from fno.dispatch_flags import resolve_dispatch_harness
 
-    events.emit(
-        "model_vendor_mismatch",
-        model=model,
-        implied_vendor=implied,
-        resolved_vendor=lane,
-        model_source=model_source or "explicit",
-        outcome="refused" if refusing else "warned",
+            harness = resolve_dispatch_harness(None, env=env)[0]
+        except Exception:
+            harness = "claude"
+    from fno.agents.spawn_overlay_client import (
+        SpawnOverlayUnavailable,
+        spawn_overlay_call,
     )
-    if refusing:
-        # THE ACCOUNT AXIS IS INVISIBLE HERE, so its presence downgrades the
-        # refusal back to a warning. `resolve_lane_vendor` reads route, then
-        # provider, then harness; it never consults `--account`, and an account
-        # can carry its own vendor credential. So a zai account paired with a
-        # glm model under a claude harness is a WORKING spawn this check reads
-        # as a mismatch. Refusing it stops the fleet spawning to prevent a
-        # failure that was not going to happen, and the `-P` escape the message
-        # suggests would compose a different credential and a different bill.
-        # Refuse only where nothing could have chosen the pairing.
-        #
-        # Fail closed with empty stdout, the posture `fno workspace worktree
-        # ensure` takes on an out-of-enum policy value: a caller holding a
-        # refusal is better off than one holding a live-looking worker.
-        print(
-            f"fno agents spawn: refusing to spawn. {model_source} supplies "
-            f"--model {model!r}, which implies vendor {implied}, but this spawn "
-            f"resolves the {lane} lane. Nothing typed this pairing, and the "
-            f"worker would start, report live, and fail on its first inference. "
-            f"Set a model for the {lane} lane at {model_source}, or name the vendor "
-            f"on this spawn with -P {implied}.",
-            file=err,
+
+    try:
+        answer = spawn_overlay_call(
+            {
+                "kind": "model-vendor",
+                "argv_tail": toks,
+                "argv_head": argv[0] if argv else None,
+                "harness": harness,
+                "model_source": model_source,
+            }
         )
+    except SpawnOverlayUnavailable as exc:
+        print(f"fno agents spawn: {exc}", file=err)
         raise SystemExit(2)
-    print(
-        f"fno agents spawn: --model {model!r} implies vendor {implied}, but the "
-        f"resolved lane is {lane}; the model rides that lane's CLI as-is. Name "
-        f"the vendor with -P {implied} to route it.",
-        file=err,
-    )
+    if answer.get("event"):
+        from fno.agents import events
+
+        events.emit("model_vendor_mismatch", **answer["event"])
+    if answer.get("verdict") == "refuse":
+        print(answer.get("message"), file=err)
+        raise SystemExit(2)
+    if answer.get("verdict") == "warn":
+        print(answer.get("message"), file=err)
 
 
 def inject_spawn_defaults(
@@ -1125,43 +1097,10 @@ def inject_spawn_defaults(
             profile = profiles.get(legacy_verb)
             if profile is not None:
                 profile_verb = legacy_verb
-    # Overlay table guards (x-8975): fail-closed like the malformed-lane
-    # refusal, because a spawn composed on top of an overlay naming an unknown
-    # harness, or carrying a ranking field, would silently mis-bill. Scoped to
-    # the rungs THIS spawn reads (defaults + its verb's profile); an unrelated
-    # verb's typo must not block this dispatch.
-    if defaults is not None or profile is not None:
-        from fno.agents.harnesses import READABLE_PROVIDERS
-
-        for _owner, _obj in (
-            ("agents.defaults", defaults),
-            (f"agents.profiles.{profile_verb}", profile),
-        ):
-            _table = getattr(_obj, "harness", None)
-            if not isinstance(_table, Mapping):
-                continue
-            for _h, _block in _table.items():
-                if _h not in READABLE_PROVIDERS:
-                    print(
-                        f"fno agents spawn: config.{_owner}.harness.{_h} is not "
-                        f"a known harness; valid: {', '.join(READABLE_PROVIDERS)}",
-                        file=err,
-                    )
-                    raise SystemExit(2)
-                # A pydantic block keeps smuggled keys in model_extra; a raw
-                # mapping (the lanes idiom) carries them as plain keys.
-                if isinstance(_block, Mapping):
-                    _extra = [k for k in _block if k not in _OVERLAY_FIELDS]
-                else:
-                    _extra = list(getattr(_block, "model_extra", None) or {})
-                for _k in _extra:
-                    if _k in _LANE_FIELD_NAMES:
-                        print(
-                            f"fno agents spawn: config.{_owner}.harness.{_h}.{_k} "
-                            "is a lane field; declare it on the lane",
-                            file=err,
-                        )
-                        raise SystemExit(2)
+    # Overlay table guards (x-8975): the spawn-overlay verb owns them now -
+    # an unknown harness name, or a ranking field inside an overlay, refuses
+    # the composition from the same call that resolves the rungs. Scoped to
+    # the rungs THIS spawn reads; an unrelated verb's typo must not block it.
     lane: Optional[object] = None
     lane_index: Optional[int] = None
     slot_candidate: Optional[dict] = None
@@ -1348,21 +1287,21 @@ def inject_spawn_defaults(
     # lane inheriting a zai route builds an argv cli.py refuses); postures fall through.
     _LANE_EXCLUSIVE = ("route", "model")
 
-    def field(name: str, harness: Optional[str] = None) -> Tuple[str, Optional[str]]:
-        """Effective value + source rung: lane > profile harness overlay >
-        profile > defaults harness overlay > defaults.
+    def field(name: str) -> Tuple[str, Optional[str]]:
+        """Effective value + source rung: lane > profile > defaults.
 
         ``route`` and ``model`` stop at the lane when one was selected; see
-        ``_LANE_EXCLUSIVE`` above. The two harness-overlay rungs join only once
-        the resolved harness is known; ``harness=None`` reads exactly the
-        pre-overlay shape, which the axis-occupancy reads above keep."""
+        ``_LANE_EXCLUSIVE`` above. The harness-keyed rungs join only in the
+        spawn-overlay verb's answer; this read is harness-blind, which is
+        exact whenever no overlay table exists (_overlays_present gates the
+        verb path on one)."""
         if lane is not None and lane_index is not None:
             lv = _lane_value(lane, name)
             if lv:
                 return lv, f"agents.profiles.{profile_verb}.lanes[{lane_index}]"
             if name in _LANE_EXCLUSIVE:
                 return "", None
-        return effective_field(defaults, profile, profile_verb, name, harness)
+        return effective_field(defaults, profile, profile_verb, name)
 
     cfg_harness, provider_rung = field("provider")
     cfg_model, model_rung = field("model")
@@ -1393,28 +1332,12 @@ def inject_spawn_defaults(
     )
     from_config.extend(slot_receipt)
 
-    def _overlay_extras() -> bool:
-        """A harness overlay table (or lane args) can carry the ONLY value
-        this spawn injects, so an empty harness-blind scalar read must not end
-        composition before the post-resolution reads run (x-8975)."""
-        for _o in (defaults, profile):
-            t = getattr(_o, "harness", None)
-            if isinstance(t, Mapping) and t:
-                return True
-        if lane is not None:
-            lv = (
-                lane.get("args")
-                if isinstance(lane, Mapping)
-                else getattr(lane, "args", None)
-            )
-            if lv:
-                return True
-        return False
-
     if not (
         cfg_harness or cfg_model or cfg_effort or cfg_substrate or cfg_permission
         or cfg_route or cfg_account or cfg_pane_group
-    ) and grid_candidate is None and not from_config and not _overlay_extras():
+    ) and grid_candidate is None and not from_config and not _overlays_present(
+        defaults, profile, lane
+    ):
         # No config field resolved at all, so any --model here was typed.
         _check_model_vendor_mismatch(out, err, env)
         return out
@@ -1651,6 +1574,56 @@ def inject_spawn_defaults(
                     file=err,
                 )
 
+    # The spawn-overlay verb owns the harness-keyed rungs (x-8975): one
+    # round-trip answers effort/substrate/permission for the resolved harness,
+    # resolves the ONE bundle, and refuses an unknown harness key or a ranking
+    # field inside an overlay. Gated on an overlay table (or lane args) being
+    # present, so the common overlay-free spawn pays zero subprocesses and the
+    # harness-blind field() reads below answer it exactly.
+    _overlay_answer: Optional[dict] = None
+    if _overlays_present(defaults, profile, lane):
+        from fno.agents.spawn_overlay_client import (
+            SpawnOverlayUnavailable,
+            spawn_overlay_call,
+        )
+
+        _lv = (
+            lane.get("args") if isinstance(lane, Mapping) else getattr(lane, "args", None)
+        ) if lane is not None else None
+        try:
+            _overlay_answer = spawn_overlay_call(
+                {
+                    "kind": "overlay",
+                    "verb": profile_verb or "",
+                    "harness": resolved_harness() or "",
+                    "defaults": _overlay_payload(defaults) if defaults is not None else {},
+                    "profile": _overlay_payload(profile) if profile is not None else None,
+                    "lane": {"args": list(_lv)} if _lv else None,
+                    "lane_index": lane_index,
+                    "argv_tail": [str(t) for t in out[1:]],
+                }
+            )
+        except SpawnOverlayUnavailable as exc:
+            print(f"fno agents spawn: {exc}", file=err)
+            raise SystemExit(2)
+        if _overlay_answer.get("refusal"):
+            print(_overlay_answer["refusal"], file=err)
+            raise SystemExit(2)
+
+    def _seamed(name: str) -> Tuple[str, Optional[str]]:
+        """The post-resolution read for the three posture fields: the lane
+        first (a lane is a complete coordinate), then the verb's harness-keyed
+        answer, then the harness-blind scalars - field()'s order with the two
+        harness rungs spliced in above them."""
+        if lane is not None and lane_index is not None:
+            lv = _lane_value(lane, name)
+            if lv:
+                return lv, f"agents.profiles.{profile_verb}.lanes[{lane_index}]"
+        entry = (_overlay_answer or {}).get("effective", {}).get(name)
+        if entry:
+            return entry["value"], entry["rung"]
+        return field(name)
+
     if not has_effort:
         # Effort surface depends on the RESOLVED HARNESS, not the vendor, so
         # the value is re-read through the harness rungs HERE, after the grid
@@ -1658,7 +1631,7 @@ def inject_spawn_defaults(
         # effort must win on codex while the scalar still answers claude.
         # resolved_harness() is the same lazy answer the substrate and
         # permission blocks read: explicit -H > config provider > inference.
-        cfg_effort, effort_rung = field("effort", harness=resolved_harness())
+        cfg_effort, effort_rung = _seamed("effort")
         if cfg_effort:
             from fno.agents.mux_spawn import effort_tokens
 
@@ -1689,7 +1662,7 @@ def inject_spawn_defaults(
         # Re-read through the harness rungs (x-8975): a substrate that only a
         # harness overlay carries must still reach its harness here.
         prov = resolved_harness()
-        cfg_substrate, substrate_rung = field("substrate", harness=prov)
+        cfg_substrate, substrate_rung = _seamed("substrate")
         if cfg_substrate:
             if prov and _substrate_compatible(cfg_substrate, prov):
                 inject += ["--substrate", cfg_substrate]
@@ -1724,7 +1697,7 @@ def inject_spawn_defaults(
         # spelling the HARNESS defines, so the answer can be keyed by harness.
         # An empty re-read keeps the harness-blind read alive: that is the
         # builtin.autonomous rung (x-7198), which field() cannot see.
-        h_permission, h_rung = field("permission_mode", harness=prov)
+        h_permission, h_rung = _seamed("permission_mode")
         if h_permission:
             cfg_permission, permission_rung = h_permission, h_rung
         # The effective substrate this spawn resolves to: an explicit pin, else a
@@ -1813,61 +1786,38 @@ def inject_spawn_defaults(
             inject += ["--tab", cfg_pane_group]
             from_config.append(("tab", cfg_pane_group, f"{pane_group_rung}.pane_group"))  # type: ignore[arg-type]
 
-    # Harness bundle (x-8975): an overlay (or lane) args list references the
-    # harness's own bundle - codex --profile <name>, claude --settings <file> -
-    # through the -- passthrough fence fno already carries. Resolved ONCE,
-    # never concatenated: a fence the caller typed selects their complete
-    # bundle and displaces the configured one with a named line. The fence
-    # lands at the argv TAIL, so the caller's own pre-fence tokens stay
-    # pre-fence; the off-pane gate below re-reads the final argv, so a bundle
-    # on an explicit bg/headless substrate is refused exactly like a typed one.
+    # Harness bundle (x-8975): the verb's ONE bundle answer (lane args >
+    # profile harness overlay > defaults harness overlay, never concatenated)
+    # lands behind the -- passthrough fence at the argv TAIL, so the caller's
+    # own pre-fence tokens stay pre-fence; a boundary the caller already typed
+    # displaces the configured bundle (the verb names it), and the off-pane
+    # gate below re-reads the final argv, so a bundle on an explicit
+    # bg/headless substrate is refused exactly like a typed one.
     _bundle_inject: List[str] = []
-    _prov = resolved_harness()
-    if _prov:
-        _bundle, _bundle_rung = None, None
-        if lane is not None and lane_index is not None:
-            lv = lane.get("args") if isinstance(lane, Mapping) else getattr(lane, "args", None)
-            if lv:
-                _bundle, _bundle_rung = (
-                    [str(a) for a in lv],
-                    f"agents.profiles.{profile_verb}.lanes[{lane_index}].args",
-                )
-        if _bundle is None:
-            for _obj, _rung in (
-                (profile, f"agents.profiles.{profile_verb}.harness.{_prov}.args"),
-                (defaults, f"agents.defaults.harness.{_prov}.args"),
-            ):
-                overlay = _overlay_of(_obj, _prov)
-                if overlay is None:
-                    continue
-                av = (
-                    overlay.get("args") if isinstance(overlay, Mapping) else getattr(overlay, "args", None)
-                )
-                if av:
-                    _bundle, _bundle_rung = [str(a) for a in av], _rung
-                    break
-        if _bundle:
-            _boundary = _passthrough_boundary(out[1:])
-            if _boundary:
-                print(
-                    "fno agents spawn: harness args skipped (argv already "
-                    f"carries a {_boundary} passthrough); {_bundle_rung} ignored",
-                    file=err,
-                )
-            else:
-                # click fills positionals in order, so a spawn with no message
-                # would eat the bundle's first token as MESSAGE; an explicit
-                # empty keeps the slot reserved for the prompt.
-                if not _positional_indices(out[1:]):
-                    out = [*out, ""]
-                _bundle_inject = ["--", *_bundle]
-                from_config.append(("args", " ".join(_bundle), _bundle_rung))  # type: ignore[arg-type]
-                print(
-                    "fno agents spawn: bundle "
-                    f"{_bundle_rung} applied unverified (fno reads no effective "
-                    "harness config; confirm on the worker receipt)",
-                    file=err,
-                )
+    _bundle_json = (_overlay_answer or {}).get("bundle")
+    if isinstance(_bundle_json, dict) and "displaced" in _bundle_json:
+        _d = _bundle_json["displaced"]
+        print(
+            "fno agents spawn: harness args skipped (argv already "
+            f"carries a {_d['boundary']} passthrough); {_d['rung']} ignored",
+            file=err,
+        )
+    elif isinstance(_bundle_json, dict):
+        _tokens = [str(a) for a in _bundle_json["tokens"]]
+        _rung = _bundle_json["rung"]
+        # click fills positionals in order, so a spawn with no message would
+        # eat the bundle's first token as MESSAGE; an explicit empty keeps the
+        # slot reserved for the prompt.
+        if not _positional_indices(out[1:]):
+            out = [*out, ""]
+        _bundle_inject = ["--", *_tokens]
+        from_config.append(("args", " ".join(_tokens), _rung))  # type: ignore[arg-type]
+        print(
+            "fno agents spawn: bundle "
+            f"{_rung} applied unverified (fno reads no effective "
+            "harness config; confirm on the worker receipt)",
+            file=err,
+        )
 
     if from_config:
         # AC9-UI / AC1-HP: config-sourced routing is never invisible; name the
@@ -1907,12 +1857,6 @@ def inject_spawn_defaults(
 #: Sizes that resolve to their own chain. Anything else reads `default`.
 _CHAIN_SIZES = ("S", "M", "L")
 
-_CHAIN_KEYS = frozenset({"S", "M", "L", "default"})
-# The harness axis is the BINARY (docs/architecture/axis-vocabulary.md).
-# `opencode` is legally both a harness and a provider, so never infer the axis
-# from the value.
-_CHAIN_HARNESSES = frozenset({"claude", "codex", "agy", "opencode"})
-
 
 class FallbackConfigError(ValueError):
     """A fallback chain that cannot be trusted to name a vendor."""
@@ -1921,19 +1865,18 @@ class FallbackConfigError(ValueError):
 def validate_fallback(table: object) -> dict:
     """Return the chain table as links, or raise naming the offending key.
 
-    Called on the failover path, never at config load. Unlike
-    ``_coerce_profiles``, which degrades a typo to no-profiles so a bad config
-    cannot brick spawning, this REFUSES: a chain is read only when a provider
-    has already refused, and degrading open there spawns a worker at an
-    unintended vendor and bills it. Refusing leaves the worker alive and the
-    node claimed, which is a bounded stop.
-
-    Raising here rather than in the config model is deliberate. A field
-    validator would fail ``load_settings()`` process-wide, so one typo would
-    make every ``fno`` command raise and stop the pr-watch tick at its settings
-    phase - taking down the daemon that runs the failover, which is a strictly
-    worse outcome than the one being prevented.
+    Called on the failover path, never at config load, and it REFUSES rather
+    than degrades open: a chain is read only when a provider has already
+    refused, and degrading there spawns a worker at an unintended vendor and
+    bills it. (Not a config-model validator either: one typo would fail
+    ``load_settings()`` process-wide and take the daemon down with it.)
+    The validation lives in the spawn-overlay verb; this shim keeps
+    ``FallbackConfigError`` and rebuilds ``SpawnDefaultsBlock`` links.
     """
+    from fno.agents.spawn_overlay_client import (
+        SpawnOverlayUnavailable,
+        spawn_overlay_call,
+    )
     from fno.config import SpawnDefaultsBlock
 
     if not isinstance(table, dict):
@@ -1941,49 +1884,41 @@ def validate_fallback(table: object) -> dict:
             "config.agents.fallback must be a table keyed by size "
             f"(S|M|L|default); got {type(table).__name__}"
         )
-    out: dict[str, list] = {}
+    # Already-built blocks pass through unvalidated; raw dicts ride the verb.
+    # Placeholders keep each size's link order so the verb's canonical dicts
+    # land back where the dicts came from.
+    wire: dict = {}
+    shell: dict = {}
     for size, chain in table.items():
-        if size not in _CHAIN_KEYS:
-            raise FallbackConfigError(
-                f"config.agents.fallback.{size}: unknown size key; "
-                f"expected one of {'|'.join(sorted(_CHAIN_KEYS))}"
-            )
         if not isinstance(chain, list):
             raise FallbackConfigError(
                 f"config.agents.fallback.{size} must be a list of links; "
                 f"got {type(chain).__name__}"
             )
-        links = []
+        wire[size] = []
+        shell[size] = []
         for i, link in enumerate(chain):
             if isinstance(link, SpawnDefaultsBlock):
-                links.append(link)
-                continue
-            if not isinstance(link, dict):
+                shell[size].append(link)
+                wire[size].append(None)
+            elif isinstance(link, dict):
+                shell[size].append(None)
+                wire[size].append(link)
+            else:
                 raise FallbackConfigError(
                     f"config.agents.fallback.{size}[{i}] must be a table of "
                     f"axis fields; got {type(link).__name__}"
                 )
-            # A link is spelled with the CORRECT axis word, `harness` (the
-            # binary). SpawnDefaultsBlock's own field is the legacy `provider`,
-            # which its comment records as meaning harness. Both spellings
-            # read and `harness` wins. The value is checked either way, because
-            # `extra="ignore"` would otherwise drop a typo'd harness silently
-            # and the link would spawn on the ambient binary.
-            link = dict(link)
-            harness = str(
-                link.pop("harness", "") or link.get("provider", "") or ""
-            ).strip()
-            if harness and harness not in _CHAIN_HARNESSES:
-                raise FallbackConfigError(
-                    f"config.agents.fallback.{size}[{i}].harness={harness!r} "
-                    f"is not a known harness "
-                    f"({'|'.join(sorted(_CHAIN_HARNESSES))})"
-                )
-            if harness:
-                link["provider"] = harness
-            links.append(SpawnDefaultsBlock(**link))
-        out[size] = links
-    return out
+    try:
+        answer = spawn_overlay_call({"kind": "fallback", "table": wire})
+    except SpawnOverlayUnavailable as exc:
+        raise FallbackConfigError(str(exc)) from exc
+    if answer.get("error"):
+        raise FallbackConfigError(answer["error"])
+    for size, links in answer["links"].items():
+        rebuilt = iter(SpawnDefaultsBlock(**link) for link in links)
+        shell[size] = [next(rebuilt) if s is None else s for s in shell[size]]
+    return shell
 
 
 def link_id(link) -> str:
