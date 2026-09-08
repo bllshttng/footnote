@@ -226,6 +226,59 @@ else
   fail "nested-dir doc not written (parent not created)"
 fi
 
+# ---------------------------------------------------------------------------
+# 7. AC2-EDGE: an uncrowned session's doc carries no King block at all.
+# ---------------------------------------------------------------------------
+if ! grep -q "## King:" "$DOC"; then
+  pass "uncrowned doc carries no King block (AC2-EDGE)"
+else
+  fail "uncrowned doc unexpectedly carries a King block"
+fi
+
+# ---------------------------------------------------------------------------
+# 8. AC1-HP: a crowned session's doc gains the King block and both new
+# session headings. A fake `fno` on PATH stands in for the registry and the
+# epic-status read so the fixture never touches the real graph.
+# ---------------------------------------------------------------------------
+FAKE_BIN="$(mktemp -d -t canon-fake-fno-XXXXXX)"
+cat > "$FAKE_BIN/fno" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+  *"agents registry-json"*)
+    echo '[{"session_id":"c35abbca-bd2d-4407-8365-cf468baa7eea","crown_level":2,"crown_scope":"x-9e1e-fixture","name":"king-fixture"}]'
+    ;;
+  *"backlog epic status x-9e1e-fixture"*)
+    echo '{"children":[{"id":"x-aaaa","status":"ready","slug":"a"},{"id":"x-bbbb","status":"in_progress","slug":"b"}]}'
+    ;;
+  *"do pr list"*)
+    echo '[]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+chmod +x "$FAKE_BIN/fno"
+trap 'rm -rf "$TMP" "$FAKE_BIN"' EXIT
+
+CROWNED_DOC="$TMP/crowned-canon.md"
+printf '{"trigger":"manual","custom_instructions":"%s"}' "$CROWNED_DOC" \
+  | env PATH="$FAKE_BIN:$PATH" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK" >/dev/null 2>&1
+if grep -q "## King: nodes under purview (auto)" "$CROWNED_DOC" \
+  && grep -q "level 2 over x-9e1e-fixture" "$CROWNED_DOC" \
+  && grep -q "x-aaaa \[ready\] a" "$CROWNED_DOC" \
+  && grep -q "x-bbbb \[in_progress\] b" "$CROWNED_DOC"; then
+  pass "crowned doc gains the King block naming level, scope, and children"
+else
+  fail "crowned doc missing King block content"
+fi
+if grep -q "## Gaps and open thinking (session)" "$CROWNED_DOC" \
+  && grep -q "## Workarounds in force (session)" "$CROWNED_DOC"; then
+  pass "crowned doc gains the two new session headings"
+else
+  fail "crowned doc missing the new session headings"
+fi
+
 echo
 echo "results: PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" == 0 ]]

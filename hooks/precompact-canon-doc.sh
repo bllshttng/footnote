@@ -130,10 +130,16 @@ fi
 # Build the auto block. One python heredoc (quoted delimiter => no shell
 # escaping) reads the facts from env and emits the mechanical sections. JSON
 # parsing stays in python; bash never touches it.
+# No apostrophes anywhere in this heredoc body: bash's paren-matching for the
+# enclosing $(...) misreads an apostrophe followed later by a parenthesized
+# comment/string as an unterminated quote, and the script fails `bash -n`
+# with an EOF error that names an unrelated later line.
 # ---------------------------------------------------------------------------
-AUTO_BLOCK="$(SID="$SID" SHORT="$SHORT" NODE="$NODE" PLAN="$PLAN" \
+AUTO_BLOCK_RAW="$(SID="$SID" SHORT="$SHORT" NODE="$NODE" PLAN="$PLAN" \
              REG_ROWS="$REG_ROWS" PR_RAW="$PR_RAW" python3 <<'PY' 2>/dev/null || true
-import os, json
+import json
+import os
+import subprocess
 
 
 def rows_from(raw):
@@ -156,9 +162,10 @@ r = mine[0] if mine else {}
 
 lvl = r.get("crown_level")
 scp = r.get("crown_scope")
+crowned = bool(mine) and (lvl is not None or scp is not None)
 if not mine:
     crown = "none (no registry row for this session)"
-elif lvl is None and scp is None:
+elif not crowned:
     crown = "none (uncrowned)"
 else:
     crown = "level %s | scope %s" % (lvl if lvl is not None else "-", scp if scp is not None else "-")
@@ -201,9 +208,56 @@ if pr_rows:
                                     x.get("title", "-"), x.get("headRefName", "-"))
             for x in pr_rows]
 
+
+def nodes_under_purview(scope):
+    """The crown scope children, id plus status, via the existing epic status
+    read. Bounded (5s) and degrade-only: a scope that is not a queryable epic
+    (a level-1 whole-project crown, an unreadable graph) yields None, never a
+    raised exception - this whole block is skipped rather than a doc that
+    fails to write."""
+    if not scope:
+        return None
+    try:
+        proc = subprocess.run(
+            ["fno", "backlog", "epic", "status", scope, "--json"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        data = json.loads(proc.stdout or "")
+    except Exception:
+        return None
+    children = data.get("children")
+    if not isinstance(children, list) or not children:
+        return None
+    return "\n".join(
+        "- %s [%s] %s" % (c.get("id", "-"), c.get("status", "-"), c.get("slug", ""))
+        for c in children
+    )
+
+
+# A king additionally holds its nodes under purview and its own live workers -
+# facts no other session has. Skipped whole when uncrowned so a non-king canon
+# doc stays byte-identical to the prior output (AC2-EDGE).
+if crowned:
+    nodes = nodes_under_purview(scp) or "_(nodes under purview: unavailable)_"
+    out += [
+        "",
+        "## King: nodes under purview (auto)",
+        "level %s over %s" % (lvl if lvl is not None else "-", scp if scp is not None else "-"),
+        "",
+        nodes,
+        "",
+        "## King: live workers in scope (auto)",
+        workers,
+    ]
+
+print("CROWNED=%s" % ("1" if crowned else "0"))
 print("\n".join(out))
 PY
 )"
+CROWNED="$(printf '%s\n' "$AUTO_BLOCK_RAW" | sed -n '1p')"
+AUTO_BLOCK="$(printf '%s\n' "$AUTO_BLOCK_RAW" | tail -n +2)"
+IS_CROWNED=0
+[[ "$CROWNED" == "CROWNED=1" ]] && IS_CROWNED=1
 
 # ---------------------------------------------------------------------------
 # Preserve any judgment the session already wrote under the two session markers.
@@ -231,12 +285,19 @@ _session_block() {
 
 DEFAULT_MERGE="_Merge order and the reason for it. Nothing external knows this. The session fills it at full context._"
 DEFAULT_DECISIONS="_Open decisions awaiting the operator. Nothing external knows this. The session fills it at full context._"
+DEFAULT_GAPS="_Gaps and open thinking only this crown holds. Nothing external knows this. The session fills it at full context._"
+DEFAULT_WORKAROUNDS="_Workarounds in force only this crown is running. Nothing external knows this. The session fills it at full context._"
 
 # Capture the preserved-or-defaulted session blocks BEFORE opening the doc for
 # write. The assembly below redirects to $DOC_PATH, which truncates it on open;
 # reading inside that block would see an empty file and always default.
 SB1="$(_session_block 1 "$DEFAULT_MERGE")"
 SB2="$(_session_block 2 "$DEFAULT_DECISIONS")"
+SB3="" SB4=""
+if [[ "$IS_CROWNED" == "1" ]]; then
+  SB3="$(_session_block 3 "$DEFAULT_GAPS")"
+  SB4="$(_session_block 4 "$DEFAULT_WORKAROUNDS")"
+fi
 
 # A doc the session wrote by hand carries none of the markers above, so the
 # preserve helper reads nothing from it and the write below would truncate it
@@ -282,6 +343,18 @@ mkdir -p "$(dirname "$DOC_PATH")" 2>/dev/null || true
   printf '%s\n' "$SB2"
   echo "<!-- /fno:session -->"
   echo ""
+  if [[ "$IS_CROWNED" == "1" ]]; then
+    echo "## Gaps and open thinking (session)"
+    echo "<!-- fno:session -->"
+    printf '%s\n' "$SB3"
+    echo "<!-- /fno:session -->"
+    echo ""
+    echo "## Workarounds in force (session)"
+    echo "<!-- fno:session -->"
+    printf '%s\n' "$SB4"
+    echo "<!-- /fno:session -->"
+    echo ""
+  fi
 } > "$DOC_PATH" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
