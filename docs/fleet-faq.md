@@ -320,6 +320,30 @@ Two kings acted on the false half within an hour. One warned the other that PR n
 
 *Graduates to:* a citation that names what the gate matches, or a gate that matches what the rule says. This entry corrects the sentence, and the gate is unchanged.
 
+## `claude agents --json` shows fewer sessions than the agent view
+
+**Answer.** The default read returns only the sessions that are not complete. Pass `--all` to include the completed ones. The completed rows are the ones you reap, so a reaper that omits the flag cannot see its own work.
+
+**Specimen.** On 2026-09-08 the bare call returned 24 rows and `--all` returned 114. The 90 hidden rows were 79 done, 11 stopped and 4 failed. The king who found this had already reported the 24 figure to the operator.
+
+*Graduates to:* a default read that includes the completed rows, or an output line naming the hidden count.
+
+## A field reads null on every row
+
+**Answer.** The reader can omit the field. A null then means the reader did not select it, not that the row has no value. Read the same fact through a second reader before you act on it.
+
+**Specimen.** `fno agents registry-json` returned `provider` as null for all 26 live rows, which reads as 26 rows with no provider stamp. `fno agents list --json` returned a provider for 42 rows and none for 7. A king acted on the first read and named the wrong cause for a dispatch outage.
+
+*Graduates to:* a projection that omits the key when it omits the field, so a null can only ever mean no value.
+
+## Do the loop and the monitors survive a compact?
+
+**Answer.** No. Re-arm them by hand after a compact, and test each arm rather than trusting a receipt.
+
+**Specimen.** `hooks/king-postcompact-reinject.sh:100` states that the loop, goal and monitors survive a compact, then tells the reader to verify and re-arm any that is missing. The two halves contradict each other, and a king who reads the first half stops checking. After a compact on 2026-09-08 `CronList` returned no scheduled jobs, and both monitors were reported stopped as orphans with no completion record. All three were re-armed by hand.
+
+*Graduates to:* the sentence stating what actually survives, and a recovery step that tests each arm and reports each result.
+
 ## Related
 
 - [troubleshooting.md](troubleshooting.md) for run-level failures
