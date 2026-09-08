@@ -3639,6 +3639,11 @@ async fn spawn_codex_thread_lane(
     };
     let effort = req.params.get("effort").and_then(Value::as_str);
     let node = req.params.get("node").and_then(Value::as_str);
+    // The requested account record id rides the spawn request when the caller
+    // pinned one: the row stamps it verbatim instead of the literal default,
+    // so a worker's account stays auditable after the fact (x-90a9 task 2.1).
+    // Requested, not verified - the observed-model comparator owns the check.
+    let account = req.params.get("account").and_then(Value::as_str);
     // Hop 2 of the state-root grant (x-f22f). Read the roots from the REQUEST,
     // never from this process's environment. This daemon is long-lived and
     // shared across every thread on the machine, so its own env is not the
@@ -3691,7 +3696,7 @@ async fn spawn_codex_thread_lane(
             return Response::err(req.id, ErrorCode::SpawnFailed, error.to_string());
         }
     };
-    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort, yolo, node);
+    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort, yolo, node, account);
     let session_id = entry.harness_session_id.clone().unwrap_or_default();
     let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
         if registry

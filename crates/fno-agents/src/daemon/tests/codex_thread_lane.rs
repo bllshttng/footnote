@@ -65,14 +65,15 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
                 .await
                 .expect("yolo thread starts")
         });
-    let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true, None);
+    let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true, None, None);
     assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
     assert!(
         entry_posture_is_full_access(&yolo)
             && yolo.fno_id.as_deref() == Some("thread-p")
             && yolo.mux.is_none()
     );
-    let bounded = build_codex_thread_entry("t", worktree.path(), &start, None, None, false, None);
+    let bounded =
+        build_codex_thread_entry("t", worktree.path(), &start, None, None, false, None, None);
     assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
     assert!(!entry_posture_is_full_access(&bounded));
     // A requested model stamps its basis on the row; an absent one
@@ -84,6 +85,7 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         Some("gpt-5.6-sol"),
         None,
         false,
+        None,
         None,
     );
     assert_eq!(modeled.model.as_deref(), Some("gpt-5.6-sol"));
@@ -138,7 +140,8 @@ fn build_codex_thread_entry_records_the_resolved_posture_and_its_roots() {
                 .expect("bounded thread starts")
             }
         });
-    let entry = build_codex_thread_entry("t", worktree.path(), &start, None, None, true, None);
+    let entry =
+        build_codex_thread_entry("t", worktree.path(), &start, None, None, true, None, None);
     // The request says full access...
     assert_eq!(entry.sandbox_posture.as_deref(), Some("danger-full-access"));
     // ...and the record says what actually came back, explicitly.
@@ -178,8 +181,54 @@ fn build_codex_thread_entry_stamps_the_request_node() {
         None,
         true,
         Some("x-535c"),
+        None,
     );
     assert_eq!(entry.node.as_deref(), Some("x-535c"));
+}
+
+#[test]
+fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
+    // x-90a9 task 2.1: a pinned account record id survives onto the row so a
+    // worker's account stays auditable; unpinned requests keep "default".
+    let worktree = tempfile::tempdir().unwrap();
+    let _guard = crate::path_test_guard();
+    let start = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+                crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-acct"),
+            );
+            crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
+                .await
+                .expect("yolo thread starts")
+        });
+    let pinned = build_codex_thread_entry(
+        "t",
+        worktree.path(),
+        &start,
+        None,
+        None,
+        true,
+        None,
+        Some("codex-main"),
+    );
+    assert_eq!(pinned.account_record_id.as_deref(), Some("codex-main"));
+    let unpinned =
+        build_codex_thread_entry("t", worktree.path(), &start, None, None, true, None, None);
+    assert_eq!(unpinned.account_record_id.as_deref(), Some("default"));
+    let blank = build_codex_thread_entry(
+        "t",
+        worktree.path(),
+        &start,
+        None,
+        None,
+        true,
+        None,
+        Some("   "),
+    );
+    assert_eq!(blank.account_record_id.as_deref(), Some("default"));
 }
 
 /// AC16: a codex PANE row (mux ref set) must refuse from the ask lane
