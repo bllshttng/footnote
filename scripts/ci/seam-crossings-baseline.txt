@@ -4,11 +4,8 @@
 # as a multiset; the line column is prose. pydoor takes NO baseline: cli/src/fno/rust_binary.py
 # stays the only Python file that execs fno-agents by literal name.
 crossing	crates/fno-agents/src/attach.rs	28	let output = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/authorized_merge.rs	415	let out = Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	696	let err = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	717	let err = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	1213	let out = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	3199	let mut cmd = Command::new("fno");
+crossing	crates/fno-agents/src/bin/client.rs	1258	let out = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/bin/client.rs	3302	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	1277	let mut command = Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	3040	let mut command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/client_verbs.rs	3108	let mut pane_command = std::process::Command::new("fno");
@@ -34,7 +31,6 @@ crossing	crates/fno-agents/src/loopcheck.rs	12921	let fno_bin = loopcheck_fno_bi
 crossing	crates/fno-agents/src/nudge.rs	35	let output = Command::new("fno")
 crossing	crates/fno-agents/src/provider.rs	544	let out = match std::process::Command::new("fno")
 crossing	crates/fno-agents/src/reentry.rs	126	let out = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/route_slot.rs	2063	let inv = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/scrape.rs	174	fn fno_bin() -> std::ffi::OsString {
 crossing	crates/fno-agents/src/scrape.rs	276	let bin = fno_bin();
 crossing	crates/fno-agents/src/spawn_gate.rs	378	let _ = std::process::Command::new("fno")
@@ -81,3 +77,5 @@ resolver	crates/fno-agents/src/scrape.rs	174	fn fno_bin() -> std::ffi::OsString 
 resolver	crates/fno/src/bootstrap.rs	1005	fn diagnose_locate_failure() -> Option<String> {
 resolver	crates/fno/src/mux_cli.rs	5901	fn prepare_pane_bytes(
 resolver	crates/fno/src/server.rs	2959	pub(crate) fn fno_bin() -> PathBuf {
+crossing	crates/fno-agents/src/bin/client.rs	1310	let err = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/route_slot.rs	2185	let mut cmd = std::process::Command::new("fno");
