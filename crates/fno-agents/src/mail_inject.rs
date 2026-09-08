@@ -37,7 +37,6 @@ use std::time::Duration;
 use crate::claude_attach::{perform_attach, AttachRequest, UnixControlTransport};
 use crate::claude_drive::{contains_detach_sentinel, find_transcript, transcript_len, DriveError};
 use crate::claude_roster::{read_control_key, ClaudeRoster};
-use std::sync::Arc;
 
 /// Default transcript-growth poll budget: 40 * 250ms = 10s. A live blocked
 /// session echoes the injected turn well within this; a miss demotes to durable.
@@ -661,10 +660,10 @@ fn resolve_keeper_target_in(
 /// is recorded, so the content confirm has something to grep. pi writes its
 /// session file at the first turn attempt, so a not-yet-filed session returns
 /// a pending target that materializes once the injected turn lands; a
-/// DUPLICATE refuses (the same no-picking discipline as pi resume). Any other
-/// hosted harness without a local store resolves to the pty stream if its TUI
-/// paints what it receives, and refuses otherwise - an honest durable
-/// demotion beats an unverifiable `delivered`.
+/// DUPLICATE refuses (the same no-picking discipline as pi resume). A hosted
+/// harness with no local accepted-turn record types but stays unconfirmed:
+/// composer echo and scrollback repaint are typing progress, never delivery
+/// (x-175a).
 enum KeeperConfirm {
     /// Poll this file from `baseline` bytes onward.
     Transcript {
@@ -673,30 +672,28 @@ enum KeeperConfirm {
     },
     /// The file does not exist yet; every line it ever has is new signal.
     PendingStore,
-    /// The hosted harness keeps its transcript REMOTELY (cursor-agent: the
-    /// chat store lives server-side; nothing lands under its state root), so
-    /// no local file can ever confirm. The pty stream is the only local
-    /// evidence: the TUI repaints the submitted turn into its scrollback, so
-    /// the SUBSCRIBER connection (this inject's own - first come, first
-    /// seated, and the only seat whose Input the keeper honors) sees the
-    /// marker in `Output` frames after the submit.
-    Pty,
+    /// The hosted harness keeps no locally greppable accepted-turn record
+    /// (cursor-agent: the chat store lives server-side; agy: a sqlite db,
+    /// not a per-turn transcript). The pty stream was once grepped for a
+    /// 48-character marker prefix, but the composer paints a pasted draft
+    /// BEFORE any submit, so paint could report delivered without one, and a
+    /// resize repaint of an OLD turn could confirm a new attempt. Paint is
+    /// never evidence: the inject still types and the retry cadence still
+    /// runs, but the confirm stays false for the whole budget, so the
+    /// receipt is an honest unconfirmed and Python writes the durable
+    /// recovery.
+    Unconfirmable,
     Refused(&'static str),
 }
 
 fn resolve_keeper_confirm(target: &KeeperTarget, session: &str, pi_root: &Path) -> KeeperConfirm {
     match target.hosted_harness.as_str() {
         // cursor-agent's chat store is remote (measured: the id appears in no
-        // file under its state root after two live turns), so there is no
-        // transcript to grep. Its TUI repaints the submitted turn, which the
-        // pty variant confirms against.
-        "cursor-agent" => KeeperConfirm::Pty,
-        // agy keeps its conversations in a sqlite db under
-        // ~/.gemini/antigravity-cli/conversations, not a greppable per-turn
-        // transcript, so there is nothing to tail. Its TUI repaints the
-        // submitted turn, which the pty variant confirms against - the same
-        // answer cursor-agent gets for the same reason.
-        "agy" => KeeperConfirm::Pty,
+        // file under its state root after two live turns) and agy keeps its
+        // conversations in a sqlite db - neither has a per-turn transcript a
+        // confirm could grep, and pty paint is not acceptance evidence
+        // (x-175a). Both type and stay unconfirmed.
+        "cursor-agent" | "agy" => KeeperConfirm::Unconfirmable,
         "pi" => match crate::pi::lookup_sessions_under(pi_root, &target.cwd, session) {
             crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
                 baseline: transcript_len(&file),
@@ -718,9 +715,11 @@ fn resolve_keeper_confirm(target: &KeeperTarget, session: &str, pi_root: &Path) 
 /// connect to its keeper socket, paste the envelope inside bracketed-paste
 /// guards as one `Input` frame, settle the hosted harness's own delay, then
 /// send the wire-level CR - and confirm by CONTENT in the hosted harness's
-/// transcript store, re-Entering on the same cadence as the claude lane
+/// accepted-turn records, re-Entering on the same cadence as the claude lane
 /// (both loops are the SHARED `inject_with_submit` / `confirm_with_cr_retry`
-/// pair; only the transport and the confirm target differ).
+/// pair; only the transport and the confirm target differ). A hosted harness
+/// with no local record (cursor-agent, agy) types and stays unconfirmed:
+/// pty paint is typing progress, never delivery (x-175a).
 pub fn deliver_via_keeper_socket(
     session: &str,
     text: &str,
@@ -739,34 +738,10 @@ pub fn deliver_via_keeper_socket(
     )
 }
 
-/// Strip ANSI escape sequences from pty output so a marker match cannot be
-/// broken by an escape interleaved into painted text: CSI sequences
-/// (`ESC [ ... final`) and two-byte `ESC x` forms are dropped, every other
-/// byte (UTF-8 continuation bytes included) passes through. Lossy on purpose:
-/// this is a matcher input, never a transcript.
-fn strip_ansi(raw: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(raw.len());
-    let mut i = 0;
-    while i < raw.len() {
-        if raw[i] == 0x1B {
-            if i + 1 < raw.len() && raw[i + 1] == b'[' {
-                i += 2;
-                while i < raw.len() && !(0x40..=0x7E).contains(&raw[i]) {
-                    i += 1;
-                }
-                i += 1; // the final byte
-            } else {
-                i += 2; // ESC plus one byte
-            }
-        } else {
-            out.push(raw[i]);
-            i += 1;
-        }
-    }
-    out
-}
-
-fn deliver_via_keeper_socket_in(
+/// Deliver `text` to a keeper-hosted lane-B thread against an explicit agents
+/// home and pi sessions root: the seam the keeper journey test drives, so the
+/// fixtures resolve rows and confirm targets exactly as the verb does.
+pub fn deliver_via_keeper_socket_in(
     home: &crate::paths::AgentsHome,
     pi_root: &Path,
     session: &str,
@@ -788,16 +763,11 @@ fn deliver_via_keeper_socket_in(
         // honest outcome, and the reason names why nothing was pasted.
         return Err(reason);
     }
-    // The pty variant confirms on THIS connection: it is the subscriber
-    // (first come, first seated - and the only seat whose Input the keeper
-    // honors), so the keeper relays the TUI's repaints to it. The accumulator
-    // starts empty at inject time: only paint that happened after OUR submit
-    // can confirm, which is exactly the claim.
-    let pty_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    // Decoded payloads land in pty_seen; a partial frame's raw bytes wait
-    // here for the next poll, exactly as the wire delivered them.
-    let pty_pending = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut transport = KeeperTransport { stream };
+    // The injected turn's opening line is the content marker the confirm
+    // greps for: recorded verbatim once the turn is accepted, and matched as
+    // the FULL line - never a truncated prefix, which sibling messages can
+    // share (x-175a).
     let marker = text.lines().next().unwrap_or(text);
     inject_with_submit(&mut transport, text, Duration::from_millis(enter_delay_ms)).map_err(
         |e| match e {
@@ -805,18 +775,27 @@ fn deliver_via_keeper_socket_in(
             _ => "io-error",
         },
     )?;
-    // A PendingStore re-looks-up per poll: pi writes the session file at the
-    // first turn attempt, and THIS inject is that attempt, so the file (and
-    // then the marker) appears within the budget; every line a fresh file has
-    // is new signal, hence the zero baseline.
+    // The subscriber seat must keep draining: the keeper's pty-reader thread
+    // relays every Output chunk to this connection with a BLOCKING write
+    // under the client lock, so an unread socket backpressures the keeper
+    // into the hosted TUI and freezes it for the rest of the budget. Every
+    // poll drains and DISCARDS - paint is never read as evidence (x-175a);
+    // the only reader here is the buffer's, not the matcher's.
     let confirm_stream = transport.stream.try_clone().ok();
-    // The drain reads must time out, never block the confirm loop past its
-    // cadence. SO_RCVTIMEO shapes reads only, so the inject writes above are
-    // unaffected.
     if let Some(cs) = confirm_stream.as_ref() {
         let _ = cs.set_read_timeout(Some(Duration::from_millis(50)));
     }
     let confirmed = move || -> bool {
+        if let Some(stream) = confirm_stream.as_ref() {
+            let mut sink = [0u8; 8192];
+            let mut reader = stream;
+            loop {
+                match std::io::Read::read(&mut reader, &mut sink) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
         match &confirm {
             KeeperConfirm::Transcript { path, baseline } => {
                 confirm_content_after(path, marker, *baseline).unwrap_or(false)
@@ -829,51 +808,12 @@ fn deliver_via_keeper_socket_in(
                     _ => false,
                 }
             }
-            KeeperConfirm::Pty => {
-                // Drain whatever the keeper has relayed since the last poll,
-                // then match the marker in the ANSI-stripped text. The
-                // needle is the payload's first line TRUNCATED to a
-                // composer-wide prefix: the TUI wraps long lines in the
-                // composer, and a newline mid-marker would break a full-line
-                // match even after the escape strip.
-                if let (Some(stream), Ok(mut raw), Ok(mut acc)) =
-                    (confirm_stream.as_ref(), pty_pending.lock(), pty_seen.lock())
-                {
-                    let mut buf = [0u8; 8192];
-                    let mut reader = stream;
-                    loop {
-                        match std::io::Read::read(&mut reader, &mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => raw.extend_from_slice(&buf[..n]),
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                            Err(_) => break,
-                        }
-                    }
-                    // The socket carries FRAMES (tag u8 | len u32 LE |
-                    // payload), not a byte stream: matching over raw bytes
-                    // would embed a 5-byte header inside any marker that
-                    // straddles two Output frames. Decode payloads only; a
-                    // partial tail frame stays buffered for the next poll.
-                    loop {
-                        if raw.len() < 5 {
-                            break;
-                        }
-                        let len = u32::from_le_bytes([raw[1], raw[2], raw[3], raw[4]]) as usize;
-                        if len > 1_048_576 || raw.len() < 5 + len {
-                            break;
-                        }
-                        acc.extend_from_slice(&raw[5..5 + len]);
-                        raw.drain(..5 + len);
-                    }
-                }
-                let prefix: String = marker.chars().take(48).collect();
-                if prefix.is_empty() {
-                    return false;
-                }
-                let snapshot = pty_seen.lock().map(|m| strip_ansi(&m)).unwrap_or_default();
-                let hay = String::from_utf8_lossy(&snapshot);
-                hay.contains(&prefix)
-            }
+            // No local accepted-turn record exists to grep, so nothing on
+            // this lane ever confirms (x-175a). The budget still runs its
+            // full course: the CR resubmits inside it are send retries for a
+            // busy recipient, not confirm polls, and the honest outcome is
+            // the unconfirmed receipt whose durable recovery Python writes.
+            KeeperConfirm::Unconfirmable => false,
             KeeperConfirm::Refused(_) => false,
         }
     };
@@ -2189,6 +2129,75 @@ mod tests {
         assert!(
             confirm_content_after(&path, marker, baseline).unwrap(),
             "the enqueue record (submit-time, not turn-end) must confirm delivery"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn content_confirm_needs_full_identity_not_a_shared_prefix() {
+        // AC1-HP (x-175a): two messages can share their first 48 characters.
+        // The needle is the FULL marker line, so a sibling whose tail differs
+        // never confirms, and no truncation can make one message's landing
+        // read as another's.
+        let path = tmp_transcript("sameprefix");
+        let marker_a = format!(
+            "<fno_mail from=\"a1b2c3d4\" id=\"msg-{}1\">",
+            "x".repeat(15)
+        );
+        let marker_b = format!(
+            "<fno_mail from=\"a1b2c3d4\" id=\"msg-{}2\">",
+            "x".repeat(15)
+        );
+        assert_eq!(
+            marker_a.chars().take(48).collect::<String>(),
+            marker_b.chars().take(48).collect::<String>(),
+            "the scenario requires a shared 48-character prefix"
+        );
+        File::create(&path).unwrap();
+        let baseline = transcript_len(&path);
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"{}\nhi\n</fno_mail>"}}}}"#,
+            escaped_marker(&marker_b)
+        )
+        .unwrap();
+        assert!(
+            !confirm_content_after(&path, &marker_a, baseline).unwrap(),
+            "b's landing must not confirm a: the shared prefix is not identity"
+        );
+        assert!(
+            confirm_content_after(&path, &marker_b, baseline).unwrap(),
+            "b's own full marker confirms b"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn content_confirm_ignores_an_accepted_turn_recorded_before_the_send() {
+        // AC2-HP (x-175a), stale half: a PREVIOUS attempt's accepted record
+        // sits in the transcript before this attempt's baseline. A retry must
+        // not read it as its own delivery; only growth past the captured
+        // boundary counts.
+        let path = tmp_transcript("stale");
+        let marker = "<fno_mail from=\"e4dca1f9\" id=\"msg-prev8\">";
+        let mut f = File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"{}\nhi\n</fno_mail>"}}}}"#,
+            escaped_marker(marker)
+        )
+        .unwrap();
+        let baseline = transcript_len(&path);
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":"the reply to that older turn"}}}}"#
+        )
+        .unwrap();
+        assert!(
+            !confirm_content_after(&path, marker, baseline).unwrap(),
+            "a stale accepted record before the boundary must not confirm"
         );
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
