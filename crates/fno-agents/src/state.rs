@@ -460,6 +460,14 @@ pub struct InsideLegReport {
     pub ttl_ms: Option<u64>,
 }
 
+/// How long a codex thread's `working` inside-leg report stays authoritative
+/// (x-fd66). The thread's daemon refreshes it at half this cadence while the
+/// driver is answering, so only a stalled app-server lets the report age out
+/// - to liveness, which for a pane-less thread row is Unmeasured (`?`), never
+/// a cheerful default. A `done` report carries no ttl: a thread at its prompt
+/// is a stable fact until the next turn.
+pub const THREAD_TURN_TTL_MS: u64 = 90_000;
+
 /// The stored form of one screen-manifest verdict (the fallback rung of the
 /// badge lattice: pane-exit > hook > screen-manifest > liveness). Written only
 /// by the daemon's scrape sweep, and ONLY for rows with no `inside_leg`

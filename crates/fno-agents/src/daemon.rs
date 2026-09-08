@@ -2852,8 +2852,15 @@ fn codex_thread_on_done(
             let bump_name = name.clone();
             let _ = update_registry_offloaded(registry_path, move |registry| {
                 if let Some(entry) = registry.find_mut(&bump_name) {
-                    entry.status = AgentStatus::Live;
-                    entry.last_message_at = Some(now_rfc3339_like());
+                    // The completion of an INTERRUPTED turn must not
+                    // resurrect a row the stop path just settled Exited:
+                    // the two writes race on the offloaded queue, and only
+                    // a non-terminal row reads Live (the same rule the
+                    // recovery pass applies to its own writes).
+                    if is_non_terminal(entry.status) {
+                        entry.status = AgentStatus::Live;
+                        entry.last_message_at = Some(now_rfc3339_like());
+                    }
                 }
             })
             .await;
@@ -2872,6 +2879,95 @@ fn codex_thread_on_done(
 
 fn emit_state(emitter: &EventEmitter, state: DaemonState) {
     let _ = emitter.emit("daemon_state", &json!({"state": state.as_str()}));
+}
+
+/// The codex thread driver's inside-leg write (x-fd66): the daemon maps the
+/// actor's turn phases onto reports and lands them on the row that holds the
+/// thread's session id, through the same seq-gated core the claude hook's
+/// flush uses, so the Done transition notifies exactly as a claude Stop hook
+/// does. `first_seq` starts at 1 for a fresh spawn; a resume seeds it above
+/// the row's current seq so the resumed thread's first report clears the gate
+/// instead of dying under the previous incarnation's seq.
+fn codex_thread_on_status(
+    emitter: &EventEmitter,
+    registry_path: std::path::PathBuf,
+    name: &str,
+    session_id: &str,
+    first_seq: u64,
+    notify_on_blocked: bool,
+    notify_on_done: bool,
+) -> Arc<dyn Fn(crate::codex_thread::ThreadTurnPhase) + Send + Sync> {
+    let emitter = emitter.clone();
+    let name = name.to_string();
+    let session_id = session_id.to_string();
+    let seq = Arc::new(std::sync::atomic::AtomicU64::new(first_seq));
+    Arc::new(move |phase| {
+        let seq = seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let rep = state::InsideLegReport {
+            state: match phase {
+                crate::codex_thread::ThreadTurnPhase::Working => state::InsideLegState::Working,
+                crate::codex_thread::ThreadTurnPhase::Done => state::InsideLegState::Done,
+            },
+            seq,
+            reason: None,
+            received_at: now_rfc3339_like(),
+            ttl_ms: match phase {
+                // A working report ages out when the driver stops answering;
+                // a done report is a stable fact until the next turn.
+                crate::codex_thread::ThreadTurnPhase::Working => Some(state::THREAD_TURN_TTL_MS),
+                crate::codex_thread::ThreadTurnPhase::Done => None,
+            },
+        };
+        tokio::spawn(write_thread_inside_leg(
+            registry_path.clone(),
+            emitter.clone(),
+            name.clone(),
+            session_id.clone(),
+            rep,
+            notify_on_blocked,
+            notify_on_done,
+        ));
+    })
+}
+
+/// Land one thread-driver report (x-fd66): off the actor task, through the
+/// shared seq gate, notifying on the done/blocked episode edge exactly as the
+/// claude hook's flush does, and emitting one event per accepted write.
+async fn write_thread_inside_leg(
+    registry_path: PathBuf,
+    emitter: EventEmitter,
+    name: String,
+    session_id: String,
+    rep: state::InsideLegReport,
+    notify_on_blocked: bool,
+    notify_on_done: bool,
+) {
+    let (seq, state_str) = (rep.seq, inside_leg_state_str(rep.state));
+    let session_for_emit = session_id.clone();
+    let notify = update_registry_offloaded(registry_path, move |registry| {
+        gate_inside_leg_onto_row(registry, &session_id, rep)
+    })
+    .await
+    .unwrap_or(None);
+    if let Some((body, is_done)) = notify {
+        let want = if is_done {
+            notify_on_done
+        } else {
+            notify_on_blocked
+        };
+        if want {
+            notify_transition(name.clone(), body);
+        }
+    }
+    let _ = emitter.emit(
+        "codex_thread_inside_leg",
+        &json!({
+            "name": name,
+            "session_id": session_for_emit,
+            "state": state_str,
+            "seq": seq,
+        }),
+    );
 }
 
 /// The final `daemon_exited` payload (x-3498). Every exit path flows through
@@ -4014,11 +4110,18 @@ async fn spawn_codex_thread_lane(
             )
         }
     }
-    let handle = Arc::new(driver.into_actor(codex_thread_on_done(
-        &ctx.emitter,
-        ctx.home.registry_json(),
-        name,
-    )));
+    let handle = Arc::new(driver.into_actor(
+        codex_thread_on_done(&ctx.emitter, ctx.home.registry_json(), name),
+        codex_thread_on_status(
+            &ctx.emitter,
+            ctx.home.registry_json(),
+            name,
+            &session_id,
+            1,
+            ctx.opts.notify_on_blocked,
+            ctx.opts.notify_on_done,
+        ),
+    ));
     ctx.codex_threads
         .lock()
         .await
@@ -4178,11 +4281,27 @@ async fn ensure_codex_thread_handle(
     if let Some(handle) = threads.get(&entry.name).cloned() {
         return Ok(handle);
     }
-    let handle = Arc::new(driver.into_actor(codex_thread_on_done(
-        &ctx.emitter,
-        ctx.home.registry_json(),
-        &entry.name,
-    )));
+    // x-fd66: the resumed actor's report seq starts ABOVE the row's current
+    // seq, so its first write clears the gate instead of dying under the
+    // previous incarnation's seq. The counter itself lives on the callback,
+    // one per thread start/resume, never on the row.
+    let first_seq = entry
+        .inside_leg
+        .as_ref()
+        .map(|report| report.seq + 1)
+        .unwrap_or(1);
+    let handle = Arc::new(driver.into_actor(
+        codex_thread_on_done(&ctx.emitter, ctx.home.registry_json(), &entry.name),
+        codex_thread_on_status(
+            &ctx.emitter,
+            ctx.home.registry_json(),
+            &entry.name,
+            &session_id,
+            first_seq,
+            ctx.opts.notify_on_blocked,
+            ctx.opts.notify_on_done,
+        ),
+    ));
     threads.insert(entry.name.clone(), Arc::clone(&handle));
     Ok(handle)
 }
@@ -9150,6 +9269,46 @@ fn buffer_pending_report(
 /// peek-then-commit window where a newer buffered report could be deleted by an
 /// unconditional remove. A no-op for a row with no buffered report; a poisoned
 /// lock leaves the report buffered.
+/// The ONE seq-gated inside-leg writer core: find the row holding
+/// `session_uuid`, apply `rep` only when its seq is newer, clear the scrape
+/// verdict on the flip (hook beats scrape), and return the transition notify
+/// intent `(body, is_done)` when the report ENTERED blocked/done (x-dd84).
+/// Both writers route through here - the claude hook's buffered flush and the
+/// codex thread driver's direct write (x-fd66) - so the gate, the capability
+/// clear, and the episode edge cannot drift apart. `None` on a stale-seq drop
+/// or a row that holds no such session.
+fn gate_inside_leg_onto_row(
+    registry: &mut state::Registry,
+    session_uuid: &str,
+    rep: state::InsideLegReport,
+) -> Option<(String, bool)> {
+    let (state_str, rep_state, rep_reason) = (
+        inside_leg_state_str(rep.state),
+        rep.state,
+        rep.reason.clone(),
+    );
+    let mut notify: Option<(String, bool)> = None;
+    if let Some(e) = registry
+        .entries
+        .iter_mut()
+        .find(|e| entry_holds_session(e, session_uuid))
+    {
+        let newer = e.inside_leg.as_ref().is_none_or(|cur| rep.seq > cur.seq);
+        if newer {
+            let prev_state = e.inside_leg.as_ref().map(|r| r.state);
+            let body = rep_reason.unwrap_or_else(|| state_str.to_string());
+            if state::enters(prev_state, rep_state, state::InsideLegState::Blocked) {
+                notify = Some((body, false));
+            } else if state::enters(prev_state, rep_state, state::InsideLegState::Done) {
+                notify = Some((body, true));
+            }
+            e.inside_leg = Some(rep);
+            e.screen_state = None;
+        }
+    }
+    notify
+}
+
 fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
     let rep = match ctx.pending_inside_leg.lock() {
         Ok(mut buf) => buf.remove(session_uuid),
@@ -9159,32 +9318,12 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
         return;
     };
     let (seq, state_str) = (rep.seq, inside_leg_state_str(rep.state));
-    // Badge-transition notify intent (x-dd84): an early-push report is the row's
-    // first, so an initial `blocked`/`done` is an episode entry too. Captured
-    // before `rep` moves into the row; fired after the write.
-    let (rep_state, rep_reason) = (rep.state, rep.reason.clone());
     let mut notify: Option<(String, String, bool)> = None;
     // Apply under the seq gate: a store-path report that landed on the row after
     // it became visible (but before this drain) set a >= seq; never regress it.
     let _ = state::update_registry(&ctx.home.registry_json(), |r| {
-        if let Some(e) = r
-            .entries
-            .iter_mut()
-            .find(|e| entry_holds_session(e, session_uuid))
-        {
-            let newer = e.inside_leg.as_ref().is_none_or(|cur| rep.seq > cur.seq);
-            if newer {
-                let prev_state = e.inside_leg.as_ref().map(|r| r.state);
-                let body = rep_reason.clone().unwrap_or_else(|| state_str.to_string());
-                if state::enters(prev_state, rep_state, state::InsideLegState::Blocked) {
-                    notify = Some((name.to_string(), body, false));
-                } else if state::enters(prev_state, rep_state, state::InsideLegState::Done) {
-                    notify = Some((name.to_string(), body, true));
-                }
-                e.inside_leg = Some(rep);
-                // Capability flip (see handle_report): hook beats scrape.
-                e.screen_state = None;
-            }
+        if let Some((body, is_done)) = gate_inside_leg_onto_row(r, session_uuid, rep.clone()) {
+            notify = Some((name.to_string(), body, is_done));
         }
     });
     if let Some((title, body, is_done)) = notify {
