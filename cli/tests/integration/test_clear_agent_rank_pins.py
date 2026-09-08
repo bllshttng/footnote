@@ -46,8 +46,31 @@ def test_clear_then_restore_round_trips(script):
     assert [e.get("rank") for e in entries] == [None, -1.0]
     assert skipped == []
 
-    script._restore({"x-aaa1": -3.0})(entries)
+    restore, refused = script._restore({"x-aaa1": -3.0})
+    restore(entries)
     assert [e.get("rank") for e in entries] == [-3.0, -1.0]
+    assert refused == []
+
+
+def test_restore_refuses_to_clobber_a_pin_written_since_the_clear(script):
+    entries = [{"id": "x-aaa1", "rank": -99.0}]
+
+    restore, refused = script._restore({"x-aaa1": -3.0})
+    restore(entries)
+
+    assert entries[0]["rank"] == -99.0
+    assert refused == ["x-aaa1"]
+
+
+def test_skipped_does_not_accumulate_across_retries(script):
+    """locked_mutate_graph re-runs the mutator on a version conflict."""
+    mutator, skipped = script._clear({"x-aaa1": -3.0})
+    entries = [{"id": "x-aaa1", "rank": -99.0}]
+
+    mutator(entries)
+    mutator(entries)
+
+    assert skipped == ["x-aaa1"]
 
 
 def test_a_rank_written_after_the_preview_is_left_alone(script):

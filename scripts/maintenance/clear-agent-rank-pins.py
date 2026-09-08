@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,13 +34,10 @@ if _SRC.is_dir() and str(_SRC) not in sys.path:
 
 
 def _is_ranked(entry: dict) -> bool:
-    rank = entry.get("rank")
-    if isinstance(rank, bool) or not isinstance(rank, (int, float)):
-        return False
-    try:
-        return math.isfinite(float(rank))
-    except (OverflowError, ValueError):
-        return False
+    """The board's own definition of ranked, not a second copy of it."""
+    from fno.graph._constants import _rank_band
+
+    return _rank_band(entry)[0] == 0
 
 
 def _pinned(entries: list[dict]) -> list[tuple[str, float]]:
@@ -70,6 +66,9 @@ def _clear(seen: dict[str, float]):
     skipped: list[str] = []
 
     def mutator(entries):
+        # locked_mutate_graph re-runs this on a version conflict, so the list
+        # is cleared per attempt; otherwise a retry double-counts every skip.
+        skipped.clear()
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -86,13 +85,25 @@ def _clear(seen: dict[str, float]):
 
 
 def _restore(pairs: dict[str, float]):
+    """Put back only the ranks this file's clear actually took.
+
+    A row that carries a rank again was pinned after the clear, and writing the
+    old value over it is the same clobber the clear refuses to perform.
+    """
+    refused: list[str] = []
+
     def mutator(entries):
+        refused.clear()
         for entry in entries:
-            if isinstance(entry, dict) and entry.get("id") in pairs:
-                entry["rank"] = pairs[entry["id"]]
+            if not isinstance(entry, dict) or entry.get("id") not in pairs:
+                continue
+            if _is_ranked(entry):
+                refused.append(entry["id"])
+                continue
+            entry["rank"] = pairs[entry["id"]]
         return entries
 
-    return mutator
+    return mutator, refused
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -108,8 +119,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.restore:
         pairs = {k: float(v) for k, v in json.loads(args.restore.read_text()).items()}
-        locked_mutate_graph(graph_path, _restore(pairs))
-        print(f"restored {len(pairs)} rank(s) from {args.restore}")
+        mutator, refused = _restore(pairs)
+        locked_mutate_graph(graph_path, mutator)
+        print(f"restored {len(pairs) - len(refused)} rank(s) from {args.restore}")
+        for node_id in refused:
+            print(f"  left alone: {node_id} carries a rank written since the clear")
         return 0
 
     pinned = _pinned(read_graph(graph_path))

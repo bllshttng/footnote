@@ -285,7 +285,7 @@ Never edit `~/.fno/graph.json`.
 ```bash
 fno backlog update <id> --add-blocker <upstream>     # serialize a chain
 fno backlog update <id> --blocked-by <a,b>           # replace the whole list
-fno backlog update <id> --priority p0                # what should run first
+fno backlog update <id> --priority p1                # what should run first
 ```
 
 Order within a wave comes from blockers and priority, never from rank.

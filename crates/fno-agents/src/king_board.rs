@@ -285,9 +285,9 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let s_outstanding = budget.start(SRC_QUESTIONS);
     let s_needs = budget.start(SRC_NEEDS);
 
-    // In-process sources: graph already read; claims scan, undispatched
-    // classify, claimed-node lookups, the needs fold, and the lane file. None
-    // of them spawn.
+    // Mostly in-process: graph already read; claims scan, claimed-node lookups,
+    // the needs fold, and the lane file. Undispatched is the exception and
+    // spawns, for the reason given at its own block below.
     let claims = match s_claims {
         None => {
             spent(&mut sources, "claims", &budget);

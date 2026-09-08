@@ -77,6 +77,14 @@ def test_ac3_edge_no_timestamps_and_no_votes_is_stable():
     assert _order(entries) == ["x-aaa1", "x-bbb2"]
 
 
+def test_orphan_last_outranks_votes():
+    """Every judgement above the score wins, orphan demotion included."""
+    entries = [_node("x-aaa1", votes=3), _node("x-bbb2")]
+    key = make_selection_sort_key(entries, orphans=frozenset({"x-aaa1"}))
+
+    assert [e["id"] for e in sorted(entries, key=key)] == ["x-bbb2", "x-aaa1"]
+
+
 def test_fanout_outranks_votes():
     """A decision outranks a measurement: blocked work goes before a vote."""
     blocker = _node("x-aaa1")

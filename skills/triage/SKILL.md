@@ -224,14 +224,10 @@ translate positional words into the equivalent flag:
 
    It aggregates by Copeland score (wins minus losses), tolerating the
    occasional contradictory or cyclic verdict, and emits a best-first `order`.
-   Apply that order as priority proposals: `fno backlog update <id> --priority
-   p0..p3`, banding the best-first order across the four values. Not through
-   `fno backlog rank`, which is the operator's pin and refuses an agent
-   session; a careful comparative judgement serialised through min-minus-one
-   writes became arrival order. Feed the ranking into the `priority_changes`
-   rationale too. For a small backlog the one-shot proposal
-   above is cheaper and fine; reserve the pairwise pass for when the node count
-   makes it worthwhile.
+
+   Apply that order as priority proposals with `fno backlog update <id> --priority p1..p3`, banding the best-first order across those three values. p0 is not yours to hand out. It needs `--blocks-everything` and means the fleet is down. Never through `fno backlog rank`, which is the operator's pin and refuses an agent session. A careful comparative judgement serialised through min-minus-one writes became arrival order. Feed the ranking into the `priority_changes` rationale too.
+
+   For a small backlog the one-shot proposal above is cheaper and fine. When the node count makes it worthwhile, reserve the pairwise pass for that.
 
 3. **Validate.** Run:
 

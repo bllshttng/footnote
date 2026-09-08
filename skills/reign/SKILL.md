@@ -89,7 +89,7 @@ Read `fno inbox board --json`, `fno agents court --json`, `fno agents status --j
 - the oldest worker last-seen stamp
 - crown liveness including `split`
 
-Then the levers, in this order, stopping at the first that applies per row: mail the stalled worker; `fno backlog encounter <node> --evidence "what it cost"` to vote the node up, and `fno backlog update <node> --priority` when the evidence contradicts the priority it was filed at, then put the node inside an active mission scope, because neither a vote nor a priority dispatches and a crown is not a mission; `fno backlog undefer` or `supersede` when the row is the problem; `fno inbox outstanding ask` when a lever needs the operator.
+Then the levers, in this order, stopping at the first that applies per row: mail the stalled worker; `fno backlog encounter <node> --evidence "what it cost"` to vote the node up, and `fno backlog update <node> --priority p1` when the evidence contradicts the priority it was filed at (p0 needs `--blocks-everything` and means the fleet is down), then put the node inside an active mission scope, because neither a vote nor a priority dispatches and a crown is not a mission; `fno backlog undefer` or `supersede` when the row is the problem; `fno inbox outstanding ask` when a lever needs the operator.
 
 Rank is not yours. It is the operator's pin, and `fno backlog rank` refuses an agent session. A king who wants a row run next says so with `--priority p0`, which is bounded, receipted, and visible to the operator as a split vote on `fno backlog demand`.
 

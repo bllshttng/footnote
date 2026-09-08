@@ -1,30 +1,16 @@
 """The divergence read over a node's encounters.
 
-Raw encounter count is the weak reading. A p0 with many encounters tells the
-operator nothing, because they already ranked it. A p3 or a never-dispatched
-node with many encounters is the entire product: it shows the shape of what the
-operator is not looking at. So the score is encounter weight AGAINST operator
-priority, and the table sorts by it.
+The score is encounter weight AGAINST operator priority, because raw count is
+the weak reading: a p0 with many encounters says nothing, a p3 with many is the
+whole product. Why there is no normalization and no decay, why sybil-by-dispatch
+and an operator disagreeing with themselves are DISPLAYED rather than corrected,
+and what each column means, are in `docs/backlog-usage.md`.
 
-The goal is an INTERRUPT, not a ranking. The bar is "surprising and true", far
-below accuracy, so there is no normalization and no decay: plain arithmetic a
-reader can verify by hand. Sybil-by-dispatch and hot-path bias are DISPLAY
-concerns, not corrections: `dispatched` renders the context beside the number
-rather than subtracting it out.
-
-An operator vote and an operator priority are two expressions from one person,
-so a p3 the operator voted on and never ranked scores 4 on the strength of them
-disagreeing with themselves. Not corrected, DISPLAYED: `enc 1 (0a/1o)` says
-which disagreement this is, and withholding the row is worse than showing it
-with its provenance.
-
-Nothing in this module writes. `demand` never touches `rank` and never consults
+Nothing here writes. `demand` never touches `rank` and never consults
 `_kanban_column` as an input, because the board is the work order and a signal
-that reorders it on its own removes the judgement this feature exists to inform.
-
+that reorders it on its own removes the judgement this exists to inform.
 `importance_score` is where the read reaches selection, and it is deliberately
-the weakest term there: it sits after priority and fan-out in
-`make_selection_sort_key`, so it only reorders rows the decisions already tied.
+the weakest term there.
 """
 from __future__ import annotations
 
@@ -43,6 +29,21 @@ OPERATOR_VOTER_KIND = "operator"
 def voter_key(record: dict) -> str:
     """Return the identity that makes an encounter one-per voter."""
     return str(record.get("voter_key") or record.get("session_id") or "")
+
+
+def recent_encounter(entry: dict, now, within_days: int) -> bool:
+    """True when some encounter was recorded inside the window.
+
+    A vote says the node cost somebody time THEN. Unwindowed it would be a
+    permanent exemption from the age drain that any agent could switch on with
+    no undo, so this reads the ``ts`` the record already carries.
+    """
+    stamps = (
+        _parse_ts(r.get("ts"))
+        for r in (entry.get("encounters") or [])
+        if isinstance(r, dict)
+    )
+    return any(s is not None and (now - s).days <= within_days for s in stamps)
 
 
 def encounter_voters(entry: dict) -> set:
@@ -71,24 +72,36 @@ def operator_voters(entry: dict) -> set:
     }
 
 
-def divergence_score(entry: dict, effective_priority: str) -> int:
+def divergence_score(entry: dict, effective_priority: str, voters: int | None = None) -> int:
     """Encounter weight against operator priority.
 
     Higher means the operator is looking at it less than the agents are hitting
     it. A node no session was ever sent to, that sessions keep hitting anyway,
     doubles: it is the loudest row available, and it is the one no other
-    instrument reports.
+    instrument reports. ``voters`` lets a caller that already built the set
+    pass its size rather than walk ``encounters`` a second time.
     """
     weight = PRIORITY_WEIGHT.get(effective_priority, _DEFAULT_WEIGHT)
     if not entry.get("sessions") and not entry.get("pr_number"):
         weight *= 2
-    return len(encounter_voters(entry)) * weight
+    return (len(encounter_voters(entry)) if voters is None else voters) * weight
 
 
 #: Age is worth at most 90/100 of a point, less than the smallest one vote can
 #: be worth (a p0 vote scores 1), so age never buys a vote. It only breaks ties.
 _AGE_CAP_DAYS = 90
 _AGE_DIVISOR = 100.0
+
+
+def _parse_ts(value: object):
+    """One ISO reader for both clocks here. An unreadable stamp is no signal."""
+    from datetime import datetime, timezone
+
+    try:
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
 
 
 def importance_score(entry: dict, effective_priority: str, now=None) -> float:
@@ -102,16 +115,13 @@ def importance_score(entry: dict, effective_priority: str, now=None) -> float:
     """
     from datetime import datetime, timezone
 
-    if not encounter_voters(entry):
+    voters = encounter_voters(entry)
+    if not voters:
         return 0.0
-    divergence = float(divergence_score(entry, effective_priority))
-    try:
-        raw = entry.get("touched_at") or entry.get("created_at")
-        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
+    divergence = float(divergence_score(entry, effective_priority, len(voters)))
+    stamp = _parse_ts(entry.get("touched_at")) or _parse_ts(entry.get("created_at"))
+    if stamp is None:
         return divergence
-    if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
     days = max(0, ((now or datetime.now(timezone.utc)) - stamp).days)
     return divergence + min(days, _AGE_CAP_DAYS) / _AGE_DIVISOR
 

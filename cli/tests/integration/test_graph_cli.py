@@ -1310,9 +1310,11 @@ def test_priority_p0_requires_breaking_acknowledgment(tmp_graph):
     r = _invoke("backlog", "add", "Not actually broken", "--priority", "p0")
     assert r.exit_code != 0
     assert "p0 blocks everything else, usually a bug" in r.output
-    # The next-step it names must be a command this session can actually run:
-    # it used to say `fno backlog rank`, which now refuses an agent too.
-    assert "fno backlog encounter" in r.output
+    # The next step it names must work for whoever hit the refusal. It used to
+    # say `rank --top`, which now refuses an agent; `encounter` exits 5 in the
+    # bare operator shell that hits this. Both halves are on this command.
+    assert "--blocks-everything" in r.output
+    assert "file it p1" in r.output
     assert _read_graph(tmp_graph) == []
 
 

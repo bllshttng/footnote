@@ -60,7 +60,7 @@ A `PreToolUse` hook blocks direct edits as a backstop, but the rule is yours to 
 
 Priority is the proposal, and it is the only ordering field you write. It is bounded to four values, so two writers disagreeing produce a visible conflict on the demand table instead of a silent stack. Rank is the operator's pin, and `fno backlog rank` refuses this session by design.
 
-Act on the shape of a `demand` row with several agent votes and a low priority. The fleet keeps paying for something nobody is looking at. Raise it with `fno backlog update <id> --priority`. Put the evidence in the report line, so the operator can overrule you from the same facts. A row you cannot decide from the evidence goes to the pile as a question, exactly like any other.
+Act on the shape of a `demand` row with several agent votes and a low priority. The fleet keeps paying for something nobody is looking at. Raise it with `fno backlog update <id> --priority p1`. p0 needs `--blocks-everything` and means the fleet is down. Put the evidence in the report line, so the operator can overrule you from the same facts. A row you cannot decide from the evidence goes to the pile as a question, exactly like any other.
 
 ## The decision rule
 

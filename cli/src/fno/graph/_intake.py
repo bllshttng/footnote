@@ -443,9 +443,8 @@ def make_selection_sort_key(
     scored_at = datetime.now(timezone.utc)
 
     def _score(node: dict) -> float:
-        # Degrade like _rank_band and orphan_ids: this key runs inside the board
-        # render inside locked_mutate_graph, where a hand-edited `encounters: 3`
-        # raising would take the whole write down.
+        # Degrade like _rank_band and orphan_ids: a hand-edited `encounters: 3`
+        # raising here would take down the whole locked_mutate_graph write.
         try:
             return -importance_score(node, effective_priority(node), scored_at)
         except Exception:  # noqa: BLE001 - ordering signal; never break selection
@@ -497,8 +496,8 @@ def make_selection_sort_key(
                 band,                    # child rank: orders only within its epic
                 child_prio,
                 _fanout(node_id),    # in-band: after priority, before orphan
-                _score(node),        # evidence: encounters, then age
                 child_orphan,
+                _score(node),        # evidence, below every judgement above it
                 child_created,
             )
         # Loose node: tier 1. Middle fields mirror the child fields so the
@@ -510,7 +509,7 @@ def make_selection_sort_key(
         # epic branch's arity; tier (index 1) already separates the two, so
         # it is never compared.
         return lane + (
-            band, 1, 0, child_prio, _fanout(node_id), _score(node), child_orphan,
+            band, 1, 0, child_prio, _fanout(node_id), child_orphan, _score(node),
             child_created, child_prio, _fanout(node_id), child_created,
         )
 

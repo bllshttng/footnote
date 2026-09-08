@@ -790,8 +790,9 @@ def node_has_movement(entry: dict, now: datetime, staleness_days: int) -> bool:
     fresher than ``staleness_days``). A node with a movement signal is NEVER
     quarantined - the quarantine is only for genuinely-abandoned ready work.
 
-    An encounter is somebody saying this node cost them time. It does not
-    expire, because the cost it records did not.
+    An encounter inside the window is somebody saying this node cost them time
+    recently. Unwindowed it would be a permanent exemption any agent could
+    switch on with no undo, so the drain reads the vote's own ``ts``.
 
     The plan-file mtime probe is best-effort: a missing/unreadable plan is simply
     "no freshness signal from the plan" (not movement), never an error.
@@ -802,9 +803,9 @@ def node_has_movement(entry: dict, now: datetime, staleness_days: int) -> bool:
         return True
     if entry.get("locked_by") or entry.get("locked_at"):
         return True
-    from fno.graph.demand import encounter_voters
+    from fno.graph.demand import recent_encounter
 
-    if encounter_voters(entry):
+    if recent_encounter(entry, now, staleness_days):
         return True
     # Resolve the freshness probe the way the node itself would (fragment
     # stripped, `~` expanded, relative resolved against the node's own `cwd`,

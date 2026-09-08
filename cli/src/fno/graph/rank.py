@@ -26,12 +26,7 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
                 raise ValueError("active-backlog target has no readable mission")
             missions.append(mission)
         missions = sorted(set(missions))
-        reachable = {
-            child_id
-            for mission in missions
-            for child_id in descendants_of(entries, mission)
-        }
-        if task_id in reachable:
+        if any(task_id in descendants_of(entries, m) for m in missions):
             return None
         # The remedy, not just the diagnosis: name the one command that makes a
         # dispatcher take the node. With no epic parent it says so, so the note
@@ -43,13 +38,11 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
         else:
             remedy = ("; no epic to activate (missions are activated per epic "
                       "with fno backlog advance --epic <epic-id>)")
-        if missions:
-            return (
-                "no live dispatcher will take it "
-                f"(outside active mission scopes: {', '.join(missions)})"
-                + remedy
-            )
-        return "no live dispatcher will take it (no resolved active missions)" + remedy
+        scope = (
+            f"outside active mission scopes: {', '.join(missions)}"
+            if missions else "no resolved active missions"
+        )
+        return f"no live dispatcher will take it ({scope}){remedy}"
     except Exception as exc:  # noqa: BLE001 - rank already committed; qualify unknowns
         return f"dispatcher scope unavailable ({exc})"
 
@@ -59,7 +52,9 @@ def agent_harness_writing_rank(env=None) -> str | None:
 
     Two provers, either enough. Ancestry catches a session fno never spawned;
     the stamp catches a codex thread worker, which owns no process to walk. A
-    half stamp reads as an agent, so a partial spawn buys back no pin.
+    half stamp reads as an agent, and an unreadable ancestry fails CLOSED: the
+    stamp cannot see what the prover was added for, so falling through to it
+    would open the fence exactly when the stronger check broke.
     """
     from fno.harness_identity import parse_canonical_identity
 
@@ -68,12 +63,11 @@ def agent_harness_writing_rank(env=None) -> str | None:
 
         if (owned := resolve_self_identity(env).harness):
             return owned
-    except Exception:  # noqa: BLE001 - the stamp below still answers
-        pass
+    except Exception as exc:  # noqa: BLE001 - fail closed, and name why
+        typer.echo(f"note: harness ancestry unreadable ({exc}); refusing", err=True)
+        return "unprovable"
     identity = parse_canonical_identity(env)
-    if identity.disposition == "absent":
-        return None
-    return identity.harness or "agent"
+    return None if identity.disposition == "absent" else (identity.harness or "agent")
 
 
 def _agent_rank_refusal(task_id: str, harness: str) -> str:
@@ -82,7 +76,7 @@ def _agent_rank_refusal(task_id: str, harness: str) -> str:
         "Every --top writes min(rank) - 1, so agent pins form a stack in which "
         "the last writer wins and importance is never computed.\nVote instead:\n"
         f"  fno backlog encounter {task_id} --evidence \"what it cost you\"\n"
-        f"  fno backlog update {task_id} --priority p0|p1|p2|p3\n"
+        f"  fno backlog update {task_id} --priority p1|p2|p3\n"
         "The graph records no writer for a rank, so nothing downstream could "
         "tell yours from the operator's. The escape hatch in --help is theirs."
     )
