@@ -88,6 +88,7 @@ pub mod gc;
 pub mod gc_inventory;
 pub mod gc_native;
 pub mod gc_sweep;
+pub mod gc_verify;
 pub mod gemini_ask;
 #[cfg(test)]
 mod git_test_helpers;
