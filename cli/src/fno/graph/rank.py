@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Optional
 
 import typer
@@ -61,8 +60,8 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
 def agent_harness_writing_rank(env=None) -> str | None:
     """The harness name when an agent runs this, ``None`` in an operator shell.
 
-    A partial stamp reads as an agent: the fence must fail closed, or a spawn
-    that half-stamps its worker buys that worker the pin back.
+    A partial stamp reads as an agent, so a half-stamped spawn cannot buy its
+    worker the pin back.
     """
     from fno.harness_identity import parse_canonical_identity
 
@@ -76,8 +75,7 @@ def _agent_rank_refusal(task_id: str, harness: str) -> str:
     return (
         f"Error: rank is operator-only; this {harness} session may not write it.\n"
         "Every --top writes min(rank) - 1, so agent pins form a stack in which "
-        "the last writer wins and importance is never computed.\n"
-        "Vote instead:\n"
+        "the last writer wins and importance is never computed.\nVote instead:\n"
         f"  fno backlog encounter {task_id} --evidence \"what it cost you\"\n"
         f"  fno backlog update {task_id} --priority p0|p1|p2|p3\n"
         "An operator pins by hand: pass --operator, or run from a shell with no "
@@ -113,10 +111,8 @@ def cmd_rank(
 ) -> None:
     """Curate a node's position within its (column, project) board lane.
 
-    Operator-only. An agent session is refused and told to vote with
-    ``fno backlog encounter`` or to propose with ``fno backlog update
-    --priority``; ``--operator`` is the operator's escape hatch from inside an
-    agent shell. Rank is a pin, and a pin every agent may write is a stack.
+    Operator-only: a pin every agent can write is a stack. ``--operator`` is
+    the escape hatch from inside an agent shell.
 
     Rank is a nullable float ordered ahead of the shared epic-aware work-order
     suffix within a lane; it never changes a node's column. ``--before`` /
@@ -128,7 +124,7 @@ def cmd_rank(
     spells that scope out loud and is refused for a node with no live epic
     parent. Loose nodes and epic containers keep the lane scope.
     """
-    from fno.graph._constants import has_node_id_prefix
+    from fno.graph._constants import has_node_id_prefix, _rank_band
     from fno.graph._intake import _find_node, _live_epic_for, _epics_with_child_progress
     from fno.graph.render import _project_key, make_kanban_column
     from fno.graph.store import locked_mutate_graph
@@ -174,17 +170,9 @@ def cmd_rank(
     result: dict = {}
 
     def _is_ranked(e: dict) -> bool:
-        # Match render._rank_band: a non-finite OR huge-int rank (from a
-        # hand-edited graph.json) is treated as unranked, so a poisoned peer
-        # can't corrupt the --top/--bottom/midpoint arithmetic or persist a
-        # NaN/inf rank. float() guards the OverflowError a giant int raises.
-        r = e.get("rank")
-        if isinstance(r, bool) or not isinstance(r, (int, float)):
-            return False
-        try:
-            return math.isfinite(float(r))
-        except (OverflowError, ValueError):
-            return False
+        # The board's own definition, not a second copy of it: a poisoned peer
+        # degrades to unranked there, so it cannot corrupt the arithmetic here.
+        return _rank_band(e)[0] == 0
 
     def mutator(entries):
         try:
@@ -330,9 +318,8 @@ def cmd_rank(
     else:
         note = _dispatch_note(result["id"], graph_path)
         suffix = f"; {note}" if note else ""
-        # The receipt names what the pin is top OF. A bare "Ranked --top" read
-        # as "runs next across the project" and meant "top of its own epic",
-        # which is how a king pinned eighth and believed it pinned first.
+        # A bare "Ranked --top" read as "runs next across the project" and
+        # meant "top of its own epic". Name what the pin is top OF.
         scope_note = (
             "orders it among that epic's children only, and the epic's own rank "
             "decides where the group runs"

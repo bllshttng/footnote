@@ -93,9 +93,6 @@ def classify_planned_unclaimed(
         if isinstance(entry.get("parent"), str)
     }
     rows: list[dict] = []
-    # The entry beside each row: the shared selection key sorts full entries,
-    # and the row is a projection that has already dropped rank and created_at.
-    scanned: list[dict] = []
     for entry in entries:
         node_id = entry.get("id")
         if not isinstance(node_id, str) or not node_id:
@@ -131,7 +128,6 @@ def classify_planned_unclaimed(
             and claim_state is None
         ):
             continue
-        scanned.append(entry)
         rows.append(
             {
                 "id": node_id,
@@ -147,20 +143,18 @@ def classify_planned_unclaimed(
             }
         )
 
-    # One ordering for both queues. This queue used to sort by (priority, id
-    # string), so the stop hook's `next:` line named a node the drain would
-    # never pick next: the drain reads the ready list, which is rank-aware.
-    # Reuse the shared key rather than re-implementing it (principle 9).
+    # One ordering for both queues. Sorting by (priority, id string) here made
+    # the stop hook's `next:` line name a node the rank-aware drain never
+    # picked next. Reuse the shared key; never re-implement it.
     from fno.graph._intake import make_selection_sort_key
 
     live_claimed = frozenset(
         node_id for node_id, state in claimed.items() if state == "live"
     )
+    # The key sorts full entries; a row is a projection that already dropped
+    # rank and created_at, so sort through `by_id` rather than through the row.
     order = make_selection_sort_key(entries, live_claimed=live_claimed)
-    paired = sorted(
-        zip(scanned, rows), key=lambda pair: (order(pair[0]), str(pair[1]["id"]))
-    )
-    rows = [row for _, row in paired]
+    rows.sort(key=lambda row: (order(by_id[row["id"]]), str(row["id"])))
     return {
         "source": OBSERVER_COMMAND,
         "status": "ok",

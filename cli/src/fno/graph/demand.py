@@ -26,9 +26,8 @@ Nothing in this module writes. `demand` never touches `rank` and never consults
 that reorders it on its own removes the judgement this feature exists to inform.
 
 `importance_score` is where the read reaches selection, and it is deliberately
-the weakest term there: `make_selection_sort_key` places it after priority and
-fan-out, so it only ever reorders rows the decision terms have already tied, and
-an operator's pin outranks it entirely.
+the weakest term there: it sits after priority and fan-out in
+`make_selection_sort_key`, so it only reorders rows the decisions already tied.
 """
 from __future__ import annotations
 
@@ -89,52 +88,37 @@ def divergence_score(entry: dict, effective_priority: str) -> int:
     return len(encounter_voters(entry)) * weight
 
 
-#: Age contributes at most 90/100 of a point, which is strictly less than the
-#: smallest thing one vote can be worth (a p0 vote scores 1). So age can never
-#: buy a vote: it only ever breaks ties among rows that already have the same
-#: number of them.
+#: Age contributes at most 90/100 of a point, strictly less than the smallest
+#: one vote can be worth (a p0 vote scores 1). So age never buys a vote; it
+#: only breaks ties among rows that already have the same number of them.
 _AGE_CAP_DAYS = 90
 _AGE_DIVISOR = 100.0
-
-
-def _age_days(entry: dict, now=None) -> int:
-    """Days since the last curation touch, falling back to birth.
-
-    Same clock ``maintain`` reads: ``touched_at`` is only ever written at or
-    after ``created_at``, so the fallback needs no max. An unparseable or
-    missing stamp is no age signal, never an error.
-    """
-    from datetime import datetime, timezone
-
-    raw = entry.get("touched_at") or entry.get("created_at")
-    if not isinstance(raw, str) or not raw:
-        return 0
-    try:
-        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return 0
-    if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
-    if now is None:
-        now = datetime.now(timezone.utc)
-    return max(0, (now - stamp).days)
 
 
 def importance_score(entry: dict, effective_priority: str, now=None) -> float:
     """Divergence plus age, for the unranked band of the selection key.
 
-    A projection, never stored. Zero for a node nobody voted on: with no
-    encounter there is no evidence, and a score built from age alone would
-    reorder the whole backlog on a signal no one recorded. So the score only
-    ever moves rows that carry votes, and a graph with no encounters sorts
-    byte-for-byte the way it sorted before this term existed.
-
-    Difficulty never enters. That is a routing axis, not an importance one.
+    A projection, never stored, and zero for a node nobody voted on: a score
+    built from age alone would reorder the whole backlog on a signal no one
+    recorded. That test comes first, so the sort parses no timestamp for the
+    overwhelming majority of rows. Difficulty never enters, being a routing
+    axis. Age reads ``touched_at`` (the last curation change) and falls back to
+    birth, the clock ``maintain`` reads; an unparseable stamp is no age signal.
     """
+    from datetime import datetime, timezone
+
     if not encounter_voters(entry):
         return 0.0
-    age = min(_age_days(entry, now), _AGE_CAP_DAYS) / _AGE_DIVISOR
-    return float(divergence_score(entry, effective_priority)) + age
+    divergence = float(divergence_score(entry, effective_priority))
+    try:
+        raw = entry.get("touched_at") or entry.get("created_at")
+        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return divergence
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    days = max(0, ((now or datetime.now(timezone.utc)) - stamp).days)
+    return divergence + min(days, _AGE_CAP_DAYS) / _AGE_DIVISOR
 
 
 def _dispatched_count(entry: dict, voters: set) -> int:
