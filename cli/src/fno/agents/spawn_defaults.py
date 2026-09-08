@@ -883,7 +883,10 @@ def resolve_lane_vendor(
     The vocabulary and the judgment live in the spawn-overlay verb; this shim
     resolves the harness-side inputs (explicit arg, then -H, then dispatch
     inference from env) and reads the answer."""
-    from fno.agents.spawn_overlay_client import spawn_overlay_call
+    from fno.agents.spawn_overlay_client import (
+        SpawnOverlayUnavailable,
+        spawn_overlay_call,
+    )
 
     toks = [str(t) for t in (list(argv)[1:] if argv else [])]
     env_harness = None
@@ -896,15 +899,19 @@ def resolve_lane_vendor(
             env_harness = resolve_dispatch_harness(None, env=env)[0]
         except Exception:
             env_harness = "claude"
-    return spawn_overlay_call(
-        {
-            "kind": "lane-vendor",
-            "argv_tail": toks,
-            "argv_head": argv[0] if argv else None,
-            "harness": harness,
-            "env_harness": env_harness,
-        }
-    ).get("vendor")
+    try:
+        return spawn_overlay_call(
+            {
+                "kind": "lane-vendor",
+                "argv_tail": toks,
+                "argv_head": argv[0] if argv else None,
+                "harness": harness,
+                "env_harness": env_harness,
+            }
+        ).get("vendor")
+    except SpawnOverlayUnavailable:
+        # No binary: no vendor opinion (the documented no-opinion answer).
+        return None
 
 
 def _check_model_vendor_mismatch(
@@ -926,6 +933,10 @@ def _check_model_vendor_mismatch(
     stderr line, exit 2).
     """
     toks = [str(t) for t in argv[1:]]
+    # Pure fast path: with no model named there is nothing to judge, and the
+    # spawn must compose on installs with no fno-agents binary at all.
+    if _flag_value(toks, "--model", "-m") is None:
+        return
     # The lane's harness, resolved in the verb's precedence order: an explicit
     # -H flag wins, then dispatch inference from env (as a LATE input; the
     # argv head may still name the harness first).
@@ -955,8 +966,10 @@ def _check_model_vendor_mismatch(
             }
         )
     except SpawnOverlayUnavailable as exc:
-        print(f"fno agents spawn: {exc}", file=err)
-        raise SystemExit(2)
+        # No binary: the check degrades open with a named line. The refusal
+        # contract is kept wherever the verb actually ran.
+        print(f"fno agents spawn: vendor check skipped ({exc})", file=err)
+        return
     if answer.get("event"):
         from fno.agents import events
 
@@ -1544,9 +1557,15 @@ def inject_spawn_defaults(
                 }
             )
         except SpawnOverlayUnavailable as exc:
-            print(f"fno agents spawn: {exc}", file=err)
-            raise SystemExit(2)
-        if _overlay_answer.get("refusal"):
+            # Transport unavailable (no fno-agents binary): degrade open like
+            # every config-sourced field here. Only the verb's own VERDICT
+            # refusal below fails the spawn.
+            print(
+                f"fno agents spawn: harness-keyed defaults skipped ({exc})",
+                file=err,
+            )
+            _overlay_answer = None
+        if _overlay_answer is not None and _overlay_answer.get("refusal"):
             print(_overlay_answer["refusal"], file=err)
             raise SystemExit(2)
 
@@ -1663,68 +1682,38 @@ def inject_spawn_defaults(
 
     # _flag_present, not _flag_value: a valueless trailing `--tab` reads as
     # absent to a value read, and injecting beside it puts TWO `--tab` tokens in
-    # the argv, so click fails the spawn on the operator's own flag. This is the
-    # same presence-not-value rule the conflict scan below states, applied to the
-    # flag the block is actually guarding on.
+    # the argv, so click fails the spawn on the operator's own flag.
     if cfg_pane_group and not _flag_present(out[1:], "--tab"):
-        eff_substrate = explicit_substrate or injected_substrate or "pane"
-        # A pane group places the pane by moving its OWN tab, so dispatch
-        # hard-refuses a group beside --split/--at (the pane then sits in a tab
-        # it does not own). That refusal is right for a group the operator
-        # TYPED and wrong for one this config injected: it would fail-close a
-        # spawn on a value the caller never asked for. Every other
-        # config-sourced field here degrades open with a named line, so this
-        # one does too.
-        # --once/-o is in this list because cli.py refuses placement on
-        # `substrate != "pane" OR once`, so a one-shot spawn has no pane
-        # geometry either even though its substrate resolves to "pane".
-        # PRESENCE, not value: `_flag_value` answers None for a valueless
-        # trailing `--at`, which read as "no conflict" and injected the group,
-        # so dispatch then hard-refused on a flag the caller never typed. A
-        # `--flag=value` spelling has to be matched on its prefix.
-        # Scanned through _spawn_tokens like every other flag read here, so a
-        # fenced provider argv cannot suppress the group: `spawn ... -- claude
-        # --at 3` names a seed token, not an fno flag, and dropping the config's
-        # pane_group over it would blame the caller for a flag they never passed.
-        _placement_flags = ("--split", "-x", "--at", "--once", "-o")
-
-        def _names(tok: str) -> "Optional[str]":
-            for f in _placement_flags:
-                if tok == f or tok.startswith(f + "="):
-                    return f
-                # The glued short form click also accepts (`-xdown`), matched the
-                # same way _flag_value matches `-Pvalue`. Missing it let a real
-                # placement flag read as absent, inject the group, and then hit
-                # the hard refusal on a value the operator never typed.
-                if len(f) == 2 and f[1] != "-" and tok != f and tok.startswith(f):
-                    return f
-            return None
-
-        conflicting = next(
-            (
-                named
-                for _, tok in _spawn_tokens(out[1:])
-                if (named := _names(tok)) is not None
-            ),
-            None,
-        )
-        if eff_substrate != "pane":
-            print(
-                f"fno agents spawn: pane group skipped (resolved substrate "
-                f"{eff_substrate!r} has no pane geometry); "
-                f"{pane_group_rung}.pane_group = {cfg_pane_group!r} ignored",
-                file=err,
+        # Placement judgment (conflicts, pane geometry) lives in the verb;
+        # config-sourced fields degrade open, so an unavailable verb skips the
+        # group with a named line instead of failing the spawn.
+        _pg_rung = f"{pane_group_rung}.pane_group"
+        try:
+            from fno.agents.spawn_overlay_client import (
+                SpawnOverlayUnavailable,
+                spawn_overlay_call,
             )
-        elif conflicting:
+
+            _pg = spawn_overlay_call(
+                {
+                    "kind": "pane-group",
+                    "group": cfg_pane_group,
+                    "rung": _pg_rung,
+                    "eff_substrate": explicit_substrate or injected_substrate or "pane",
+                    "argv_tail": [t for _, t in _spawn_tokens(out[1:])],
+                }
+            )
+        except SpawnOverlayUnavailable as exc:
             print(
-                f"fno agents spawn: pane group skipped ({conflicting} places this "
-                f"pane in a tab it does not own, which a group cannot move); "
-                f"{pane_group_rung}.pane_group = {cfg_pane_group!r} ignored",
+                f"fno agents spawn: pane group skipped ({exc}); {_pg_rung} ignored",
                 file=err,
             )
         else:
-            inject += ["--tab", cfg_pane_group]
-            from_config.append(("tab", cfg_pane_group, f"{pane_group_rung}.pane_group"))  # type: ignore[arg-type]
+            if _pg.get("inject"):
+                inject += ["--tab", cfg_pane_group]
+                from_config.append(("tab", cfg_pane_group, _pg_rung))  # type: ignore[arg-type]
+            elif _pg.get("skipped"):
+                print(_pg["skipped"], file=err)
 
     # Harness bundle (x-8975): the verb's ONE bundle answer (lane args >
     # profile harness overlay > defaults harness overlay, never concatenated)

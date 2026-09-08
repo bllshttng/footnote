@@ -2097,6 +2097,15 @@ class _FakeLink:
         self.account = ""
 
 
+from fno.rust_binary import find_dev_binary  # noqa: E402
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents)`",
+)
+
+
+@requires_rust
 class TestChainRedispatch:
     """The operator's sentence, executed: complex work reaches codex."""
 

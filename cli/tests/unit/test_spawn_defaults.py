@@ -755,6 +755,7 @@ def test_profile_lane_unknown_harness_refuses(monkeypatch):
 
 
 @requires_rust
+@requires_rust
 def test_profile_lane_injects_pane_group(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
 
@@ -1424,6 +1425,7 @@ _OPERATOR_RULE = {
 }
 
 
+@requires_rust
 class TestResolveFallbackChain:
     def test_ac5_hp_size_picks_the_operators_own_split(self, monkeypatch) -> None:
         # "Simple work goes to a claude sonnet background thread, complex work
@@ -1498,6 +1500,7 @@ class TestResolveFallbackChain:
         assert [sd.link_id(x) for x in chain] == ["claude/sonnet"]
 
 
+@requires_rust
 class TestChainValidatorRefuses:
     """AC5-NEG: the failover path is where degrading open costs money.
 
@@ -1560,6 +1563,7 @@ class TestChainValidatorRefuses:
         assert AgentsBlock(fallback={}).fallback == {}
 
 
+@requires_rust
 class TestLinkToSpawnFlags:
     def test_no_new_axis_vocabulary(self) -> None:
         from fno.agents import spawn_defaults as sd
@@ -1595,6 +1599,7 @@ class TestLinkToSpawnFlags:
         assert sd.link_id(a) == sd.link_id(b)
 
 
+@requires_rust
 class TestLinkIdentityIncludesTheAccountAxis:
     def test_two_accounts_on_one_model_are_two_destinations(self) -> None:
         # An account names a different bill and a different meter. Folding two
@@ -1634,6 +1639,7 @@ class TestLinkIdentityIncludesTheAccountAxis:
         assert [sd.link_id(x) for x in chain] == ["claude/sonnet@secondary"]
 
 
+@requires_rust
 class TestForeignProjectRooting:
     def test_the_chain_is_read_from_the_candidates_repo(self, monkeypatch, tmp_path):
         # The recovery roster is global. A foreign worker resolving the
@@ -1686,6 +1692,7 @@ class TestForeignProjectRooting:
 # --- model-implies-vendor mismatch warning (change 5, spawn half) ------------
 
 
+@requires_rust
 def test_model_vendor_mismatch_warns_naming_both_sides():
     # --model glm-5.3 with no zai route resolved: the spawn proceeds AND warns,
     # naming the implied vendor (zai) and the resolved lane (anthropic, the
@@ -1716,6 +1723,7 @@ def test_route_matching_model_is_silent():
     assert "implies vendor" not in err.getvalue()
 
 
+@requires_rust
 def test_mismatch_warns_with_no_config_at_all():
     # The warning must not depend on config being present: a bare argv with a
     # cross-vendor model is the exact operator typo it exists to catch.
@@ -1740,6 +1748,7 @@ def test_explicit_route_with_cross_vendor_model_is_silent():
     assert "implies vendor" not in err.getvalue()
 
 
+@requires_rust
 def test_injected_cross_vendor_model_refuses_and_names_the_config_key():
     # The specimen, 2026-08-21: agents.defaults.model was a gpt-* id, every
     # spawn that named no model inherited it, and the worker started, reported
@@ -1755,6 +1764,7 @@ def test_injected_cross_vendor_model_refuses_and_names_the_config_key():
     assert "openai" in msg and "anthropic" in msg
 
 
+@requires_rust
 def test_typed_cross_vendor_model_still_warns_and_proceeds():
     # The other half of the same predicate, and the one that must NOT change.
     # A caller who types a cross-vendor model means it; passthrough is
@@ -1780,6 +1790,7 @@ def test_injected_model_matching_the_lane_is_silent():
     assert err.getvalue() == "" or "implies vendor" not in err.getvalue()
 
 
+@requires_rust
 def test_account_in_play_downgrades_the_refusal_to_a_warning():
     """An account can carry its own vendor credential, and `resolve_lane_vendor`
     never reads the `--account` axis.
@@ -1816,6 +1827,7 @@ def test_lane_vendor_resolves_unrouted_harness_from_final_argv():
     assert resolve_lane_vendor(["codex", "-C", "/tmp/workspace"]) == "openai"
 
 
+@requires_rust
 def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
     emitted = []
     monkeypatch.setattr(
@@ -1845,6 +1857,7 @@ def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
     ]
 
 
+@requires_rust
 def test_refused_mismatch_event_names_the_config_key_that_supplied_the_model(
     monkeypatch,
 ):
@@ -2171,6 +2184,7 @@ def test_lane_validation_refusals_run_on_real_dict_lanes(monkeypatch):
         assert "no worker launched" in err.getvalue()
 
 
+@requires_rust
 def test_config_pane_group_degrades_open_beside_an_explicit_split(monkeypatch):
     """dispatch hard-refuses a pane group beside --split/--at. That refusal is
     right for a group the operator TYPED and wrong for one config injected: it
@@ -2188,6 +2202,7 @@ def test_config_pane_group_degrades_open_beside_an_explicit_split(monkeypatch):
     assert out[out.index("--harness") + 1] == "codex"
 
 
+@requires_rust
 def test_config_pane_group_still_injects_without_a_conflicting_flag(monkeypatch):
     err = io.StringIO()
     out = _inject(
@@ -2198,6 +2213,7 @@ def test_config_pane_group_still_injects_without_a_conflicting_flag(monkeypatch)
     assert out[out.index("--tab") + 1] == "codex"
 
 
+@requires_rust
 def test_config_pane_group_degrades_open_beside_once(monkeypatch):
     """cli.py refuses placement on `substrate != "pane" OR once`, so a one-shot
     spawn has no pane geometry even though its substrate resolves to pane. The
@@ -2217,6 +2233,7 @@ def test_config_pane_group_degrades_open_beside_once(monkeypatch):
     assert "--once" in err.getvalue()
 
 
+@requires_rust
 def test_config_pane_group_survives_a_fenced_provider_argv(monkeypatch):
     """`spawn ... -- claude --at 3` names a SEED token, not an fno flag. Scanning
     raw argv would drop the config's pane_group and blame a flag the caller never
@@ -2244,6 +2261,7 @@ def test_config_pane_group_defers_to_a_valueless_trailing_tab(monkeypatch):
     assert out.count("--tab") == 1
 
 
+@requires_rust
 def test_config_pane_group_skips_on_a_glued_short_placement_flag(monkeypatch):
     """click accepts `-xdown`. Missing that spelling let a real placement flag
     read as absent, inject the group, and then hit the hard refusal on a value
@@ -2708,6 +2726,7 @@ _PROFILE_OVERLAY = {
 }
 
 
+@requires_rust
 def test_profile_harness_overlay_answers_claude_scalar_answers_codex():
     """AC2-HP: the same verb carries two harnesses' answers to one question.
 
@@ -2732,6 +2751,7 @@ def test_profile_harness_overlay_answers_claude_scalar_answers_codex():
     assert "agents.profiles.target.permission_mode" in err.getvalue()
 
 
+@requires_rust
 def test_effort_overlay_read_happens_after_harness_resolution():
     """AC2-EDGE: no -H on the argv; the profile's own provider=codex resolves
     the harness, and the effort read through THAT harness picks xhigh."""
@@ -2752,6 +2772,7 @@ def test_effort_overlay_read_happens_after_harness_resolution():
     assert "agents.profiles.target.harness.codex.effort" in err.getvalue()
 
 
+@requires_rust
 def test_defaults_harness_overlay_answers_when_profile_is_silent():
     """The defaults rung keeps its own harness table: a codex answer there
     wins on -H codex over the defaults scalar, with no profile in play."""
@@ -2777,6 +2798,7 @@ def test_explicit_flag_still_beats_every_overlay_rung():
     assert out.count("--permission-mode") == 1
 
 
+@requires_rust
 def test_harness_args_appended_behind_tail_fence():
     """The overlay bundle rides the -- passthrough fence at the argv TAIL, so
     the caller's own pre-fence tokens stay pre-fence."""
@@ -2792,6 +2814,7 @@ def test_harness_args_appended_behind_tail_fence():
     assert "unverified" in err.getvalue()
 
 
+@requires_rust
 def test_harness_args_skipped_when_argv_already_fenced():
     """AC2-ERR: the caller's fence selects their complete bundle; the
     configured one is displaced by name, and no second fence is added."""
@@ -2806,6 +2829,7 @@ def test_harness_args_skipped_when_argv_already_fenced():
     assert "agents.defaults.harness.codex.args" in err.getvalue()
 
 
+@requires_rust
 def test_harness_args_skipped_behind_an_argv_payload():
     """The --argv payload boundary owns everything after it too (the Rust
     parser reads it as the provider command line), so it displaces the
@@ -2821,6 +2845,7 @@ def test_harness_args_skipped_behind_an_argv_payload():
     assert "--argv" in err.getvalue()
 
 
+@requires_rust
 def test_bundle_reserves_the_empty_message_slot():
     """A pane spawn with no prompt keeps its message slot: click fills
     positionals in order, so without the explicit empty the bundle's first
@@ -2832,6 +2857,7 @@ def test_bundle_reserves_the_empty_message_slot():
     assert out[-4:] == ["", "--", "--profile", "fno"]
 
 
+@requires_rust
 def test_lane_args_win_over_overlay_bundle():
     """The lane rung sits above the overlays for args too, and bundles are
     never concatenated."""
@@ -2852,6 +2878,7 @@ def test_lane_args_win_over_overlay_bundle():
     assert ".lanes[0].args" in err.getvalue()
 
 
+@requires_rust
 def test_unknown_overlay_harness_name_refuses():
     """AC1-ERR sibling: a typo'd harness key refuses at the seam by name."""
     err = io.StringIO()
@@ -2865,6 +2892,7 @@ def test_unknown_overlay_harness_name_refuses():
     assert "agents.profiles.target.harness.codx" in err.getvalue()
 
 
+@requires_rust
 def test_lane_field_inside_overlay_refuses():
     """AC1-ERR: a ranking field in an overlay is a lane field, refused by
     name; nothing launches."""
@@ -2880,6 +2908,7 @@ def test_lane_field_inside_overlay_refuses():
     assert "lane field" in err.getvalue()
 
 
+@requires_rust
 def test_overlay_scoped_to_this_verbs_profile():
     """A typo in an unrelated verb's overlay must not block this dispatch."""
     out = _inject(
