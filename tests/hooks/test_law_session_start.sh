@@ -129,6 +129,37 @@ expect_contains "a malformed row does not lose its healthy siblings" \
     'echo "{\"decisions\":[\"oops\",{\"subject\":\"healthy\"}],\"total\":2}"' \
     "healthy"
 
+# A subject is a table of contents, and a table of contents cannot warn you.
+# A ruling that says IN ITS OWN TEXT not to reopen it speaks its first
+# sentence instead of being named: measured 2026-09-07, a session read
+# `review-coverage` in this line as a topic it knew and spent ninety minutes
+# arguing against the ruling behind it.
+expect_contains "a settled ruling speaks its first sentence" \
+    'echo "{\"decisions\":[{\"subject\":\"review-coverage\",\"decision\":\"Two reviews maximum. This is settled. Do not reopen it.\"}],\"total\":1}"' \
+    "review-coverage: Two reviews maximum."
+
+expect_contains "a settled ruling is labelled as settled" \
+    'echo "{\"decisions\":[{\"subject\":\"s\",\"decision\":\"Origin never gates. Do not re-derive it.\"}],\"total\":1}"' \
+    "Settled, do not re-derive:"
+
+# The whole point: the settled block sits outside RENDER_CAP, so the ruling a
+# confident agent is about to break cannot be the one truncated away.
+expect_contains "a settled ruling survives the render cap" \
+    'echo "{\"decisions\":[{\"subject\":\"filler-0\"},{\"subject\":\"filler-1\"},{\"subject\":\"filler-2\"},{\"subject\":\"filler-3\"},{\"subject\":\"filler-4\"},{\"subject\":\"filler-5\"},{\"subject\":\"filler-6\"},{\"subject\":\"filler-7\"},{\"subject\":\"filler-8\"},{\"subject\":\"filler-9\"},{\"subject\":\"late-law\",\"decision\":\"Two rounds complete the phase. Do not reopen it.\"}],\"total\":11}"' \
+    "late-law: Two rounds complete the phase."
+
+# Narrow on purpose: the preamble is byte-budgeted, and only a ruling whose
+# own text carries the clause is worth the bytes.
+out="$(run_with_stub 'echo "{\"decisions\":[{\"subject\":\"ordinary\",\"decision\":\"Blueprints run on opus.\"}],\"total\":1}"')"
+if [[ "$out" == *"ordinary"* && "$out" != *"Settled, do not re-derive"* ]]; then
+    echo "  PASS: an ordinary ruling stays a name"
+    pass=$((pass + 1))
+else
+    echo "  FAIL: an ordinary ruling was rendered as settled"
+    echo "    got: $out"
+    fail=$((fail + 1))
+fi
+
 echo
 echo "Results: $pass passed, $fail failed"
 [[ $fail -eq 0 ]] || exit 1
