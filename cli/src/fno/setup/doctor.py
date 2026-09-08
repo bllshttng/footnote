@@ -9,7 +9,7 @@ or settings could not be loaded.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # Patterns that indicate misconfigured paths.
 # Each entry is (path_prefix, human_reason).
@@ -46,6 +46,25 @@ def _settings_candidates_for(path: Path) -> list[Path]:
     stopped running at the yaml-to-toml migration.
     """
     return [path.with_name("config.toml"), path]
+
+
+def _scan_config_files(paths: list[Path], probe: "Callable[[object], list[str]]") -> list[str]:
+    """Run ``probe`` over each readable FLAT config in ``paths``, deduped."""
+    from fno.config_io import _load_raw, _unwrap_config_dict
+
+    problems: list[str] = []
+    seen: set[Path] = set()
+    for path in paths:
+        if not path.is_file() or path.resolve() in seen:
+            continue
+        seen.add(path.resolve())
+        parsed, ok = _load_raw(path)
+        if not ok:
+            continue
+        for msg in probe(_unwrap_config_dict(parsed)):
+            if msg not in problems:
+                problems.append(msg)
+    return problems
 
 
 def _wip_cap_problems_in(data: object) -> list[str]:
@@ -91,26 +110,11 @@ def check_wip_caps() -> list[str]:
     """
     try:
         from fno.config import _global_settings_path
-        from fno.config_io import _load_raw, _unwrap_config_dict
+
+        paths = _settings_candidates_for(_global_settings_path())
     except Exception:
         return []
-
-    problems: list[str] = []
-    seen: set[Path] = set()
-    for path in _settings_candidates_for(_global_settings_path()):
-        if not path.is_file():
-            continue
-        resolved = path.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        parsed, ok = _load_raw(path)
-        if not ok:
-            continue
-        for msg in _wip_cap_problems_in(_unwrap_config_dict(parsed)):
-            if msg not in problems:
-                problems.append(msg)
-    return problems
+    return _scan_config_files(paths, _wip_cap_problems_in)
 
 
 _VALID_WORKTREE_POLICIES = ("never", "harness-native", "external")
@@ -192,11 +196,10 @@ def check_worktree_policy() -> list[str]:
     """
     try:
         from fno.config import _global_settings_path
-        from fno.config_io import _load_raw, _unwrap_config_dict
+
+        paths: list[Path] = _settings_candidates_for(_global_settings_path())
     except Exception:
         return []
-
-    paths: list[Path] = _settings_candidates_for(_global_settings_path())
     try:
         from fno.paths import resolve_repo_root
 
@@ -204,42 +207,16 @@ def check_worktree_policy() -> list[str]:
         paths[:0] = _settings_candidates_for(repo_fno / "settings.yaml")
     except Exception:
         pass
-
-    problems: list[str] = []
-    seen_files: set[Path] = set()
-    for path in paths:
-        if not path.is_file():
-            continue
-        resolved = path.resolve()
-        if resolved in seen_files:
-            continue
-        seen_files.add(resolved)
-        parsed, ok = _load_raw(path)
-        if not ok:
-            problems.append(f"{path} failed to parse; worktree policy cannot be validated")
-            continue
-        for msg in _worktree_policy_problems_in(_unwrap_config_dict(parsed)):
-            if msg not in problems:
-                problems.append(msg)
-    return problems
+    # An unreadable file is check_config_files_read's finding, not this one's.
+    return _scan_config_files(paths, _worktree_policy_problems_in)
 
 
 def _detected_harness() -> str:
     """Best-effort name of the harness running this shell, for the remedy line.
 
-    Delegates to the canonical tables in :mod:`fno.harness_identity` rather than
-    listing markers here. A second copy drifted immediately: the first version of
-    this function checked ``CLAUDE_SESSION_ID``, which is the LEGACY marker, and
-    never ``CLAUDE_CODE_SESSION_ID``, which is what a live claude session
-    actually sets. A real claude session therefore fell through to the ambient
-    tier, where a ``CODEX_HOME`` exported in the shell profile - ordinary on a
-    machine that runs both - answered "codex" and pointed the remedy at the wrong
-    settings file.
-
-    Session-scoped markers are consulted first, then the legacy spellings, then
-    ambient vars that merely survive a fork. Only the ambient tier is local: it
-    is a remedy-line nicety, not an identity decision, so it does not belong in
-    the resolver's own precedence.
+    Delegates to the tables in :mod:`fno.harness_identity`; a second copy
+    drifted immediately. Only the ambient tier is local, because it is a
+    remedy-line nicety and not an identity decision.
     """
     import os
 
@@ -249,12 +226,8 @@ def _detected_harness() -> str:
         SELF_SET_HARNESS_MARKERS,
     )
 
-    # CLAUDECODE used to be a literal here. It is a marker the claude binary
-    # writes about itself, so it belongs in the shared table with the rest of
-    # the identity mapping; a second copy of that fact is what let the crown
-    # grantor resolve identity differently from whoami. What stays local is
-    # genuinely local: CLAUDE_CONFIG_DIR and CODEX_HOME name where config lives,
-    # not which binary is running.
+    # CLAUDE_CONFIG_DIR and CODEX_HOME name where config lives, not which
+    # binary is running, so they stay out of the shared identity table.
     ambient = (
         ("CLAUDE_CONFIG_DIR", "claude"),
         ("CODEX_HOME", "codex"),
