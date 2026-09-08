@@ -154,9 +154,14 @@ if [[ "${FNO_TEST_HERMETIC:-}" == "1" ]]; then
     # across every repository and every run for one user, so its cache and its
     # 15-minute refresh stamp outlive the run that wrote them: one run then
     # shows another repository's stranded rows, or suppresses its own refresh
-    # against a stamp it never wrote. Under this branch HOME is the sandbox,
-    # so its leaf name is per-run.
-    _STRANDED_KEY="${HOME##*/}"
+    # against a stamp it never wrote.
+    #
+    # The WHOLE path, not its leaf. Sandbox roots are named by their purpose
+    # under a per-run parent, so leaves repeat across runs while the parent
+    # does not: two concurrent runs both holding a HOME that ends `/home`
+    # would share one key again, which is the collision this key exists to
+    # end. Substitution, not a subprocess, because this is a hot hook path.
+    _STRANDED_KEY="${HOME//\//_}"
     _STRANDED_DIR="${TMPDIR:-/tmp}/fno-stranded-$(id -u)-${_STRANDED_KEY:-nohome}"
     echo "worktree-peers: $_PATHS_STUB is missing under FNO_TEST_HERMETIC=1; using $_STRANDED_DIR rather than the checkout state root" >&2
   fi

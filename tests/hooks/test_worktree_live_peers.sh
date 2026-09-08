@@ -351,7 +351,13 @@ cp "$CARRIER" "$MISSING_THROTTLE_ROOT/hooks/worktree-peers-session-start.sh"
 # locally and failed on CI, because it was relying on the carrier falling back
 # to the checkout state root when the stub was missing, which is exactly the
 # fallback that got removed.
-cp "$REPO_ROOT/scripts/lib/paths.sh" "$MISSING_THROTTLE_ROOT/scripts/lib/paths.sh" 2>/dev/null || true
+# Asserted, not swallowed. A silent copy failure leaves the stub absent, the
+# carrier then resolves its dir through the fallback below rather than the
+# stub, and this case quietly measures the wrong branch while still reporting
+# a pass on the unpinned lane.
+if ! cp "$REPO_ROOT/scripts/lib/paths.sh" "$MISSING_THROTTLE_ROOT/scripts/lib/paths.sh"; then
+  fail "missing throttle setup: could not stage paths.sh, so this case would measure the fallback branch instead of the pinned one"
+fi
 cat > "$MISSING_THROTTLE_ROOT/hooks/helpers/worktree-live-peers.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
