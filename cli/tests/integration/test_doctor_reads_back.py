@@ -278,6 +278,23 @@ def test_wip_caps_in_config_toml_can_be_clean(
     assert check_wip_caps() == []
 
 
+def test_an_overridden_bad_cap_is_not_a_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The renderer resolves 20 from the toml, so the yaml value nothing reads
+    is not the operator's problem. Probing each layer alone reported it."""
+    from fno.setup.doctor import check_wip_caps
+
+    yaml_path = _write(tmp_path / "settings.yaml", 'kanban:\n  wip_caps:\n    now: "bad"\n')
+    _write(tmp_path / "config.toml", "[kanban.wip_caps]\nnow = 20\n")
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(yaml_path))
+    # Positive control on the same reader: a bad value nothing overrides IS one.
+    _write(tmp_path / "config.toml", '[kanban.wip_caps]\nlater = "bad"\n')
+    assert check_wip_caps() != []
+    _write(tmp_path / "config.toml", "[kanban.wip_caps]\nnow = 20\n")
+    assert check_wip_caps() == []
+
+
 # --- the report stays readable on a real machine ---------------------------
 
 
