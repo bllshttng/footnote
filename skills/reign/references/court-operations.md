@@ -149,7 +149,7 @@ fno backlog update x-b3a8 --add-blocker x-7a53   # if a merge-order constraint a
 - **Lane accounting counts corpses.** Dead bg claims can starve court spawns; check `fno agents claim` liveness before concluding the project is saturated.
 - **`done` is stamped at finalize, not merge.** The wave gate needs `gh pr view --json state` truth, and pr-watch can be silently dead - verify it at crowning.
 - **Linking a plan to an unencumbered node arms the daemon within about a minute.** Wire blockers first, then link - same ordering as the pass (3a before 3b).
-- **`--to-project` is anycast into a possibly-ghost inbox with a success-shaped receipt.** Court messaging uses direct handle sends only.
+- **`--to-project` is anycast into a possibly-ghost inbox with a success-shaped receipt.** Court messaging uses direct handle sends, or `--to-king <scope>` when you mean the role. A handle learned while its session was crowned keeps arriving after succession moves the crown, and the abdicated session answers as if crowned; `--to-king` resolves the holder off the registry at send time and refuses when nobody holds it.
 - **The retired `<harness>-<short-id>` mail form is refused.** Use the bare 8-hex id.
 - **One input path per teammate.** The crowning brief fixes whether a teammate is driven by mail-inject or the pane layer's own prompt verb; the two never both drive one pane.
 

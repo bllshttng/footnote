@@ -451,6 +451,108 @@ def test_sender_crown_is_read_from_the_live_matching_registry_row(tmp_path):
     assert sender_crown_at(registry_path, None) is None
 
 
+def test_recipient_crown_is_read_from_the_live_matching_registry_row(tmp_path):
+    from fno.mail.envelope import crown_at
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        '{"schema_version":19,"agents":['
+        '{"name":"king","cwd":"/tmp","log_path":"/tmp/log",'
+        '"harness":"codex","harness_session_id":"session-king",'
+        '"related_session_id":"session-king-related",'
+        '"status":"live","created_at":"2026-01-01T00:00:00Z",'
+        '"crown_level":1,"crown_scope":"fno"},'
+        '{"name":"former-king","cwd":"/tmp","log_path":"/tmp/log",'
+        '"harness":"codex","harness_session_id":"session-former",'
+        '"status":"live","created_at":"2026-01-01T00:00:00Z"}]}',
+        encoding="utf-8",
+    )
+
+    assert crown_at(registry_path, "session-king") == "L1 fno"
+    assert crown_at(registry_path, "session-king-related") == "L1 fno"
+    assert crown_at(registry_path, "session-former") is None
+    assert crown_at(registry_path, "session-stranger") is None
+    assert crown_at(registry_path, None) is None
+
+
+def test_abdicated_recipient_reads_its_own_lost_crown_in_the_envelope(
+    tmp_path, monkeypatch
+):
+    """x-6346 AC3: an uncrowned recipient sees it in what it READS, without
+    remembering to run `fno agents court`."""
+    import fno.mail.envelope as envelope
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        '{"schema_version":19,"agents":['
+        '{"name":"king","cwd":"/tmp","log_path":"/tmp/log",'
+        '"harness":"codex","harness_session_id":"session-king",'
+        '"status":"live","created_at":"2026-01-01T00:00:00Z",'
+        '"crown_level":1,"crown_scope":"fno"},'
+        '{"name":"former-king","cwd":"/tmp","log_path":"/tmp/log",'
+        '"harness":"codex","harness_session_id":"session-former",'
+        '"status":"live","created_at":"2026-01-01T00:00:00Z"}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry_path)
+    envelope.fleet_has_crown_at.cache_clear()
+    envelope.crown_at.cache_clear()
+
+    abdicated = envelope.wrap_fno_mail(
+        "rule on this",
+        from_="peer",
+        harness="codex",
+        model="m",
+        to_session="session-former",
+    )
+    assert envelope.RECIPIENT_NO_CROWN_TRAILER in abdicated
+    # The authority notice stays the LAST line inside the envelope (x-4ce4).
+    assert abdicated.splitlines()[-2] == envelope.FNO_MAIL_TRAILER
+
+    crowned = envelope.wrap_fno_mail(
+        "rule on this",
+        from_="peer",
+        harness="codex",
+        model="m",
+        to_session="session-king",
+    )
+    assert "-- your crown: L1 fno" in crowned
+
+
+def test_unresolved_recipient_gets_no_crown_line(monkeypatch):
+    """An address no lane resolved is an ABSENCE, not a reading: claiming
+    "none right now" there would be a positive statement about authority made
+    from no measurement at all."""
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
+    rendered = envelope.wrap_fno_mail(
+        "hi", from_="peer", harness="codex", model="m", to_session=None
+    )
+    assert "your crown" not in rendered
+
+
+def test_crownless_fleet_envelope_is_byte_unchanged(tmp_path, monkeypatch):
+    import fno.mail.envelope as envelope
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        '{"schema_version":19,"agents":[{"name":"w","cwd":"/tmp",'
+        '"log_path":"/tmp/log","harness":"codex",'
+        '"harness_session_id":"session-w","status":"live",'
+        '"created_at":"2026-01-01T00:00:00Z"}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry_path)
+    envelope.fleet_has_crown_at.cache_clear()
+    envelope.crown_at.cache_clear()
+
+    rendered = envelope.wrap_fno_mail(
+        "hi", from_="peer", harness="codex", model="m", to_session="session-w"
+    )
+    assert rendered == '<fno_mail from="peer" harness="codex" model="m">\nhi\n</fno_mail>'
+
+
 def test_crowned_sender_trailer_reports_standing_without_content_warrant(
     tmp_path, monkeypatch
 ):
