@@ -1279,4 +1279,42 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // The cross-check runs even when the reverse join answers: a name
+    // resolving a DIFFERENT node than sessions[] holds the row, it does not
+    // retire on the join's answer alone.
+    #[test]
+    fn a_name_contradicting_the_session_join_holds_the_row() {
+        use crate::gc::KeepReason;
+        use std::collections::HashMap;
+        let mut e =
+            crate::state::RegistryEntry::new(Some("sid-77".into()), crate::state::Lineage::none());
+        e.name = "target-N2".into();
+        e.origin = Some("spawn".into());
+        let graph = GraphRead {
+            index: HashMap::from([(
+                crate::graph_store::work_state_key("sid-77"),
+                vec![("N1".to_string(), "review".to_string())],
+            )]),
+            statuses: HashMap::from([
+                ("N1".to_string(), "done".to_string()),
+                ("N2".to_string(), "open".to_string()),
+            ]),
+            pr_state: HashMap::from([("N1".to_string(), (Some("merged".into()), 0))]),
+            ..Default::default()
+        };
+        let verdict = provenance_verdict(&e, "sid-77", &graph, None);
+        assert_eq!(
+            verdict.hold,
+            Some(KeepReason::NodeConflict {
+                a: "name".into(),
+                b: "N2".into()
+            }),
+            "the contradicting witness holds the row"
+        );
+        assert!(
+            matches!(verdict.work, WorkState::NoProvenance),
+            "a conflict leaves no work verdict to retire on"
+        );
+    }
 }
