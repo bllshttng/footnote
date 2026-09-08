@@ -26,7 +26,9 @@ Run the `/simple-english` skill over your entry before you send it. That is ASD-
 
 **Retiring one.** The PR that satisfies a `Graduates to:` line replaces that entry with one Retired line, in that same PR. Name the PR number. Never name a node id, because this file is public and a gate rejects node ids under `docs/`.
 
-**Checking.** A reigning king checks at its own check-in beat, which is the only hook measured to run. The check-in body in [../skills/reign/SKILL.md](../skills/reign/SKILL.md) names this file, so the read is encoded rather than asserted here. Over one two-day window this repo took at least 99 merges and fired zero post-merge rituals, against 171 check-ins. Do not hang this list on the ritual until a merge actually triggers one. That is the one moment somebody knows a gap closed.
+**Checking.** Retirement rides the PR that closes the gap, so it needs no beat at all. A reigning king's check-in is the backstop, for a gap somebody closed without reading this file. The check-in body in [../skills/reign/SKILL.md](../skills/reign/SKILL.md) names this file, so the backstop is encoded rather than asserted here.
+
+Do not trust that backstop on its own. This file's own beat entry records a reign losing its loop and every monitor at a compact, with no reader that reports the loss. Over one two-day window this repo took at least 99 merges and fired zero post-merge rituals, against 171 check-ins. Do not hang this list on the ritual until a merge actually triggers one. That is the one moment somebody knows a gap closed.
 
 The list shrinking is the point. A workaround that survives here for months is a gap nobody funded.
 
@@ -327,7 +329,7 @@ A rebase is destructive on a branch carrying attestations, and it does nothing a
 
 **Answer.** Read the gate, not the sentence that names it. A citation is a claim about behavior, and it drifts from behavior for free.
 
-**Specimen.** Principle 6 in AGENTS.md read "Never ticket/PR/node IDs (`scripts/ci/check-no-internal-refs.sh` fails on them)". That script carries two patterns: `NODE_ID_RE` for `x-` plus four hex or `ab-` plus eight, and `SESSION_URL_RE` for a session link. It has no ticket pattern and no PR pattern. Its own help also says the code tree is not scanned, and principle 6 governs code comments. So the rule named a gate that catches one of its three targets, in the one place the rule does not apply.
+**Specimen.** Principle 6 in AGENTS.md read "Never ticket/PR/node IDs (`scripts/ci/check-no-internal-refs.sh` fails on them)". That script blocks four leak classes, named in its own header: a vault path, a node id, a session URL, and a competitor name. It has no ticket pattern and no PR pattern. Its own help also says the code tree is not scanned, and principle 6 governs code comments. So the rule named a gate that catches one of its three targets, in the one place the rule does not apply.
 
 Two kings acted on the false half within an hour. One warned the other that PR numbers fail the gate. The other stripped real PR numbers out of quoted specimens on that warning, then had to be told to keep them.
 
