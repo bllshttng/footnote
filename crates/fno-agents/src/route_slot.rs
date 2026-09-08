@@ -2184,11 +2184,14 @@ pub(crate) fn audit_load_snapshot(
         Err(_) => {} // no journal: no receipts, the verifier names the boundary
     }
 
-    // View records: one row per subject prefix routing-view:, with retractions
-    // and supersedes applied by row order (a consumer-side consistency read;
-    // the Python decisions reader stays the format owner).
+    // View records: one row per subject prefix routing-view:. Retirement
+    // (retraction or a superseding ruling) is resolved in a second pass over
+    // the collected rows, so row order can never leave a withdrawn
+    // confirmation reading as live. The Python decisions reader stays the
+    // format owner; this is a consumer-side consistency read.
     let mut view_rows: BTreeMap<String, (String, String, String)> = BTreeMap::new(); // subject -> (decision, ts, decision_id)
     let mut retired: BTreeMap<String, ()> = BTreeMap::new();
+    let mut candidates: Vec<(String, String, String, String)> = Vec::new(); // subject, decision, ts, decision_id
     match std::fs::read_to_string(state_root.join("decisions.jsonl")) {
         Ok(text) => {
             for line in text.lines() {
@@ -2197,8 +2200,6 @@ pub(crate) fn audit_load_snapshot(
                 };
                 let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
                 let data = row.get("data").cloned().unwrap_or(json!({}));
-                let subject = data.get("subject").and_then(Value::as_str).unwrap_or("");
-                let is_view = subject.starts_with("routing-view:");
                 if kind == "decision_retracted" {
                     if let Some(target) = data.get("target_decision_id").and_then(Value::as_str) {
                         if !target.is_empty() {
@@ -2207,37 +2208,41 @@ pub(crate) fn audit_load_snapshot(
                     }
                     continue;
                 }
-                if !is_view {
+                let subject = data.get("subject").and_then(Value::as_str).unwrap_or("");
+                if !subject.starts_with("routing-view:") {
                     continue;
                 }
-                // A later ruling naming this one in `supersedes` retires it,
-                // the same derivation the Python decisions reader applies.
+                // A ruling naming another in `supersedes` retires it, the
+                // same derivation the Python decisions reader applies.
                 if let Some(superseded) = data.get("supersedes").and_then(Value::as_str) {
                     if !superseded.is_empty() {
                         retired.insert(superseded.to_string(), ());
                     }
                 }
-                let did = data
-                    .get("decision_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                view_rows.insert(
+                candidates.push((
                     subject.to_string(),
-                    (
-                        data.get("decision")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                        row.get("ts")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                        did.to_string(),
-                    ),
-                );
+                    data.get("decision")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    row.get("ts")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    data.get("decision_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                ));
             }
         }
         Err(_) => {} // no index: no view records, the verifier names the boundary
+    }
+    for (subject, decision, ts, did) in candidates {
+        if retired.contains_key(did.as_str()) {
+            continue;
+        }
+        view_rows.insert(subject, (decision, ts, did));
     }
 
     // Sessions: registry rows naming the node inside the window.
