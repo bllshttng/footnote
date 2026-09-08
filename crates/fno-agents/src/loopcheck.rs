@@ -27,6 +27,9 @@ use serde_json::Value;
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+// Production code spawns only through bounded_spawn; bare Command remains in
+// the git-fixtured test modules below.
+#[cfg(test)]
 use std::process::Command;
 
 // ── public types ──────────────────────────────────────────────────────────────
