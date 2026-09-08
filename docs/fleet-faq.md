@@ -26,7 +26,7 @@ Every entry names the change that retires it. That line is a contract, not a wis
 
 **Retiring one.** The PR that satisfies a `Graduates to:` line moves that entry to Retired at the bottom, in that same PR. Name the PR number. Never name a node id, because this file is public and a gate rejects node ids under `docs/`.
 
-**Checking.** The post-merge ritual is the moment to look. That is the one moment somebody knows a gap closed.
+**Checking.** A reigning king checks at its own check-in beat, which is the only hook measured to run. Over one two-day window this repo took at least 99 merges and fired zero post-merge rituals, against 171 check-ins. Do not hang this list on the ritual until a merge actually triggers one. That is the one moment somebody knows a gap closed.
 
 The list shrinking is the point. A workaround that survives here for months is a gap nobody funded.
 
