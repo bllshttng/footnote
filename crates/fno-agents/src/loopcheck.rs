@@ -4587,9 +4587,9 @@ fn resolve_posture_config(settings: &Settings) -> PostureConfig {
 
 /// Evaluate the resolved posture against the coverage verdicts. Every
 /// unsatisfied component names its exact gap; `declare` and `sigma` never
-/// satisfy the self lane (a self-cert and a retired panel, respectively), and
-/// the peer lane counts only verdicts the cross-model resolver admits (the
-/// same-model sentinel never matches a real reviewer name).
+/// satisfy the self lane, any other Reviewed verdict does whatever produced
+/// it, and the peer lane counts only verdicts the cross-model resolver
+/// admits (the same-model sentinel never matches a real reviewer name).
 fn posture_verdict(
     config: &PostureConfig,
     rep: &CoverageReport,
@@ -4597,10 +4597,7 @@ fn posture_verdict(
 ) -> PostureVerdict {
     let satisfies = |component: &str| match component {
         "self" => rep.verdicts.iter().any(|v| {
-            v.producer == CoverageProducer::LocalAttestation
-                && v.verdict == CoverageVerdict::Reviewed
-                && v.name != "declare"
-                && v.name != "sigma"
+            v.verdict == CoverageVerdict::Reviewed && v.name != "declare" && v.name != "sigma"
         }),
         "independent" => rep.verdicts.iter().any(|v| {
             v.producer == CoverageProducer::LocalAttestation
@@ -22539,3 +22536,6 @@ mod done_probe_tests {
         assert!(!is_graphql_read("pr_status_rest_parse"));
     }
 }
+#[cfg(test)]
+#[path = "posture_self_lane_tests.rs"]
+mod posture_self_lane_tests;
