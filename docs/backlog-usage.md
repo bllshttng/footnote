@@ -114,9 +114,9 @@ An encounter has no correction verb. It cannot be edited or withdrawn, because a
 
 ### Progress notes reach the people building the node
 
-`fno backlog note <id> "<text>"` appends the note AND mails it. A worker reads its node once, at dispatch, so a note written after that reaches nobody on its own. The verb sends a short pointer to the node's live claim holder, to the holder of the node whose PR carries it, and to whoever is crowned over the epic. Every outcome prints, including "nobody to reach": silence would read the same as delivery.
+`fno backlog note <id> "<text>"` appends the note AND mails it. A worker reads its node once, at dispatch. So a note written after that reaches nobody on its own. The verb sends a short pointer to three readers. The node's live claim holder. The holder of the node whose PR carries it. Whoever is crowned over the epic. Every outcome prints, including "nobody to reach". Silence reads the same as delivery.
 
-Pass `--quiet` to annotate without mailing. Delivery is the default on purpose. A forgotten flag costs a redundant mail; a forgotten mail used to cost the finding.
+Pass `--quiet` to annotate without mailing. Delivery is the default on purpose. A forgotten flag costs a redundant mail. A forgotten mail cost the finding.
 
 ## Moving cards
 
