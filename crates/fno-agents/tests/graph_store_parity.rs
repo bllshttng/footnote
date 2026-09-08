@@ -35,6 +35,7 @@ fn strict_error_kind(e: &fno_agents::graph_store::StoreError) -> String {
         | E::LockTimeout(_, _)
         | E::Conflict => "GraphUnreadableError".to_string(),
         E::MalformedRoot(_) => "GraphMalformedRootError".to_string(),
+        E::ClaimsUnavailable(_) => "ClaimsUnavailableError".to_string(),
     }
 }
 
