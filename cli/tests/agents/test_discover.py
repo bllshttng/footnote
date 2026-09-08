@@ -2760,6 +2760,44 @@ def test_resolve_reachable_reports_ambiguity_instead_of_guessing(tmp_path, monke
     assert sorted(ambiguous) == sorted([a, b])
 
 
+def test_resolve_reachable_ambiguity_names_the_source_of_each_candidate(tmp_path, monkeypatch, capsys):
+    """The ambiguity refusal must attribute each candidate to its store.
+
+    The 2026-09-05 refusal named two uuids for one token while 0 of the
+    registry's rows carried the id, and nothing said which stores disagreed
+    (x-a469). A transcript hit and a registry hit sharing one 8-hex token
+    reproduce the shape; the stderr line must name source=transcript and
+    source=registry.
+    """
+    from fno.agents import discover
+
+    a = "c0ffee11-1111-2222-3333-444444444444"
+    b = "c0ffee11-9999-8888-7777-666666666666"
+
+    proj = tmp_path / "projects" / "-Users-x-a"
+    proj.mkdir(parents=True)
+    t = proj / f"{a}.jsonl"
+    t.write_text("{}\n", encoding="utf-8")
+    _stale(t)
+
+    class _Row:
+        harness = "claude"
+        harness_session_id = b
+        short_id = "c0ffee11"
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda *_a, **_k: [_Row()])
+
+    found, ambiguous = discover.resolve_reachable(
+        "c0ffee11", projects_dir=tmp_path / "projects", registry_path=tmp_path / "registry.json"
+    )
+
+    assert found is None
+    assert sorted(ambiguous) == sorted([a, b])
+    err = capsys.readouterr().err
+    assert f"{a} (source=transcript" in err
+    assert f"{b} (source=registry" in err
+
+
 def test_resolve_reachable_misses_cleanly_on_an_unknown_token(tmp_path, monkeypatch):
     """A clean miss across READABLE stores is the only case that earns exit 16."""
     from fno.agents import discover

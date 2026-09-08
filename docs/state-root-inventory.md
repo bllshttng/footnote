@@ -117,7 +117,7 @@ Not written by anything in this repo. Named so the gate can tell known junk from
 
 ## Unclassified (follow-up filed)
 
-Present in the real root, no writer found, not confirmable as dead inside this task's budget. The gate allowlists exactly these names; a follow-up node owns the verdict.
+Present in the real root, no writer found, not confirmable as dead inside this task's budget. The gate allowlists exactly these names. A follow-up node owns the verdict.
 
 | Entry | What is known | Follow-up |
 |---|---|---|
@@ -177,7 +177,7 @@ The sweep's matching keep rule is `kept (permanent)` in `scripts/lib/worktree-li
 
 Files present in one real install with no writer anywhere in the checkout. Recorded rather than deleted: an unexplained file is a finding, not a deletion, and a finding nobody wrote down gets rediscovered.
 
-If you are cleaning up an install and hit one of these, find the writer first. If you confirm it is dead, delete the row here in the same change. The 2026-08-13 rows (a rollout latch family, the retired-loop cancellations and stop-hook logs, `registry.json.lock`, `keepalive.log`, `fno-mode.sh`, `evals.md`, `SUMMARY.md`) were confirmed dead and cleared by the 2026-09-08 backfill; `.env` graduated to a real row above, so no rows remain. The table returns here the next time an install produces one.
+If you are cleaning up an install and hit one of these, find the writer first. If you confirm it is dead, delete the row here in the same change. The 2026-08-13 rows were confirmed dead and cleared by the 2026-09-08 backfill. `.env` graduated to a real row above, so no rows remain. The table returns here the next time an install produces one.
 
 ## Foreign and cwd-relative debris
 
