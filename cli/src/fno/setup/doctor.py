@@ -42,8 +42,8 @@ _ACCESSOR_NAMES = (
 def _settings_candidates_for(path: Path) -> list[Path]:
     """The ``config.toml``-first pair at one settings location.
 
-    A check reading only the legacy ``settings.yaml`` name is a check that
-    stopped running at the yaml-to-toml migration.
+    A check reading only the legacy ``settings.yaml`` name stopped running at
+    the yaml-to-toml migration.
     """
     return [path.with_name("config.toml"), path]
 
@@ -491,6 +491,12 @@ def run_doctor() -> int:
 
     issues: list[tuple[str, str, str]] = []
     errors: list[tuple[str, str]] = []
+    # FNO_TEST_MODE skips the /tmp/ patterns: pytest's tmp_path is under /tmp/
+    # on Linux runners, where they are false positives.
+    suspicious = [
+        (pat, reason) for pat, reason in SUSPICIOUS_PATHS
+        if not (test_mode and pat in ("/tmp/", "/var/tmp/", "/private/tmp/"))
+    ]
 
     for accessor_name in _ACCESSOR_NAMES:
         accessor = getattr(paths, accessor_name, None)
@@ -507,12 +513,6 @@ def run_doctor() -> int:
         key = accessor_name if accessor_name == "state_dir" else f"paths.{accessor_name}"
         note = source_note(key) or "default"
         print(f"[doctor]   {accessor_name}: {resolved_str}  (config.{key} {note})")
-        # Skip /tmp/ suspicious checks in test mode (FNO_TEST_MODE=1) to avoid
-        # false positives when pytest's tmp_path is under /tmp/ on Linux runners.
-        suspicious = [
-            (pat, reason) for pat, reason in SUSPICIOUS_PATHS
-            if not (test_mode and pat in ("/tmp/", "/var/tmp/", "/private/tmp/"))
-        ]
         for sus_pattern, reason in suspicious:
             try:
                 expanded = str(Path(sus_pattern).expanduser().resolve())

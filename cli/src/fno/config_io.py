@@ -114,11 +114,7 @@ def _prefer_toml(paths: list[Path]) -> list[Path]:
 
 
 def _read_settings_doc(path: Path) -> tuple[object, str | None]:
-    """The ONE parser: ``(parsed document, error or None)``.
-
-    TOML for a ``.toml`` suffix, YAML otherwise. The error names the file and
-    the cause. Shape is the caller's question, not this function's.
-    """
+    """The ONE parser: ``(document, error or None)``. TOML by suffix, else YAML."""
     try:
         text = path.read_text(encoding="utf-8")
         if path.suffix == ".toml":
@@ -135,9 +131,8 @@ def _read_settings_doc(path: Path) -> tuple[object, str | None]:
 def _parse_settings(path: Path) -> tuple[dict[str, object], str | None]:
     """Operator-facing read: ``(mapping, human error or None)``.
 
-    Reports both ways a file fails to contribute: unreadable, or parsed to
-    something that is not a table. An empty file is legal. `fno config doctor`
-    reads through this so its verdict comes from a config it proved it read.
+    Both ways a file fails to contribute: unreadable, or not a table. An empty
+    file is legal. See docs/architecture/config-readback.md.
     """
     doc, error = _read_settings_doc(path)
     if error is not None:
@@ -150,9 +145,8 @@ def _parse_settings(path: Path) -> tuple[dict[str, object], str | None]:
 def _load_raw(path: Path) -> tuple[dict[str, object], bool]:
     """Load a settings file: ``(data, parse_succeeded)``.
 
-    ``({}, False)`` on any OS or parse error so callers fall through to the
-    next candidate, with a cause-specific WARNING. A document that parsed but
-    is not a mapping contributes ``{}`` and still counts as parsed.
+    ``({}, False)`` on any OS or parse error so callers fall through, with a
+    cause-specific WARNING. A parsed non-mapping contributes ``{}``, parsed.
     """
     doc, error = _read_settings_doc(path)
     if error is not None:

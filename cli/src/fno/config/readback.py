@@ -24,12 +24,7 @@ _LOG = logging.getLogger("fno.config")
 
 
 def _field_models(annotation: object) -> tuple[Optional[type[BaseModel]], Optional[type[BaseModel]]]:
-    """``(dict[str, Model] value model, nested model)`` for one field.
-
-    Both union spellings resolve, so a model switching from
-    ``Optional[dict[...]]`` to ``dict[...] | None`` cannot silently regress to
-    walking the map's keys as field names.
-    """
+    """``(dict[str, Model] value model, nested model)``. Both union spellings."""
     candidates = list(typing.get_args(annotation)) or [annotation]
     if typing.get_origin(annotation) not in (typing.Union, types.UnionType):
         candidates = [annotation, *candidates]
@@ -94,10 +89,7 @@ def source_note(key: str, root: Optional[Path] = None) -> Optional[str]:
 
 
 def check_config_files_read() -> list[str]:
-    """Settings files the loader could not read back.
-
-    A file parsing to an EMPTY table is legal and reports no error.
-    """
+    """Settings files the loader could not read back. An EMPTY table is legal."""
     try:
         from fno.config import _candidate_paths
         from fno.config_io import _parse_settings
@@ -138,9 +130,7 @@ def check_unknown_keys() -> list[str]:
     """Keys the model ignores, each named with the file that holds it.
 
     Reads `_aliased_layers`, the loader's own per-file collector, so a legacy
-    spelling the loader accepts is never reported as a typo, and each message
-    still names one file rather than the merged result. A clean install reports
-    nothing: the report is the operator's own wrong key.
+    spelling is never reported as a typo and each message names one file.
     """
     try:
         from fno.config import (
@@ -171,11 +161,7 @@ def check_unknown_keys() -> list[str]:
 
 
 def check_enabled_with_empty_population() -> list[str]:
-    """A switch that is on with nothing that can satisfy it.
-
-    Only pairs proved coupled by reading the consumer belong here; a pair added
-    from the leaf name alone is how this defect was first mis-diagnosed.
-    """
+    """A switch on with nothing that can satisfy it. Read the consumer first."""
     try:
         from fno.config import load_settings
         from fno.review.provider_resolution import available_provider_kinds
