@@ -6,6 +6,7 @@ behind both caps: docs/architecture/config-readback.md.
 """
 from __future__ import annotations
 
+import difflib
 import logging
 import os
 import types
@@ -117,33 +118,11 @@ def check_config_files_read() -> list[str]:
         return []
 
 
-def _edit_distance_le_1(a: str, b: str) -> bool:
-    """True if ``a`` and ``b`` differ by at most one insert/delete/substitute."""
-    if a == b:
-        return True
-    la, lb = len(a), len(b)
-    if abs(la - lb) > 1:
-        return False
-    if la == lb:
-        return sum(1 for x, y in zip(a, b) if x != y) == 1
-    short, long = (a, b) if la < lb else (b, a)
-    i = j = edits = 0
-    while i < len(short) and j < len(long):
-        if short[i] == long[j]:
-            i += 1
-        else:
-            edits += 1
-            if edits > 1:
-                return False
-        j += 1
-    return True
-
-
 def _near_miss_keys(unknown: str) -> list[str]:
     """Modeled keys the operator plausibly meant, in schema order.
 
     Same leaf name in another section first, because that is the wrong-section
-    case. Failing that, a leaf within one edit, which is the misspelling case.
+    case. Failing that, a close leaf name, which is the misspelling case.
     """
     try:
         from fno.config.registry import FIELD_META
@@ -153,7 +132,8 @@ def _near_miss_keys(unknown: str) -> list[str]:
     others = [key for key in FIELD_META if key != unknown]
     hits = [key for key in others if key.rsplit(".", 1)[-1] == leaf]
     if not hits:
-        hits = [key for key in others if _edit_distance_le_1(key.rsplit(".", 1)[-1], leaf)]
+        close = set(difflib.get_close_matches(leaf, [k.rsplit(".", 1)[-1] for k in others], 5, 0.85))
+        hits = [key for key in others if key.rsplit(".", 1)[-1] in close]
     return hits if len(hits) <= _NEAR_MISS_CAP else []
 
 
