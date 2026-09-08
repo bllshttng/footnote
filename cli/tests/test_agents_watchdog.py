@@ -471,6 +471,60 @@ def test_no_deliverable_ages_into_stale():
     assert v.verdict == STALE
 
 
+def test_done_node_row_past_the_ceiling_is_spent_not_stale():
+    # The measured re-nag shape: a session whose node shipped, quiet past the
+    # wake ceiling. The work is over; filing it stale asked a human to triage
+    # a finished row that can never age out of the ask.
+    rows = [Row("dddd4444-0000", "k1", "stopped", "abc12345", "/tmp/k1")]
+    [v] = _run(rows, {"dddd4444-0000": _facts("stopped mid turn", age_min=61 * 1440)},
+               nodes={"abc12345": {"status": "done"}})
+    assert v.verdict == watchdog.SPENT
+    assert v.action == "none"
+    assert "node abc12345 done" in v.basis
+    assert "needs a human" not in v.basis
+    outcome, _ = apply_verdict(v, lanes="all")
+    assert outcome == watchdog.SKIPPED
+
+
+def test_done_tail_row_past_the_ceiling_is_spent_even_when_the_graph_fails():
+    # A tail carrying a promise is positive completion evidence: the node
+    # read failing (or the node being unknown) must not send the row to the
+    # needs-human ask.
+    rows = [Row("dddd4444-0000", "k1", "stopped", "abc12345", "/tmp/k1")]
+
+    def broken(_node):
+        raise RuntimeError("graph unreadable")
+
+    [v] = _run(
+        rows,
+        {"dddd4444-0000": _facts(
+            "<promise>MISSION COMPLETE: PR is green</promise>", age_min=61 * 1440
+        )},
+        nodes={"abc12345": None},
+    )
+    assert v.verdict == watchdog.SPENT
+    assert "tail reads done" in v.basis
+
+    [v2] = verdicts(
+        rows,
+        transcript_for=lambda sid: _facts(
+            "<promise>MISSION COMPLETE: PR is green</promise>", age_min=61 * 1440
+        ),
+        claim_for=lambda node: {},
+        node_state_for=broken,
+        now_s=NOW_1840,
+    )
+    assert v2.verdict == watchdog.SPENT
+
+
+def test_stalled_open_row_past_the_ceiling_stays_stale():
+    rows = [Row("dddd4444-0000", "k1", "stopped", "abc12345", "/tmp/k1")]
+    [v] = _run(rows, {"dddd4444-0000": _facts("stopped mid turn", age_min=61 * 1440)},
+               nodes={"abc12345": {"status": "ready"}})
+    assert v.verdict == STALE
+    assert "needs a human" in v.basis
+
+
 def test_ledger_join_finds_nodes_for_manifest_less_rows(monkeypatch, tmp_path):
     # A worker that ran in the canonical checkout has no manifest of its own;
     # the execution ledger's machine-written (sessions -> node) row is its
