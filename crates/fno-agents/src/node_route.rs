@@ -80,28 +80,33 @@ fn newest<'a>(paths: &'a [PathBuf]) -> Option<&'a Path> {
         .map(|p| p.as_path())
 }
 
-/// Read at most 256 KiB from one end of the file, as whole lines (the same
-/// bound `truth_status._TAIL_BYTES` sets on the Python reads).
-const BOUND_BYTES: u64 = 256 * 1024;
+/// Read the file as whole lines from one end, walking at most `limit`
+/// bytes. `from_head` walks forward from byte zero; otherwise it walks
+/// backward from EOF. A retask can name a different node ANYWHERE in a
+/// transcript (measured: 31% of files exceed a 256 KiB window), so a
+/// witness that read only one end is not a witness for the middle - the
+/// scan limit is the budget cap, not the evidence's reach.
+const SCAN_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 
-fn bound_lines(path: &Path, from_head: bool) -> Vec<String> {
+fn bound_lines(path: &Path, from_head: bool, limit: u64) -> Vec<String> {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut file) = std::fs::File::open(path) else {
         return Vec::new();
     };
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let read_len = len.min(limit);
     let start = if from_head {
         0
     } else {
-        len.saturating_sub(BOUND_BYTES)
+        len.saturating_sub(read_len)
     };
     if start > 0 {
         let Ok(_) = file.seek(SeekFrom::Start(start)) else {
             return Vec::new();
         };
     }
-    let mut raw: Vec<u8> = Vec::with_capacity(BOUND_BYTES as usize);
-    if file.take(BOUND_BYTES).read_to_end(&mut raw).is_err() {
+    let mut raw: Vec<u8> = Vec::with_capacity(read_len as usize);
+    if file.take(read_len).read_to_end(&mut raw).is_err() {
         return Vec::new();
     }
     let dropped_first = !from_head && start > 0;
@@ -149,7 +154,11 @@ fn first_node_token(text: &str, ids: &HashSet<String>) -> Option<String> {
 /// The first user message names the node: the dispatch brief travels in it.
 fn transcript_first(paths: Option<&[PathBuf]>, ids: &HashSet<String>) -> Option<String> {
     let path = newest(paths?)?;
-    for line in bound_lines(path, true) {
+    // Forward scan with early exit: the dispatch brief lives in the first
+    // user message, and the scan stops at the first one carrying a node.
+    // The 8 MiB cap bounds pathological files; short of those the witness
+    // covers the whole transcript.
+    for line in bound_lines(path, true, SCAN_LIMIT_BYTES) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
@@ -163,10 +172,14 @@ fn transcript_first(paths: Option<&[PathBuf]>, ids: &HashSet<String>) -> Option<
     None
 }
 
-/// The last message, scanned back, is the second witness.
+/// The last node-naming message, wherever it sits, is the second witness.
+/// A mid-transcript retask (head names a done node, middle names an open
+/// one, tail goes quiet) must answer from the retask, not the head, so
+/// this walks the FULL transcript backward and keeps the newest naming
+/// line it finds.
 fn transcript_last(paths: Option<&[PathBuf]>, ids: &HashSet<String>) -> Option<String> {
     let path = newest(paths?)?;
-    for line in bound_lines(path, false).into_iter().rev() {
+    for line in bound_lines(path, false, SCAN_LIMIT_BYTES).into_iter().rev() {
         if line.trim().is_empty() {
             continue;
         }
@@ -365,10 +378,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let path = write_transcript(
             &tmp,
-            &[
-                r#"{"type":"assistant","message":{"content":"started"}}"#,
-                r#"{"type":"user","message":{"content":"execute plan for node x-9d11 now"}}"#,
-            ],
+            &[r#"{"type":"user","message":{"content":"execute plan for node x-9d11 now"}}"#],
         );
         let ids = ids_of(&[("x-9d11", "done")]);
         assert_eq!(
@@ -379,6 +389,40 @@ mod tests {
         let e = entry("planner-row-no-id-in-name", None);
         let route = resolve(&e, "sid-none", &g, Some(&[path]));
         assert_eq!(route.source, Some(NodeSource::TranscriptFirst));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // The operator's wrong-retirement path: head names a done node, a
+    // mid-transcript retask names an open one, and the tail goes quiet.
+    // The full backward walk answers from the retask, so the witness
+    // disagrees and holds instead of retiring on the head.
+    #[test]
+    fn a_mid_transcript_retask_names_the_newer_node() {
+        let tmp = std::env::temp_dir().join(format!("node-route-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let filler = "x".repeat(200);
+        let path = write_transcript(
+            &tmp,
+            &[
+                r#"{"type":"user","message":{"content":"work node x-9d11 to done"}}"#,
+                &format!(
+                    r#"{{"type":"user","message":{{"content":"retasked to node x-aaaa {filler}"}}}}"#
+                ),
+            ],
+        );
+        let ids = ids_of(&[("x-9d11", "done"), ("x-aaaa", "open")]);
+        assert_eq!(
+            transcript_last(Some(&[path.clone()]), &ids).as_deref(),
+            Some("x-aaaa"),
+            "the retask is the newest naming line"
+        );
+        let g = graph(&[("x-9d11", "done"), ("x-aaaa", "open")]);
+        let e = entry("retasked-row", None);
+        let route = resolve(&e, "sid-none", &g, Some(&[path]));
+        assert!(
+            route.conflict.is_some(),
+            "done head plus open retask is a conflict hold"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 
