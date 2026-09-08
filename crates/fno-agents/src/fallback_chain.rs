@@ -1,15 +1,18 @@
-//! The fallback-chain walk (x-8975 budget port of `resolve_fallback_chain`).
+//! The fallback-chain walk (x-8975 budget port of the failover walk).
 //!
 //! Python resolves config and paths (the compatibility shell): it serializes
-//! the chain links, the spent link ids, and each harness's account ids, and
-//! hands over the runtime-state path it resolved. This module owns the
-//! machine-truth half: reading the provider runtime-state file, deriving the
+//! the chain links as raw config tables, the spent link ids, and each
+//! harness's account ids, and hands over the runtime-state path it resolved.
+//! This module owns the machine-truth half: canonicalizing each link (config
+//! `harness` becomes the axis `provider`), minting the walk-memory id and
+//! spawn flags, reading the provider runtime-state file, deriving the
 //! headroom verdict per account, and filtering the chain.
 //!
-//! Fail-open is the contract inherited from `link_is_exhausted`: an unreadable
-//! state file, an unknown account, or any error on the way reads as UNKNOWN,
-//! and UNKNOWN stays eligible - guessing "exhausted" holds a node that could
-//! have run.
+//! Fail-open is the contract inherited from the walk: an unreadable state
+//! file, an unknown account, or any error on the way reads as UNKNOWN, and
+//! UNKNOWN stays eligible - guessing "exhausted" holds a node that could have
+//! run. A malformed LINK is different: it answers `{"error": ...}` so the
+//! caller can refuse the config rather than mis-bill it.
 
 use serde_json::{json, Map, Value};
 use std::io::{self, Read};
@@ -42,7 +45,7 @@ struct Snapshot {
     windows: Vec<Window>,
 }
 
-/// One account's headroom verdict, mirroring `_headroom_from`.
+/// One account's headroom verdict, mirroring the Python rotation invariant.
 #[derive(PartialEq, Clone, Copy, Debug)]
 enum Verdict {
     Exhausted,
@@ -192,6 +195,49 @@ fn parse_health(raw: &Value) -> Map<String, Value> {
     out
 }
 
+/// Canonicalize one RAW config link: config `harness` becomes the axis
+/// `provider` and is name-checked, mirroring spawn_overlay's table
+/// canonicalization. Err carries the operator-facing reason.
+fn canonicalize_link(raw: &Value) -> Result<Map<String, Value>, String> {
+    let obj = raw
+        .as_object()
+        .ok_or_else(|| format!("link must be a table; got {}", type_name(raw)))?;
+    let harness = obj
+        .get("harness")
+        .or_else(|| obj.get("provider"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if !harness.is_empty() && !crate::spawn_overlay::CHAIN_HARNESSES.contains(&harness) {
+        return Err(format!(
+            "harness={harness:?} is not a known harness ({})",
+            crate::spawn_overlay::CHAIN_HARNESSES.join("|")
+        ));
+    }
+    let mut fields = Map::new();
+    for (k, v) in obj {
+        if k == "harness" {
+            continue;
+        }
+        fields.insert(k.clone(), v.clone());
+    }
+    if !harness.is_empty() {
+        fields.insert("provider".into(), Value::String(harness.into()));
+    }
+    Ok(fields)
+}
+
+fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "int",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
 /// True only when every account the link can land on is KNOWN exhausted.
 fn link_is_exhausted(
     link: &Value,
@@ -251,8 +297,11 @@ fn link_is_exhausted(
     })
 }
 
-/// Answer `{eligible: [indices]}`: the positions in `links` that were not
-/// already spent and are not known exhausted, preserving chain order.
+/// Answer `{eligible: [{index, id, flags}]}`: every chain position that was
+/// not already spent and is not known exhausted, with its walk-memory id and
+/// spawn flags minted here, preserving chain order. A malformed link answers
+/// `{"error": ...}` (exit 0) so the caller can REFUSE the config instead of
+/// reading a transport fault.
 pub fn resolve(payload: &Value) -> Result<Value, String> {
     let links = payload
         .get("links")
@@ -294,40 +343,19 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
     let health = parse_health(&state);
     let usage = parse_usage(&state);
     let mut eligible = Vec::new();
-    for (i, link) in links.iter().enumerate() {
-        let get = |k: &str| {
-            link.get(k)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or("")
+    for (i, raw) in links.iter().enumerate() {
+        let link = match canonicalize_link(raw) {
+            Ok(fields) => Value::Object(fields),
+            Err(reason) => return Ok(json!({ "error": reason })),
         };
-        let harness = get("provider");
-        let model = get("model");
-        let route = get("route");
-        let account = get("account");
-        let base = format!(
-            "{}/{}",
-            if harness.is_empty() { "?" } else { harness },
-            if !model.is_empty() {
-                model
-            } else if !route.is_empty() {
-                route
-            } else {
-                "default"
-            }
-        );
-        let id = if account.is_empty() {
-            base
-        } else {
-            format!("{base}@{account}")
-        };
+        let (id, flags) = crate::spawn_overlay::mint_link(&link);
         if spent.contains(&id) {
             continue;
         }
-        if link_is_exhausted(link, accounts, &health, &usage, now) {
+        if link_is_exhausted(&link, accounts, &health, &usage, now) {
             continue;
         }
-        eligible.push(json!(i));
+        eligible.push(json!({"index": i, "id": id, "flags": flags}));
     }
     Ok(json!({ "eligible": eligible }))
 }
@@ -363,34 +391,34 @@ pub fn run_fallback_chain(args: &[String]) -> i32 {
 mod tests {
     use super::*;
 
-    fn walk(state: Value, links: Value, _accounts: Value) -> Vec<usize> {
+    fn ids(answer: &Value) -> Vec<String> {
+        answer["eligible"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn walk(state: Value, links: Value, accounts: Value) -> Vec<String> {
         let payload = json!({
             "links": links,
             "state": state,
             "exclude": [],
-            "accounts": _accounts,
+            "accounts": accounts,
             "now": 1000.0,
         });
-        resolve(&payload)
-            .map(|a| {
-                a["eligible"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_u64().unwrap() as usize)
-                    .collect()
-            })
-            .unwrap()
+        ids(&resolve(&payload).unwrap())
     }
 
     #[test]
     fn empty_state_keeps_every_link_eligible() {
         let got = walk(
             json!({}),
-            json!([{"provider": "codex", "model": "m"}]),
+            json!([{"harness": "codex", "model": "m"}]),
             json!({}),
         );
-        assert_eq!(got, vec![0]);
+        assert_eq!(got, vec!["codex/m"]);
     }
 
     #[test]
@@ -402,10 +430,10 @@ mod tests {
         });
         let got = walk(
             state,
-            json!([{"provider": "codex", "model": "m", "account": "a1"}]),
+            json!([{"harness": "codex", "model": "m", "account": "a1"}]),
             json!({}),
         );
-        assert_eq!(got, Vec::<usize>::new());
+        assert_eq!(got, Vec::<String>::new());
     }
 
     #[test]
@@ -419,10 +447,10 @@ mod tests {
         // out of the 3600s TTL, so the account reads UNKNOWN and stays up.
         let got = walk(
             state,
-            json!([{"provider": "codex", "model": "m", "account": "a1"}]),
+            json!([{"harness": "codex", "model": "m", "account": "a1"}]),
             json!({}),
         );
-        assert_eq!(got, vec![0]);
+        assert_eq!(got, vec!["codex/m@a1"]);
     }
 
     #[test]
@@ -435,10 +463,10 @@ mod tests {
         });
         let got = walk(
             state,
-            json!([{"provider": "codex", "model": "m", "account": "a1"}]),
+            json!([{"harness": "codex", "model": "m", "account": "a1"}]),
             json!({}),
         );
-        assert_eq!(got, Vec::<usize>::new());
+        assert_eq!(got, Vec::<String>::new());
     }
 
     #[test]
@@ -450,17 +478,17 @@ mod tests {
         });
         let got = walk(
             state,
-            json!([{"provider": "codex", "model": "m", "account": "a1"}]),
+            json!([{"harness": "codex", "model": "m", "account": "a1"}]),
             json!({}),
         );
-        assert_eq!(got, vec![0]);
+        assert_eq!(got, vec!["codex/m@a1"]);
     }
 
     #[test]
     fn a_spent_link_is_filtered_by_its_id() {
         let links = json!([
-            {"provider": "codex", "model": "m"},
-            {"provider": "claude", "model": "m2"},
+            {"harness": "codex", "model": "m"},
+            {"harness": "claude", "model": "m2"},
         ]);
         let payload = json!({
             "links": links,
@@ -469,24 +497,26 @@ mod tests {
             "accounts": {},
             "now": 1000.0,
         });
-        let got = resolve(&payload).unwrap();
-        let eligible: Vec<usize> = got["eligible"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_u64().unwrap() as usize)
-            .collect();
-        assert_eq!(eligible, vec![1]);
+        let got = ids(&resolve(&payload).unwrap());
+        assert_eq!(got, vec!["claude/m2"]);
     }
 
     #[test]
-    fn an_unknown_harness_with_no_accounts_is_eligible() {
+    fn an_exhausted_second_link_is_skipped_not_fatal() {
+        let state = json!({
+            "usage": {"a1": {"probed_at": 990.0, "windows": [
+                {"label": "5h", "used_pct": 100.0, "resets_at": null}
+            ]}}
+        });
         let got = walk(
-            json!({}),
-            json!([{"provider": "codex", "model": "m"}]),
-            json!({"accounts": {}}),
+            state,
+            json!([
+                {"harness": "codex", "model": "m", "account": "a1"},
+                {"harness": "claude", "model": "m2"},
+            ]),
+            json!({"codex": ["a1"]}),
         );
-        assert_eq!(got, vec![0]);
+        assert_eq!(got, vec!["claude/m2"]);
     }
 
     #[test]
@@ -496,21 +526,20 @@ mod tests {
                 {"label": "5h", "used_pct": 30.0, "resets_at": 1100.0}
             ]}}
         });
-        // partial → LOW → eligible (LOW is not exhausted); the assertion pins
-        // that the verdict is not OK by checking a threshold window reads LOW
-        // through the link filter only in the exhausted direction.
+        // partial reads LOW, LOW is not exhausted, so the link stays up; this
+        // pins that a partial read never escalates to a refusal verdict.
         let got = walk(
             state,
-            json!([{"provider": "codex", "model": "m", "account": "a1"}]),
+            json!([{"harness": "codex", "model": "m", "account": "a1"}]),
             json!({}),
         );
-        assert_eq!(got, vec![0]);
+        assert_eq!(got, vec!["codex/m@a1"]);
     }
 
     #[test]
     fn the_state_path_is_read_and_unreadable_reads_empty() {
         let payload = json!({
-            "links": [{"provider": "codex", "model": "m"}],
+            "links": [{"harness": "codex", "model": "m"}],
             "state_path": "/nonexistent/fno-state.json",
             "exclude": [],
             "accounts": {},
@@ -535,7 +564,7 @@ mod tests {
         )
         .unwrap();
         let payload = json!({
-            "links": [{"provider": "codex", "model": "m", "account": "a1"}],
+            "links": [{"harness": "codex", "model": "m", "account": "a1"}],
             "state_path": path.to_str().unwrap(),
             "exclude": [],
             "accounts": {},
@@ -544,5 +573,58 @@ mod tests {
         let got = resolve(&payload).unwrap();
         assert!(got["eligible"].as_array().unwrap().is_empty());
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn provider_spelling_passes_through_the_canonicalizer() {
+        let got = walk(
+            json!({}),
+            json!([{"provider": "codex", "model": "m"}]),
+            json!({}),
+        );
+        assert_eq!(got, vec!["codex/m"]);
+    }
+
+    #[test]
+    fn an_unknown_harness_link_is_an_error_answer() {
+        let payload = json!({
+            "links": [{"harness": "gemini", "model": "m"}],
+            "state": {},
+            "exclude": [],
+            "accounts": {},
+            "now": 1000.0,
+        });
+        let answer = resolve(&payload).unwrap();
+        assert!(answer["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a known harness"));
+    }
+
+    #[test]
+    fn flags_carry_the_axis_spelling() {
+        let payload = json!({
+            "links": [{"harness": "codex", "model": "m", "effort": "high"}],
+            "state": {},
+            "exclude": [],
+            "accounts": {},
+            "now": 1000.0,
+        });
+        let answer = resolve(&payload).unwrap();
+        let flags = answer["eligible"][0]["flags"].as_array().unwrap();
+        let toks: Vec<&str> = flags.iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(
+            toks,
+            vec![
+                "-H",
+                "codex",
+                "-m",
+                "m",
+                "--effort",
+                "high",
+                "--substrate",
+                "pane"
+            ]
+        );
     }
 }

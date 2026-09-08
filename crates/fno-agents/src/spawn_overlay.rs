@@ -28,7 +28,7 @@ const LANE_FIELD_NAMES: [&str; 4] = ["provider", "model", "route", "account"];
 const CHAIN_KEYS: [&str; 4] = ["S", "M", "L", "default"];
 /// The harness axis is the BINARY; opencode is legally both harness and
 /// provider, so the chain roster is spelled here and never inferred.
-const CHAIN_HARNESSES: [&str; 4] = ["claude", "codex", "agy", "opencode"];
+pub(crate) const CHAIN_HARNESSES: [&str; 4] = ["claude", "codex", "agy", "opencode"];
 
 /// The vendor a harness's own primary lane bills when no route/vendor was
 /// named. opencode is operator-configured, so it holds no opinion here.
@@ -533,70 +533,78 @@ fn resolve_link_meta(payload: &Value) -> Result<Value, String> {
     let mut ids = Vec::new();
     let mut flag_rows = Vec::new();
     for link in &links {
-        let field = |k: &str| -> String {
-            link.get(k)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or("")
-                .to_string()
-        };
-        let (harness, model, route, account) = (
-            field("provider"),
-            field("model"),
-            field("route"),
-            field("account"),
-        );
-        let base = format!(
-            "{}/{}",
-            if harness.is_empty() {
-                "?"
-            } else {
-                harness.as_str()
-            },
-            if !model.is_empty() {
-                model.as_str()
-            } else if !route.is_empty() {
-                route.as_str()
-            } else {
-                "default"
-            }
-        );
-        ids.push(Value::String(if account.is_empty() {
-            base
-        } else {
-            format!("{base}@{account}")
-        }));
-        let mut row: Vec<Value> = Vec::new();
-        if !harness.is_empty() {
-            row.push(json!("-H"));
-            row.push(json!(harness));
-        }
-        for (flag, key) in [
-            ("-m", "model"),
-            ("--effort", "effort"),
-            ("--permission-mode", "permission_mode"),
-            ("--route", "route"),
-            ("--account", "account"),
-        ] {
-            let v = field(key);
-            if !v.is_empty() {
-                row.push(json!(flag));
-                row.push(json!(v));
-            }
-        }
-        let mut substrate = field("substrate");
-        if substrate.is_empty() {
-            substrate = if harness == "claude" {
-                "bg".into()
-            } else {
-                "pane".into()
-            };
-        }
-        row.push(json!("--substrate"));
-        row.push(json!(substrate));
-        flag_rows.push(Value::Array(row));
+        let (id, flags) = mint_link(link);
+        ids.push(Value::String(id));
+        flag_rows.push(Value::Array(flags));
     }
     Ok(json!({"ids": ids, "flags": flag_rows}))
+}
+
+/// The walk-memory id and spawn flags for one canonical link (axis spelling,
+/// `provider` carrying the harness).
+pub(crate) fn mint_link(link: &Value) -> (String, Vec<Value>) {
+    let field = |k: &str| -> String {
+        link.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string()
+    };
+    let (harness, model, route, account) = (
+        field("provider"),
+        field("model"),
+        field("route"),
+        field("account"),
+    );
+    let base = format!(
+        "{}/{}",
+        if harness.is_empty() {
+            "?"
+        } else {
+            harness.as_str()
+        },
+        if !model.is_empty() {
+            model.as_str()
+        } else if !route.is_empty() {
+            route.as_str()
+        } else {
+            "default"
+        }
+    );
+    let id = if account.is_empty() {
+        base
+    } else {
+        format!("{base}@{account}")
+    };
+    let mut flags: Vec<Value> = Vec::new();
+    if !harness.is_empty() {
+        flags.push(json!("-H"));
+        flags.push(json!(harness));
+    }
+    for (flag, key) in [
+        ("-m", "model"),
+        ("--effort", "effort"),
+        ("--permission-mode", "permission_mode"),
+        ("--route", "route"),
+        ("--account", "account"),
+    ] {
+        let v = field(key);
+        if !v.is_empty() {
+            flags.push(json!(flag));
+            flags.push(json!(v));
+        }
+    }
+    let mut substrate = field("substrate");
+    if substrate.is_empty() {
+        substrate = if harness == "claude" {
+            "bg".into()
+        } else {
+            "pane".into()
+        };
+    }
+    flags.push(json!("--substrate"));
+    flags.push(json!(substrate));
+    (id, flags)
 }
 
 /// Where a configured pane group may land. A group places the pane by moving

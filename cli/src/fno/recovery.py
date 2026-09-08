@@ -69,6 +69,7 @@ from typing import Any, Callable, Iterable, Optional, Sequence
 
 from fno import _subprocess_util
 from fno.agents.harnesses.claude import ProviderSocketError
+from fno.rust_binary import VerbUnavailable
 
 # The error the real send seam raises; aliased so callers/tests have one name.
 _SendError = ProviderSocketError
@@ -816,6 +817,61 @@ def _emit_recovery_event(event_type: str, data: dict) -> None:
         pass
 
 
+def _accounts_map(repo_root=None) -> dict:
+    """Harness -> account ids, for every harness with a provider record.
+
+    Rooted at ``repo_root`` because the recovery roster is global: a foreign
+    worker resolving the dispatcher's chain must not see its own accounts as
+    answers for a different project's.
+    """
+    try:
+        from fno.adapters.providers.loader import load_providers
+
+        cfg = load_providers(repo_root=Path(repo_root) if repo_root else None)
+        out: dict = {}
+        for r in cfg.records:
+            out.setdefault(r.harness, []).append(r.id)
+        return out
+    except Exception:  # noqa: BLE001 - an unreadable config reads as no accounts
+        return {}
+
+
+def _chain_walk(node: str, cwd, tried) -> dict:
+    """One verb round-trip over the node's chain (``fallback-chain``, in
+    crates/fno-agents): canonicalization, the exhaustion verdicts, the
+    walk-memory ids and the spawn flags all live in the verb; Python resolves
+    the config table and the state path only. The answer is the verb's own
+    shape: ``{"eligible": [...]}`` or ``{"error": ...}``."""
+    if cwd:
+        from fno.config import load_settings_for_repo
+
+        settings = load_settings_for_repo(Path(cwd))
+    else:
+        from fno.config import load_settings
+
+        settings = load_settings()
+    raw = getattr(settings.agents, "fallback", None) or {}
+    if not raw:
+        return {"eligible": []}
+    size = _node_size(node)
+    key = size if size in ("S", "M", "L") else "default"
+    links = raw.get(key) or raw.get("default") or []
+    if not links:
+        return {"eligible": []}
+    from fno.paths import runtime_state_json
+    from fno.rust_binary import verb_call
+
+    state_path = os.environ.get("FNO_RUNTIME_STATE_PATH") or str(runtime_state_json())
+    return verb_call("fallback-chain",
+        {
+            "links": links,
+            "exclude": list(tried),
+            "accounts": _accounts_map(cwd),
+            "state_path": state_path,
+        },
+    )
+
+
 def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
     """Walk the node's fallback chain one link, or stop and say why.
 
@@ -835,11 +891,6 @@ def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
         return _gave_up("node-missing")
 
     from fno import fleet_state
-    from fno.agents.spawn_defaults import (
-        link_id,
-        link_to_spawn_flags,
-        resolve_fallback_chain,
-    )
 
     if _node_is_done(node):
         # The walk's memory exists to stop ONE node relapping its own links. A
@@ -855,9 +906,18 @@ def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
         # Rooted at the CANDIDATE's worktree. The roster is global and a
         # candidate can belong to another project, whose chain, whose settings
         # and whose provider health are all different from the daemon's.
-        chain = resolve_fallback_chain(
-            _node_size(node), exclude=tried, repo_root=cwd,
-        )
+        outcome = _chain_walk(node, cwd, tried)
+    except VerbUnavailable as exc:
+        # No (or stale) binary: the walk holds with a named reason. No local
+        # replica: the failover walk needs the runtime binary, and holding is
+        # the safe no-spawn answer.
+        _emit_recovery_event("failover_exhausted", {
+            "node": node,
+            "short_id": candidate.short_id,
+            "links_tried": ",".join(tried),
+            "reason": f"chain-unavailable: {exc}"[:400],
+        })
+        return _gave_up("chain-unavailable")
     except Exception as exc:  # noqa: BLE001 - a malformed chain REFUSES, loudly
         # Locked Decision 11. Degrading open here would spawn a worker at an
         # unintended vendor and bill it, so the worker stays alive, the node
@@ -870,7 +930,20 @@ def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
         })
         return _gave_up("chain-malformed")
 
-    if not chain:
+    if outcome.get("error"):
+        # The verb's canonicalizer refused the config (unknown harness, a
+        # non-table link); that IS the finding, and refusing is the posture
+        # Locked Decision 11 keeps on this path.
+        _emit_recovery_event("failover_exhausted", {
+            "node": node,
+            "short_id": candidate.short_id,
+            "links_tried": ",".join(tried),
+            "reason": f"chain-malformed: {outcome['error']}"[:400],
+        })
+        return _gave_up("chain-malformed")
+
+    eligible = outcome.get("eligible") or []
+    if not eligible:
         _emit_recovery_event("failover_exhausted", {
             "node": node,
             "short_id": candidate.short_id,
@@ -879,18 +952,18 @@ def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
         })
         return _gave_up("all-tried" if tried else "chain-empty")
 
-    link = chain[0]
+    first = eligible[0]
     # Recorded BEFORE the spawn, not after: a link whose spawn dies half-way
     # must still count as tried, or the next tick walks into the same failing
     # vendor again and the chain loops. A chain that loops is a worse failure
     # than a chain that ends.
-    fleet_state.record_link(node, link_id(link))
+    fleet_state.record_link(node, first["id"])
     # No emit here. The sweep emits exactly one `failover_swapped` for the
     # "swapped" outcome, and a second one from in here would record two swaps
     # for one replacement worker. Which link was taken stays readable in the
     # walk this just wrote, and `failover_exhausted` names them all when the
     # chain ends.
-    redispatched = _redispatch(candidate, flags=link_to_spawn_flags(link))
+    redispatched = _redispatch(candidate, flags=first["flags"])
     if redispatched is True:
         return "swapped"
     if redispatched == REDISPATCH_PARTIAL:

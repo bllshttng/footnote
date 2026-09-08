@@ -565,8 +565,8 @@ class TestResetStampBounds:
     """A misread stamp must never outlive the outage it describes.
 
     The lock this feeds is read with NO TTL, so a stamp resolving to next year
-    takes the provider out until next year - and `link_is_exhausted` drops the
-    whole harness from the fallback chain with it.
+    takes the provider out until next year - and the fallback-chain verb drops
+    the whole harness from the chain with it.
     """
 
     def _soon(self, hours: float = 9) -> str:

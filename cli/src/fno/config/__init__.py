@@ -2342,10 +2342,10 @@ class AgentsBlock(SweepKeys):
     # only when a provider refuses and the account queue cannot answer. Every
     # size wants more than one link, because providers cap on different meters
     # with different periods. Held RAW and typed loosely on purpose: the
-    # strict check lives in `spawn_defaults.validate_fallback`. A field
-    # validator here would fail `load_settings()` for the whole process, so
-    # one typo kills every `fno` command at its settings phase. Refuse on the
-    # path that reads it, not the path that loads it.
+    # strict check lives in the `fallback-chain` verb. A field validator here
+    # would fail `load_settings()` for the whole process, so one typo kills
+    # every `fno` command at its settings phase. Refuse on the path that reads
+    # it, not the path that loads it.
     fallback: dict[str, Any] = Field(default_factory=dict)
     # Seconds of transcript silence after which `fno agents sweep` reports a
     # worker as silent. A REPORT, never an action - nothing is stopped, spawned
@@ -2435,8 +2435,8 @@ class AgentsBlock(SweepKeys):
         A non-mapping value cannot be a chain, so it reads as no chain and the
         pre-existing no-failover behavior stands. Everything else passes
         through untouched, INCLUDING a malformed link, because the failover
-        path has to be able to see the mistake and name it. The strict check is
-        ``spawn_defaults.validate_fallback``.
+        path has to be able to see the mistake and name it. The strict check
+        lives in the ``fallback-chain`` verb (crates/fno-agents).
         """
         return v if isinstance(v, dict) else {}
 
