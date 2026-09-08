@@ -195,6 +195,12 @@ struct StoreFile {
     /// is opt-in, and the next lifecycle gesture persists a clean value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     confirm_lifecycle: Option<serde_json::Value>,
+    /// (x-f089) The operator's chosen feed-panel width, once they drag the
+    /// panel's border. `Value` for the same forward-compat reason as `width`;
+    /// absent means "use the default width" - existing installs are unchanged
+    /// until their first drag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    feed_width: Option<serde_json::Value>,
 }
 
 /// (x-e763) Read the operator's stop/remove confirm pref. Absent, corrupt, or
@@ -216,6 +222,29 @@ pub fn load_confirm_lifecycle() -> bool {
 pub fn save_confirm_lifecycle(confirm: bool) {
     mutate(|file| {
         file.confirm_lifecycle = serde_json::to_value(confirm).ok();
+    });
+}
+
+/// (x-f089) Read the operator's feed-panel width pref. Absent, corrupt, or
+/// out-of-range reads as `None` - "use the default width" - and the first
+/// drag persists a clean value, the same degrade-independently posture every
+/// pref here keeps.
+pub fn load_feed_width() -> Option<u16> {
+    #[cfg(test)]
+    if TEST_PATH.with(|c| c.borrow().is_none()) {
+        return None;
+    }
+    read_raw()
+        .feed_width
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok())
+}
+
+/// (x-f089) Persist the operator's dragged feed-panel width. Best-effort and
+/// fire-and-forget, the same locked read-modify-write core as [`save_width`].
+pub fn save_feed_width(width: u16) {
+    mutate(|file| {
+        file.feed_width = serde_json::to_value(width).ok();
     });
 }
 

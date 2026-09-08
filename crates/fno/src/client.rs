@@ -86,6 +86,9 @@ const SLIM_PANEL_W: u16 = 16;
 const MIN_SLIM_PANEL_W: u16 = 8;
 /// Below this many content columns the sideline auto-hides (AC6-EDGE).
 const MIN_CONTENT_COLS: u16 = 40;
+/// (x-f089) The feed panel's width until the operator drags its border once;
+/// persisted thereafter, like the sideline's.
+const FEED_DEFAULT_W: u16 = 40;
 
 /// Extended-table column widths in display columns, render order: status glyph,
 /// agent, last message, PR, and relative last-update age. The first and last
@@ -1064,11 +1067,22 @@ struct View {
     /// Pending escape bytes in answer-overlay mode (same split-arrow safety as
     /// [`View::sel_esc`]).
     ans_esc: Vec<u8>,
-    /// (x-4433) The activity feed overlay, prefix+e: the fold's rows newest
-    /// first, its cursor, and the needs-fold generation/single-flight
-    /// discipline. `None` closed.
+    /// (x-4433, x-f089) The activity feed PANEL on the right edge, `e` toggle:
+    /// the fold's rows newest first, the hover marker, and the needs-fold
+    /// generation/single-flight discipline. `None` closed.
     feed: Option<feed_view::FeedOverlay>,
-    feed_esc: Vec<u8>,
+    /// (x-f089) The operator's chosen feed-panel width in columns (stored
+    /// intent, like the sideline's); the rendered width is
+    /// [`View::feed_panel_w`], a transient clamp.
+    feed_width: u16,
+    /// (x-f089) First-visible display item for the feed panel's scroll window.
+    feed_offset: usize,
+    /// (x-f089) True while the pointer is over the feed panel's border column,
+    /// so the divider carries the same draggable affordance the sideline's
+    /// border wears.
+    hover_feed_border: bool,
+    /// (x-f089) A feed-border drag in flight, same shape as the sideline's.
+    feed_drag: Option<SidelineDrag>,
     /// (x-feec) The event-derived needs-me leg: the last `fno-agents needs` fold
     /// result while the overlay is open (`None` = live-only, not yet fetched
     /// this open). Merged with the live badge leg by [`View::needs_queue`].
@@ -1513,7 +1527,7 @@ pub(crate) use confirm::{remove_dead, ConfirmAction, ConfirmKind, CLEAR_DEAD_MAX
 // reuses join_fold_row's join keys for its deep link (x-4433).
 mod feed_view;
 mod needs_view;
-use feed_view::{feed_hit, feed_overlay_lines, feed_selected_line, FeedOverlay};
+use feed_view::{feed_hit, feed_panel_lines, feed_row_item};
 pub(crate) use needs_view::{needs_overlay_lines, NeedsProjection};
 
 /// The move-tab / move-pane destination picker's state (x-96e8, cursored by
@@ -2838,7 +2852,10 @@ impl View {
             answers: None,
             ans_esc: Vec::new(),
             feed: None,
-            feed_esc: Vec::new(),
+            feed_width: view_store::load_feed_width().unwrap_or(FEED_DEFAULT_W),
+            feed_offset: 0,
+            hover_feed_border: false,
+            feed_drag: None,
             needs_fold: None,
             mine_fold: None,
             needs_fold_at: None,
@@ -4245,6 +4262,26 @@ impl View {
         self.sideline_width.clamp(MIN_SLIM_PANEL_W, max)
     }
 
+    /// (x-f089) The feed panel's width in columns, or 0 when it is closed or
+    /// the terminal cannot admit it. The sideline is the senior panel: the
+    /// cap here is the terminal cap MINUS the sideline's own width, so the
+    /// feed yields its columns on a tight terminal (the AC6-EDGE shape) and
+    /// the content floor holds with both panels open. The clamp is TRANSIENT,
+    /// like the sideline's: `feed_width` is never mutated by the clamp, so a
+    /// shrink-then-grow restores the operator's chosen width.
+    fn feed_panel_w(&self) -> u16 {
+        if self.feed.is_none() {
+            return 0;
+        }
+        let cols = self.term.1;
+        let max =
+            sideline_max_width(cols).min(cols.saturating_sub(self.panel_w() + MIN_CONTENT_COLS));
+        if max < MIN_SLIM_PANEL_W {
+            return 0;
+        }
+        self.feed_width.clamp(MIN_SLIM_PANEL_W, max)
+    }
+
     /// Whether the bottom row belongs to chrome. Geometry beats the toggle:
     /// a too-short terminal recovers the line for content (AC4-ERR).
     fn status_visible(&self) -> bool {
@@ -4267,7 +4304,10 @@ impl View {
                 .0
                 .saturating_sub(TAB_BAR_ROWS + self.status_rows())
                 .max(1),
-            self.term.1.saturating_sub(self.panel_w()).max(1),
+            self.term
+                .1
+                .saturating_sub(self.panel_w() + self.feed_panel_w())
+                .max(1),
         )
     }
 
@@ -4434,7 +4474,68 @@ impl View {
     fn refresh_hover_affordances(&mut self, row: u16, col: u16) {
         self.hover_seam = self.seam_at(row, col);
         self.hover_sideline_border = self.on_sideline_border(row, col);
+        self.hover_feed_border = self.on_feed_border(row, col);
         self.hover_grip = self.grip_at(row, col);
+    }
+
+    /// (x-f089) True on the feed panel's divider column - the grab band for
+    /// the width drag. False when the panel is closed or the terminal hid it:
+    /// there is no border to grab, so revealing it stays on the `e` toggle.
+    fn on_feed_border(&self, row: u16, col: u16) -> bool {
+        let w = self.feed_panel_w();
+        w > 0 && row >= TAB_BAR_ROWS && col == self.term.1 - w
+    }
+
+    /// (x-f089) Set the feed panel to a free width from the dragged border
+    /// column, clamped exactly as [`View::feed_panel_w`] clamps, and report
+    /// whether the width changed so the caller re-reports the content viewport
+    /// only on a real crossing.
+    fn drag_feed_to(&mut self, col: u16, now: Instant) -> bool {
+        if self.feed_drag.is_none() {
+            return false;
+        }
+        let cols = self.term.1;
+        let max =
+            sideline_max_width(cols).min(cols.saturating_sub(self.panel_w() + MIN_CONTENT_COLS));
+        let Some(w) = cols.checked_sub(col) else {
+            return false;
+        };
+        if max < MIN_SLIM_PANEL_W {
+            return false;
+        }
+        let want = w.clamp(MIN_SLIM_PANEL_W, max);
+        if let Some(drag) = self.feed_drag.as_mut() {
+            drag.last_at = now;
+        }
+        if want == self.feed_panel_w() {
+            return false;
+        }
+        self.feed_width = want;
+        true
+    }
+
+    /// (x-f089) End a feed-border drag: persist the width when it moved (the
+    /// operator's stored intent, the sideline's own release contract), then
+    /// recompute the hover accent so it never lingers past the gesture.
+    fn end_feed_drag(&mut self, row: u16, col: u16) {
+        if let Some(drag) = self.feed_drag.take() {
+            if drag.start_width != self.feed_width {
+                view_store::save_feed_width(self.feed_width);
+            }
+        }
+        self.refresh_hover_affordances(row, col);
+    }
+
+    /// (x-f089) Revert a feed-border drag to the width at grab. Client-local,
+    /// so only the content report travels; `false` when no drag is live or the
+    /// width did not change, so no resize travels at all.
+    fn revert_feed_drag(&mut self) -> bool {
+        let Some(drag) = self.feed_drag.take() else {
+            return false;
+        };
+        let changed = self.feed_width != drag.start_width;
+        self.feed_width = drag.start_width;
+        changed
     }
 
     /// End a seam drag and recompute hover from `(row, col)`. Both the release
@@ -5124,6 +5225,37 @@ impl View {
     /// clicking anywhere off the panel still reaches the pane underneath.
     fn chrome_hit(&self, row: u16, col: u16) -> Option<ChromeHit> {
         let panel_w = self.panel_w();
+        // (x-f089) The feed panel owns the rightmost `feed_panel_w` columns; a
+        // click there resolves through the feed's own deep link (the sideline's
+        // resolution via agent_hit, or a direct attach), never the pane
+        // underneath. The divider column is the drag band, not a row.
+        let feed_w = self.feed_panel_w();
+        if feed_w > 0 && col >= self.term.1 - feed_w {
+            if col == self.term.1 - feed_w {
+                return None;
+            }
+            // The bottom row is overlaid by the bottom chrome (draw_bottom_row
+            // paints last), so a click there belongs to that chrome (codex P2
+            // shape, mirrored from the sideline).
+            if row as usize == (self.term.0 as usize).saturating_sub(1)
+                && self.bottom_row_is_chrome()
+            {
+                return None;
+            }
+            let Some(f) = &self.feed else {
+                return None;
+            };
+            return feed_row_item(
+                f.items.len(),
+                row as usize,
+                self.term.0 as usize,
+                self.feed_offset,
+            )
+            .and_then(|d| {
+                let item = f.items.get(f.items.len() - 1 - d)?;
+                feed_hit(self, item)
+            });
+        }
         // Tab strip (row 0, scoped to the content columns since x-cd67 US1): it
         // begins at `panel_w`, walking the same spans the renderer paints (with
         // the same origin). A row-0 click LEFT of the divider (`col < panel_w`)
@@ -5593,7 +5725,23 @@ impl View {
         // of the focus-follow off-switch below).
         self.refresh_hover_affordances(row, col);
 
-        // (hover affordance) The link probe tracks the exact CELL, so every
+        // (x-f089) The feed panel's hover marker follows the pointer: a row in
+        // the panel's text area moves the `▸`, anything else parks it on the
+        // newest row. Marker only; a hover never deep-links.
+        if self.feed.is_some() {
+            let len = self.feed.as_ref().map(|f| f.items.len()).unwrap_or(0);
+            let feed_w = self.feed_panel_w();
+            let d = if feed_w > 0 && col > self.term.1 - feed_w {
+                feed_row_item(len, row as usize, self.term.0 as usize, self.feed_offset)
+                    .map(|d| d.min(len.saturating_sub(1)))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            if let Some(f) = self.feed.as_mut() {
+                f.sel = d;
+            }
+        }
         // crossed cell restarts its quiet period - unlike focus-follows below,
         // which keeps the pane's first landing time. Chrome/divider/overlay
         // targets clear the probe and the underline immediately, no request.
@@ -6353,7 +6501,25 @@ impl View {
         }
     }
 
-    /// Compose the full-terminal frame: tab bar, sideline, dividers, panes.
+    /// (x-f089) Wheel-scroll the feed panel's item window by one row. A list
+    /// that fits the viewport is a no-op, and the offset clamps to the item
+    /// count so the window never opens past the last row.
+    fn scroll_feed(&mut self, down: bool) {
+        let Some(f) = &self.feed else {
+            return;
+        };
+        let total = f.items.len();
+        let viewport = self.term.0 as usize;
+        let visible = viewport.saturating_sub(2); // header + pinned footer
+        if total <= visible || visible == 0 {
+            return;
+        }
+        self.feed_offset = if down {
+            (self.feed_offset + 1).min(total - visible)
+        } else {
+            self.feed_offset.saturating_sub(1)
+        };
+    }
     /// Pure - all the drawing machinery (row diff, styles, wide-spacer
     /// handling) stays in [`Compositor`].
     fn compose(&self) -> Frame {
@@ -6623,6 +6789,11 @@ impl View {
         }
 
         self.draw_bottom_row(&mut cells, rows, cols);
+        // (x-f089) The feed panel is CHROME, not an overlay: it owns the
+        // rightmost columns for the whole frame and paints after the panes so
+        // a stale pane rect cannot paint under it mid-resize, and before the
+        // overlay pass so a real modal still wins its cells.
+        self.draw_feed_panel(&mut cells, rows, cols);
         let (overlay_origin, overlay_dims) = self.overlay_viewport();
         if let Some(lines) = &self.digest {
             // x-4e2d catch-up overlay: any key dismisses (handle_stdin, like the
@@ -6697,23 +6868,6 @@ impl View {
                 // the MINE/THEY NEED YOU heading + footer lines between the
                 // two lanes, which a flat `sel + 1` no longer can.
                 Some(projection.selected_line(sel)),
-            );
-        } else if let Some(f) = &self.feed {
-            // x-4433: the activity feed, newest first, cursor-followed. Same
-            // chrome + viewport as the needs overlay beside it.
-            let lines = feed_overlay_lines(f);
-            let chrome =
-                chrome::Chrome::new("activity feed", Anchor::Center).footer("⏎ goto · q close");
-            draw_lines_overlay(
-                &mut cells,
-                rows,
-                cols,
-                overlay_origin,
-                overlay_dims,
-                &chrome,
-                &lines,
-                &self.theme,
-                Some(feed_selected_line(f.sel)),
             );
         } else if let Some(yv) = &self.yard {
             // (x-b2bf) The yard: the fleet as f[no]nimals. The
@@ -8531,6 +8685,51 @@ impl View {
         };
         for r in 0..rows {
             cells[r * cols + (panel_w - 1)] = Cell {
+                c: '│',
+                fg: border_fg,
+                bg: Color::Default,
+                flags: border_flags,
+            };
+        }
+    }
+
+    /// (x-f089) The right-edge activity feed panel. Mirrors [`View::draw_sideline`]
+    /// inverted: the divider is the panel's LEFT edge (cols - width), the header
+    /// paints at row 0 (the panel, like the sideline, owns the full height), items
+    /// fill the rows below, and the footer pins to the last row. Every cell past
+    /// the divider is panel-owned, so a stale pane rect mid-resize cannot bleed
+    /// through.
+    fn draw_feed_panel(&self, cells: &mut [Cell], rows: usize, cols: usize) {
+        let Some(f) = &self.feed else {
+            return;
+        };
+        let w = self.feed_panel_w() as usize;
+        if w == 0 {
+            return;
+        }
+        let x0 = cols - w; // panel's left edge = divider column
+        let lines = feed_panel_lines(f, w - 1, rows, self.feed_offset);
+        for (r, line) in lines.iter().enumerate() {
+            if r >= rows {
+                break;
+            }
+            for (i, ch) in line.chars().take(w - 1).enumerate() {
+                cells[r * cols + x0 + 1 + i] = Cell {
+                    c: ch,
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    flags: 0,
+                };
+            }
+        }
+        let border_active = self.hover_feed_border || self.feed_drag.is_some();
+        let (border_fg, border_flags) = if border_active {
+            (self.theme.accent, cell_flags::BOLD)
+        } else {
+            (Color::Default, cell_flags::DIM)
+        };
+        for r in 0..rows {
+            cells[r * cols + x0] = Cell {
                 c: '│',
                 fg: border_fg,
                 bg: Color::Default,
@@ -12378,6 +12577,28 @@ async fn handle_stdin(
                 _ => view.end_sideline_drag(rep.row, rep.col),
             }
         }
+        // (x-f089) The feed-border drag in flight, the sideline block's mirror:
+        // a width change tells the server its content area changed, reported
+        // per crossed column so inner apps reflow live.
+        if view.feed_drag.is_some() {
+            match rep.kind {
+                MouseKind::Drag(MouseButton::Left) => {
+                    if view.drag_feed_to(rep.col, Instant::now()) {
+                        let (r, c) = view.content_dims();
+                        write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                            .await
+                            .map_err(|e| format!("feed resize send failed: {e}"))?;
+                    }
+                    continue;
+                }
+                MouseKind::Release(MouseButton::Left) => {
+                    view.end_feed_drag(rep.row, rep.col);
+                    continue;
+                }
+                // A non-left termination (a wheel, another button) ends the drag.
+                _ => view.end_feed_drag(rep.row, rep.col),
+            }
+        }
         // Name and confirmation overlays share the same framed layout and own
         // every pointer event, including clicks outside their block.
         if modal_mouse(view, rep) {
@@ -12447,6 +12668,15 @@ async fn handle_stdin(
                 });
                 continue;
             }
+            // (x-f089) Likewise the feed panel's divider: same grab, same
+            // width-at-grab memory for Esc, same stuck-drag stamp.
+            if view.on_feed_border(rep.row, rep.col) {
+                view.feed_drag = Some(SidelineDrag {
+                    start_width: view.feed_width,
+                    last_at: Instant::now(),
+                });
+                continue;
+            }
         }
         // x-8ccf US2: right-click a sideline row opens its context menu (agent
         // rows) or is swallowed (non-agent chrome). A right-click on a PANE cell
@@ -12510,6 +12740,14 @@ async fn handle_stdin(
                 view.scroll_sideline(matches!(rep.kind, MouseKind::WheelDown));
                 continue;
             }
+            // (x-f089) Wheel over the feed panel scrolls its item window the
+            // same way: the panel owns the rightmost columns, so a pane never
+            // gets the event either.
+            let feed_w = view.feed_panel_w();
+            if feed_w > 0 && rep.col >= view.term.1 - feed_w {
+                view.scroll_feed(matches!(rep.kind, MouseKind::WheelDown));
+                continue;
+            }
         }
         if let Some((pane, prow, pcol)) = view.hit_test(rep.row, rep.col) {
             write_msg(
@@ -12561,6 +12799,18 @@ async fn handle_stdin(
             write_msg(sock_w, &ClientMsg::Resize { rows, cols })
                 .await
                 .map_err(|e| format!("sideline revert resize send failed: {e}"))?;
+        }
+        return Ok(StdinFlow::Continue);
+    }
+    // (x-f089) A bare Esc during a feed-border drag reverts the width to where
+    // the drag began, the sideline revert's mirror. Client-local, so only a
+    // Resize travels, and only if the width actually changed.
+    if view.feed_drag.is_some() && passthrough == [0x1b] {
+        if view.revert_feed_drag() {
+            let (rows, cols) = view.content_dims();
+            write_msg(sock_w, &ClientMsg::Resize { rows, cols })
+                .await
+                .map_err(|e| format!("feed revert resize send failed: {e}"))?;
         }
         return Ok(StdinFlow::Continue);
     }
@@ -12646,9 +12896,9 @@ async fn handle_stdin(
     if view.yard.is_some() {
         return yard_keys(view, &passthrough, sock_w).await;
     }
-    if view.feed.is_some() {
-        return feed_view::feed_keys(view, &passthrough, sock_w).await;
-    }
+    // (x-f089) The feed panel consumes NO keys: it is chrome, so typing always
+    // reaches the focused pane while it is open. The only key it knows is the
+    // `e` toggle, handled at Event::OpenFeed in the key table.
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
     }
@@ -12837,15 +13087,28 @@ async fn dispatch_event(
             }
         }
         Event::OpenFeed => {
-            // x-4433: open the activity feed. Prior rows render instantly; a
-            // fresh fold is always armed and merges in when it lands - the
-            // overlay never blocks on it, and a failed fold degrades loudly.
+            // x-4433, x-f089: toggle the activity feed panel. Opening keeps the
+            // x-4433 contract - prior rows render instantly and a fresh fold is
+            // always armed (never blocks, fails loudly) - and a real state
+            // change re-reports the content area, the TogglePanel accounting:
+            // the panel now takes columns, so rects must refill without it.
             let gen = view
                 .feed
                 .as_ref()
                 .map(|f| f.gen.wrapping_add(1))
                 .unwrap_or(0);
-            view.feed = Some(feed_view::open_overlay(view.feed.take(), gen));
+            let opening = view.feed.is_none();
+            view.feed = if opening {
+                Some(feed_view::open_overlay(view.feed.take(), gen))
+            } else {
+                None
+            };
+            if view.feed.is_some() {
+                let (r, c) = view.content_dims();
+                write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                    .await
+                    .map_err(|e| format!("resize send failed: {e}"))?;
+            }
         }
         Event::OpenCourt => view.court.toggle(),
         Event::TogglePanel => {
