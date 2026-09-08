@@ -19,6 +19,11 @@ from typer.testing import CliRunner
 from fno import rust_binary
 from fno.agents import rust_runtime as rr
 
+# Declared journal isolation: the conftest pin keys on this module's name
+# (see _PLAN_JOURNAL_PINNED_MODULES) and the guard
+# scripts/ci/check-tests-hermetic-events.sh proves this marker did not rot.
+FNO_EVENTS_PATH = "hermetic: this module's journal is pinned per test"
+
 
 @pytest.fixture(autouse=True)
 def _isolated_registry(monkeypatch, tmp_path_factory):
