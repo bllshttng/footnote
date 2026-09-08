@@ -2946,7 +2946,8 @@ def cmd_note(
     Distinct from ``update --details`` (which REPLACES the rationale) and the
     single ``completion_note``: ``note`` accumulates a list of ``{ts, text}``
     entries. The status-fanout backlog-progress adapter stamps one per
-    ``task_done``/``run_summary`` (); it is also hand-runnable.
+    ``task_done``/``run_summary`` through the store, so those machine stamps
+    never mail; it is also hand-runnable.
 
     Delivery is the DEFAULT. A worker reads its node once, at dispatch, so a
     note written after that reaches nobody unless the verb mails it: the node's

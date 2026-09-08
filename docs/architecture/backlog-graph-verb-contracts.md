@@ -41,6 +41,8 @@ The author is dropped from that list, matching a bare session id against a role-
 
 The body is a POINTER, never the note: the node id, the note's opening words, and the command to read it. A full body spends the 80-word rolling pair budget on the first send, and several notes share one 10-minute window.
 
+The delivery lives in the VERB, not in ``append_progress_note``. The status-fanout adapter writes its ``task_done`` / ``run_summary`` stamps through the store function, so machine progress lines never mail: one note per finished task would spend every pair budget on traffic no reader asked for. A fact somebody chose to record is the case that needs a reader.
+
 ``--quiet`` is the deliberate silent annotation. Delivery is the default because the two failure modes are not symmetric: a forgotten flag costs a redundant mail, where a forgotten mail costs the finding.
 
 Every outcome prints. A delivery prints ``notified <address> (<why>): <transport> <msg-id>``, no reachable reader prints ``notify: no holder, owner or king to reach for <id>``, and a failed send - a budget refusal included - prints ``notify FAILED`` on stderr. Each send is bounded at 30 seconds because a live inject waits on the recipient's per-agent flock and one measured run wedged past 150; an unanswered recipient prints ``notify UNCONFIRMED`` on stderr, which says the delivery is unknown rather than done. Nothing here can cost the note: the append already happened, so a resolution or send fault degrades to a printed receipt and the exit code stays 0.
