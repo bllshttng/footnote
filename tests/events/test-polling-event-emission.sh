@@ -171,17 +171,37 @@ assert_contains "size cap polling message" "$out" "exceeds"
 # of the way: the hermetic sandbox sets it for the whole run and the library
 # checks it ahead of the root, by design. The pin's own coverage is in
 # tests/events/test-events-path-pin.sh.
+#
+# A project `.fno/` is the opt-in marker, so the root branch is asserted in
+# both directions: the emit creates nothing in a repo that never opted in, and
+# the same emit lands once the directory is there. Without the second half a
+# green would also be satisfied by an emit that did nothing at all.
 repo_root="$WORK/repo"
 mkdir -p "$repo_root/nested/source"
 git -C "$repo_root" init -q
-(
-    unset EVENTS_FILE
-    unset FNO_EVENTS_PATH
-    cd "$repo_root/nested/source" || exit 1
-    # shellcheck disable=SC1090
-    source "$EVENTS_LIB"
-    emit_event target root_probe '{}'
-)
+# PATH is narrowed so the case under test is the same one every time: the
+# degrade the library documents for a context with no fno-agents on PATH. With
+# the binary present the resolver answers the space journal instead and this
+# assertion silently stops being about the root branch at all, which is what a
+# developer box was measuring while CI measured the degrade.
+emit_from_nested() {
+    (
+        unset EVENTS_FILE
+        unset FNO_EVENTS_PATH
+        export PATH=/usr/bin:/bin
+        cd "$repo_root/nested/source" || exit 1
+        # shellcheck disable=SC1090
+        source "$EVENTS_LIB"
+        emit_event target root_probe '{}'
+    )
+}
+emit_from_nested
+if [[ -d "$repo_root/.fno" ]]; then
+    echo "FAIL repo root: emit created a .fno in a repo that never opted in"
+    fail=1
+fi
+mkdir -p "$repo_root/.fno"
+emit_from_nested
 [[ -s "$repo_root/.fno/events.jsonl" ]] || { echo "FAIL repo root: shell event did not land at root"; fail=1; }
 [[ ! -e "$repo_root/nested/source/.fno" ]] || { echo "FAIL repo root: shell event created a nested .fno"; fail=1; }
 
