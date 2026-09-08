@@ -1469,11 +1469,13 @@ fn probe_pid(pid: i32) -> PidProbe {
         return PidProbe::Absent;
     };
     static BTIME: std::sync::OnceLock<Option<i64>> = std::sync::OnceLock::new();
-    let btime = (*BTIME.get_or_init(|| {
+    let Some(btime) = *BTIME.get_or_init(|| {
         let stat = std::fs::read_to_string("/proc/stat").ok()?;
         stat.lines()
             .find_map(|l| l.strip_prefix("btime ").and_then(|r| r.trim().parse().ok()))
-    }))?;
+    }) else {
+        return PidProbe::Absent;
+    };
     let tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     if tck <= 0 {
         return PidProbe::Absent;
