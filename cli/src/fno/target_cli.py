@@ -1027,6 +1027,7 @@ def _read_pr_metadata(pr_number: int, cwd: Path) -> dict[str, Any]:
     return {
         "number": info.get("pr", pr_number),
         "headRefOid": info.get("head_sha") or "",
+        "headRefName": info.get("head_ref") or "",
         "baseRefName": info.get("base_ref") or "",
     }
 
@@ -1103,46 +1104,33 @@ def _self_review_refusal(
 
 
 def _hold_branch_under_review(
-    cwd: Path, *, head_sha: str, session_id: str, receipt: dict[str, Any]
+    cwd: Path, *, head_sha: str, session_id: str, receipt: dict[str, Any], branch: str = ""
 ) -> None:
-    """Register that a review of this branch at ``head_sha`` is RUNNING.
+    """Register that a review of ``branch`` at ``head_sha`` is RUNNING.
 
-    Merge readiness models a review as a recorded VERDICT, so a review still
-    reading produces nothing it can see: `fno do pr merge` is fail-closed
-    against the hold, and on PR 1575 the merge fired while the only non-author
-    review was mid-flight, discarding eight findings including a HIGH one. The
-    hold existed and worked; nothing took it unless the reviewer remembered.
+    The requester side, so every pipeline review is held without a reviewer
+    remembering. On PR 1575 the merge fired mid-review and discarded eight
+    findings, one HIGH. The hold existed and nothing took it. ``branch`` is the
+    PR's own head ref on the post-push form: a local alias with a matching sha
+    keys a hold the merge guard, which reads GitHub, never looks up.
 
-    This is the requester side, so it takes the hold for every pipeline review
-    without a reviewer doing anything. `hooks/review-hold.sh` still covers the
-    Skill-tool invocation, and re-taking a hold this session already owns is a
-    no-op. Best-effort in both directions: an unconfirmed send takes nothing,
-    and a lockfile failure never turns a sent review into a refusal.
-
-    Counts nothing and gates nothing. A hold says a review is running, never
-    that a round was spent (laws d-0fa92eb9, d-777e7d1f).
+    Best-effort throughout. An unconfirmed send takes nothing. A refused
+    invocation takes nothing, since it emits no attestation and nothing would
+    release the hold. A lockfile failure never turns a sent review into a
+    refusal. Counts no round, gates on no origin (d-0fa92eb9, d-777e7d1f).
     """
     if str(receipt.get("outcome") or "") in {"refused", "unconfirmed"}:
         return
     try:
         from fno.pr._review_hold import acquire_review_hold, review_invocation_refusal
 
-        branch = (_git_out(cwd, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
+        branch = branch or (_git_out(cwd, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
         if not branch or branch == "HEAD":
             return
-        # The same gate the other acquire site applies, and for a sharper
-        # reason here. A refused invocation runs no review and emits no
-        # attestation, so nothing would ever release the hold, and the merge
-        # the refusal is telling the worker to take would be blocked for the
-        # full TTL by a review that never started.
         if review_invocation_refusal(branch, head_sha, cwd=str(cwd)):
             return
-        acquire_review_hold(
-            branch,
-            head=head_sha,
-            holder=f"review-session:{session_id or 'unknown'}",
-            verb="/fno:review",
-        )
+        holder = f"review-session:{session_id or 'unknown'}"
+        acquire_review_hold(branch, head=head_sha, holder=holder, verb="/fno:review")
     except Exception:  # noqa: BLE001 - see docstring
         pass
 
@@ -1194,6 +1182,9 @@ def request_self_review_cmd(
             metadata = _read_pr_metadata(pr_number, cwd)
             pr_head = str(metadata.get("headRefOid") or "").strip()
             base_branch = str(metadata.get("baseRefName") or "").strip()
+            # The hold keys on the PR's OWN head ref: a local alias with a
+            # matching sha keys one the merge guard never looks up.
+            branch = str(metadata.get("headRefName") or "").strip()
             if not pr_head:
                 raise RuntimeError("PR has no headRefOid")
             if head_sha.lower() != pr_head.lower():
@@ -1216,7 +1207,7 @@ def request_self_review_cmd(
             payload=payload, harness=harness, session_id=session_id
         )
         _hold_branch_under_review(
-            cwd, head_sha=head_sha, session_id=session_id, receipt=receipt
+            cwd, head_sha=head_sha, session_id=session_id, receipt=receipt, branch=branch
         )
     except (RuntimeError, ValueError) as exc:
         receipt = _self_review_refusal(

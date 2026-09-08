@@ -129,13 +129,12 @@ def _repo_state_dir(cwd: str) -> str:
 
 
 def _manifest_file(cwd: str) -> str:
-    """This run's session manifest: the space slice, falling back to the
-    checkout's ``.fno/``.
+    """This run's session manifest: the space slice, else the checkout's ``.fno/``.
 
-    ``_repo_state_dir`` still answers where the merge's SENTINELS live (beside
-    the checkout), but the manifest itself moved to the space, so the two are
-    no longer the same directory. Every followup that read
-    ``<state_dir>/target-state.md`` was reading a path init stopped writing.
+    The sentinels still live beside the checkout, but the manifest moved to the
+    space. Every followup reading ``<state_dir>/target-state.md`` was reading a
+    path init stopped writing. Resolve from the toplevel, never a nested cwd:
+    the space slice is named after the worktree root.
     """
     legacy = os.path.join(_repo_state_dir(cwd), "target-state.md")
     try:
@@ -143,8 +142,6 @@ def _manifest_file(cwd: str) -> str:
 
         from fno.paths import target_state_path_or_legacy
 
-        # The space slice is named after the WORKTREE ROOT, so resolve from the
-        # toplevel `_repo_state_dir` already found, never from a nested cwd.
         return str(target_state_path_or_legacy(Path(legacy).parent.parent))
     except Exception:  # noqa: BLE001 - a resolver failure degrades to the legacy path
         return legacy
@@ -1159,28 +1156,23 @@ def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
     )
 
 
-# The sentinel a degraded merge row carries in place of a manifest field it
-# could not read. Never a real session id or a real md5, so the auto-complete
-# matcher (which requires BOTH to equal the live session's) can never adopt a
-# degraded row.
+# Stands in for a manifest field the merge row could not read. Never a real
+# session id or md5, so the auto-complete matcher, which requires both to equal
+# the live session's, can never adopt a degraded row.
 _MERGE_ROW_UNKNOWN = "unknown"
 
 
 def _emit_session_satisfied(pr_url: str, state_file: str) -> None:
     """Emit a ``session_satisfied{source:pr_merge}`` row for EVERY merge.
 
-    Unconditional on purpose. Three silent early returns used to guard this
-    (absent manifest, absent session_id, unreadable manifest bytes) and between
-    them they produced ZERO rows in a 21605-event journal - not zero for one PR,
-    zero for every merge this repo has ever taken. The first guard was the one
-    that fired: the manifest moved to the space and this path still looked for
-    it beside the checkout.
+    Three silent early returns used to guard this and between them produced
+    ZERO rows in a 21605-event journal. Not zero for one PR: zero for every
+    merge ever taken. The manifest moved to the space and this path still
+    looked for it beside the checkout.
 
-    This row is the only record that distinguishes a merge which consulted the
-    review-hold gate from one which did not, and a guard whose use leaves no
-    trace cannot be audited. It also cannot change a merge outcome, so a
-    missing input degrades to a NAMED sentinel with a diagnostic rather than
-    deleting the row.
+    This row is the only record telling a merge that consulted the review-hold
+    gate from one that did not, and it cannot change a merge outcome. So a
+    missing input degrades to a NAMED sentinel with a diagnostic.
     """
     sid = _read_state_field(state_file, "session_id")
     if not sid or sid == "null":
@@ -1211,10 +1203,9 @@ def _emit_session_satisfied(pr_url: str, state_file: str) -> None:
             evidence_url=pr_url or None,
             source="target",
         )
-        # No explicit path: the resolver answers the SPACE journal, which is
-        # what an audit reads. `<checkout>/.fno/events.jsonl` is a plain file
-        # the post-merge worktree reap deletes, so a row written there is as
-        # unauditable as no row at all - the defect this emit exists to close.
+        # No explicit path: the resolver answers the space journal, which is
+        # what an audit reads. A row in `<checkout>/.fno/` dies with the
+        # worktree reap, which is as unauditable as no row at all.
         append_event(event)
     except Exception as exc:  # noqa: BLE001 - best-effort, surface a diagnostic
         sys.stderr.write(
@@ -1383,8 +1374,7 @@ def _run_post_merge_followups(
         pass
 
     # Auto-complete signal, and the merge's own audit row. Not swallowed: the
-    # `except: pass` here was the fourth silence stacked on the three inside the
-    # emitter, so even a raising emit left no trace of the merge.
+    # `except: pass` here was a fourth silence on top of the emitter's three.
     try:
         pr_url = ""
         res = _gh(["pr", "view", str(pr_number), "--json", "url", "-q", ".url"], cwd)
