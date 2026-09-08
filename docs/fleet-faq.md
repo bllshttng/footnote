@@ -126,6 +126,8 @@ The shapes, each measured:
 
 **A killed subprocess surfaces as a traceback.** `ClaimVerdictError: fno-agents claim sweep failed with exit -9: no diagnostic`. Exit -9 is SIGKILL, and a killed process writes no stderr, which is why the message ends in `no diagnostic`. Run the sweep alone before accepting the traceback. It returned exit 0 and 5,610 bytes. The next run of the verb then gave the ordinary refusal the crash had hidden.
 
+**A peer's zero is still a zero.** A king proposed widening a lint's scope to the code tree, on the grounds that it was free that day: zero hits repo-wide, controls passing. Measured before acting, the code tree held 12,831 node-id hits across 1,377 files. Most are synthetic fixtures (`x-aaaa` 188 times, `x-abcd` 181, `x-1234` 115), and real ids sit among them. The change would have turned 1,377 files red. A measurement arrives with the authority of the session that took it, and it inherits none of that session's care.
+
 *Graduates to:* an assert helper that rejects absence-only success and zero-hit probes with no positive control, which the AGENTS.md pitfalls corpus already names. Then, per shape. A refusal that separates "unreadable" from "still present". One decision function shared by the dry run and the real run. A non-zero exit on a refusal. A killed subprocess reported as a kill, with its signal named.
 
 ## My check-in keeps saying nothing changed
