@@ -792,6 +792,11 @@ def render_merge_evidence_failure(
 # free slot across graph/cli.py and done/cli.py. Do not renumber.
 PROMISE_REFUSAL_EXIT_CODE = 6
 
+# A retryable read outage is not a policy refusal, so it does not reuse 6. It
+# reuses the merge gate's own outage code so one number means "the reader was
+# down, retry" across both gates.
+PROMISE_UNKNOWN_EXIT_CODE = REFUSAL_EXIT_CODES["outage"]
+
 # Wall clock for the fno-agents probe-run subprocess (3 probes * 60s native
 # timeout + overhead). resolve_promise_evidence runs outside the graph lock,
 # same as the gh cross-check, so a slow probe holds no other mutation.
@@ -810,7 +815,7 @@ class PromiseVerdict:
     ``plan_path`` never wedges a close; the warning names the path.
     """
 
-    outcome: Literal["ok", "promise_unmet"]
+    outcome: Literal["ok", "promise_unmet", "promise_unknown"]
     reason: Optional[str] = None  # multi-line refusal text; None when ok
     # Why a fail-open happened (unreadable plan, unparseable frontmatter), naming
     # the path. Returned, not printed: the close verbs emit it on stderr, but a
@@ -819,8 +824,22 @@ class PromiseVerdict:
     warning: Optional[str] = None
 
     @property
+    def satisfied(self) -> bool:
+        """True only on positive evidence. Every close boundary reads THIS.
+
+        A negative test (``outcome == "promise_unmet"``) closed the node on any
+        outcome the author had not enumerated, which is how a retryable read
+        outage closed a declared multi-ship node.
+        """
+        return self.outcome == "ok"
+
+    @property
     def exit_code(self) -> int:
-        return PROMISE_REFUSAL_EXIT_CODE if self.outcome == "promise_unmet" else 0
+        if self.outcome == "promise_unmet":
+            return PROMISE_REFUSAL_EXIT_CODE
+        if self.outcome == "promise_unknown":
+            return PROMISE_UNKNOWN_EXIT_CODE
+        return 0
 
 
 def _close_probe_runner_shellout(
@@ -1010,11 +1029,18 @@ def resolve_promise_evidence(
             # down, and the merge gate already treats an outage as retryable
             # (exit 4) rather than a policy refusal.
             if failure and failure.retryable:
+                # Unknown, not ok: the read was down, so the ship count is
+                # unconfirmed in BOTH directions. Closing here stamped a
+                # declared multi-ship node done on the strength of an outage.
+                # The node stays open and the sweep retries when gh answers.
                 return PromiseVerdict(
-                    outcome="ok",
-                    warning=(
-                        f"promise gate could not confirm {expected} ships for "
-                        f"{node_id}: {failure}; ship-count check skipped"
+                    outcome="promise_unknown",
+                    reason=(
+                        f"Unknown: {node_id} could not confirm {expected} ships "
+                        f"({merged} confirmed MERGED): {failure}\n"
+                        f"  The read failed retryably; the node stays open. "
+                        f"Retry with `fno backlog reconcile --node {node_id}` "
+                        f"once GitHub answers."
                     ),
                 )
             if failure:
@@ -1103,6 +1129,30 @@ def _promise_refusal_c(node_id: str, plan_display: str, expected: int, merged: i
         f"    file the remainder (`fno backlog idea`) and close with\n"
         f"      --force --reason \"remaining ships filed as <id>\""
     )
+
+
+def summarize_promise_held(
+    held: "list[tuple[str, str, str]]", *, dry_run: bool = False
+) -> str:
+    """Render reconcile's held-open roll, split by WHY the node stayed open.
+
+    ``held`` rows are ``(node_id, first_reason_line, outcome)``. The two
+    outcomes need different operator sentences: an unmet promise is a policy
+    refusal the operator resolves, an unknown is a read outage that resolves
+    itself on the next sweep.
+    """
+    verb = "Holding" if dry_run else "Held"
+    lines: list[str] = []
+    for outcome, headline in (
+        ("promise_unmet", "merged PR, unmet plan promise"),
+        ("promise_unknown", "ship count unconfirmed, retryable read failure"),
+    ):
+        rows = [(nid, reason) for nid, reason, out in held if out == outcome]
+        if not rows:
+            continue
+        lines.append(f"{verb} {len(rows)} node(s) open ({headline}):")
+        lines.extend(f"  {nid}: {reason}" for nid, reason in rows)
+    return "\n".join(lines)
 
 
 def _unharvested_deferred_carveouts(cwd: Optional[str]) -> list[dict]:

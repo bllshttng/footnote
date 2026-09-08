@@ -681,7 +681,7 @@ def done_command(
         promise = resolve_promise_evidence(
             node, cwd=node.get("cwd"), query=_gh_query, extra_refs=_extra_refs
         )
-        if promise.outcome == "promise_unmet":
+        if not promise.satisfied:
             typer.echo(promise.reason, err=True)
             raise typer.Exit(code=promise.exit_code)
         if promise.warning:

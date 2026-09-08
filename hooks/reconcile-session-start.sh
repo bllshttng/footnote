@@ -46,10 +46,10 @@ if [[ -f "$RESULT" ]] && command -v jq >/dev/null 2>&1; then
     # .closed left these held open with no named cause - the silent-gate shape
     # this repo fixes at the source, so the bucket is surfaced here too, before
     # the consume-after-show move hides the result.
-    unmet_n=$(jq '.promise_unmet | length' "$RESULT" 2>/dev/null || echo 0)
+    unmet_n=$(jq '[(.promise_unmet // [])[], (.promise_unknown // [])[]] | length' "$RESULT" 2>/dev/null || echo 0)
     if [[ "$unmet_n" =~ ^[0-9]+$ ]] && (( unmet_n > 0 )); then
-        nodes=$(jq -r '.promise_unmet[].node_id' "$RESULT" 2>/dev/null | paste -sd, - 2>/dev/null)
-        echo "reconcile: last sweep held ${unmet_n} node(s) open on the promise gate (${nodes}). Run \`fno backlog reconcile\` for the per-node cause (unharvested carve-out / failed close_probe / short ship count); resolve, or close with --force --reason."
+        nodes=$(jq -r '[(.promise_unmet // [])[], (.promise_unknown // [])[]] | .[].node_id' "$RESULT" 2>/dev/null | paste -sd, - 2>/dev/null)
+        echo "reconcile: last sweep held ${unmet_n} node(s) open on the promise gate (${nodes}). Run \`fno backlog reconcile\` for the per-node cause (unharvested carve-out / failed close_probe / short ship count / unreadable ship count); resolve, or close with --force --reason."
     fi
     mv -f "$RESULT" "$RESULT.shown" 2>/dev/null || true
 fi

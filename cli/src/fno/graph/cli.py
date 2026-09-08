@@ -9099,7 +9099,7 @@ def _done_gate_pipeline(
     # journaled line (the backlog_done_forced event above) rather than silence.
     if not force:
         promise = resolve_promise_evidence(node, cwd=node.get("cwd"), query=_done_gh_query)
-        if promise.outcome == "promise_unmet":
+        if not promise.satisfied:
             typer.echo(promise.reason, err=True)
             raise typer.Exit(code=promise.exit_code)
         if promise.warning:
@@ -10760,7 +10760,7 @@ def cmd_reconcile(
     # rather than closing silently on the unattended sweep. Reconcile is the
     # MAINSTREAM close (auto-fires on SessionStart), so without this leg a node
     # that cmd_done refused would close here on the next session anyway.
-    promise_unmet: list[tuple[str, str]] = []
+    promise_held: list[tuple[str, str, str]] = []
     promise_warnings: list[dict[str, str]] = []
     if closeable:
         gated: list = []
@@ -10790,11 +10790,11 @@ def cmd_reconcile(
                 typer.echo(f"warning: {verdict.warning}", err=True)
             if verdict.warning:
                 promise_warnings.append({"node_id": record.node_id, "warning": verdict.warning})
-            if verdict.outcome == "promise_unmet":
+            if not verdict.satisfied:
                 # First refusal line only: the full reason belongs to the verb
                 # the operator runs to resolve it, not this one-line sweep roll.
                 first_line = (verdict.reason or "").splitlines()[0]
-                promise_unmet.append((record.node_id, first_line))
+                promise_held.append((record.node_id, first_line, verdict.outcome))
             else:
                 gated.append(record)
         closeable = gated
@@ -11556,7 +11556,8 @@ def cmd_reconcile(
             ],
             # Closeable records held open by the promise gate (): a merged
             # PR whose plan promised work that has not all shipped.
-            "promise_unmet": [{"node_id": nid, "reason": reason} for nid, reason in promise_unmet],
+            "promise_unmet": [{"node_id": n, "reason": r} for n, r, o in promise_held if o == "promise_unmet"],
+            "promise_unknown": [{"node_id": n, "reason": r} for n, r, o in promise_held if o == "promise_unknown"],
             "promise_warnings": promise_warnings,
             "supersession_evidence_failures": owed_evidence_failures,
         }
@@ -11581,7 +11582,7 @@ def cmd_reconcile(
         and not healed_epics
         and not contained_closed
         and not reverted_stamped
-        and not promise_unmet
+        and not promise_held
         and not promise_warnings
         and not owed_evidence_failures
         and not closure_claims
@@ -11646,17 +11647,12 @@ def cmd_reconcile(
 
         typer.echo(summarize_edge_settlement(blocked_by_settlement))
 
-    if promise_unmet:
-        # Held open, not failed: the PR merged but the plan promised more. The
-        # operator resolves it through `fno backlog done <id> --force --reason`
-        # (a deliberate half-ship) or by shipping/filing the remainder.
-        held = "Holding" if dry_run else "Held"
-        typer.echo(
-            f"{held} {len(promise_unmet)} node(s) open (merged PR, unmet plan promise):",
-            err=True,
-        )
-        for nid, reason in promise_unmet:
-            typer.echo(f"  {nid}: {reason}", err=True)
+    if promise_held:
+        # Held open, not failed: either the plan promised more than merged, or
+        # the ship count could not be read. summarize_promise_held splits them.
+        from fno.graph._reconcile import summarize_promise_held
+
+        typer.echo(summarize_promise_held(promise_held, dry_run=dry_run), err=True)
 
     if promise_warnings:
         typer.echo("Promise ship-count warnings:", err=True)

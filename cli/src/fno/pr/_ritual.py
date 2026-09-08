@@ -438,7 +438,8 @@ class Ritual:
                 closed = [c.get("node_id") for c in (obj.get("closed") or [])
                           if isinstance(c, dict) and c.get("node_id")]
                 self.ctx.node_ids.extend(closed)
-                held = [h.get("node_id") for h in (obj.get("promise_unmet") or [])
+                held_rows = (obj.get("promise_unmet") or []) + (obj.get("promise_unknown") or [])
+                held = [h.get("node_id") for h in held_rows
                         if isinstance(h, dict) and h.get("node_id")]
                 errs = len(obj.get("contained_errors") or [])
                 sync_obj = obj.get("sync_catchup") or {}

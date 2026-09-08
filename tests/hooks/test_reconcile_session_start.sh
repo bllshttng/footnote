@@ -210,6 +210,25 @@ grep -q "x-dd2" <<<"$OUT" || fail "render: reminder missing node id x-dd2"
 pass "render: promise-gate held-open reminder emitted; result consumed"
 
 # ============================================================================
+# AC: render - a retryable UNKNOWN ship count holds the node open too, and the
+# hook must name it. A sweep that reads only .promise_unmet reports zero held
+# while the gate is holding nodes open on an outage, which is the silent-gate
+# shape this file exists to refuse.
+# ============================================================================
+log "render: promise_unknown nodes -> held-open reminder emitted"
+REPO_PU="$WORK/repo-pu"; mkdir -p "$REPO_PU/.fno"
+RESULT_PU="$REPO_PU/.fno/.reconcile-result.json"
+touch "$REPO_PU/.fno/.reconcile-stamp"
+cat > "$RESULT_PU" <<'JSON'
+{"dry_run": false, "candidates": [], "closed": [], "failures": [], "promise_unmet": [{"node_id":"x-dd1","reason":"deferred carve-out cv-99"}], "promise_unknown": [{"node_id":"x-uu1","reason":"could not confirm 2 ships"}]}
+JSON
+OUT=$(CLAUDE_PROJECT_DIR="$REPO_PU" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
+grep -q "held 2 node(s) open on the promise gate" <<<"$OUT" \
+    || fail "render: unknown rows not counted with unmet rows (got: $OUT)"
+grep -q "x-uu1" <<<"$OUT" || fail "render: reminder missing node id x-uu1"
+pass "render: retryable-unknown nodes counted in the held-open reminder"
+
+# ============================================================================
 # AC: render — a legacy result (no `sync_catchup` key) must not kill the hook.
 # The render block runs under `set -euo pipefail` ABOVE the load-bearing
 # reconcile trigger, so a jq type error there took out both the consume and

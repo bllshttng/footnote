@@ -84,9 +84,9 @@ bypasses the gate on `backlog done` so a deliberate half-ship is a recorded
 line, not silence. The Rust loop closer needs no change: its catch-all maps any
 non-zero, non-5 exit to `Parked` with the refusal text intact.
 
-The gate fails open on an absent/unreadable/unparseable plan (a stale
-`plan_path` never wedges a close) or a gh outage while counting ships (retryable,
-matching the merge gate). Those limits are stated in the refusal/warning text.
+**Closing needs positive evidence.** The verdict has three outcomes. Only `ok` closes. Every close boundary asks `verdict.satisfied`, never a test against one refusal name. `promise_unmet` is the policy refusal above. `promise_unknown` is a retryable read outage while counting ships. The reader failed on some refs, so the count is unconfirmed in both directions. The node, its plan and its dependents stay open until a later sweep confirms the declared count. It exits **4**, the merge gate's outage code. `reconcile` holds it in a `promise_unknown` bucket beside `promise_unmet`. Returning `ok` there is what closed declared multi-ship nodes on the strength of a gh timeout. A NON-retryable read failure (bad credentials, a stale ref) stays `promise_unmet`. Retrying will not fix a policy problem.
+
+The gate still fails open on an absent, unreadable or unparseable plan, so a stale `plan_path` never wedges a close. A plan with no declaration never reaches the ship count. The refusal and warning text state these limits.
 
 ## Invocation Points
 
