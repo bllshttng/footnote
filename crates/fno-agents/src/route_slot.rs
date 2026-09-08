@@ -1766,23 +1766,42 @@ fn pick(
     candidate.insert("evidence".into(), Value::Object(evidence));
     json!({
         "status": "pick",
+        "verdict": "armed",
         "candidate": Value::Object(candidate),
         "chain": chain,
     })
 }
 
 fn none(chain: Vec<Value>) -> Value {
-    json!({"status": "none", "candidate": Value::Null, "chain": chain})
+    // The terminal line classifies a no-candidate walk-out exactly as the
+    // readout always has: a config fault or a strict refusal is a policy
+    // hold, a capacity stand-down is capacity-held, anything else is the
+    // harness default standing by.
+    let verdict = chain
+        .last()
+        .and_then(Value::as_str)
+        .map(|terminal| {
+            if terminal.starts_with("slot=config ") || terminal.starts_with("slot=strict-refusal") {
+                "policy-held"
+            } else if terminal.starts_with("slot=exhausted") {
+                "capacity-held"
+            } else {
+                "unarmed"
+            }
+        })
+        .unwrap_or("unarmed");
+    json!({"status": "none", "verdict": verdict, "candidate": Value::Null, "chain": chain})
 }
 
 /// Capacity terminals keep the receipt vocabulary verbatim while naming their
-/// kind for machine consumers.
+/// kind for machine consumers. A policy hold is never described as a spent
+/// quota, so the verdict word differs from the reason kind.
 fn queue_decision(chain: Vec<Value>) -> Value {
-    json!({"status": "none", "candidate": Value::Null, "reason_kind": "capacity-queue", "chain": chain})
+    json!({"status": "none", "verdict": "capacity-held", "candidate": Value::Null, "reason_kind": "capacity-queue", "chain": chain})
 }
 
 fn exhausted_decision(chain: Vec<Value>) -> Value {
-    json!({"status": "none", "candidate": Value::Null, "reason_kind": "capacity-exhausted", "chain": chain})
+    json!({"status": "none", "verdict": "capacity-held", "candidate": Value::Null, "reason_kind": "capacity-exhausted", "chain": chain})
 }
 
 /// A strict-policy refusal: the decision path is named, the candidate is
@@ -1791,6 +1810,7 @@ fn exhausted_decision(chain: Vec<Value>) -> Value {
 fn refused_decision(chain: Vec<Value>, kind: &str, reason: &str) -> Value {
     json!({
         "status": "none",
+        "verdict": "policy-held",
         "candidate": Value::Null,
         "reason_kind": "policy-refusal",
         "refusal": kind,
