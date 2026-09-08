@@ -368,15 +368,7 @@ def routing_for(node: Optional[dict]) -> dict:
     }
     # The verdict reads the same terminal the spawn seam refuses on: a policy
     # refusal is held, capacity is held, and neither is "exhausted dispatch".
-    terminal = chain[-1] if chain else ""
-    if candidate:
-        verdict = "armed"
-    elif "slot=strict-refusal" in terminal or terminal.startswith("slot=config "):
-        verdict = "policy-held"
-    elif terminal.startswith("slot=exhausted"):
-        verdict = "capacity-held"
-    else:
-        verdict = "unarmed"
+    verdict = route_resolve.slot_verdict(candidate, chain)
     return {
         "chain": list(chain),
         "candidate": candidate,
