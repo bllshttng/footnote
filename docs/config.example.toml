@@ -269,7 +269,7 @@ single_flight_ttl_seconds = 10
 single_flight_join_budget_seconds = 30
 # Age at which an fno child that init inherited is reaped (default 5400). Three times `do pr wait --timeout 30m`, the longest detached child allowed to be running. The sweep also needs parent pid 1 and a pid no registry row names live.
 orphan_reap_after_seconds = 5400
-# Per-verb spawn-defaults overlay keyed by the seed's leading slash-verb. A profile may set scalar fields or a strict ordered lanes list: each lane is either the name of a [[routing.models]] row (harness, model, effort, route, account) or an inline table {provider,model,effort,substrate,permission_mode,route,account,pane_group}. Lanes are walked in declared order (the list is the rank), each lane's capacity read per its account, and the first lane that passes is the spawn's coordinate. by_difficulty optionally keys low|medium|high overlays that replace lanes and the policy fields; omitted fields inherit the base slot, and the effective difficulty comes from the dispatched node, rounding up to high. on_exhausted declares the all-lanes-skipped terminal: refuse (default; the spawn stops), degrade (the profile scalars answer), or queue (a typed capacity refusal, exit 78). on_low governs a low-capacity observation: allow, prefer_healthy (default; demote low behind healthy lanes), or skip. on_unknown governs stale, absent or unproven observations: allow (default) or skip. A lane named on the command line or FNO_SPAWN_GATE=0 degrades whatever on_exhausted says. Malformed lanes, overlays and unknown row names refuse at the spawn seam rather than billing an unintended vendor.
+# Per-verb spawn-defaults overlay keyed by the seed's leading slash-verb. A profile may set scalar fields or a strict ordered lanes list: each lane is either the name of a [[routing.models]] row (harness, model, effort, route, account) or an inline table {provider,model,effort,substrate,permission_mode,route,account,pane_group,args}. Lanes are walked in declared order (the list is the rank), each lane's capacity read per its account, and the first lane that passes is the spawn's coordinate. by_difficulty optionally keys low|medium|high overlays that replace lanes and the policy fields; omitted fields inherit the base slot, and the effective difficulty comes from the dispatched node, rounding up to high. on_exhausted declares the all-lanes-skipped terminal: refuse (default; the spawn stops), degrade (the profile scalars answer), or queue (a typed capacity refusal, exit 78). on_low governs a low-capacity observation: allow, prefer_healthy (default; demote low behind healthy lanes), or skip. on_unknown governs stale, absent or unproven observations: allow (default) or skip. A lane named on the command line or FNO_SPAWN_GATE=0 degrades whatever on_exhausted says. Malformed lanes, overlays and unknown row names refuse at the spawn seam rather than billing an unintended vendor. A profile may also carry a harness table (agents.profiles.<verb>.harness.<h>) whose entries re-answer permission_mode, effort, substrate or args for ONE harness; it sits between the lane rung and the profile scalars, and the same lane-field refusal applies.
 profiles = {}
 # Ordered fallback chain per node size, consulted ONLY when a provider refuses and the account queue cannot answer (agents.fallback.<S|M|L|default> = a list of {harness,model,effort,substrate,permission_mode,route,account} links). The operator rule 'simple work to a claude sonnet bg thread, complex work to codex' written where a daemon can read it. Give every size more than one link: a claude weekly cap and a z.ai five-hour cap are different meters with different periods, and either can be the one that is down. A link whose own provider reads EXHAUSTED with an unexpired reset is SKIPPED; UNKNOWN is not exhausted and stays eligible. An all-exhausted chain returns empty rather than link zero, because routing into a known-capped provider is worse than holding. Unlike agents.profiles this block REFUSES a malformed value rather than degrading open: degrading open on the failover path spawns a worker at an unintended vendor and bills it.
 fallback = {}
@@ -323,24 +323,8 @@ permission_mode = ""
 route = ""
 # Default claude account pin for bare spawns, forwarded as --account; an explicit --account wins, empty = unset.
 account = ""
-
-# Per-harness answers under the spawn defaults. The scalars above are the base
-# that works for most; an entry here re-answers one harness whose flag
-# vocabulary differs. Each entry may set permission_mode, effort, substrate, or
-# an opaque args list appended behind a -- passthrough fence (the harness's own
-# bundle). Precedence: explicit flag > lane > profiles.<verb>.harness.<h> >
-# profiles.<verb> > agents.defaults.harness.<h> > agents.defaults.
-# [agents.defaults.harness.codex]
-# permission_mode = "yolo"
-# args = ["--profile", "fno"]
-# [agents.defaults.harness.opencode]
-# permission_mode = "auto"
-
-# Per-verb profiles carry the same harness table, one rung above their scalars:
-# [agents.profiles.target]
-# effort = "high"
-# [agents.profiles.target.harness.codex]
-# effort = "xhigh"
+# Per-harness answers under the spawn defaults, keyed by harness name: each entry may set permission_mode, effort, substrate, or an opaque args list appended behind a -- passthrough fence (the harness's own bundle, e.g. codex --profile <name>). The scalar fields on agents.defaults are the base that works for most; an entry here re-answers one harness whose flag vocabulary differs. Precedence: explicit flag > lane > profiles.<verb>.harness.<h> > profiles.<verb> > agents.defaults.harness.<h> > agents.defaults. provider/model/route/account are refused here (lane fields, never per-harness answers); an unknown harness name refuses at the spawn seam.
+harness = {}
 
 [agents.reap_receipts]
 # Days a reap receipt (the resume handle for a reaped row) stays before the GC sweep expires it (default 7). A receipt whose reaped_at cannot be read is kept and named, never deleted on a failed read.
