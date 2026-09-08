@@ -73,7 +73,6 @@ pub(crate) fn build_sweep_modal(tabs: usize, used: usize, dead: usize) -> AuxPop
     }
 }
 
-
 /// The prune flags one sweep scope maps to, pure so the expansion each
 /// choice promises is unit-testable without spawning the verb. `both` means
 /// all three populations (x-688b): tabs, spent shells, and dead agents -
