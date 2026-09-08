@@ -8234,8 +8234,7 @@ def _sweep_close_stranded_contained(entries: list[dict]) -> list[str]:
     return closed
 
 
-# These two sweeps live in graph/_closures.py: this file is over the
-# source budget and may only shrink.
+# In graph/_closures.py: this file is over the source budget.
 from fno.graph._closures import (  # noqa: E402
     _strandable_epic_ids,
     _sweep_close_done_epics,
@@ -10343,9 +10342,7 @@ def cmd_reconcile(
         # is invisible to the SessionStart hook, which runs `reconcile --json`
         # and discards stderr.
         contained_errors_acc: list = []
-        # Nodes given the do rows of the session that shipped them inside
-        # another node's PR. Reporting only, like contained_closed_acc:
-        # a repair nobody names reads as "nothing happened".
+        # Reporting only: a repair nobody names reads as "nothing happened".
         carried_stamped_acc: list = []
         supersession_unverified_acc: list[dict] = []
         blocked_by_settlement_acc: list[dict] = []
@@ -10482,23 +10479,19 @@ def cmd_reconcile(
                         err=True,
                     )
                 cascade_closed_acc.extend(_sweep_close_done_epics(entries))
-                # AFTER both close sweeps: a node closed in this same pass is a
-                # passenger too, and stamping before it closed would miss it.
+                # AFTER both close sweeps: a node closed this pass is a
+                # passenger too. Guarded like them, for the same reason.
                 try:
                     carried_stamped_acc.extend(_sweep_stamp_carried_sessions(entries))
                 except Exception as _cs_exc:  # noqa: BLE001 - never abort the sweep
                     contained_errors_acc.append(
-                        {
-                            "owner": None,
-                            "stage": "carried-session-stamp",
-                            "error": str(_cs_exc)[:200],
-                        }
+                        {"owner": None, "stage": "carried-session-stamp",
+                         "error": str(_cs_exc)[:200]}
                     )
                     typer.echo(
-                        "warning: the carried-session stamp failed: "
-                        f"{_cs_exc}; nodes that shipped inside another node's PR "
-                        "still record no session (`fno backlog reconcile` retries "
-                        "next run)",
+                        f"warning: the carried-session stamp failed: {_cs_exc}; "
+                        "nodes that shipped inside another node's PR still record "
+                        "no session (`fno backlog reconcile` retries next run)",
                         err=True,
                     )
                 # Same self-heal shape, and guarded the same way: a raise here
@@ -10771,9 +10764,7 @@ def cmd_reconcile(
             _sim_acc.extend(_sweep_close_done_epics(_sim))
         healed_epics = sorted(set(_sim_acc))
         contained_closed = sorted(set(_sim_contained))
-        # Previewed on the throwaway copy for the same reason the closes are:
-        # a preview that omits a leg reads as "in sync" where a real run writes.
-        try:
+        try:  # a preview that omits a leg reads "in sync" where a run writes
             carried_stamped = sorted(set(_sweep_stamp_carried_sessions(_sim)))
         except Exception:  # noqa: BLE001 - a preview never raises
             carried_stamped = []
@@ -10988,8 +10979,6 @@ def cmd_reconcile(
             # (). Reported separately from `closed`, whose entries all
             # carry their own pr_number - a contained node has none.
             "contained_closed": contained_closed,
-            # Nodes given the do rows of the session that shipped them inside
-            # another node's PR.
             "carried_stamped": carried_stamped,
             # Cascade/sweep and canonical-sync legs. In the payload because the
             # SessionStart hook reads --json and discards stderr: a leg whose
@@ -11063,11 +11052,6 @@ def cmd_reconcile(
                 f"Would close {len(contained_closed)} contained node(s) shipped "
                 f"inside {_whose}: " + ", ".join(contained_closed)
             )
-        if carried_stamped:
-            typer.echo(
-                f"Would record the shipping session on {len(carried_stamped)} node(s) "
-                f"that shipped inside another node's PR: " + ", ".join(carried_stamped)
-            )
         if healed_epics:
             typer.echo(
                 f"Would self-heal {len(healed_epics)} container epic(s): " + ", ".join(healed_epics)
@@ -11097,10 +11081,8 @@ def cmd_reconcile(
                 f"inside {_whose} (cost stays on the delivery unit): " + ", ".join(contained_closed)
             )
         if carried_stamped:
-            typer.echo(
-                f"Recorded the shipping session on {len(carried_stamped)} node(s) "
-                f"that shipped inside another node's PR: " + ", ".join(carried_stamped)
-            )
+            typer.echo(f"Recorded the shipping session on {len(carried_stamped)} node(s) "
+                       "carried in another node's PR: " + ", ".join(carried_stamped))
         if healed_epics:
             typer.echo(
                 f"Auto-closed {len(healed_epics)} container epic(s) "
