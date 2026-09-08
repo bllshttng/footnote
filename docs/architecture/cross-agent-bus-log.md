@@ -136,7 +136,7 @@ The inject targets the session id. Both `control.sock` and the codex daemon are 
 
 The durable copy must be addressed to the RESOLVED session's canonical handle. Deriving it from the raw token misaddresses every alias. A full session id is the collision escape hatch. It is written verbatim, never canonicalized. Two same-window codex sessions share their first eight characters, so canonicalizing a full id collapses both onto one durable key. `drain-self` reads the full id.
 
-A non-id token, such as a `--name` like `blueprint-x-ce6e-glm`, is not a mail address. The drain is handle-keyed, so a name never matches a session's handle and a durable write under it strands. `--force` is the exception, and for that same reason: it writes no durable row. It types at a pane the registry names, and the registry is what resolves a friendly name to the session behind it.
+A non-id token, such as a spawn `--name` like `blueprint-auth-glm`, is not a mail address. The drain is handle-keyed, so a name never matches a session's handle and a durable write under it strands. `--force` is the exception, and for that same reason: it writes no durable row. It types at a pane the registry names, and the registry is what resolves a friendly name to the session behind it.
 
 The codex head-8 refusal and the `--force` guard both sit ABOVE every lane that returns on its own. An address rule that covers only the lanes reached last is not an address rule. A dropped transport flag is worse than a refused one, because the receipt still reads like a success. Neither guard applies where the positional holds the message BODY. `--to-project` and `--to-king` address by option, so an eight-hex body there is content nobody is addressing.
 
