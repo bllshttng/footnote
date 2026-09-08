@@ -70,12 +70,28 @@ impl VerifyReport {
     }
 }
 
-/// The compile-time identity of the running binary: the pin every receipt in
-/// the window must carry. A version bump or a rebuild behind the same
-/// version both change what a receipt must show to pass - the version plus
-/// the build target's mtime is the honest cheap identity.
+/// The identity of the RUNNING binary: the pin every receipt in the window
+/// must carry. Two deployments of the same package version must not share a
+/// stamp - a rebuild behind the same version would otherwise accept receipts
+/// the deployed binary never wrote - so the pin carries the running
+/// executable's own mtime beside the version. An unreadable exe path falls
+/// back to the version alone (named in the stamp) rather than failing the
+/// writer.
 pub fn current_build() -> String {
-    format!("fno-agents {}", env!("CARGO_PKG_VERSION"),)
+    let version = env!("CARGO_PKG_VERSION");
+    match std::env::current_exe()
+        .and_then(|exe| exe.metadata())
+        .and_then(|meta| meta.modified())
+    {
+        Ok(modified) => {
+            let secs = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("fno-agents {version} exe-mtime {secs}")
+        }
+        Err(_) => format!("fno-agents {version} exe-mtime unknown"),
+    }
 }
 
 /// Audit the receipts store over the window. Read-only: nothing here writes.
@@ -125,6 +141,13 @@ pub fn verify(home: &AgentsHome, since_secs: u64) -> VerifyReport {
         };
         if (now - reaped).num_seconds() > since_secs as i64 {
             continue; // outside the window: not this report's population
+        }
+        // A removal receipt (`removed_by` set, the x-b150 shape) records a
+        // deliberate operator removal, not a reap: it carries no effect
+        // records by contract, so demanding them here would make one plain
+        // `fno agents rm` red the whole window.
+        if receipt.removed_by.is_some() {
+            continue; // removal receipt: not a retirement, not this audit's population
         }
         let stamped = receipt.writer_build.as_deref().unwrap_or_default();
         if stamped != build {
@@ -345,5 +368,26 @@ mod tests {
         assert!(!report.passes(), "verified must be empty");
         assert_eq!(report.checked, 1);
         assert!(report.problems.is_empty());
+    }
+
+    #[test]
+    fn a_removal_receipt_is_not_this_audits_population() {
+        // The x-b150 removal receipt (removed_by set, no effect records by
+        // contract) must not red the window: one plain `fno agents rm` is a
+        // deliberate operator removal, not a failed reap.
+        let home = temp_home();
+        let mut receipt = build_reap_receipt(&row("rm-row"), None).unwrap();
+        stamp(&mut receipt, Some(current_build().as_str()));
+        receipt.removed_by = Some("operator".into());
+        write_reap_receipt(&home, &receipt).unwrap();
+
+        let report = verify(&home, 24 * 3600);
+        assert_eq!(report.checked, 1);
+        assert!(report.verified.is_empty());
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert!(
+            !report.passes(),
+            "no retirement evidence: an empty window is no pass"
+        );
     }
 }

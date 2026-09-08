@@ -1868,6 +1868,50 @@ pub fn retire_session_members(harness: &str, session_id: &str) -> io::Result<usi
     Ok(retired)
 }
 
+/// The native session ids a reap receipt preserves (x-70e1): a retired
+/// session's squad membership can outlive its tombstone until the sweep's
+/// squad wiring lands, so restore consults the receipts store as the death
+/// record before resuming a member. `None` answers "present but unreadable":
+/// like the other member-evidence readers, it contributes no verdict and the
+/// caller keeps the member (the unknown-liveness convention) rather than
+/// bricking restore on a broken store. A missing directory is the
+/// complete-empty case: no receipt was ever written.
+pub fn retired_receipt_session_ids() -> Option<std::collections::HashSet<String>> {
+    let root = crate::agents_view::registry_path()
+        .parent()?
+        .to_path_buf()
+        .join("reap-receipts");
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Some(std::collections::HashSet::new())
+        }
+        Err(_) => return None,
+    };
+    let mut out = std::collections::HashSet::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        if let Some(sid) = value
+            .get("harness_session_id")
+            .and_then(serde_json::Value::as_str)
+        {
+            if !sid.is_empty() {
+                out.insert(sid.to_string());
+            }
+        }
+    }
+    Some(out)
+}
+
 /// The lifecycle-collection twin of [`mutate`] (x-7561): the SAME locked atomic
 /// read-modify-write, applying `f` to `external_lifecycle` while preserving
 /// `squads` byte-for-byte. Both collections ride one version-1 object, so a
