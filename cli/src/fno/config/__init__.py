@@ -5154,103 +5154,13 @@ def loaded_from() -> Optional[Path]:
     return _loaded_from
 
 
-# An unknown table with more leaves than this reports as the table, not as a
-# line per leaf. Three keeps the typo'd-section case exact and bounds the rest.
-_UNKNOWN_LEAF_CAP = 3
-
-
-def _nested_model(annotation: object) -> "type[BaseModel] | None":
-    """The BaseModel a field annotation resolves to, unwrapping Optional."""
-    for arg in getattr(annotation, "__args__", ()):
-        if arg is not type(None) and isinstance(arg, type) and issubclass(arg, BaseModel):
-            return arg
-    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-        return annotation
-    return None
-
-
-def _mapping_value_model(annotation: object) -> "type[BaseModel] | None":
-    """The VALUE model of a ``dict[str, Model]`` field, else None.
-
-    ``Optional[dict[str, Model]]`` resolves the same way. A plain
-    ``dict[str, str]`` returns None: there is no schema below it to check.
-    """
-    import types
-    import typing
-
-    candidates = [annotation]
-    # Both union spellings: `Optional[dict[...]]` and `dict[...] | None` have
-    # different origins, and a model that switches spelling must not silently
-    # fall back to walking the map's keys as field names.
-    if typing.get_origin(annotation) in (typing.Union, types.UnionType):
-        candidates = list(typing.get_args(annotation))
-    for candidate in candidates:
-        if typing.get_origin(candidate) is not dict:
-            continue
-        args = typing.get_args(candidate)
-        if len(args) == 2 and isinstance(args[1], type) and issubclass(args[1], BaseModel):
-            return args[1]
-    return None
-
-
 def _warn_unknown_keys(
     data: dict[str, object], model: type[BaseModel], prefix: str = ""
 ) -> list[str]:
-    """Return the dotted keys not in the model's field set, and log them.
+    """Deprecated spelling of :func:`fno.config.readback.warn_unknown_keys`."""
+    from fno.config.readback import warn_unknown_keys
 
-    Always walks and always returns; the ``FNO_DEBUG`` gate now governs only
-    the WARNING, so the default UX stays quiet while ``fno config doctor``
-    (``check_unknown_keys``) can report the same finding on demand.
-
-    An unknown SECTION is expanded to its leaf paths, so a typo'd ``[reveiw]``
-    reports ``reveiw.cross_model`` rather than a bare section name the operator
-    then has to open the file to interpret.
-    """
-    debug = bool(os.environ.get("FNO_DEBUG"))
-    unknown: list[str] = []
-    known = set(model.model_fields.keys())
-    for key in data:
-        qualified = f"{prefix}.{key}" if prefix else key
-        if key not in known:
-            value = data[key]
-            leaves: list[str] = []
-            if isinstance(value, dict) and value:
-                leaves = [f"{qualified}.{leaf}" for leaf, _ in _flatten_leaf_paths(value)]
-            # Name the leaves of a small unknown table, so a typo'd `[reveiw]`
-            # reports reveiw.cross_model rather than a bare section the reader
-            # then has to open the file to interpret. A LARGE unknown table is
-            # one thing, not many: a foreign tool's block sharing the config
-            # file would otherwise print a line per key, forever.
-            unknown.extend(leaves if 0 < len(leaves) <= _UNKNOWN_LEAF_CAP else [qualified])
-            continue
-        # Recurse into nested dicts if the field is itself a BaseModel
-        sub_value = data[key]
-        field_info = model.model_fields[key]
-        annotation = field_info.annotation
-        if not isinstance(sub_value, dict):
-            continue
-        mapped = _mapping_value_model(annotation)
-        if mapped is not None:
-            # A `dict[str, Model]` field: its KEYS are operator-chosen names
-            # (a profile verb, a workspace, a provider id), not field names.
-            # Walking them against Model's field set called every real entry
-            # unknown - `agents.profiles.think` read as a typo for a field.
-            for name, entry in sub_value.items():
-                if isinstance(entry, dict):
-                    unknown.extend(
-                        _warn_unknown_keys(entry, mapped, prefix=f"{qualified}.{name}")
-                    )
-            continue
-        inner = _nested_model(annotation)
-        if inner is not None:
-            unknown.extend(_warn_unknown_keys(sub_value, inner, prefix=qualified))
-    if debug:
-        for qualified in unknown:
-            _LOG.warning(
-                "settings.yaml: unknown key %r (ignored for forward compatibility)",
-                qualified,
-            )
-    return unknown
+    return warn_unknown_keys(data, model, prefix)
 
 
 def _flatten_leaf_paths(
@@ -5668,21 +5578,6 @@ def resolve_source(
         return None
     assert decider is not None  # the first setter introduces the value: a change
     return (decider, [p for p in setters if p != decider])
-
-
-def source_note(key: str, root: Optional[Path] = None) -> Optional[str]:
-    """``"set in <file>"`` when a config file decides ``key``, else ``None``.
-
-    The ONE renderer for provenance on a printed value, so every receipt names
-    the deciding file in the same words and reads the loader's own answer
-    rather than re-deriving one. ``None`` means the value is a built-in
-    default, which a caller renders however its line reads best.
-    """
-    try:
-        decided = resolve_source(key, root)
-    except Exception:  # noqa: BLE001 - a receipt, not the loader
-        return None
-    return f"set in {decided[0]}" if decided is not None else None
 
 
 def agents_headless_yolo(provider: str) -> bool:

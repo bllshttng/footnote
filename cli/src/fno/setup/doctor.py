@@ -42,10 +42,8 @@ _ACCESSOR_NAMES = (
 def _settings_candidates_for(path: Path) -> list[Path]:
     """The ``config.toml``-first pair at one settings location.
 
-    ``_global_settings_path`` still names ``settings.yaml``; after the
-    yaml-to-toml migration the file that exists is its ``config.toml``
-    sibling. A check that reads only the yaml name is a check that stopped
-    running.
+    A check reading only the legacy ``settings.yaml`` name is a check that
+    stopped running at the yaml-to-toml migration.
     """
     return [path.with_name("config.toml"), path]
 
@@ -88,11 +86,8 @@ def check_wip_caps() -> list[str]:
     malformed cap so a config typo never crashes a backlog mutation - a
     deliberate "never raise" contract on the render path. The cost is zero
     feedback: a quoted, negative, or mistyped cap just stops working. This
-    surfaces those drops as advisory messages at ``fno config doctor`` time,
-    reading the GLOBAL settings location the renderer reads - both the
-    ``config.toml`` that exists after migration and the legacy
-    ``settings.yaml``. Returns a (possibly empty) list of human-readable
-    reasons.
+    surfaces those drops at ``fno config doctor`` time, reading both files at
+    the GLOBAL settings location the renderer reads.
     """
     try:
         from fno.config import _global_settings_path
@@ -484,142 +479,13 @@ def check_accounts() -> list[str]:
     return list(dict.fromkeys(problems))
 
 
-def check_config_files_read() -> list[str]:
-    """Report every settings file the loader could not read back (x-b052).
-
-    ``_load_raw`` swallows a parse failure so one bad file never makes every
-    fno command exit. The cost was that ``fno config doctor`` printed a file as
-    the settings source, printed OK, and exited 0 - a verdict computed from a
-    config it never proved it read. An operator who copies a documented schema
-    into the documented path gets a file that no-ops and a doctor that agrees.
-
-    A file that parses to an EMPTY table reports nothing: an empty file and a
-    comments-only file are both legal.
-    """
-    try:
-        from fno.config import _candidate_paths
-        from fno.config_io import _parse_settings
-    except Exception:
-        return []
-
-    problems: list[str] = []
-    seen: set[Path] = set()
-    for path in _candidate_paths():
-        if not path.is_file():
-            continue
-        resolved = path.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        _, error = _parse_settings(path)
-        if error is not None:
-            problems.append(error)
-    return problems
-
-
-# A leaf name shared by more sections than this is a common word, not a near
-# miss; naming every holder teaches nothing.
-_NEAR_MISS_CAP = 4
-
-
-def _near_miss_keys(unknown: str) -> list[str]:
-    """Modeled keys sharing ``unknown``'s trailing leaf name, in schema order.
-
-    The operator wrote a real leaf name in the wrong section. ``[agents]
-    max_lanes = 4`` is the specimen: it reads as a lane cap and sets nothing
-    the parallel lanes consult. Naming ``parallel.max_lanes`` beside it is the
-    whole remedy.
-    """
-    try:
-        from fno.config.registry import FIELD_META
-    except Exception:
-        return []
-    leaf = unknown.rsplit(".", 1)[-1]
-    hits = [key for key in FIELD_META if key != unknown and key.rsplit(".", 1)[-1] == leaf]
-    # `enabled` alone lives under 25 sections. A hint listing all of them is
-    # not a remedy, it is the schema dumped into a doctor line.
-    return hits if len(hits) <= _NEAR_MISS_CAP else []
-
-
-def check_unknown_keys() -> list[str]:
-    """Report keys the model ignores, naming the file that holds each (x-b052).
-
-    ``extra="ignore"`` is forward compatibility, and it also means a typo'd
-    section (``[reveiw]``) or leaf (``cros_model``) is accepted in silence.
-    ``_warn_unknown_keys`` already finds them and, without ``FNO_DEBUG``, says
-    nothing.
-
-    Each candidate layer is walked SEPARATELY rather than the merged result, so
-    every message names the file that actually holds the key. A clean install
-    reports nothing, because a clean install sets no unknown keys - the report
-    is the operator's own wrong key, never the schema's shape.
-    """
-    try:
-        from fno.config import SettingsModel, _candidate_paths, _warn_unknown_keys
-        from fno.config_io import _parse_settings, _unwrap_config_dict
-    except Exception:
-        return []
-
-    problems: list[str] = []
-    seen: set[Path] = set()
-    for path in _candidate_paths():
-        if not path.is_file():
-            continue
-        resolved = path.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        parsed, error = _parse_settings(path)
-        if error is not None:
-            continue  # check_config_files_read owns the unreadable file
-        try:
-            unknown = _warn_unknown_keys(_unwrap_config_dict(parsed), SettingsModel)
-        except Exception:  # noqa: BLE001 - a report, not the loader
-            continue
-        for key in unknown:
-            hints = _near_miss_keys(key)
-            tail = f"did you mean {' or '.join(hints)}?" if hints else "ignored"
-            problems.append(f"{key} (set in {path}) is not a modeled config key; {tail}")
-    return problems
-
-
-def check_enabled_with_empty_population() -> list[str]:
-    """Report a switch that is on with nothing that can satisfy it (x-b052).
-
-    ``review.cross_model`` is the pair verified by reading its consumer:
-    ``review_assurance`` widens the reviewer set from
-    ``available_provider_kinds()``, so with no dispatchable non-claude provider
-    the diversity requirement can never be met, and the gate reads as
-    configured rather than as unsatisfiable.
-
-    Only pairs proved coupled by reading the consumer belong here. A pair added
-    from the leaf name alone is how this defect was first mis-diagnosed.
-    """
-    try:
-        from fno.config import load_settings
-        from fno.review.provider_resolution import available_provider_kinds
-    except Exception:
-        return []
-
-    try:
-        enabled = bool(load_settings().review.cross_model.enabled)
-    except Exception:  # noqa: BLE001 - a report, not the loader
-        return []
-    if not enabled:
-        return []
-
-    try:
-        kinds = [str(k).strip().lower() for k in available_provider_kinds()]
-    except Exception:  # noqa: BLE001
-        return []
-    if any(kind != "claude" for kind in kinds):
-        return []
-    return [
-        "review.cross_model.enabled is true and no non-claude provider is "
-        f"dispatchable; available reviewer kinds: {', '.join(kinds) or 'none'}. "
-        "The diversity requirement can never be met until a provider record is "
-        "added (fno config accounts)."
-    ]
+from fno.config.readback import (  # noqa: E402  - re-export, not a cycle
+    check_config_files_read,
+    check_enabled_with_empty_population,
+    check_unknown_keys,
+    contributing_files,
+    source_note,
+)
 
 
 def run_doctor() -> int:
@@ -627,7 +493,7 @@ def run_doctor() -> int:
     import os
 
     from fno import paths
-    from fno.config import _candidate_paths, load_settings, loaded_from, source_note
+    from fno.config import _candidate_paths, load_settings, loaded_from
 
     test_mode = os.environ.get("FNO_TEST_MODE") == "1"
 
@@ -664,16 +530,10 @@ def run_doctor() -> int:
     # file) may not match what was actually parsed.
     settings_path = loaded_from() or found_path
 
-    # Contributors, not presences. The old line named the highest-priority file
+    # Contributors, not presences: the old line named the highest-priority file
     # PRESENT, so an unreadable project config was printed as the source of
-    # values the global file actually decided.
-    try:
-        from fno.config import _aliased_layers
-
-        contributors = [str(path) for path, _ in _aliased_layers(tuple(_candidate_paths()))]
-    except Exception:  # noqa: BLE001 - a receipt, not the loader
-        contributors = []
-    print(f"[doctor] settings source: {', '.join(contributors) or settings_path}")
+    # values the global file decided.
+    print(f"[doctor] settings source: {', '.join(contributing_files()) or settings_path}")
     print(f"[doctor] schema_version: {s.schema_version}")
 
     # A key that degraded to its default rather than raising. The degrade keeps

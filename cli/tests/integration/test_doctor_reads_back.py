@@ -328,7 +328,7 @@ def test_a_large_unknown_table_reports_once(tmp_path: Path) -> None:
 
 def test_a_leaf_name_shared_by_many_sections_gets_no_hint(tmp_path: Path) -> None:
     """`enabled` lives under 25 sections; listing all of them is not a remedy."""
-    from fno.setup.doctor import _near_miss_keys
+    from fno.config.readback import _near_miss_keys
 
     assert _near_miss_keys("nosuchsection.enabled") == []
     # Positive control on the lookup itself, so an empty list above cannot be
@@ -347,7 +347,7 @@ def test_both_optional_spellings_of_a_dict_block_resolve(tmp_path: Path) -> None
 
     from pydantic import BaseModel
 
-    from fno.config import _mapping_value_model
+    from fno.config.readback import _mapping_value_model
 
     class Row(BaseModel):
         name: str = ""
