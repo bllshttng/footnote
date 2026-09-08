@@ -138,6 +138,22 @@ The R5 guard walks every `lru_cache` and `cache` decorator under `cli/src/fno`. 
 
 When `FNO_TEST_HERMETIC=1`, the `fno.paths` state accessors pass their resolved paths through the existing events hermetic fence. A path outside the temporary allowed roots raises `HermeticEscapeError` with the path and remediation. The check judges the resolved path, so a symlink inside the sandbox cannot redirect a write to a live journal.
 
+The shell appender carries the same fence. When `FNO_TEST_HERMETIC=1`, `_append_bounded_event` in `scripts/lib/events.sh` refuses a journal write outside the allowed roots. It names the path on stderr and returns non-zero. Three hooks build a `${REPO_ROOT}/.fno/events.jsonl` path themselves, so `FNO_EVENTS_PATH` never reaches them. In a worktree that file is a symlink to the canonical journal. That is how 33 fixture questions reached the operator's live queue on 2026-08-20. The refusal judges the physical directory, so it follows the symlink before it decides. Both guards run before the mutex. Acquiring the mutex creates a writer directory beside the journal, which touches the file the guard refuses.
+
+## The project journal is opt-in
+
+A project `.fno/` marks a project that opted in. `fno config setup wizard` and `fno do target init` create it.
+
+An event append never creates one. Before this rule, a session in any git repo with the plugin installed left a `.fno/` and an `events.jsonl` behind. The project did not have to use footnote at all.
+
+The appender was not the only source, and guarding it alone changed nothing. `hooks/session-start.sh` ran `mkdir -p .fno` for its plan-reconcile watermark, and `hooks/groom-self-heal-session-start.sh` ran it for the daily grooming watermark. Both fired before the appender was reached, so the directory already existed by the time a guard saw the path. Both now carry the gate `hooks/reconcile-session-start.sh` already applied: no `.fno/` means no fire and no probe, and the directory is never created.
+
+The local journal itself stays. The loop gate, the review attestation reader and `fno backlog` all answer per-project questions from it. When the directory is absent the append is skipped and returns 3, never 0, so no caller reads a skip as a write.
+
+`context-nudge.sh` and the stop hooks write the global journal too, so their rows survive. `guard-mark.sh` and `target-stopfailure.sh` write one path, so their rows drop in a repo that never opted in. That is the intended outcome. A stop failure needs a target session, which creates `.fno/config.toml` first. A guard decision in a repo with no `.fno/` has no reader.
+
+The rule names the directory, not a state root. `STATE_DIR` cannot be read here. `scripts/lib/paths.sh` exports it as the machine-wide root, and `hooks/capture-plan-mode.sh` sets it to `<repo>/.fno`, so the second meaning turns the guard off in exactly the repos it protects. `~/.fno` is named as itself, and the spaces under it have parents that are not `.fno`, so both stay creatable.
+
 ## A declared root or a refusal
 
 `FNO_TEST_HERMETIC` has three states and `fno.hermetic.declared_root` reads all three. `1` declares a sandboxed process root. `0` is ambient on purpose, and is set PER TEST by the handful of tests asserting production behavior. No lane runs on it. `--ambient dirty` builds its child env as `neutralise(poison(E))`. `poison` never touches the pin, and `neutralise` stamps `1` unconditionally. So the dirty lane runs pinned, like the clean one. Absent means nothing was declared. Under a test runner that refuses with `UndeclaredStateRootError`, naming the path, its root class and the three ways to declare. The marker for "under a test runner" is `pytest` in `sys.modules`, because the runner itself produces it and it is true at import time, which `PYTEST_CURRENT_TEST` is not. Both pytest trees declare a process root in-process already, at `cli/tests/conftest.py` and `cli/src/fno/conftest.py`, so the refusal only meets a lane that skipped the conftest chain. Production never meets it.

@@ -396,10 +396,15 @@ gc_helper="${SCRIPT_DIR}/helpers/gc-dead-target-manifest.sh"
 # Watermark written BEFORE launch = at-most-once-per-day even if the sweep dies
 # (the write-time projection and post-merge ritual are the other two layers).
 if command -v fno >/dev/null 2>&1; then
+    # Gated on an existing `.fno/`, and it never creates one. `mkdir -p .fno`
+    # here put a `.fno/` in every repo a session touched, whether or not that
+    # project ever used footnote, and it ran before the appender guard could
+    # see anything. Same gate hooks/reconcile-session-start.sh applies, for the
+    # same reason.
     rs_watermark=".fno/.reconcile-status-watermark"
     rs_today="$(date +%Y-%m-%d 2>/dev/null || echo "")"
-    if [[ -n "$rs_today" && "$(cat "$rs_watermark" 2>/dev/null || echo "")" != "$rs_today" ]]; then
-        mkdir -p .fno 2>/dev/null; printf '%s\n' "$rs_today" >"$rs_watermark" 2>/dev/null || true
+    if [[ -d .fno && -n "$rs_today" && "$(cat "$rs_watermark" 2>/dev/null || echo "")" != "$rs_today" ]]; then
+        printf '%s\n' "$rs_today" >"$rs_watermark" 2>/dev/null || true
         ( fno do plan reconcile-status --apply >/dev/null 2>&1 & ) 2>/dev/null || true
     fi
     # Grooming fallback, for the codex/gemini path only: claude registers the
