@@ -85,9 +85,9 @@ CONTENDED = "contended"
 POLLING_SETTLED = "polling_settled"
 #: Open node, spawn row, no crown, quiet past the drive threshold (x-c624). Driven like WAKE.
 SILENCE = "silence"
-#: Report-only: a past-ceiling row whose evidence says FINISHED work (its
-#: node shipped, or its tail reads done) never enters the needs-human ask -
-#: it can never age out of an ask, so filing it stale re-asked it forever.
+#: Report-only: a past-ceiling row whose evidence says FINISHED work (node
+#: shipped, or tail reads done) never enters the needs-human ask it can
+#: never age out of. Evidence rules: docs/architecture/fleet-watchdog.md.
 SPENT = "spent"
 
 #: Every verdict this module can return. `--only` validates against THIS, not

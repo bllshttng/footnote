@@ -50,11 +50,7 @@ def question_text(findings, key: str) -> str:
 
 
 def _ask_line(findings) -> str:
-    unique = _unique(findings)
-    if not unique:
-        return "fno agents watchdog"
-    first = unique[0]
-    return first.clear_command
+    return _unique(findings)[0].clear_command
 
 
 def already_asked(root: Path, key: str, *, marker: str = MARKER) -> "str | None":
@@ -73,8 +69,7 @@ def already_asked(root: Path, key: str, *, marker: str = MARKER) -> "str | None"
     return None
 
 
-#: The closers reconcile_channel mints. Mechanical, never a human verdict:
-#: they do not suppress, so a set that changed away and back re-asks.
+#: Closers reconcile_channel mints. Mechanical, never a human verdict.
 _MECHANICAL_CLOSERS = frozenset({"stale-escalate", "friction-escalate"})
 
 
@@ -82,12 +77,8 @@ def _is_answer_close(rec: dict, qids: "set[str]") -> bool:
     from fno.outstanding.core import QUESTION_CLOSED_EVENT
 
     data = rec.get("data")
-    return (
-        rec.get("type") == QUESTION_CLOSED_EVENT
-        and isinstance(data, dict)
-        and str(data.get("question_id") or "") in qids
-        and bool(data.get("answer"))
-    )
+    return (rec.get("type") == QUESTION_CLOSED_EVENT and isinstance(data, dict)
+            and str(data.get("question_id") or "") in qids and bool(data.get("answer")))
 
 
 def _is_reset(rec: dict, marker: str) -> bool:
@@ -101,8 +92,7 @@ def _is_reset(rec: dict, marker: str) -> bool:
 
 def answered_question(root: Path, key: str, *, marker: str = MARKER) -> "str | None":
     """The id of the question carrying ``[<marker>:<key>]`` that a human
-    answered and no empty-set reset has retired, else None. Contract:
-    docs/architecture/fleet-watchdog.md."""
+    answered and no empty-set reset retired, else None."""
     from fno.outstanding.core import read_answered_questions, read_question_events
 
     needle = f"[{marker}:{key}]"
@@ -122,16 +112,14 @@ def answered_question(root: Path, key: str, *, marker: str = MARKER) -> "str | N
 
 
 def reset_answered(root: Path, *, marker: str) -> None:
-    """Record the empty-set episode boundary for a marker, lazily: only when
-    an answer is pending reset. The returning set then asks fresh."""
+    """Record the empty-set episode boundary, lazily: only when an answer is pending reset."""
     import secrets
 
     from fno.events import operator_decision
     from fno.outstanding.core import append_question_event, read_answered_questions, read_question_events
 
     events = read_question_events()
-    answered_ids = {q["id"] for q in read_answered_questions()
-                    if f"[{marker}:" in q.get("question", "")}
+    answered_ids = {q["id"] for q in read_answered_questions() if f"[{marker}:" in q.get("question", "")}
     last = max(
         (i for i, rec in enumerate(events) if _is_answer_close(rec, answered_ids)),
         default=-1,
