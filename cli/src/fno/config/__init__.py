@@ -4329,22 +4329,9 @@ KING_GOAL_TEXT = (
 
 
 class KingBlock(BaseModel):
-    """The king loop (nested under 'config.king').
-
-    Both base keys default OFF. ``enabled`` arms the loop that holds a king
-    session open while its board names work it can shrink. ``autonomous_merge``
-    is separate and stricter: merging is outward and hard to reverse, so a
-    mergeable PR is reported to the king and never counted as its work until an
-    operator opts in.
-
-    The ``wake_*`` keys arm the pr-watch tick's wake phase, which respawns a
-    king whose holder is gone and whose scope still has work or undrained mail.
-    Sizes are derived, not guessed: ceiling 32 is ~1.5x the worst measured day
-    (21 wakes at a 15m debounce over 114 messages) and ~1.8x the p90; the
-    debounce is 15m because a king woken inside it is still working under its
-    own in-session arm, so a second wake buys nothing. The ceiling is a ROLLING
-    24h window per scope, never a lifetime constant: a lifetime cap of any size
-    strands a long-lived reign.
+    """The king loop (nested under 'config.king'). Field-by-field detail
+    (what each key arms, the derived wake sizing, the grace window) is in
+    registry.py's Meta text, surfaced verbatim by `fno config schema`.
 
     ``RunAtLoad`` is false for the pr-watcher LaunchAgent by design (the
     operator loads it by hand), so a machine that never ran ``launchctl load``
@@ -4359,9 +4346,6 @@ class KingBlock(BaseModel):
     wake_ceiling: int = 32
     wake_debounce_seconds: int = 900
     wake_backstop_seconds: int = 1800
-    # A blocked distress row younger than this is still within its own
-    # response window; older than this with no answer is what the
-    # blocked_child queue surfaces.
     blocked_child_grace_minutes: int = 30
     # The reign skill carries these defaults verbatim; the keys are the one
     # place an operator edits them.
