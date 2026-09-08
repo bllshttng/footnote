@@ -106,7 +106,7 @@ def test_locked_mutate_keeps_last_10_backups(tmp_path):
         # Small sleep to ensure distinct timestamps in backup names
         time.sleep(0.01)
 
-    backups = sorted(tmp_path.glob("graph.json.bak.*"))
+    backups = sorted(tmp_path.glob("backups/graph.json.bak.*"))
     assert len(backups) == 10, f"Expected 10 backups, got {len(backups)}: {backups}"
 
 

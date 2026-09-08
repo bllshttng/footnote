@@ -275,7 +275,9 @@ def run_migration(
             existing_content_path: Optional[Path] = None
             if settings_path.exists() and not force:
                 ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
-                backup_path = settings_path.parent / f"settings.yaml.bak.{ts}"
+                backup_dir = settings_path.parent / "backups"
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                backup_path = backup_dir / f"settings.yaml.bak.{ts}"
                 settings_path.rename(backup_path)
                 existing_content_path = backup_path
                 print(

@@ -276,8 +276,8 @@ def test_existing_settings_without_sentinel_gets_backed_up(tmp_path: Path) -> No
     rc = run_migration(settings_root=settings_root)
     assert rc == 0
 
-    # A backup should exist
-    backups = list(settings_root.glob("settings.yaml.bak.*"))
+    # A backup should exist, under backups/ (never the state root, x-a469)
+    backups = list(settings_root.glob("backups/settings.yaml.bak.*"))
     assert backups, "A backup of the prior settings.yaml should have been created"
 
     # The main settings.yaml should exist (possibly same or new content)
@@ -434,7 +434,7 @@ def test_non_force_backup_preserves_existing_keys(tmp_path: Path) -> None:
     assert rc == 0, f"Expected exit 0, got {rc}"
 
     # Backup must have been created (confirms we hit the non-force path)
-    backups = list(settings_root.glob("settings.yaml.bak.*"))
+    backups = list(settings_root.glob("backups/settings.yaml.bak.*"))
     assert backups, "A backup should exist (confirms non-force backup path was taken)"
 
     # Final settings.yaml must retain user keys from the backed-up file
