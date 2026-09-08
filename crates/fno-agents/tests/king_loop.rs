@@ -1061,12 +1061,14 @@ fn external_read_timeout_king_board_blocks_named() {
     let spec = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
     king_prepare_fixture(cwd, bin_dir.path(), &spec);
 
-    // Exactly the `backlog ready` read never answers; every other read of the
-    // same binary answers clean, so the timeout is attributable to ONE slice.
+    // Exactly the `backlog undispatched` read never answers; every other read
+    // of the same binary answers clean, so the timeout is attributable to ONE
+    // slice. (The ready selection answers in-process now; a wedged source
+    // must be one that still rides a subprocess.)
     let stubs = bin_dir.path().join("stubs");
     fs::write(
         stubs.join("fno-py"),
-        "#!/bin/sh\ncase \"$*\" in\n  *\"backlog ready\"*) exec sleep 30;;\n  *) echo '{}';;\nesac\n",
+        "#!/bin/sh\ncase \"$*\" in\n  *\"backlog undispatched\"*) exec sleep 30;;\n  *) echo '{}';;\nesac\n",
     )
     .unwrap();
 
@@ -1114,9 +1116,11 @@ fn external_read_timeout_king_board_blocks_named() {
         .unwrap();
     let board: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
-    let ready_err = board["sources"]["ready"]["error"].as_str().unwrap_or("");
+    let undispatched_err = board["sources"]["undispatched"]["error"]
+        .as_str()
+        .unwrap_or("");
     assert!(
-        ready_err.contains("timed out after"),
-        "the killed source is named in the payload: {ready_err}"
+        undispatched_err.contains("timed out after"),
+        "the killed source is named in the payload: {undispatched_err}"
     );
 }

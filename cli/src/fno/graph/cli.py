@@ -4403,11 +4403,9 @@ def cmd_next(
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
         detect_project,
-        make_selection_sort_key,
         descendants_of,
         _find_node,
     )
-    from fno.graph.ladder import is_cold_dispatchable
     from fno.tracker import active_backend_name
 
     result: list = [None]
@@ -4435,8 +4433,8 @@ def cmd_next(
     # transitive children of --parent. Resolve the parent id up-front so a
     # missing node is a hard error (AC2-ERR) and a childless node prints a
     # clear note while still returning null so the walker can fall back
-    # (AC2-EDGE). The actual descendant SET is computed inside _pick_ready
-    # from the entries it receives so that under --claim it reflects the
+    # (AC2-EDGE). The actual descendant SET is computed inside the keeper's
+    # ready verb from the entries it receives so that under --claim it reflects the
     # locked graph state, not a pre-read snapshot (avoids a TOCTOU where a
     # concurrent reparent could claim a node no longer in the subtree).
     parent_target_id: Optional[str] = None
@@ -4450,67 +4448,40 @@ def cmd_next(
         if not descendants_of(pre_entries, parent_target_id):
             typer.echo(f"no children under {parent_target_id}", err=True)
 
-    allowed = {"ready"}
-    if include_ideas:
-        allowed.add("idea")
-    if include_deferred:
-        allowed.add("deferred")
+    def _select(entries):
+        """One call into the native leg: survivors, in selection order.
 
-    def _pick_ready(entries):
-        # read_graph does not recompute status, so a node closed out of band
-        # (e.g. PR merged via reconcile/done in another process) can carry
-        # completed_at while its persisted status is still "ready". Guard on
-        # completed_at so advance / megawalk never dispatch a /target worker for
-        # an already-done node.
-        # `allowed` covers the persisted-status gate (ready, plus idea/deferred
-        # only on explicit --include-ideas/--include-deferred). A plan-less idea
-        # (Rung.NONE) is ALSO admitted by default (): `/target` authors its
-        # plan, so the autonomous drain dispatches it. A linked-but-undesigned
-        # decompose stub (Rung.IDEA) is NOT admitted here - it needs warm
-        # inline-fill and stays behind --include-ideas.
-        candidates = [
-            e
-            for e in entries
-            if (e.get("status") in allowed or is_cold_dispatchable(e)) and not e.get("completed_at")
-        ]
-        # The narrowing cascade lives in `fno.backlog.explain` and is shared
-        # with `fno backlog advance --explain`, so the explanation of a
-        # selection can never drift from the selection. Order is unchanged; each
-        # step's own reasoning now rides on the filter it belongs to:
-        #   roadmap / mission / parent-scope - explicit scoping flags.
-        #   project - detects from the candidate list, so it narrows a LIST.
-        #   live-claim () - a live session already holds the node.
-        #   unmerged-open-pr () - the only in-flight signal left once
-        #     the builder session's pid claim dies; scoped to `ready` so an
-        #     explicitly --include-deferred/--include-ideas row still surfaces.
-        #   container () - build the leaves, not the box.
-        #   batched - ships via the batch PR.
-        #   selection-guard () - dead ancestor / stale-ready quarantine.
-        from fno.backlog.explain import build_selection_filters, run_cascade
+        The admission set, the narrowing cascade, and the ranking are the
+        keeper verb's (backlog_ready::select); `next` takes rows[0] of the
+        same answer its sibling verb serves, so the two surfaces cannot
+        drift. `entries` rides IN so a `--claim` mutation and its selection
+        read the same instant under the graph lock.
+        """
+        from fno.graph._intake import repo_root
+        from fno.graph.store import (
+            ReadyParentMissingError,
+            StoreUnavailable,
+            ready as store_ready,
+        )
 
-        # Selection-time claim enforcement () and the container set
-        # are read ONCE here, under this call's graph read, and handed to the
-        # cascade: recomputing inside it would read a different instant.
-        claimed = _require_live_claimed_node_ids("backlog selection")
-        container_ids = _container_ids(entries)
-        candidates = run_cascade(
-            candidates,
-            build_selection_filters(
-                entries,
+        try:
+            return store_ready(
+                project=project_filter,
+                all=all_,
                 roadmap_id=roadmap_id,
                 mission=mission,
-                parent_target_id=parent_target_id,
-                project_filter=project_filter,
-                all_=all_,
-                claimed=claimed,
-                container_ids=container_ids,
-            ),
-        ).survivors
-        # Epics-first, then flat priority (C3, Locked Decision 7). Build the
-        # key from the FULL graph so epic parents resolve even when filtered
-        # out of the candidate set.
-        candidates.sort(key=make_selection_sort_key(entries, live_claimed=claimed))
-        return candidates
+                parent=parent_target_id,
+                include_ideas=include_ideas,
+                include_deferred=include_deferred,
+                repo_root=repo_root(),
+                entries=entries,
+            )["rows"]
+        except StoreUnavailable as exc:
+            typer.echo(f"Error: store keeper unavailable; selection refused: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        except ReadyParentMissingError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
 
     from fno.backlog.undispatched import (
         ObserverReadError,
@@ -4620,7 +4591,7 @@ def cmd_next(
             from fno.claims.io import claims_root_for
 
             assert pre_entries is not None
-            candidates = _with_observer(_pick_ready(pre_entries), pre_entries)
+            candidates = _with_observer(_select(pre_entries), pre_entries)
             for winner in candidates:
                 key = f"node:{winner['id']}"
                 # TWO things have to be true for this lock to protect anything,
@@ -4653,7 +4624,7 @@ def cmd_next(
         else:
 
             def mutator(entries):
-                candidates = _with_observer(_pick_ready(entries), entries)
+                candidates = _with_observer(_select(entries), entries)
                 if candidates:
                     winner = candidates[0]
                     winner["locked_by"] = claim
@@ -4668,7 +4639,7 @@ def cmd_next(
             entries = pre_entries
         else:
             entries = read_graph(_graph_path())
-        candidates = _with_observer(_pick_ready(entries), entries)
+        candidates = _with_observer(_select(entries), entries)
         if candidates:
             result[0] = _dispatch_node_summary(candidates[0])
 
@@ -4792,112 +4763,45 @@ def cmd_ready(
         False, "--json", "-J", help="Emit JSON (default; flag accepted for parity)."
     ),
 ) -> None:
-    from fno.graph.store import read_graph
-    from fno.graph._intake import (
-        filter_by_project,
-        make_selection_sort_key,
-        descendants_of,
-        _find_node,
+    from fno.graph._intake import repo_root
+    from fno.graph.store import (
+        ReadyParentMissingError,
+        StoreUnavailable,
+        ready as store_ready,
     )
-    from fno.graph.ladder import is_cold_dispatchable
     from fno.tracker import active_backend_name
 
     # Joined selection under an external backend: the same filters and ranking
     # run over the transient list_open + sidecar join (fail-closed, never the
-    # local graph), so `ready` and `next` cannot drift between backends.
+    # local graph), so `ready` and `next` cannot drift between backends. The
+    # rows ride IN, the one decision answers both backends.
+    entries = None
     if active_backend_name() != "graph":
         try:
             entries = _joined_open_candidates()
         except _ExternalSelectionError as exc:
             typer.echo(f"Error: {exc}; selection refused", err=True)
             raise typer.Exit(code=1)
-    else:
-        entries = read_graph(_graph_path())
-    allowed = {"ready"}
-    if include_ideas:
-        allowed.add("idea")
-    if include_deferred:
-        allowed.add("deferred")
-    # read_graph does not recompute status, so a node closed out of band can
-    # carry completed_at while its persisted status is still "ready". Guard on
-    # completed_at so a done node never lists as actionable work (the same guard
-    # is in `next`'s _pick_ready, the dispatch path).
-    # Same plan-less idea admission as `next`'s _pick_ready (): a Rung.NONE
-    # idea is cold-dispatchable and surfaces alongside ready work; a linked
-    # Rung.IDEA stub stays behind --include-ideas.
-    ready = [
-        e
-        for e in entries
-        if (e.get("status") in allowed or is_cold_dispatchable(e)) and not e.get("completed_at")
-    ]
-    ready = filter_by_project(ready, project, all_)
-    if roadmap_id:
-        ready = [e for e in ready if e.get("roadmap_id") == roadmap_id]
-    # Mission scope (same rule as `next`): a mission-scoped caller (the
-    # active-backlog daemon's lane-fill, megatron child walks) must never see
-    # out-of-mission nodes as actionable (codex P1 on PR #137).
-    if mission:
-        ready = [e for e in ready if e.get("mission_id") == mission]
-    # Epic-scope filter (C2, ): transitive children of --parent.
-    if parent:
-        target = _find_node(entries, parent)
-        if target is None:
-            typer.echo(f"Error: no such node '{parent}'", err=True)
-            raise typer.Exit(code=1)
-        scope = descendants_of(entries, target["id"])
-        if not scope:
-            typer.echo(f"no children under {target['id']}", err=True)
-        ready = [e for e in ready if e.get("id") in scope]
-    # Selection-time claim enforcement (): hide nodes a live
-    # session already holds (same rule as `graph next`).
-    claimed = _require_live_claimed_node_ids("backlog ready")
-    if claimed:
-        ready = [e for e in ready if e.get("id") not in claimed]
-    # Same in-flight guard as `next` (): a human / megawalk `ready`
-    # listing must not present an already-PR'd node as actionable work.
-    # cmd_ready keeps its own inline status/claim filter (it does not route
-    # through _pick_ready), so the guard is applied here too for parity.
-    # Scoped to status "ready" so an explicitly --include-deferred / -ideas
-    # paused PR-bearing node still lists (the defer contract resurfaces those
-    # on request; codex PR #516 P2).
-    ready = [e for e in ready if e.get("status") != "ready" or not _has_unmerged_open_pr(e)]
-    # Containers are never actionable work ( / codex P2 on PR #69): drop
-    # epics so `fno backlog ready` - and the `dispatch-node.sh --all-ready` bulk
-    # path that enumerates it - never presents/launches the box instead of its
-    # leaves. No all-done exception: the epic auto-closes via
-    # _cascade_close_parents when its last child lands, so it is already done
-    # rather than a lingering ready container. Shares _container_ids with `next`'s
-    # _pick_ready so the surfaces cannot drift.
-    container_ids = _container_ids(entries)
-    ready = [e for e in ready if e.get("id") not in container_ids]
-    # Batch-lane Wave 2: hide open-batch members (they ship via the batch PR, not
-    # as individual ready work). Shares _is_batched_member with `next`'s
-    # _pick_ready so the surfaces cannot drift.
-    ready = [e for e in ready if not _is_batched_member(e)]
-    # G1 guards (): dead-ancestor + stale-ready quarantine, the SAME filter
-    # `next`'s _pick_ready applies. `ready` is a third dispatch-feeding surface -
-    # `select_lane_fill` -> `_ready_nodes` shells `fno backlog ready` for both
-    # parallel lane-fill AND the active-backlog daemon's single-node path, and
-    # `dispatch-node.sh --all-ready` enumerates it - so an unguarded `ready`
-    # would dispatch exactly the nodes `next` quarantines. Shares selection_guards
-    # so the surfaces cannot drift.
-    from fno.backlog.advance import selection_guards, _guard_staleness_days
 
-    _guard_now = datetime.now(timezone.utc)
-    _guard_stale = _guard_staleness_days()
-    _guard_by_id = {e.get("id"): e for e in entries if e.get("id")}
-    ready = [
-        e
-        for e in ready
-        if not selection_guards(e, _guard_by_id, _guard_now, staleness_days=_guard_stale)
-    ]
-    # Epics-first, then flat priority (C3, Locked Decision 7); key built
-    # from the full graph so epic parents always resolve.
-    ready.sort(key=make_selection_sort_key(entries, live_claimed=claimed))
-
-    output = [_dispatch_node_summary(e) for e in ready]
-
-    typer.echo(json.dumps(output, indent=2))
+    try:
+        result = store_ready(
+            project=project,
+            all=all_,
+            roadmap_id=roadmap_id,
+            parent=parent,
+            mission=mission,
+            include_ideas=include_ideas,
+            include_deferred=include_deferred,
+            repo_root=repo_root(),
+            entries=entries,
+        )
+    except StoreUnavailable as exc:
+        typer.echo(f"Error: store keeper unavailable; ready selection refused: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except ReadyParentMissingError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(result["rows"], indent=2))
 
 
 # -- lane-fill --

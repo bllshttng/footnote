@@ -673,6 +673,62 @@ def apply_readiness_overlay_via_store(entries: list[dict]) -> list[dict]:
     return result["entries"]
 
 
+class ReadyParentMissingError(ValueError):
+    """`ready --parent` named a node the graph does not have."""
+
+
+def ready(
+    *,
+    project: str | None = None,
+    all: bool = False,  # noqa: A002 - the verb flag's own name
+    roadmap_id: str | None = None,
+    parent: str | None = None,
+    mission: str | None = None,
+    include_ideas: bool = False,
+    include_deferred: bool = False,
+    repo_root: str | None = None,
+    entries: "list[dict] | None" = None,
+) -> "dict":
+    """The dispatch admission decision, answered by the native leg.
+
+    One call into ``backlog_ready::select`` through the keeper's ``ready``
+    verb: survivors (dispatch summaries in selection order) plus per-node
+    drops. `next` takes ``rows[0]`` of the same call its sibling verb makes,
+    so the two surfaces cannot drift. When `entries` is given the verb
+    filters that list instead of reading the graph (the external-tracker
+    backend's joined candidates); otherwise the keeper reads the graph it
+    owns. An unreachable keeper raises ``StoreUnavailable`` - selection
+    refuses, it never falls back to a locally recomputed answer.
+    """
+    params: "dict" = {
+        "project": project,
+        "all": all,
+        "roadmap_id": roadmap_id,
+        "parent": parent,
+        "mission": mission,
+        "include_ideas": include_ideas,
+        "include_deferred": include_deferred,
+        "repo_root": repo_root,
+    }
+    if entries is not None:
+        params["entries"] = entries
+    from fno import paths as _paths
+
+    try:
+        # Read the RESOLVER, not the imported facade: a test (or session) that
+        # repins config mid-process would otherwise be served the graph path
+        # frozen at this module's first import.
+        result = _client_for(_paths.graph_json()).request("ready", params)
+    except RuntimeError as exc:
+        if str(exc).startswith("no such node"):
+            raise ReadyParentMissingError(str(exc)) from None
+        raise
+    return {
+        "rows": result.get("rows") or [],
+        "drops": result.get("drops") or [],
+    }
+
+
 def settle_blocked_by_edges_via_store(entries: list[dict]) -> dict:
     """The blocked_by edge settlement (graph_store.rs
     ``settle_blocked_by_edges``): rewritten entries, one receipt per settled
