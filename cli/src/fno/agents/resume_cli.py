@@ -577,7 +577,9 @@ def _resume_claude_wake(
     if not skipped:
         from fno.agents.watchdog import confirm_wake_landed, tail_facts
 
-        before_facts = tail_facts(session_id, cwd) if session_id else None
+        before_facts = (
+            tail_facts(session_id, cwd, agent=harness) if session_id else None
+        )
         before_epoch = (
             before_facts.last_event_epoch if before_facts is not None else None
         )
@@ -650,7 +652,9 @@ def _resume_claude_wake(
     if not skipped:
         landed = after.lower() == _WAKE_TARGET_STATUS.lower()
         if not landed and session_id:
-            landed = confirm_wake_landed(session_id, cwd, message, before_epoch)
+            landed = confirm_wake_landed(
+                session_id, cwd, message, before_epoch, agent=harness
+            )
     if not skipped and not landed:
         # A wake cannot reach a session that has exited. An adopted row carries
         # a uuid and a short_id but no answering supervisor, so it takes the

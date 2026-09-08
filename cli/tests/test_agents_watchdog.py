@@ -621,7 +621,7 @@ def test_untimestamped_continue_record_does_not_confirm_wake(monkeypatch):
     )
     monkeypatch.setattr(watchdog, "tail_facts", lambda *a, **k: facts)
     assert not watchdog.confirm_wake_landed(
-        "dddd4444-0000", "/tmp/k1", "continue", before_epoch
+        "dddd4444-0000", "/tmp/k1", "continue", before_epoch, agent="claude"
     )
 
 
@@ -644,7 +644,7 @@ def test_wake_confirmation_requires_the_exact_message(monkeypatch):
     )
     monkeypatch.setattr(watchdog, "tail_facts", lambda *a, **k: facts)
     assert not watchdog.confirm_wake_landed(
-        "dddd4444-0000", "/tmp/k1", "continue", before
+        "dddd4444-0000", "/tmp/k1", "continue", before, agent="claude"
     )
 
 
@@ -666,7 +666,7 @@ def test_wake_confirmation_scans_past_the_classification_tail(monkeypatch):
     )
     monkeypatch.setattr(watchdog, "tail_facts", lambda *a, **k: facts)
     assert watchdog.confirm_wake_landed(
-        "dddd4444-0000", "/tmp/k1", "continue", marker - 60
+        "dddd4444-0000", "/tmp/k1", "continue", marker - 60, agent="claude"
     )
 
 
@@ -715,7 +715,153 @@ def test_fleet_rows_includes_live_nonclaude_registry_rows(monkeypatch, tmp_path)
     rows, warnings = watchdog.fleet_rows()
 
     assert warnings == []
-    assert rows == [Row("thread-535c", "codex-thread", "live", "x-535c", str(tmp_path))]
+    assert rows == [
+        Row("thread-535c", "codex-thread", "working", "x-535c", str(tmp_path), "codex")
+    ]
+
+
+def test_registry_live_row_reaches_the_wake_lane(monkeypatch, tmp_path):
+    """A registry status folds through the shared mapper, so a live codex
+    worker with a stalled tail is WAKE material, never a silent LEAVE."""
+    from fno.agents import registry as registry_mod
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.registry import AgentEntry
+
+    row = AgentEntry(
+        name="codex-thread",
+        harness="codex",
+        harness_session_id="thread-535c",
+        cwd=str(tmp_path),
+        log_path="",
+        status="live",
+        origin="spawn",
+        node="x-535c",
+    )
+    monkeypatch.setattr(registry_mod, "load_registry", lambda: [row])
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **_k: ([], []))
+
+    rows, _warnings = watchdog.fleet_rows()
+    assert [r.state for r in rows] == ["working"]
+
+    # 130m: past classify_tail's 2h window, so the tail reads stalled - the
+    # same shape the stopped-row wake test pins.
+    [v] = _run(rows, {"thread-535c": _facts("mid task", age_min=130)})
+    assert v.verdict == WAKE
+
+
+def test_verdict_carries_the_rows_harness():
+    """The apply lanes re-read the transcript through the verdict, so the
+    verdict carries the same agent the row resolved its own read with."""
+    row = Row("thread-535c", "codex-thread", "working", None, "/tmp/w1", "codex")
+    [v] = _run([row], {})
+    assert v.verdict == GHOST
+    assert v.agent == "codex"
+    claude_row = Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")
+    [cv] = _run([claude_row], {})
+    assert cv.agent == "claude"
+
+
+def test_sweep_reads_each_rows_transcript_under_that_rows_harness(monkeypatch, tmp_path):
+    """A codex row's tick read resolves the codex transcript store, so its
+    facts are real and the row is never a ghost."""
+    from fno.agents import provider_outage as po
+    from fno.agents import registry as registry_mod
+
+    rows = [Row("thread-535c", "codex-thread", "working", None, str(tmp_path), "codex")]
+    monkeypatch.setattr(watchdog, "fleet_rows", lambda timeout=None: (rows, []))
+    monkeypatch.setattr(registry_mod, "load_registry", lambda: [])
+    monkeypatch.setattr(po, "journal_path", lambda: tmp_path / "po.json")
+
+    seen: list[str] = []
+
+    def fake_tail_entries(sid, cwd, *, agent):
+        seen.append(agent)
+        return [{
+            "type": "assistant",
+            "timestamp": "2026-08-16T18:39:00Z",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "mid task"}]},
+        }]
+
+    monkeypatch.setattr(watchdog, "tail_entries", fake_tail_entries)
+    payload, _out = watchdog.run_sweep(
+        now_s=NOW_1840, claim_fn=lambda key: {}, graph_fn=lambda: {},
+    )
+    assert seen == ["codex"]
+    [v] = payload["verdicts"]
+    assert v["verdict"] != GHOST
+
+
+def test_apply_wake_confirms_through_the_verdicts_harness(monkeypatch):
+    """The wake-landed proof re-reads the transcript under the verdict's own
+    harness, so a codex wake confirms at the codex store."""
+    v = Verdict("thread-9", "codex-worker", "blocked", WAKE, "silent", "resume", "codex")
+    reads: list[str] = []
+    calls = {"n": 0}
+
+    def fake_tail_facts(sid, cwd, *, agent, max_records=None):
+        reads.append(agent)
+        calls["n"] += 1
+        epoch = NOW_1840 - 60 if calls["n"] == 1 else NOW_1840
+        return TailFacts(
+            [(epoch, watchdog.WAKE_MESSAGE)], epoch,
+            watchdog.WAKE_MESSAGE, "user", watchdog.WAKE_MESSAGE,
+        )
+
+    monkeypatch.setattr(watchdog, "tail_facts", fake_tail_facts)
+    runner = lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
+    outcome, detail = apply_verdict(v, lanes="all", cwd="/tmp/x", runner=runner)
+    assert outcome == "applied"
+    assert reads == ["codex", "codex"]
+
+
+def test_a_transcript_read_without_an_agent_refuses():
+    """The silent claude default was the defect: an omitted agent is a bind
+    error, never a wrong-file read."""
+    with pytest.raises(TypeError):
+        watchdog.tail_facts("sid", "/tmp")
+    with pytest.raises(TypeError):
+        watchdog.tail_entries("sid", "/tmp")
+
+
+def test_harness_for_session_answers_from_the_registry(monkeypatch):
+    import fno.agents.watchdog as wd
+
+    monkeypatch.setattr(
+        wd, "_harness_by_session", lambda registry_path: {"thread-9": "codex"}
+    )
+    assert wd.harness_for_session("thread-9") == "codex"
+    assert wd.harness_for_session("not-in-the-registry") == "claude"
+
+
+def test_harness_for_session_survives_an_unreadable_registry(monkeypatch):
+    import fno.agents.watchdog as wd
+    from fno.agents import registry as registry_mod
+
+    def boom():
+        raise OSError("registry locked")
+
+    monkeypatch.setattr(registry_mod, "load_registry", boom)
+    wd._harness_by_session.cache_clear()
+    try:
+        assert wd.harness_for_session("any-session") == "claude"
+    finally:
+        wd._harness_by_session.cache_clear()
+
+
+def test_a_transcriptless_harness_ghost_names_the_harness():
+    """opencode/agy keep no per-session transcript, so their ghost is a fact
+    about the harness, not a fault in the row."""
+    row = Row("oc-1234", "oc-worker", "working", None, "/tmp/w1", "opencode")
+    [v] = _run([row], {})
+    assert v.verdict == GHOST
+    assert v.basis == "harness opencode keeps no per-session transcript, unmeasurable"
+
+
+def test_a_codex_row_with_a_genuinely_missing_transcript_still_ghosts_by_id():
+    row = Row("thread-535c", "codex-worker", "working", None, "/tmp/w1", "codex")
+    [v] = _run([row], {})
+    assert v.verdict == GHOST
+    assert v.basis == "no transcript for thread-535c"
 
 
 def test_fleet_rows_skips_a_name_only_nonclaude_row_loudly(monkeypatch, tmp_path):
@@ -759,7 +905,7 @@ def test_reroute_delegates_to_the_full_failover(monkeypatch):
 
     # The tail must classify swap-class or the lane refuses before delegating.
     monkeypatch.setattr(
-        watchdog, "tail_facts", lambda sid, cwd: _facts(RATE_LIMIT_TAIL, age_min=125)
+        watchdog, "tail_facts", lambda sid, cwd, **k: _facts(RATE_LIMIT_TAIL, age_min=125)
     )
     v = Verdict("cccc3333-0000", "r1", "blocked", REROUTE, "429", "redispatch")
     outcome, detail = apply_verdict(
@@ -777,7 +923,7 @@ def test_reroute_refuses_when_no_alternate_is_armed(monkeypatch):
     # guard, which has its own test.
     monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
     monkeypatch.setattr(
-        watchdog, "tail_facts", lambda sid, cwd: _facts(RATE_LIMIT_TAIL, age_min=125)
+        watchdog, "tail_facts", lambda sid, cwd, **k: _facts(RATE_LIMIT_TAIL, age_min=125)
     )
 
     def exhausted(candidate, err):
@@ -799,7 +945,7 @@ def test_reroute_receipts_tell_the_truth(monkeypatch):
     # guard, which has its own test.
     monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
     monkeypatch.setattr(
-        watchdog, "tail_facts", lambda sid, cwd: _facts(RATE_LIMIT_TAIL, age_min=125)
+        watchdog, "tail_facts", lambda sid, cwd, **k: _facts(RATE_LIMIT_TAIL, age_min=125)
     )
     v = Verdict("cccc3333-0000", "r1", "blocked", REROUTE, "429", "redispatch")
 
@@ -1010,7 +1156,7 @@ def test_wake_confirmation_polls_for_the_flushed_turn(monkeypatch):
     monkeypatch.setattr(watchdog, "tail_facts", fake_tail)
     slept = []
     assert watchdog.confirm_wake_landed(
-        "dddd4444-0000", "/tmp/k1", "continue", NOW_1840 - 600,
+        "dddd4444-0000", "/tmp/k1", "continue", NOW_1840 - 600, agent="claude",
         attempts=6, interval_s=0.01, sleep=slept.append,
     )
     assert slept, "a polling confirm must have waited at least once"
@@ -1020,7 +1166,7 @@ def test_wake_confirmation_polls_for_the_flushed_turn(monkeypatch):
         watchdog, "tail_facts", lambda *a, **k: _facts("stopped mid turn")
     )
     assert not watchdog.confirm_wake_landed(
-        "dddd4444-0000", "/tmp/k1", "continue", NOW_1840 - 600,
+        "dddd4444-0000", "/tmp/k1", "continue", NOW_1840 - 600, agent="claude",
         attempts=3, interval_s=0.0, sleep=lambda _s: None,
     )
 
