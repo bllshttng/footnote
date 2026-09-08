@@ -100,6 +100,7 @@ impl ProbeOutcome {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum ProbeGate {
     /// No declaration: zero subprocesses, gate behavior byte-identical to before.
     Absent,
@@ -1158,13 +1159,16 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
     // answered nothing cannot read as a pass.
     let coverage = acceptance_coverage(bindings, &key, &outcomes);
     for row in &coverage {
-        if row["status"] != "satisfied" && failed_reason.is_none() {
+        if row["status"] != "satisfied" {
+            let probe_detail = failed_reason.take();
             failed_reason = Some(format!(
-                "criterion {} bound to {} is not satisfied ({})",
+                "criterion {} bound to {} is not satisfied ({}): {}",
                 row["ac"].as_str().unwrap_or("?"),
                 row["probe"].as_str().unwrap_or("?"),
                 row["status"].as_str().unwrap_or("?"),
+                probe_detail.unwrap_or_else(|| "the probe did not pass".to_string()),
             ));
+            break;
         }
     }
     if required && !coverage.iter().any(|r| r["status"] == "satisfied") {
@@ -2037,5 +2041,237 @@ mod done_probe_tests {
         assert!(!is_graphql_read("pr_info_rest"));
         assert!(!is_graphql_read("pr_status_rest"));
         assert!(!is_graphql_read("pr_status_rest_parse"));
+    }
+}
+
+#[cfg(test)]
+mod acceptance_evidence_tests {
+    // x-d098: bindings parse fail-closed, validate structurally, and evaluate
+    // to criterion-level coverage in the probe-run payload and the session
+    // gate's event map.
+    use super::*;
+    use std::time::Duration;
+
+    fn fm(body: &str) -> String {
+        format!("---\ntitle: t\n{body}\n---\n\n# doc\n")
+    }
+
+    fn decl_of(doc: &str) -> EvidenceDecl {
+        parse_acceptance_evidence(doc)
+    }
+
+    #[test]
+    fn a_binding_block_parses_to_bound_criteria() {
+        let doc = fm(
+            "acceptance_evidence:\n  required: true\n  bindings:\n    AC1-HP: done_probes[0]\n    AC2-HP: close_probes[0]",
+        );
+        match decl_of(&doc) {
+            EvidenceDecl::Evidence { required, bindings } => {
+                assert!(required);
+                assert_eq!(bindings.len(), 2);
+                assert_eq!(bindings[0].ac, "AC1-HP");
+                assert_eq!(bindings[0].key, "done_probes");
+                assert_eq!(bindings[0].index, 0);
+                assert_eq!(bindings[1].key, "close_probes");
+                assert_eq!(bindings[1].index, 0);
+            }
+            other => panic!("expected Evidence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn absent_and_explicitly_empty_are_unarmed_not_required() {
+        assert_eq!(decl_of(&fm("status: ready")), EvidenceDecl::None);
+        assert_eq!(
+            decl_of(&fm("acceptance_evidence: {}")),
+            EvidenceDecl::Evidence {
+                required: false,
+                bindings: vec![]
+            }
+        );
+        assert_eq!(
+            decl_of(&fm("acceptance_evidence: []")),
+            EvidenceDecl::Evidence {
+                required: false,
+                bindings: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn unreadable_declarations_refuse_not_degrade() {
+        assert_eq!(
+            decl_of(&fm(
+                "acceptance_evidence:\n  bindings:\n    AC1-HP: probes[0]"
+            )),
+            EvidenceDecl::Unparseable,
+            "a malformed reference must refuse, never silently disarm"
+        );
+        assert_eq!(
+            decl_of(&fm("acceptance_evidence:\n  who_knows: yes")),
+            EvidenceDecl::Unparseable,
+            "an unknown sub-key must refuse"
+        );
+        assert_eq!(
+            decl_of(&fm("acceptance_evidence:\n  bindings:\n    AC1-HP: done_probes[0]\n    AC1-HP: close_probes[0]")),
+            EvidenceDecl::Unparseable,
+            "a criterion bound in both terminals must refuse"
+        );
+        assert_eq!(
+            decl_of(&fm("acceptance_evidence:\n  required: maybe")),
+            EvidenceDecl::Unparseable
+        );
+    }
+
+    #[test]
+    fn validation_refuses_a_missing_probe_by_name() {
+        let decl = decl_of(&fm(
+            "acceptance_evidence:\n  bindings:\n    AC1-HP: done_probes[1]",
+        ));
+        let EvidenceDecl::Evidence { bindings, .. } = decl else {
+            panic!("expected Evidence")
+        };
+        let why = validate_bindings(&bindings, 1).unwrap_err();
+        assert!(why.contains("AC1-HP") && why.contains("missing"), "{why}");
+    }
+
+    #[test]
+    fn coverage_maps_each_verdict_to_its_criterion() {
+        let decl = decl_of(&fm(
+            "acceptance_evidence:\n  bindings:\n    AC1-HP: done_probes[0]\n    AC2-HP: done_probes[1]\n    AC3-HP: done_probes[2]\n    AC4-HP: close_probes[0]",
+        ));
+        let EvidenceDecl::Evidence { bindings, .. } = decl else {
+            panic!("expected Evidence")
+        };
+        let outcomes = vec![
+            ("echo pass".to_string(), "pass".to_string()),
+            ("exit 3".to_string(), "fail:3".to_string()),
+            ("sleep 90".to_string(), "timeout".to_string()),
+        ];
+        let rows = acceptance_coverage(&bindings, "done_probes", &outcomes);
+        assert_eq!(rows.len(), 3, "the close binding is Pending here");
+        assert_eq!(rows[0]["status"], "satisfied");
+        assert_eq!(rows[0]["ac"], "AC1-HP");
+        assert_eq!(rows[0]["terminal"], "session");
+        assert_eq!(rows[1]["status"], "failed");
+        assert_eq!(rows[2]["status"], "unknown");
+    }
+
+    #[test]
+    fn a_failing_bound_probe_names_its_criterion_at_the_close_terminal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("plan.md");
+        std::fs::write(
+            &plan,
+            fm("close_probes:\n  - \"echo shipped-marker\"\n  - \"exit 4\"\nacceptance_evidence:\n  bindings:\n    AC1-HP: close_probes[0]\n    AC2-HP: close_probes[1]"),
+        )
+        .unwrap();
+        let (code, json) = decide_probe_run(&[
+            "--plan".into(),
+            plan.to_string_lossy().into(),
+            "--key".into(),
+            "close_probes".into(),
+            "--json".into(),
+        ]);
+        assert_eq!(code, 1);
+        let payload: Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            payload["reason"].as_str().unwrap().contains("AC2-HP"),
+            "{json}"
+        );
+        let rows = payload["acceptance_coverage"].as_array().unwrap();
+        assert_eq!(rows[0]["status"], "satisfied");
+        assert_eq!(rows[1]["status"], "failed");
+    }
+
+    #[test]
+    fn required_unarmed_close_evidence_cannot_read_as_a_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("plan.md");
+        std::fs::write(&plan, fm("acceptance_evidence:\n  required: true")).unwrap();
+        let (code, json) = decide_probe_run(&[
+            "--plan".into(),
+            plan.to_string_lossy().into(),
+            "--key".into(),
+            "close_probes".into(),
+            "--json".into(),
+        ]);
+        assert_eq!(code, 1, "unarmed required must refuse, not exit 0");
+        assert!(json.contains("unarmed"), "{json}");
+    }
+
+    #[test]
+    fn session_gate_refuses_a_required_plan_with_no_done_binding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("plan.md");
+        std::fs::write(&plan, fm("acceptance_evidence:\n  required: true")).unwrap();
+        let events = tmp.path().join("events.jsonl");
+        match evaluate_done_probes(
+            plan.to_str(),
+            None,
+            tmp.path(),
+            &events,
+            "s1",
+            Duration::from_secs(10),
+        ) {
+            ProbeGate::Fail { reason, .. } => assert!(reason.contains("unarmed"), "{reason}"),
+            other => panic!("unarmed required must refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_gate_passes_with_coverage_when_a_bound_probe_satisfies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("plan.md");
+        std::fs::write(
+            &plan,
+            fm("done_probes:\n  - \"echo runs-marker\"\nacceptance_evidence:\n  required: true\n  bindings:\n    AC1-HP: done_probes[0]"),
+        )
+        .unwrap();
+        let events = tmp.path().join("events.jsonl");
+        match evaluate_done_probes(
+            plan.to_str(),
+            None,
+            tmp.path(),
+            &events,
+            "s1",
+            Duration::from_secs(10),
+        ) {
+            ProbeGate::Pass(results) => {
+                let rows = results["_acceptance_coverage"].as_array().unwrap();
+                assert_eq!(rows[0]["status"], "satisfied");
+                assert_eq!(rows[0]["ac"], "AC1-HP");
+            }
+            other => panic!("a satisfied required binding must pass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_gate_passes_while_close_scope_is_pending() {
+        // AC2-EDGE: session evidence satisfied, close evidence pending - the
+        // session may stop; node closure is the close terminal's business.
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("plan.md");
+        std::fs::write(
+            &plan,
+            fm("done_probes:\n  - \"echo session-marker\"\nclose_probes:\n  - \"exit 1\"\nacceptance_evidence:\n  bindings:\n    AC1-HP: done_probes[0]\n    AC2-HP: close_probes[0]"),
+        )
+        .unwrap();
+        let events = tmp.path().join("events.jsonl");
+        match evaluate_done_probes(
+            plan.to_str(),
+            None,
+            tmp.path(),
+            &events,
+            "s1",
+            Duration::from_secs(10),
+        ) {
+            ProbeGate::Pass(results) => {
+                let rows = results["_acceptance_coverage"].as_array().unwrap();
+                assert_eq!(rows.len(), 1, "close-scope binding is Pending here");
+                assert_eq!(rows[0]["status"], "satisfied");
+            }
+            other => panic!("session must pass while close is pending, got {other:?}"),
+        }
     }
 }
