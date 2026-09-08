@@ -4359,6 +4359,10 @@ class KingBlock(BaseModel):
     wake_ceiling: int = 32
     wake_debounce_seconds: int = 900
     wake_backstop_seconds: int = 1800
+    # A blocked distress row younger than this is still within its own
+    # response window; older than this with no answer is what the
+    # blocked_child queue surfaces.
+    blocked_child_grace_minutes: int = 30
     # The reign skill carries these defaults verbatim; the keys are the one
     # place an operator edits them.
     checkin_interval: str = "30m"

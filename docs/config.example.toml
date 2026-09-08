@@ -665,6 +665,8 @@ wake_ceiling = 32
 wake_debounce_seconds = 900
 # Timer-backstop interval (default 1800). An approximation of the mail and board-change triggers, kept so a missed event cannot strand a scope forever; the interval is a policy choice, not a measurement.
 wake_backstop_seconds = 1800
+# Minutes a blocked distress row may sit unanswered before the blocked_child board queue surfaces it (default 30). An answer is mail to that session, a claim release on the node, or the node closing.
+blocked_child_grace_minutes = 30
 # The /loop interval a reign self-injects (default 30m). Fail-safe: a value that is not <digits>[smhd] degrades to 30m at load, never raises.
 checkin_interval = "30m"
 # The /loop prompt text a reign self-injects at each check-in (default: run the reign skill's check-in body, journal reign_checkin, print 'no change' when idle).
