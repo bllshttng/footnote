@@ -321,6 +321,12 @@ struct StoreFile {
     /// and STORE_VERSION does not bump (which would quarantine existing squads).
     #[serde(default)]
     external_lifecycle: Vec<ExternalLifecycle>,
+    /// (x-ea5b) A counter every write bumps, so a holder of an in-memory copy
+    /// can tell whether the file moved under it. Defaulted on the version-1
+    /// object for the same reason `external_lifecycle` is: a store written by
+    /// an older build reads as epoch 0 and the next write starts counting.
+    #[serde(default)]
+    epoch: u64,
 }
 
 /// The outcome of a durable compare-and-set gate (x-7561). `Committed` carries
@@ -345,6 +351,11 @@ pub struct Loaded {
     /// validated exactly like squad members (a malformed id never reaches an
     /// argv). Empty when the store has none.
     pub external_lifecycle: Vec<ExternalLifecycle>,
+    /// (x-ea5b) The store epoch these squads were read at. A caller that keeps
+    /// the member list in memory hands this back to [`upsert_at_epoch`], which
+    /// refuses the write when the file has moved on. Zero for a store that is
+    /// missing, empty, or quarantined - all three read as a fresh store.
+    pub epoch: u64,
     pub notice: Option<String>,
 }
 
@@ -624,6 +635,7 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
         squads,
         next_pane_id: file.next_pane_id,
         external_lifecycle,
+        epoch: file.epoch,
         notice,
     }
 }
@@ -662,44 +674,95 @@ pub fn upsert(
     origins: &[String],
     members: &[StoredMember],
 ) -> io::Result<()> {
+    upsert_at_epoch(name, key, origins, members, None).map(|_| ())
+}
+
+/// What a guarded [`upsert_at_epoch`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpsertOutcome {
+    /// The write landed (or had nothing to write); the store carries `epoch`.
+    Wrote { epoch: u64 },
+    /// Refused, file untouched: the store had already moved to `epoch`, so the
+    /// caller's member list predates somebody else's write.
+    Stale { epoch: u64 },
+}
+
+/// [`upsert`] under an epoch guard (x-ea5b). `expected` is the store epoch the
+/// caller's member list was derived from. The mux server keeps that list in
+/// memory and rewrites the whole row from it, so a write made against a store
+/// that moved in between resurrects every member the other writer reaped - the
+/// exact way a `fno mux squad prune` was undone by the next pane event. The
+/// comparison runs inside the store lock, so no write can land between the
+/// check and the one it authorizes. `None` is the unguarded write, for a
+/// caller with no prior read to be stale against.
+pub fn upsert_at_epoch(
+    name: &str,
+    key: &str,
+    origins: &[String],
+    members: &[StoredMember],
+    expected: Option<u64>,
+) -> io::Result<UpsertOutcome> {
     // A squad with neither a name nor a durable key has no identity across a
     // restart, so it cannot be persisted (nor found again). Skip it here, the
     // one place every write path funnels through, rather than at each caller.
-    if name.is_empty() && key.is_empty() {
-        return Ok(());
-    }
+    let identityless = name.is_empty() && key.is_empty();
     // (x-6b0b) A named squad keys by name and leaves the key empty (the
     // struct's own contract at `StoredSquad::key`). Enforced here, where every
     // write funnels through, for the same reason the identity-less skip above
     // lives here: a caller passing both minted a row that matched by name
     // while its key-keyed twin stayed alive.
     let key = if name.is_empty() { key } else { "" };
-    mutate(|squads| {
-        let existing = squads.iter().find(|s| same_squad(s, name, key));
-        let created_at = existing
-            .map(|s| s.created_at.clone())
-            .filter(|c| !c.is_empty())
-            .unwrap_or_else(now_iso);
-        // Preserve template tab specs and tab trees (owned by set_tab_specs /
-        // set_tab_trees, not this path) across a membership upsert - the struct
-        // is rebuilt fresh, so an un-carried field would be silently wiped
-        // (x-c4d4, x-caef).
-        let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
-        let (tab_trees, active_tab) = existing
-            .map(|s| (s.tab_trees.clone(), s.active_tab))
-            .unwrap_or_default();
-        squads.retain(|s| !same_squad(s, name, key));
-        squads.push(StoredSquad {
-            name: name.to_string(),
-            key: key.to_string(),
-            origins: origins.to_vec(),
-            members: members.to_vec(),
-            created_at,
-            tab_specs,
-            tab_trees,
-            active_tab,
-        });
+    let mut stale = None;
+    let epoch = mutate_file_gated(|file| {
+        if expected.is_some_and(|e| e != file.epoch) {
+            stale = Some(file.epoch);
+            return false;
+        }
+        if identityless {
+            return false;
+        }
+        upsert_into(&mut file.squads, name, key, origins, members);
+        true
+    })?;
+    Ok(match stale {
+        Some(epoch) => UpsertOutcome::Stale { epoch },
+        None => UpsertOutcome::Wrote { epoch },
     })
+}
+
+/// The row replacement itself, split out so the guarded and unguarded entries
+/// share one body.
+fn upsert_into(
+    squads: &mut Vec<StoredSquad>,
+    name: &str,
+    key: &str,
+    origins: &[String],
+    members: &[StoredMember],
+) {
+    let existing = squads.iter().find(|s| same_squad(s, name, key));
+    let created_at = existing
+        .map(|s| s.created_at.clone())
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(now_iso);
+    // Preserve template tab specs and tab trees (owned by set_tab_specs /
+    // set_tab_trees, not this path) across a membership upsert - the struct
+    // is rebuilt fresh, so an un-carried field would be silently wiped
+    // (x-c4d4, x-caef).
+    let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
+    let (tab_trees, active_tab) = existing
+        .map(|s| (s.tab_trees.clone(), s.active_tab))
+        .unwrap_or_default();
+    squads.retain(|s| !same_squad(s, name, key));
+    squads.push(StoredSquad {
+        name: name.to_string(),
+        key: key.to_string(),
+        origins: origins.to_vec(),
+        members: members.to_vec(),
+        created_at,
+        tab_specs,
+        tab_trees,
+        active_tab,
+    });
 }
 
 /// Set the template tab specs for `name` (x-c4d4), preserving its other fields.
@@ -1929,6 +1992,22 @@ fn assert_writable() -> io::Result<()> {
 /// rename a tmp over the target. `mutate` / `mutate_lifecycle` are thin views
 /// onto it, so every mutation preserves both collections.
 fn mutate_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
+    let mut out = None;
+    mutate_file_gated(|sf| {
+        out = Some(f(sf));
+        true
+    })?;
+    // The gate above is a constant `true`, so the closure always ran.
+    out.ok_or_else(|| io::Error::other("squad store mutation did not run"))
+}
+
+/// [`mutate_file`] with a write gate: `f` inspects the store as it was read
+/// under the flock and answers whether its edits should be written. `false`
+/// leaves the file byte-for-byte untouched. Deciding inside the lock is what
+/// makes the epoch guard race-free - a concurrent writer cannot land between
+/// the epoch this reads and the write it authorizes. Returns the store's epoch
+/// AFTER the call: bumped when the write landed, unchanged when it did not.
+fn mutate_file_gated(f: impl FnOnce(&mut StoreFile) -> bool) -> io::Result<u64> {
     #[cfg(not(test))]
     assert_writable()?;
     let path = squads_path();
@@ -1968,8 +2047,15 @@ fn mutate_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
         Err(e) => return Err(e),
     };
     let mut file = parse_seed(seed, from_legacy)?;
-    let result = f(&mut file);
+    if !f(&mut file) {
+        return Ok(file.epoch);
+    }
     file.version = STORE_VERSION;
+    // (x-ea5b) Bump on EVERY write, not only the member-carrying ones. The two
+    // ways to be wrong are not symmetric: a missed bump hides an external write
+    // and resurrects what it reaped, while a bump nobody needed costs the
+    // holder one re-read. Broad is the fail-safe side.
+    file.epoch = file.epoch.saturating_add(1);
 
     let bytes = serde_json::to_vec_pretty(&file)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -1978,7 +2064,7 @@ fn mutate_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
     // Atomic rename: a concurrent reader sees either the old or the new file,
     // never a torn one (AC1-FR).
     std::fs::rename(&tmp, &path)?;
-    Ok(result)
+    Ok(file.epoch)
 }
 
 /// The mutate seed parse. Corruption at the PRIMARY path refuses the write
