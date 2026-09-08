@@ -1146,7 +1146,7 @@ def inject_spawn_defaults(
             try:
                 from fno import route_resolve as _rr
 
-                slot_candidate, slot_chain = _rr.resolve_slot(
+                slot_candidate, slot_chain, _slot_verdict = _rr.resolve_slot(
                     profile_verb,
                     grid_node_entry,
                     capacity,
@@ -1336,12 +1336,7 @@ def inject_spawn_defaults(
         # No config field resolved at all, so any --model here was typed.
         _check_model_vendor_mismatch(out, err, env)
         _emit_defaults_applied(
-            out, profile_verb, seed, _resolved_axes_view(
-                cfg_harness, provider_rung, cfg_model, model_rung, cfg_effort,
-                effort_rung, cfg_substrate, substrate_rung, cfg_permission,
-                permission_rung, cfg_route, route_rung, cfg_account, account_rung,
-                cfg_pane_group, pane_group_rung,
-            ), from_config, suppressed,
+            out, profile_verb, seed, _seam_axes_view(locals()), from_config, suppressed,
         )
         return out
 
@@ -1905,48 +1900,35 @@ def inject_spawn_defaults(
         (source for axis, _value, source in from_config if axis == "model"), None
     )
     _check_model_vendor_mismatch(out, err, env, model_source=model_source)
-    try:
-        from fno.route_resolve import routing_fingerprint
+    from fno.route_resolve import routing_fingerprint
 
-        _fp = routing_fingerprint(settings)
-    except Exception:  # noqa: BLE001 - a fingerprint gap is a receipt gap, never a crash
-        _fp = ""
     _emit_defaults_applied(
-        out, profile_verb, seed, _resolved_axes_view(
-            cfg_harness, provider_rung, cfg_model, model_rung, cfg_effort,
-            effort_rung, cfg_substrate, substrate_rung, cfg_permission,
-            permission_rung, cfg_route, route_rung, cfg_account, account_rung,
-            cfg_pane_group, pane_group_rung,
-        ), from_config, suppressed, fingerprint=_fp,
+        out, profile_verb, seed, _seam_axes_view(locals()),
+        from_config, suppressed,
+        fingerprint=routing_fingerprint(settings),
     )
     return out
 
 
-def _resolved_axes_view(
-    cfg_harness: Optional[str], provider_rung: Optional[str],
-    cfg_model: Optional[str], model_rung: Optional[str],
-    cfg_effort: Optional[str], effort_rung: Optional[str],
-    cfg_substrate: Optional[str], substrate_rung: Optional[str],
-    cfg_permission: Optional[str], permission_rung: Optional[str],
-    cfg_route: Optional[str], route_rung: Optional[str],
-    cfg_account: Optional[str], account_rung: Optional[str],
-    cfg_pane_group: Optional[str], pane_group_rung: Optional[str],
-) -> dict:
+def _seam_axes_view(scope: dict) -> dict:
     """Every config-resolved spawn axis as ``(value, rung)``, empties included.
 
     "The config read as empty here" and "the value was suppressed" are
     different facts; the event must tell them apart.
     """
-    return {
-        "provider": (cfg_harness or "", provider_rung),
-        "model": (cfg_model or "", model_rung),
-        "effort": (cfg_effort or "", effort_rung),
-        "substrate": (cfg_substrate or "", substrate_rung),
-        "permission_mode": (cfg_permission or "", permission_rung),
-        "route": (cfg_route or "", route_rung),
-        "account": (cfg_account or "", account_rung),
-        "pane_group": (cfg_pane_group or "", pane_group_rung),
-    }
+    axes = {}
+    for axis, value_key, rung_key in (
+        ("provider", "cfg_harness", "provider_rung"),
+        ("model", "cfg_model", "model_rung"),
+        ("effort", "cfg_effort", "effort_rung"),
+        ("substrate", "cfg_substrate", "substrate_rung"),
+        ("permission_mode", "cfg_permission", "permission_rung"),
+        ("route", "cfg_route", "route_rung"),
+        ("account", "cfg_account", "account_rung"),
+        ("pane_group", "cfg_pane_group", "pane_group_rung"),
+    ):
+        axes[axis] = (scope.get(value_key) or "", scope.get(rung_key))
+    return axes
 
 
 def _emit_defaults_applied(

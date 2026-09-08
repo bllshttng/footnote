@@ -297,13 +297,13 @@ def resolve_slot(
     by_diff = getattr(profile, "by_difficulty", None)
     has_overlay = isinstance(by_diff, Mapping) and bool(by_diff)
     if not lanes and not has_overlay and node is None and not _routing_enforced(settings):
-        return None, []
+        return None, [], "unarmed"
 
     gate_bypassed = os.environ.get("FNO_SPAWN_GATE") == "0"
     from fno.route_slot_client import RouteSlotUnavailable, route_slot_call
 
     try:
-        return _answer(route_slot_call(_slot_payload(
+        out = route_slot_call(_slot_payload(
             rung_base=rung_base, profile=profile, lanes=lanes, node=node,
             capacity=capacity, inventory=inventory, settings=settings,
             substrate=substrate, permission_mode=permission_mode,
@@ -315,9 +315,14 @@ def resolve_slot(
             explicit_model_value=explicit_model_value,
             explicit_route_value=explicit_route_value,
             explicit_vendor_value=explicit_vendor_value,
-        )), "candidate")
+        ))
     except RouteSlotUnavailable as exc:
-        return None, [f"slot=route-slot-unavailable ({exc})"]
+        return None, [f"slot=route-slot-unavailable ({exc})"], "unarmed"
+    chain = [str(line) for line in (out.get("chain") or [])]
+    candidate, verdict = out.get("candidate"), str(out.get("verdict") or "")
+    if not verdict:
+        verdict = slot_verdict(candidate, chain)
+    return candidate, chain, verdict
 
 
 def _routing_enforced(settings: object) -> bool:
@@ -356,11 +361,10 @@ def _answer(out: dict[str, Any], key: str) -> tuple[Any, list[str]]:
 
 
 def slot_verdict(candidate: Any, chain: list[str]) -> str:
-    """The readout verdict, read from the same terminal the seam refuses on.
+    """The terminal classifier for a binary that predates the verdict field.
 
-    One classifier for every consumer: explain renders it, the spawn seam
-    refuses on it, and the inventory preview echoes it. A policy refusal is
-    held, capacity is held, and neither is "exhausted dispatch".
+    A policy refusal is held, capacity is held, and neither is "exhausted
+    dispatch"; anything else is the harness default standing by.
     """
     if candidate:
         return "armed"

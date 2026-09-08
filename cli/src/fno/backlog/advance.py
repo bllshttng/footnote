@@ -1706,7 +1706,7 @@ def _grid_lane_for(
         role: Optional[str] = None
         if not (node.get("plan_path") or "").strip():
             role = "planning"
-        candidate, chain = route_resolve.resolve_slot(
+        candidate, chain, _verdict = route_resolve.resolve_slot(
             "target",
             node,
             capacity,

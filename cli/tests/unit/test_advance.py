@@ -2990,7 +2990,7 @@ def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
         seen["verb"] = verb
         seen["node"] = node
         seen["role"] = kw.get("role")
-        return candidate, ["slot agents.profiles.target.lanes[0] flash-zai capacity=ok"]
+        return candidate, ["slot agents.profiles.target.lanes[0] flash-zai capacity=ok"], "armed"
 
     monkeypatch.setattr(route_resolve, "resolve_slot", _fake_slot)
     monkeypatch.setattr(
@@ -3007,7 +3007,7 @@ def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
 
     # a decline keeps the receipt vocabulary: the terminal reason surfaces
     monkeypatch.setattr(
-        route_resolve, "resolve_slot", lambda *a, **k: (None, ["slot=exhausted queue"])
+        route_resolve, "resolve_slot", lambda *a, **k: (None, ["slot=exhausted queue"], "capacity-held")
     )
     harness, model, route, account, reason = adv._grid_lane_for(node, model=None, provider=None)
     assert (harness, model, route, account) == (None, None, None, None)

@@ -350,7 +350,7 @@ def routing_for(node: Optional[dict]) -> dict:
     try:
         inventory = route_resolve.resolve_inventory()
         capacity = dict(route_resolve.runtime_capacity(inventory=inventory))
-        candidate, chain = route_resolve.resolve_slot(
+        candidate, chain, verdict = route_resolve.resolve_slot(
             "target",
             node,
             capacity,
@@ -368,7 +368,6 @@ def routing_for(node: Optional[dict]) -> dict:
     }
     # The verdict reads the same terminal the spawn seam refuses on: a policy
     # refusal is held, capacity is held, and neither is "exhausted dispatch".
-    verdict = route_resolve.slot_verdict(candidate, chain)
     return {
         "chain": list(chain),
         "candidate": candidate,

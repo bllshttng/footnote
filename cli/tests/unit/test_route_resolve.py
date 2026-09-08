@@ -27,7 +27,7 @@ def _grid(difficulty, priority, capacity, inv=None, **kw):
     node = {"priority": priority}
     if difficulty is not None:
         node["difficulty"] = difficulty
-    return rr.resolve_slot("target", node, capacity, inventory=inv, **kw)
+    return rr.resolve_slot("target", node, capacity, inventory=inv, **kw)[:2]
 
 def _inv(rows, objective="cheapest-that-clears", prefer="", snapshot=None):
     return rr.inventory_from_rows(

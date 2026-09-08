@@ -136,7 +136,7 @@ def _grid_candidate(monkeypatch, candidate, chain):
     )
     monkeypatch.setattr(rr, "resolve_inventory", lambda: _Inv())
     monkeypatch.setattr(rr, "runtime_capacity", lambda inventory=None: {})
-    monkeypatch.setattr(rr, "resolve_slot", lambda *a, **k: (candidate, chain))
+    monkeypatch.setattr(rr, "resolve_slot", lambda *a, **k: (candidate, chain, "unarmed"))
 
 
 def test_route_skip_names_caller_route_rung_and_reason(journal: Path) -> None:

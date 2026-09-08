@@ -396,13 +396,10 @@ def _routing_fingerprint_safe() -> str:
 
 def _routing_policy_safe() -> dict:
     from fno.config import load_settings
+    from fno.route_resolve import _routing_policy_payload
 
     try:
-        routing = getattr(load_settings(), "routing", None)
-        return {
-            "enforce_inventory": bool(getattr(routing, "enforce_inventory", False)),
-            "operator_access": getattr(routing, "operator_access", "unknown"),
-        }
+        return _routing_policy_payload(load_settings())
     except Exception:  # noqa: BLE001 - an unreadable config answers unknown
         return {"enforce_inventory": False, "operator_access": "unknown"}
 
