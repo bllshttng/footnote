@@ -1314,6 +1314,146 @@ def test_cli_session_close_refuses_without_identity(tmp_path, monkeypatch):
     assert "no ambient identity" in r.output
 
 
+def test_cli_session_close_releases_spawn_handover_claim(tmp_path, monkeypatch):
+    """The blueprint terminal releases the exact handover claim it was
+    launched under; the receipt names the holder and the claim answers free."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import acquire_claim, claim_status
+    from fno.graph.store import read_graph
+
+    holder = "spawn-handover:target-x-close003-blueprint"
+    g = _make_graph(tmp_path, [{"id": "x-close003", "title": "t", "plan_path": "p.md"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-close3")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.setenv("FNO_NODE_CLAIM_HOLDER", holder)
+    acquire_claim("node:x-close003", holder, ttl_ms=60_000)
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "close", "x-close003",
+        "--summary", "plan is ready",
+        "--launch", "/fno:target x-close003",
+        "--json",
+    ])
+
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["claim_released"] is True
+    assert out["claim_holder"] == holder
+    assert claim_status("node:x-close003")["state"] == "free"
+    assert read_graph(g)[0].get("dispatch_verb") == "/fno:target"
+
+
+def test_cli_session_close_leaves_foreign_holder_claim_intact(tmp_path, monkeypatch):
+    """When a successor already rebound the claim, the close leaves it
+    held, answers claim_released false, and names the key and the mismatch."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import acquire_claim, claim_status
+
+    g = _make_graph(tmp_path, [{"id": "x-close006", "title": "t", "plan_path": "p.md"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-close6")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.setenv("FNO_NODE_CLAIM_HOLDER", "spawn-handover:target-x-close006-bp")
+    acquire_claim("node:x-close006", "target-session:successor-sess", ttl_ms=60_000)
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "close", "x-close006",
+        "--summary", "plan is ready",
+        "--launch", "/fno:target x-close006",
+        "--json",
+    ])
+
+    assert r.exit_code == 0, r.output
+    # The mismatch stderr line precedes the receipt, so parse the last line.
+    assert json.loads(r.output.strip().splitlines()[-1])["claim_released"] is False
+    assert "node:x-close006 not released" in r.output
+    status = claim_status("node:x-close006")
+    assert status["state"] == "live"
+    assert status["holder"] == "target-session:successor-sess"
+
+
+def test_cli_session_close_repoints_dispatch_verb_from_launch(tmp_path, monkeypatch):
+    """The close writes the launch verb so the next dispatcher resolves
+    the target slot instead of agents.profiles.blueprint."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(
+        tmp_path, [{"id": "x-close007", "title": "t", "dispatch_verb": "/fno:blueprint"}]
+    )
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-close7")
+    monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "close", "x-close007",
+        "--summary", "plan is ready",
+        "--launch", "/fno:target x-close007",
+    ])
+
+    assert r.exit_code == 0, r.output
+    assert read_graph(g)[0]["dispatch_verb"] == "/fno:target"
+
+
+def test_cli_session_close_canonicalizes_codex_launch_verb(tmp_path, monkeypatch):
+    """The codex $fno: spelling stores as /fno:, the only prefix the dispatch
+    resolver reads back - a verbatim $fno: row would never resolve."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(
+        tmp_path, [{"id": "x-close009", "title": "t", "dispatch_verb": "/fno:blueprint"}]
+    )
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-close9")
+    monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "close", "x-close009",
+        "--summary", "plan is ready",
+        "--launch", "$fno:target x-close009",
+    ])
+
+    assert r.exit_code == 0, r.output
+    assert read_graph(g)[0]["dispatch_verb"] == "/fno:target"
+
+
+def test_cli_session_close_skips_non_qualified_launch_verb(tmp_path, monkeypatch):
+    """A --launch whose first token is not a plugin-qualified verb
+    writes nothing and names the rejected token on stderr."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(
+        tmp_path, [{"id": "x-close008", "title": "t", "dispatch_verb": "/fno:blueprint"}]
+    )
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-close8")
+    monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "close", "x-close008",
+        "--summary", "plan is ready",
+        "--launch", "continue by hand",
+    ])
+
+    assert r.exit_code == 0, r.output
+    assert "not a plugin-qualified verb" in r.output
+    assert "'continue'" in r.output
+    assert read_graph(g)[0]["dispatch_verb"] == "/fno:blueprint"
+
+
 def test_cli_session_add_pr_repo_scopes_resolution(tmp_path, monkeypatch):
     """AC1-HP (CLI): --repo disambiguates a pr_number that collides across repos."""
     from typer.testing import CliRunner
@@ -1854,19 +1994,19 @@ def test_guard_plan_absent_evidence_is_agreement(tmp_path, monkeypatch, plan_arg
 def test_plan_claims_reads_node_key_as_single_claim(tmp_path):
     """330 of 807 plans carry `node:` not `claims:`. Reading only claims: left
     G3 unevaluable on ~41% of plans; node: is now a single-value claim too."""
-    import fno.graph.cli as C
+    import fno.graph._session as S
 
-    assert C._plan_claims(_plan_node(tmp_path, "x-abcd")) == {"x-abcd"}
+    assert S._plan_claims(_plan_node(tmp_path, "x-abcd")) == {"x-abcd"}
 
 
 def test_plan_claims_unions_claims_and_node(tmp_path):
     """Both keys present -> the union. A plan should not declare both, but the
     read must not drop either if it does."""
-    import fno.graph.cli as C
+    import fno.graph._session as S
 
     p = tmp_path / "both.md"
     p.write_text("---\nstatus: ready\nnode: x-1111\nclaims: [x-2222, x-3333]\n---\n\n# plan\n")
-    assert C._plan_claims(str(p)) == {"x-1111", "x-2222", "x-3333"}
+    assert S._plan_claims(str(p)) == {"x-1111", "x-2222", "x-3333"}
 
 
 def test_guard_plan_agreement_via_node_key(tmp_path, monkeypatch):

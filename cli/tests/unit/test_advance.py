@@ -162,6 +162,46 @@ def test_advance_writes_one_control_plane_tick_row(iso, monkeypatch):
     assert data["scheduler"] == "session"
 
 
+@requires_rust
+def test_skip_tick_carries_detail(iso, monkeypatch):
+    """A skip whose reason carries a detail lands it in the tick row,
+    truncated the way failed() truncates - a claim-error tick is diagnosable."""
+    monkeypatch.setenv("FNO_AUTO_CONTINUE", "1")
+
+    def _boom(project):
+        raise RuntimeError("roster boom")
+
+    monkeypatch.setattr(adv, "_next_node", _boom)
+
+    adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    rows = [
+        json.loads(line)
+        for line in iso.read_text().splitlines()
+        if json.loads(line)["type"] == "control_plane_tick"
+    ]
+    assert rows[0]["data"]["skip_reason"] == "next-error"
+    assert rows[0]["data"]["detail"] == \
+        "closed=ab-1111aaaa node=- reason=next-error detail=roster boom"
+
+
+@requires_rust
+def test_skip_tick_without_detail_is_byte_identical(iso, monkeypatch):
+    """A detail-less skip keeps today's exact tick detail string."""
+    monkeypatch.setenv("FNO_AUTO_CONTINUE", "0")
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: "x")
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+
+    adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    rows = [
+        json.loads(line)
+        for line in iso.read_text().splitlines()
+        if json.loads(line)["type"] == "control_plane_tick"
+    ]
+    assert rows[0]["data"]["detail"] == "closed=ab-1111aaaa node=- reason=disabled"
+
+
 def test_no_work(iso, monkeypatch):
     monkeypatch.setattr(adv, "_next_node", lambda project: None)
     monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: pytest.fail("must not spawn"))
@@ -1076,6 +1116,42 @@ def test_worker_agent_name_carries_verb_id_and_slug():
         "target-ab-2222aaaa-cargo-bootstrapper"
     assert adv._worker_agent_name("ab-2222aaaa", "x" * 35) == \
         "target-ab-2222aaaa-" + "x" * 30
+
+
+def test_verb_qualifier_derives_bare_declared_verb():
+    assert adv._verb_qualifier("/fno:blueprint") == "blueprint"
+    assert adv._verb_qualifier("blueprint") == "blueprint"
+    assert adv._verb_qualifier("$fno:blueprint") == "fno-blueprint"
+    assert adv._verb_qualifier(None) is None
+    assert adv._verb_qualifier("") is None
+    assert adv._verb_qualifier("  ") is None
+
+
+def test_worker_agent_name_qualifier_keeps_prefix_contract():
+    # The verb lands in agent_name's qualifier slot: the name states which verb
+    # ran while every target-<node>- consumer match keeps holding.
+    name = adv._worker_agent_name("x-7aa8abc1", "daily-pass", qualifier="blueprint")
+    assert name == "target-x-7aa8abc1-blueprint-daily-pass"
+    assert name.startswith("target-x-7aa8abc1-")
+    # A node declaring no verb keeps today's exact name (no empty qualifier).
+    assert adv._worker_agent_name("ab-2222aaaa", "cargo-bootstrapper") == \
+        "target-ab-2222aaaa-cargo-bootstrapper"
+
+
+def test_spawn_worker_declared_verb_lands_in_name(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _FakeProc(0, _RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    # /think: an allowlisted verb exercises the same qualifier mechanics the
+    # resolver refuses for unlisted ones.
+    adv._spawn_worker("x-7aa8abc1", None, "daily-pass", verb="/think")
+    name = captured["cmd"][-2]
+    assert name.startswith("target-x-7aa8abc1-")
+    assert "think" in name
 
 
 def test_spawn_worker_name_includes_slug(monkeypatch):
