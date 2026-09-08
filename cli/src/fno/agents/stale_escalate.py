@@ -73,6 +73,29 @@ def already_asked(root: Path, key: str, *, marker: str = MARKER) -> "str | None"
     return None
 
 
+#: The closers reconcile_channel itself mints. Their close answers are
+#: mechanical ("set changed; superseded by ..."), never a human verdict, so
+#: they do not suppress: a set that changed away and back must re-ask.
+_MECHANICAL_CLOSERS = frozenset({"stale-escalate", "friction-escalate"})
+
+
+def answered_question(root: Path, key: str, *, marker: str = MARKER) -> "str | None":
+    """The id of the question carrying ``[<marker>:<key>]`` that a HUMAN
+    answered, else None. An answered ask is a consumed ask: re-minting it on
+    the next sweep is the re-nag this fold kills. An unchanged row set after
+    an answer never asks again; a CHANGED set mints a fresh key and asks.
+    """
+    from fno.outstanding.core import read_answered_questions
+
+    needle = f"[{marker}:{key}]"
+    for question in read_answered_questions():
+        if needle in question.get("question", "") and (
+            question.get("closed_by") not in _MECHANICAL_CLOSERS
+        ):
+            return question["id"]
+    return None
+
+
 def escalate_unfinished(
     findings,
     *,
@@ -93,6 +116,9 @@ def escalate_unfinished(
     existing = already_asked(root, key)
     if existing:
         return ("duplicate", existing)
+    answered = answered_question(root, key)
+    if answered:
+        return ("answered", answered)
 
     qid = f"q-{secrets.token_hex(4)}"
     append_question_event(

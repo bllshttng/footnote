@@ -427,6 +427,7 @@ def read_answered_questions() -> "list[dict[str, Any]]":
                     "question": str(origin.get("question") or ""),
                     "answer": str(data["answer"]),
                     "closed_ts": str(rec.get("ts") or ""),
+                    "closed_by": str(data.get("closed_by") or ""),
                 }
             )
     answered.sort(key=lambda a: (a["closed_ts"], a["id"]))

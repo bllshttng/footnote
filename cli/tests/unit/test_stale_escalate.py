@@ -128,6 +128,90 @@ def test_emptied_set_closes_the_open_ask(tmp_path: Path) -> None:
     assert read_open_questions(tmp_path) == []
 
 
+def _answer(qid: str, answer: str, root: Path, *, closed_by: str = "operator") -> None:
+    from fno.events import operator_question_closed
+    from fno.outstanding.core import append_question_event
+
+    append_question_event(
+        operator_question_closed(
+            question_id=qid,
+            answer=answer,
+            closed_by=closed_by,
+            source="daemon",
+        ),
+        root,
+    )
+
+
+def test_answered_ask_suppresses_the_renag(tmp_path: Path) -> None:
+    """An answered ask is a consumed ask: the next sweep with an UNCHANGED
+    row set reports 'answered' (the sweep RAN - a positive marker, never an
+    absence-only no-mail claim) and appends no new question row."""
+    transcripts = {"dddd4444-0000": _tail("stopped mid turn", 61 * 1440 * 60)}
+    _outcome, asked_id = _stale_run(tmp_path, [_stale_row()], transcripts)
+    assert read_open_questions(tmp_path)
+
+    _answer(asked_id, "noted; leave them", tmp_path)
+
+    outcome, seen_id = _stale_run(tmp_path, [_stale_row()], transcripts)
+
+    assert outcome == "answered"
+    assert seen_id == asked_id
+    assert read_open_questions(tmp_path) == []
+
+
+def test_mechanical_supersede_close_does_not_suppress_a_returning_set(
+    tmp_path: Path,
+) -> None:
+    """A close minted by the fold itself is not an answer: when the set
+    changes away and comes back, the returning set must re-ask."""
+    one = _stale_row("dddd4444-0000", "k1")
+    transcripts_one = {"dddd4444-0000": _tail("stopped mid turn", 61 * 1440 * 60)}
+    _outcome, first_id = _stale_run(tmp_path, [one], transcripts_one)
+
+    two = _stale_row("eeee5555-0000", "k2")
+    transcripts_two = {
+        "dddd4444-0000": _tail("stopped mid turn", 61 * 1440 * 60),
+        "eeee5555-0000": _tail("blocked mid turn", 30 * 1440 * 60),
+    }
+    _outcome, second_id = _stale_run(tmp_path, [one, two], transcripts_two)
+    assert second_id != first_id
+    _answer(second_id, "k2 reaped", tmp_path)
+
+    outcome, third_id = _stale_run(tmp_path, [one], transcripts_one)
+
+    assert outcome == "asked"
+    assert third_id not in (first_id, second_id)
+
+
+def test_answered_finding_ask_suppresses_the_renag(tmp_path: Path) -> None:
+    """The unfinished-work emitter rides the same fold: an answered finding
+    set never re-asks while unchanged."""
+    from types import SimpleNamespace
+
+    from fno.agents.stale_escalate import escalate_unfinished
+
+    finding = SimpleNamespace(
+        kind="dirty", subject="/w/x", basis="82 files dirty",
+        clear_command="fno agents workspace worktree cleanup", node_id=None,
+        pr_number=None, cwd="/w/x", age_s=100.0,
+    )
+    first_outcome, asked_id = escalate_unfinished(
+        [finding], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+    assert first_outcome == "recorded"
+
+    _answer(asked_id, "cleaning it now", tmp_path)
+
+    outcome, seen_id = escalate_unfinished(
+        [finding], root=tmp_path, session_id="watchdog-test", cwd=tmp_path
+    )
+
+    assert outcome == "answered"
+    assert seen_id == asked_id
+    assert read_open_questions(tmp_path) == []
+
+
 def test_duplicate_run_closes_straggler_asks_from_an_interrupted_supersede(
     tmp_path: Path,
 ) -> None:
