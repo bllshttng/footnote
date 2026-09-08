@@ -460,6 +460,55 @@ fn cases() -> Vec<Case> {
             claims: &[],
             expect_err: false,
         },
+        // Review-found epic-group ordering: a ranked child must NOT float
+        // its group ahead of a ranked loose node (the group's leading band
+        // is the EPIC's), and the in-progress probe names the candidate's
+        // PARENT (an epic id), never the candidate's own id.
+        Case {
+            name: "epic_group_leading_band",
+            flags: &["-A"],
+            entries: |c: &Ctx| vec![
+                {
+                    let mut e = ready_row("x-gb-l", "p2", "fno", 3, c);
+                    e["rank"] = serde_json::json!(1.5);
+                    e
+                },
+                serde_json::json!({"id": "x-gb-e", "slug": "e1", "title": "Unranked epic", "priority": "p1",
+                    "project": "fno", "status": "ready", "type": "epic", "created_at": c.iso(9)}),
+                {
+                    let mut e = ready_row("x-gb-rc", "p1", "fno", 2, c);
+                    e["rank"] = serde_json::json!(1.5);
+                    e["parent"] = serde_json::json!("x-gb-e");
+                    e
+                },
+            ],
+            plans: &[],
+            claims: &[],
+            expect_err: false,
+        },
+        Case {
+            name: "epic_progress_probe_parent",
+            flags: &["-A"],
+            entries: |c: &Ctx| vec![
+                serde_json::json!({"id": "x-pp-g", "slug": "g", "title": "Grand epic", "priority": "p1",
+                    "project": "fno", "status": "ready", "type": "epic", "created_at": c.iso(9)}),
+                {
+                    let mut e = ready_row("x-pp-h", "p1", "fno", 2, c);
+                    e["rank"] = serde_json::json!(1.5);
+                    e["parent"] = serde_json::json!("x-pp-g");
+                    e
+                },
+                serde_json::json!({"id": "x-pp-c", "slug": "c", "title": "Mid epic", "priority": "p2",
+                    "project": "fno", "status": "ready", "type": "epic", "parent": "x-pp-g",
+                    "created_at": c.iso(3)}),
+                serde_json::json!({"id": "x-pp-d", "slug": "d", "title": "Done grandchild", "priority": "p2",
+                    "project": "fno", "status": "done", "type": "task", "parent": "x-pp-c",
+                    "contained_in": "x-pp-c", "completed_at": c.iso(1), "created_at": c.iso(4)}),
+            ],
+            plans: &[],
+            claims: &[],
+            expect_err: false,
+        },
         // The full sort key over one graph: epics-first tiers, in-progress
         // epic groups, fan-out, orphans last, encounter evidence.
         Case {
@@ -735,6 +784,76 @@ print(json.dumps({
 }))
 "#;
 
+/// The pre-port `cmd_ready` row pipeline, word for word from the commit that
+/// moved the callers onto the native leg. Every piece it names still lives in
+/// the cli package (`_dispatch_node_summary`, the sort key, the guards), so
+/// this driver stays runnable on the POST-deletion tree where
+/// `fno backlog ready` itself is the Rust leg. It is the row oracle for the
+/// scoped capture mode below.
+const ROWS_ORACLE_DRIVER: &str = r#"
+import json, sys
+from datetime import datetime, timezone
+from fno import paths
+from fno.graph.store import read_graph
+from fno.graph.cli import (
+    _container_ids,
+    _dispatch_node_summary,
+    _has_unmerged_open_pr,
+    _is_batched_member,
+)
+from fno.graph.statuses import live_claimed_node_ids
+from fno.backlog.advance import _guard_staleness_days, selection_guards
+from fno.graph.ladder import is_cold_dispatchable
+from fno.graph._intake import (
+    _find_node,
+    descendants_of,
+    filter_by_project,
+    make_selection_sort_key,
+)
+
+cfg = json.loads(sys.argv[1])
+entries = read_graph(paths.graph_json())
+allowed = {"ready"}
+if cfg["include_ideas"]:
+    allowed.add("idea")
+if cfg["include_deferred"]:
+    allowed.add("deferred")
+ready = [
+    e
+    for e in entries
+    if (e.get("status") in allowed or is_cold_dispatchable(e)) and not e.get("completed_at")
+]
+ready = filter_by_project(ready, cfg.get("project"), cfg.get("all", False))
+if cfg.get("roadmap_id"):
+    ready = [e for e in ready if e.get("roadmap_id") == cfg["roadmap_id"]]
+if cfg.get("mission"):
+    ready = [e for e in ready if e.get("mission_id") == cfg["mission"]]
+if cfg.get("parent"):
+    target = _find_node(entries, cfg["parent"])
+    if target is None:
+        sys.exit(3)
+    scope = descendants_of(entries, target["id"])
+    if not scope:
+        print("no children", file=sys.stderr)
+    ready = [e for e in ready if e.get("id") in scope]
+claimed = live_claimed_node_ids(strict=True)
+if claimed:
+    ready = [e for e in ready if e.get("id") not in claimed]
+ready = [e for e in ready if e.get("status") != "ready" or not _has_unmerged_open_pr(e)]
+container_ids = _container_ids(entries)
+ready = [e for e in ready if e.get("id") not in container_ids]
+ready = [e for e in ready if not _is_batched_member(e)]
+now = datetime.now(timezone.utc)
+by_id = {e.get("id"): e for e in entries if e.get("id")}
+ready = [
+    e
+    for e in ready
+    if not selection_guards(e, by_id, now, staleness_days=_guard_staleness_days())
+]
+ready.sort(key=make_selection_sort_key(entries, live_claimed=claimed))
+print(json.dumps([_dispatch_node_summary(e) for e in ready], indent=2))
+"#;
+
 fn run_cascade_oracle(repo: &Path, dir: &Path, case: &Case) -> (i32, String, String) {
     let cfg = serde_json::json!({
         "include_ideas": case.flags.contains(&"--ideas") || case.flags.contains(&"--include-ideas") || case.flags.contains(&"-I"),
@@ -747,6 +866,25 @@ fn run_cascade_oracle(repo: &Path, dir: &Path, case: &Case) -> (i32, String, Str
     });
     let mut cmd = Command::new(venv_python(repo));
     cmd.arg("-c").arg(CASCADE_DRIVER).arg(cfg.to_string());
+    cmd.current_dir(canonical_repo_root());
+    run_with_env(&mut cmd, &py_env(dir))
+}
+
+/// The pre-port row pipeline as the oracle for a scoped capture. Unlike the
+/// cascade driver this needs no deleted module: every symbol it names still
+/// lives in the cli package.
+fn run_rows_oracle(repo: &Path, dir: &Path, case: &Case) -> (i32, String, String) {
+    let cfg = serde_json::json!({
+        "include_ideas": case.flags.contains(&"--ideas") || case.flags.contains(&"--include-ideas") || case.flags.contains(&"-I"),
+        "include_deferred": case.flags.contains(&"--include-deferred"),
+        "all": case.flags.contains(&"-A") || case.flags.contains(&"--all"),
+        "project": case.flags.iter().position(|f| *f == "-p").map(|i| case.flags[i + 1]),
+        "roadmap_id": case.flags.iter().position(|f| *f == "--roadmap-id").map(|i| case.flags[i + 1]),
+        "mission": case.flags.iter().position(|f| *f == "--mission").map(|i| case.flags[i + 1]),
+        "parent": case.flags.iter().position(|f| *f == "--parent").map(|i| case.flags[i + 1]),
+    });
+    let mut cmd = Command::new(venv_python(repo));
+    cmd.arg("-c").arg(ROWS_ORACLE_DRIVER).arg(cfg.to_string());
     cmd.current_dir(canonical_repo_root());
     run_with_env(&mut cmd, &py_env(dir))
 }
@@ -783,6 +921,7 @@ fn rust_rows(ctx: &Ctx, case: &Case, dir: &Path) -> Value {
         include_ideas: flag("--ideas") || flag("--include-ideas") || flag("-I"),
         include_deferred: flag("--include-deferred"),
         repo_root: Some(ctx.repo.display().to_string()),
+        staleness_days: None,
         claimed,
         now_ms: ctx.now_ms,
     };
@@ -837,7 +976,22 @@ fn golden_dir() -> PathBuf {
 fn characterization_ready_selection_matches_the_frozen_goldens() {
     let repo = canonical_repo_root();
     let capture = std::env::var("FNO_CAPTURE_GOLDEN").is_ok();
-    for case in cases() {
+    // Scoped capture: with FNO_CAPTURE_CASES=name[,name], only those cases
+    // freeze, and their rows oracle is the pre-port pipeline driver (still
+    // fully alive in the cli package), not `fno backlog ready` - which on
+    // this tree IS the Rust leg, so a full-tree re-capture would freeze Rust
+    // over the Python goldens. A full capture (no case filter) keeps the
+    // pre-deletion contract: run it on a tree where the cascade still lives.
+    let capture_cases: Option<Vec<String>> = std::env::var("FNO_CAPTURE_CASES")
+        .ok()
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect());
+    let in_scope = |name: &str| {
+        capture_cases
+            .as_ref()
+            .map(|list| list.iter().any(|n| n == name))
+            .unwrap_or(true)
+    };
+    for case in cases().into_iter().filter(|c| !capture || in_scope(c.name)) {
         let (_m, ctx) = materialize(&case);
         let dir = _m.dir.path().to_path_buf();
         let rs = rust_rows(&ctx, &case, &dir);
@@ -863,7 +1017,11 @@ fn characterization_ready_selection_matches_the_frozen_goldens() {
         // characterization mode the Python leg never runs.
         let rs_normalized = normalized_text(rs.get("rows").unwrap());
         if capture {
-            let (py_exit, py_out, py_err) = run_python_ready(&repo, &dir, case.flags);
+            let (py_exit, py_out, py_err) = if capture_cases.is_some() {
+                run_rows_oracle(&repo, &dir, &case)
+            } else {
+                run_python_ready(&repo, &dir, case.flags)
+            };
             assert_eq!(py_exit, 0, "[{}] python leg failed: {py_err}", case.name);
             let py_rows: Value = serde_json::from_str(&py_out).unwrap_or_else(|e| {
                 panic!("[{}] python stdout is not JSON: {e}\n{py_out}", case.name)

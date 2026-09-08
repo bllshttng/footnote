@@ -4627,9 +4627,21 @@ def cmd_next(
                 candidates = _with_observer(_select(entries), entries)
                 if candidates:
                     winner = candidates[0]
-                    winner["locked_by"] = claim
-                    winner["locked_at"] = datetime.now(timezone.utc).isoformat()
-                    result[0] = _dispatch_node_summary(winner)
+                    # Rows are serialized summaries, not graph references:
+                    # the lock must land on the graph entry itself or the
+                    # commit publishes nothing (the pre-port leg returned
+                    # graph references from _pick_ready, so this was
+                    # implicit).
+                    target = next(
+                        (e for e in entries if e.get("id") == winner["id"]), None
+                    )
+                    if target is None:
+                        raise RuntimeError(
+                            f"selected node vanished under the lock: {winner['id']}"
+                        )
+                    target["locked_by"] = claim
+                    target["locked_at"] = datetime.now(timezone.utc).isoformat()
+                    result[0] = _dispatch_node_summary(target)
                 return entries
 
             locked_mutate_graph(_graph_path(), mutator)

@@ -32,7 +32,7 @@ use crate::identity::{harness_of_session_id, shape_known_harness};
 use serde_json::{json, Map, Value};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -486,11 +486,29 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
                 .filter_map(Value::as_str)
                 .map(str::to_string)
                 .collect::<BTreeSet<String>>(),
-            _ => crate::claims::list(Some("node:"), None, false)
+            // Unknown claim state must refuse, not read as "nothing is
+            // claimed": the Python leg this verb replaced failed closed
+            // (`live_claimed_node_ids(strict=True)`).
+            _ => crate::claims::list_strict(Some("node:"), None, false)
+                .map_err(|e| {
+                    StoreError::Corrupt(format!(
+                        "live claim state is unavailable; ready selection refused: {e}"
+                    ))
+                })?
                 .iter()
                 .filter_map(|rec| rec.key.strip_prefix("node:").map(str::to_string))
                 .collect(),
         },
+        // Explicit param first (a client that resolved policy), then the
+        // config beside the graph, then the fail-open default in select().
+        staleness_days: params
+            .get("staleness_days")
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                crate::backlog_ready::configured_staleness_days(
+                    &state.graph.parent().unwrap_or(Path::new("")),
+                )
+            }),
         now_ms: params
             .get("now_ms")
             .and_then(Value::as_i64)

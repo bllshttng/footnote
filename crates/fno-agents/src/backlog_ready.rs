@@ -49,6 +49,21 @@ const DEFAULT_STALENESS_DAYS: i64 = 21;
 /// (advance._MAX_ANCESTOR_WALK).
 const MAX_ANCESTOR_WALK: usize = 64;
 
+/// `config.backlog.staleness_days`, read from the `config.toml` in
+/// `config_dir` (the graph's own `.fno` directory). `None` on a missing,
+/// malformed, or non-positive value, so every caller degrades to
+/// [`DEFAULT_STALENESS_DAYS`] exactly as `_guard_staleness_days` did.
+pub fn configured_staleness_days(config_dir: &std::path::Path) -> Option<i64> {
+    let raw = std::fs::read_to_string(config_dir.join("config.toml")).ok()?;
+    let table = raw.parse::<toml::Table>().ok()?;
+    let days = table
+        .get("backlog")?
+        .as_table()?
+        .get("staleness_days")?
+        .as_integer()?;
+    (days > 0).then_some(days)
+}
+
 // ---------------------------------------------------------------------------
 // Options + reply
 // ---------------------------------------------------------------------------
@@ -70,6 +85,11 @@ pub struct ReadyOpts {
     /// the claims store (`claims::list` + liveness) so the decision stays a
     /// pure function of entries + options.
     pub claimed: BTreeSet<String>,
+    /// `config.backlog.staleness_days`, resolved by the caller. `None` (or a
+    /// non-positive value) means "no config surface reached me" and the
+    /// selection degrades to [`DEFAULT_STALENESS_DAYS`], the same fail-open
+    /// contract `_guard_staleness_days` had.
+    pub staleness_days: Option<i64>,
     /// The selection instant, epoch milliseconds UTC. now()-stamps never
     /// reach the projection; this only drives staleness and encounter age.
     pub now_ms: i64,
@@ -990,7 +1010,11 @@ fn selection_sort_key(
     let epic = live_epic_for(node, by_id, child_progress);
     match epic {
         Some(epic) => {
-            let in_progress_rank = if epic_in_progress.contains(node_id) {
+            // Python parity: the membership probe and the leading band both
+            // name the EPIC (the parent id, the epic's rank), never the
+            // child; the child's band only orders among siblings.
+            let parent_id = get_str(node, "parent").unwrap_or("");
+            let in_progress_rank = if epic_in_progress.contains(parent_id) {
                 0
             } else {
                 1
@@ -999,7 +1023,7 @@ fn selection_sort_key(
             let epic_prio = priority_rank(&priority_name(&epic));
             let epic_created = get_str(&epic, "created_at").unwrap_or("").to_string();
             vec![
-                Term::Band(band.0, OrdF64(band.1)),
+                Term::Band(epic_band.0, OrdF64(epic_band.1)),
                 Term::I(0),
                 Term::I(in_progress_rank),
                 Term::I(epic_prio),
@@ -1224,10 +1248,14 @@ pub fn select(entries: &[Value], opts: &ReadyOpts) -> Result<ReadyReply, NoSuchP
     };
 
     let repo_root = opts.repo_root.clone().unwrap_or_default();
+    let staleness_days = opts
+        .staleness_days
+        .filter(|days| *days > 0)
+        .unwrap_or(DEFAULT_STALENESS_DAYS);
     let ctx = SelectCtx {
         opts: opts.clone(),
         repo_root,
-        staleness_days: DEFAULT_STALENESS_DAYS,
+        staleness_days,
         parent_scope,
         container_ids: container_ids(entries),
         by_id: by_id.clone(),

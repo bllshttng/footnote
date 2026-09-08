@@ -393,8 +393,18 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 let Some(entries) = entries else {
                     return SourceRead::err("graph unreadable: no entries for ready selection");
                 };
+                // Strict claims read: an unreadable root is unknown claim
+                // state, surfaced as a source error rather than an empty
+                // set that would re-dispatch held work.
+                let claimed_records = crate::claims::list_strict(Some("node:"), None, false);
+                let Ok(claim_records) = claimed_records else {
+                    return SourceRead::err(format!(
+                        "claims unreadable: {}",
+                        claimed_records.err().unwrap_or_default()
+                    ));
+                };
                 let mut claimed = std::collections::BTreeSet::new();
-                for rec in crate::claims::list(Some("node:"), None, false) {
+                for rec in claim_records {
                     if let Some(id) = rec.key.strip_prefix("node:") {
                         claimed.insert(id.to_string());
                     }
@@ -403,6 +413,9 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                     all: true,
                     repo_root: crate::paths::canonical_repo_root(&cwd)
                         .map(|p| p.display().to_string()),
+                    staleness_days: crate::backlog_ready::configured_staleness_days(
+                        &cwd.join(".fno"),
+                    ),
                     claimed,
                     now_ms: crate::claims::now_ms(),
                     ..Default::default()
