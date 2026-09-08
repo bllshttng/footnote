@@ -400,8 +400,11 @@ def make_selection_sort_key(
     ``swimlane=True`` prepends the project lane used by renderers; the remaining
     suffix is byte-identical to selection precedence: curated ``rank`` first,
     then epics-first, then flat priority.
-    The key always includes the same ``_rank_band`` term, so a ``fno backlog
-    rank --top`` node is *worked* next, not merely floated on the board.
+    The key always includes the same ``_rank_band`` term, so an operator's
+    ``fno backlog rank --top`` pin is *worked* next among the peers it ordered.
+    Read the scope literally: a LOOSE pin leads its (column, project) lane, and
+    a CHILD's pin leads only its live epic's children - it never floats the
+    group past another epic, so a pinned child is not the project's next node.
     A ranked node (band 0, ascending rank) outranks every
     unranked node, so an explicit rank overrides the epics-first heuristic;
     with no ranks set every node shares the ``(1, 0.0)`` band and ordering is
@@ -417,6 +420,12 @@ def make_selection_sort_key(
     pull its epic group ahead of another epic or a loose node), then the
     child's own priority and ``created_at``. Loose nodes fall back to flat
     priority then ``created_at`` (matching ``_graph_sort_key_fn``).
+
+    After priority and fan-out comes ``demand.importance_score``: encounters
+    weighed against the operator's own priority, plus a capped age term. It is
+    the fleet's revealed preference, and it sits below the decision terms
+    because a measurement must not outrank a judgement. It is zero for every
+    node with no encounter, so a graph nobody voted on sorts unchanged.
 
     The key is precomputed against ``entries`` once so sorting stays O(N
     log N): epic lookup, child grouping, and in-progress detection are all
@@ -444,6 +453,19 @@ def make_selection_sort_key(
 
     def _fanout(node_id: object) -> int:
         return -dependents.get(node_id, 0) if isinstance(node_id, str) else 0
+    # Evidence: encounters weighed against the operator's own priority, plus a
+    # capped age term. It sits AFTER priority and fan-out, so a measurement
+    # never outranks a decision, and it is zero for every unvoted row - a graph
+    # with no encounters keeps its exact previous order.
+    from datetime import datetime, timezone
+
+    from fno.graph.demand import importance_score
+
+    effective_priority = make_effective_priority(entries)
+    scored_at = datetime.now(timezone.utc)
+
+    def _score(node: dict) -> float:
+        return -importance_score(node, effective_priority(node), scored_at)
     # Board == work order: `next` must demote orphans exactly where the board
     # does, or the board shows one order and the walker works another. Computed
     # here (not passed by every caller) so no call site can forget it; fails
@@ -491,6 +513,7 @@ def make_selection_sort_key(
                 band,                    # child rank: orders only within its epic
                 child_prio,
                 _fanout(node_id),    # in-band: after priority, before orphan
+                _score(node),        # evidence: encounters, then age
                 child_orphan,
                 child_created,
             )
@@ -503,8 +526,8 @@ def make_selection_sort_key(
         # epic branch's arity; tier (index 1) already separates the two, so
         # it is never compared.
         return lane + (
-            band, 1, 0, child_prio, _fanout(node_id), child_orphan, child_created,
-            child_prio, _fanout(node_id), child_created,
+            band, 1, 0, child_prio, _fanout(node_id), _score(node), child_orphan,
+            child_created, child_prio, _fanout(node_id), child_created,
         )
 
     return key
