@@ -1141,6 +1141,54 @@ def _stamp_spawned_session_row(
         )
 
 
+def _stamp_launch_edge(node: "str | None") -> None:
+    """Record WHO LAUNCHED this node's worker, on the node itself (x-5c25).
+
+    The graph declares `spawned_by_session` / `spawned_by_harness` /
+    `spawned_by_cwd`, `fno backlog provenance` reads them back, and until this
+    stamp nothing wrote them: 0 of 2356 nodes carried one, flat zero in every
+    cohort. The registry row carries the same triple, but a row is reaped and a
+    node is durable, so the launch edge has to live on the node too.
+
+    This is the sibling of :func:`_stamp_spawned_session_row`, which answers a
+    different question with a different field. sessions[] is who WORKED the
+    node; source_session_id is who DISCOVERED it; this is who LAUNCHED it. The
+    three routinely differ: of 506 nodes carrying both a source_session_id and
+    a worked session, the filer is not among the workers in 428, so no existing
+    field can be copied into this one.
+
+    Refuses rather than half-writes. No node, no write. No proven parent
+    session, no write: the registry row and its `agent_spawned` event already
+    record the absence with its reason, and a triple with a null session on a
+    durable node would assert a launch nobody can trace. Never overwrites an
+    existing edge, because launch is the FIRST launch. Never raises.
+    """
+    if not node:
+        return
+    from fno.agents.dispatch import _capture_parent_edge
+
+    session_id, harness, parent_cwd = _capture_parent_edge()
+    if not session_id:
+        return
+
+    def mutator(entries: "list[dict]") -> "list[dict]":
+        for row in entries:
+            if row.get("id") != node or row.get("spawned_by_session"):
+                continue
+            row["spawned_by_session"] = session_id
+            row["spawned_by_harness"] = harness
+            row["spawned_by_cwd"] = parent_cwd
+        return entries
+
+    try:
+        from fno.graph.store import locked_mutate_graph
+        from fno.paths import graph_json
+
+        locked_mutate_graph(graph_json(), mutator)
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
+        print(f"spawn: launch edge not recorded on {node}: {exc}", file=sys.stderr)
+
+
 @agents_app.command("spawn")
 def cmd_spawn(
     message: str = typer.Argument("", help="The prompt to seed the worker with."),
@@ -2573,6 +2621,7 @@ def cmd_spawn(
                 worker_session_uuid=pane_result.session_uuid,
                 worker_effort=effort,
             )
+            _stamp_launch_edge((prov_env or {}).get("FNO_NODE"))
             # Exit 22 means one thing: a receipt WAS written and something on it
             # is unverified - the seed, or the pane the seed was handed to. Both
             # leave a caller holding a row it cannot trust, which is what exit 22
@@ -2716,6 +2765,7 @@ def cmd_spawn(
         worker_session_uuid=None,
         worker_effort=effort,
     )
+    _stamp_launch_edge((prov_env or {}).get("FNO_NODE"))
 
     if result.kind == "created":
         # claude plain spawn: compact hand-rolled JSON receipt on stdout.
