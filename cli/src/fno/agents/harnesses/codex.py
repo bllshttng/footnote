@@ -998,3 +998,59 @@ def remove_session_index_entry(
         tmp.unlink(missing_ok=True)
         raise
     return True
+def capture_session_index_entries(
+    session_id: str, *, session_index_path: Optional[Path] = None
+) -> list:
+    """Return the raw index lines whose parsed ``id`` equals ``session_id``.
+
+    The rollback half of the removal contract (the companion of
+    :func:`remove_session_index_entry`): a removal that does not succeed
+    must leave every store unchanged, so the caller snapshots the exact
+    lines the rewrite will drop BEFORE tearing down, and re-appends them
+    when the registry write later declines. Same parse discipline as the
+    removal: matching on the parsed ``id`` field, never substring.
+    """
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
+        return []
+    path = session_index_path or default_session_index_path()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(row, dict) and row.get("id") == session_id:
+            out.append(line)
+    return out
+
+
+def restore_session_index_entries(
+    lines: list, *, session_index_path: Optional[Path] = None
+) -> None:
+    """Re-append previously captured index lines (atomic rewrite).
+
+    The caller invokes this when the registry write declined after a
+    successful teardown: the harness record goes back, so the refusal's
+    "nothing was removed" is true of every store. Raises on a failed
+    restore so a half-removal never reads as a clean one.
+    """
+    if not lines:
+        return
+    path = session_index_path or default_session_index_path()
+    try:
+        current = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except FileNotFoundError:
+        current = []
+    merged = current + [line for line in lines if line not in current]
+    tmp = path.with_name(f"{path.name}.fno-restore.{os.getpid()}.tmp")
+    try:
+        tmp.write_text("".join(merged), encoding="utf-8")
+        os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise

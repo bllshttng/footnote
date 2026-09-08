@@ -413,6 +413,51 @@ def test_rm_retains_row_restamped_during_shellout(
     assert rows[0].harness_session_id == replacement_id
 
 
+def test_rm_codex_declined_write_restores_session_index_bytes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The removal invariant: a removal that does not succeed leaves every
+    store unchanged. The teardown rewrote the index, the registry write
+    declined, and the captured entry lines go back -- so the refusal's
+    "nothing was removed" is true of the harness store too. Asserted on
+    the FILE BYTES, positive marker, not on the absence of an error."""
+    use_tmpdir(monkeypatch, tmp_path)
+    session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    _seed_registry(
+        dict(
+            name="victim-codex",
+            provider="codex",
+            harness_session_id=session_id,
+            codex_session_id=session_id,
+            status="live",
+        ),
+    )
+
+    from fno.agents import dispatch
+    from fno.agents.harnesses import codex as codex_mod
+
+    index = tmp_path / "session_index.jsonl"
+    index_line = json.dumps({"id": session_id, "threadName": "t"}) + "\n"
+    index.write_text(index_line)
+    monkeypatch.setattr(
+        codex_mod, "default_session_index_path", lambda: index
+    )
+
+    # Force the registry write to decline after a successful teardown,
+    # exactly the ghost shape that stranded a torn-down record behind a
+    # "nothing was removed" error.
+    monkeypatch.setattr(
+        dispatch,
+        "_update_registry_if_recipient_unchanged",
+        lambda *args, **kwargs: False,
+    )
+
+    with pytest.raises(dispatch.DispatchAskError, match="nothing was removed"):
+        dispatch.rm_agent("victim-codex")
+
+    assert index.read_text() == index_line
+
+
 def test_rm_refuses_when_row_is_removed_entirely_during_shellout(
     tmp_path: Path,
     monkeypatch,

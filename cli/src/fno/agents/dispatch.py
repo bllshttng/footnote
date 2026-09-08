@@ -4096,6 +4096,19 @@ def stop_agent(
         ) from exc
 
 
+def _restore_torn_down_index(captured_lines: list) -> None:
+    """Put captured codex session-index lines back after a declined write.
+
+    Called only on the decline paths, after the teardown already removed
+    the entry: restoring is what makes the refusal's "nothing was
+    removed" true of every store. A failed restore raises so a
+    half-removal never reads as a clean refusal.
+    """
+    from fno.agents.harnesses import codex as codex_mod
+
+    codex_mod.restore_session_index_entries(captured_lines)
+
+
 def _teardown_harness_session(
     existing: AgentEntry,
     *,
@@ -4296,6 +4309,9 @@ def rm_agent(
             # Non-None only when --force swallowed a teardown failure; rides
             # the terminal event so the forensic stream stays single and true.
             teardown_error: Optional[str] = None
+            # The codex index lines the teardown removed, snapshotted before
+            # the teardown so a declining registry write can put them back.
+            captured_index_lines: list = []
             from fno.worktree_reapable import is_linked_worktree
 
             detected_worktree = bool(existing.cwd and is_linked_worktree(existing.cwd))
@@ -4435,6 +4451,18 @@ def rm_agent(
                         )
 
             elif existing.harness in ("codex", "opencode", "cursor-agent"):
+                # Snapshot the exact index lines the rewrite will drop, so a
+                # declining registry write can put them back: a removal that
+                # does not succeed leaves every store unchanged, and the
+                # refusal's "nothing was removed" must be true of the harness
+                # store too.
+                captured_index_lines = []
+                if existing.harness == "codex" and existing.harness_session_id:
+                    from fno.agents.harnesses import codex as codex_capture
+
+                    captured_index_lines = codex_capture.capture_session_index_entries(
+                        existing.harness_session_id
+                    )
                 teardown_error = _teardown_harness_session(
                     existing,
                     name=name,
@@ -4457,6 +4485,8 @@ def rm_agent(
                     decline_reason=decline_reason,
                 )
             except (OSError, RegistryVersionError) as exc:
+                if captured_index_lines:
+                    _restore_torn_down_index(captured_index_lines)
                 events.emit(
                     "agent_removed",
                     name=name,
@@ -4473,6 +4503,8 @@ def rm_agent(
                     exit_code=12,
                 ) from exc
             if not registry_changed:
+                if captured_index_lines:
+                    _restore_torn_down_index(captured_index_lines)
                 row_removed = decline_reason and decline_reason[0] == "row_removed"
                 events.emit(
                     "agent_removed",
