@@ -6826,10 +6826,9 @@ impl Core {
         let retired = crate::restore_gate::retired_receipt_session_ids().unwrap_or_default();
         let mut rows = Vec::with_capacity(candidates.len());
         for (name, member) in candidates {
-            if let Some(reason) = crate::restore_gate::retired_refusal(
-                member.harness_session_id.as_deref(),
-                &retired,
-            ) {
+            if let Some(reason) =
+                crate::restore_gate::retired_refusal(member.harness_session_id.as_deref(), &retired)
+            {
                 rows.push(RestoreRow {
                     member: name,
                     harness: member.harness.clone(),
