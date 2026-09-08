@@ -16481,10 +16481,10 @@ mod tests {
     mod squad_sync_tests;
 
     // The per-pane orphan verdict family.
+    mod pane_identity_tests;
 
     // (x-b64e) The restore test family, same treatment: the file is
     // shrink-only under the file-budget gate. Moved verbatim.
-    mod pane_identity_tests;
     mod server_restore_tests;
 
     #[test]
