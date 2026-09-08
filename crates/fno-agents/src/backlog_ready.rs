@@ -7,8 +7,8 @@
 //! `plan_rung`, `is_stale_ready`, `make_selection_sort_key`,
 //! `filter_by_project`. One leg, in Rust, served over the keeper socket;
 //! the Python callers become clients and the old leg is deleted in the same
-//! change (law d-52ae01cb: a port that leaves a compatibility shell is not
-//! finished).
+//! change: a port that leaves a compatibility shell is not finished, so
+//! every caller with no surviving consumer moved onto this leg.
 //!
 //! Three behaviors are contracts, not incidental, and are kept exactly:
 //! `selection_guards` fails OPEN on missing/malformed data except the plan
@@ -151,7 +151,6 @@ fn priority_name(e: &Value) -> String {
 fn parse_iso_ms(value: &Value) -> Option<i64> {
     let s = match value {
         Value::String(s) => s.as_str(),
-        other if !other.is_null() => return None,
         _ => return None,
     };
     parse_iso_str(s)
@@ -190,10 +189,6 @@ fn parse_iso_str(s: &str) -> Option<i64> {
 /// Whole days from `ts` to `now`, flooring like Python's `timedelta.days`.
 fn days_between(now_ms: i64, ts_ms: i64) -> i64 {
     (now_ms - ts_ms).div_euclid(86_400_000)
-}
-
-fn now_opt(opts: &ReadyOpts) -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::from_timestamp_millis(opts.now_ms).unwrap_or_else(chrono::Utc::now)
 }
 
 // ---------------------------------------------------------------------------
@@ -698,10 +693,17 @@ fn descendants_of(entries: &[Value], parent_id: &str) -> BTreeSet<String> {
     result
 }
 
-/// `_find_node`: exact id, or a unique short `ab-` prefix; ambiguous and
-/// missing both read as absent.
+/// `_find_node`: exact id, or a unique short `ab-` prefix (4-7 hex in the
+/// suffix, `resolve_id`'s partial-prefix gate); malformed prefixes,
+/// ambiguity, and absence all read as no match.
 fn find_node<'a>(entries: &'a [Value], node_id: &str) -> Option<&'a Value> {
     if node_id.starts_with("ab-") && node_id.len() < 11 {
+        let suffix = &node_id[3..];
+        let is_partial =
+            (4..=7).contains(&suffix.len()) && suffix.chars().all(|c| c.is_ascii_hexdigit());
+        if !is_partial {
+            return None;
+        }
         let matches: Vec<&Value> = entries
             .iter()
             .filter(|e| entry_id(e).map(|i| i.starts_with(node_id)).unwrap_or(false))

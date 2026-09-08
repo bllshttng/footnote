@@ -82,6 +82,10 @@ STATE_ABSENT = "absent"
 STATE_SPAWN_FAILED = "spawn_failed"
 STATE_UNREACHABLE = "unreachable"
 STATE_SILENT = "silent"
+# The keeper answered but does not know the verb: it predates the client
+# (an installed worker behind the source). Remedied by restarting that
+# keeper on a current binary.
+STATE_STALE_KEEPER = "stale_keeper"
 
 
 class GraphCorruptError(Exception):
@@ -720,8 +724,17 @@ def ready(
         # frozen at this module's first import.
         result = _client_for(_paths.graph_json()).request("ready", params)
     except RuntimeError as exc:
-        if str(exc).startswith("no such node"):
-            raise ReadyParentMissingError(str(exc)) from None
+        text = str(exc)
+        if "no such node" in text:
+            # The verb's own refusal wording, without the store-error prefix
+            # the transport wraps it in.
+            raise ReadyParentMissingError(text[text.index("no such node") :]) from None
+        if "unknown store method" in text:
+            raise StoreUnavailable(
+                STATE_STALE_KEEPER,
+                "the running store keeper predates this verb; restart it on a "
+                "current fno-agents-worker (`fno doctor` names binary lag)",
+            ) from None
         raise
     return {
         "rows": result.get("rows") or [],
