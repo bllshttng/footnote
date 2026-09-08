@@ -5786,6 +5786,7 @@ mod tests {
             owns_worktree: true,
             worktree_clean: None,
             branch_merged: None,
+            planning: None,
         };
         assert_eq!(crate::gc::gc_decide(&row, 60).0, crate::gc::GcAction::Keep);
     }

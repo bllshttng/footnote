@@ -131,7 +131,7 @@ def resolvable_uuid(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_spawn_with_node_opens_review_row(workdir_claude, resolvable_uuid) -> None:
+def test_spawn_with_node_and_review_verb_opens_row(workdir_claude, resolvable_uuid) -> None:
     from fno.agents.cli import agents_app
 
     result = CliRunner().invoke(
@@ -139,7 +139,7 @@ def test_spawn_with_node_opens_review_row(workdir_claude, resolvable_uuid) -> No
         [
             "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "bg",
             "--effort", "xhigh",
-            "--node", NODE, "review this diff",
+            "--node", NODE, "/code-review this diff",
         ],
         catch_exceptions=False,
     )
@@ -158,6 +158,27 @@ def test_spawn_with_node_opens_review_row(workdir_claude, resolvable_uuid) -> No
     assert row["observed_model"].get("kind") != "unreadable"
     assert "effort" in row
     assert row["effort"] == "xhigh"
+
+
+def test_spawn_with_prose_and_node_opens_no_mislabeled_row(
+    workdir_claude, resolvable_uuid
+) -> None:
+    """Arbitrary prose is a label the spawn cannot guess and never defaults
+    to review: a review row is a retirement blocker for life, so an
+    unlabeled task opens NO sessions row rather than a lying one."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "review this diff",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert _node_rows() == [], f"no row for prose: {_node_rows()!r}"
+    assert "session row open skipped" in result.stderr
 
 
 def test_stamp_duplicate_fill_keeps_one_row(workdir_claude, resolvable_uuid) -> None:
@@ -303,9 +324,28 @@ def test_spawn_target_family_stamps_do(workdir_claude, resolvable_uuid) -> None:
 
 
 def test_spawn_unlabelable_verb_skips_named(workdir_claude, resolvable_uuid) -> None:
-    """A /think worker with --node is neither do nor review; a guessed label
-    would lie on an append-only record, so nothing stamps and the skip names
-    the escape hatch."""
+    """A /fno:triage worker with --node is none of the known work shapes; a
+    guessed label would lie on an append-only record, so nothing stamps and
+    the skip names the escape hatch."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "triage-worker", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "/fno:triage deep",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert _node_rows() == []
+    assert "session row open skipped" in result.stderr
+    assert "--session-phase" in result.stderr
+
+
+def test_spawn_think_verb_stamps_think(workdir_claude, resolvable_uuid) -> None:
+    """A /fno:think worker names a think planner: the phase is in the
+    vocabulary, and the retirement's planning lane keys on it."""
     from fno.agents.cli import agents_app
 
     result = CliRunner().invoke(
@@ -317,9 +357,9 @@ def test_spawn_unlabelable_verb_skips_named(workdir_claude, resolvable_uuid) -> 
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
-    assert _node_rows() == []
-    assert "session row open skipped" in result.stderr
-    assert "--session-phase" in result.stderr
+    rows = _node_rows()
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "think"
 
 
 def test_spawn_no_node_anywhere_writes_nothing_and_stays_silent(
@@ -593,7 +633,7 @@ def test_spawn_review_row_carries_no_grant(workdir_claude, resolvable_uuid) -> N
         agents_app,
         [
             "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "bg",
-            "--node", NODE, "review this diff",
+            "--node", NODE, "/code-review this diff",
         ],
         catch_exceptions=False,
     )

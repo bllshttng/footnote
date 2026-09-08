@@ -2159,11 +2159,11 @@ def cmd_spawn(
     # --session-phase is the operator's label and wins; empty infers from the
     # work's own shape - a /target-family message names a do worker (whose
     # claim-acquire stamp duplicate-fills the same row), a review verb names
-    # the contributor shape that motivated the stamp, prose defaults to review.
-    # Any OTHER leading verb is a label this code cannot guess (a /think worker
-    # stamped review would lie on an append-only record), so it stamps nothing
-    # and says so. Fail-closed on an unknown explicit value, like the guards
-    # above, before anything spawns.
+    # the reviewer, a blueprint or think verb names the planner. Arbitrary
+    # prose is a label this code cannot guess and never defaults to review: a
+    # review row is a retirement blocker for life, so an unlabeled task keeps
+    # no row rather than a lying one. Fail-closed on an unknown explicit
+    # value, like the guards above, before anything spawns.
     from fno.graph.types import SESSION_PHASES
 
     if session_phase:
@@ -2177,12 +2177,19 @@ def cmd_spawn(
         stamp_phase = session_phase
     else:
         _verb = (message or "").lstrip().split(maxsplit=1)[0] if message else ""
+        _bare_verb = _verb.lstrip("/$")
         if is_target_family(message):
             stamp_phase = "do"
-        elif _verb.startswith(_REVIEW_VERB_PREFIXES) or not _verb.startswith("/"):
+        elif _verb.startswith(_REVIEW_VERB_PREFIXES):
             stamp_phase = "review"
+        elif _bare_verb.startswith("fno:blueprint"):
+            stamp_phase = "blueprint"
+        elif _bare_verb.startswith("fno:think"):
+            stamp_phase = "think"
         else:
-            stamp_phase = ""  # unlabelable verb: the helper skips, named
+            # Prose or any other leading verb: unlabelable, the helper skips
+            # and says so.
+            stamp_phase = ""
     # A resume may restore a recorded route inside dispatch_spawn. Resolve its
     # separately stored provider axis before admission so the gate judges the
     # destination the revived worker will actually use.
