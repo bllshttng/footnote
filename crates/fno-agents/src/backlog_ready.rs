@@ -713,10 +713,14 @@ fn descendants_of(entries: &[Value], parent_id: &str) -> BTreeSet<String> {
     result
 }
 
-/// `_find_node`: exact id, or a unique short `ab-` prefix (4-7 hex in the
-/// suffix, `resolve_id`'s partial-prefix gate); malformed prefixes,
-/// ambiguity, and absence all read as no match.
+/// `_find_node`: exact id first, format-agnostic (resolve_id's first step:
+/// fixtures and legacy data use non-hex ids), then a unique short `ab-`
+/// prefix (4-7 hex in the suffix, `resolve_id`'s partial-prefix gate);
+/// malformed prefixes, ambiguity, and absence all read as no match.
 fn find_node<'a>(entries: &'a [Value], node_id: &str) -> Option<&'a Value> {
+    if let Some(exact) = entries.iter().find(|e| entry_id(e) == Some(node_id)) {
+        return Some(exact);
+    }
     if node_id.starts_with("ab-") && node_id.len() < 11 {
         let suffix = &node_id[3..];
         let is_partial =
@@ -734,7 +738,7 @@ fn find_node<'a>(entries: &'a [Value], node_id: &str) -> Option<&'a Value> {
             None
         };
     }
-    entries.iter().find(|e| entry_id(e) == Some(node_id))
+    None
 }
 
 // ---------------------------------------------------------------------------

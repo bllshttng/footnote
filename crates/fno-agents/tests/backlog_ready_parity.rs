@@ -489,8 +489,7 @@ fn cases() -> Vec<Case> {
         Case {
             name: "epic_progress_probe_parent",
             flags: &["-A"],
-            entries: |c: &Ctx| vec![
-                serde_json::json!({"id": "x-pp-g", "slug": "g", "title": "Grand epic", "priority": "p1",
+            entries: |c: &Ctx| vec![                serde_json::json!({"id": "x-pp-g", "slug": "g", "title": "Grand epic", "priority": "p1",
                     "project": "fno", "status": "ready", "type": "epic", "created_at": c.iso(9)}),
                 {
                     let mut e = ready_row("x-pp-h", "p1", "fno", 2, c);
@@ -504,6 +503,21 @@ fn cases() -> Vec<Case> {
                 serde_json::json!({"id": "x-pp-d", "slug": "d", "title": "Done grandchild", "priority": "p2",
                     "project": "fno", "status": "done", "type": "task", "parent": "x-pp-c",
                     "contained_in": "x-pp-c", "completed_at": c.iso(1), "created_at": c.iso(4)}),
+            ],
+            plans: &[],
+            claims: &[],
+            expect_err: false,
+        },
+        // Exact id resolution is format-agnostic (a fixture/legacy id with
+        // non-hex characters resolves as --parent), and the hex gate only
+        // governs the partial-prefix convenience.
+        Case {
+            name: "parent_fixture_id",
+            flags: &["-A", "--parent", "ab-epic"],
+            entries: |c: &Ctx| vec![
+                serde_json::json!({"id": "ab-epic", "slug": "e", "title": "Mission", "priority": "p1",
+                    "project": "fno", "status": "ready", "type": "epic", "created_at": c.iso(9)}),
+                ready_row("x-fx1", "p1", "fno", 2, c),
             ],
             plans: &[],
             claims: &[],
