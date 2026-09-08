@@ -78,6 +78,16 @@ ALLOWLIST = {
     # completion). Scratch-graph closures are gated out; only the process's
     # configured graph releases.
     "cli/src/fno/graph/store.py",
+    # graph/_session.py cmd_session_close: the BLUEPRINT-CLOSE terminal release.
+    # A spawn dispatch acquires node:<id> under spawn-handover:<worker> and a
+    # blueprint session never runs init, so the close is the only terminal that
+    # lifecycle has. Holder-scoped and strict=True: it releases ONLY the
+    # session's own spawn-handover holder and REFUSES (loud stderr, receipt
+    # false) when a successor target session already rebound the claim, so the
+    # ab-588326a7 shape (a helper releasing somebody else's claim) cannot
+    # occur here by construction. Not releasing at all leaves the node
+    # un-dispatchable until TTL with advance skipping it as already-claimed.
+    "cli/src/fno/graph/_session.py",
 }
 
 _EXTS = {".py", ".sh", ".bash", ".rs"}
