@@ -188,6 +188,8 @@ pub enum StoreError {
     EmptyFieldUpdate(String),
     #[error("{0}")]
     Invalid(String),
+    #[error("{0}")]
+    ClaimsUnavailable(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

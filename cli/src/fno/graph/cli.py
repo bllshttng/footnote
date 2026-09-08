@@ -4459,6 +4459,7 @@ def cmd_next(
         """
         from fno.graph._intake import repo_root
         from fno.graph.store import (
+            ClaimsUnavailableError,
             ReadyParentMissingError,
             StoreUnavailable,
             ready as store_ready,
@@ -4480,6 +4481,9 @@ def cmd_next(
             typer.echo(f"Error: store keeper unavailable; selection refused: {exc}", err=True)
             raise typer.Exit(code=1) from exc
         except ReadyParentMissingError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        except ClaimsUnavailableError as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
@@ -4777,6 +4781,7 @@ def cmd_ready(
 ) -> None:
     from fno.graph._intake import repo_root
     from fno.graph.store import (
+        ClaimsUnavailableError,
         ReadyParentMissingError,
         StoreUnavailable,
         ready as store_ready,
@@ -4811,6 +4816,9 @@ def cmd_ready(
         typer.echo(f"Error: store keeper unavailable; ready selection refused: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     except ReadyParentMissingError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except ClaimsUnavailableError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(json.dumps(result["rows"], indent=2))

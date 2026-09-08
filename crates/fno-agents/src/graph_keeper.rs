@@ -372,6 +372,7 @@ fn store_err_kind(err: &StoreError) -> &'static str {
         StoreError::Conflict => "conflict",
         StoreError::EmptyFieldUpdate(_) => "empty_field_update",
         StoreError::Invalid(_) => "invalid",
+        StoreError::ClaimsUnavailable(_) => "claims_unavailable",
         StoreError::Io(_) => "io",
     }
 }
@@ -491,7 +492,7 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             // (`live_claimed_node_ids(strict=True)`).
             _ => crate::claims::list_strict(Some("node:"), None, false)
                 .map_err(|e| {
-                    StoreError::Corrupt(format!(
+                    StoreError::ClaimsUnavailable(format!(
                         "live claim state is unavailable; ready selection refused: {e}"
                     ))
                 })?

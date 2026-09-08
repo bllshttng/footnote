@@ -129,6 +129,15 @@ class StoreUnavailable(RuntimeError):
         super().__init__(f"graph store unavailable ({state}): {detail}")
 
 
+class ClaimsUnavailableError(RuntimeError):
+    """The keeper refused selection because live claim state is unreadable.
+
+    The selection leg fails closed on unknown claim state (the Python leg's
+    ``live_claimed_node_ids(strict=True)`` contract, now enforced keeper
+    side). Never read as "nothing is claimed".
+    """
+
+
 class GraphLockTimeout(TimeoutError):
     """The store's bounded lock stayed busy past its deadline.
 
@@ -556,6 +565,8 @@ def _raise_store_error(kind: str, message: str) -> None:
         raise ValueError(message)
     if kind == "conflict":
         raise _Conflict()
+    if kind == "claims_unavailable":
+        raise ClaimsUnavailableError(message)
     raise RuntimeError(f"store error ({kind}): {message}")
 
 
