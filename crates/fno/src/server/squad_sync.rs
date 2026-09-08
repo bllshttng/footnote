@@ -15,6 +15,7 @@ impl Core {
     /// carries reads as empty.
     pub(super) fn reload_members_from_store(&mut self) -> SquadReloadReceipt {
         let loaded = crate::squad_store::load();
+        self.store_generations = loaded.generations.clone();
         let identities: HashMap<(String, String), Vec<_>> = loaded
             .squads
             .into_iter()

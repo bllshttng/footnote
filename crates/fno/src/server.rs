@@ -6046,9 +6046,8 @@ impl Core {
                 Some(crate::squad_store::StoredTabSpec { tab_name, spec })
             })
             .collect();
-        if let Err(e) = crate::squad_store::set_tab_specs(&name, &specs) {
-            self.persist_degraded(&e);
-        }
+        let result = crate::squad_store::set_tab_specs_with_generations(&name, &specs);
+        self.persist_result(result);
     }
 
     /// Rebuild squad `sid`'s template-managed tabs from their stored specs (US8),
@@ -7660,9 +7659,8 @@ impl Core {
         origins: &[String],
         members: &[crate::squad_store::StoredMember],
     ) {
-        if let Err(e) = crate::squad_store::upsert(name, key, origins, members) {
-            self.persist_degraded(&e);
-        }
+        let result = crate::squad_store::upsert_with_generations(name, key, origins, members);
+        self.persist_result(result);
     }
 
     /// The store identity of a live squad: `(name, key)`, `name` empty for an
@@ -7678,8 +7676,14 @@ impl Core {
     /// A named caller may pass `""` for key; an unpersisted squad (empty key)
     /// removes nothing.
     fn persist_remove(&mut self, name: &str, key: &str) {
-        if let Err(e) = crate::squad_store::remove(name, key) {
-            self.persist_degraded(&e);
+        let result = crate::squad_store::remove_with_generations(name, key);
+        self.persist_result(result);
+    }
+
+    fn persist_result(&mut self, result: std::io::Result<std::collections::HashMap<String, u64>>) {
+        match result {
+            Ok(generations) => self.store_generations.extend(generations),
+            Err(e) => self.persist_degraded(&e),
         }
     }
 
@@ -8132,8 +8136,11 @@ impl Core {
                     .iter()
                     .any(|m| !m.tombstone && live.contains(&m.attach_id));
             if sweep {
-                if let Err(e) = crate::squad_store::remove("", &sq.key) {
-                    self.notice_all(format!("squad prune at restore skipped: {e}"));
+                match crate::squad_store::remove_with_generations("", &sq.key) {
+                    Ok(generations) => self.store_generations.extend(generations),
+                    Err(e) => {
+                        self.notice_all(format!("squad prune at restore skipped: {e}"));
+                    }
                 }
                 continue;
             }
@@ -12755,11 +12762,10 @@ impl Core {
                                         .squad(squad)
                                         .map(|s| s.origins.clone())
                                         .unwrap_or_default();
-                                    if let Err(e) =
-                                        crate::squad_store::rename(&old, &new, &origins, &members)
-                                    {
-                                        self.persist_degraded(&e);
-                                    }
+                                    let result = crate::squad_store::rename_with_generations(
+                                        &old, &new, &origins, &members,
+                                    );
+                                    self.persist_result(result);
                                 }
                                 (Some(old), None) => {
                                     self.persist_remove(&old, "");

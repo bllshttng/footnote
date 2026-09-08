@@ -1,5 +1,18 @@
 use super::*;
 
+fn deadbeef_member() -> crate::squad_store::StoredMember {
+    crate::squad_store::StoredMember {
+        attach_id: "deadbeef".into(),
+        tombstone: false,
+        detached: false,
+        tab_name: None,
+        cwd: None,
+        worker: None,
+        harness: None,
+        harness_session_id: None,
+    }
+}
+
 #[test]
 fn capture_topology_now_writes_restored_clean_layout() {
     let _scratch = StoreScratch::new("shutdown-capture-restored");
@@ -56,17 +69,7 @@ fn clean_shutdown_does_not_overwrite_a_newer_store_generation() {
     older.flush_topology();
     let baseline = older.store_generations.clone();
 
-    let newer_member = crate::squad_store::StoredMember {
-        attach_id: "deadbeef".into(),
-        tombstone: false,
-        detached: false,
-        tab_name: None,
-        cwd: None,
-        worker: None,
-        harness: None,
-        harness_session_id: None,
-    };
-    crate::squad_store::upsert("sq", "", &["/a".into()], &[newer_member]).unwrap();
+    crate::squad_store::upsert("sq", "", &["/a".into()], &[deadbeef_member()]).unwrap();
     assert!(
         crate::squad_store::load().generations != baseline,
         "the newer writer advances the overlapping squad generation"
@@ -110,23 +113,49 @@ fn dirty_shutdown_does_not_overwrite_a_newer_overlapping_snapshot() {
     older.restored = true;
     older.topology_dirty = true;
     older.flush_topology();
-    let newer_member = crate::squad_store::StoredMember {
-        attach_id: "deadbeef".into(),
-        tombstone: false,
-        detached: false,
-        tab_name: None,
-        cwd: None,
-        worker: None,
-        harness: None,
-        harness_session_id: None,
-    };
-    crate::squad_store::upsert("sq", "", &["/a".into()], &[newer_member]).unwrap();
+    crate::squad_store::upsert("sq", "", &["/a".into()], &[deadbeef_member()]).unwrap();
     older.topology_dirty = true;
 
     assert!(!older.capture_topology_now());
     let stored = crate::squad_store::load();
     let squad = stored.squads.iter().find(|s| s.name == "sq").unwrap();
     assert!(squad.members.iter().any(|m| m.attach_id == "deadbeef"));
+}
+
+#[test]
+fn local_store_write_refreshes_the_shutdown_generation_baseline() {
+    let _scratch = StoreScratch::new("shutdown-capture-local-write");
+    let (mut core, _) = template_core();
+    core.restored = true;
+    core.topology_dirty = true;
+    core.flush_topology();
+    core.persist_stored("sq", "", &["/a".into()], &[deadbeef_member()]);
+    core.session.squad_mut(1).unwrap().tabs[0].name = Some("shutdown-only".into());
+
+    assert!(core.capture_topology_now());
+    let stored = crate::squad_store::load();
+    let squad = stored.squads.iter().find(|s| s.name == "sq").unwrap();
+    assert_eq!(
+        squad.tab_trees[0].tab_name.as_deref(),
+        Some("shutdown-only")
+    );
+}
+
+#[test]
+fn store_reload_refreshes_the_shutdown_generation_baseline() {
+    let _scratch = StoreScratch::new("shutdown-capture-store-reload");
+    let (mut core, _) = template_core();
+    core.restored = true;
+    core.topology_dirty = true;
+    core.flush_topology();
+    crate::squad_store::upsert("sq", "", &["/a".into()], &[deadbeef_member()]).unwrap();
+    core.reload_members_from_store();
+    core.session.squad_mut(1).unwrap().tabs[0].name = Some("after-reload".into());
+
+    assert!(core.capture_topology_now());
+    let stored = crate::squad_store::load();
+    let squad = stored.squads.iter().find(|s| s.name == "sq").unwrap();
+    assert_eq!(squad.tab_trees[0].tab_name.as_deref(), Some("after-reload"));
 }
 
 #[test]
