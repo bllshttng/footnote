@@ -106,7 +106,7 @@ A refusal message can name the wrong cause while still being right to refuse. Fi
 
 ## An absence, a zero, or an unconfirmed result is not a verdict
 
-This is the single most common fault in the fleet, and one shift found six shapes of it. Learn the pattern once and you will recognise the rest.
+This is the single most common fault in the fleet. One shift found six shapes of it in a day, and the list has grown since. Learn the pattern once and you will recognise the rest.
 
 A tool reports what it did not see. A reader treats that as what is not there. The two are different, and an absence has three explanations: the real outcome, an instrument that never ran, or a pipeline that ate the output.
 
@@ -132,7 +132,9 @@ The cause is worth more than the correction. POSIX ERE has no `\b`, so a `git gr
 
 The control did not catch it because the control ran somewhere else. In the king's own words: it validated the regex in BSD grep, then the search ran in `git grep`. **The control checked the tool, not the target.** The AGENTS.md pitfalls corpus already names that trap. This is a fresh specimen of it. A green control aimed at the wrong engine still reads as proof.
 
-*Graduates to:* an assert helper that rejects absence-only success and zero-hit probes with no positive control, which the AGENTS.md pitfalls corpus already names. Then, per shape. A refusal that separates "unreadable" from "still present". One decision function shared by the dry run and the real run. A non-zero exit on a refusal. A killed subprocess reported as a kill, with its signal named.
+**An absence with no reader at all.** A king wrote in a durable note that a peer's `operator_request` stamp had no operator turn behind it. No reader exposes another session's operator turns. The claim had no instrument, so there was no control to run. The turn existed. Here the remedy is not a positive control, because none is available. Do not assert the absence. Ask the session that holds the transcript.
+
+*Graduates to:* an assert helper that rejects absence-only success and zero-hit probes with no positive control, which the AGENTS.md pitfalls corpus already names. Then, per shape. A refusal that separates "unreadable" from "still present". One decision function shared by the dry run and the real run. A non-zero exit on a refusal. A killed subprocess reported as a kill, with its signal named. For a claim about another session's interior, no helper can help, because the fleet exposes no such reader.
 
 ## My check-in keeps saying nothing changed
 
