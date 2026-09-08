@@ -19,6 +19,7 @@ Order is precedence. The top row wins.
 | `ghost` | state is `working` or `blocked` (both of claude's spellings for each, folded through the harness map) and no transcript resolves for the row's recorded id | `no transcript for <id>` |
 | `contended` | the row is itself a live occupant of a linked worktree holding another live occupant | `worktree <path> holds <n> live sessions, peers <ids>` |
 | `stale` | a wake-state row past the wake ceiling | `<state> <n>h old, past the 12h wake ceiling, needs a human` |
+| `spent` | a wake-state row past the wake ceiling whose evidence says finished work: its node reads done/superseded/deferred, or its own tail reads done | `node <id> <status>; quiet <n>h past the 12h wake ceiling; finished row, nothing to triage` |
 | `reroute` | state `blocked` and the transcript tail carries a 429 whose reset window has not opened | `429 resets <utc>, <n>m out` |
 | `wake` | any of `working`, `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and no live 429 window | `<state> <n>m silent, last 429 window passed` |
 | `leave` | everything else, including every healthy injectable row | `state <s>, last turn <n>m ago, no lane applies` |
@@ -28,6 +29,8 @@ Order is precedence. The top row wins.
 `silence` reads a different row source. `silence_rows()` reads the registry directly, scoped to the project. `fleet_rows()` only reads `claude agents --json`, so a codex or opencode row never reaches it. `silence` is checked ABOVE the `stale` ceiling on purpose. A row silent past twelve hours is exactly the "we may never find out" case this lane exists to catch.
 
 `stale` is the needs-human bucket. It is checked before the 429 window math on purpose. The reset stamp carries no date, so on a tail older than the ceiling its time-of-day reading is garbage. That reading must not poison reroute. The ceiling is twelve hours, not a day. That is the parser's own resolution, because a date-less stamp is unambiguous for only half a day. A session stopped for two months has a dead node, a stale branch, and a context describing a repository that has moved. Waking it is not recovery. `stale` never auto-acts at any apply level.
+
+`spent` splits finished rows out of that bucket. Its evidence is positive only: the row's node reads done, superseded or deferred, or its own tail reads done. An unreadable node read is never evidence. A row without evidence stays `stale`. A finished row has nothing for a human to triage. It also can never age out of an ask. Filing it stale re-asked the same rows every sweep and grew the ask with fleet throughput. `spent` never asks, never acts. It surfaces in the digest once per set change. When the worktree it shares eventually frees, the row is still there in the digest, ready to reap.
 
 Every wake condition is positive evidence. The last event parses. The age sits under the ceiling. And the shipped classifier (`session_truth.classify_tail`) reads the tail as `stalled`: silent while still owing its next move. "No 429 in tail" is an absence and never a wake reason, and a tail with no parseable evidence reads leave, never an action lane.
 
@@ -57,7 +60,7 @@ Actions delegate. The watchdog owns the decision, never the mechanism.
 | `wake` | `fno agents resume <id>`, then content confirmation in the transcript |
 | `reroute` | `fno.recovery._default_failover`: rotate the provider, stop first, then respawn in the same worktree. A bare redispatch would respawn onto the same capped account, so with no alternate armed the lane refuses and names the outcome rather than looping the fleet on the dead account |
 | `ghost` | report only |
-| `stale`, `contended`, `polling_settled` | report only, at every apply level |
+| `stale`, `spent`, `contended`, `polling_settled` | report only, at every apply level |
 | `silence` | drive only (`fno agents resume`, same mechanism as `wake`). Ending a row past a drive cap and handing the node back through `fno backlog advance` is a deferred follow-up, not this lane |
 
 ## The friction verdicts and their one question
@@ -66,7 +69,7 @@ Actions delegate. The watchdog owns the decision, never the mechanism.
 
 `polling_settled` is scoped to the unambiguous case. The tail asserts a PR reached `MERGED` or `CLOSED` (a tool result's JSON), then issues two or more further status reads. A poll after the answer arrived is waste in every reading. A cadence alone never fires. `fno do pr wait` is the sanctioned CI-watch pattern: one command whose internal polling never reaches the transcript. A transcript-level repeat really is the agent re-asking. Reads before the settle marker do not count. Without the marker there is no honest "after the state was reached" count. The live state read confirms the PR is terminal now. It runs `fno do pr info` in the row's own checkout, one subprocess per real finding. Unreadable is UNKNOWN, and UNKNOWN produces no verdict and attests nothing. Like `contended` it upgrades only a `leave`, so every liveness lane outranks it.
 
-Both verdicts need a human to clear them. The surface is ONE reconciled `[watchdog-friction:*]` operator question: `fno agents friction-escalate`, hidden, driven by the daemon like `stale-escalate`. Same measured set is a duplicate. A changed set supersedes. An empty set closes. The fold is `cli/src/fno/agents/friction_lane.py`, riding the same `reconcile_channel` the stale lane uses. One question, not one row per finding. The needs-fold cleanup measured that queue at 17 percent signal, six of twelve rows test fixtures. A producer that appends per finding rebuilds it.
+Both verdicts need a human to clear them. The surface is ONE reconciled `[watchdog-friction:*]` operator question: `fno agents friction-escalate`, hidden, driven by the daemon like `stale-escalate`. Same measured set is a duplicate. A changed set supersedes. An empty set closes. A set a human already answered stays answered. A mechanical supersede close is not an answer. A set that changed away and back re-asks. The fold is `cli/src/fno/agents/friction_lane.py`, riding the same `reconcile_channel` the stale lane uses. One question, not one row per finding. The needs-fold cleanup measured that queue at 17 percent signal, six of twelve rows test fixtures. A producer that appends per finding rebuilds it.
 
 ## Resume: what re-entry can actually restore
 
