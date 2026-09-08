@@ -1333,6 +1333,11 @@ fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), Str
 /// A marker is an upstream seam crossing, never proof a model is authorized -
 /// the strict coordinate checks still own that.
 fn spawn_needs_python_seam(params: &Value) -> bool {
+    // FNO_SPAWN_GATE=0 is the operator bypass both gate implementations honor
+    // (spawn_gate.rs, spawn_gate.py); it excuses the seam bounce the same way.
+    if std::env::var_os("FNO_SPAWN_GATE").is_some_and(|v| v == "0") {
+        return false;
+    }
     params.get("defaults_applied").is_none()
 }
 
