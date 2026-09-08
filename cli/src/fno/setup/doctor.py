@@ -42,8 +42,7 @@ _ACCESSOR_NAMES = (
 def _settings_candidates_for(path: Path) -> list[Path]:
     """The ``config.toml``-first pair at one settings location.
 
-    A check reading only the legacy ``settings.yaml`` name stopped running at
-    the yaml-to-toml migration.
+    A check reading only ``settings.yaml`` stopped running at the migration.
     """
     return [path.with_name("config.toml"), path]
 
@@ -51,9 +50,8 @@ def _settings_candidates_for(path: Path) -> list[Path]:
 def _scan_config_files(paths: list[Path], probe: "Callable[[object], list[str]]") -> list[str]:
     """Run ``probe`` over the MERGED config the runtime resolves from ``paths``.
 
-    ``paths`` is highest precedence first. Probing each layer separately made a
-    stale value in an overridden layer a finding, even where the winning layer
-    resolves fine: the operator was told to fix a value nothing reads.
+    ``paths`` is highest precedence first. Probing each layer alone made a
+    stale value in an overridden layer a finding nothing reads.
     """
     from fno.config_io import _deep_merge, _load_raw, _unwrap_config_dict
 
@@ -101,14 +99,11 @@ def _wip_cap_problems_in(data: object) -> list[str]:
 
 
 def check_wip_caps() -> list[str]:
-    """Report malformed ``config.kanban.wip_caps`` entries (ab-554d37ef).
+    """Report malformed ``config.kanban.wip_caps`` entries.
 
-    The board renderer (``render_html._load_wip_caps``) silently drops a
-    malformed cap so a config typo never crashes a backlog mutation - a
-    deliberate "never raise" contract on the render path. The cost is zero
-    feedback: a quoted, negative, or mistyped cap just stops working. This
-    surfaces those drops at ``fno config doctor`` time, reading both files at
-    the GLOBAL settings location the renderer reads.
+    The board renderer drops a malformed cap so a typo never crashes a backlog
+    mutation. The cost is zero feedback, which this check pays back at doctor
+    time from the same global location the renderer reads.
     """
     try:
         from fno.config import _global_settings_path
@@ -123,12 +118,7 @@ _VALID_WORKTREE_POLICIES = ("never", "harness-native", "external")
 
 
 def _worktree_policy_problems_in(data: object) -> list[str]:
-    """An out-of-enum ``worktree.policy`` in one flat config dict.
-
-    A typo'd per-project key used to be caught here by edit distance over a
-    hand-listed key set. `check_unknown_keys` walks the same list-of-models
-    from the schema now, so this keeps only the value check.
-    """
+    """An out-of-enum ``worktree.policy`` in one flat config dict."""
     if not isinstance(data, dict):
         return []
     wt = data.get("worktree")
@@ -142,16 +132,11 @@ def _worktree_policy_problems_in(data: object) -> list[str]:
 
 
 def check_worktree_policy() -> list[str]:
-    """Report a bad ``config.worktree.policy`` or a typo'd per-project key (x-168b).
+    """Report an out-of-enum ``config.worktree.policy``.
 
-    Two silent footguns: an out-of-enum policy value refuses worktree creation
-    (fail-closed is correct, but the operator gets no doctor-time hint), and a
-    per-project key mistyped within one edit of ``worktree`` (e.g. ``worktre``)
-    is dropped by ``extra="ignore"`` -- the project silently gets the DEFAULT
-    policy when it wanted ``never``. Scans BOTH the global config AND the
-    invoking repo's ``.fno/config.toml`` (a per-project override, and its typo,
-    can live in either), deduping identical messages. Returns human-readable
-    reasons.
+    The bad value refuses worktree creation, and fail-closed is correct, but
+    the operator gets no doctor-time hint. Scans the global config and the
+    invoking repo's own, because a per-project override lives in either.
     """
     try:
         from fno.config import _global_settings_path

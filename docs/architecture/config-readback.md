@@ -20,7 +20,7 @@ An empty file exits 0. That is correct and stays correct.
 
 `check_config_files_read` names every candidate that exists and failed to parse, and every document that parsed to a non-table, with the type it parsed to.
 
-`check_unknown_keys` walks each candidate layer SEPARATELY rather than the merged result, so every message names the file that actually holds the key. `extra="ignore"` is forward compatibility. It also means a typo'd section or leaf is accepted in silence. `_warn_unknown_keys` already found them and, without `FNO_DEBUG`, said nothing.
+`check_unknown_keys` walks each candidate layer SEPARATELY rather than the merged result, so every message names the file that actually holds the key. It reads `_aliased_layers`, the loader's own per-file collector, so a legacy spelling the loader accepts is never called a typo. `extra="ignore"` is forward compatibility. It also means a typo'd section or leaf is accepted in silence. `warn_unknown_keys` already found them and, without `FNO_DEBUG`, said nothing.
 
 `check_enabled_with_empty_population` reports a switch that is on with nothing that can satisfy it. `review.cross_model` is the one pair here, and it is here because its consumer was read. `review_assurance` widens the reviewer set from `available_provider_kinds()`. With no dispatchable non-claude provider the diversity requirement can never be met.
 
@@ -30,7 +30,7 @@ An empty file exits 0. That is correct and stays correct.
 
 Both were found by running the check against a real machine config rather than by reading it. The first run returned 31 findings on an install that works.
 
-**A `dict[str, Model]` field's keys are data, not schema.** `_warn_unknown_keys` resolved the annotation to its VALUE model. It then checked the map's own keys against that model's fields. So `agents.profiles.blueprint` read as a typo for a field name. Nineteen of the thirty-one were entries in such a block: `agents.profiles`, `work.workspaces`, `model_routing.providers`, `accounts.combos`, `agents.provider_limits`. It now recurses into each VALUE with the map key in the prefix, so a typo INSIDE a profile is still caught.
+**A `dict[str, Model]` field's keys are data, not schema.** `warn_unknown_keys` resolved the annotation to its VALUE model. It then checked the map's own keys against that model's fields. So `agents.profiles.blueprint` read as a typo for a field name. Nineteen of the thirty-one were entries in such a block: `agents.profiles`, `work.workspaces`, `model_routing.providers`, `accounts.combos`, `agents.provider_limits`. It now recurses into each VALUE with the map key in the prefix, so a typo INSIDE a profile is still caught.
 
 **A report has to stay readable.** An unknown table with more than `_UNKNOWN_LEAF_CAP` leaves reports as the table, not a line per leaf. A foreign tool's block sharing `~/.fno/config.toml` printed six lines and a non-zero exit nobody can clear. A leaf name shared by more than `_NEAR_MISS_CAP` sections gets no hint. `enabled` lives under 25 of them, and a hint naming all 25 is the schema dumped into a doctor line.
 
@@ -49,6 +49,18 @@ The settings-source line lists the files that CONTRIBUTED, from `_aliased_layers
 `docs/path-config.md` names `config.toml` files and used to hand the reader YAML in the legacy `config:`-wrapped shape. `tomllib` raises on it, `_load_raw` swallows the raise, the doctor certified the file. An operator who copied the documented schema into the documented path got a file that no-ops.
 
 `cli/tests/unit/test_docs_fences.py` walks every fence in `docs/` and parses it as its declared language. Its non-zero fence count is the positive control on the walker. A walker that found no files can otherwise pass by finding nothing to reject.
+
+## Two blocks the walker skips
+
+`_UNMODELED_BLOCKS` holds `kanban` and `providers`. The board renderer reads `kanban` straight out of the file, so the model never carries it. `providers` is the pre-rename spelling of `accounts`. The loader's alias copies it across and leaves it in place. Both work. Neither is unknown.
+
+## The module loads fno.config by importlib
+
+`config_readback.py` reaches `fno.config` through `_cfg()`, which calls `importlib.import_module`. A plain import puts `fno.config` in a mypy strongly-connected component. There the lazy `__getattr__` re-exports in `graph/_constants.py` degrade to `Optional[Path]`, and two files this feature never touches fail.
+
+The number came from a measurement, not from reasoning. `origin/main` is clean at 567 files. The branch reported three errors at 568. Hiding the module made them vanish, which named the cause. Removing the doctor's import edge did not, and neither did moving the module out of the package.
+
+`fno.config._revoke_unbacked_optouts` records the same failure and the same remedy.
 
 ## Not here
 
