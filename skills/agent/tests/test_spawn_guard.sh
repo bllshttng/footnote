@@ -252,14 +252,14 @@ out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='junk\ndeadbeef' \
   run --name spawn-torn --provider claude --message '/target x' --node "$NODE")"
 ok 'pane torn short_id -> failed'  "$(field "$out")" 'failed'
 
-# AC1-EDGE: the bg lane keeps the strict 8-hex rule. A real 8-hex validates...
+# AC1-EDGE: the thread lane keeps the strict 8-hex rule. A real 8-hex validates...
 out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='b92eec14' \
-  run --name spawn-bg --provider claude --message '/target x' --node "$NODE" --substrate bg)"
-ok 'bg 8-hex -> launched'          "$(field "$out")" 'launched'
-# ...but a name-slug on the bg lane is still rejected (that lane really returns hex).
+  run --name spawn-thread --provider claude --message '/target x' --node "$NODE" --substrate thread)"
+ok 'thread 8-hex -> launched'      "$(field "$out")" 'launched'
+# ...but a name-slug on the thread lane is still rejected (that lane returns hex).
 out="$(STUB_VERDICT="$DISP" STUB_SHORT_ID='spawngoa' \
-  run --name spawn-bg2 --provider claude --message '/target x' --node "$NODE" --substrate bg)"
-ok 'bg slug -> failed'             "$(field "$out")" 'failed'
+  run --name spawn-thread2 --provider claude --message '/target x' --node "$NODE" --substrate thread)"
+ok 'thread slug -> failed'          "$(field "$out")" 'failed'
 
 # --- pane worker observability hint (PR #341 delta) --------------------------
 # A matched mux-pane receipt launches (main's verified-identity path), but a pane

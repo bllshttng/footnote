@@ -117,9 +117,9 @@ out="$(run_nofno 'spawn the node that will merge two branches')"
 check_eq   'AC1-EDGE merge not consumed' "$(field "$out" allow_merge)" '0'
 check_contains 'AC1-EDGE merge stays in message' "$(field "$out" message)" 'merge two branches'
 
-# --- x-2c27: bg / headless substrate posture words ----------------------------
+# --- x-61df: thread / pane substrate grammar ---------------------------------
 out="$(run 'build the thing bg')"
-check_eq   'x-2c27 bg substrate'       "$(field "$out" substrate)" 'bg'
+check_eq   'x-61df bg alias substrate'  "$(field "$out" substrate)" 'thread'
 check_contains 'x-2c27 bg task trimmed' "$(field "$out" message)"  'build the thing'
 out="$(run 'fix it headless codex')"
 check_eq   'x-2c27 headless substrate' "$(field "$out" substrate)" 'headless'
@@ -130,6 +130,34 @@ check_eq   'x-2c27 no posture -> empty substrate (pane default)' "$(field "$out"
 out="$(run 'make the bg job run faster')"
 check_eq   'x-2c27 mid-task bg not consumed' "$(field "$out" substrate)" ''
 check_contains 'x-2c27 mid-task bg stays in message' "$(field "$out" message)" 'bg job run faster'
+
+out="$(run_nofno 'fix the thing substrate thread')"
+check_eq   'x-61df substrate thread' "$(field "$out" substrate)" 'thread'
+check_eq   'x-61df substrate thread task' "$(field "$out" message)" 'fix the thing'
+out="$(run_nofno 'fix the thing substrate pane')"
+check_eq   'x-61df substrate pane' "$(field "$out" substrate)" 'pane'
+check_eq   'x-61df substrate pane task' "$(field "$out" message)" 'fix the thing'
+_alias_err="$(mktemp)"
+out="$(run_nofno 'fix the thing substrate bg' 2>"$_alias_err")"
+check_eq       'x-61df substrate bg alias' "$(field "$out" substrate)" 'thread'
+check_contains 'x-61df substrate bg warning' "$(cat "$_alias_err")" "bg' is deprecated; use 'thread' instead"
+rm -f "$_alias_err"
+out="$(run_nofno 'fix the deadlock in the worker thread')"
+check_eq       'x-61df trailing thread stays task' "$(field "$out" substrate)" ''
+check_contains 'x-61df trailing thread message' "$(field "$out" message)" 'worker thread'
+out="$(run_nofno 'fix the layout in the pane')"
+check_eq       'x-61df trailing pane stays task' "$(field "$out" substrate)" ''
+check_contains 'x-61df trailing pane message' "$(field "$out" message)" 'in the pane'
+out="$(run_nofno 'thread the needle carefully')"
+check_eq       'x-61df thread prose stays task' "$(field "$out" substrate)" ''
+check_eq       'x-61df thread prose unchanged' "$(field "$out" message)" 'thread the needle carefully'
+out="$(run_nofno 'substrate thread /goal x-1234')"
+check_eq       'x-61df leading substrate pair refuses' "$(field "$out" status)" 'error'
+check_contains 'x-61df leading substrate pair hint' "$(field "$out" error)" '/goal x-1234 substrate thread'
+check_eq       'x-61df leading substrate pair no message' "$(field "$out" message)" ''
+out="$(run_nofno 'fix the thing substrate nonsense')"
+check_eq       'x-61df bad substrate refuses' "$(field "$out" status)" 'error'
+check_contains 'x-61df bad substrate names values' "$(field "$out" error)" 'pane, thread, bg, headless'
 
 # --- x-ffc3: a LEADING posture word + /command is refused, not buried in a seed -
 # Posture words (bg|headless) are TRAILING only. A leading one whose remainder is
@@ -158,7 +186,7 @@ out="$(run 'bg worker cleanup')"
 check_eq       'x-ffc3 bg feature prose seeds'    "$(field "$out" status)" 'ok'
 # AC1-EDGE: a trailing posture word is unchanged (the guard fires on LEADING only)
 out="$(run '/goal x-ead3 residual bg')"
-check_eq       'x-ffc3 trailing bg substrate'      "$(field "$out" substrate)" 'bg'
+check_eq       'x-ffc3 trailing bg substrate'      "$(field "$out" substrate)" 'thread'
 check_contains 'x-ffc3 trailing bg message intact' "$(field "$out" message)" '/goal x-ead3 residual'
 check_eq       'x-ffc3 trailing bg status ok'      "$(field "$out" status)" 'ok'
 # AC1-ERR: exact-token match -> a feature whose first word merely CONTAINS the
@@ -356,7 +384,7 @@ check_eq   'mid-task effort leaves effort empty' "$(field "$out" effort)" ''
 
 # --- x-d235: --yolo on claude maps to --permission-mode bypassPermissions -----
 # claude has no --yolo flag; its full-auto/no-gates equivalent is
-# bypassPermissions. Map it (don't drop it) so a yolo'd claude bg worker runs
+# bypassPermissions. Map it (don't drop it) so a yolo'd claude thread worker runs
 # gate-free. An explicit --permission-mode wins; codex/gemini yolo is unchanged.
 out="$(run 'ab-99999999' --provider claude --yolo)"
 check_eq 'claude yolo -> permission_mode=bypassPermissions' "$(field "$out" permission_mode)" 'bypassPermissions'
@@ -547,6 +575,17 @@ check_contains     'handoff seed continues' "$(msg_block "$out")"          'Cont
 check_contains     'handoff seed guardrail' "$(msg_block "$out")"          'GUARDRAIL'
 check_not_contains 'handoff no /target'     "$(msg_block "$out")"          '/target'
 check_not_contains 'handoff no no-merge tok' "$(msg_block "$out")"         'no-merge'
+
+out="$(run_nofno 'docs/plan.md substrate thread' --handoff)"
+check_eq       'handoff thread substrate' "$(field "$out" substrate)" 'thread'
+check_eq       'handoff thread payload mode' "$(field "$out" payload_mode)" 'handoff'
+check_contains 'handoff thread path preserved' "$(msg_block "$out")" 'docs/plan.md'
+out="$(run_nofno 'thread' --handoff)"
+check_eq       'handoff one-word thread path' "$(field "$out" substrate)" ''
+check_contains 'handoff one-word thread preserved' "$(msg_block "$out")" 'thread'
+out="$(run_nofno 'docs/plan.md substrate thread extra' --handoff)"
+check_eq       'handoff four-token input not peeled' "$(field "$out" substrate)" ''
+check_contains 'handoff four-token path preserved' "$(msg_block "$out")" 'docs/plan.md substrate thread extra'
 
 # --- handoff path with leading / is NOT passthrough --------------------------
 out="$(run '/abs/path/doc.md' --handoff)"
@@ -742,7 +781,7 @@ rm -f "$_proj_res"
 out="$(run_nofno 'x-2aad bg')"
 check_eq 'configured-prefix node classifies'      "$(field "$out" node)" 'x-2aad'
 check_eq 'configured-prefix build mode'           "$(field "$out" payload_mode)" 'build'
-check_eq 'configured-prefix substrate survives'   "$(field "$out" substrate)" 'bg'
+check_eq 'configured-prefix substrate survives'   "$(field "$out" substrate)" 'thread'
 check_eq 'configured-prefix message'              "$(field "$out" message)" '/target x-2aad --no-merge'
 
 out="$(run_nofno 'ab-4040eee8')"
