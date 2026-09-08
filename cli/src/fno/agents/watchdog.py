@@ -2285,16 +2285,10 @@ def session_verdict(
     roster_timeout: Optional[float] = None,
     pr_state_fn: Optional[Callable[[str, int], Optional[str]]] = None,
 ) -> Optional[str]:
-    """This module's own verdict word (wake/reroute/ghost/stale/leave/...)
-    for one session, or ``None`` when the row is absent from the sweep or
-    the sweep itself failed to read.
-
-    A thin filter over :func:`run_sweep` - the DI seams pass straight
-    through, so a caller can inject the same synthetic rows a unit test
-    would. Exported so a caller outside this module (the king board's
-    blocked_child queue, x-3ecf) asks the ONE classifier this file owns for
-    "is this session stuck" instead of restating it against raw
-    transcripts."""
+    """This module's verdict word for one session, or None if absent/unreadable.
+    A thin filter over :func:`run_sweep`, exported so a caller outside this
+    module (the king board's blocked_child queue, x-3ecf) asks the ONE
+    classifier this file owns instead of restating it."""
     try:
         payload, _rows = run_sweep(
             now_s=now_s,

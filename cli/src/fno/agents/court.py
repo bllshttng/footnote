@@ -178,16 +178,9 @@ def find_presiding_crown(
     crowns: list[dict[str, Any]],
     by_id: Optional[dict[str, dict]],
 ) -> Optional[dict[str, Any]]:
-    """The live crown one rung ABOVE ``scope``/``level`` whose territory
-    contains it, or ``None`` when nothing outranks it: level 0 already tops
-    the ladder, the graph is unreadable, or the members span more than one
-    containing project.
-
-    Directive points 3/4 (x-3ecf): a disagreement climbs to the crown that
-    presides over both, never straight to the operator. A ``manifest-only``
-    row (:func:`_manifest_only_crowns`) is excluded - a message can never
-    reach a crown with no live worker behind it.
-    """
+    """The live crown one rung above scope/level, or None (x-3ecf AC4-HP:
+    escalation climbs the crown ladder before the operator). Excludes
+    manifest-only rows - no live worker to mail."""
     if level is None or level <= 0:
         return None
     live = [c for c in crowns if c.get("status") != "manifest-only"]
@@ -200,13 +193,11 @@ def find_presiding_crown(
             return None
         (target_project,) = projects
         return next(
-            (c for c in live if c.get("level") == 1 and c.get("scope") == target_project),
-            None,
+            (c for c in live if c.get("level") == 1 and c.get("scope") == target_project), None
         )
     if level == 1:
         return next(
-            (c for c in live if c.get("level") == 0 and scope in split_scope(c.get("scope"))),
-            None,
+            (c for c in live if c.get("level") == 0 and scope in split_scope(c.get("scope"))), None
         )
     return None
 

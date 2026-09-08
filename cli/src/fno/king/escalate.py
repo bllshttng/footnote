@@ -139,13 +139,10 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
 
 
 def resolve_presiding_king(session_id: "str | None") -> "dict | None":
-    """The crown one rung above the ESCALATING session's own crown, read the
-    way ``fno agents court`` reads it - or ``None`` on any unreadable input,
-    an uncrowned session, or nothing outranking it. Fail-quiet: escalation
-    must still fall through to the operator, never raise (x-3ecf, directive
-    points 3/4 - a disagreement climbs to the crown that presides over both,
-    never straight to the operator).
-    """
+    """The crown one rung above the escalating session's own, or None on any
+    unreadable input, an uncrowned session, or nothing outranking it.
+    Fail-quiet: escalation still falls through to the operator (x-3ecf
+    AC4-HP: a disagreement climbs the crown ladder first)."""
     if not session_id:
         return None
     try:
@@ -167,39 +164,28 @@ def resolve_presiding_king(session_id: "str | None") -> "dict | None":
         return None
 
 
-def king_escalation_message(stalled_ids: "list[str]", reason: str) -> str:
-    """The presiding king's mail body: shorter than :func:`question_text`
-    (no dedupe marker - the operator question already carries that), because
-    the receiving king is live and can ask for detail."""
-    ids = sorted(set(stalled_ids))
-    if ids:
-        shown = ", ".join(ids[:MAX_LISTED_IDS])
-        if len(ids) > MAX_LISTED_IDS:
-            shown += f", and {len(ids) - MAX_LISTED_IDS} more"
-        subject = f"{len(ids)} board row(s) nothing is clearing: {shown}"
-    else:
-        subject = "a board it could not read"
-    return (
-        f"A crown under yours stopped on {subject}. Reason given: {reason}. "
-        "It presides over territory yours contains - check on it before this "
-        "reaches the operator."
-    )
-
-
 def mail_presiding_king(holder: str, stalled_ids: "list[str]", reason: str) -> bool:
-    """Best-effort mail to the presiding king. ``True`` only on a confirmed
-    send; any failure (no ``fno`` on PATH, a non-zero exit, a timeout) reads
-    ``False`` so the caller still records the durable operator question -
-    a failed send must never make the escalation disappear."""
+    """Best-effort mail to the presiding king. True only on a confirmed
+    send; any failure reads False so the caller still records the durable
+    operator question."""
     import shutil
     import subprocess
 
     fno_bin = shutil.which("fno")
     if not fno_bin:
         return False
+    ids = sorted(set(stalled_ids))
+    shown = ", ".join(ids[:MAX_LISTED_IDS]) if ids else "a board it could not read"
+    if len(ids) > MAX_LISTED_IDS:
+        shown += f", and {len(ids) - MAX_LISTED_IDS} more"
+    subject = f"{len(ids)} board row(s) nothing is clearing: {shown}" if ids else shown
+    message = (
+        f"A crown under yours stopped on {subject}. Reason given: {reason}. "
+        "It presides over territory yours contains - check on it before this reaches the operator."
+    )
     try:
         proc = subprocess.run(
-            [fno_bin, "agents", "mail", "send", holder, king_escalation_message(stalled_ids, reason)],
+            [fno_bin, "agents", "mail", "send", holder, message],
             capture_output=True,
             text=True,
             timeout=15,

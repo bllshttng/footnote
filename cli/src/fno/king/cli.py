@@ -594,14 +594,10 @@ def escalate_cmd(
     ),
 ) -> None:
     """Tell the presiding crown - or the operator when nothing outranks this
-    king - that it stopped with work still pending.
-
-    Called by BOTH king terminals (stop-hook NoProgress and the walk arm's
-    park), because a guard on one of two reachable paths is decorative.
-    Idempotent per stalled id set. The operator question always records
-    (durable dedup + audit trail, unchanged); a live presiding crown ALSO
-    gets mailed and becomes the receipt's named target (x-3ecf, AC4-HP).
-    """
+    king - that it stopped with work still pending. Called by both king
+    terminals; idempotent per stalled id set. The operator question always
+    records; a live presiding crown also gets mailed and named as the
+    receipt's target (x-3ecf, AC4-HP)."""
     from fno.carveout.core import resolve_carveout_root, resolve_session_id
     from fno.king.escalate import escalate, mail_presiding_king, resolve_presiding_king
     from fno.king.state import reign_state

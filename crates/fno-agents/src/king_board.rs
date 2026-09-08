@@ -710,21 +710,27 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                         &cwd,
                         std::time::Duration::from_millis(HAND_RUN_BUDGET_MS),
                     );
-                    let answered: HashMap<String, bool> = candidates
-                        .iter()
-                        .map(|(row, _)| {
-                            let ok = answered_payload
-                                .payload
-                                .as_ref()
-                                .and_then(|p| p.get(&row.session))
-                                .and_then(|v| v.get("answered"))
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false);
-                            (row.session.clone(), ok)
-                        })
-                        .collect();
+                    let mut answered: HashMap<String, bool> = HashMap::new();
+                    let mut verdicts: HashMap<String, String> = HashMap::new();
+                    for (row, _) in &candidates {
+                        let entry = answered_payload
+                            .payload
+                            .as_ref()
+                            .and_then(|p| p.get(&row.session));
+                        let ok = entry
+                            .and_then(|v| v.get("answered"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        answered.insert(row.session.clone(), ok);
+                        if let Some(v) = entry
+                            .and_then(|v| v.get("watchdog_verdict"))
+                            .and_then(Value::as_str)
+                        {
+                            verdicts.insert(row.session.clone(), v.to_string());
+                        }
+                    }
                     SourceRead::ok(Value::Array(queues::filter_unanswered_by_mail(
-                        candidates, &answered,
+                        candidates, &answered, &verdicts,
                     )))
                 }
             }

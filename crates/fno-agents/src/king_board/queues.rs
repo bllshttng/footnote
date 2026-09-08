@@ -177,6 +177,7 @@ pub(crate) fn resolve_blocked_child_candidates(
 pub(crate) fn filter_unanswered_by_mail(
     candidates: Vec<(BlockedRow, i64)>,
     mail_answered: &HashMap<String, bool>,
+    watchdog_verdicts: &HashMap<String, String>,
 ) -> Vec<Value> {
     candidates
         .into_iter()
@@ -188,6 +189,7 @@ pub(crate) fn filter_unanswered_by_mail(
                 "reason": row.reason,
                 "evidence": row.evidence,
                 "age_minutes": age_minutes,
+                "watchdog_verdict": watchdog_verdicts.get(&row.session),
             })
         })
         .collect()
@@ -1143,7 +1145,7 @@ mod tests {
         let row = blocked("2026-09-08T00:00:00Z", "cx-1", "x-a");
         let mut answered = HashMap::new();
         answered.insert("cx-1".to_string(), true);
-        let out = filter_unanswered_by_mail(vec![(row, 45)], &answered);
+        let out = filter_unanswered_by_mail(vec![(row, 45)], &answered, &HashMap::new());
         assert!(
             out.is_empty(),
             "a session with mail after its row must not appear"
@@ -1153,10 +1155,16 @@ mod tests {
     #[test]
     fn ac3_edge_no_answer_still_names_the_row() {
         let row = blocked("2026-09-08T00:00:00Z", "cx-1", "x-a");
-        let out = filter_unanswered_by_mail(vec![(row, 45)], &HashMap::new());
+        let mut verdicts = HashMap::new();
+        verdicts.insert("cx-1".to_string(), "ghost".to_string());
+        let out = filter_unanswered_by_mail(vec![(row, 45)], &HashMap::new(), &verdicts);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["id"], "x-a");
         assert_eq!(out[0]["session"], "cx-1");
         assert_eq!(out[0]["age_minutes"], 45);
+        assert_eq!(
+            out[0]["watchdog_verdict"], "ghost",
+            "the queue surfaces the watchdog's own verdict rather than judging staleness itself"
+        );
     }
 }
