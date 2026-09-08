@@ -355,10 +355,15 @@ def test_both_optional_spellings_of_a_dict_block_resolve(tmp_path: Path) -> None
     assert _field_models(dict[str, Row])[0] is Row
     assert _field_models(Optional[dict[str, Row]])[0] is Row
     assert _field_models(dict[str, Row] | None)[0] is Row
-    # Positive control on the negative case: a plain map has no schema below it.
+    # A list of models resolves on its own slot, so a typo in one element is
+    # reachable: `[[routing.models]] harnes = ...` was silently accepted.
+    assert _field_models(list[Row])[1] is Row
+    assert _field_models(Optional[list[Row]])[1] is Row
+    # Positive control on the negative cases: no schema below a plain map or list.
     assert _field_models(dict[str, str])[0] is None
-    # And a plain nested model still resolves on the other slot.
-    assert _field_models(Row)[1] is Row
+    assert _field_models(list[str])[1] is None
+    # And a plain nested model still resolves on the third slot.
+    assert _field_models(Row)[2] is Row
 
 
 def test_a_legacy_spelling_the_loader_accepts_is_not_a_typo(tmp_path: Path) -> None:

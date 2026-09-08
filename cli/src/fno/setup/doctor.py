@@ -49,22 +49,24 @@ def _settings_candidates_for(path: Path) -> list[Path]:
 
 
 def _scan_config_files(paths: list[Path], probe: "Callable[[object], list[str]]") -> list[str]:
-    """Run ``probe`` over each readable FLAT config in ``paths``, deduped."""
-    from fno.config_io import _load_raw, _unwrap_config_dict
+    """Run ``probe`` over the MERGED config the runtime resolves from ``paths``.
 
-    problems: list[str] = []
+    ``paths`` is highest precedence first. Probing each layer separately made a
+    stale value in an overridden layer a finding, even where the winning layer
+    resolves fine: the operator was told to fix a value nothing reads.
+    """
+    from fno.config_io import _deep_merge, _load_raw, _unwrap_config_dict
+
+    merged: dict[str, object] = {}
     seen: set[Path] = set()
-    for path in paths:
+    for path in reversed(paths):
         if not path.is_file() or path.resolve() in seen:
             continue
         seen.add(path.resolve())
         parsed, ok = _load_raw(path)
-        if not ok:
-            continue
-        for msg in probe(_unwrap_config_dict(parsed)):
-            if msg not in problems:
-                problems.append(msg)
-    return problems
+        if ok:
+            merged = _deep_merge(merged, _unwrap_config_dict(parsed))
+    return list(dict.fromkeys(probe(merged)))
 
 
 def _wip_cap_problems_in(data: object) -> list[str]:
@@ -118,68 +120,25 @@ def check_wip_caps() -> list[str]:
 
 
 _VALID_WORKTREE_POLICIES = ("never", "harness-native", "external")
-_KNOWN_PROJECT_KEYS = frozenset(
-    {"name", "path", "type", "stack", "package_manager", "worktree"}
-)
-
-
-def _edit_distance_le_1(a: str, b: str) -> bool:
-    """True if ``a`` and ``b`` differ by at most one insert/delete/substitute."""
-    if a == b:
-        return True
-    la, lb = len(a), len(b)
-    if abs(la - lb) > 1:
-        return False
-    if la == lb:  # one substitution
-        return sum(1 for x, y in zip(a, b) if x != y) == 1
-    # one insert/delete: the shorter must be a subsequence missing one char
-    short, long = (a, b) if la < lb else (b, a)
-    i = j = edits = 0
-    while i < len(short) and j < len(long):
-        if short[i] == long[j]:
-            i += 1
-        else:
-            edits += 1
-            if edits > 1:
-                return False
-        j += 1
-    return True
 
 
 def _worktree_policy_problems_in(data: object) -> list[str]:
-    """Out-of-enum policy + typo'd per-project keys in one flat config dict."""
+    """An out-of-enum ``worktree.policy`` in one flat config dict.
+
+    A typo'd per-project key used to be caught here by edit distance over a
+    hand-listed key set. `check_unknown_keys` walks the same list-of-models
+    from the schema now, so this keeps only the value check.
+    """
     if not isinstance(data, dict):
         return []
-    problems: list[str] = []
     wt = data.get("worktree")
     policy = wt.get("policy") if isinstance(wt, dict) else None
-    if policy is not None and policy not in _VALID_WORKTREE_POLICIES:
-        problems.append(
-            f"config.worktree.policy = {policy!r} is not one of "
-            f"{' | '.join(_VALID_WORKTREE_POLICIES)}; worktree creation will refuse"
-        )
-    work = data.get("work")
-    workspaces = work.get("workspaces") if isinstance(work, dict) else None
-    if isinstance(workspaces, dict):
-        for ws in workspaces.values():
-            projects = ws.get("projects") if isinstance(ws, dict) else None
-            if not isinstance(projects, list):
-                continue
-            for entry in projects:
-                if not isinstance(entry, dict):
-                    continue
-                name = entry.get("name") or entry.get("path") or "?"
-                for key in entry:
-                    if (
-                        key not in _KNOWN_PROJECT_KEYS
-                        and _edit_distance_le_1(str(key), "worktree")
-                    ):
-                        problems.append(
-                            f"project {name!r} has key {key!r}, likely a typo for "
-                            "'worktree'; it is IGNORED, so the project silently gets "
-                            "the default policy"
-                        )
-    return problems
+    if policy is None or policy in _VALID_WORKTREE_POLICIES:
+        return []
+    return [
+        f"config.worktree.policy = {policy!r} is not one of "
+        f"{' | '.join(_VALID_WORKTREE_POLICIES)}; worktree creation will refuse"
+    ]
 
 
 def check_worktree_policy() -> list[str]:

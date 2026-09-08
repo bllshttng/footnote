@@ -23,20 +23,26 @@ _NEAR_MISS_CAP = 4
 _LOG = logging.getLogger("fno.config")
 
 
-def _field_models(annotation: object) -> tuple[Optional[type[BaseModel]], Optional[type[BaseModel]]]:
-    """``(dict[str, Model] value model, nested model)``. Both union spellings."""
+def _field_models(
+    annotation: object,
+) -> tuple[Optional[type[BaseModel]], Optional[type[BaseModel]], Optional[type[BaseModel]]]:
+    """``(dict value model, list item model, nested model)``. Both union spellings."""
     candidates = list(typing.get_args(annotation)) or [annotation]
     if typing.get_origin(annotation) not in (typing.Union, types.UnionType):
         candidates = [annotation, *candidates]
     nested: Optional[type[BaseModel]] = None
     for candidate in candidates:
-        if typing.get_origin(candidate) is dict:
-            args = typing.get_args(candidate)
-            if len(args) == 2 and isinstance(args[1], type) and issubclass(args[1], BaseModel):
-                return args[1], None
+        origin = typing.get_origin(candidate)
+        args = typing.get_args(candidate)
+        if origin is dict and len(args) == 2:
+            if isinstance(args[1], type) and issubclass(args[1], BaseModel):
+                return args[1], None, None
+        elif origin is list and len(args) == 1:
+            if isinstance(args[0], type) and issubclass(args[0], BaseModel):
+                return None, args[0], None
         elif nested is None and isinstance(candidate, type) and issubclass(candidate, BaseModel):
             nested = candidate
-    return None, nested
+    return None, None, nested
 
 
 def warn_unknown_keys(
@@ -62,10 +68,16 @@ def warn_unknown_keys(
             )
             unknown.extend(leaves if 0 < len(leaves) <= _UNKNOWN_LEAF_CAP else [qualified])
             continue
-        if not isinstance(value, dict):
+        mapped, item, nested = _field_models(model.model_fields[key].annotation)
+        if item is not None and isinstance(value, list):
+            for index, entry in enumerate(value):
+                if isinstance(entry, dict):
+                    unknown.extend(
+                        warn_unknown_keys(entry, item, prefix=f"{qualified}[{index}]")
+                    )
+        elif not isinstance(value, dict):
             continue
-        mapped, nested = _field_models(model.model_fields[key].annotation)
-        if mapped is not None:
+        elif mapped is not None:
             for name, entry in value.items():
                 if isinstance(entry, dict):
                     unknown.extend(warn_unknown_keys(entry, mapped, prefix=f"{qualified}.{name}"))
@@ -108,14 +120,43 @@ def check_config_files_read() -> list[str]:
     return errors
 
 
+def _edit_distance_le_1(a: str, b: str) -> bool:
+    """True if ``a`` and ``b`` differ by at most one insert/delete/substitute."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        return sum(1 for x, y in zip(a, b) if x != y) == 1
+    short, long = (a, b) if la < lb else (b, a)
+    i = j = edits = 0
+    while i < len(short) and j < len(long):
+        if short[i] == long[j]:
+            i += 1
+        else:
+            edits += 1
+            if edits > 1:
+                return False
+        j += 1
+    return True
+
+
 def _near_miss_keys(unknown: str) -> list[str]:
-    """Modeled keys sharing ``unknown``'s trailing leaf name, in schema order."""
+    """Modeled keys the operator plausibly meant, in schema order.
+
+    Same leaf name in another section first, because that is the wrong-section
+    case. Failing that, a leaf within one edit, which is the misspelling case.
+    """
     try:
         from fno.config.registry import FIELD_META
     except Exception:
         return []
     leaf = unknown.rsplit(".", 1)[-1]
-    hits = [key for key in FIELD_META if key != unknown and key.rsplit(".", 1)[-1] == leaf]
+    others = [key for key in FIELD_META if key != unknown]
+    hits = [key for key in others if key.rsplit(".", 1)[-1] == leaf]
+    if not hits:
+        hits = [key for key in others if _edit_distance_le_1(key.rsplit(".", 1)[-1], leaf)]
     return hits if len(hits) <= _NEAR_MISS_CAP else []
 
 
@@ -175,8 +216,9 @@ def check_enabled_with_empty_population() -> list[str]:
         return []
     return [
         "review.cross_model.enabled is true and no non-claude provider is dispatchable; "
-        f"available reviewer kinds: {', '.join(kinds) or 'none'}. The diversity "
-        "requirement can never be met until a provider record is added."
+        f"available reviewer kinds: {', '.join(kinds) or 'none'}. The switch buys "
+        "nothing for a claude-written change, which is most of them; a claude "
+        "reviewer is a different family only when codex or gemini wrote the code."
     ]
 
 
