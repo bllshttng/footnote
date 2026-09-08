@@ -27,6 +27,8 @@ A thing is a ship type ONLY if it has a definable **green** - a finish line read
 
 `/ship` (this verb) = drive a deliverable to its finish line. It is distinct from the *ship phase* and *ship gate* inside `/target`, from the `DonePRGreen`/`DoneAdvisory` termination reasons, from `fno do pr merge`, and from `/ship-docs` (which generates documentation and is NOT a ship type). The single canonical disambiguation lives in `AGENTS.md` -> "Ship vocabulary"; read it if the overlap is confusing.
 
+One owner decides every merge. `fno do pr merge` asks it, and so do `fno do pr verify --kind merged` and the `fno-agents finalize` queue arm. It answers merge or arm for one exact head, and it never emits an unpinned request. See [authorized-merge](../../docs/architecture/authorized-merge.md).
+
 ## Composition, not self-containment
 
 `/ship` is a **composing umbrella**, deliberately NOT a self-contained, liftable-in-isolation skill. `/ship pr` routes to the co-installed `/pr` skill (which stays the real implementation and permanent alias - the plan's no-forced-migration rule); `/pr` is therefore a hard companion dependency, not reimplemented here. Only the genuinely-new `doc` mode is local to this folder ([doc.md](references/doc.md), loaded via Read). This skill is intentionally excluded from the marketplace self-containment lint, because folding `/pr`'s ~400 lines of mode bodies in would tax the dominant code path for no payoff.
