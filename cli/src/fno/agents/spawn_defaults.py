@@ -903,72 +903,38 @@ def effective_field(
 # A model string's implied vendor, by prefix or tier word. A pure string
 # opinion and never a routing input: the warning it drives is advisory, because
 # the pairing is legal and --model is deliberate passthrough (cli.py).
-_MODEL_VENDOR_HINTS: Tuple[Tuple[str, str], ...] = (
-    ("glm-", "zai"),
-    ("gpt-", "openai"),
-    ("deepseek", "deepseek"),
-    ("gemini-", "google"),
-    ("claude-", "anthropic"),
-)
-_MODEL_WORD_VENDORS = {"opus": "anthropic", "sonnet": "anthropic", "haiku": "anthropic"}
-
-# The vendor a harness's own primary lane bills when no route/vendor was named.
-# opencode is operator-configured, so it holds no opinion here.
-_HARNESS_DEFAULT_VENDOR = {
-    "claude": "anthropic",
-    "codex": "openai",
-    "gemini": "google",
-    "agy": "google",
-}
-
-
-def _implied_vendor(model: Optional[str]) -> Optional[str]:
-    if not model:
-        return None
-    for candidate in (model.lower(), model.lower().rsplit("/", 1)[-1]):
-        for prefix, vendor in _MODEL_VENDOR_HINTS:
-            if candidate.startswith(prefix):
-                return vendor
-        base = candidate.split("[", 1)[0].split("-", 1)[0]
-        word_vendor: Optional[str] = _MODEL_WORD_VENDORS.get(base)
-        if word_vendor:
-            return word_vendor
-    return None
-
-
 def resolve_lane_vendor(
     argv: Sequence[str],
     env: Optional[Mapping[str, str]] = None,
     *,
     harness: Optional[str] = None,
 ) -> Optional[str]:
-    """Resolve the model vendor carried by a final spawn argv."""
-    values = list(argv)
-    tokens = values[1:] if values else []
-    explicit_route = _flag_value(tokens, "--route")
-    if explicit_route:
-        return explicit_route.replace(",", "/").split("/", 1)[0].strip().lower() or None
-    explicit_vendor = _flag_value(tokens, "--provider", "-P")
-    if explicit_vendor:
-        return explicit_vendor.strip().lower() or None
-    resolved_harness = (
-        harness or _flag_value(tokens, "--harness", "-H") or ""
-    ).strip().lower()
-    if not resolved_harness and values and values[0] in _HARNESS_DEFAULT_VENDOR:
-        resolved_harness = values[0]
-    if not resolved_harness:
+    """The model vendor a final spawn argv bills: route > provider > harness.
+    The vocabulary and the judgment live in the spawn-overlay verb; this shim
+    resolves the harness-side inputs (explicit arg, then -H, then dispatch
+    inference from env) and reads the answer."""
+    from fno.agents.spawn_overlay_client import spawn_overlay_call
+
+    toks = [str(t) for t in (list(argv)[1:] if argv else [])]
+    env_harness = None
+    if not (harness and str(harness).strip()):
+        harness = _flag_value(toks, "--harness", "-H")
+    if not (harness and str(harness).strip()):
         try:
             from fno.dispatch_flags import resolve_dispatch_harness
 
-            resolved_harness = resolve_dispatch_harness(None, env=env)[0]
+            env_harness = resolve_dispatch_harness(None, env=env)[0]
         except Exception:
-            resolved_harness = "claude"
-    lane = _HARNESS_DEFAULT_VENDOR.get(resolved_harness)
-    if lane:
-        return lane
-    if resolved_harness == "opencode":
-        return _implied_vendor(_flag_value(tokens, "--model", "-m"))
-    return None
+            env_harness = "claude"
+    return spawn_overlay_call(
+        {
+            "kind": "lane-vendor",
+            "argv_tail": toks,
+            "argv_head": argv[0] if argv else None,
+            "harness": harness,
+            "env_harness": env_harness,
+        }
+    ).get("vendor")
 
 
 def _check_model_vendor_mismatch(
@@ -991,16 +957,17 @@ def _check_model_vendor_mismatch(
     """
     toks = [str(t) for t in argv[1:]]
     # The lane's harness, resolved in the verb's precedence order: an explicit
-    # -H flag wins, then dispatch inference from env. The verb maps harness >
-    # vendor and judges the model against it.
+    # -H flag wins, then dispatch inference from env (as a LATE input; the
+    # argv head may still name the harness first).
     harness = _flag_value(toks, "--harness", "-H")
-    if not (harness and harness.strip()):
+    env_harness = None
+    if not (harness and str(harness).strip()):
         try:
             from fno.dispatch_flags import resolve_dispatch_harness
 
-            harness = resolve_dispatch_harness(None, env=env)[0]
+            env_harness = resolve_dispatch_harness(None, env=env)[0]
         except Exception:
-            harness = "claude"
+            env_harness = "claude"
     from fno.agents.spawn_overlay_client import (
         SpawnOverlayUnavailable,
         spawn_overlay_call,
@@ -1013,6 +980,7 @@ def _check_model_vendor_mismatch(
                 "argv_tail": toks,
                 "argv_head": argv[0] if argv else None,
                 "harness": harness,
+                "env_harness": env_harness,
                 "model_source": model_source,
             }
         )

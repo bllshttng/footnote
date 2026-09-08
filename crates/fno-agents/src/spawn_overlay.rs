@@ -98,9 +98,28 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
     match payload.get("kind").and_then(Value::as_str) {
         Some("overlay") => resolve_overlay(&payload),
         Some("model-vendor") => resolve_model_vendor(&payload),
+        Some("lane-vendor") => {
+            let toks: Vec<String> = payload
+                .get("argv_tail")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let refs: Vec<&str> = toks.iter().map(String::as_str).collect();
+            let vendor = resolve_lane_vendor(
+                &refs,
+                payload.get("harness").and_then(Value::as_str),
+                payload.get("env_harness").and_then(Value::as_str),
+                payload.get("argv_head").and_then(Value::as_str),
+            );
+            Ok(json!({"vendor": vendor}))
+        }
         Some("fallback") => resolve_fallback(&payload),
         other => Err(format!(
-            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|fallback"
+            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|fallback|lane-vendor"
         )),
     }
 }
@@ -344,6 +363,7 @@ fn implied_vendor(model: Option<&str>) -> Option<String> {
 fn resolve_lane_vendor(
     toks: &[&str],
     harness: Option<&str>,
+    env_harness: Option<&str>,
     argv_head: Option<&str>,
 ) -> Option<String> {
     if let Some(route) = flag_value(toks, &["--route"]) {
@@ -383,6 +403,11 @@ fn resolve_lane_vendor(
             }
         }
     }
+    if resolved.is_empty() {
+        if let Some(env_answer) = env_harness {
+            resolved = env_answer.trim().to_lowercase();
+        }
+    }
     for (h, vendor) in HARNESS_DEFAULT_VENDOR {
         if resolved == h {
             return Some(vendor.to_string());
@@ -420,7 +445,12 @@ fn resolve_model_vendor(payload: &Value) -> Result<Value, String> {
         // Explicit route: a deliberate lane choice beside a deliberate model.
         return Ok(json!({"verdict": "ok", "message": Value::Null, "event": Value::Null}));
     }
-    let lane = match resolve_lane_vendor(&refs, harness, head) {
+    let lane = match resolve_lane_vendor(
+        &refs,
+        harness,
+        payload.get("env_harness").and_then(Value::as_str),
+        head,
+    ) {
         Some(l) => l,
         None => return Ok(json!({"verdict": "ok", "message": Value::Null, "event": Value::Null})),
     };
@@ -682,6 +712,40 @@ mod tests {
         .unwrap();
         assert!(out["error"].is_null());
         assert_eq!(out["links"]["default"][0]["provider"], "codex");
+    }
+
+    #[test]
+    fn lane_vendor_answers_route_provider_then_harness() {
+        let vendor = |payload: Value| {
+            resolve(payload).unwrap()["vendor"]
+                .as_str()
+                .map(String::from)
+        };
+        assert_eq!(
+            vendor(json!({"kind": "lane-vendor", "argv_tail": ["--route", "zai/glm"]})),
+            Some("zai".into())
+        );
+        assert_eq!(
+            vendor(json!({"kind": "lane-vendor", "argv_tail": ["-P", "openai"]})),
+            Some("openai".into())
+        );
+        assert_eq!(
+            vendor(json!({"kind": "lane-vendor", "argv_tail": [], "harness": "codex"})),
+            Some("openai".into())
+        );
+        // opencode holds no vendor opinion; the model's own spelling answers.
+        assert_eq!(
+            vendor(json!({
+                "kind": "lane-vendor",
+                "argv_tail": ["--model", "glm-5.3-flash"],
+                "harness": "opencode",
+            })),
+            Some("zai".into())
+        );
+        assert_eq!(
+            vendor(json!({"kind": "lane-vendor", "argv_tail": [], "harness": "opencode"})),
+            None
+        );
     }
 }
 

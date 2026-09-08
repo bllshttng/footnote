@@ -29,15 +29,10 @@ write_match() {
   printf '%s\n' \
     'const KNOWN_UNROUTED_PROVIDER: &str = "__uncapped__";' > "$tmp/rust-gate.rs"
   printf '%s\n' \
-    '_HARNESS_DEFAULT_VENDOR = {' \
-    '    "claude": "anthropic",' \
-    '    "codex": "openai",' \
-    '}' \
-    'def resolve_lane_vendor(argv, harness=None):' \
-    '    resolved_harness = harness' \
-    '    lane = _HARNESS_DEFAULT_VENDOR.get(resolved_harness)' \
-    '    if lane:' \
-    '        return lane' > "$tmp/defaults.py"
+    'const HARNESS_DEFAULT_VENDOR: [(&str, &str); 2] = [' \
+    '    ("claude", "anthropic"),' \
+    '    ("codex", "openai"),' \
+    '];' > "$tmp/overlay.rs"
   printf '%s\n' \
     '_KNOWN_UNROUTED_PROVIDER = "__uncapped__"' > "$tmp/python-gate.py"
 }
@@ -48,7 +43,7 @@ check() {
     --adopt-rust "$tmp/adopt.rs" \
     --codex-rust "$tmp/codex.rs" \
     --rust-gate "$tmp/rust-gate.rs" \
-    --python-defaults "$tmp/defaults.py" \
+    --overlay-rust "$tmp/overlay.rs" \
     --python-gate "$tmp/python-gate.py"
 }
 
