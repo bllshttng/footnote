@@ -69,7 +69,7 @@ const KNOWN_UNROUTED_PROVIDER: &str = "__uncapped__";
 /// Registry statuses that can hold a live process (idle counts: an
 /// idle-but-unreaped process still holds RAM; a reaped pid drops out via the
 /// liveness check). Mirrors `spawn_gate.py::LIVE_STATUSES`.
-fn status_is_liveish(s: &AgentStatus) -> bool {
+pub(crate) fn status_is_liveish(s: &AgentStatus) -> bool {
     matches!(
         s,
         AgentStatus::Spawning
@@ -177,7 +177,7 @@ pub fn gate_node() -> Option<String> {
 /// The liveness-filtered registry rows behind [`slot_count`], exposed so the
 /// per-territory cap (x-e221) can read the rows' worked NODES without a second
 /// liveness implementation.
-fn live_rows(registry_path: &Path, warnings: &mut Vec<String>) -> Vec<RegistryEntry> {
+pub(crate) fn live_rows(registry_path: &Path, warnings: &mut Vec<String>) -> Vec<RegistryEntry> {
     let live_roster_short_ids: std::collections::HashSet<String> =
         match ClaudeRoster::load_default() {
             Ok(roster) => roster
@@ -262,7 +262,7 @@ fn territory_of_node(
 ) -> Option<(String, std::collections::HashSet<String>)> {
     use crate::king_board::graph_json_path;
     use crate::king_board::project_map;
-    use crate::king_board::scope::compile_territory;
+    use crate::territory::compile_territory;
 
     let entries: Vec<Value> = {
         let path = graph_json_path(config_cwd);

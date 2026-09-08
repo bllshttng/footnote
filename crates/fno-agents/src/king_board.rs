@@ -46,13 +46,14 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+pub(crate) use crate::territory::compile_scope_ids;
 pub(crate) use budget::{fno_py_cmd, now_secs_board, run_json, Budget, HAND_RUN_BUDGET_MS};
 pub(crate) use claims::read_claims;
 pub(crate) use classify::{classify_planned_unclaimed, read_claimed_nodes};
 pub(crate) use prs::read_prs;
 pub(crate) use queues::{build_board, parse_lane, queue_json, BoardInputs, Queue};
 pub(crate) use scope::{
-    autonomous_merge_enabled, compile_scope_ids, graph_json_path, operator_lane_path,
+    autonomous_merge_enabled, expand_home, graph_json_path, home_dot_fno, operator_lane_path,
     parse_manifest, project_map,
 };
 
