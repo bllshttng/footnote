@@ -4237,12 +4237,7 @@ def advance_epic(
 def _ready_loose_nodes(project: str) -> list[dict]:
     """Ready PARENTLESS (loose) nodes of one project, in board order.
 
-    The rung-1 territory's selection surface: the shipped ``fno backlog
-    ready -p <project>`` read (claim-filtered, PR-filtered, rank-sorted like
-    the epic selection) filtered to rows with no parent and no epic box. A
-    loose node is exactly what an epic-territory drain can never see, which
-    is why the project territory exists (x-e221 WIDENED). Raises on a
-    garbled response so the caller skips rather than guessing.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     cmd = [
         *_subprocess_util.fno_py_cmd(),
@@ -4283,12 +4278,7 @@ def advance_project_loose(
 ) -> AdvanceEpicResult:
     """Drain one project territory's loose nodes (x-e221 rung-1 path).
 
-    The project-rung counterpart of ``advance_epic``: same gates (auto-continue
-    opt-in, walker-live), same shared ``_converge_one`` core and lane math, but
-    NO mission lifecycle - there is no activation record to keep in step and no
-    completion to retire on, so the receipt never reports ``deactivated`` and
-    the territory keeps draining while its workspace exists. ``mission`` on
-    every receipt is the territory label (scope), falling back to the project.
+    Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     ev_path = events_path if events_path is not None else _events_path(project_root)
     label = territory_label or project
