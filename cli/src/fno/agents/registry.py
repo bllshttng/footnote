@@ -285,7 +285,7 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # v28 (x-5283): additive `adopted_by_session` - the session that VOUCHED for
 # an adopted row; `spawned_by_session` keeps one meaning, so crowning cannot
 # re-attribute a row's cost. Same writer-protection rationale as v27.
-# v29 adds the effective git common-dir grant for Codex threads. The path is a
+# v30 adds the effective git common-dir grant for Codex threads. The path is a
 # positive receipt of which repository metadata the sandbox can write; absence
 # means unresolved, never an empty string. Older rows remain readable and the
 # schema bump prevents an older writer from erasing the stamp.
