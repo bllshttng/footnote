@@ -102,6 +102,13 @@ impl VerifyReport {
 /// identical source shares a stamp, which is correct - it is the same build.
 /// The `-dirty` suffix names an uncommitted tree so a dev build never passes
 /// itself off as the committed rev.
+///
+/// The known limit: a build with no git checkout to read (a crates.io
+/// tarball) bakes the rev `unknown`, so every such build of one package
+/// version shares a pin. The audit then verifies at version granularity
+/// there. That is the weaker end of the trade, and it is the end that still
+/// works: pinning harder than the triad can agree on is what made the audit
+/// unpassable in the first place.
 pub fn current_build() -> String {
     let version = env!("CARGO_PKG_VERSION");
     let rev = env!("FNO_AGENTS_CRATES_REV");
@@ -217,17 +224,18 @@ pub fn verify(home: &AgentsHome, since_secs: u64) -> VerifyReport {
                 .collect(),
         });
     }
-    // A window that refused nothing and verified nothing reads as a silent
+    // A window that verified nothing and refused nothing reads as a silent
     // red: `problems` empty, `passes` false, and no reason on the page. Name
-    // the shape. On the live fleet this exact output (523 checked, 0
-    // verified, 0 problems) hid a build pin that could never match, and
-    // reading it took a source dive instead of a receipt.
-    if report.verified.is_empty() && report.problems.is_empty() && !report.skipped.is_empty() {
+    // the shape, with the counts that separate its causes. On the live fleet
+    // this exact output (523 checked, 0 verified, 0 problems) hid a build pin
+    // that could never match, and reading it took a source dive.
+    if report.verified.is_empty() && report.problems.is_empty() {
         report.problems.push(VerifyProblem {
-            receipt: format!("window of {}s", since_secs),
+            receipt: format!("window of {since_secs}s"),
             reason: format!(
-                "{} receipt(s) in the window, every one from another build, none from {build:?}: \
-                 no retirement by the current build to verify yet",
+                "no retirement by the current build to verify: {} receipt(s) read, \
+                 {} from another build, none stamped {build:?}",
+                report.checked,
                 report.skipped.len()
             ),
         });
@@ -348,9 +356,7 @@ mod tests {
         assert!(report.skipped.len() == 1, "{:?}", report.skipped);
         assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
         assert!(
-            report.problems[0]
-                .reason
-                .contains("every one from another build"),
+            report.problems[0].reason.contains("1 from another build"),
             "{:?}",
             report.problems
         );
@@ -445,10 +451,17 @@ mod tests {
 
         let report = verify(&home, 24 * 3600);
         // Out-of-window receipts are not this report's population: the
-        // window reads empty, and an empty window never passes.
+        // window reads empty, and an empty window never passes. It still
+        // says so - the counts name which emptiness this is.
         assert!(!report.passes(), "verified must be empty");
         assert_eq!(report.checked, 1);
-        assert!(report.problems.is_empty());
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        assert!(
+            report.problems[0].reason.contains("1 receipt(s) read")
+                && report.problems[0].reason.contains("0 from another build"),
+            "{:?}",
+            report.problems
+        );
     }
 
     #[test]
@@ -465,10 +478,19 @@ mod tests {
         let report = verify(&home, 24 * 3600);
         assert_eq!(report.checked, 1);
         assert!(report.verified.is_empty());
-        assert!(report.problems.is_empty(), "{:?}", report.problems);
         assert!(
             !report.passes(),
             "no retirement evidence: an empty window is no pass"
+        );
+        // The removal receipt itself is never refused. The only entry is the
+        // window's own line saying it found no retirement to verify.
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        assert!(
+            report.problems[0]
+                .reason
+                .starts_with("no retirement by the current build to verify"),
+            "{:?}",
+            report.problems
         );
     }
 }
