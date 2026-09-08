@@ -4752,6 +4752,9 @@ use tab_prune::{live_tabs, prune_live_tabs, LiveTab, TabPruneOutcome};
 // (v72) The `fno mux thread reseat` verb, same child-module pattern.
 mod reseat_verb;
 pub use reseat_verb::reseat;
+// (v75, x-7649) The `fno mux retire-session` verb, same child-module pattern.
+mod retire_session;
+pub use retire_session::retire_session;
 /// `fno mux where <fno_id>` (x-d865): resolve an fno session id to its live
 /// location. Reads the registry to find the hosting mux session, connects to
 /// THAT session's socket, and rounds-trips one `PaneWhere`. The three failure
@@ -6735,6 +6738,11 @@ mod tests {
     // The reseat registry-half tests, same reason.
     #[path = "reseat_verb_tests.rs"]
     mod reseat_verb_tests;
+
+    // (v75) The control_roundtrip typed-error test, moved out under the same
+    // rule as the retire-session verb landed beside it.
+    #[path = "control_roundtrip_tests.rs"]
+    mod control_roundtrip_tests;
 
     #[test]
     fn squad_target_reads_the_id_spelling_pane_ls_reports() {
@@ -8813,38 +8821,6 @@ mod tests {
         assert_ne!(EXIT_CONTROL_UNANSWERED, EXIT_ERROR);
     }
 
-    #[test]
-    fn control_roundtrip_surfaces_unanswered_not_a_flattened_string() {
-        // `where_` and `block pipe` both dispatch through control_roundtrip,
-        // not send_control directly, so a fix that only touches send_control's
-        // callers in `dispatch`/`run_on_existing_server` leaves this path
-        // asserting no pane exists on a mere timeout - exactly the P1 review
-        // found. Pin the typed error, not a stringified one, all the way
-        // through control_roundtrip.
-        let sock = control_test_sock("roundtrip-unanswered");
-        let _ = std::fs::remove_file(&sock);
-        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
-            let _msg: ClientMsg = read_msg_sync(&mut s).unwrap();
-            std::thread::sleep(Duration::from_millis(200));
-        });
-
-        let result = control_roundtrip_with_timeouts(
-            &sock,
-            "test-session",
-            ControlVerb::PaneLs,
-            Duration::from_millis(50),
-            Duration::from_millis(150),
-        );
-        server.join().unwrap();
-        let _ = std::fs::remove_file(&sock);
-
-        assert!(
-            matches!(result, Err(ControlError::Unanswered(_))),
-            "expected Unanswered, got {result:?}"
-        );
-    }
     // -- x-1499 ordinal translation + human rendering ---------------------
 
     #[test]

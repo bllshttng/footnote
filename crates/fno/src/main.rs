@@ -89,6 +89,10 @@ enum Role {
     /// whole move (operator ruling, 2026-09-06); the former Python front
     /// door is deleted.
     MuxThreadReseat(Vec<OsString>),
+    /// (v75, x-7649) `mux retire-session <session> --harness <name> --session-id <id>`:
+    /// the thin transport for the exact-session retirement. The server closes
+    /// only the identity's attached panes and tombstones through the store.
+    MuxRetireSession(Vec<OsString>),
     /// (x-b80d) `mux view <selector> [--url] [--fzf] [--json]`: point the
     /// operator's view at the pane hosting an agent, selected by node id,
     /// slug, or name; a selector naming no agent focuses the tab at that
@@ -242,6 +246,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 Role::MuxThreadReseat(args[3..].to_vec())
             }
             Some("thread") if args.len() > 2 => Role::MuxThread(args[2..].to_vec()),
+            // (v75, x-7649) The exact-session retirement door, same
+            // carry-verbatim shape: a bare verb falls through to MuxUsage.
+            Some("retire-session") if args.len() > 2 => Role::MuxRetireSession(args[2..].to_vec()),
             // (x-b80d) view: focus a pane by node id/slug/name; --fzf picks.
             // An explicit -h/--help prints the usage banner (the verb family's
             // one self-teaching surface) rather than parsing as a selector.
@@ -380,6 +387,9 @@ fn main() {
         Role::MuxWhere(rest) => exit_mux(mux_cli::where_(&rest, env_session.as_deref())),
         Role::MuxThread(rest) => exit_mux(mux_cli::thread(&rest, env_session.as_deref())),
         Role::MuxThreadReseat(rest) => exit_mux(mux_cli::reseat(&rest, env_session.as_deref())),
+        Role::MuxRetireSession(rest) => {
+            exit_mux(mux_cli::retire_session(&rest, env_session.as_deref()))
+        }
         Role::MuxView(rest) => exit_mux(mux_cli::view(&rest, env_session.as_deref())),
         Role::MuxWorkspace(rest) => exit_mux(mux_cli::workspace(&rest, env_session.as_deref())),
         Role::Client(flag) => {

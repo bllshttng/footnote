@@ -310,7 +310,9 @@ fn default_true() -> bool {
 /// v73: `LayoutSlot.portal` serde(default), the persisted portal seat; floor stays 58.
 /// v74 (x-b5d1): `Command::RemoveAgent.measure` - measure-and-remove skips
 /// the stop leg on an Unmeasured row; floor stays 58.
-pub const PROTO_VERSION: u32 = 74;
+/// v75 (x-7649): `ControlVerb::RetireSession` + `ServerMsg::SessionRetired`,
+/// the exact-session retirement op; floor stays 58.
+pub const PROTO_VERSION: u32 = 75;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -836,6 +838,12 @@ pub enum ControlVerb {
     /// [`ServerMsg::SquadReloaded`]. The prune CLI sends this after an
     /// applied store pass, so `persist_squad` cannot write reaped members back.
     SquadReload,
+    /// (v75, x-7649) Retire every member whose (harness, full session id)
+    /// matches, across every squad this server holds. Closes only the
+    /// matching member's attached panes, tombstones through the store's own
+    /// `retire_session_members`, then re-projects from the store so the
+    /// in-memory list cannot write the retired member back. -> [`ServerMsg::SessionRetired`]
+    RetireSession { harness: String, session_id: String },
 }
 
 /// What a [`ControlVerb::LayoutGet`] dumps (v41, layout-api).
@@ -2089,6 +2097,10 @@ pub enum ServerMsg {
         members: usize,
         emptied: usize,
     },
+    /// (v75) Answer to [`ControlVerb::RetireSession`]: how many members the
+    /// store tombstoned and how many attached panes closed. Both are zero on
+    /// a repeat call: retirement is idempotent, never an error.
+    SessionRetired { retired: usize, panes_closed: usize },
     /// Answer to [`ControlVerb::PaneWait`].
     WaitDone { outcome: WaitOutcome },
     /// A control verb failed (dead pane, spawn failure, version skew, ...).
@@ -2457,6 +2469,10 @@ pub mod err_code {
     /// (v61, x-7d02) `PaneSend` targeted a pane whose registry row is DND.
     /// The bytes did not land; use mail send to queue durable until release.
     pub const TARGET_DND: u32 = 16;
+    /// (v75, x-7649) `RetireSession`'s durable half failed: the store write
+    /// did not land, so the retirement is NOT durable and the caller retries
+    /// the whole verb.
+    pub const STORE_WRITE_FAILED: u32 = 17;
 }
 
 /// One pane inside a [`TabMeta`] (v22, x-653d): the leaf id the session
@@ -4478,70 +4494,6 @@ mod tests {
             assert_eq!(decoded, msg);
         }
     }
-
-    #[test]
-    fn proto_v4_control_verbs_roundtrip() {
-        // Every control verb survives the codec inside the versioned Control
-        // envelope (mirrors the v3 discipline). PROTO_VERSION rides along so a
-        // skew is detectable server-side.
-        for verb in [
-            ControlVerb::PaneLs,
-            ControlVerb::PaneRead {
-                pane: 3,
-                lines: Some(40),
-                block: None,
-            },
-            ControlVerb::PaneRead {
-                pane: 3,
-                lines: None,
-                block: Some(BlockSel::Last),
-            },
-            ControlVerb::PaneRead {
-                pane: 3,
-                lines: None,
-                block: Some(BlockSel::Seq(7)),
-            },
-            ControlVerb::PaneRun {
-                cwd: "/code/footnote".into(),
-                argv: vec!["claude".into(), "--print".into()],
-                cols: Some(120),
-                rows: None,
-                claim: true,
-                placement: PanePlacement::default(),
-                worker: None,
-            },
-            ControlVerb::PaneClaim {
-                pane: 5,
-                holder_pid: 4242,
-            },
-            ControlVerb::PaneRelease { pane: 5 },
-            ControlVerb::PaneSend {
-                pane: 5,
-                bytes: b"hello\r".to_vec(),
-                guarded: true,
-                expected_identity: None,
-            },
-            ControlVerb::PaneWait {
-                pane: 5,
-                quiet_ms: Some(200),
-                pattern: Some("done".into()),
-                timeout_ms: 5000,
-                command_done: true,
-            },
-            ControlVerb::PaneKill { pane: 5 },
-        ] {
-            let msg = ClientMsg::Control {
-                proto: PROTO_VERSION,
-                build: BUILD_VERSION.into(),
-                verb,
-            };
-            let bytes = encode(&msg).unwrap();
-            let mut cursor = std::io::Cursor::new(bytes);
-            let decoded: ClientMsg = read_msg_sync(&mut cursor).unwrap();
-            assert_eq!(decoded, msg);
-        }
-    }
-
     #[test]
     fn proto_v28_placement_roundtrips_for_pane_run_and_attach() {
         let placement = PanePlacement {
@@ -4582,93 +4534,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn proto_v4_control_replies_roundtrip() {
-        for msg in [
-            ServerMsg::PaneList {
-                panes: vec![PaneInfo {
-                    shell_idle: false,
-                    pane_id: 4,
-                    squad_id: 1,
-                    squad_name: None,
-                    tab_id: 7,
-                    cwd: "/code/footnote".into(),
-                    child_pid: Some(4242),
-                    title: None,
-                    pristine_idle_shell: false,
-                    tab_name: None,
-                    tab_ordinal: Some(1),
-                    fno_id: None,
-                    orphaned_worker: false,
-                    harness_session_id: None,
-                    predecessor_session_ids: Vec::new(),
-                    forked_from_session_id: None,
-                    name: None,
-                }],
-            },
-            ServerMsg::PaneText {
-                pane_id: 4,
-                text: "marker-42\n$ ".into(),
-                block: None,
-                pane_name: None,
-                registry_fno_id: None,
-            },
-            ServerMsg::PaneText {
-                pane_id: 4,
-                text: "$ false".into(),
-                block: Some(BlockMeta {
-                    seq: Some(2),
-                    exit: Some(1),
-                    complete: true,
-                    truncated: false,
-                    implicit: false,
-                }),
-                pane_name: None,
-                registry_fno_id: None,
-            },
-            ServerMsg::PaneSpawned {
-                pane_id: 9,
-                placement: None,
-            },
-            ServerMsg::Ok,
-            ServerMsg::WaitDone {
-                outcome: WaitOutcome::Quiet,
-            },
-            ServerMsg::WaitDone {
-                outcome: WaitOutcome::Timeout,
-            },
-            ServerMsg::WaitDone {
-                outcome: WaitOutcome::CommandDone { exit: Some(0) },
-            },
-            ServerMsg::Err {
-                code: err_code::DEAD_PANE,
-                msg: "no such pane: 99".into(),
-            },
-            ServerMsg::Copy {
-                text: "selected lines\nincluding history".into(),
-            },
-            ServerMsg::SearchResult {
-                pane_id: 4,
-                total: 12,
-                current: 3,
-            },
-            ServerMsg::SearchResult {
-                pane_id: 4,
-                total: 0,
-                current: 0,
-            },
-        ] {
-            let bytes = encode(&msg).unwrap();
-            let mut cursor = std::io::Cursor::new(bytes);
-            let decoded: ServerMsg = read_msg_sync(&mut cursor).unwrap();
-            assert_eq!(decoded, msg);
-        }
-    }
-
     // (reader + frozen-wire-shape families) moved verbatim into its own module: this file is over the
     // shrink-only line, and test motion is the sanctioned shrink.
     #[path = "reader_and_wire_tests.rs"]
     mod reader_and_wire_tests;
+    // (v75) The control-verb + control-reply round-trip lists moved out under
+    // the same rule; the RetireSession entries ride the moved lists.
+    #[path = "control_roundtrip_tests.rs"]
+    mod control_roundtrip_tests;
 
     fn proto_session_name_cannot_escape_mux_dir() {
         assert!(socket_path("../evil").is_err());
