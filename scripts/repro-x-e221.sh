@@ -60,7 +60,8 @@ state_dir = "$FNO_HOME_DIR"
 [active_backlog]
 enabled = true
 interval = "5m"
-[work.projects.fno]
+[[work.workspaces.main.projects]]
+name = "fno"
 path = "$FIXTURE"
 EOF
 export FNO_CONFIG="$FIXTURE/.fno/config.toml"
@@ -68,9 +69,16 @@ export FNO_CONFIG="$FIXTURE/.fno/config.toml"
 # reader from load_settings); redirect it too so the real machine's workspace
 # map cannot leak into the fixture.
 export FNO_GLOBAL_SETTINGS_PATH="$FIXTURE/.fno/settings.yaml"
-# The binary the feed verbs run through, built from this tree.
+# The binary the feed verbs run through, built from this tree. Pin it for the
+# Python passthroughs too: resolve_binary() would otherwise find the deployed
+# binary, which predates the territory verbs and answers "unknown verb".
 AGENTS_BIN="$ROOT/crates/fno-agents/target/debug/fno-agents"
 [ -x "$AGENTS_BIN" ] || AGENTS_BIN=$(command -v fno-agents) || fail "fno-agents binary required (cargo build -p fno-agents)"
+export FNO_AGENTS_BIN="$AGENTS_BIN"
+# The binary resolves the registry under FNO_AGENTS_HOME (Python resolves it
+# under the state dir); pin both to the fixture so the real machine's crown
+# registry cannot leak into the territory reads.
+export FNO_AGENTS_HOME="$FNO_HOME_DIR/agents"
 # Claims root must leave the machine before the fixture claims step writes.
 export FNO_CLAIMS_ROOT="$FNO_HOME_DIR"
 
@@ -116,19 +124,31 @@ print("fixture graph written:", "$RESOLVED")
 PYEOF
 
 # --- fixture: registry cache (two live node-working rows, no crown) ---------
-py - <<PYEOF || fail "fixture registry write"
-import json, pathlib
+# The rows carry the SCRIPT's pid ($$, via env: the quoted heredoc would not
+# expand it), which stays alive for every read below; a subprocess pid would
+# be dead by readout time.
+REPRO_SCRIPT_PID=$$ py - <<PYEOF || fail "fixture registry write"
+import os
+import pathlib
 
-registry = {
-    "schema_version": 1,
-    "agents": [
-        {"name": "w1", "status": "live", "pid": 1, "node": "x-1", "harness": "claude", "cwd": "/tmp", "log_path": "/tmp/w.log"},
-        {"name": "w2", "status": "live", "pid": 1, "node": "x-2", "harness": "claude", "cwd": "/tmp", "log_path": "/tmp/w.log"},
-    ],
-}
+from fno.agents.registry import AgentEntry, write_registry
+
 path = pathlib.Path("$FNO_HOME_DIR") / "agents" / "registry.json"
 path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(registry))
+# The registry writer stamps the current schema itself, so the Rust reader
+# decodes both rows instead of refusing the raw/decoded divergence. The rows
+# carry the script's pid: the liveness probe refuses pid <= 1 by design, and a
+# subprocess pid would already be dead at readout time.
+script_pid = int(os.environ["REPRO_SCRIPT_PID"])
+write_registry(
+    [
+        AgentEntry(name="w1", harness="claude", cwd="/tmp", log_path="/tmp/w.log",
+                   status="live", pid=script_pid, node="x-1"),
+        AgentEntry(name="w2", harness="claude", cwd="/tmp", log_path="/tmp/w.log",
+                   status="live", pid=script_pid, node="x-2"),
+    ],
+    path,
+)
 print("fixture registry written:", path)
 PYEOF
 
