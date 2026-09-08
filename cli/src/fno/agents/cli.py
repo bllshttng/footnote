@@ -5091,4 +5091,4 @@ def harness_probe(
 
 agents_app.add_typer(harness_app, name="harness", hidden=True)
 
-from fno.agents import transcript_reads as _transcript_reads  # noqa: E402,F401
+from fno.agents import distress_reads as _dr, transcript_reads as _tr  # noqa: E402,F401
