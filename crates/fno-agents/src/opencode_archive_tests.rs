@@ -190,11 +190,9 @@ fn an_accepted_write_the_store_did_not_keep_answers_survived() {
 
 #[test]
 fn an_unreachable_serve_is_an_error_not_an_outcome() {
-    // Bind and drop, so the port is closed and nothing answers.
-    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = dead.local_addr().unwrap();
-    drop(dead);
-    let err = archive_session(&format!("http://{addr}"), "tok", "ses_probe").unwrap_err();
+    // Port 1 is privileged and unbound, so the connect is refused at once. A
+    // just-freed ephemeral port would race another test's listener.
+    let err = archive_session("http://127.0.0.1:1", "tok", "ses_probe").unwrap_err();
     assert!(!err.is_empty());
 }
 
