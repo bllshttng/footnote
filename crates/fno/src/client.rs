@@ -1064,21 +1064,13 @@ struct View {
     /// Pending escape bytes in answer-overlay mode (same split-arrow safety as
     /// [`View::sel_esc`]).
     ans_esc: Vec<u8>,
-    /// (x-4433, x-f089) The activity feed PANEL on the right edge, `e` toggle:
-    /// the fold's rows newest first, the hover marker, and the needs-fold
-    /// generation/single-flight discipline. `None` closed.
+    /// (x-4433, x-f089) The activity feed panel on the right edge, `e`
+    /// toggle; the fold's rows newest first. `None` closed. The panel's
+    /// width/drag/hover state and behavior live in `feed_view`.
     feed: Option<feed_view::FeedOverlay>,
-    /// (x-f089) The operator's chosen feed-panel width in columns (stored
-    /// intent, like the sideline's); the rendered width is
-    /// [`View::feed_panel_w`], a transient clamp.
     feed_width: u16,
-    /// (x-f089) First-visible display item for the feed panel's scroll window.
     feed_offset: usize,
-    /// (x-f089) True while the pointer is over the feed panel's border column,
-    /// so the divider carries the same draggable affordance the sideline's
-    /// border wears.
     hover_feed_border: bool,
-    /// (x-f089) A feed-border drag in flight, same shape as the sideline's.
     feed_drag: Option<SidelineDrag>,
     /// (x-feec) The event-derived needs-me leg: the last `fno-agents needs` fold
     /// result while the overlay is open (`None` = live-only, not yet fetched
@@ -5141,8 +5133,6 @@ impl View {
     /// clicking anywhere off the panel still reaches the pane underneath.
     fn chrome_hit(&self, row: u16, col: u16) -> Option<ChromeHit> {
         let panel_w = self.panel_w();
-        // (x-f089) The feed panel owns the rightmost columns; its clicks
-        // resolve through the feed's own deep link, never the pane underneath.
         if let Some(hit) = self.chrome_hit_feed(row, col) {
             return Some(hit);
         }
@@ -5615,7 +5605,6 @@ impl View {
         // of the focus-follow off-switch below).
         self.refresh_hover_affordances(row, col);
 
-        // (x-f089) The panel's hover marker follows the pointer.
         self.hover_feed_marker(row, col);
 
         // (hover affordance) The link probe tracks the exact CELL, so every
@@ -6648,10 +6637,7 @@ impl View {
         }
 
         self.draw_bottom_row(&mut cells, rows, cols);
-        // (x-f089) The feed panel is CHROME, not an overlay: it owns the
-        // rightmost columns for the whole frame and paints after the panes so
-        // a stale pane rect cannot paint under it mid-resize, and before the
-        // overlay pass so a real modal still wins its cells.
+        // (x-f089) Chrome, not an overlay: after panes, before modals.
         self.draw_feed_panel(&mut cells, rows, cols);
         let (overlay_origin, overlay_dims) = self.overlay_viewport();
         if let Some(lines) = &self.digest {
@@ -11080,8 +11066,6 @@ async fn attach_and_run(
         // a swallowed mouse-up is worse than under the old single-snap drag.
         // Give it the same backstop seam/pane drags already have.
         let sideline_drag_deadline = view.sideline_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
-        // (x-f089) The feed-border drag latches continuous resize the same way,
-        // so it gets the same stuck-drag backstop.
         let feed_drag_deadline = view.feed_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
         // (x-d6a8 AC1-FR) The tab-cell and sideline-row drags share the same
         // dead-drag reaper: a mouse-up that never arrives must not latch the
@@ -12382,7 +12366,6 @@ async fn handle_stdin(
                 _ => view.end_sideline_drag(rep.row, rep.col),
             }
         }
-        // (x-f089) The feed-border drag in flight, the sideline block's mirror.
         if feed_view::drag_mouse(view, rep.row, rep.col, rep.kind, sock_w).await? {
             continue;
         }
@@ -12455,8 +12438,6 @@ async fn handle_stdin(
                 });
                 continue;
             }
-            // (x-f089) Likewise the feed panel's divider: same grab, same
-            // width-at-grab memory for Esc, same stuck-drag stamp.
             if view.begin_border_drag(rep.row, rep.col) {
                 continue;
             }
@@ -12523,9 +12504,7 @@ async fn handle_stdin(
                 view.scroll_sideline(matches!(rep.kind, MouseKind::WheelDown));
                 continue;
             }
-            // (x-f089) Wheel over the feed panel scrolls its item window the
-            // same way: the panel owns the rightmost columns, so a pane never
-            // gets the event either.
+            // The feed panel's columns: scroll its window, never a pane.
             let feed_w = view.feed_panel_w();
             if feed_w > 0 && rep.col >= view.term.1 - feed_w {
                 view.scroll_feed(matches!(rep.kind, MouseKind::WheelDown));
@@ -12675,9 +12654,7 @@ async fn handle_stdin(
     if view.yard.is_some() {
         return yard_keys(view, &passthrough, sock_w).await;
     }
-    // (x-f089) The feed panel consumes NO keys: it is chrome, so typing always
-    // reaches the focused pane while it is open. The only key it knows is the
-    // `e` toggle, handled at Event::OpenFeed in the key table.
+    // (x-f089) The feed panel is chrome and consumes no keys.
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
     }
