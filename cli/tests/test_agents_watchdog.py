@@ -732,6 +732,59 @@ def test_verdict_carries_the_rows_harness():
     assert cv.agent == "claude"
 
 
+def test_sweep_reads_each_rows_transcript_under_that_rows_harness(monkeypatch, tmp_path):
+    """A codex row's tick read resolves the codex transcript store, so its
+    facts are real and the row is never a ghost."""
+    from fno.agents import provider_outage as po
+    from fno.agents import registry as registry_mod
+
+    rows = [Row("thread-535c", "codex-thread", "working", None, str(tmp_path), "codex")]
+    monkeypatch.setattr(watchdog, "fleet_rows", lambda timeout=None: (rows, []))
+    monkeypatch.setattr(registry_mod, "load_registry", lambda: [])
+    monkeypatch.setattr(po, "journal_path", lambda: tmp_path / "po.json")
+
+    seen: list[str] = []
+
+    def fake_tail_entries(sid, cwd, *, agent):
+        seen.append(agent)
+        return [{
+            "type": "assistant",
+            "timestamp": "2026-08-16T18:39:00Z",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "mid task"}]},
+        }]
+
+    monkeypatch.setattr(watchdog, "tail_entries", fake_tail_entries)
+    payload, _out = watchdog.run_sweep(
+        now_s=NOW_1840, claim_fn=lambda key: {}, graph_fn=lambda: {},
+    )
+    assert seen == ["codex"]
+    [v] = payload["verdicts"]
+    assert v["verdict"] != GHOST
+
+
+def test_apply_wake_confirms_through_the_verdicts_harness(monkeypatch):
+    """The wake-landed proof re-reads the transcript under the verdict's own
+    harness, so a codex wake confirms at the codex store."""
+    v = Verdict("thread-9", "codex-worker", "blocked", WAKE, "silent", "resume", "codex")
+    reads: list[str] = []
+    calls = {"n": 0}
+
+    def fake_tail_facts(sid, cwd, *, agent, max_records=None):
+        reads.append(agent)
+        calls["n"] += 1
+        epoch = NOW_1840 - 60 if calls["n"] == 1 else NOW_1840
+        return TailFacts(
+            [(epoch, watchdog.WAKE_MESSAGE)], epoch,
+            watchdog.WAKE_MESSAGE, "user", watchdog.WAKE_MESSAGE,
+        )
+
+    monkeypatch.setattr(watchdog, "tail_facts", fake_tail_facts)
+    runner = lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
+    outcome, detail = apply_verdict(v, lanes="all", cwd="/tmp/x", runner=runner)
+    assert outcome == "applied"
+    assert reads == ["codex", "codex"]
+
+
 def test_fleet_rows_skips_a_name_only_nonclaude_row_loudly(monkeypatch, tmp_path):
     """A row carrying only a name cannot resolve a transcript or a claim, so a
     name-based row id is never minted for it: it would silently drop a live
@@ -773,7 +826,7 @@ def test_reroute_delegates_to_the_full_failover(monkeypatch):
 
     # The tail must classify swap-class or the lane refuses before delegating.
     monkeypatch.setattr(
-        watchdog, "tail_facts", lambda sid, cwd: _facts(RATE_LIMIT_TAIL, age_min=125)
+        watchdog, "tail_facts", lambda sid, cwd, **k: _facts(RATE_LIMIT_TAIL, age_min=125)
     )
     v = Verdict("cccc3333-0000", "r1", "blocked", REROUTE, "429", "redispatch")
     outcome, detail = apply_verdict(
@@ -791,7 +844,7 @@ def test_reroute_refuses_when_no_alternate_is_armed(monkeypatch):
     # guard, which has its own test.
     monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
     monkeypatch.setattr(
-        watchdog, "tail_facts", lambda sid, cwd: _facts(RATE_LIMIT_TAIL, age_min=125)
+        watchdog, "tail_facts", lambda sid, cwd, **k: _facts(RATE_LIMIT_TAIL, age_min=125)
     )
 
     def exhausted(candidate, err):
@@ -813,7 +866,7 @@ def test_reroute_receipts_tell_the_truth(monkeypatch):
     # guard, which has its own test.
     monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
     monkeypatch.setattr(
-        watchdog, "tail_facts", lambda sid, cwd: _facts(RATE_LIMIT_TAIL, age_min=125)
+        watchdog, "tail_facts", lambda sid, cwd, **k: _facts(RATE_LIMIT_TAIL, age_min=125)
     )
     v = Verdict("cccc3333-0000", "r1", "blocked", REROUTE, "429", "redispatch")
 

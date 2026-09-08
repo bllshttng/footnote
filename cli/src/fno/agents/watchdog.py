@@ -2121,7 +2121,9 @@ def run_sweep(
     if provider_outage_fn is None and rows_provider is None:
         for row in rows:
             try:
-                entries_by_row[row.row_id] = tail_entries(row.row_id, row.cwd)
+                entries_by_row[row.row_id] = tail_entries(
+                    row.row_id, row.cwd, agent=row.agent
+                )
             except Exception:  # noqa: BLE001 - a failed read is never a verdict
                 entries_by_row[row.row_id] = None
         provider_outages = measure_provider_outages(
@@ -2152,11 +2154,14 @@ def run_sweep(
             "provider_outages": provider_outages,
         }, rows
     cwd_by_sid = {r.row_id: r.cwd for r in rows}
+    agent_by_sid = {r.row_id: r.agent for r in rows}
     if transcript_fn is None:
         def transcript_fn(sid: str) -> Optional[TailFacts]:
             if sid in entries_by_row:
                 return _facts_from_entries(entries_by_row[sid], _TAIL_RECORDS)
-            return tail_facts(sid, cwd_by_sid.get(sid, ""))
+            return tail_facts(
+                sid, cwd_by_sid.get(sid, ""), agent=agent_by_sid.get(sid, "claude")
+            )
     claim_fn = claim_fn or _claim_view
     if graph_fn is None:
         index = _graph_index()
@@ -2772,18 +2777,19 @@ def apply_verdict(
     *,
     lanes: str,
     cwd: str = "",
-    agent: str = "claude",
+    agent: Optional[str] = None,
     runner=subprocess.run,
     failover_fn: Optional[Callable[[Any, Any], str]] = None,
     rotation: Optional[RotationBudget] = None,
 ) -> tuple[str, str]:
     """Execute one verdict inside ``lanes`` ("wake" | "all"); only ``SKIPPED`` is
-    silent. wake/silence resume with ``cwd``/``agent`` set; reroute uses recovery._redispatch."""
+    silent. wake/silence resume with ``cwd`` set; the transcript reads run under
+    the row's own harness (``agent or v.agent``); reroute uses recovery._redispatch."""
     if v.verdict not in LANES.get(lanes, frozenset()):
         return SKIPPED, f"{v.verdict} outside {lanes} lane"
     try:
         if v.verdict in (WAKE, SILENCE):
-            return _apply_wake(v, cwd=cwd, runner=runner, agent=agent)
+            return _apply_wake(v, cwd=cwd, runner=runner, agent=agent or v.agent)
         if v.verdict == REROUTE:
             return _apply_reroute(
                 v, cwd=cwd, failover_fn=failover_fn, rotation=rotation
@@ -2793,7 +2799,7 @@ def apply_verdict(
     return SKIPPED, f"{v.verdict} has no auto-action"
 
 
-def _apply_wake(v: Verdict, *, cwd: str, runner: Callable, agent: str = "claude") -> tuple[str, str]:
+def _apply_wake(v: Verdict, *, cwd: str, runner: Callable, agent: str) -> tuple[str, str]:
     before = tail_facts(v.row_id, cwd, agent=agent)
     before_epoch = before.last_event_epoch if before is not None else None
     proc = runner(
@@ -2847,7 +2853,7 @@ def _apply_reroute(
             f"it respawns is read from a manifest other sessions share. "
             f"Rotate the provider and respawn this row by hand",
         )
-    facts = tail_facts(v.row_id, cwd)
+    facts = tail_facts(v.row_id, cwd, agent=v.agent)
     err = classify_session_error(facts.tail_text if facts is not None else "")
     if err is None or not getattr(err, "triggers_swap", False):
         return "refused", f"reroute refused: tail is not swap-class ({v.basis})"
