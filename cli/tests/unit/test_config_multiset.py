@@ -208,3 +208,36 @@ def test_cli_bare_token_without_eq_errors(tmp_path, monkeypatch):
     # One token, no '=' and not the 2-token legacy form -> usage error.
     res = CliRunner().invoke(app, ["set", "config.agents.a2a.auto"])
     assert res.exit_code != 0
+
+
+def test_dict_block_leaf_writes_the_map_entry(tmp_path):
+    """One dict[str, model] hop is writable: the key segment names the map
+    entry, the leaf names a field of the map's value model."""
+    set_config_values(
+        [
+            ("config.agents.defaults.harness.codex.permission_mode", "yolo"),
+            ("config.agents.profiles.target.harness.codex.effort", "xhigh"),
+        ],
+        scope="project",
+        repo_root=tmp_path,
+    )
+    data = _read(tmp_path)
+    assert data["agents"]["defaults"]["harness"]["codex"]["permission_mode"] == "yolo"
+    assert data["agents"]["profiles"]["target"]["harness"]["codex"]["effort"] == "xhigh"
+
+
+def test_dict_block_whole_entry_and_bad_inner_leaf_refuse(tmp_path):
+    """The map-key leaf itself (a whole sub-block) is not a settable scalar,
+    and an unknown field inside the value model still refuses."""
+    with pytest.raises(ConfigSetError):
+        set_config_values(
+            [("config.agents.defaults.harness.codex", "yolo")],
+            scope="project",
+            repo_root=tmp_path,
+        )
+    with pytest.raises(ConfigSetError):
+        set_config_values(
+            [("config.agents.defaults.harness.codex.banana", "1")],
+            scope="project",
+            repo_root=tmp_path,
+        )

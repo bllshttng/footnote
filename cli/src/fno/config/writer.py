@@ -127,14 +127,36 @@ def _resolve_parent_block(
         # error instead of an IndexError on parts[-1].
         return None
     cls: type[BaseModel] = SettingsModel
+    # One dict[str, model] hop is writable (`...harness.codex.permission_mode`):
+    # the segment after a map-typed block is a KEY into that map, and the map's
+    # value model names every field after it. A second hop (model in model in
+    # map) is not supported and reads as unknown.
+    map_model: Optional[type[BaseModel]] = None
     for part in parts[:-1]:
+        if map_model is not None:
+            cls = map_model
+            map_model = None
+            continue
         fields = getattr(cls, "model_fields", {})
         if part not in fields:
             return None
-        model = _as_model(fields[part].annotation)
-        if model is None:
-            return None
-        cls = model
+        ann = fields[part].annotation
+        model = _as_model(ann)
+        if model is not None:
+            cls = model
+            continue
+        base = _unwrap_optional(ann)
+        if get_origin(base) is dict:
+            args = get_args(base)
+            inner = _as_model(args[1]) if len(args) > 1 else None
+            if inner is None:
+                return None
+            map_model = inner
+            continue
+        return None
+    if map_model is not None:
+        # The leaf IS a map key (a whole sub-block write), not a field.
+        return None
     leaf = parts[-1]
     fields = getattr(cls, "model_fields", {})
     if leaf not in fields:
