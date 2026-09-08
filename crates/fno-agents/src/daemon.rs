@@ -876,7 +876,7 @@ const CASCADE_TIMEOUT: Duration = Duration::from_secs(15);
 /// teardown arm). opencode/gemini: registry-only by contract - nothing to
 /// cascade.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CascadeOutcome {
+pub(crate) enum CascadeOutcome {
     Removed,
     AlreadyAbsent(String),
     Unverified(String),
@@ -926,7 +926,7 @@ fn claude_row_provably_absent(
         .is_some_and(|snap| snap.is_known() && row_id.is_some_and(|id| snap.find(id).is_none()))
 }
 
-fn cascade_harness_session_result_with(
+pub(crate) fn cascade_harness_session_result_with(
     e: &state::RegistryEntry,
     claude_agents: Option<&crate::claude_roster::ClaudeAgentsSnapshot>,
     read_claude_agents: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
@@ -1008,7 +1008,7 @@ fn cascade_harness_session_result_with(
     }
 }
 
-fn run_claude_rm(short_id: &str) -> Result<(), String> {
+pub(crate) fn run_claude_rm(short_id: &str) -> Result<(), String> {
     let mut child = std::process::Command::new("claude")
         .args(["rm", short_id])
         .stdout(std::process::Stdio::piped())

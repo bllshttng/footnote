@@ -71,6 +71,7 @@ fn retire_sweep(
         &move |_| graph.clone(),
         transcripts,
         &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (None, None),
         &|_| {},
     )
@@ -96,6 +97,7 @@ fn staged_sweep(
         &move |_| graph.clone(),
         transcripts,
         &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|e| trees(&e.name),
         &|e| pruned.borrow_mut().push(e.name.clone()),
     );
@@ -273,6 +275,7 @@ fn ac4_err_graph_unreadable_and_stop_refusal_keep_every_row() {
         &|_| None,
         &|_| None,
         &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
         &|_| {},
     );
@@ -298,6 +301,7 @@ fn ac4_err_graph_unreadable_and_stop_refusal_keep_every_row() {
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
         &|e| e.name != "row-a",
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
         &|_| {},
     );
@@ -341,6 +345,7 @@ fn an_open_do_row_on_a_done_node_holds_the_retirement() {
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
         &|_| {},
     );
@@ -384,6 +389,7 @@ fn a_done_node_with_a_closed_do_row_retires_by_name() {
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
         &|_| {},
     );
@@ -450,6 +456,7 @@ fn operator_and_crowned_rows_never_retire_and_tree_buckets_only_keep_trees() {
             _ => Some(vec![q3.clone()]),
         },
         &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
         // row-t's tree: dirty. The row retires; the tree stays and is named.
         &|e| {
             if e.name == "row-t" {
@@ -540,6 +547,7 @@ fn reap_receipt_built_from_the_row_when_the_ledger_has_no_entry() {
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
         &|_| {},
     );
@@ -609,6 +617,7 @@ fn a_row_whose_receipt_cannot_be_built_is_never_reaped() {
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
         &|_| {},
     );
@@ -764,6 +773,104 @@ fn an_already_stripped_receipt_is_not_rewritten_on_later_sweeps() {
     );
 }
 
+/// x-70e1 AC6: the active-surface removal is a REAL effect of the sweep. A
+/// typed outcome that does not confirm (Failed) HOLDS the row for retry, and
+/// a confirming outcome is recorded on the staged receipt as an
+/// `active-surface` effect - a partial retirement is never readable as a
+/// full one.
+#[test]
+fn a_failed_surface_removal_holds_the_row_and_a_confirmation_is_recorded() {
+    use crate::daemon::CascadeOutcome;
+
+    let home = tmp_home("gc-surface-hold");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let dir = home.root().join("store");
+    std::fs::create_dir_all(&dir).unwrap();
+    let quiet = quiet_transcript(&dir, "q.jsonl", 2 * 3600);
+    let graph = graph_read(&[("s-hold", "N1", "done")], &[]);
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "holdw".into();
+        e.short_id = "holdw".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-hold".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+
+    // First pass: the surface removal FAILS. The row holds; nothing drops.
+    let refusing =
+        |_e: &state::RegistryEntry| CascadeOutcome::Failed("claude rm timed out".to_string());
+    let q1 = quiet.clone();
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![q1.clone()]),
+        &|_| true,
+        &refusing,
+        &|_| (Some(true), Some(true)),
+        &|_| {},
+    );
+    assert!(summary.retired.is_empty(), "{:?}", summary.retired);
+    assert!(
+        summary
+            .stop_refused
+            .iter()
+            .any(|(id, reason)| id == "holdw" && reason.contains("active-surface")),
+        "{:?}",
+        summary.stop_refused
+    );
+    assert!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.name == "holdw"),
+        "a refused surface removal holds the row"
+    );
+
+    // Second pass: the removal confirms. The row retires and the receipt on
+    // disk carries the active-surface effect record. The staged values are
+    // re-cloned for the second closure set.
+    let confirming = |e: &state::RegistryEntry| {
+        let _ = e;
+        CascadeOutcome::Removed
+    };
+    let graph = graph_read(&[("s-hold", "N1", "done")], &[]);
+    let quiet2 = quiet.clone();
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &move |_| graph.clone(),
+        &move |_| Some(vec![quiet2.clone()]),
+        &|_| true,
+        &confirming,
+        &|_| (Some(true), Some(true)),
+        &|_| {},
+    );
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    let receipts: Vec<String> = std::fs::read_dir(home.root().join("reap-receipts"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().to_string_lossy().to_string())
+        .collect();
+    assert!(!receipts.is_empty(), "a receipt was staged");
+    let body = std::fs::read_to_string(&receipts[0]).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let effects = value["effects"].as_array().expect("effects recorded");
+    assert_eq!(effects[0]["op"], "active-surface");
+    assert_eq!(effects[0]["outcome"], "confirmed-removed");
+}
+
 #[test]
 fn a_receipt_whose_reaped_at_will_not_parse_is_kept_and_named() {
     let home = tmp_home("gc-receipt-baddate");
@@ -905,6 +1012,7 @@ fn a_row_reaps_only_after_its_receipt_is_durable() {
         &move |_| graph.clone(),
         &move |_| Some(vec![quiet.clone()]),
         &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
         &|_| (Some(true), Some(true)),
         &|_| {},
     );
@@ -2415,6 +2523,7 @@ fn settle_then_run(
             &|h| gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned)),
             transcripts,
             &|_| true,
+            &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|_| (None, None),
             &|_| {},
         );
@@ -2434,6 +2543,7 @@ fn settle_then_run(
             &gc_sweep::read_graph_entries,
             transcripts,
             &|_| true,
+            &|_| crate::daemon::CascadeOutcome::NotApplicable,
             &|_| (None, None),
             &|_| {},
         );
