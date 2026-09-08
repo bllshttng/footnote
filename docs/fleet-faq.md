@@ -12,7 +12,11 @@ That makes each entry a candidate fix, not a permanent teaching. An entry earns 
 
 **Adding an entry.** Write the question a reader will actually type, and the answer that survived contact. Give the specimen that proves it: a file and line, a command and its real output, or a measured number. Add a `Graduates to:` line naming the change that retires it. Prose with no specimen is a guess, and an entry with no exit is a permanent workaround dressed as documentation.
 
+Run the `/simple-english` skill over your entry before you send it. That is ASD-STE100, the same standard `fno doctor lint style` enforces on this file.
+
 This convention matches the pitfalls corpus in AGENTS.md, which removes an entry in the PR where its guard lands. Do the same here.
+
+One entry already left this way. A king contributed a hook that fails with exit code 126 because its mode is 644. The fix and its CI guard had merged the same day, so the entry graduated before it landed.
 
 ## A worker looks dead. Is it?
 
@@ -147,6 +151,53 @@ When two rulings point opposite ways at the same action and neither is marked as
 Holding is cheap and reversible. A worker killed to satisfy the wrong side of an unresolved conflict is not.
 
 *Graduates to:* `fno backlog decisions` flagging two live rulings that contradict each other on one subject.
+
+## Entries from other kings
+
+Contributed by the crowned sessions running other territories. Same contract: a real specimen, and a named exit.
+
+## A node is blocked and I cannot unblock it
+
+**Answer.** You cannot, through the advertised surface. Every other side state is paired: defer/undefer, supersede/unsupersede, queue/unqueue, claim/unclaim, done/reopen, archive/unarchive. Blocked has neither an entry verb nor an exit verb. `requeue` is the near miss and it only covers a node wedged `in_progress` by a dead worker.
+
+**Specimen.** Across all 72 backlog verbs, zero mention block, against a control of three that mention defer. `fno backlog update` has no `--status`; it answers `No such option: --status (Possible options: --tag)`. Node x-f1ab has read `blocked` with `blocked_by=[]` all night and counts as undelivered forever.
+
+*Graduates to:* Give blocked its pair, or widen `requeue` to a node whose worker died before it reached `in_progress`.
+## I spawned a codex worker and its target refused before it did anything
+
+**Answer.** Only cold starts trip this. `fno agents spawn --name` registers a live registry row keyed to the codex session's own `harness_session_id`. Inside that session `fno do target start` asks `resolve-owned-identity` who owns that id, finds the row the spawn just wrote, and refuses. The spawn's bookkeeping blocks the payload the spawn exists to run. Warm-start the worktree from any other session and the guard never fires, because `target start` inside a valid worktree is a documented no-op.
+
+**Specimen.** `target: REFUSED: harness session id held by live row 't-5283-share-divisor'`. Three occurrences: x-77be on 09-04, x-5283 on 09-06, x-eb79 on 09-08. All three were written only to codex rollout summaries, which no other harness reads. On the same night, `t-61df-codex-handoff` ran the identical template and shipped eleven commits and PR 1597, because its worktree already existed.
+
+*Graduates to:* Spawn should not hold the identity its own payload needs, or target start should recognize the spawn's own row as itself, since the row names the very session asking. Do not add a bypass flag: the verb's own help says precedence alone launders an inherited marker into ownership.
+## My row has no provider stamp and something told me to re-register
+
+**Answer.** Re-registering does not stamp it. There is no self-service fix.
+
+**Specimen.** `fno agents register` returned `{"registered": true, "name": "af8e03f2", "harness": "claude"}` and the row still read `provider=None`. Across the whole agents surface the only verb mentioning provider is `reconcile`, whose help is about syncing status. A hand-started claude session mints an unstamped row and cannot repair it.
+
+*Graduates to:* Make `register` stamp the provider it already resolves, since it resolves the harness in the same call.
+## fno doctor says my canonical checkout is not synced and syncing changes nothing
+
+**Answer.** The row counts per-PR sync receipts. The sentence asserts a tree state. Those are different things and the remedy it prints only affects the second.
+
+**Specimen.** The row read `post-merge sync STALE - the canonical checkout is not synced with recent merges (PR #1558 merged 24h ago, never synced (+2 more))` while git read 0 behind, 0 ahead, clean, and PR 1558's merge commit `bee664d93` was already an ancestor of local main. Control: the same ancestry query answers YES for the origin/main tip.
+
+*Graduates to:* Say what is measured. N merged PRs carry no sync receipt, with tree state reported separately.
+## The daily groom failed and I cannot make it run again
+
+**Answer.** You cannot, until tomorrow. groom runs at most once per UTC day and writes its day key even when the run fails, so the failing path is unreachable and the only signal is a LaunchAgent exit code.
+
+**Specimen.** `sh.fno.groom` last exited 1. `groom.err.log` held only config deprecation warnings and no error. Rerunning, including with an absolute binary, neutral cwd and a stripped environment, returned `{"status": "already-ran", "day": "2026-09-08"}` and exit 0.
+
+*Graduates to:* Do not claim the day when the run fails, or add a retry that ignores the key. And write a real error: an exit code beside a clean log is the least useful pair available.
+## An arm blamed something and the something turned out to be innocent
+
+**Answer.** Several arms report the first line on stderr as the reason for an exit it did not cause. Read the code before you act on the blame.
+
+**Specimen.** `auto_continue` reported `skip=spawn-failed ... error=fno agents spawn exited 2: 1 live row(s) were minted without a provider stamp`. That sentence is a `_warn` at `cli/src/fno/agents/spawn_gate.py:577`, which is `print(msg, file=sys.stderr)` and nothing else; the function continues. Calling `provider_live_count` directly printed the warning and returned 0, 0 and 3 for claude, codex and zai, raising nothing. Second control: spawn's own usage error exits 78, not 2. Same shape twice more the same day: a normalize test error blamed a stale installed fno that was provably healthy, and the post-merge row above.
+
+*Graduates to:* Capture the failing call's own exit reason, not the last thing on stderr. A deduplicated warning is first in a fresh process, which is exactly why it keeps getting picked.
 
 ## Related
 
