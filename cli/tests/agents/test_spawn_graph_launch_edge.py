@@ -116,3 +116,29 @@ def test_a_graph_failure_never_fails_the_spawn(monkeypatch, parent, capsys):
     _stamp_launch_edge("x-1234")
 
     assert "launch edge not recorded on x-1234" in capsys.readouterr().err
+
+
+def test_a_node_the_graph_does_not_hold_says_so(monkeypatch, parent, capsys):
+    """A write that matched nothing must SAY so.
+
+    resolve_provenance keeps a well-formed id it could not resolve, so a graph
+    missing the node commits an unchanged snapshot and exits 0. Silence there is
+    the same absence this stamp exists to end.
+    """
+    import fno.graph.store as store
+
+    monkeypatch.setattr(store, "locked_mutate_graph", lambda path, mutator: mutator([]))
+
+    _stamp_launch_edge("x-9999")
+
+    assert "not recorded on x-9999 (node not in graph)" in capsys.readouterr().err
+
+
+def test_a_kept_existing_edge_says_whose_it_is(graph, parent, capsys):
+    """AC4-EDGE, read half: the operator hears which launch was kept."""
+    entries, _calls = graph
+    entries[0]["spawned_by_session"] = "the-first-launcher"
+
+    _stamp_launch_edge("x-1234")
+
+    assert "already names the-first-launcher; kept" in capsys.readouterr().err
