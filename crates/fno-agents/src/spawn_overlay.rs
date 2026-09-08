@@ -117,9 +117,10 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
             );
             Ok(json!({"vendor": vendor}))
         }
+        Some("link-meta") => resolve_link_meta(&payload),
         Some("fallback") => resolve_fallback(&payload),
         other => Err(format!(
-            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|fallback|lane-vendor"
+            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|fallback"
         )),
     }
 }
@@ -209,6 +210,15 @@ fn resolve_overlay(payload: &Value) -> Result<Value, String> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let harness_list: Vec<String> = payload
+        .get("harnesses")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // The overlay table guards, scoped to the rungs THIS spawn reads: an
     // unknown harness name or a ranking field refuses the whole composition,
@@ -253,13 +263,32 @@ fn resolve_overlay(payload: &Value) -> Result<Value, String> {
     // The three postures, resolved through the harness rungs. The rung is
     // BARE (no field suffix): the spawn seam appends the field name when it
     // records the injection, and the doctor reads `config.{rung}.{name}`.
-    let mut effective = Map::new();
-    for name in ["effort", "substrate", "permission_mode"] {
-        let entry = effective_field(&defaults, profile.as_ref(), verb, name, harness);
-        if let Some((v, rung)) = entry {
-            effective.insert(name.to_string(), json!({"value": v, "rung": rung}));
+    let effective_for = |h: Option<&str>| {
+        let mut effective = Map::new();
+        for name in ["effort", "substrate", "permission_mode"] {
+            let entry = effective_field(&defaults, profile.as_ref(), verb, name, h);
+            if let Some((v, rung)) = entry {
+                effective.insert(name.to_string(), json!({"value": v, "rung": rung}));
+            }
         }
+        effective
+    };
+
+    // Doctor mode: a `harnesses` list answers the whole sweep in one call,
+    // with the guards still refusing the config once.
+    if !harness_list.is_empty() {
+        let mut by_harness = Map::new();
+        for h in &harness_list {
+            by_harness.insert(h.clone(), json!(effective_for(Some(h.as_str()))));
+        }
+        return Ok(json!({
+            "refusal": Value::Null,
+            "effective_by_harness": by_harness,
+            "bundle": Value::Null,
+        }));
     }
+
+    let mut effective = effective_for(harness);
 
     // ONE bundle: lane args > profile harness overlay args > defaults harness
     // overlay args. Never concatenated; the boundary the caller's argv already
@@ -486,6 +515,87 @@ fn resolve_model_vendor(payload: &Value) -> Result<Value, String> {
     lane is {lane}; the model rides that lane's CLI as-is. Name the vendor with -P {implied} to route it."
         ),
     }))
+}
+
+/// One stop in the fallback walk: each link's stable destination id and its
+/// spawn flags. Two links differing only in effort are the SAME destination
+/// for walk memory; `account` participates because it names a different bill
+/// and meter. Flags keep the existing axis spelling, and substrate resolves
+/// from the harness's own spawn claim (claude rides bg, everything else pane)
+/// rather than being handed one its harness rejects.
+fn resolve_link_meta(payload: &Value) -> Result<Value, String> {
+    let links = payload
+        .get("links")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut ids = Vec::new();
+    let mut flag_rows = Vec::new();
+    for link in &links {
+        let field = |k: &str| -> String {
+            link.get(k)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string()
+        };
+        let (harness, model, route, account) = (
+            field("provider"),
+            field("model"),
+            field("route"),
+            field("account"),
+        );
+        let base = format!(
+            "{}/{}",
+            if harness.is_empty() {
+                "?"
+            } else {
+                harness.as_str()
+            },
+            if !model.is_empty() {
+                model.as_str()
+            } else if !route.is_empty() {
+                route.as_str()
+            } else {
+                "default"
+            }
+        );
+        ids.push(Value::String(if account.is_empty() {
+            base
+        } else {
+            format!("{base}@{account}")
+        }));
+        let mut row: Vec<Value> = Vec::new();
+        if !harness.is_empty() {
+            row.push(json!("-H"));
+            row.push(json!(harness));
+        }
+        for (flag, key) in [
+            ("-m", "model"),
+            ("--effort", "effort"),
+            ("--permission-mode", "permission_mode"),
+            ("--route", "route"),
+            ("--account", "account"),
+        ] {
+            let v = field(key);
+            if !v.is_empty() {
+                row.push(json!(flag));
+                row.push(json!(v));
+            }
+        }
+        let mut substrate = field("substrate");
+        if substrate.is_empty() {
+            substrate = if harness == "claude" {
+                "bg".into()
+            } else {
+                "pane".into()
+            };
+        }
+        row.push(json!("--substrate"));
+        row.push(json!(substrate));
+        flag_rows.push(Value::Array(row));
+    }
+    Ok(json!({"ids": ids, "flags": flag_rows}))
 }
 
 fn resolve_fallback(payload: &Value) -> Result<Value, String> {

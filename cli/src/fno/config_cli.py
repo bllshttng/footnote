@@ -898,6 +898,60 @@ def _report_harness_overlays() -> None:
     rows.append(("", None))
     seen: set = set()
     for verb, prof in rows:
+        try:
+            answer = spawn_overlay_call(
+                {
+                    "kind": "overlay",
+                    "verb": verb,
+                    "defaults": _overlay_payload(defaults),
+                    "profile": _overlay_payload(prof) if prof is not None else None,
+                    "harnesses": list(READABLE_PROVIDERS),
+                }
+            )
+        except SpawnOverlayUnavailable as exc:
+            typer.echo(f"config doctor: harness-overlay readout unavailable: {exc}")
+            return
+        if answer.get("refusal"):
+            # The verb's own guards refused the config (unknown harness
+            # key, a ranking field in an overlay); that IS the finding.
+            typer.echo(answer["refusal"])
+            return
+        for harness, effective in (answer.get("effective_by_harness") or {}).items():
+            for name, mapper in (
+                ("permission_mode", permission_pane_tokens),
+                ("effort", effort_tokens),
+            ):
+                entry = effective.get(name)
+                if not entry:
+                    continue
+                value, rung = entry["value"], entry["rung"]
+                # One line per unique (rung, field, harness, value): every
+                # verb resolves the same defaults scalar beneath it, and the
+                # defect is one, not four.
+                key = (rung, name, harness, value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if harness == "claude" and name == "permission_mode":
+                    # claude is exact passthrough, so the mapper alone cannot
+                    # catch a codex spelling: check the value against the
+                    # vocabulary claude's --help lists.
+                    if value in CLAUDE_PERMISSION_MODES:
+                        continue
+                    typer.echo(
+                        f"config.{rung}.permission_mode = {value!r} is not a "
+                        "claude permission mode; set claude's answer under "
+                        f"[{rung}.harness.claude]"
+                    )
+                    continue
+                try:
+                    mapper(harness, value)
+                except Exception as exc:
+                    typer.echo(
+                        f"config.{rung}.{name} = {value!r} cannot map on "
+                        f"{harness}: {exc}; set {harness}'s answer under "
+                        f"[{rung}.harness.{harness}]"
+                    )
         for harness in READABLE_PROVIDERS:
             try:
                 answer = spawn_overlay_call(

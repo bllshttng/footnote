@@ -870,14 +870,6 @@ def _overlay_payload(obj: object) -> dict:
     return out
 
 
-#: Ranking fields are lane business: an overlay table re-answers a flag
-#: spelling for one harness, it never re-routes the spawn.
-_LANE_FIELD_NAMES = ("provider", "model", "route", "account")
-
-#: The fields an overlay block may legally carry.
-_OVERLAY_FIELDS = frozenset({"permission_mode", "effort", "substrate", "args"})
-
-
 def effective_field(
     defaults: object,
     profile: Optional[object],
@@ -1890,24 +1882,31 @@ def validate_fallback(table: object) -> dict:
 
 
 def link_id(link) -> str:
-    """A stable ``harness/model`` name for one chain link.
+    """A stable ``harness/model`` name for one chain link, via the verb. The
+    account participates: it names a different bill and a different meter."""
+    return link_meta([link])["ids"][0]
 
-    Used as the walk's memory key, so a node never re-dispatches onto a link it
-    has already spent. Two links that differ only in effort are the SAME
-    destination for that purpose: retrying the same vendor at a different
-    reasoning setting does not answer a cap.
 
-    ``account`` DOES participate, because it names a different bill and a
-    different meter. Two links on one harness and model that differ only by
-    account are the operator's second credential, and folding them together
-    would spend the first and then skip the second as already tried.
-    """
-    harness = (getattr(link, "provider", "") or "").strip() or "?"
-    model = (getattr(link, "model", "") or "").strip()
-    route = (getattr(link, "route", "") or "").strip()
-    account = (getattr(link, "account", "") or "").strip()
-    base = f"{harness}/{model or route or 'default'}"
-    return f"{base}@{account}" if account else base
+def link_meta(links: list) -> dict:
+    """Chain-link ids and spawn flags, one verb call for the batch."""
+    from fno.agents.spawn_overlay_client import spawn_overlay_call
+
+    return spawn_overlay_call(
+        {
+            "kind": "link-meta",
+            "links": [
+                {
+                    k: v
+                    for k in (
+                        "provider", "model", "route", "account",
+                        "effort", "permission_mode", "substrate",
+                    )
+                    if (v := str(getattr(link, k, "") or "").strip())
+                }
+                for link in links
+            ],
+        }
+    )
 
 
 def _harness_records(harness: str, repo_root=None):
@@ -2014,31 +2013,7 @@ def resolve_fallback_chain(
 
 
 def link_to_spawn_flags(link) -> List[str]:
-    """One chain link as spawn flags, in the codebase's existing axis spelling.
-
-    No new axis vocabulary: harness is ``-H``, the vendor/model route is
-    ``--route``, and model, effort, substrate, permission-mode and account keep
-    their own flags. ``--substrate bg`` is the deprecated thread alias; the
-    dispatch resolver seats it from the harness's spawn claim (``native``),
-    so a codex link that left substrate unset resolves to a pane rather than
-    being handed a substrate its harness rejects.
-    """
-    harness = (getattr(link, "provider", "") or "").strip()
-    out: List[str] = []
-    if harness:
-        out += ["-H", harness]
-    for flag, field in (
-        ("-m", "model"),
-        ("--effort", "effort"),
-        ("--permission-mode", "permission_mode"),
-        ("--route", "route"),
-        ("--account", "account"),
-    ):
-        val = (getattr(link, field, "") or "").strip()
-        if val:
-            out += [flag, val]
-    substrate = (getattr(link, "substrate", "") or "").strip()
-    if not substrate:
-        substrate = "bg" if harness == "claude" else "pane"
-    out += ["--substrate", substrate]
-    return out
+    """One chain link as spawn flags, in the existing axis spelling, via the
+    verb. Substrate resolves from the harness's spawn claim (claude rides bg,
+    everything else pane)."""
+    return link_meta([link])["flags"][0]
