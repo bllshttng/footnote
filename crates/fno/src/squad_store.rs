@@ -820,12 +820,27 @@ pub struct MemberEvidence {
     dead: std::collections::HashSet<String>,
     live_pairs: std::collections::HashSet<(String, String)>,
     dead_pairs: std::collections::HashSet<(String, String)>,
-    /// (x-6b0b) Worker names a journal row positively records as never bound.
-    /// Kept separate from `dead` because the name is the identity of LAST
-    /// resort: it may only kill a member with no harness and no session id -
-    /// the one case where the name is all the member has. A member carrying
-    /// either stronger key keeps using it (AC7-EDGE).
+    /// (x-6b0b, x-688b) Worker names positively recorded dead: a never-bound
+    /// journal marker, a DEAD registry row, or a spawned worker whose row a
+    /// successful registry read no longer carries. Kept separate from `dead`
+    /// because the name is the identity of LAST resort: in `verdict` it only
+    /// reaches the keys branch (a member with no session id - the one case
+    /// where the name is all the member has). A session-keyed member keeps
+    /// its exact pair (AC7-EDGE).
     dead_names: std::collections::HashSet<String>,
+    /// (x-688b) Every registry row name one fold observed. With
+    /// `complete_registry_names`, a spawned name ABSENT here is dead evidence
+    /// (its row was reaped), not missing evidence.
+    registry_row_names: std::collections::HashSet<String>,
+    /// (x-688b) Worker names the spawn journal records, held or not.
+    spawned_names: std::collections::HashSet<String>,
+    /// (x-688b) Names with a still-held spawn receipt: the worker is
+    /// resumable, so registry absence must stay `Unknown`.
+    held_names: std::collections::HashSet<String>,
+    /// (x-688b) The registry read itself succeeded (and the roster is
+    /// readable-or-absent). Only then may absence prove death; a failed read
+    /// keeps every member `Unknown`.
+    complete_registry_names: bool,
     complete_attach_set: bool,
 }
 
@@ -840,6 +855,10 @@ impl MemberEvidence {
             live_pairs: std::collections::HashSet::new(),
             dead_pairs: std::collections::HashSet::new(),
             dead_names: std::collections::HashSet::new(),
+            registry_row_names: std::collections::HashSet::new(),
+            spawned_names: std::collections::HashSet::new(),
+            held_names: std::collections::HashSet::new(),
+            complete_registry_names: false,
             complete_attach_set: false,
         }
     }
@@ -854,6 +873,10 @@ impl MemberEvidence {
             live_pairs: std::collections::HashSet::new(),
             dead_pairs: std::collections::HashSet::new(),
             dead_names: std::collections::HashSet::new(),
+            registry_row_names: std::collections::HashSet::new(),
+            spawned_names: std::collections::HashSet::new(),
+            held_names: std::collections::HashSet::new(),
+            complete_registry_names: false,
             complete_attach_set: true,
         }
     }
@@ -883,6 +906,105 @@ impl MemberEvidence {
 
     pub fn add_dead_pair(&mut self, harness: impl Into<String>, session_id: impl Into<String>) {
         self.dead_pairs.insert((harness.into(), session_id.into()));
+    }
+
+    /// (x-688b) True when `name` carries positive dead evidence (dead row,
+    /// never-bound marker, or reaped spawned worker - reuse-guarded).
+    pub fn is_dead_name(&self, name: &str) -> bool {
+        self.dead_names.contains(name)
+    }
+
+    /// (x-688b) THE shared registry-row fold. Both evidence builders (the CLI
+    /// prune's file read and the daemon's cached rows) call this one function,
+    /// so the two can never drift on what a row proves. Beyond today's
+    /// pair/identity folding it records every row's name and derives two new
+    /// name-keyed death signals:
+    ///
+    /// - a DEAD row (exited/permanent-dead) proves its NAME dead, unless the
+    ///   same read holds an ALIVE row of that name or a still-held spawn
+    ///   receipt carries it (name-reuse guard);
+    /// - a journal-spawned name that a COMPLETE registry read does not carry
+    ///   is a reaped row, and reaping the row destroyed the old evidence with
+    ///   it - so the absence itself is the death evidence. A held receipt
+    ///   keeps the name `Unknown` (the worker is resumable). An INCOMPLETE
+    ///   read (failed, or roster unreadable) proves nothing: absence stays
+    ///   missing evidence and members stay fail-safe `Unknown`.
+    ///
+    /// `spawned_names`/`held_names` come from one [`crate::spawn_journal`]
+    /// walk. Fold roster live-evidence BEFORE calling, so a roster-live name
+    /// can never land in `dead_names`.
+    pub fn fold_registry_rows(
+        &mut self,
+        rows: &[crate::agents_view::RegistryAgent],
+        spawned_names: std::collections::HashSet<String>,
+        held_names: std::collections::HashSet<String>,
+        complete_registry_names: bool,
+    ) {
+        let mut alive_names = std::collections::HashSet::new();
+        let mut dead_row_names = std::collections::HashSet::new();
+        for row in rows {
+            self.registry_row_names.insert(row.name.clone());
+            // The pair session id is the union of both builders' prior
+            // resolutions: the row's own harness id, claude's uuid, and the
+            // fno session id - so unifying the fold widens neither side's
+            // pair coverage by less than it merges.
+            let pair_session = row
+                .harness_session_id
+                .as_deref()
+                .or(row.claude_session_uuid.as_deref())
+                .or(row.session_id.as_deref());
+            match row.liveness {
+                crate::agents_view::Liveness::Alive => {
+                    alive_names.insert(row.name.clone());
+                }
+                crate::agents_view::Liveness::Dead => {
+                    dead_row_names.insert(row.name.clone());
+                }
+                crate::agents_view::Liveness::Unmeasured => continue,
+            }
+            if let (Some(harness), Some(session_id)) = (row.harness.as_deref(), pair_session) {
+                match row.liveness {
+                    crate::agents_view::Liveness::Alive => self.add_live_pair(harness, session_id),
+                    crate::agents_view::Liveness::Dead => self.add_dead_pair(harness, session_id),
+                    crate::agents_view::Liveness::Unmeasured => {}
+                }
+                continue;
+            }
+            let mut keys = vec![row.name.as_str()];
+            if let Some(id) = row.attach_id.as_deref() {
+                keys.push(id);
+            }
+            if let Some(id) = row.effective_identity() {
+                keys.push(id);
+            }
+            for key in keys {
+                match row.liveness {
+                    crate::agents_view::Liveness::Alive => self.add_live(key),
+                    crate::agents_view::Liveness::Dead => self.add_dead(key),
+                    crate::agents_view::Liveness::Unmeasured => {}
+                }
+            }
+        }
+        self.spawned_names = spawned_names;
+        self.held_names = held_names;
+        self.complete_registry_names = complete_registry_names;
+        let reuse_or_live = |evidence: &Self, name: &str| {
+            alive_names.contains(name)
+                || evidence.held_names.contains(name)
+                || evidence.live.contains(name)
+        };
+        for name in dead_row_names {
+            if !reuse_or_live(self, &name) {
+                self.dead_names.insert(name);
+            }
+        }
+        if complete_registry_names {
+            for name in self.spawned_names.iter() {
+                if !self.registry_row_names.contains(name) && !reuse_or_live(self, name) {
+                    self.dead_names.insert(name.clone());
+                }
+            }
+        }
     }
 
     pub fn verdict(&self, member: &StoredMember) -> MemberLiveness {
@@ -921,11 +1043,10 @@ impl MemberEvidence {
                 .into_iter()
                 .flatten()
                 .any(|key| self.dead.contains(key))
-            || (member.harness.is_none()
-                && member
-                    .worker
-                    .as_deref()
-                    .is_some_and(|w| self.dead_names.contains(w)))
+            || member
+                .worker
+                .as_deref()
+                .is_some_and(|w| self.dead_names.contains(w))
         {
             MemberLiveness::Dead
         } else {
@@ -2774,8 +2895,138 @@ mod tests {
         harness_only.harness = Some("codex".into());
         assert_eq!(
             evidence.verdict(&harness_only),
+            MemberLiveness::Dead,
+            "(x-688b) the keys branch guarantees no session id, so the name \
+             is all the member has even with a harness recorded"
+        );
+    }
+
+    /// (x-688b) The reaped-row rule: a journal-spawned name that a SUCCESSFUL
+    /// registry read does not carry is dead evidence. The inversion this
+    /// fixes: row reaping destroyed the evidence, so the member was kept
+    /// Unknown forever - one stranded squads.json row per reaped worker.
+    #[test]
+    fn a_spawned_name_absent_from_a_complete_registry_read_is_dead() {
+        use std::collections::HashSet;
+        let member = StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("w1".into()),
+            harness: Some("claude".into()),
+            harness_session_id: None,
+        };
+        let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        evidence.fold_registry_rows(
+            &[],
+            ["w1".to_string()].into_iter().collect(),
+            HashSet::new(),
+            true,
+        );
+        assert_eq!(
+            evidence.verdict(&member),
+            MemberLiveness::Dead,
+            "the row's absence, once the read succeeded, is positive death evidence"
+        );
+        let mut unreadable = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        unreadable.fold_registry_rows(
+            &[],
+            ["w1".to_string()].into_iter().collect(),
+            HashSet::new(),
+            false,
+        );
+        assert_eq!(
+            unreadable.verdict(&member),
             MemberLiveness::Unknown,
-            "AC7-EDGE: a harness-only member keeps its own (unknown) path"
+            "a failed registry read stays fail-safe: absence is missing evidence"
+        );
+    }
+
+    /// (x-688b) A still-held spawn receipt means the worker is resumable:
+    /// registry absence must not read as its death.
+    #[test]
+    fn a_held_receipt_keeps_a_spawned_name_unknown() {
+        use std::collections::HashSet;
+        let member = StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("w1".into()),
+            harness: Some("claude".into()),
+            harness_session_id: None,
+        };
+        let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        evidence.fold_registry_rows(
+            &[],
+            HashSet::new(),
+            ["w1".to_string()].into_iter().collect(),
+            true,
+        );
+        assert_eq!(
+            evidence.verdict(&member),
+            MemberLiveness::Unknown,
+            "a resumable worker is not reaped by absence"
+        );
+    }
+
+    /// (x-688b) An EXITED row proves its NAME dead (the t-f90d case: the row
+    /// carries a session id, so its evidence only ever landed as a pair the
+    /// session-less member could not match), and a name both exited and alive
+    /// in one read is a reuse, not a death.
+    #[test]
+    fn an_exited_row_kills_its_name_and_a_reused_name_stays_alive() {
+        use std::collections::HashSet;
+        let exited = crate::agents_view::RegistryAgent {
+            name: "w2".into(),
+            harness: Some("claude".into()),
+            harness_session_id: Some("11111111-1111-1111-1111-111111111111".into()),
+            exited: true,
+            liveness: crate::agents_view::Liveness::Dead,
+            ..Default::default()
+        };
+        let reused_dead = crate::agents_view::RegistryAgent {
+            name: "w3".into(),
+            harness: Some("claude".into()),
+            harness_session_id: Some("22222222-2222-2222-2222-222222222222".into()),
+            exited: true,
+            liveness: crate::agents_view::Liveness::Dead,
+            ..Default::default()
+        };
+        let reused_alive = crate::agents_view::RegistryAgent {
+            name: "w3".into(),
+            liveness: crate::agents_view::Liveness::Alive,
+            ..Default::default()
+        };
+        let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        evidence.fold_registry_rows(
+            &[exited, reused_dead, reused_alive],
+            HashSet::new(),
+            HashSet::new(),
+            true,
+        );
+        let member = |worker: &str| StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some(worker.into()),
+            harness: Some("claude".into()),
+            harness_session_id: None,
+        };
+        assert_eq!(
+            evidence.verdict(&member("w2")),
+            MemberLiveness::Dead,
+            "the exited row's name reaches the session-less member"
+        );
+        assert_eq!(
+            evidence.verdict(&member("w3")),
+            MemberLiveness::Live,
+            "an alive row of the same name wins: reuse is not death"
         );
     }
 

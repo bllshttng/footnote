@@ -2790,6 +2790,12 @@ pub struct ReaderState {
     reg_stamp: Option<(std::time::SystemTime, u64)>,
     roster_raw: Option<String>,
     roster_stamp: Option<(std::time::SystemTime, u64)>,
+    /// (x-688b) The registry file is CONFIRMED absent (vanished, or no agents
+    /// system at all) - distinct from a stamp that never advanced because a
+    /// present file's read keeps failing. Feeds `read_ok`.
+    reg_absent: bool,
+    /// (x-688b) The same confirmed-absence fact for the roster file.
+    roster_absent: bool,
     /// Last successfully-derived rows per source, so a torn concurrent write
     /// keeps that source's last-good instead of blanking it (the merged
     /// `last_sent` alone can't distinguish which source went stale).
@@ -2840,6 +2846,17 @@ impl ReaderState {
         self.isolated.get(account).and_then(|c| c.stamp)
     }
 
+    /// (x-688b) Both primary stores resolved: parsed-or-last-good bytes, or a
+    /// CONFIRMED absence. A present-but-unreadable file leaves its stamp
+    /// unadvanced with no cached bytes and reads false - the daemon-side
+    /// registry-absence death rule must stay inert in exactly that state.
+    /// A file whose stat itself fails reads absent (the same exotic
+    /// stat-perm surface the CLI's `exists()` probe has).
+    pub fn read_ok(&self) -> bool {
+        (self.reg_raw.is_some() || self.reg_absent)
+            && (self.roster_raw.is_some() || self.roster_absent)
+    }
+
     /// One tick: fold fresh stats/reads of BOTH files (taken OFF the core loop
     /// by the caller, each behind its own mtime+len gate) and return the
     /// merged row set to publish, or `None` when the merged set is unchanged.
@@ -2862,6 +2879,11 @@ impl ReaderState {
         // raced/failed read: leave the stamp behind so the next tick's scan gate
         // (stamp != cached) re-attempts the SAME stamp instead of freezing the
         // last-good rows until an unrelated later write happens to move mtime.
+        // (x-688b) A no-file-on-either-side agreement is a confirmed absence
+        // too (the startup-before-first-write state never enters the arms).
+        if reg_stamp.is_none() && self.reg_stamp.is_none() {
+            self.reg_absent = true;
+        }
         if reg_stamp != self.reg_stamp {
             match (reg_read(), reg_stamp) {
                 (Some(raw), _) => {
@@ -2871,9 +2893,13 @@ impl ReaderState {
                 (None, None) => {
                     self.reg_raw = None; // vanished
                     self.reg_stamp = None;
+                    self.reg_absent = true;
                 }
                 (None, Some(_)) => {} // raced/failed read: keep last-good AND retry next tick
             }
+        }
+        if roster_stamp.is_none() && self.roster_stamp.is_none() {
+            self.roster_absent = true;
         }
         if roster_stamp != self.roster_stamp {
             match (roster_read(), roster_stamp) {
@@ -2884,6 +2910,7 @@ impl ReaderState {
                 (None, None) => {
                     self.roster_raw = None;
                     self.roster_stamp = None;
+                    self.roster_absent = true;
                 }
                 (None, Some(_)) => {}
             }

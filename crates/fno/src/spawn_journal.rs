@@ -232,6 +232,9 @@ pub(crate) fn parse_spawn_receipts(raw: &str) -> HashMap<(String, String), HeldW
 pub(crate) struct JournalEvents {
     pub(crate) receipts: HashMap<(String, String), HeldWorker>,
     pub(crate) never_bound: HashMap<String, String>,
+    /// (x-688b) Every name an `agent_spawned` event ever recorded - the
+    /// population a registry read is checked against for reaped rows.
+    pub(crate) spawned_names: std::collections::HashSet<String>,
 }
 
 pub(crate) fn parse_journal_events(raw: &str) -> JournalEvents {
@@ -362,7 +365,16 @@ pub(crate) fn parse_journal_events(raw: &str) -> JournalEvents {
     JournalEvents {
         receipts,
         never_bound,
+        spawned_names: last_spawn.into_keys().collect(),
     }
+}
+
+/// (x-688b) The names with a still-held spawn receipt: these workers are
+/// resumable, so registry absence must never read as their death.
+pub(crate) fn held_worker_names(
+    receipts: &HashMap<(String, String), HeldWorker>,
+) -> std::collections::HashSet<String> {
+    receipts.values().map(|r| r.name.clone()).collect()
 }
 
 /// (x-6b0b) Worker names the journal positively records as never bound, with
@@ -402,6 +414,7 @@ fn spawn_receipt_segments(dir: &std::path::Path, stem: &str) -> Vec<std::path::P
 pub(crate) struct SpawnJournal {
     pub(crate) receipts: HashMap<(String, String), HeldWorker>,
     pub(crate) never_bound: HashMap<String, String>,
+    pub(crate) spawned_names: std::collections::HashSet<String>,
     pub(crate) error: Option<String>,
 }
 
@@ -418,6 +431,7 @@ pub(crate) fn scan_journal_at(live: &std::path::Path) -> SpawnJournal {
     SpawnJournal {
         receipts: events.receipts,
         never_bound: events.never_bound,
+        spawned_names: events.spawned_names,
         error,
     }
 }
@@ -725,6 +739,29 @@ mod tests {
                 .get("v")
                 .map(String::as_str),
             Some("missing harness session identity")
+        );
+    }
+
+    /// (x-688b) The reaped-row rule's input: every name an `agent_spawned`
+    /// event ever recorded, whether or not the spawn minted a receipt (a
+    /// pane-substrate spawn with no session id is still a spawned worker the
+    /// registry-absence check must see).
+    #[test]
+    fn spawned_names_record_every_agent_spawned_name() {
+        let raw = concat!(
+            r#"{"type":"agent_spawned","data":{"name":"held","provider":"codex","harness_session_id":"s1","substrate":"pane"}}"#,
+            "\n",
+            r#"{"type":"agent_spawned","data":{"name":"shell-only","provider":"claude","substrate":"pane"}}"#,
+            "\n",
+            r#"{"type":"agent_removed","data":{"name":"held","harness":"codex","harness_session_id":"s1"}}"#,
+            "\n",
+        );
+        let events = parse_journal_events(raw);
+        assert!(events.spawned_names.contains("held"));
+        assert!(events.spawned_names.contains("shell-only"));
+        assert!(
+            events.receipts.is_empty(),
+            "the removal revoked the receipt"
         );
     }
 }

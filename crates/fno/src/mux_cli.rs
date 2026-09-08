@@ -1916,35 +1916,6 @@ fn live_set_or_unknown() -> Option<std::collections::HashSet<String>> {
     Some(crate::server::live_attach_ids_snapshot())
 }
 
-fn add_agent_evidence(
-    agent: &crate::agents_view::RegistryAgent,
-    evidence: &mut crate::squad_store::MemberEvidence,
-    liveness: crate::agents_view::Liveness,
-) {
-    let mut add = |identity: &str| match liveness {
-        crate::agents_view::Liveness::Alive => evidence.add_live(identity),
-        crate::agents_view::Liveness::Dead => evidence.add_dead(identity),
-        crate::agents_view::Liveness::Unmeasured => {}
-    };
-    if let (Some(harness), Some(session_id)) =
-        (agent.harness.as_deref(), agent.effective_identity())
-    {
-        match liveness {
-            crate::agents_view::Liveness::Alive => evidence.add_live_pair(harness, session_id),
-            crate::agents_view::Liveness::Dead => evidence.add_dead_pair(harness, session_id),
-            crate::agents_view::Liveness::Unmeasured => {}
-        }
-        return;
-    }
-    add(&agent.name);
-    if let Some(id) = agent.attach_id.as_deref() {
-        add(id);
-    }
-    if let Some(id) = agent.effective_identity() {
-        add(id);
-    }
-}
-
 /// Read exact positive live/dead identities for the squad-member classifier.
 /// Missing stores are the only complete-empty case; a present but malformed or
 /// unreadable store contributes no verdict and therefore keeps unknown members.
@@ -1964,29 +1935,36 @@ fn member_evidence() -> crate::squad_store::MemberEvidence {
         std::collections::HashSet::new(),
     );
     let now = crate::squad_store::now_epoch_secs().unwrap_or_default() as u64;
-    if let Ok(raw) = registry {
-        if let Some(rows) = crate::agents_view::derive_rows(&raw, now) {
-            for row in rows {
-                match row.liveness {
-                    crate::agents_view::Liveness::Alive => {
-                        add_agent_evidence(&row, &mut evidence, row.liveness)
-                    }
-                    crate::agents_view::Liveness::Dead => {
-                        add_agent_evidence(&row, &mut evidence, row.liveness)
-                    }
-                    crate::agents_view::Liveness::Unmeasured => {}
-                }
+    // (x-688b) The registry leg: rows when the read parsed, and completeness
+    // only then. A present-but-garbage file is a failed read (fail safe); a
+    // NotFound file is the legitimate absence of any agents system.
+    let mut rows: Vec<crate::agents_view::RegistryAgent> = Vec::new();
+    let registry_read_ok = match &registry {
+        Ok(raw) => {
+            if let Some(derived) = crate::agents_view::derive_rows(raw, now) {
+                rows = derived;
+                true
+            } else {
+                false
             }
         }
-    }
-    if let Ok(raw) = roster {
-        if let Some(rows) = crate::agents_view::parse_roster(&raw) {
-            for row in rows {
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    };
+    if let Ok(raw) = roster.as_ref() {
+        if let Some(parsed) = crate::agents_view::parse_roster(raw) {
+            for row in parsed {
                 evidence.add_live(row.name);
                 evidence.add_live(row.short_id);
             }
         }
     }
+    // (x-688b) Completeness needs the roster readable-or-absent as well: an
+    // unreadable roster means the merged live population is unknown, so a
+    // name absent from the registry alone must not read dead.
+    let roster_read_ok = match &roster {
+        Ok(_) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    };
     // (x-6b0b) The same segmented journal read the server sweep uses: a
     // death marker rotated out of the live file is still a marker. This
     // evidence gates the sweep modal and the CLI apply, so it must agree
@@ -2027,13 +2005,21 @@ fn member_evidence() -> crate::squad_store::MemberEvidence {
                 evidence.add_dead_pair(harness, value);
             }
         }
-        // The never-bound name set rides the same walk: a member with no
-        // harness and no session id has no pair to match, and its removal
-        // marker is the one identity it will ever have.
-        for name in crate::spawn_journal::parse_never_bound_removals(&journal_raw).into_keys() {
-            evidence.add_dead_name(name);
-        }
     }
+    // The never-bound name set and the reaped-row inputs ride the same
+    // journal text: one walk yields the markers, the spawned names, and the
+    // still-held receipts.
+    let events = crate::spawn_journal::parse_journal_events(&journal_raw);
+    for name in events.never_bound.keys() {
+        evidence.add_dead_name(name.clone());
+    }
+    let held = crate::spawn_journal::held_worker_names(&events.receipts);
+    evidence.fold_registry_rows(
+        &rows,
+        events.spawned_names,
+        held,
+        registry_read_ok && roster_read_ok,
+    );
     if complete_empty {
         evidence.mark_complete_attach_set();
     }
