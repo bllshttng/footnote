@@ -1315,7 +1315,7 @@ def test_cli_session_close_refuses_without_identity(tmp_path, monkeypatch):
 
 
 def test_cli_session_close_releases_spawn_handover_claim(tmp_path, monkeypatch):
-    """x-b9f4: the blueprint terminal releases the exact handover claim it was
+    """The blueprint terminal releases the exact handover claim it was
     launched under; the receipt names the holder and the claim answers free."""
     from typer.testing import CliRunner
     import fno.graph.cli as C
@@ -1347,7 +1347,7 @@ def test_cli_session_close_releases_spawn_handover_claim(tmp_path, monkeypatch):
 
 
 def test_cli_session_close_leaves_foreign_holder_claim_intact(tmp_path, monkeypatch):
-    """x-b9f4: when a successor already rebound the claim, the close leaves it
+    """When a successor already rebound the claim, the close leaves it
     held, answers claim_released false, and names the key and the mismatch."""
     from typer.testing import CliRunner
     import fno.graph.cli as C
@@ -1378,7 +1378,7 @@ def test_cli_session_close_leaves_foreign_holder_claim_intact(tmp_path, monkeypa
 
 
 def test_cli_session_close_repoints_dispatch_verb_from_launch(tmp_path, monkeypatch):
-    """x-b9f4: the close writes the launch verb so the next dispatcher resolves
+    """The close writes the launch verb so the next dispatcher resolves
     the target slot instead of agents.profiles.blueprint."""
     from typer.testing import CliRunner
     import fno.graph.cli as C
@@ -1402,8 +1402,33 @@ def test_cli_session_close_repoints_dispatch_verb_from_launch(tmp_path, monkeypa
     assert read_graph(g)[0]["dispatch_verb"] == "/fno:target"
 
 
+def test_cli_session_close_canonicalizes_codex_launch_verb(tmp_path, monkeypatch):
+    """The codex $fno: spelling stores as /fno:, the only prefix the dispatch
+    resolver reads back - a verbatim $fno: row would never resolve."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(
+        tmp_path, [{"id": "x-close009", "title": "t", "dispatch_verb": "/fno:blueprint"}]
+    )
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-close9")
+    monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "close", "x-close009",
+        "--summary", "plan is ready",
+        "--launch", "$fno:target x-close009",
+    ])
+
+    assert r.exit_code == 0, r.output
+    assert read_graph(g)[0]["dispatch_verb"] == "/fno:target"
+
+
 def test_cli_session_close_skips_non_qualified_launch_verb(tmp_path, monkeypatch):
-    """x-b9f4: a --launch whose first token is not a plugin-qualified verb
+    """A --launch whose first token is not a plugin-qualified verb
     writes nothing and names the rejected token on stderr."""
     from typer.testing import CliRunner
     import fno.graph.cli as C

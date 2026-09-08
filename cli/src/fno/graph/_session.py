@@ -392,6 +392,31 @@ def cmd_session_close(
         "ended_at": ended_at,
         "added": added,
     }
+    # Name the next verb on the node BEFORE the claim release below: the release
+    # is what makes the node dispatchable again, and a dispatcher it wakes must
+    # never resolve the blueprint slot this close just ended. The codex $fno:
+    # spelling canonicalizes to /fno:, the only prefix the dispatch resolver
+    # reads back.
+    launch_verb = launch.split()[0]
+    stored_verb = launch_verb
+    if launch_verb.startswith("$fno:"):
+        stored_verb = "/fno:" + launch_verb[len("$fno:"):]
+    if launch_verb.startswith(("/fno:", "$fno:")):
+
+        def _write_dispatch_verb(entries):
+            for entry in entries:
+                if entry.get("id") == node_id and entry.get("dispatch_verb") != stored_verb:
+                    entry["dispatch_verb"] = stored_verb
+                    break
+            return entries
+
+        locked_mutate_graph(_graph_path(), _write_dispatch_verb)
+    else:
+        typer.echo(
+            f"session close: dispatch_verb not written: launch token "
+            f"{launch_verb!r} is not a plugin-qualified verb.",
+            err=True,
+        )
     # A spawn dispatch acquires node:<id> under spawn-handover:<worker> and
     # this close is the only terminal that lifecycle has. Release exactly OUR
     # holder, never the key: a successor target session may already hold the
@@ -418,25 +443,6 @@ def cmd_session_close(
             )
     else:
         receipt["claim_released"] = False
-    # Name the next verb on the node so the next dispatcher resolves the
-    # target slot, not the blueprint one this close just ended.
-    launch_verb = launch.split()[0]
-    if launch_verb.startswith(("/fno:", "$fno:")):
-
-        def _write_dispatch_verb(entries):
-            for entry in entries:
-                if entry.get("id") == node_id and entry.get("dispatch_verb") != launch_verb:
-                    entry["dispatch_verb"] = launch_verb
-                    break
-            return entries
-
-        locked_mutate_graph(_graph_path(), _write_dispatch_verb)
-    else:
-        typer.echo(
-            f"session close: dispatch_verb not written: launch token "
-            f"{launch_verb!r} is not a plugin-qualified verb.",
-            err=True,
-        )
     if json_out:
         typer.echo(json.dumps(receipt))
     else:
