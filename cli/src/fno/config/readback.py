@@ -105,19 +105,16 @@ def check_config_files_read() -> list[str]:
     try:
         from fno.config import _candidate_paths
         from fno.config_io import _parse_settings
+
+        seen: set[Path] = set()
+        errors = []
+        for path in _candidate_paths():
+            if path.is_file() and path.resolve() not in seen:
+                seen.add(path.resolve())
+                errors.append(_parse_settings(path)[1])
+        return [e for e in errors if e is not None]
     except Exception:  # noqa: BLE001 - a report, not the loader
         return []
-
-    errors: list[str] = []
-    seen: set[Path] = set()
-    for path in _candidate_paths():
-        if not path.is_file() or path.resolve() in seen:
-            continue
-        seen.add(path.resolve())
-        error = _parse_settings(path)[1]
-        if error is not None:
-            errors.append(error)
-    return errors
 
 
 def _edit_distance_le_1(a: str, b: str) -> bool:
@@ -174,19 +171,13 @@ def check_unknown_keys() -> list[str]:
     spelling is never reported as a typo and each message names one file.
     """
     try:
-        from fno.config import (
-            SettingsModel,
-            _aliased_layers,
-            _candidate_paths,
-        )
+        from fno.config import SettingsModel
         from fno.config_io import _unwrap_config_dict
-
-        layers = _aliased_layers(tuple(_candidate_paths()))
     except Exception:  # noqa: BLE001 - a report, not the loader
         return []
 
     problems: list[str] = []
-    for path, parsed in layers:
+    for path, parsed in _layers():
         try:
             flat = _unwrap_config_dict(parsed)
             unknown = warn_unknown_keys(
@@ -224,9 +215,14 @@ def check_enabled_with_empty_population() -> list[str]:
 
 def contributing_files() -> list[str]:
     """The files that actually contributed to the merge, highest first."""
+    return [str(path) for path, _ in _layers()]
+
+
+def _layers() -> list[tuple[Path, dict[str, object]]]:
+    """The loader's own per-file collector, or empty when it cannot run."""
     try:
         from fno.config import _aliased_layers, _candidate_paths
 
-        return [str(path) for path, _ in _aliased_layers(tuple(_candidate_paths()))]
+        return list(_aliased_layers(tuple(_candidate_paths())))
     except Exception:  # noqa: BLE001 - a receipt, not the loader
         return []
