@@ -131,6 +131,26 @@ def _arm_world(
         checks={"state": "OPEN", "headRefOid": "cafe" * 6, "statusCheckRollup": rollup},
     )
     monkeypatch.setattr(merge_mod, "run", fake)
+
+    # The checks verdict, the head pin and the gh argv moved into the
+    # authorized-merge owner, so this journey arms the OWNER rather than the
+    # rollup above. The stub answers what the owner answers: pending checks
+    # hold, green authorizes and merges. The rollup stays because the rest of
+    # the transport still reads it.
+    def _owner(pr_number, repo, *, effect, approved, source, **kwargs):
+        if checks_pending:
+            return {
+                "outcome": "held",
+                "detail": (
+                    "checks are pending; require_checks_pass forbids merging "
+                    "without green"
+                ),
+            }
+        if kwargs.get("decide_only"):
+            return {"outcome": "authorized", "detail": "cafe" * 6}
+        return {"outcome": "merged", "detail": "cafe" * 6}
+
+    monkeypatch.setattr(merge_mod, "_authorized_merge", _owner)
     return fake
 
 
