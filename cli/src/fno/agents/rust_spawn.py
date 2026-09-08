@@ -16,12 +16,8 @@ from typing import Mapping, Optional
 
 
 def _defaults_applied_marker() -> str:
-    """The seam marker both bridges carry: ``--defaults-applied=<state>``.
-
-    These bridges build a fresh ``fno-agents spawn`` argv and run it as a
-    subprocess. They sit downstream of ``cmd_spawn``, which is downstream of
-    the Python seam, so their spawn has already been configured; the marker
-    is what keeps the binary's seam gate from bouncing it back here.
+    """The seam marker both bridges carry; it keeps the binary's seam
+    gate from bouncing an already-configured spawn back to the front door.
     """
     from fno.agents.spawn_defaults import routing_enforcement_state
 
@@ -59,10 +55,7 @@ def _opencode_serve_spawn(
     argv = [
         str(binary),
         "spawn",
-        # Asserts the Python seam crossed upstream (cmd_spawn is downstream of
-        # inject_spawn_defaults): without it the binary sends this spawn back
-        # to the front door and the bridge recursion-loops. Straight after the
-        # verb so it can never land inside the ["--", message] fence below.
+        # Straight after the verb so it never lands inside the fence below.
         _defaults_applied_marker(),
         "--name",
         name,
@@ -148,10 +141,7 @@ def _codex_thread_spawn(
     argv = [
         str(binary),
         "spawn",
-        # Asserts the Python seam crossed upstream (cmd_spawn is downstream of
-        # inject_spawn_defaults): without it the binary sends this spawn back
-        # to the front door and the bridge recursion-loops. Straight after the
-        # verb so it can never land inside the ["--", message] fence below.
+        # Straight after the verb so it never lands inside the fence below.
         _defaults_applied_marker(),
         "--name",
         name,
