@@ -970,18 +970,18 @@ def test_release_receipt_is_silent_when_nothing_was_contained(world, dispatches)
     assert "Released" not in result.output
 
 
-# -- carried-session stamp (x-3967) --
+# -- carried-session stamp --
 #
 # A worker claims one node and ships several. The claim, the worktree, the
 # branch and finalize all name the claimed node, so every writer of
 # `sessions[]` fires on the owner and none fires on its passengers. Measured
-# 2026-09-08: 20 of the 28 PR-carrying nodes with an empty `sessions` share
-# their pr_number with a node that has one. Mechanism and denominator in
-# internal/fno/analysis/20260908-sessions-write-gap-x-3967.md.
+# 2026-09-08: 20 of the 28 PR-carrying nodes with an empty `sessions` share a
+# PR with a node that has one.
 
 OWNER = "x-1bd0"
 PASSENGER = "x-b7ae"
 CO_PR = 1562
+CO_URL = "https://github.com/o/footnote/pull/1562"
 
 
 def _do_row(session_id: str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee") -> dict:
@@ -995,10 +995,10 @@ def _do_row(session_id: str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee") -> dict:
 
 
 def _co_ship(**passenger_overrides) -> list[dict]:
-    passenger = {"pr_number": CO_PR, "sessions": []}
+    passenger = {"pr_number": CO_PR, "pr_url": CO_URL, "sessions": []}
     passenger.update(passenger_overrides)
     return [
-        _node(OWNER, pr_number=CO_PR, sessions=[_do_row()]),
+        _node(OWNER, pr_number=CO_PR, pr_url=CO_URL, sessions=[_do_row()]),
         _node(PASSENGER, **passenger),
     ]
 
@@ -1025,9 +1025,56 @@ def test_a_node_with_no_pr_is_untouched():
     """The shared PR is the whole evidence of carriage. No PR, no inference."""
     from fno.graph.cli import _sweep_stamp_carried_sessions
 
-    entries = _co_ship(pr_number=None)
+    entries = _co_ship(pr_number=None, pr_url=None)
     assert _sweep_stamp_carried_sessions(entries) == []
     assert entries[1]["sessions"] == []
+
+
+def test_the_same_pr_number_in_two_repos_never_crosses():
+    """The graph spans five repos and their PR numbers already interleave.
+
+    Keyed on the bare number, footnote #920 would stamp its session onto the
+    regready node that also carries 920.
+    """
+    from fno.graph.cli import _sweep_stamp_carried_sessions
+
+    entries = _co_ship(pr_url="https://github.com/o/other-repo/pull/1562")
+    assert _sweep_stamp_carried_sessions(entries) == []
+    assert entries[1]["sessions"] == []
+
+
+def test_a_link_with_no_url_is_skipped_rather_than_matched_on_the_number():
+    """A number alone cannot name a PR across repos, so it names none."""
+    from fno.graph.cli import _sweep_stamp_carried_sessions
+
+    entries = _co_ship(pr_url=None)
+    assert _sweep_stamp_carried_sessions(entries) == []
+    assert entries[1]["sessions"] == []
+
+
+def test_a_pr_carried_in_additional_prs_counts_on_both_sides():
+    """A second PR on a node is a real link, and node_pr_refs already reads it."""
+    from fno.graph.cli import _sweep_stamp_carried_sessions
+
+    second = "https://github.com/o/footnote/pull/1523"
+    entries = [
+        _node(OWNER, pr_number=CO_PR, pr_url=CO_URL, sessions=[_do_row()],
+              additional_prs=[{"number": 1523, "url": second}]),
+        _node(PASSENGER, pr_number=1523, pr_url=second, sessions=[]),
+    ]
+    assert _sweep_stamp_carried_sessions(entries) == [PASSENGER]
+    assert entries[1]["sessions"] == [_do_row()]
+
+
+def test_a_carried_row_shares_no_nested_object_with_the_owners():
+    """Two graph nodes holding one dict is a write to one showing on both."""
+    from fno.graph.cli import _sweep_stamp_carried_sessions
+
+    entries = _co_ship()
+    entries[0]["sessions"][0]["observed_model"] = {"kind": "known", "model": "opus"}
+    assert _sweep_stamp_carried_sessions(entries) == [PASSENGER]
+    entries[1]["sessions"][0]["observed_model"]["model"] = "haiku"
+    assert entries[0]["sessions"][0]["observed_model"]["model"] == "opus"
 
 
 def test_only_the_do_row_is_carried():
@@ -1069,11 +1116,11 @@ def test_a_peer_with_no_sessions_carries_nothing():
 
 
 def test_every_passenger_on_one_pr_is_stamped():
-    """PR #1257 carried x-735e and x-6290 for owner x-e555. Both are misses."""
+    """One PR carried two nodes for one owner. Both are misses, not one."""
     from fno.graph.cli import _sweep_stamp_carried_sessions
 
     entries = _co_ship()
-    entries.append(_node("x-6290", pr_number=CO_PR, sessions=[]))
+    entries.append(_node("x-6290", pr_number=CO_PR, pr_url=CO_URL, sessions=[]))
     assert _sweep_stamp_carried_sessions(entries) == [PASSENGER, "x-6290"]
     assert entries[2]["sessions"] == [_do_row()]
 
@@ -1088,7 +1135,7 @@ def test_two_sessioned_owners_on_one_pr_both_reach_the_passenger():
 
     second = _do_row("99999999-8888-7777-6666-555555555555")
     entries = _co_ship()
-    entries.insert(1, _node("x-0fb9", pr_number=CO_PR, sessions=[second]))
+    entries.insert(1, _node("x-0fb9", pr_number=CO_PR, pr_url=CO_URL, sessions=[second]))
     assert _sweep_stamp_carried_sessions(entries) == [PASSENGER]
     assert entries[2]["sessions"] == [_do_row(), second]
 
@@ -1098,10 +1145,13 @@ def test_a_malformed_row_never_takes_the_sweep_down():
     from fno.graph.cli import _sweep_stamp_carried_sessions
 
     entries = [
-        {"pr_number": CO_PR},                              # no id at all
-        {"id": None, "pr_number": CO_PR, "sessions": []},  # null id
-        _node(OWNER, pr_number=CO_PR, sessions=[_do_row(), "not-a-dict"]),
-        _node(PASSENGER, pr_number=CO_PR, sessions=[]),
+        {"pr_number": CO_PR, "pr_url": CO_URL},                     # no id at all
+        {"id": None, "pr_url": CO_URL, "sessions": []},              # null id
+        # additional_prs of the wrong type: node_pr_refs must not raise on it
+        {"id": "x-9999", "pr_number": CO_PR, "pr_url": CO_URL, "additional_prs": "nope"},
+        _node(OWNER, pr_number=CO_PR, pr_url=CO_URL,
+              sessions=[_do_row(), "not-a-dict"]),
+        _node(PASSENGER, pr_number=CO_PR, pr_url=CO_URL, sessions=[]),
     ]
-    assert _sweep_stamp_carried_sessions(entries) == [PASSENGER]
-    assert entries[3]["sessions"] == [_do_row()]
+    assert _sweep_stamp_carried_sessions(entries) == ["x-9999", PASSENGER]
+    assert entries[4]["sessions"] == [_do_row()]
