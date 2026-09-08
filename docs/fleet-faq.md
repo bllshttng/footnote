@@ -18,6 +18,18 @@ This convention matches the pitfalls corpus in AGENTS.md, which removes an entry
 
 One entry already left this way. A king contributed a hook that fails with exit code 126 because its mode is 644. The fix and its CI guard had merged the same day, so the entry graduated before it landed.
 
+## How this list is kept
+
+Every entry names the change that retires it. That line is a contract, not a wish.
+
+**Adding one.** An entry needs an answer, a dated specimen that is real output or a file and a line, and a `Graduates to:` line. An entry that cannot name its own exit is a tip, not a gap. It does not belong here.
+
+**Retiring one.** The PR that satisfies a `Graduates to:` line moves that entry to Retired at the bottom, in that same PR. Name the PR number. Never name a node id, because this file is public and a gate rejects node ids under `docs/`.
+
+**Checking.** The post-merge ritual is the moment to look. That is the one moment somebody knows a gap closed.
+
+The list shrinking is the point. A workaround that survives here for months is a gap nobody funded.
+
 ## A worker looks dead. Is it?
 
 Probably not, and four readers will disagree with each other. Know what each one actually proves before you act on it.
@@ -187,6 +199,7 @@ What has no pair is the STATE. Every other side state is paired. The pairs: defe
 **Specimen.** Across all 72 backlog verbs, zero mention block, against a control of three that mention defer. `fno backlog update` has no `--status`. It answers `No such option: --status (Possible options: --tag)`. One node has read `blocked` with `blocked_by=[]` all night and counts as undelivered forever.
 
 *Graduates to:* Give blocked its pair, or widen `requeue` to a node whose worker died before it reached `in_progress`.
+
 ## I spawned a codex worker and its target refused before it did anything
 
 **Answer.** Only cold starts trip this. `fno agents spawn --name` registers a live registry row keyed to the codex session's own `harness_session_id`. Inside that session `fno do target start` asks `resolve-owned-identity` who owns that id, finds the row the spawn just wrote, and refuses. The spawn's bookkeeping blocks the payload the spawn exists to run. Warm-start the worktree from any other session and the guard never fires, because `target start` inside a valid worktree is a documented no-op.
@@ -194,6 +207,7 @@ What has no pair is the STATE. Every other side state is paired. The pairs: defe
 **Specimen.** `target: REFUSED: harness session id held by live row '<the row the spawn just wrote>'`. Three occurrences, on 09-04, 09-06 and 09-08. All three were written only to codex rollout summaries, which no other harness reads. On the same night a worker ran the identical template and shipped eleven commits and a merged PR, because its worktree already existed.
 
 *Graduates to:* a spawn that does not hold the identity its own payload needs. Or a target start that reads the spawn's own row as itself, since the row names the session asking. Do not add a bypass flag: the verb's own help says precedence alone launders an inherited marker into ownership.
+
 ## My row has no provider stamp and something told me to re-register
 
 **Answer.** Re-registering does not stamp it. There is no self-service fix.
@@ -201,6 +215,7 @@ What has no pair is the STATE. Every other side state is paired. The pairs: defe
 **Specimen.** `fno agents register` returned `{"registered": true, "name": "af8e03f2", "harness": "claude"}` and the row still read `provider=None`. Across the whole agents surface the only verb mentioning provider is `reconcile`, whose help is about syncing status. A hand-started claude session mints an unstamped row and cannot repair it.
 
 *Graduates to:* Make `register` stamp the provider it already resolves, since it resolves the harness in the same call.
+
 ## fno doctor says my canonical checkout is not synced and syncing changes nothing
 
 **Answer.** The row counts per-PR sync receipts. The sentence asserts a tree state. Those are different things and the remedy it prints only affects the second.
@@ -208,6 +223,7 @@ What has no pair is the STATE. Every other side state is paired. The pairs: defe
 **Specimen.** The row read `post-merge sync STALE - the canonical checkout is not synced with recent merges (PR #1558 merged 24h ago, never synced (+2 more))`. Git read 0 behind, 0 ahead, clean. PR 1558's merge commit `bee664d93` was already an ancestor of local main. Control: the same ancestry query answers YES for the origin/main tip.
 
 *Graduates to:* Say what is measured. N merged PRs carry no sync receipt, with tree state reported separately.
+
 ## The daily groom failed and I cannot make it run again
 
 **Answer.** You cannot, until tomorrow. groom runs at most once per UTC day. On a failed run it still writes its day key, so the failing path is unreachable. The only signal left is a LaunchAgent exit code.
@@ -215,6 +231,7 @@ What has no pair is the STATE. Every other side state is paired. The pairs: defe
 **Specimen.** `sh.fno.groom` last exited 1. `groom.err.log` held only config deprecation warnings and no error. Rerunning, including with an absolute binary, neutral cwd and a stripped environment, returned `{"status": "already-ran", "day": "2026-09-08"}` and exit 0.
 
 *Graduates to:* a groom that claims the day only on success, or a retry that ignores the key. It must also write a real error, because an exit code beside a clean log is the least useful pair available.
+
 ## An arm blamed something and the something turned out to be innocent
 
 **Answer.** Several arms report the first line on stderr as the reason for an exit it did not cause. Read the code before you act on the blame.
@@ -398,6 +415,12 @@ The second king already held the disproof. An hour earlier the same king measure
 What settled it was neither grep. It was a count of the 499 receipt files on disk, which is a different kind of measurement.
 
 *Graduates to:* a review habit, not a gate. When you check a claim about where something does not happen, measure at a different layer than the claimant did. A filesystem count, a direct function call, or a runtime probe all beat a second grep.
+
+## Retired
+
+Closed gaps, newest first. Each line names the PR that closed it, so a reader can see the machinery absorb the list.
+
+Nothing yet.
 
 ## Related
 
