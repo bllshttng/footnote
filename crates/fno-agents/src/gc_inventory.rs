@@ -628,3 +628,162 @@ mod tests {
         assert!(!is_uuid_like("ee99ff00-7777-8888-9999-aaaabbbbcccc-extra"));
     }
 }
+
+// --- assignment-link recovery ------------------------------------------------
+//
+// A legacy row's node link is reconstructed from three complementary sources:
+// the registry row's own `node` field, the row NAME (dispatch-shaped labels
+// embed the node id), and the session transcript's FIRST user message (a
+// dispatched worker's opening directive names its target). Every candidate is
+// VERIFIED against the graph's id set before it is reported: a bare 4-hex
+// token collides against thousands of ids, and an unverified mention is a
+// guess, not provenance (AC1: the join must be auditable).
+
+/// Node-id-shaped candidate tokens, in order of appearance: `<prefix>-<hex>`
+/// first, then bare hex tokens of the same length class. A slug word like
+/// `feed` never reads as an id; a 4-hex token stays a CANDIDATE - verification
+/// against the graph is a separate, explicit step.
+pub fn candidate_node_ids(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |t: &str| {
+        if !out.iter().any(|e| e == t) {
+            out.push(t.to_string());
+        }
+    };
+    // <prefix>-<hex>: prefix 1-4 lowercase alnum, hex 4-12 hex chars.
+    let bytes = text.as_bytes();
+    let n = bytes.len();
+    let is_hex = |c: u8| c.is_ascii_hexdigit();
+    let is_pfx = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit();
+    for i in 0..n {
+        if bytes[i] != b'-' {
+            continue;
+        }
+        // Walk left over prefix chars.
+        let mut start = i;
+        while start > 0 && is_pfx(bytes[start - 1]) && i - (start - 1) <= 4 {
+            start -= 1;
+        }
+        if start == i || !bytes[start].is_ascii_lowercase() {
+            continue;
+        }
+        // Walk right over hex chars.
+        let mut end = i + 1;
+        while end < n && is_hex(bytes[end]) && end - (i + 1) < 12 {
+            end += 1;
+        }
+        let hex_len = end - (i + 1);
+        // The hex part must carry at least one DIGIT: every real node id has
+        // one (70e1, 2188, a3f9), and without this a pure-letter hex word
+        // like "feed" reads as an id (the exact slug collision the plan
+        // names as the join's failure mode).
+        let has_digit = text[(i + 1)..end].bytes().any(|c| c.is_ascii_digit());
+        if hex_len >= 4 && has_digit && (end >= n || !is_hex(bytes[end])) {
+            push(&text[start..end]);
+        }
+    }
+    out
+}
+
+/// Which candidates resolve against the graph's id set. A candidate matching
+/// two ids by hex SUFFIX is ambiguous and resolves to nothing; a unique match
+/// returns the full id. Order follows the candidate order (the first mention
+/// in a directive is its target, later ones are siblings).
+pub fn verify_candidates(candidates: &[String], graph_ids: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for c in candidates {
+        let exact = graph_ids.iter().find(|g| g.as_str() == c);
+        if let Some(g) = exact {
+            if !out.contains(g) {
+                out.push(g.clone());
+            }
+            continue;
+        }
+        let suffix_matches: Vec<&String> = graph_ids
+            .iter()
+            .filter(|g| g.ends_with(c.as_str()))
+            .collect();
+        if suffix_matches.len() == 1 {
+            let g = suffix_matches[0].clone();
+            if !out.contains(&g) {
+                out.push(g);
+            }
+        }
+        // 0 or 2+ suffix matches: not provenance either way.
+    }
+    out
+}
+
+/// Read the first `max_lines` lines of a transcript and return its text, so
+/// the first-directive scan stays cheap on multi-megabyte files. A read
+/// failure returns an empty string: a transcript we cannot read contributes
+/// no candidates, and the caller reports the session unjudgeable instead of
+/// guessing.
+fn transcript_head(path: &std::path::Path, max_lines: usize) -> String {
+    let Ok(file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    use std::io::BufRead;
+    let mut head = String::new();
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines().take(max_lines) {
+        match line {
+            Ok(l) => {
+                head.push_str(&l);
+                head.push(' ');
+            }
+            Err(_) => break,
+        }
+    }
+    head
+}
+
+/// The verified node links for one session: name candidates first (they are
+/// fno's own dispatch labels), then the transcript head. `transcripts` are
+/// the store hits for this session; `graph_ids` is the full id set.
+pub fn recover_assignment(
+    name: Option<&str>,
+    transcripts: &[PathBuf],
+    graph_ids: &[String],
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Some(name) = name {
+        for c in candidate_node_ids(name) {
+            if !candidates.contains(&c) {
+                candidates.push(c);
+            }
+        }
+    }
+    // Newest transcript first: a session can carry stubs in other project
+    // dirs, and the real transcript is the freshest one.
+    let mut newest: Vec<(std::time::SystemTime, &PathBuf)> = transcripts
+        .iter()
+        .filter_map(|p| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .ok()
+                .map(|m| (m, p))
+        })
+        .collect();
+    newest.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in newest.iter().take(1) {
+        for c in candidate_node_ids(&transcript_head(path, 50)) {
+            if !candidates.contains(&c) {
+                candidates.push(c);
+            }
+        }
+    }
+    verify_candidates(&candidates, graph_ids)
+}
+
+/// Every graph entry id (working graph plus archive), the verification set
+/// for candidate links.
+pub fn graph_ids(home: &AgentsHome) -> Option<Vec<String>> {
+    crate::gc_sweep::read_graph_entries_raw(home).map(|entries| {
+        entries
+            .iter()
+            .filter_map(crate::graph_store::entry_id)
+            .map(str::to_string)
+            .collect()
+    })
+}
