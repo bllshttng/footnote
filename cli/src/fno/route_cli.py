@@ -400,7 +400,139 @@ def _echo_slots(slots: list[dict]) -> None:
             line += f"; on_exhausted={slot['on_exhausted']}"
         line += f"; would take {slot['would_take']}"
         line += f"; routing={slot.get('routing', 'unarmed')}"
+        if slot.get("work_kind"):
+            line += f"; work={slot['work_kind']}"
+        if slot.get("operator_access"):
+            line += f"; access={slot['operator_access']}"
         typer.echo(line)
+        for reason in slot.get("skipped") or []:
+            typer.echo(f"    {reason}")
+
+
+@route_app.command("audit-snapshot", hidden=True)
+def audit_snapshot_cmd(
+    project: str = typer.Option(..., "--project", help="Project root the audit scopes to."),
+    node: str = typer.Option("", "--node", help="Backlog node the sessions must name."),
+    since: str = typer.Option("30m", "--since", help="Evidence window (30m, 2h, 7d)."),
+) -> None:
+    """Assemble the bounded snapshot `fno-agents route-slot audit` verifies.
+
+    Read-only. Config, registry, spawn journal and decision records load
+    through their established readers; the Rust route-slot verb owns the
+    verdict, so this prints evidence and answers nothing.
+    """
+    import datetime as dt
+
+    from fno.agents.registry import load_registry
+    from fno.config import load_settings
+    from fno.decide import list_decisions
+    from fno.route_resolve import routing_fingerprint
+
+    def _parse_since(text: str) -> int:
+        units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+        text = text.strip().lower()
+        if text and text[-1] in units and text[:-1].isdigit():
+            return int(text[:-1]) * units[text[-1]]
+        try:
+            return int(text)
+        except ValueError as exc:
+            raise typer.BadParameter(f"--since must look like 30m, 2h or 7d: {text!r}") from exc
+
+    since_seconds = _parse_since(since)
+    now = dt.datetime.now(dt.timezone.utc)
+    cutoff = now - dt.timedelta(seconds=since_seconds)
+
+    def _within(text: object) -> bool:
+        try:
+            stamp = dt.datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=dt.timezone.utc)
+        return stamp >= cutoff
+
+    settings = load_settings()
+    routing_cfg = getattr(settings, "routing", None)
+    project_s = str(project)
+    sessions: list[dict] = []
+    try:
+        entries = load_registry()
+    except Exception as exc:  # noqa: BLE001 - an unreadable registry is evidence loss
+        typer.echo(f"audit-snapshot: registry unreadable: {exc}", err=True)
+        raise typer.Exit(1)
+
+    def _journal_fingerprints() -> dict[str, str]:
+        from fno.paths import state_dir
+
+        out: dict[str, str] = {}
+        try:
+            lines = (state_dir() / "events.jsonl").read_text().splitlines()
+        except OSError:
+            return out
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("kind") != "spawn_defaults_applied":
+                continue
+            if not _within(row.get("ts") or row.get("time") or ""):
+                continue
+            name = str(row.get("name") or "")
+            fp = str(row.get("fingerprint") or "")
+            if name and fp:
+                out[name] = fp
+        return out
+
+    receipts = _journal_fingerprints()
+    for entry in entries:
+        if (getattr(entry, "node", None) or "") != node:
+            continue
+        root = getattr(entry, "project_root", "") or getattr(entry, "cwd", "")
+        if project_s and root and not root.startswith(project_s):
+            continue
+        created = getattr(entry, "created_at", "")
+        if not _within(created):
+            continue
+        sid = (
+            getattr(entry, "harness_session_id", None)
+            or getattr(entry, "fno_id", None)
+            or ""
+        )
+        name = getattr(entry, "name", "")
+        rows = []
+        if sid:
+            try:
+                _, rows, _damaged = list_decisions(f"routing-view:{sid}", limit=5)
+            except Exception:  # noqa: BLE001 - an unreadable index is a boundary, not a crash
+                rows = []
+        sessions.append({
+            "session_id": sid or "",
+            "name": name,
+            "harness": getattr(entry, "harness", "") or getattr(entry, "provider", "") or "",
+            "model": getattr(entry, "model", None) or "",
+            "model_basis": getattr(entry, "model_basis", None) or "",
+            "requested_model": getattr(entry, "requested_model", None) or "",
+            "account": getattr(entry, "account_record_id", None) or "",
+            "created_at": created,
+            "receipt_fingerprint": receipts.get(name, ""),
+            "view_records": [
+                {k: row.get(k) for k in ("subject", "decision", "ts", "lifecycle")}
+                for row in rows
+            ],
+        })
+    typer.echo(json.dumps({
+        "project": project_s,
+        "node": node,
+        "since_seconds": since_seconds,
+        "now": now.isoformat(),
+        "fingerprint": routing_fingerprint(settings),
+        "policy": {
+            "enforce_inventory": bool(getattr(routing_cfg, "enforce_inventory", False)),
+            "operator_access": getattr(routing_cfg, "operator_access", "unknown"),
+        },
+        "sessions": sessions,
+    }))
 
 
 @route_app.command("env")

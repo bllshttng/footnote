@@ -481,7 +481,7 @@ def routing_for(node: Optional[dict]) -> dict:
     verbatim - reformatting them would fork it.
     """
     if node is None:
-        return {"chain": [], "candidate": None, "inputs": {}}
+        return {"chain": [], "candidate": None, "inputs": {}, "routing": "unarmed", "skipped": []}
     from fno import route_resolve
 
     # An unplanned node bills the planning tier at the spawn seam, so the floor
@@ -504,12 +504,32 @@ def routing_for(node: Optional[dict]) -> dict:
             inventory=inventory,
         )
     except Exception as exc:  # noqa: BLE001 - an unreadable grid is reported
-        return {"chain": [f"grid unreadable: {exc}"], "candidate": None, "inputs": inputs}
+        return {
+            "chain": [f"grid unreadable: {exc}"], "candidate": None, "inputs": inputs,
+            "routing": "unarmed", "skipped": [],
+        }
     inputs["capacity"] = {
         harness: (state.get("state") if isinstance(state, dict) else state)
         for harness, state in capacity.items()
     }
-    return {"chain": list(chain), "candidate": candidate, "inputs": inputs}
+    # The verdict reads the same terminal the spawn seam refuses on: a policy
+    # refusal is held, capacity is held, and neither is "exhausted dispatch".
+    terminal = chain[-1] if chain else ""
+    if candidate:
+        verdict = "armed"
+    elif "slot=strict-refusal" in terminal or terminal.startswith("slot=config "):
+        verdict = "policy-held"
+    elif terminal.startswith("slot=exhausted"):
+        verdict = "capacity-held"
+    else:
+        verdict = "unarmed"
+    return {
+        "chain": list(chain),
+        "candidate": candidate,
+        "inputs": inputs,
+        "routing": verdict,
+        "skipped": [s for s in chain if s.startswith("slot skip ")],
+    }
 
 
 def build_report(
@@ -727,6 +747,9 @@ def _render_gates_routing_decision(report: dict, out: list) -> None:
         if candidate
         else "  -> grid declined; the spawn falls back to caller defaults"
     )
+    out.append(f"  routing={routing.get('routing', 'unarmed')}")
+    for reason in routing.get("skipped") or []:
+        out.append(f"  {reason}")
 
 
 def build_lane_fill_report(
