@@ -1565,35 +1565,23 @@ def _territory_verdict(node: str) -> dict:
     """The per-territory cap verdict for `node`, asked from the Rust gate.
 
     One counting leg (crates/fno-agents territory fact set): Python passes the
-    node through the binary door and recomputes nothing. The JSON receipt
-    carries verdict ok | territory_cap | territory_unknown with its counts; a
-    binary or payload fault reads as territory_unknown, never as headroom.
+    node through the binary door and recomputes nothing. A binary or payload
+    fault reads as territory_unknown, never as headroom.
     """
-    import json as _json
-    import subprocess as _sp
+    from fno.rust_binary import call_binary_json
 
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        return {"verdict": "territory_unknown", "reason": "territory_unknown", "node": node}
-    try:
-        proc = _sp.run(
-            [str(binary), "territory-verdict", "--node", node],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except OSError as exc:
-        return {"verdict": "territory_unknown", "reason": str(exc)[:200], "node": node}
-    try:
-        receipt = _json.loads(proc.stdout)
-        if isinstance(receipt, dict) and receipt.get("verdict"):
-            return receipt
-    except ValueError:
-        pass
-    detail = (proc.stderr or "").strip()[:200]
-    return {"verdict": "territory_unknown", "reason": detail or "unreadable verdict", "node": node}
+    error, receipt = call_binary_json("territory-verdict", ["--node", node])
+    if (
+        error is not None
+        or not isinstance(receipt, dict)
+        or not receipt.get("verdict")
+    ):
+        return {
+            "verdict": "territory_unknown",
+            "reason": error or "unreadable verdict",
+            "node": node,
+        }
+    return receipt
 
 
 def _check_territory_cap(node: Optional[str]) -> None:

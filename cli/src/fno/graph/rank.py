@@ -15,21 +15,12 @@ def _drain_receipt() -> list[dict]:
     of pretending no dispatcher is live. Test seam: monkeypatch this, not a
     subprocess.
     """
-    import subprocess as _sp
+    from fno.rust_binary import call_binary_json
 
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        raise RuntimeError("fno-agents binary not found for the drain receipt")
-    proc = _sp.run(
-        [str(binary), "active-backlog-receipt"], capture_output=True, text=True
-    )
-    if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or "drain receipt unavailable").strip()[:200])
-    import json as _json
-
-    return _json.loads(proc.stdout or "[]")
+    error, receipt = call_binary_json("active-backlog-receipt")
+    if error is not None or not isinstance(receipt, list):
+        raise RuntimeError(error or "non-list drain receipt")
+    return receipt
 
 
 def _dispatch_note(task_id: str, graph_path) -> str | None:

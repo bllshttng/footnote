@@ -884,26 +884,14 @@ def active_backlog_cmd(
     the workspace map, and config.active_backlog, and this verb prints that
     answer verbatim. Read-only; exit 1 names the unreadable source.
     """
-    import json as _json
-    import subprocess as _sp
+    from fno.rust_binary import call_binary_json
 
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        typer.echo("active-backlog: fno-agents binary not found", err=True)
+    error, targets = call_binary_json("active-backlog-receipt")
+    if error is not None:
+        typer.echo(f"active-backlog: {error}", err=True)
         raise typer.Exit(code=1)
-    proc = _sp.run([str(binary), "active-backlog-receipt"], capture_output=True, text=True)
-    if proc.returncode != 0:
-        typer.echo((proc.stderr or "receipt unavailable").strip(), err=True)
-        raise typer.Exit(code=proc.returncode or 1)
     if json_out:
-        typer.echo(proc.stdout.rstrip())
-        return
-    try:
-        targets = _json.loads(proc.stdout)
-    except ValueError:
-        typer.echo(proc.stdout.rstrip())
+        typer.echo(json.dumps(targets))
         return
     if not targets:
         typer.echo("active-backlog: no territories to drain")
@@ -929,24 +917,17 @@ def active_backlog_territories_cmd(
     blueprinter's handle. The king check-in and the operational probe read the
     same projection, so none of them can disagree. Read-only.
     """
-    import subprocess as _sp
+    from fno.rust_binary import call_binary_json
 
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        typer.echo("territories: fno-agents binary not found", err=True)
+    error, rows = call_binary_json("territory-rows")
+    if error is not None:
+        typer.echo(f"territories: {error}", err=True)
         raise typer.Exit(code=1)
-    proc = _sp.run([str(binary), "territory-rows"], capture_output=True, text=True)
-    if proc.returncode != 0:
-        typer.echo((proc.stderr or "territory read failed").strip(), err=True)
-        raise typer.Exit(code=proc.returncode or 1)
     if json_out:
-        typer.echo(proc.stdout.rstrip())
+        typer.echo(json.dumps(rows))
         return
-    import json as _json
-
-    rows = _json.loads(proc.stdout or "[]")
+    if not isinstance(rows, list):
+        rows = []
     if not rows:
         typer.echo("territories: none")
         return
