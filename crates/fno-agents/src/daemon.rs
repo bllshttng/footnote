@@ -9257,18 +9257,6 @@ fn buffer_pending_report(
     BufferOutcome::Buffered
 }
 
-/// Flush a buffered early-push report onto its session's row AFTER the row is
-/// registered (E3.3 flush).
-///
-/// Called only on a winning insert with the row's pinned claude session uuid.
-/// Takes the buffered report out of the pending map (highest-seq, since
-/// `buffer_pending_report` keeps only the newest) and applies it to the row
-/// under a seq gate, so a report that raced in on the row's *store* path between
-/// insert and this drain is never regressed (codex P2: highest-seq-wins must
-/// survive the flush). Draining strictly after the insert closes the
-/// peek-then-commit window where a newer buffered report could be deleted by an
-/// unconditional remove. A no-op for a row with no buffered report; a poisoned
-/// lock leaves the report buffered.
 /// The ONE seq-gated inside-leg writer core: find the row holding
 /// `session_uuid`, apply `rep` only when its seq is newer, clear the scrape
 /// verdict on the flip (hook beats scrape), and return the transition notify
@@ -9309,6 +9297,18 @@ fn gate_inside_leg_onto_row(
     notify
 }
 
+/// Flush a buffered early-push report onto its session's row AFTER the row is
+/// registered (E3.3 flush).
+///
+/// Called only on a winning insert with the row's pinned claude session uuid.
+/// Takes the buffered report out of the pending map (highest-seq, since
+/// `buffer_pending_report` keeps only the newest) and applies it to the row
+/// under a seq gate, so a report that raced in on the row's *store* path between
+/// insert and this drain is never regressed (codex P2: highest-seq-wins must
+/// survive the flush). Draining strictly after the insert closes the
+/// peek-then-commit window where a newer buffered report could be deleted by an
+/// unconditional remove. A no-op for a row with no buffered report; a poisoned
+/// lock leaves the report buffered.
 fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
     let rep = match ctx.pending_inside_leg.lock() {
         Ok(mut buf) => buf.remove(session_uuid),

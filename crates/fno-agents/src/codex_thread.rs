@@ -1091,7 +1091,6 @@ impl CodexThread {
             .take()
             .expect("the read half is only taken here, once, at actor birth");
         tokio::spawn(read_pump(stream, frame_tx));
-        tokio::spawn(keepalive_loop(cmd_tx.clone()));
         tokio::spawn(actor_task(
             self,
             frame_rx,
@@ -1177,11 +1176,6 @@ pub enum ThreadCommand {
     /// Closing the connection does NOT end the thread: the daemon owns it and
     /// it stays resumable, which is the durability this lane promises.
     Shutdown { ack: oneshot::Sender<()> },
-    /// Driver-status keepalive tick (x-fd66): the daemon's refresh task asks
-    /// the actor to re-report `working` while a turn is driving. Handled in
-    /// the actor loop so the driving check serializes against the completion
-    /// that clears it - a tick landing after the completion fires nothing.
-    Keepalive,
 }
 
 type SubmitReplyTx = oneshot::Sender<Result<TurnReceipt, String>>;
@@ -1309,23 +1303,6 @@ async fn read_pump(mut stream: AppServerStream, tx: mpsc::Sender<Value>) {
     }
 }
 
-/// The keepalive task behind [`ThreadCommand::Keepalive`]: one tick per
-/// refresh interval for the actor's whole life. The tick is only a REQUEST -
-/// the actor decides whether a turn is actually driving - so an idle thread
-/// costs a channel send every interval and nothing else. The task ends when
-/// every handle (and the channel) is gone.
-async fn keepalive_loop(cmd_tx: mpsc::Sender<ThreadCommand>) {
-    let mut tick = tokio::time::interval(thread_turn_refresh());
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    tick.tick().await; // interval's first tick fires immediately; consume it
-    loop {
-        tick.tick().await;
-        if cmd_tx.send(ThreadCommand::Keepalive).await.is_err() {
-            return;
-        }
-    }
-}
-
 struct Driving {
     turn_id: String,
     waiters: Vec<oneshot::Sender<Result<TurnReceipt, String>>>,
@@ -1361,8 +1338,26 @@ async fn actor_task(
         on_turn_done,
         on_turn_phase,
     };
+    // The driver-status keepalive (x-fd66) lives as a select arm, NOT a
+    // separate task: a separate task would hold a `cmd_tx` clone forever, and
+    // `cmds.recv()` would then never answer None - the "every handle dropped"
+    // exit the arm below promises would be unreachable. A turn drives while
+    // the actor sits at this loop (the completion routes through the frame
+    // arm), so the tick is observable exactly while it matters; only the
+    // bounded interrupt-settle wait pauses it.
+    let mut next_keepalive = tokio::time::Instant::now() + thread_turn_refresh();
     loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(next_keepalive) => {
+                next_keepalive = tokio::time::Instant::now() + thread_turn_refresh();
+                if ctx.driving.is_some() {
+                    // Rewrite `working` while a turn drives so a turn longer
+                    // than the report's ttl never ages to Unmeasured. The
+                    // check runs in the actor loop, so a tick landing after
+                    // the completion fires nothing.
+                    (ctx.on_turn_phase)(ThreadTurnPhase::Working);
+                }
+            }
             cmd = cmds.recv() => {
                 match cmd {
                     None => {
@@ -1561,15 +1556,6 @@ impl ActorCtx {
             ThreadCommand::Interrupt { ack } => {
                 let outcome = self.handle_interrupt(frames).await;
                 let _ = ack.send(outcome);
-            }
-            ThreadCommand::Keepalive => {
-                // The x-fd66 refresh: rewrite `working` while a turn drives so
-                // a turn longer than the report's ttl never ages to
-                // Unmeasured. The check runs HERE, in the actor loop, so a
-                // tick that lands after the completion fires nothing.
-                if self.driving.is_some() {
-                    (self.on_turn_phase)(ThreadTurnPhase::Working);
-                }
             }
             ThreadCommand::Review {
                 target,
