@@ -6,6 +6,7 @@ use crate::vt::frame_text;
 // file is shrink-only under the file-budget gate.
 #[path = "client/tests/nav_tests.rs"]
 mod nav_tests;
+#[path = "client/tests/sweep_both_tests.rs"]
 mod sweep_both_tests;
 
 // The x-9fd0 portal-placement-picker family lives in its own module too.
