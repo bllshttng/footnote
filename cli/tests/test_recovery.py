@@ -2328,9 +2328,14 @@ class TestChainRedispatch:
 
     def test_the_real_verb_walks_the_configured_chain(self, tmp_path, monkeypatch):
         # Contract test against the compiled verb: one round-trip from a raw
-        # config table to the first eligible link's id and flags.
+        # config table to the first eligible link's id and flags. The state
+        # file is a fixture: the machine's real provider health must never
+        # decide this test.
         from fno import fleet_state
 
+        state = tmp_path / "runtime-state.json"
+        state.write_text("{}")
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(state))
         hb = tmp_path / "fleet-sweep-state.json"
         monkeypatch.setattr(fleet_state, "fleet_state_path", lambda: hb, raising=True)
         monkeypatch.setattr(recovery, "_node_size", lambda node: "L", raising=True)

@@ -310,7 +310,8 @@ async fn run(args: Vec<String>) -> i32 {
     // `fallback-chain`: the failover chain walk (see fallback_chain.rs doc).
     // Python resolves config and paths and serializes the candidate links;
     // this verb reads the provider runtime-state file, derives headroom
-    // verdicts, and answers the eligible link indices.
+    // verdicts, and answers the eligible links with their walk-memory ids
+    // and spawn flags.
     if verb == "fallback-chain" {
         return fno_agents::fallback_chain::run_fallback_chain(&args[1..]);
     }

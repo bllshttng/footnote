@@ -202,6 +202,24 @@ fn canonicalize_link(raw: &Value) -> Result<Map<String, Value>, String> {
     let obj = raw
         .as_object()
         .ok_or_else(|| format!("link must be a table; got {}", type_name(raw)))?;
+    // Axis values are flag spellings: a non-string (a TOML int, say) must
+    // refuse, never silently drop the field and spawn without it.
+    for key in [
+        "harness",
+        "provider",
+        "model",
+        "route",
+        "account",
+        "effort",
+        "permission_mode",
+        "substrate",
+    ] {
+        if let Some(v) = obj.get(key) {
+            if !v.is_string() && !v.is_null() {
+                return Err(format!("link field {key:?} must be a string"));
+            }
+        }
+    }
     let harness = obj
         .get("harness")
         .or_else(|| obj.get("provider"))
@@ -599,6 +617,22 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("not a known harness"));
+    }
+
+    #[test]
+    fn a_non_string_axis_value_is_an_error_answer() {
+        let payload = json!({
+            "links": [{"harness": "codex", "model": 123}],
+            "state": {},
+            "exclude": [],
+            "accounts": {},
+            "now": 1000.0,
+        });
+        let answer = resolve(&payload).unwrap();
+        assert!(answer["error"]
+            .as_str()
+            .unwrap()
+            .contains("must be a string"));
     }
 
     #[test]
