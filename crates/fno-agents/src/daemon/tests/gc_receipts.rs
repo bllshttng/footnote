@@ -48,6 +48,7 @@ fn graph_read(named: &[(&str, &str, &str)], open_do: &[(&str, &str)]) -> Option<
     Some(GraphRead {
         index,
         open_do: open,
+        phases: std::collections::HashMap::new(),
     })
 }
 

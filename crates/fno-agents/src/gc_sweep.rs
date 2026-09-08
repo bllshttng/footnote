@@ -102,6 +102,10 @@ pub struct GcSummary {
 pub(crate) struct GraphRead {
     pub index: HashMap<String, Vec<(String, String)>>,
     pub open_do: HashMap<String, Vec<String>>,
+    /// Normalized session id -> the phases its sessions[] rows carry. The
+    /// planning lane reads this to recognize a planner row (blueprint/think)
+    /// that a node's reverse join alone cannot.
+    pub phases: HashMap<String, Vec<String>>,
 }
 
 /// One row the pass decided to retire, with everything the write tail needs.
@@ -152,6 +156,7 @@ pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let entries = read_graph_entries_raw(home)?;
     let index = graph_store::sessions_index(&entries);
     let mut open_do: HashMap<String, Vec<String>> = HashMap::new();
+    let mut phases: HashMap<String, Vec<String>> = HashMap::new();
     for entry in &entries {
         let Some(node_id) = graph_store::entry_id(entry) else {
             continue;
@@ -170,9 +175,24 @@ pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
                     .or_default()
                     .push(node_id.to_string());
             }
+            let phase = row
+                .get("phase")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if !phase.is_empty() {
+                phases
+                    .entry(sid.to_ascii_lowercase())
+                    .or_default()
+                    .push(phase);
+            }
         }
     }
-    Some(GraphRead { index, open_do })
+    Some(GraphRead {
+        index,
+        open_do,
+        phases,
+    })
 }
 
 /// One open do row the sweep may settle: its node is done, GitHub-confirmed
@@ -581,6 +601,32 @@ pub(crate) fn run(
         }
         let age = transcript_age_s(store_matches(e).as_deref(), now);
         let owns_worktree = !e.is_one_shot_ask() && crate::daemon::is_linked_worktree(&e.cwd);
+        // The planning lane (x-70e1 task 2): a blueprint/think row's OWN job
+        // ends at plan-written-and-node-ready. A row whose sessions[] phases
+        // name it a planner (or whose dispatch label is the bp- shape) gets
+        // its every named node's status checked as a set; any node still at
+        // `idea` (the plan never landed) or similar holds the row.
+        let is_planning = graph
+            .phases
+            .get(&sid.to_ascii_lowercase())
+            .is_some_and(|phases| phases.iter().any(|p| p == "blueprint" || p == "think"))
+            || e.name.starts_with("bp-");
+        let planning = if is_planning {
+            Some(
+                graph
+                    .index
+                    .get(&sid.to_ascii_lowercase())
+                    .map(|named| {
+                        named
+                            .iter()
+                            .map(|(_, status)| status.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+            )
+        } else {
+            None
+        };
         let row = GcRow {
             origin: e.origin.clone(),
             crowned: e.crown_level.is_some(),
@@ -589,6 +635,7 @@ pub(crate) fn run(
             owns_worktree,
             worktree_clean: None,
             branch_merged: None,
+            planning,
         };
         let (action, reason) = gc_decide(&row, grace_secs);
         if action == GcAction::Keep {
@@ -614,6 +661,21 @@ pub(crate) fn run(
         // keeps the row this tick and names the refusal. DRY-RUN never stops
         // anything - a rehearsal that killed the worker it rehearsed
         // retiring would be the destructive run wearing a dry flag.
+        // Per-candidate freshness re-check (the fold of the reap-guard
+        // finding): between classifying and applying, re-read THIS row's
+        // transcript activity. Activity arrived in the window -> keep, and a
+        // re-read that cannot resolve (a moved or deleted transcript) keeps
+        // too: absence on re-read is not quiet. One stat, on rows already
+        // classified would-retire, so the hot path pays nothing.
+        if !dry_run {
+            let fresh_age = transcript_age_s(store_matches(e).as_deref(), now);
+            let still_quiet = matches!(fresh_age, Some(a) if a > grace_secs);
+            if !still_quiet {
+                let age_now = fresh_age.unwrap_or(0);
+                summary.kept_active.push((id, age_now));
+                continue;
+            }
+        }
         let stopped = if dry_run { true } else { stop_confirmed(e) };
         if !stopped {
             summary
