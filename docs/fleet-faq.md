@@ -118,15 +118,15 @@ The shapes, each measured:
 
 **A path in an error is a path from somewhere.** CI reported `ERROR collecting tests/unit/test_king_scope.py`. That path exists nowhere in the tree. The file is at `cli/tests/unit/test_king_scope.py`, because CI reports relative to the root it runs pytest from. A session nearly filed the check as stale.
 
-**A refusal blames the reader that worked.** `fno agents rm` refuses with `its harness row's presence in 'claude agents --json --all' could not be confirmed (the roster read failed)`. The same command seconds later in the same shell: exit 0, 32,578 bytes on stdout, 0 on stderr, 121 rows, target row present with `state: done`. The code folds "row still present" and "roster unreadable" into one condition and reports the second. Its printed remedy, retry when the roster is readable, names a condition already true.
+**A refusal blames the reader that worked.** `fno agents rm` refuses with `its harness row's presence in 'claude agents --json --all' could not be confirmed (the roster read failed)`. The same command seconds later in the same shell: exit 0, 32,578 bytes on stdout, 0 on stderr, 121 rows, target row present with `state: done`. The code folds "row still present" and "roster unreadable" into one condition and reports the second. Its printed remedy asks the caller to retry once the roster is readable, which names a condition already true.
 
 **A dry run promises what the real run cannot deliver.** `fno agents reap --dry-run` listed nine rows. The real run returned `retired: 0` and kept eight with `the stop did not confirm; row kept for retry`. Only a live process can confirm a stop, so an already-dead row can never clear. Every one of the eight pids probed dead, with the probe shell's own pid reading ALIVE as the control.
 
 **A refusal exits 0.** The spawn gate writes its refusal to stdout as JSON and still exits 0: `{"status": "refused", "reason": "queue_timeout", "max_live": 30, ...}` followed by `[exited with code 0]`.
 
-**A killed subprocess surfaces as a traceback.** `ClaimVerdictError: fno-agents claim sweep failed with exit -9: no diagnostic`. Exit -9 is SIGKILL, and a killed process writes no stderr, which is why the message ends in `no diagnostic`. Run the sweep alone before accepting the traceback: it returned exit 0 and 5,610 bytes, and the next run of the verb gave the ordinary refusal the crash had hidden.
+**A killed subprocess surfaces as a traceback.** `ClaimVerdictError: fno-agents claim sweep failed with exit -9: no diagnostic`. Exit -9 is SIGKILL, and a killed process writes no stderr, which is why the message ends in `no diagnostic`. Run the sweep alone before accepting the traceback. It returned exit 0 and 5,610 bytes. The next run of the verb then gave the ordinary refusal the crash had hidden.
 
-*Graduates to:* an assert helper that rejects absence-only success and zero-hit probes with no positive control, which the AGENTS.md pitfalls corpus already names. Plus, per shape: a refusal that separates "unreadable" from "still present", one decision function shared by the dry run and the real run, a non-zero exit on refusal, and a killed subprocess reported as a kill with its signal named.
+*Graduates to:* an assert helper that rejects absence-only success and zero-hit probes with no positive control, which the AGENTS.md pitfalls corpus already names. Then, per shape. A refusal that separates "unreadable" from "still present". One decision function shared by the dry run and the real run. A non-zero exit on a refusal. A killed subprocess reported as a kill, with its signal named.
 
 ## My check-in keeps saying nothing changed
 
@@ -246,7 +246,7 @@ The two corrections are opposite. Shrink-only means this file can only get small
 
 *Graduates to:* the sentence splitter treating a bold lead-in as part of the sentence that follows it.
 
-## `claim status` says a node is free when a worker holds it
+## `claim status` reports free on a node a worker holds
 
 **Answer.** The top-level `state` field and the `roster_workers` array answer different questions in one payload. Only the array is correct.
 
@@ -262,7 +262,7 @@ Until the fix merges, confirm ownership against the worker roster. Do not trust 
 
 **Specimen, one.** `fno agents status` showed `active_backlog ok skip=no_missions targets=0` while six epics carried `mission_active=true`. `resolve_drain_targets` in `cli/src/fno/active_backlog.py` returns `[]` at its first gate, `if not cfg.any_enabled()`, before any mission is read. A disabled drain and a drain with no missions print the same word. One king read a healthy but disabled arm as an arm with no lever, and filed an operator question on that basis.
 
-**Specimen, two.** `auto_continue` read `stale: true` at `age_s` 6041 against `interval_s` 1800, with `skip_reason: disabled`. Staleness is computed at `crates/fno-agents/src/tick_ledger.rs` from age alone. `skip_reason` is populated five lines above, from the same tick, and never consulted. An arm that is off by configuration reads exactly like an arm whose scheduler died, and the reign skill's one sanctioned dispatch exception keys on that field.
+**Specimen, two.** `auto_continue` read `stale: true` at `age_s` 6041 against `interval_s` 1800, with `skip_reason: disabled`. Staleness is computed at `crates/fno-agents/src/tick_ledger.rs` from age alone. `skip_reason` is populated five lines above, from the same tick, and never consulted. An arm that is off by configuration reads exactly like an arm whose scheduler died. The reign skill's one sanctioned dispatch exception keys on that field.
 
 *Graduates to:* a third skip reason for a disabled drain, and staleness that excludes a configured-off arm. The Rust side already separates `env_broken` from `no_missions` in `active_backlog.rs`.
 
@@ -286,11 +286,11 @@ Everything in that checkout was 342 commits old: hooks, guards and CI scripts. A
 
 ## Must I rebase onto main first?
 
-**Answer.** Rebase only when staleness is the blocker. Read the blocker before you name the remedy.
+**Answer.** Rebase if staleness is the blocker, and not otherwise. Read the blocker before you name the remedy.
 
 A rebase is destructive on a branch carrying attestations, and it does nothing against a content gate.
 
-**Specimen.** One king told two workers to rebase. On the first PR the worker merged `origin/main` instead, which was correct: six of its commits carry head-pinned review attestations, a rebase rewrites those commits, and a rewrite voids every attestation and stops the `attestation_in_scope` arm. On the second PR the red came from the file-budget gate at +899 against an allowance of 100, and no rebase touches that gate. That branch was 68 commits behind, and 25 behind one hour earlier.
+**Specimen.** One king told two workers to rebase. On the first PR the worker merged `origin/main` instead, which was correct. Six of its commits carry head-pinned review attestations. A rebase rewrites those commits, and a rewrite voids every attestation and stops the `attestation_in_scope` arm. On the second PR the red came from the file-budget gate at +899 against an allowance of 100, and no rebase touches that gate. That branch was 68 commits behind, and 25 behind one hour earlier.
 
 *Graduates to:* nothing. This entry is documentation, and it stays until the reflex does.
 
@@ -298,7 +298,7 @@ A rebase is destructive on a branch carrying attestations, and it does nothing a
 
 **Answer.** With no review configuration, the posture resolves to `self_review`, whose only component matches a local attestation. A GitHub App review satisfies nothing.
 
-**Specimen.** A PR was green, at rounds 2 of 2, coverage covered. A second model reviewed it and found three real P2 findings. The merge refused. `posture_verdict` in `crates/fno-agents/src/loopcheck.rs` matches `"self"` against `CoverageProducer::LocalAttestation` only. With `github_apps`, `required_bots`, `peers` and `reviewers` all unset and `self_review_required` true, `resolve_posture_config` finds no signal and falls to its final `else`, returning `self_review`, components `["self"]`, source `default`.
+**Specimen.** A PR was green, at rounds 2 of 2, coverage covered. A second model reviewed it and found three real P2 findings. The merge refused. `posture_verdict` in `crates/fno-agents/src/loopcheck.rs` matches `"self"` against `CoverageProducer::LocalAttestation` only. `github_apps`, `required_bots`, `peers` and `reviewers` are all unset, and `self_review_required` is true. So `resolve_posture_config` finds no signal and falls to its final `else`. It returns `self_review`, components `["self"]`, source `default`.
 
 So by default the gate rewards the author's own lane and discards the more independent review.
 
