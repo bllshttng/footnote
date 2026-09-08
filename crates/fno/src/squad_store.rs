@@ -964,7 +964,16 @@ impl MemberEvidence {
             }
             if let (Some(harness), Some(session_id)) = (row.harness.as_deref(), pair_session) {
                 match row.liveness {
-                    crate::agents_view::Liveness::Alive => self.add_live_pair(harness, session_id),
+                    crate::agents_view::Liveness::Alive => {
+                        self.add_live_pair(harness, session_id);
+                        // A paired row still owes its NAME to the live set: a
+                        // session-less member sharing the name must read Live
+                        // (the daemon's old key fold did this; the pair-only
+                        // path would strand it Unknown). Dead rows skip this -
+                        // their name reaches members only through the
+                        // reuse-guarded dead_names rule below.
+                        self.live.insert(row.name.clone());
+                    }
                     crate::agents_view::Liveness::Dead => self.add_dead_pair(harness, session_id),
                     crate::agents_view::Liveness::Unmeasured => {}
                 }
@@ -2970,6 +2979,39 @@ mod tests {
             evidence.verdict(&member),
             MemberLiveness::Unknown,
             "a resumable worker is not reaped by absence"
+        );
+    }
+
+    /// (x-688b) A paired ALIVE row still owes its name to the live set: a
+    /// session-less member sharing the name must read Live even when the row
+    /// carries no harness session id (the pair path would otherwise strand
+    /// it Unknown).
+    #[test]
+    fn a_paired_alive_row_still_marks_its_name_live() {
+        use std::collections::HashSet;
+        let row = crate::agents_view::RegistryAgent {
+            name: "w4".into(),
+            harness: Some("claude".into()),
+            session_id: Some("fno-9".into()),
+            liveness: crate::agents_view::Liveness::Alive,
+            ..Default::default()
+        };
+        let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        evidence.fold_registry_rows(&[row], HashSet::new(), HashSet::new(), true);
+        let member = StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("w4".into()),
+            harness: Some("claude".into()),
+            harness_session_id: None,
+        };
+        assert_eq!(
+            evidence.verdict(&member),
+            MemberLiveness::Live,
+            "the paired row's name still reaches the session-less member"
         );
     }
 

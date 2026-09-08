@@ -1950,20 +1950,24 @@ fn member_evidence() -> crate::squad_store::MemberEvidence {
         }
         Err(e) => e.kind() == std::io::ErrorKind::NotFound,
     };
-    if let Ok(raw) = roster.as_ref() {
-        if let Some(parsed) = crate::agents_view::parse_roster(raw) {
-            for row in parsed {
-                evidence.add_live(row.name);
-                evidence.add_live(row.short_id);
-            }
+    // (x-688b) Parsed once: the live names fold from the parse, and
+    // completeness requires the parse to have SUCCEEDED - a roster that
+    // reads but does not parse is a failed liveness surface (its live
+    // population is unknown), not a readable one.
+    let roster_parsed = roster
+        .as_ref()
+        .ok()
+        .and_then(|raw| crate::agents_view::parse_roster(raw));
+    if let Some(parsed) = &roster_parsed {
+        for row in parsed {
+            evidence.add_live(row.name.clone());
+            evidence.add_live(row.short_id.clone());
         }
     }
-    // (x-688b) Completeness needs the roster readable-or-absent as well: an
-    // unreadable roster means the merged live population is unknown, so a
-    // name absent from the registry alone must not read dead.
-    let roster_read_ok = match &roster {
-        Ok(_) => true,
-        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    let roster_read_ok = match (&roster, &roster_parsed) {
+        (_, Some(_)) => true,
+        (Err(e), None) => e.kind() == std::io::ErrorKind::NotFound,
+        (Ok(_), None) => false,
     };
     // (x-6b0b) The same segmented journal read the server sweep uses: a
     // death marker rotated out of the live file is still a marker. This
