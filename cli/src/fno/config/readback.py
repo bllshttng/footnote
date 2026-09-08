@@ -93,35 +93,27 @@ def source_note(key: str, root: Optional[Path] = None) -> Optional[str]:
     return f"set in {decided[0]}" if decided is not None else None
 
 
-def _read_candidates() -> tuple[list[tuple[Path, dict[str, object]]], list[str]]:
-    """One walk: the layers that parsed, and the errors from those that did not.
+def check_config_files_read() -> list[str]:
+    """Settings files the loader could not read back.
 
     A file parsing to an EMPTY table is legal and reports no error.
     """
-    from fno.config import _candidate_paths
-    from fno.config_io import _parse_settings
+    try:
+        from fno.config import _candidate_paths
+        from fno.config_io import _parse_settings
+    except Exception:  # noqa: BLE001 - a report, not the loader
+        return []
 
-    layers: list[tuple[Path, dict[str, object]]] = []
     errors: list[str] = []
     seen: set[Path] = set()
     for path in _candidate_paths():
         if not path.is_file() or path.resolve() in seen:
             continue
         seen.add(path.resolve())
-        parsed, error = _parse_settings(path)
-        if error is None:
-            layers.append((path, parsed))
-        else:
+        error = _parse_settings(path)[1]
+        if error is not None:
             errors.append(error)
-    return layers, errors
-
-
-def check_config_files_read() -> list[str]:
-    """Settings files the loader could not read back."""
-    try:
-        return _read_candidates()[1]
-    except Exception:  # noqa: BLE001 - a report, not the loader
-        return []
+    return errors
 
 
 def _near_miss_keys(unknown: str) -> list[str]:
@@ -135,24 +127,40 @@ def _near_miss_keys(unknown: str) -> list[str]:
     return hits if len(hits) <= _NEAR_MISS_CAP else []
 
 
+#: Top-level blocks the walker must not judge. `kanban` is real config that
+#: another reader owns (the board renderer reads it straight out of the file).
+#: `providers` is the pre-rename spelling of `accounts`; the loader's alias
+#: copies it across and leaves it in place, so it works and is not unknown.
+_UNMODELED_BLOCKS = frozenset({"kanban", "providers"})
+
+
 def check_unknown_keys() -> list[str]:
     """Keys the model ignores, each named with the file that holds it.
 
-    Layers are walked separately, not merged, so every message names a file. A
-    clean install reports nothing: the report is the operator's own wrong key.
+    Reads `_aliased_layers`, the loader's own per-file collector, so a legacy
+    spelling the loader accepts is never reported as a typo, and each message
+    still names one file rather than the merged result. A clean install reports
+    nothing: the report is the operator's own wrong key.
     """
     try:
-        from fno.config import SettingsModel
+        from fno.config import (
+            SettingsModel,
+            _aliased_layers,
+            _candidate_paths,
+        )
         from fno.config_io import _unwrap_config_dict
 
-        layers = _read_candidates()[0]
+        layers = _aliased_layers(tuple(_candidate_paths()))
     except Exception:  # noqa: BLE001 - a report, not the loader
         return []
 
     problems: list[str] = []
     for path, parsed in layers:
         try:
-            unknown = warn_unknown_keys(_unwrap_config_dict(parsed), SettingsModel)
+            flat = _unwrap_config_dict(parsed)
+            unknown = warn_unknown_keys(
+                {k: v for k, v in flat.items() if k not in _UNMODELED_BLOCKS}, SettingsModel
+            )
         except Exception:  # noqa: BLE001
             continue
         for key in unknown:

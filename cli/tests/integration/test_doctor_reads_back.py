@@ -359,3 +359,34 @@ def test_both_optional_spellings_of_a_dict_block_resolve(tmp_path: Path) -> None
     assert _field_models(dict[str, str])[0] is None
     # And a plain nested model still resolves on the other slot.
     assert _field_models(Row)[1] is Row
+
+
+def test_a_legacy_spelling_the_loader_accepts_is_not_a_typo(tmp_path: Path) -> None:
+    """`[providers]` is the pre-rename `accounts`, and `kanban` has its own reader.
+
+    Both are real, working config. Reporting either as an unknown key is the
+    false positive that makes an operator stop reading the doctor.
+    """
+    f = _write(
+        tmp_path / "config.toml",
+        'schema_version = 1\nstate_dir = "%s"\n'
+        "[providers]\nauto_switch = false\n"
+        "[kanban.wip_caps]\nnow = 20\n" % (tmp_path / ".fno"),
+    )
+    result = _doctor(f)
+    assert result.exit_code == 0, result.output
+    assert "not a modeled config key" not in result.output
+
+
+def test_the_exemption_does_not_hide_a_typo_in_the_same_file(tmp_path: Path) -> None:
+    """Positive control on the exemption: it exempts blocks, not the file."""
+    f = _write(
+        tmp_path / "config.toml",
+        "schema_version = 1\n[providers]\nauto_switch = false\n"
+        "[kanban.wip_caps]\nnow = 20\n[reveiw]\ncross_model = true\n",
+    )
+    result = _doctor(f)
+    assert result.exit_code == 1, result.output
+    unknown = [ln for ln in result.output.splitlines() if "not a modeled config key" in ln]
+    assert len(unknown) == 1, unknown
+    assert "reveiw.cross_model" in unknown[0]
